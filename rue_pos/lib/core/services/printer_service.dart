@@ -297,6 +297,15 @@ class PrinterService {
                       padding: const pw.EdgeInsets.only(left: 4, bottom: 1.5),
                       child: pw.Text('  + ${a.addonName}', style: ts(font, sz: 7.5)));
             }),
+            ...item.optionals.map((o) {
+              final oPrice = o.price > 0 ? '+${egp(o.price)}' : '';
+              return oPrice.isNotEmpty
+                  ? _row('  + ${o.fieldName}', oPrice,
+                      font: font, fontB: fontB, sz: 7.5, leftIndent: 4)
+                  : pw.Padding(
+                      padding: const pw.EdgeInsets.only(left: 4, bottom: 1.5),
+                      child: pw.Text('  + ${o.fieldName}', style: ts(font, sz: 7.5)));
+            }),
           ];
         }),
         _divider(),

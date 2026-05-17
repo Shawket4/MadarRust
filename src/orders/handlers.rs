@@ -10,6 +10,11 @@ use crate::{
     permissions::checker::check_permission,
 };
 
+/// Default page size when listing orders for a single shift (POS home stats, shift history).
+const DEFAULT_PER_PAGE_SHIFT: i64 = 1000;
+/// Default page size when listing orders for a whole branch (dashboard).
+const DEFAULT_PER_PAGE_BRANCH: i64 = 100;
+
 // ── Shared SELECT fragment ────────────────────────────────────
 const ORDER_SELECT: &str =
     "SELECT o.id, o.branch_id, o.shift_id, o.teller_id, u.name AS teller_name,
@@ -801,8 +806,13 @@ pub async fn list_orders(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
 
-    let page     = query.page.unwrap_or(1).max(1);
-    let per_page = query.per_page.unwrap_or(30).clamp(1, 999999);
+    let page = query.page.unwrap_or(1).max(1);
+    let default_per_page = if query.shift_id.is_some() {
+        DEFAULT_PER_PAGE_SHIFT
+    } else {
+        DEFAULT_PER_PAGE_BRANCH
+    };
+    let per_page = query.per_page.unwrap_or(default_per_page).clamp(1, 999999);
     let offset   = (page - 1) * per_page;
 
     if let Some(pm) = &query.payment_method { validate_payment_method(pm)?; }

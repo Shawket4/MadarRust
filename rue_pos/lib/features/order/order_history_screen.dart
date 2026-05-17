@@ -723,6 +723,31 @@ class _ItemRow extends StatelessWidget {
                         );
                       }).toList()),
                 ],
+                if (item.optionals.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Wrap(
+                      spacing: 4,
+                      runSpacing: 4,
+                      children: item.optionals.map((o) {
+                        final hasPrice = o.price > 0;
+                        return Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 7, vertical: 3),
+                          decoration: BoxDecoration(
+                              color: AppColors.warning.withOpacity(0.08),
+                              borderRadius:
+                                  BorderRadius.circular(AppRadius.xs)),
+                          child: Text(
+                              hasPrice
+                                  ? '${normaliseName(o.fieldName)}  +${egp(o.price)}'
+                                  : normaliseName(o.fieldName),
+                              style: cairo(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppColors.warning)),
+                        );
+                      }).toList()),
+                ],
               ])),
           const SizedBox(width: 10),
           Text(egp(item.lineTotal),

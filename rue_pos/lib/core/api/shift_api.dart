@@ -64,26 +64,14 @@ class ShiftApi {
     return Shift.fromJson(body['shift'] as Map<String, dynamic>);
   }
 
-  Future<int> systemCash(String shiftId, int openingCash) async {
-    final ordersRes =
-        await _c.dio.get('/orders', queryParameters: {'shift_id': shiftId});
-    final orders =
-        (ordersRes.data['data'] as List).cast<Map<String, dynamic>>();
-    final cashFromOrders = orders
-        .where((o) =>
-            o['payment_method'] == 'cash' &&
-            o['status'] != 'voided' &&
-            o['status'] != 'refunded')
-        .fold<int>(0, (s, o) => s + (o['total_amount'] as int));
-
+  Future<int> cashMovementsTotal(String shiftId) async {
     int movements = 0;
     try {
       final movRes = await _c.dio.get('/shifts/$shiftId/cash-movements');
       movements = (movRes.data as List)
           .fold<int>(0, (s, m) => s + (m['amount'] as int));
     } catch (_) {}
-
-    return openingCash + cashFromOrders + movements;
+    return movements;
   }
 
   Future<ShiftReport> getReport(String shiftId) async {

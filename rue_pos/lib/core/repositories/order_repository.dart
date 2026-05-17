@@ -50,6 +50,12 @@ class OrderRepository {
   void saveOrdersToCache(String shiftId, List<Order> current) {
     _storage.saveOrders(shiftId, current.map((o) => o.toJson()).toList());
   }
+
+  List<Order>? loadCachedOrders(String shiftId) {
+    final cached = _storage.loadOrders(shiftId);
+    if (cached == null) return null;
+    return cached.map(Order.fromJson).toList();
+  }
 }
 
 final orderRepositoryProvider =

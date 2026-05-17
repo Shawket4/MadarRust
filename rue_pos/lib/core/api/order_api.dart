@@ -47,12 +47,59 @@ class OrderApi {
     return Order.fromJson(res.data as Map<String, dynamic>);
   }
 
+  /// Fetches all orders for the given filters.
+  ///
+  /// Backend (`GET /orders`) paginates (shift default `per_page=1000`) and returns:
+  /// `{ data, total, page, per_page, total_pages, summary }`.
   Future<List<Order>> list({String? shiftId, String? branchId}) async {
-    final params = <String, dynamic>{};
-    if (shiftId  != null) params['shift_id']  = shiftId;
-    if (branchId != null) params['branch_id'] = branchId;
-    final res = await _c.dio.get('/orders', queryParameters: params);
-    return (res.data['data'] as List).map((o) => Order.fromJson(o)).toList();
+    final baseParams = <String, dynamic>{
+      // RueRust API allows up to 999999; use a high page size for POS shift loads.
+      'per_page': 500,
+    };
+    if (shiftId  != null) baseParams['shift_id']  = shiftId;
+    if (branchId != null) baseParams['branch_id'] = branchId;
+
+    final all = <Order>[];
+    var page = 1;
+
+    while (true) {
+      final params = {...baseParams, 'page': page};
+      final res = await _c.dio.get('/orders', queryParameters: params);
+      final body = res.data;
+
+      final List<dynamic> items;
+      int? totalPages;
+
+      if (body is Map<String, dynamic>) {
+        final raw = body['data'];
+        if (raw is! List) break;
+        items = raw;
+        // RueRust: top-level total_pages (not Laravel-style meta.last_page)
+        totalPages = _asInt(body['total_pages']);
+        if (totalPages == null) {
+          final meta = body['meta'];
+          if (meta is Map) totalPages = _asInt(meta['last_page']);
+        }
+      } else if (body is List) {
+        items = body;
+        totalPages = 1;
+      } else {
+        break;
+      }
+
+      all.addAll(items.map((o) => Order.fromJson(o as Map<String, dynamic>)));
+
+      if (totalPages == null || page >= totalPages || items.isEmpty) break;
+      page++;
+    }
+
+    return all;
+  }
+
+  static int? _asInt(dynamic v) {
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    return int.tryParse(v?.toString() ?? '');
   }
 
   Future<Order> get(String id) async {

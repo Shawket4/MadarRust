@@ -357,6 +357,13 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
               quantity: a.quantity,
               lineTotal: a.priceModifier * a.quantity,
             )).toList(),
+            optionals: ci.optionals.map((o) => OrderItemOptional(
+              id: const Uuid().v4(),
+              orderItemId: '',
+              optionalFieldId: o.optionalFieldId,
+              fieldName: o.name,
+              price: o.price,
+            )).toList(),
           )).toList(),
         );
         ref.read(orderHistoryProvider.notifier).addOrder(optimistic);

@@ -1,4 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../api/order_api.dart';
 import '../api/shift_api.dart';
 import '../api/inventory_api.dart';
 import '../models/shift.dart';
@@ -7,9 +8,10 @@ import '../storage/storage_service.dart';
 
 class ShiftRepository {
   final ShiftApi       _shiftApi;
+  final OrderApi       _orderApi;
   final InventoryApi   _inventoryApi;
   final StorageService _storage;
-  ShiftRepository(this._shiftApi, this._inventoryApi, this._storage);
+  ShiftRepository(this._shiftApi, this._orderApi, this._inventoryApi, this._storage);
 
   Future<ShiftPreFill> currentShift(String branchId) async {
     try {
@@ -53,8 +55,17 @@ class ShiftRepository {
     return shift;
   }
 
-  Future<int> getSystemCash(String shiftId, int openingCash) =>
-      _shiftApi.systemCash(shiftId, openingCash);
+  Future<int> getSystemCash(String shiftId, int openingCash) async {
+    final orders = await _orderApi.list(shiftId: shiftId);
+    final cashFromOrders = orders
+        .where((o) =>
+            o.paymentMethod == 'cash' &&
+            o.status != 'voided' &&
+            o.status != 'refunded')
+        .fold<int>(0, (s, o) => s + o.totalAmount);
+    final movements = await _shiftApi.cashMovementsTotal(shiftId);
+    return openingCash + cashFromOrders + movements;
+  }
 
   Future<List<InventoryItem>> getInventory(String branchId) async {
     try { return await _inventoryApi.items(branchId); }
@@ -64,6 +75,7 @@ class ShiftRepository {
 
 final shiftRepositoryProvider = Provider<ShiftRepository>((ref) => ShiftRepository(
   ref.watch(shiftApiProvider),
+  ref.watch(orderApiProvider),
   ref.watch(inventoryApiProvider),
   ref.watch(storageServiceProvider),
 ));

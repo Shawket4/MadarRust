@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import '../../../core/providers/auth_notifier.dart';
 import '../../../core/providers/cart_notifier.dart';
 import '../../../core/providers/menu_notifier.dart';
+import '../../../core/providers/discount_notifier.dart';
 import '../../../core/services/connectivity_service.dart';
 import '../../../core/services/offline_queue.dart';
 import '../../../core/theme/app_theme.dart';
@@ -197,7 +198,10 @@ class _SyncBtnState extends ConsumerState<SyncBtn>
     try {
       final orgId = ref.read(authProvider).user?.orgId;
       if (orgId != null) {
-        await ref.read(menuProvider.notifier).load(orgId, force: true);
+        await Future.wait([
+          ref.read(menuProvider.notifier).load(orgId, force: true),
+          ref.read(discountProvider.notifier).load(orgId, force: true),
+        ]);
       }
     } finally {
       if (mounted) {

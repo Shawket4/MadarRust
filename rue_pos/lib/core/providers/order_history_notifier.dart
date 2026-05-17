@@ -40,17 +40,28 @@ class OrderHistoryNotifier extends Notifier<OrderHistoryState> {
 
   Future<void> loadForShift(String shiftId, {bool force = false}) async {
     if (!force && state.shiftId == shiftId && state.orders.isNotEmpty) return;
-    state = state.copyWith(isLoading: true, clearError: true);
+    state = state.copyWith(isLoading: true, clearError: true, shiftId: shiftId);
     try {
       final orders =
           await ref.read(orderRepositoryProvider).listForShift(shiftId);
       state = state.copyWith(
           isLoading: false, orders: orders, shiftId: shiftId, fromCache: false);
     } catch (_) {
-      state = state.copyWith(
-          isLoading: false,
-          fromCache: true,
-          error: 'Could not load orders — check connection');
+      final cached =
+          ref.read(orderRepositoryProvider).loadCachedOrders(shiftId);
+      if (cached != null) {
+        state = state.copyWith(
+            isLoading: false,
+            orders: cached,
+            shiftId: shiftId,
+            fromCache: true,
+            error: 'Showing cached orders — check connection');
+      } else {
+        state = state.copyWith(
+            isLoading: false,
+            fromCache: true,
+            error: 'Could not load orders — check connection');
+      }
     }
   }
 

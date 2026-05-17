@@ -33,7 +33,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     await ref.read(shiftProvider.notifier).load(branchId);
     final shift = ref.read(shiftProvider).shift;
     if (shift != null) {
-      await ref.read(orderHistoryProvider.notifier).loadForShift(shift.id);
+      await ref
+          .read(orderHistoryProvider.notifier)
+          .loadForShift(shift.id, force: true);
       await ref.read(shiftProvider.notifier).loadSystemCash();
     }
   }
