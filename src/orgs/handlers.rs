@@ -19,6 +19,7 @@ pub struct Org {
     pub id:             Uuid,
     pub name:           String,
     pub slug:           String,
+    #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
     pub logo_url:       Option<String>,       // already in DB, now populated
     pub currency_code:  String,
     pub tax_rate:       sqlx::types::BigDecimal,

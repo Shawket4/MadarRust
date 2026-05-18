@@ -19,6 +19,7 @@ pub struct Category {
     pub id:            Uuid,
     pub org_id:        Uuid,
     pub name:          String,
+    #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
     pub image_url:     Option<String>,
     pub display_order: i32,
     pub is_active:     bool,
@@ -34,6 +35,7 @@ pub struct MenuItem {
     pub category_id:   Option<Uuid>,
     pub name:          String,
     pub description:   Option<String>,
+    #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
     pub image_url:     Option<String>,
     pub base_price:    i32,
     pub is_active:     bool,
@@ -143,6 +145,7 @@ pub struct MenuItemFull {
 pub struct PublicMenuResponse {
     pub org_id:     Uuid,
     pub org_name:   String,
+    #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
     pub logo_url:   Option<String>,
     pub categories: Vec<PublicCategory>,
 }
@@ -151,6 +154,7 @@ pub struct PublicMenuResponse {
 pub struct PublicCategory {
     pub id:            Uuid,
     pub name:          String,
+    #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
     pub image_url:     Option<String>,
     pub display_order: i32,
     pub items:         Vec<PublicMenuItem>,
@@ -161,6 +165,7 @@ pub struct PublicMenuItem {
     pub id:            Uuid,
     pub name:          String,
     pub description:   Option<String>,
+    #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
     pub image_url:     Option<String>,
     pub base_price:    i32,
     pub display_order: i32,

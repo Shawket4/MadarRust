@@ -15,7 +15,10 @@ const ALLOWED_MIME: &[&str] = &[
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Serialize)]
-pub struct UploadResponse { pub image_url: String }
+pub struct UploadResponse {
+    #[serde(serialize_with = "serialize_url")]
+    pub image_url: String,
+}
 
 pub async fn upload_menu_item_image(
     req:          HttpRequest,
@@ -134,15 +137,61 @@ fn compress_to_jpeg(raw: &[u8]) -> Result<Vec<u8>, AppError> {
     Err(AppError::Internal)
 }
 
-pub async fn delete_old_image(old_url: &str, base_url: &str, uploads_dir: &str) {
-    let prefix = format!("{}/", base_url.trim_end_matches('/'));
-    if let Some(rel) = old_url.strip_prefix(&prefix) {
-        let full = Path::new(uploads_dir).join(rel);
-        if full.exists()
-            && let Err(e) = tokio::fs::remove_file(&full).await {
-                tracing::warn!("Could not delete old image {:?}: {}", full, e);
-            }
+pub async fn delete_old_image(old_url: &str, _base_url: &str, uploads_dir: &str) {
+    let rel = extract_relative_path(old_url);
+    let full = Path::new(uploads_dir).join(rel);
+    if full.exists() {
+        if let Err(e) = tokio::fs::remove_file(&full).await {
+            tracing::warn!("Could not delete old image {:?}: {}", full, e);
+        }
     }
+}
+
+pub fn extract_relative_path(url: &str) -> &str {
+    if let Some(pos) = url.find("/uploads/") {
+        &url[pos + 9..]
+    } else if let Some(pos) = url.find("/logos/") {
+        &url[pos + 1..]
+    } else if url.starts_with("logos/") {
+        url
+    } else if let Some(pos) = url.find("/menu-items/") {
+        let before = &url[..pos];
+        if let Some(last_slash) = before.rfind('/') {
+            &url[last_slash + 1..]
+        } else {
+            url
+        }
+    } else {
+        url
+    }
+}
+
+pub fn normalize_upload_url(url: &str) -> String {
+    let base_url = std::env::var("UPLOADS_BASE_URL").unwrap_or_else(|_| "https://sufrix-pos.ddns.net/api/uploads".to_string());
+    let base = base_url.trim_end_matches('/');
+    let rel = extract_relative_path(url);
+    format!("{}/{}", base, rel)
+}
+
+pub fn serialize_opt_url<S>(url: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match url {
+        Some(u) => {
+            let normalized = normalize_upload_url(u);
+            serializer.serialize_some(&normalized)
+        }
+        None => serializer.serialize_none(),
+    }
+}
+
+pub fn serialize_url<S>(url: &str, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let normalized = normalize_upload_url(url);
+    serializer.serialize_str(&normalized)
 }
 
 fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
