@@ -199,3 +199,99 @@ pub async fn me(
 
     Ok(HttpResponse::Ok().json(MeResponse { user: user_public }))
 }
+
+// ── GET /auth/permissions ────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct UserPermissionItem {
+    pub resource: String,
+    pub action:   String,
+    pub granted:  bool,
+}
+
+#[derive(Serialize)]
+pub struct AuthPermissionsResponse {
+    pub permissions: Vec<UserPermissionItem>,
+}
+
+#[derive(sqlx::FromRow)]
+struct DbPermission {
+    pub resource: String,
+    pub action:   String,
+    pub granted:  bool,
+}
+
+pub async fn permissions(
+    req:  HttpRequest,
+    pool: web::Data<PgPool>,
+) -> Result<HttpResponse, AppError> {
+    let claims = req
+        .extensions()
+        .get::<Claims>()
+        .cloned()
+        .ok_or_else(|| AppError::Unauthorized("Missing claims".into()))?;
+
+    // Query user role
+    let role: String = sqlx::query_scalar(
+        "SELECT role::text FROM users WHERE id = $1 AND deleted_at IS NULL"
+    )
+    .bind(claims.user_id())
+    .fetch_optional(pool.get_ref())
+    .await?
+    .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+
+    // Query role defaults
+    let role_defaults = sqlx::query_as::<_, DbPermission>(
+        "SELECT resource::text as resource, action::text as action, granted
+         FROM role_permissions WHERE role = $1::user_role",
+    )
+    .bind(&role)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    // Query user overrides
+    let user_overrides = sqlx::query_as::<_, DbPermission>(
+        "SELECT resource::text as resource, action::text as action, granted
+         FROM permissions WHERE user_id = $1",
+    )
+    .bind(claims.user_id())
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    let resources = [
+        "orgs", "branches", "users", "categories",
+        "menu_items", "addon_groups", "shifts",
+        "orders", "order_items", "payments", "permissions",
+        "addon_items", "inventory", "inventory_adjustments", "inventory_transfers",
+        "recipes", "soft_serve_batches", "shift_counts",
+    ];
+    let actions = ["create", "read", "update", "delete"];
+
+    let mut permissions = Vec::new();
+
+    for resource in resources {
+        for action in actions {
+            let role_default = role_defaults.iter()
+                .find(|r| r.resource == resource && r.action == action)
+                .map(|r| r.granted);
+
+            let user_override = user_overrides.iter()
+                .find(|p| p.resource == resource && p.action == action)
+                .map(|p| p.granted);
+
+            let effective = if role == "super_admin" {
+                true
+            } else {
+                user_override.or(role_default).unwrap_or(false)
+            };
+
+            permissions.push(UserPermissionItem {
+                resource: resource.to_string(),
+                action:   action.to_string(),
+                granted:  effective,
+            });
+        }
+    }
+
+    Ok(HttpResponse::Ok().json(AuthPermissionsResponse { permissions }))
+}

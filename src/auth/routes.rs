@@ -11,7 +11,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .service(
                 web::scope("")
                     .wrap(JwtMiddleware)
-                    .route("/me", web::get().to(handlers::me)),
+                    .route("/me", web::get().to(handlers::me))
+                    .route("/permissions", web::get().to(handlers::permissions)),
             ),
     );
 }
