@@ -212,10 +212,11 @@ pub struct OrderExport {
 
 #[derive(Serialize)]
 pub struct ExportResponse {
-    pub data:         Vec<OrderExport>,
-    pub total:        i64,
-    pub generated_at: chrono::DateTime<chrono::Utc>,
-    pub summary:      OrderSummary,
+    pub data:             Vec<OrderExport>,
+    pub total:            i64,
+    pub generated_at:     chrono::DateTime<chrono::Utc>,
+    pub summary:          OrderSummary,
+    pub ingredient_costs: std::collections::HashMap<Uuid, i32>,  // NEW: org_ingredient_id → cost_per_unit (piastres)
 }
 
 #[derive(Deserialize)]
@@ -1530,10 +1531,41 @@ pub async fn export_orders(
         data.push(OrderExport { order, items, payments });
     }
 
+    use std::collections::HashSet;
+
+    // Collect every distinct org_ingredient_id from all deduction snapshots
+    let ingredient_ids: Vec<Uuid> = data.iter()
+        .flat_map(|o| o.items.iter())
+        .flat_map(|i| {
+            i.item.deductions_snapshot.as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|d| d.get("org_ingredient_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| Uuid::parse_str(s).ok()))
+        })
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    let ingredient_costs: HashMap<Uuid, i32> = if ingredient_ids.is_empty() {
+        HashMap::new()
+    } else {
+        sqlx::query_as::<_, (Uuid, i32)>(
+            "SELECT id, cost_per_unit FROM org_ingredients WHERE id = ANY($1)"
+        )
+        .bind(&ingredient_ids)
+        .fetch_all(pool.get_ref())
+        .await?
+        .into_iter()
+        .collect()
+    };
+
     Ok(HttpResponse::Ok().json(ExportResponse {
         data,
         total,
         generated_at: chrono::Utc::now(),
         summary,
+        ingredient_costs,
     }))
 }
