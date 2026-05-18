@@ -58,7 +58,7 @@ async fn main() -> std::io::Result<()> {
 
     let tls_config = build_tls_config();
 
-    tracing::info!("Starting rue-rust");
+    tracing::info!("Starting sufrix-rust");
     tracing::info!("Uploads directory: {}", uploads_dir);
 
     let server = HttpServer::new(move || {

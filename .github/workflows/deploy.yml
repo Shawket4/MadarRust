@@ -1,4 +1,4 @@
-name: Build and Deploy RueRust
+name: Build and Deploy SufrixRust
 
 on:
   push:
@@ -48,13 +48,13 @@ jobs:
       - name: Build release binary
         run: |
           cargo build --release --target x86_64-unknown-linux-gnu
-          strip target/x86_64-unknown-linux-gnu/release/rue-rust
-          chmod +x target/x86_64-unknown-linux-gnu/release/rue-rust
+          strip target/x86_64-unknown-linux-gnu/release/sufrix-rust
+          chmod +x target/x86_64-unknown-linux-gnu/release/sufrix-rust
 
       - name: Package deployment
         run: |
           mkdir -p deployment
-          cp target/x86_64-unknown-linux-gnu/release/rue-rust deployment/
+          cp target/x86_64-unknown-linux-gnu/release/sufrix-rust deployment/
           tar -czf deployment.tar.gz -C deployment .
 
       - name: Setup SSH
@@ -69,32 +69,32 @@ jobs:
         run: |
           scp -i ~/.ssh/deploy_key -P ${{ secrets.SSH_PORT }} \
             deployment.tar.gz \
-            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/tmp/rue-rust-deployment.tar.gz
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/tmp/sufrix-rust-deployment.tar.gz
 
       - name: Deploy on VPS
         run: |
           ssh -i ~/.ssh/deploy_key -p ${{ secrets.SSH_PORT }} \
             ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
             set -e
-            DEPLOY_DIR="/opt/rue-rust"
-            SERVICE="rue-rust"
-            BACKUP_DIR="/opt/rue-rust/backups"
+            DEPLOY_DIR="/opt/sufrix-rust"
+            SERVICE="sufrix-rust"
+            BACKUP_DIR="/opt/sufrix-rust/backups"
 
             sudo mkdir -p $DEPLOY_DIR $BACKUP_DIR
 
             # Backup existing binary
-            if [ -f $DEPLOY_DIR/rue-rust ]; then
+            if [ -f $DEPLOY_DIR/sufrix-rust ]; then
               TS=$(date +%Y%m%d_%H%M%S)
-              sudo cp $DEPLOY_DIR/rue-rust $BACKUP_DIR/rue-rust.$TS
-              sudo ls -t $BACKUP_DIR/rue-rust.* | tail -n +6 | xargs -r sudo rm
+              sudo cp $DEPLOY_DIR/sufrix-rust $BACKUP_DIR/sufrix-rust.$TS
+              sudo ls -t $BACKUP_DIR/sufrix-rust.* | tail -n +6 | xargs -r sudo rm
             fi
 
             # Stop service
             sudo systemctl stop $SERVICE || true
 
             # Extract new binary
-            sudo tar -xzf /tmp/rue-rust-deployment.tar.gz -C $DEPLOY_DIR
-            sudo chmod +x $DEPLOY_DIR/rue-rust
+            sudo tar -xzf /tmp/sufrix-rust-deployment.tar.gz -C $DEPLOY_DIR
+            sudo chmod +x $DEPLOY_DIR/sufrix-rust
             sudo chown -R root:root $DEPLOY_DIR
 
             # Start service
@@ -103,6 +103,6 @@ jobs:
             sudo systemctl status $SERVICE --no-pager
 
             # Cleanup
-            rm /tmp/rue-rust-deployment.tar.gz
+            rm /tmp/sufrix-rust-deployment.tar.gz
             echo "✅ Deployment complete"
           EOF

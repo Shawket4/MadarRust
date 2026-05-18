@@ -1,6 +1,6 @@
-# Rue POS API Documentation
+# Sufrix POS API Documentation
 
-Welcome to the Rue POS Backend API documentation. This document provides a comprehensive guide to all endpoints, models, and authentication patterns used in the system.
+Welcome to the Sufrix POS Backend API documentation. This document provides a comprehensive guide to all endpoints, models, and authentication patterns used in the system.
 
 ## 🚀 General Information
 - **Base URL**: `http://0.0.0.0:8080` (Development)
@@ -17,7 +17,7 @@ Authenticates a user and returns a JWT token. Supports both Email/Password and P
 **Request Body (Email Login):**
 ```json
 {
-  "email": "admin@rue.com",
+  "email": "admin@sufrix.com",
   "password": "password123",
   "org_id": "optional-uuid"
 }
