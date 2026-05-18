@@ -2,6 +2,8 @@ use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
+use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 
 use crate::{
     auth::jwt::Claims,
@@ -1551,14 +1553,23 @@ pub async fn export_orders(
     let ingredient_costs: HashMap<Uuid, i32> = if ingredient_ids.is_empty() {
         HashMap::new()
     } else {
-        sqlx::query_as::<_, (Uuid, i32)>(
+        let decimal_costs: Vec<(Uuid, Decimal)> = sqlx::query_as::<_, (Uuid, Decimal)>(
             "SELECT id, cost_per_unit FROM org_ingredients WHERE id = ANY($1)"
         )
         .bind(&ingredient_ids)
         .fetch_all(pool.get_ref())
-        .await?
-        .into_iter()
-        .collect()
+        .await?;
+
+        decimal_costs.into_iter()
+            .map(|(id, cost)| {
+                // Convert from standard currency Decimal (e.g. 5.50 EGP) to i32 piastres (e.g. 550)
+                let piastres = (cost * Decimal::from(100))
+                    .round()
+                    .to_i32()
+                    .unwrap_or(0);
+                (id, piastres)
+            })
+            .collect()
     };
 
     Ok(HttpResponse::Ok().json(ExportResponse {
