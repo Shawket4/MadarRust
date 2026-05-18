@@ -116,6 +116,8 @@ pub async fn get_permission_matrix(
         "orgs", "branches", "users", "categories",
         "menu_items", "addon_groups", "shifts",
         "orders", "order_items", "payments", "permissions",
+        "addon_items", "inventory", "inventory_adjustments", "inventory_transfers",
+        "recipes", "soft_serve_batches", "shift_counts",
     ];
     let actions = ["create", "read", "update", "delete"];
 

@@ -5,11 +5,12 @@ use uuid::Uuid;
 
 use crate::{
     auth::{
-        guards::{require_manager, require_org_admin, require_same_org, require_super_admin},
+        guards::{require_org_admin, require_same_org, require_super_admin},
         jwt::Claims,
     },
     errors::AppError,
     models::{User, UserPublic, UserRole},
+    permissions::checker::check_permission,
 };
 
 // ── Request types ─────────────────────────────────────────────
@@ -49,14 +50,34 @@ pub async fn create_user(
     let claims = extract_claims(&req)?;
 
     // Permission checks
-    require_manager(&claims)?;
+    check_permission(pool.get_ref(), &claims, "users", "create").await?;
     require_same_org(&claims, Some(body.org_id))?;
 
-    // branch_managers can only create tellers
-    if claims.role == UserRole::BranchManager && body.role != UserRole::Teller {
-        return Err(AppError::Forbidden(
-            "Branch managers can only create teller accounts".into(),
-        ));
+    // branch_managers can only create tellers in their own assigned branches
+    if claims.role == UserRole::BranchManager {
+        if body.role != UserRole::Teller {
+            return Err(AppError::Forbidden(
+                "Branch managers can only create teller accounts".into(),
+            ));
+        }
+
+        if let Some(branch_ids) = &body.branch_ids {
+            for bid in branch_ids {
+                let is_assigned: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)"
+                )
+                .bind(claims.user_id())
+                .bind(bid)
+                .fetch_one(pool.get_ref())
+                .await?;
+                if !is_assigned {
+                    return Err(AppError::Forbidden(format!(
+                        "You cannot assign a user to branch {} because it is not assigned to you",
+                        bid
+                    )));
+                }
+            }
+        }
     }
 
     // org_admins cannot create super_admins
@@ -175,7 +196,7 @@ pub async fn list_users(
     query: web::Query<ListUsersQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    require_org_admin(&claims)?;
+    check_permission(pool.get_ref(), &claims, "users", "read").await?;
 
     // Non-super-admins must be scoped to their own org
     let org_id = if claims.role == UserRole::SuperAdmin {
@@ -187,20 +208,48 @@ pub async fn list_users(
     };
 
     let users = match org_id {
-        Some(oid) => sqlx::query_as::<_, User>(
-            r#"
-            SELECT id, org_id, name, email, phone,
-                   password_hash, pin_hash, role,
-                   is_active, last_login_at,
-                   created_at, updated_at, deleted_at
-            FROM users
-            WHERE org_id = $1 AND deleted_at IS NULL
-            ORDER BY name
-            "#,
-        )
-        .bind(oid)
-        .fetch_all(pool.get_ref())
-        .await?,
+        Some(oid) => {
+            if claims.role == UserRole::BranchManager {
+                sqlx::query_as::<_, User>(
+                    r#"
+                    SELECT DISTINCT u.id, u.org_id, u.name, u.email, u.phone,
+                           u.password_hash, u.pin_hash, u.role,
+                           u.is_active, u.last_login_at,
+                           u.created_at, u.updated_at, u.deleted_at
+                    FROM users u
+                    LEFT JOIN user_branch_assignments uba ON uba.user_id = u.id
+                    WHERE u.org_id = $1
+                      AND u.deleted_at IS NULL
+                      AND (
+                          u.id = $2
+                          OR uba.branch_id IN (
+                              SELECT branch_id FROM user_branch_assignments WHERE user_id = $2
+                          )
+                      )
+                    ORDER BY u.name
+                    "#,
+                )
+                .bind(oid)
+                .bind(claims.user_id())
+                .fetch_all(pool.get_ref())
+                .await?
+            } else {
+                sqlx::query_as::<_, User>(
+                    r#"
+                    SELECT id, org_id, name, email, phone,
+                           password_hash, pin_hash, role,
+                           is_active, last_login_at,
+                           created_at, updated_at, deleted_at
+                    FROM users
+                    WHERE org_id = $1 AND deleted_at IS NULL
+                    ORDER BY name
+                    "#,
+                )
+                .bind(oid)
+                .fetch_all(pool.get_ref())
+                .await?
+            }
+        }
 
         None => sqlx::query_as::<_, User>(
             r#"
@@ -229,7 +278,7 @@ pub async fn get_user(
     user_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    require_manager(&claims)?;
+    check_permission(pool.get_ref(), &claims, "users", "read").await?;
 
     let user = sqlx::query_as::<_, User>(
         r#"
@@ -249,6 +298,27 @@ pub async fn get_user(
     // Non-super-admins can only see users within their own org
     require_same_org(&claims, user.org_id)?;
 
+    // Branch managers can only see users assigned to at least one of their assigned branches, or themselves
+    if claims.role == UserRole::BranchManager && claims.user_id() != *user_id {
+        let same_branch: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM user_branch_assignments uba1
+                JOIN user_branch_assignments uba2 ON uba2.branch_id = uba1.branch_id
+                WHERE uba1.user_id = $1 AND uba2.user_id = $2
+            )
+            "#,
+        )
+        .bind(*user_id)
+        .bind(claims.user_id())
+        .fetch_one(pool.get_ref())
+        .await?;
+
+        if !same_branch {
+            return Err(AppError::Forbidden("You do not have access to this user".into()));
+        }
+    }
+
     Ok(HttpResponse::Ok().json(UserPublic::from(user)))
 }
 
@@ -260,7 +330,7 @@ pub async fn delete_user(
     user_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    require_org_admin(&claims)?;
+    check_permission(pool.get_ref(), &claims, "users", "delete").await?;
 
     // Fetch target user to check org
     let user = sqlx::query_as::<_, User>(
@@ -280,6 +350,27 @@ pub async fn delete_user(
         require_super_admin(&claims)?;
     }
 
+    // Branch managers can only delete users assigned to at least one of their assigned branches
+    if claims.role == UserRole::BranchManager {
+        let same_branch: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM user_branch_assignments uba1
+                JOIN user_branch_assignments uba2 ON uba2.branch_id = uba1.branch_id
+                WHERE uba1.user_id = $1 AND uba2.user_id = $2
+            )
+            "#,
+        )
+        .bind(*user_id)
+        .bind(claims.user_id())
+        .fetch_one(pool.get_ref())
+        .await?;
+
+        if !same_branch {
+            return Err(AppError::Forbidden("You can only delete users assigned to your branches".into()));
+        }
+    }
+
     sqlx::query("UPDATE users SET deleted_at = NOW() WHERE id = $1")
         .bind(*user_id)
         .execute(pool.get_ref())
@@ -297,7 +388,21 @@ pub async fn assign_branch(
     body:    web::Json<AssignBranchRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    require_manager(&claims)?;
+    check_permission(pool.get_ref(), &claims, "users", "update").await?;
+
+    // If branch manager, verify they are assigned to that branch
+    if claims.role == UserRole::BranchManager {
+        let is_assigned: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)"
+        )
+        .bind(claims.user_id())
+        .bind(body.branch_id)
+        .fetch_one(pool.get_ref())
+        .await?;
+        if !is_assigned {
+            return Err(AppError::Forbidden("You cannot assign a user to a branch you are not assigned to".into()));
+        }
+    }
 
     sqlx::query(
         r#"
@@ -323,9 +428,23 @@ pub async fn unassign_branch(
     path:     web::Path<(Uuid, Uuid)>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    require_manager(&claims)?;
+    check_permission(pool.get_ref(), &claims, "users", "update").await?;
 
     let (user_id, branch_id) = path.into_inner();
+
+    // If branch manager, verify they are assigned to that branch
+    if claims.role == UserRole::BranchManager {
+        let is_assigned: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)"
+        )
+        .bind(claims.user_id())
+        .bind(branch_id)
+        .fetch_one(pool.get_ref())
+        .await?;
+        if !is_assigned {
+            return Err(AppError::Forbidden("You cannot unassign a user from a branch you are not assigned to".into()));
+        }
+    }
 
     sqlx::query(
         "DELETE FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2"
@@ -365,7 +484,7 @@ pub async fn update_user(
     body:    web::Json<UpdateUserRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    require_manager(&claims)?;
+    check_permission(pool.get_ref(), &claims, "users", "update").await?;
 
     let existing = sqlx::query_as::<_, User>(
         "SELECT id, org_id, name, email, phone, password_hash, pin_hash, role,
@@ -378,6 +497,27 @@ pub async fn update_user(
     .ok_or_else(|| AppError::NotFound("User not found".into()))?;
 
     require_same_org(&claims, existing.org_id)?;
+
+    // Branch managers can only update users assigned to at least one of their assigned branches, or themselves
+    if claims.role == UserRole::BranchManager && claims.user_id() != *user_id {
+        let same_branch: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM user_branch_assignments uba1
+                JOIN user_branch_assignments uba2 ON uba2.branch_id = uba1.branch_id
+                WHERE uba1.user_id = $1 AND uba2.user_id = $2
+            )
+            "#,
+        )
+        .bind(*user_id)
+        .bind(claims.user_id())
+        .fetch_one(pool.get_ref())
+        .await?;
+
+        if !same_branch {
+            return Err(AppError::Forbidden("You do not have access to this user".into()));
+        }
+    }
 
     // Only org_admin+ can change roles
     if body.role.is_some() {
@@ -443,7 +583,28 @@ pub async fn list_user_branches(
     user_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    require_manager(&claims)?;
+    check_permission(pool.get_ref(), &claims, "users", "read").await?;
+
+    // If branch manager, verify they have access to this user
+    if claims.role == UserRole::BranchManager && claims.user_id() != *user_id {
+        let same_branch: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM user_branch_assignments uba1
+                JOIN user_branch_assignments uba2 ON uba2.branch_id = uba1.branch_id
+                WHERE uba1.user_id = $1 AND uba2.user_id = $2
+            )
+            "#,
+        )
+        .bind(*user_id)
+        .bind(claims.user_id())
+        .fetch_one(pool.get_ref())
+        .await?;
+
+        if !same_branch {
+            return Err(AppError::Forbidden("You do not have access to this user".into()));
+        }
+    }
 
     let rows = sqlx::query_as::<_, UserBranch>(
         r#"

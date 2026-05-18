@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::{
     auth::{guards::{require_super_admin, require_same_org}, jwt::Claims},
     errors::AppError,
+    permissions::checker::check_permission,
     uploads::handlers::delete_old_image,  // reuse your existing helper
 };
 
@@ -60,6 +61,7 @@ pub async fn create_org(
     mut mp:  Multipart,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "orgs", "create").await?;
     require_super_admin(&claims)?;
 
     let uploads_dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
@@ -159,6 +161,7 @@ pub async fn list_orgs(
     pool: web::Data<PgPool>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "orgs", "read").await?;
     require_super_admin(&claims)?;
 
     let orgs = sqlx::query_as::<_, Org>(
@@ -183,6 +186,7 @@ pub async fn get_org(
     org_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "orgs", "read").await?;
     require_same_org(&claims, Some(*org_id))?;
 
     let org = fetch_org(pool.get_ref(), *org_id).await?;
@@ -199,6 +203,7 @@ pub async fn update_org(
     body:   web::Json<UpdateOrgRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "orgs", "update").await?;
     require_super_admin(&claims)?;
 
     let existing = fetch_org(pool.get_ref(), *org_id).await?;
@@ -273,6 +278,7 @@ pub async fn upload_org_logo(
     mut mp: Multipart,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "orgs", "update").await?;
     require_super_admin(&claims)?;
 
     let existing    = fetch_org(pool.get_ref(), *org_id).await?;
@@ -348,6 +354,7 @@ pub async fn delete_org(
     org_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "orgs", "delete").await?;
     require_super_admin(&claims)?;
 
     let rows_affected = sqlx::query(

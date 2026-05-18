@@ -44,6 +44,11 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("Failed to connect to PostgreSQL");
 
+    tracing::info!("Seeding default role permissions into database...");
+    permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .expect("Failed to seed default role permissions");
+
     let pool          = web::Data::new(pool);
     let jwt_secret    = web::Data::new(auth::jwt::JwtSecret(jwt_secret));
     let uploads_clone = uploads_dir.clone();

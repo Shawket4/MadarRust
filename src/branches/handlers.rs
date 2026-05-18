@@ -96,19 +96,37 @@ pub async fn list_branches(
     check_permission(pool.get_ref(), &claims, "branches", "read").await?;
     require_same_org(&claims, Some(query.org_id))?;
 
-    let branches = sqlx::query_as::<_, Branch>(
-        r#"
-        SELECT id, org_id, name, address, phone, timezone,
-               printer_brand, printer_ip::text, printer_port,
-               is_active, created_at, updated_at
-        FROM branches
-        WHERE org_id = $1 AND deleted_at IS NULL
-        ORDER BY name
-        "#,
-    )
-    .bind(query.org_id)
-    .fetch_all(pool.get_ref())
-    .await?;
+    let branches = if claims.role == crate::models::UserRole::BranchManager || claims.role == crate::models::UserRole::Teller {
+        sqlx::query_as::<_, Branch>(
+            r#"
+            SELECT b.id, b.org_id, b.name, b.address, b.phone, b.timezone,
+                   b.printer_brand, b.printer_ip::text, b.printer_port,
+                   b.is_active, b.created_at, b.updated_at
+            FROM branches b
+            JOIN user_branch_assignments uba ON uba.branch_id = b.id
+            WHERE b.org_id = $1 AND uba.user_id = $2 AND b.deleted_at IS NULL
+            ORDER BY b.name
+            "#,
+        )
+        .bind(query.org_id)
+        .bind(claims.user_id())
+        .fetch_all(pool.get_ref())
+        .await?
+    } else {
+        sqlx::query_as::<_, Branch>(
+            r#"
+            SELECT id, org_id, name, address, phone, timezone,
+                   printer_brand, printer_ip::text, printer_port,
+                   is_active, created_at, updated_at
+            FROM branches
+            WHERE org_id = $1 AND deleted_at IS NULL
+            ORDER BY name
+            "#,
+        )
+        .bind(query.org_id)
+        .fetch_all(pool.get_ref())
+        .await?
+    };
 
     Ok(HttpResponse::Ok().json(branches))
 }

@@ -19,6 +19,7 @@ pub fn require_org_admin(claims: &Claims) -> Result<(), AppError> {
 }
 
 /// Ensure the caller is at least branch_manager
+#[allow(dead_code)]
 pub fn require_manager(claims: &Claims) -> Result<(), AppError> {
     match claims.role {
         UserRole::SuperAdmin | UserRole::OrgAdmin | UserRole::BranchManager => Ok(()),
