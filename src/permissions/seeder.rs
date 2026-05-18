@@ -1,6 +1,11 @@
 use sqlx::PgPool;
 
 pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
+    // ── CLEAR CUSTOM USER OVERRIDES (FORCE ROLE LEVEL DEFAULTS) ──
+    sqlx::query("DELETE FROM permissions")
+        .execute(pool)
+        .await?;
+
     let resources = [
         "orgs",
         "branches",
@@ -101,10 +106,12 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
 
     // teller defaults
     let teller_perms = [
+        ("branches", "read", true),
         ("categories", "read", true),
         ("menu_items", "read", true),
         ("addon_groups", "read", true),
         ("addon_items", "read", true),
+        ("inventory", "read", true),
         ("orders", "create", true),
         ("orders", "read", true),
         ("order_items", "create", true),
