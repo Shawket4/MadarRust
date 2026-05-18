@@ -355,7 +355,7 @@ pub async fn branch_sales(
     .bind(*branch_id).bind(query.from).bind(query.to)
     .fetch_one(pool.get_ref()).await?;
 
-    let item_limit = query.limit.unwrap_or(20).min(100).max(1);
+    let item_limit = query.limit.unwrap_or(20).clamp(1, 100);
 
     let top_items = sqlx::query_as::<_, ItemSales>(
         r#"
@@ -655,11 +655,10 @@ pub async fn org_branch_comparison(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
 
-    if claims.role != UserRole::SuperAdmin {
-        if claims.org_id() != Some(*org_id) {
+    if claims.role != UserRole::SuperAdmin
+        && claims.org_id() != Some(*org_id) {
             return Err(AppError::Forbidden("Not your org".into()));
         }
-    }
 
     #[derive(sqlx::FromRow)]
     struct Row {

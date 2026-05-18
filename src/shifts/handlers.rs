@@ -695,13 +695,10 @@ pub async fn force_close_shift(
     let shift = fetch_shift_or_404(pool.get_ref(), *shift_id).await?;
     require_branch_access(pool.get_ref(), &claims, shift.branch_id).await?;
 
-    match claims.role {
-        UserRole::Teller => {
-            return Err(AppError::Forbidden(
-                "Only managers can force close a shift".into(),
-            ));
-        }
-        _ => {}
+    if claims.role == UserRole::Teller {
+        return Err(AppError::Forbidden(
+            "Only managers can force close a shift".into(),
+        ));
     }
 
     if shift.status != "open" {
@@ -737,6 +734,44 @@ pub async fn force_close_shift(
     .await?;
 
     Ok(HttpResponse::Ok().json(closed))
+}
+
+// ── DELETE /shifts/:shift_id ──────────────────────────────────
+
+pub async fn delete_shift(
+    req:      HttpRequest,
+    pool:     web::Data<PgPool>,
+    shift_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    
+    // Only OrgAdmin and SuperAdmin can delete shifts
+    use crate::models::UserRole;
+    if claims.role != UserRole::OrgAdmin && claims.role != UserRole::SuperAdmin {
+        return Err(AppError::Forbidden("Only organization administrators can delete shifts".into()));
+    }
+
+    // Verify shift exists and belongs to this organization
+    let shift = fetch_shift_or_404(pool.get_ref(), *shift_id).await?;
+    require_branch_access(pool.get_ref(), &claims, shift.branch_id).await?;
+
+    let mut tx = pool.get_ref().begin().await?;
+
+    // 1. Delete orders belonging to the shift (cascades to order items, payments, etc.)
+    sqlx::query("DELETE FROM orders WHERE shift_id = $1")
+        .bind(*shift_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // 2. Delete the shift itself (cascades to cash movements and inventory counts)
+    sqlx::query("DELETE FROM shifts WHERE id = $1")
+        .bind(*shift_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+
+    Ok(HttpResponse::NoContent().finish())
 }
 
 // ── Helpers ───────────────────────────────────────────────────

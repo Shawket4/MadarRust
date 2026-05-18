@@ -258,13 +258,12 @@ pub async fn update_org(
     .ok_or_else(|| AppError::NotFound("Org not found".into()))?;
 
     // Clear old logo from disk if explicitly nulled
-    if body.logo_url == Some(None) {
-        if let Some(old_url) = existing.logo_url {
+    if body.logo_url == Some(None)
+        && let Some(old_url) = existing.logo_url {
             let uploads_dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
             let base_url    = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
             delete_old_image(&old_url, &base_url, &uploads_dir).await;
         }
-    }
 
     Ok(HttpResponse::Ok().json(org))
 }

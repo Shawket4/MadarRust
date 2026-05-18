@@ -203,11 +203,10 @@ pub async fn create_catalog_item(
     .fetch_one(pool.get_ref())
     .await
     .map_err(|e| {
-        if let sqlx::Error::Database(ref db) = e {
-            if db.code().as_deref() == Some("23505") {
+        if let sqlx::Error::Database(ref db) = e
+            && db.code().as_deref() == Some("23505") {
                 return AppError::Conflict("An ingredient with this name already exists in the catalog".into());
             }
-        }
         AppError::Db(e)
     })?;
 
@@ -398,11 +397,10 @@ pub async fn add_to_branch_stock(
     .fetch_one(pool.get_ref())
     .await
     .map_err(|e| {
-        if let sqlx::Error::Database(ref db) = e {
-            if db.code().as_deref() == Some("23505") {
+        if let sqlx::Error::Database(ref db) = e
+            && db.code().as_deref() == Some("23505") {
                 return AppError::Conflict("This ingredient is already tracked for this branch".into());
             }
-        }
         AppError::Db(e)
     })?;
 
@@ -468,13 +466,12 @@ pub async fn remove_from_branch_stock(
         .execute(pool.get_ref())
         .await
         .map_err(|e| {
-            if let sqlx::Error::Database(ref db) = e {
-                if db.code().as_deref() == Some("23503") {
+            if let sqlx::Error::Database(ref db) = e
+                && db.code().as_deref() == Some("23503") {
                     return AppError::Conflict(
                         "Cannot remove ingredient with existing adjustment or transfer history".into(),
                     );
                 }
-            }
             AppError::Db(e)
         })?;
 

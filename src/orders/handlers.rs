@@ -193,6 +193,42 @@ pub struct PaginatedOrders {
     pub summary:     OrderSummary,   // ← add this
 }
 
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct OrderPayment {
+    pub id:        Uuid,
+    pub order_id:  Uuid,
+    pub method:    String,
+    pub amount:    i32,
+    pub reference: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OrderExport {
+    #[serde(flatten)]
+    pub order:    Order,
+    pub items:    Vec<OrderItemFull>,
+    pub payments: Vec<OrderPayment>,
+}
+
+#[derive(Serialize)]
+pub struct ExportResponse {
+    pub data:         Vec<OrderExport>,
+    pub total:        i64,
+    pub generated_at: chrono::DateTime<chrono::Utc>,
+    pub summary:      OrderSummary,
+}
+
+#[derive(Deserialize)]
+pub struct ExportOrdersQuery {
+    pub branch_id:      Option<Uuid>,
+    pub shift_id:       Option<Uuid>,
+    pub teller_name:    Option<String>,
+    pub payment_method: Option<String>,   // same comma-separated semantics
+    pub status:         Option<String>,
+    pub from:           Option<chrono::DateTime<chrono::Utc>>,
+    pub to:             Option<chrono::DateTime<chrono::Utc>>,
+}
+
 // ── Deduction helper ──────────────────────────────────────────
 
 #[derive(Serialize, Clone)]
@@ -222,12 +258,11 @@ pub async fn create_order(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| Uuid::parse_str(s).ok());
 
-    if let Some(key) = idempotency_key {
-        if let Some(existing) = fetch_order_by_idempotency_key(pool.get_ref(), key).await? {
+    if let Some(key) = idempotency_key
+        && let Some(existing) = fetch_order_by_idempotency_key(pool.get_ref(), key).await? {
             let items = fetch_order_items_full(pool.get_ref(), existing.id).await?;
             return Ok(HttpResponse::Ok().json(OrderFull { order: existing, items }));
         }
-    }
 
     if body.items.is_empty() {
         return Err(AppError::BadRequest("Order must have at least one item".into()));
@@ -523,12 +558,11 @@ pub async fn create_order(
             };
 
             // If field is size-restricted, check it matches
-            if let Some(fs) = &field_size {
-                if item_input.size_label.as_deref() != Some(fs.as_str()) {
+            if let Some(fs) = &field_size
+                && item_input.size_label.as_deref() != Some(fs.as_str()) {
                     tracing::warn!(field_id = %field_id, "Optional field size mismatch — skipping");
                     continue;
                 }
-            }
 
             // Add ingredient deduction if configured
             if let (Some(ref name), Some(ref unit), Some(qty)) =
@@ -815,7 +849,17 @@ pub async fn list_orders(
     let per_page = query.per_page.unwrap_or(default_per_page).clamp(1, 999999);
     let offset   = (page - 1) * per_page;
 
-    if let Some(pm) = &query.payment_method { validate_payment_method(pm)?; }
+    let parsed_payment_methods = match &query.payment_method {
+        Some(pm) => {
+            let methods = parse_payment_methods(pm)?;
+            if methods.is_empty() {
+                None
+            } else {
+                Some(methods)
+            }
+        }
+        None => None,
+    };
 
     let branch_id = match (query.shift_id, query.branch_id) {
         (Some(shift_id), _) => {
@@ -854,7 +898,12 @@ pub async fn list_orders(
     }
 
     push_filter!("u.name ILIKE",             query.teller_name);
-    push_filter!("o.payment_method::text =", query.payment_method);
+    if parsed_payment_methods.is_some() {
+        data_filter.push_str( &format!(" AND o.payment_method::text = ANY(${}::text[])", data_idx));
+        count_filter.push_str(&format!(" AND o.payment_method::text = ANY(${}::text[])", count_idx));
+        data_idx  += 1;
+        count_idx += 1;
+    }
     push_filter!("o.status::text =",         query.status);
     push_filter!("o.created_at >=",          query.from);
     push_filter!("o.created_at <=",          query.to);
@@ -879,7 +928,7 @@ pub async fn list_orders(
         ($q:expr) => {{
             let mut q = $q;
             if let Some(ref v) = query.teller_name    { q = q.bind(format!("%{}%", v)); }
-            if let Some(ref v) = query.payment_method { q = q.bind(v.clone()); }
+            if let Some(v)     = &parsed_payment_methods { q = q.bind(v); }
             if let Some(ref v) = query.status         { q = q.bind(v.clone()); }
             if let Some(v)     = query.from            { q = q.bind(v); }
             if let Some(v)     = query.to              { q = q.bind(v); }
@@ -990,8 +1039,8 @@ pub async fn void_order(
                     if let (Some(qty), Some(ing_id_str)) = (
                         d.get("quantity").and_then(|v| v.as_f64()),
                         d.get("org_ingredient_id").and_then(|v| v.as_str()),
-                    ) {
-                        if let Ok(ing_id) = Uuid::parse_str(ing_id_str) {
+                    )
+                        && let Ok(ing_id) = Uuid::parse_str(ing_id_str) {
                             sqlx::query(
                                 "UPDATE branch_inventory \
                                  SET current_stock = current_stock + $1 \
@@ -1003,7 +1052,6 @@ pub async fn void_order(
                             .execute(&mut *tx)
                             .await?;
                         }
-                    }
                 }
             }
         }
@@ -1128,8 +1176,8 @@ pub async fn preview_recipe(
                 && addon_ing_id.is_some()
                 && base_ing_id == addon_ing_id;
 
-            if !is_base {
-                if let Some((_, _, repl_name, repl_unit)) = rows.first() {
+            if !is_base
+                && let Some((_, _, repl_name, repl_unit)) = rows.first() {
                     for r in result.iter_mut() {
                         if r.source == "drink_recipe" && r.category == cat {
                             r.ingredient_name = repl_name.clone();
@@ -1138,7 +1186,6 @@ pub async fn preview_recipe(
                         }
                     }
                 }
-            }
             continue;
         }
 
@@ -1294,6 +1341,32 @@ fn validate_payment_method(method: &str) -> Result<(), AppError> {
     }
 }
 
+fn parse_payment_methods(raw: &str) -> Result<Vec<String>, AppError> {
+    let mut methods = Vec::new();
+    for part in raw.split(',') {
+        let trimmed = part.trim();
+        if !trimmed.is_empty() {
+            validate_payment_method(trimmed)?;
+            methods.push(trimmed.to_string());
+        }
+    }
+    Ok(methods)
+}
+
+#[allow(dead_code)]
+async fn fetch_order_payments(pool: &PgPool, order_id: Uuid)
+    -> Result<Vec<OrderPayment>, AppError>
+{
+    let rows = sqlx::query_as::<_, OrderPayment>(
+        "SELECT id, order_id, method::text AS method, amount, reference \
+         FROM order_payments WHERE order_id = $1 ORDER BY id"
+    )
+    .bind(order_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 fn validate_discount_type(dt: &str) -> Result<(), AppError> {
     match dt {
         "percentage" | "fixed" => Ok(()),
@@ -1306,4 +1379,161 @@ fn validate_void_reason(reason: &str) -> Result<(), AppError> {
         "customer_request" | "wrong_order" | "quality_issue" | "other" => Ok(()),
         _ => Err(AppError::BadRequest("Invalid void_reason".into())),
     }
+}
+
+#[allow(unused_assignments)]
+pub async fn export_orders(
+    req:   HttpRequest,
+    pool:  web::Data<PgPool>,
+    query: web::Query<ExportOrdersQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "orders", "read").await?;
+
+    let branch_id = match (query.shift_id, query.branch_id) {
+        (Some(shift_id), _) => {
+            let bid: Option<Uuid> = sqlx::query_scalar(
+                "SELECT branch_id FROM shifts WHERE id = $1"
+            )
+            .bind(shift_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .flatten();
+            bid.ok_or_else(|| AppError::NotFound("Shift not found".into()))?
+        }
+        (None, Some(bid)) => bid,
+        _ => return Err(AppError::BadRequest("Provide either shift_id or branch_id".into())),
+    };
+
+    require_branch_access(pool.get_ref(), &claims, branch_id).await?;
+
+    let parsed_payment_methods = match &query.payment_method {
+        Some(pm) => {
+            let methods = parse_payment_methods(pm)?;
+            if methods.is_empty() {
+                None
+            } else {
+                Some(methods)
+            }
+        }
+        None => None,
+    };
+
+    let scope_condition = if query.shift_id.is_some() { "o.shift_id = $1" } else { "o.branch_id = $1" };
+    let scope_id = query.shift_id.unwrap_or(branch_id);
+
+    let mut filter  = String::new();
+    #[allow(unused_assignments)]
+    let mut idx  = 2i32;
+
+    macro_rules! push_export_filter {
+        ($col:expr, $opt:expr) => {
+            if $opt.is_some() {
+                filter.push_str(&format!(" AND {} ${}", $col, idx));
+                idx += 1;
+            }
+        };
+    }
+
+    push_export_filter!("u.name ILIKE",             query.teller_name);
+    if parsed_payment_methods.is_some() {
+        filter.push_str(&format!(" AND o.payment_method::text = ANY(${}::text[])", idx));
+        idx += 1;
+    }
+    push_export_filter!("o.status::text =",         query.status);
+    push_export_filter!("o.created_at >=",          query.from);
+    push_export_filter!("o.created_at <=",          query.to);
+
+    macro_rules! bind_export_filters {
+        ($q:expr) => {{
+            let mut q = $q;
+            if let Some(ref v) = query.teller_name    { q = q.bind(format!("%{}%", v)); }
+            if let Some(v)     = &parsed_payment_methods { q = q.bind(v); }
+            if let Some(ref v) = query.status         { q = q.bind(v.clone()); }
+            if let Some(v)     = query.from            { q = q.bind(v); }
+            if let Some(v)     = query.to              { q = q.bind(v); }
+            q
+        }};
+    }
+
+    let count_sql = format!(
+        "SELECT COUNT(*) FROM orders o JOIN users u ON u.id = o.teller_id WHERE {} {}",
+        scope_condition, filter
+    );
+
+    let total: i64 = bind_export_filters!(sqlx::query_scalar(&count_sql).bind(scope_id))
+        .fetch_one(pool.get_ref())
+        .await?;
+
+    if total > 50_000 {
+        return Err(AppError::BadRequest(format!(
+            "Export too large: {} orders match. Narrow the date range or add filters (limit: 50000).",
+            total
+        )));
+    }
+
+    let summary_sql = format!(
+        "SELECT \
+            COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN o.total_amount ELSE 0 END), 0), \
+            COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN 1              ELSE 0 END), 0), \
+            COALESCE(SUM(CASE WHEN o.status::text = 'voided'    THEN 1              ELSE 0 END), 0), \
+            COALESCE(SUM(o.discount_amount), 0), \
+            COALESCE(SUM(COALESCE(o.tip_amount, 0)), 0) \
+         FROM orders o JOIN users u ON u.id = o.teller_id \
+         WHERE {} {}",
+        scope_condition, filter
+    );
+
+    let (revenue, completed, voided, discounts, tips): (i64, i64, i64, i64, i64) =
+        bind_export_filters!(sqlx::query_as(&summary_sql).bind(scope_id))
+            .fetch_one(pool.get_ref())
+            .await?;
+
+    let summary = OrderSummary { revenue, completed, voided, discounts, tips };
+
+    let data_sql = format!(
+        "{} WHERE {} {} ORDER BY o.created_at DESC",
+        ORDER_SELECT, scope_condition, filter
+    );
+
+    let orders: Vec<Order> = bind_export_filters!(
+        sqlx::query_as::<_, Order>(&data_sql)
+            .bind(scope_id)
+    )
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    let order_ids: Vec<Uuid> = orders.iter().map(|o| o.id).collect();
+    let payments_rows = if order_ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as::<_, OrderPayment>(
+            "SELECT id, order_id, method::text AS method, amount, reference \
+             FROM order_payments WHERE order_id = ANY($1) ORDER BY id"
+        )
+        .bind(&order_ids)
+        .fetch_all(pool.get_ref())
+        .await?
+    };
+
+    use std::collections::HashMap;
+    let mut payments_by_order: HashMap<Uuid, Vec<OrderPayment>> = HashMap::new();
+    for p in payments_rows {
+        payments_by_order.entry(p.order_id).or_default().push(p);
+    }
+
+    let mut data = Vec::with_capacity(orders.len());
+    for order in orders {
+        let order_id = order.id;
+        let items = fetch_order_items_full(pool.get_ref(), order_id).await?;
+        let payments = payments_by_order.remove(&order_id).unwrap_or_default();
+        data.push(OrderExport { order, items, payments });
+    }
+
+    Ok(HttpResponse::Ok().json(ExportResponse {
+        data,
+        total,
+        generated_at: chrono::Utc::now(),
+        summary,
+    }))
 }

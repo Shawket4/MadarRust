@@ -36,11 +36,10 @@ pub async fn upload_menu_item_image(
     let (org_id, old_image_url) = row
         .ok_or_else(|| AppError::NotFound("Menu item not found".into()))?;
 
-    if claims.role != UserRole::SuperAdmin {
-        if claims.org_id() != Some(org_id) {
+    if claims.role != UserRole::SuperAdmin
+        && claims.org_id() != Some(org_id) {
             return Err(AppError::Forbidden("Menu item belongs to a different org".into()));
         }
-    }
 
     let uploads_dir = std::env::var("UPLOADS_DIR").map_err(|_| AppError::Internal)?;
     let base_url    = std::env::var("UPLOADS_BASE_URL").map_err(|_| AppError::Internal)?;
@@ -139,11 +138,10 @@ pub async fn delete_old_image(old_url: &str, base_url: &str, uploads_dir: &str) 
     let prefix = format!("{}/", base_url.trim_end_matches('/'));
     if let Some(rel) = old_url.strip_prefix(&prefix) {
         let full = Path::new(uploads_dir).join(rel);
-        if full.exists() {
-            if let Err(e) = tokio::fs::remove_file(&full).await {
+        if full.exists()
+            && let Err(e) = tokio::fs::remove_file(&full).await {
                 tracing::warn!("Could not delete old image {:?}: {}", full, e);
             }
-        }
     }
 }
 

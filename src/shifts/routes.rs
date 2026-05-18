@@ -22,6 +22,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/{shift_id}/force-close",
                 web::post().to(handlers::force_close_shift))
             .route("/{shift_id}",
-                web::get().to(handlers::get_shift)),
+                web::get().to(handlers::get_shift))
+            .route("/{shift_id}",
+                web::delete().to(handlers::delete_shift)),
     );
 }

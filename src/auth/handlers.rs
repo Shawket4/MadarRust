@@ -104,7 +104,7 @@ pub async fn login(
                 .find(|u| {
                     u.pin_hash
                         .as_deref()
-                        .map_or(false, |h| bcrypt::verify(pin, h).unwrap_or(false))
+                        .is_some_and(|h| bcrypt::verify(pin, h).unwrap_or(false))
                 })
                 .ok_or_else(|| AppError::Unauthorized("Invalid PIN".into()))?
         }

@@ -395,13 +395,12 @@ pub async fn update_category(
     .ok_or_else(|| AppError::NotFound("Category not found".into()))?;
 
     // If explicit null, cleanup old image from storage
-    if body.image_url == Some(None) {
-        if let Some(old_url) = existing.image_url {
+    if body.image_url == Some(None)
+        && let Some(old_url) = existing.image_url {
             let uploads_dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
             let base_url    = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
             delete_old_image(&old_url, &base_url, &uploads_dir).await;
         }
-    }
 
     Ok(HttpResponse::Ok().json(row))
 }
@@ -612,13 +611,12 @@ pub async fn update_menu_item(
     .ok_or_else(|| AppError::NotFound("Menu item not found".into()))?;
 
     // If explicit null, cleanup old image from storage
-    if body.image_url == Some(None) {
-        if let Some(old_url) = existing.image_url {
+    if body.image_url == Some(None)
+        && let Some(old_url) = existing.image_url {
             let uploads_dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
             let base_url    = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
             delete_old_image(&old_url, &base_url, &uploads_dir).await;
         }
-    }
 
     Ok(HttpResponse::Ok().json(item))
 }
@@ -1253,11 +1251,10 @@ pub async fn create_optional_field(
                 "ingredient_name, ingredient_unit, and quantity_used are all required when configuring an ingredient deduction".into()
             ));
         }
-        if let Some(qty) = body.quantity_used {
-            if qty < 0.0 {
+        if let Some(qty) = body.quantity_used
+            && qty < 0.0 {
                 return Err(AppError::BadRequest("quantity_used cannot be negative".into()));
             }
-        }
     }
 
     let row = sqlx::query_as::<_, OptionalField>(
@@ -1299,11 +1296,10 @@ pub async fn update_optional_field(
     let item = fetch_menu_item(pool.get_ref(), item_id).await?;
     require_same_org(&claims, Some(item.org_id))?;
 
-    if let Some(qty) = body.quantity_used {
-        if qty < 0.0 {
+    if let Some(qty) = body.quantity_used
+        && qty < 0.0 {
             return Err(AppError::BadRequest("quantity_used cannot be negative".into()));
         }
-    }
 
     let row = sqlx::query_as::<_, OptionalField>(
         r#"

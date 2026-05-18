@@ -1,10 +1,10 @@
 use sqlx::PgPool;
 
 pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
-    // ── CLEAR CUSTOM USER OVERRIDES (FORCE ROLE LEVEL DEFAULTS) ──
-    sqlx::query("DELETE FROM permissions")
-        .execute(pool)
-        .await?;
+    // ── CLEAR CUSTOM USER OVERRIDES (DISABLED BY USER REQUEST) ──
+    // sqlx::query("DELETE FROM permissions")
+    //     .execute(pool)
+    //     .await?;
 
     let resources = [
         "orgs",
