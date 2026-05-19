@@ -31,6 +31,7 @@ pub struct Branch {
     pub printer_ip:    Option<String>,
     pub printer_port:  Option<i32>,
     pub is_active:     bool,
+    pub org_logo_url:  Option<String>,
     pub created_at:    DateTime<Utc>,
     pub updated_at:    DateTime<Utc>,
 }
@@ -101,8 +102,9 @@ pub async fn list_branches(
             r#"
             SELECT b.id, b.org_id, b.name, b.address, b.phone, b.timezone,
                    b.printer_brand, b.printer_ip::text, b.printer_port,
-                   b.is_active, b.created_at, b.updated_at
+                   b.is_active, o.logo_url as org_logo_url, b.created_at, b.updated_at
             FROM branches b
+            JOIN organizations o ON o.id = b.org_id
             JOIN user_branch_assignments uba ON uba.branch_id = b.id
             WHERE b.org_id = $1 AND uba.user_id = $2 AND b.deleted_at IS NULL
             ORDER BY b.name
@@ -115,12 +117,13 @@ pub async fn list_branches(
     } else {
         sqlx::query_as::<_, Branch>(
             r#"
-            SELECT id, org_id, name, address, phone, timezone,
-                   printer_brand, printer_ip::text, printer_port,
-                   is_active, created_at, updated_at
-            FROM branches
-            WHERE org_id = $1 AND deleted_at IS NULL
-            ORDER BY name
+            SELECT b.id, b.org_id, b.name, b.address, b.phone, b.timezone,
+                   b.printer_brand, b.printer_ip::text, b.printer_port,
+                   b.is_active, o.logo_url as org_logo_url, b.created_at, b.updated_at
+            FROM branches b
+            JOIN organizations o ON o.id = b.org_id
+            WHERE b.org_id = $1 AND b.deleted_at IS NULL
+            ORDER BY b.name
             "#,
         )
         .bind(query.org_id)
@@ -156,11 +159,18 @@ pub async fn create_branch(
 
     let branch = sqlx::query_as::<_, Branch>(
         r#"
-        INSERT INTO branches (org_id, name, address, phone, timezone, printer_brand, printer_ip, printer_port)
-        VALUES ($1, $2, $3, $4, $5, $6, $7::inet, $8)
-        RETURNING id, org_id, name, address, phone, timezone,
-                  printer_brand, printer_ip::text, printer_port,
-                  is_active, created_at, updated_at
+        WITH inserted AS (
+            INSERT INTO branches (org_id, name, address, phone, timezone, printer_brand, printer_ip, printer_port)
+            VALUES ($1, $2, $3, $4, $5, $6, $7::inet, $8)
+            RETURNING id, org_id, name, address, phone, timezone,
+                      printer_brand, printer_ip, printer_port,
+                      is_active, created_at, updated_at
+        )
+        SELECT i.id, i.org_id, i.name, i.address, i.phone, i.timezone,
+               i.printer_brand, i.printer_ip::text, i.printer_port,
+               i.is_active, o.logo_url as org_logo_url, i.created_at, i.updated_at
+        FROM inserted i
+        JOIN organizations o ON o.id = i.org_id
         "#,
     )
     .bind(body.org_id)
@@ -201,28 +211,35 @@ pub async fn update_branch(
     // nullable fields, so that an explicit null can clear the column.
     let branch = sqlx::query_as::<_, Branch>(
         r#"
-        UPDATE branches SET
-            name          = COALESCE($2, name),
-            address       = COALESCE($3, address),
-            phone         = COALESCE($4, phone),
-            timezone      = COALESCE($5, timezone),
-            is_active     = COALESCE($6, is_active),
-            printer_brand = CASE
-                              WHEN $7 THEN $8
-                              ELSE printer_brand
-                            END,
-            printer_ip    = CASE
-                              WHEN $9  THEN $10::inet
-                              ELSE printer_ip
-                            END,
-            printer_port  = CASE
-                              WHEN $11 THEN $12
-                              ELSE printer_port
-                            END
-        WHERE id = $1 AND deleted_at IS NULL
-        RETURNING id, org_id, name, address, phone, timezone,
-                  printer_brand, printer_ip::text, printer_port,
-                  is_active, created_at, updated_at
+        WITH updated AS (
+            UPDATE branches SET
+                name          = COALESCE($2, name),
+                address       = COALESCE($3, address),
+                phone         = COALESCE($4, phone),
+                timezone      = COALESCE($5, timezone),
+                is_active     = COALESCE($6, is_active),
+                printer_brand = CASE
+                                  WHEN $7 THEN $8
+                                  ELSE printer_brand
+                                END,
+                printer_ip    = CASE
+                                  WHEN $9  THEN $10::inet
+                                  ELSE printer_ip
+                                END,
+                printer_port  = CASE
+                                  WHEN $11 THEN $12
+                                  ELSE printer_port
+                                END
+            WHERE id = $1 AND deleted_at IS NULL
+            RETURNING id, org_id, name, address, phone, timezone,
+                      printer_brand, printer_ip, printer_port,
+                      is_active, created_at, updated_at
+        )
+        SELECT u.id, u.org_id, u.name, u.address, u.phone, u.timezone,
+               u.printer_brand, u.printer_ip::text, u.printer_port,
+               u.is_active, o.logo_url as org_logo_url, u.created_at, u.updated_at
+        FROM updated u
+        JOIN organizations o ON o.id = u.org_id
         "#,
     )
     .bind(*id)
@@ -278,11 +295,12 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 async fn fetch_branch(pool: &PgPool, id: Uuid) -> Result<Branch, AppError> {
     sqlx::query_as::<_, Branch>(
         r#"
-        SELECT id, org_id, name, address, phone, timezone,
-               printer_brand, printer_ip::text, printer_port,
-               is_active, created_at, updated_at
-        FROM branches
-        WHERE id = $1 AND deleted_at IS NULL
+        SELECT b.id, b.org_id, b.name, b.address, b.phone, b.timezone,
+               b.printer_brand, b.printer_ip::text, b.printer_port,
+               b.is_active, o.logo_url as org_logo_url, b.created_at, b.updated_at
+        FROM branches b
+        JOIN organizations o ON o.id = b.org_id
+        WHERE b.id = $1 AND b.deleted_at IS NULL
         "#,
     )
     .bind(id)
