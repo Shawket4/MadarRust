@@ -106,12 +106,46 @@ pub struct OrderFull {
     pub items: Vec<OrderItemFull>,
 }
 
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct OrderBundleComponentAddon {
+    pub id:                Uuid,
+    pub order_line_id:     Uuid,
+    pub component_item_id: Uuid,
+    pub addon_item_id:     Uuid,
+    pub addon_name:        String,
+    pub unit_price:        i32,
+    pub quantity:          i32,
+    pub line_total:        i32,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct OrderBundleComponentOptional {
+    pub id:                Uuid,
+    pub order_line_id:     Uuid,
+    pub component_item_id: Uuid,
+    pub optional_field_id: Option<Uuid>,
+    pub field_name:        String,
+    pub price:             i32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OrderBundleComponentFull {
+    pub item_id:    Uuid,
+    pub item_name:  String,
+    pub quantity:   i32,
+    pub size_label: Option<String>,
+    pub addons:     Vec<OrderBundleComponentAddon>,
+    pub optionals:  Vec<OrderBundleComponentOptional>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct OrderItemFull {
     #[serde(flatten)]
-    pub item:      OrderItem,
-    pub addons:    Vec<OrderItemAddon>,
-    pub optionals: Vec<OrderItemOptional>,
+    pub item:              OrderItem,
+    pub addons:            Vec<OrderItemAddon>,
+    pub optionals:         Vec<OrderItemOptional>,
+    #[serde(default)]
+    pub bundle_components: Vec<OrderBundleComponentFull>,
 }
 
 #[derive(Deserialize)]
@@ -121,12 +155,7 @@ pub struct PaymentSplitInput {
     pub reference: Option<String>,
 }
 
-#[derive(Deserialize)]
-pub struct AddonInput {
-    pub addon_item_id: Uuid,
-    #[serde(default = "default_qty")]
-    pub quantity: i32,
-}
+pub use crate::orders::component_resolve::AddonInput;
 
 #[derive(Deserialize)]
 pub struct OrderItemInput {
@@ -136,10 +165,10 @@ pub struct OrderItemInput {
     pub quantity:          i32,
     pub addons:            Vec<AddonInput>,
     pub optional_field_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub bundle_components: Vec<crate::orders::component_resolve::BundleComponentInput>,
     pub notes:             Option<String>,
 }
-
-fn default_qty() -> i32 { 1 }
 
 #[derive(Deserialize)]
 pub struct CreateOrderRequest {
@@ -328,8 +357,12 @@ pub async fn create_order(
     }
 
     struct ResolvedBundleComponent {
-        item_id:  Uuid,
-        quantity: i32,
+        item_id:    Uuid,
+        item_name:  String,
+        quantity:   i32,
+        size_label: Option<String>,
+        addons:     Vec<ResolvedAddon>,
+        optionals:  Vec<ResolvedOptional>,
     }
 
     struct ResolvedItem {
@@ -342,9 +375,10 @@ pub async fn create_order(
         addons:            Vec<ResolvedAddon>,
         optionals:         Vec<ResolvedOptional>,
         deductions:        Vec<InventoryDeduction>,
-        bundle_id:         Option<Uuid>,
-        bundle_unit_price: Option<i32>,
-        bundle_components: Vec<ResolvedBundleComponent>,
+        bundle_id:           Option<Uuid>,
+        bundle_unit_price:   Option<i32>,
+            bundle_components:   Vec<ResolvedBundleComponent>,
+        component_surcharge:   i32,
     }
 
     struct ResolvedAddon {
@@ -367,6 +401,7 @@ pub async fn create_order(
         let mut resolved_optionals: Vec<ResolvedOptional> = Vec::new();
         let mut bundle_components = Vec::new();
 
+        let mut component_surcharge: i32 = 0;
         let (resolved_menu_item_id, item_name, unit_price, bundle_id, bundle_unit_price) = if let Some(b_id) = item_input.bundle_id {
             // ── 1. Resolve Bundle ─────────────────────────────
             let bundle: (Uuid, String, i32, String) = sqlx::query_as(
@@ -447,52 +482,114 @@ pub async fn create_order(
                 }
             }
 
-            // Resolve Components
-            let comps: Vec<(Uuid, i32, String)> = sqlx::query_as(
+            // Resolve components (client snapshot or catalog defaults)
+            let catalog: Vec<(Uuid, i32, String)> = sqlx::query_as(
                 "SELECT bc.item_id, bc.quantity, mi.name \
                  FROM bundle_components bc \
                  JOIN menu_items mi ON mi.id = bc.item_id \
-                 WHERE bc.bundle_id = $1"
+                 WHERE bc.bundle_id = $1 \
+                 ORDER BY bc.position ASC",
             )
             .bind(bundle.0)
             .fetch_all(pool.get_ref())
             .await?;
 
-            for comp in comps {
-                bundle_components.push(ResolvedBundleComponent {
-                    item_id: comp.0,
-                    quantity: comp.1,
-                });
+            if catalog.is_empty() {
+                return Err(AppError::BadRequest(format!("Bundle {} has no components", bundle.1)));
+            }
 
-                let component_qty = comp.1 * item_input.quantity;
+            let catalog_map: std::collections::HashMap<Uuid, (i32, String)> = catalog
+                .iter()
+                .map(|(id, qty, name)| (*id, (*qty, name.clone())))
+                .collect();
 
-                // Component base recipe deduction
-                let recipe_rows: Vec<(Option<Uuid>, f64, String, String, String)> = sqlx::query_as(
-                    r#"SELECT r.org_ingredient_id, r.quantity_used::float8,
-                              r.ingredient_name, r.ingredient_unit,
-                              COALESCE(i.category, 'general') as category
-                       FROM   menu_item_recipes r
-                       LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id
-                       WHERE  r.menu_item_id = $1
-                         AND  r.size_label = COALESCE(
-                             (SELECT size_label FROM menu_item_recipes WHERE menu_item_id = $1 LIMIT 1),
-                             'one_size'::item_size
-                         )"#,
+            let component_inputs: Vec<crate::orders::component_resolve::BundleComponentInput> =
+                if item_input.bundle_components.is_empty() {
+                    catalog
+                        .iter()
+                        .map(|(id, qty, _)| crate::orders::component_resolve::BundleComponentInput {
+                            item_id: *id,
+                            quantity: *qty,
+                            size_label: None,
+                            addons: vec![],
+                            optional_field_ids: vec![],
+                        })
+                        .collect()
+                } else {
+                    item_input.bundle_components.clone()
+                };
+
+            for comp_in in component_inputs {
+                let Some((catalog_qty, item_name)) = catalog_map.get(&comp_in.item_id) else {
+                    return Err(AppError::BadRequest(format!(
+                        "Item {} is not a component of bundle {}",
+                        comp_in.item_id, bundle.1
+                    )));
+                };
+                if comp_in.quantity != *catalog_qty {
+                    return Err(AppError::BadRequest(format!(
+                        "Invalid quantity for component {} in bundle {}",
+                        item_name, bundle.1
+                    )));
+                }
+
+                let line_qty = comp_in.quantity * item_input.quantity;
+                let config = crate::orders::component_resolve::resolve_menu_item_configuration(
+                    pool.get_ref(),
+                    comp_in.item_id,
+                    comp_in.size_label.clone(),
+                    line_qty,
+                    &comp_in.addons,
+                    &comp_in.optional_field_ids,
                 )
-                .bind(comp.0)
-                .fetch_all(pool.get_ref())
                 .await?;
 
-                for (ing_id, qty, name, unit, category) in recipe_rows {
+                component_surcharge += (config.addon_line + config.optional_line) * item_input.quantity;
+
+                for d in config.deductions {
                     deductions.push(InventoryDeduction {
-                        org_ingredient_id: ing_id,
-                        ingredient_name:   name,
-                        unit,
-                        quantity:          qty * component_qty as f64,
-                        source:            format!("bundle_component_{}", comp.2),
-                        category,
+                        org_ingredient_id: d.org_ingredient_id,
+                        ingredient_name:   d.ingredient_name,
+                        unit:              d.unit,
+                        quantity:          d.quantity,
+                        source:            format!("bundle_component:{}", item_name),
+                        category:          d.category,
                     });
                 }
+
+                let comp_addons: Vec<ResolvedAddon> = config
+                    .addons
+                    .into_iter()
+                    .map(|a| ResolvedAddon {
+                        addon_item_id: a.addon_item_id,
+                        addon_name:    a.addon_name,
+                        unit_price:    a.unit_price,
+                        quantity:      a.quantity,
+                    })
+                    .collect();
+
+                let comp_optionals: Vec<ResolvedOptional> = config
+                    .optionals
+                    .into_iter()
+                    .map(|o| ResolvedOptional {
+                        optional_field_id: o.optional_field_id,
+                        field_name:        o.field_name,
+                        price:             o.price,
+                        org_ingredient_id: o.org_ingredient_id,
+                        ingredient_name:   o.ingredient_name,
+                        ingredient_unit:   o.ingredient_unit,
+                        quantity_used:     o.quantity_used,
+                    })
+                    .collect();
+
+                bundle_components.push(ResolvedBundleComponent {
+                    item_id:    comp_in.item_id,
+                    item_name:  item_name.clone(),
+                    quantity:   comp_in.quantity,
+                    size_label: comp_in.size_label.clone(),
+                    addons:     comp_addons,
+                    optionals:  comp_optionals,
+                });
             }
 
             (None, bundle.1, bundle.2, Some(bundle.0), Some(bundle.2))
@@ -737,19 +834,27 @@ pub async fn create_order(
             return Err(AppError::BadRequest("Each line item must have either menu_item_id or bundle_id".into()));
         };
 
-        let item_line      = unit_price * item_input.quantity;
-        let addon_line: i32 = resolved_addons
-            .iter()
-            .map(|a| a.unit_price * a.quantity)
-            .sum::<i32>()
-            * item_input.quantity;
-        let optional_line: i32 = resolved_optionals
-            .iter()
-            .map(|o| o.price)
-            .sum::<i32>()
-            * item_input.quantity;
+        let item_line = unit_price * item_input.quantity;
+        let addon_line: i32 = if bundle_id.is_some() {
+            0
+        } else {
+            resolved_addons
+                .iter()
+                .map(|a| a.unit_price * a.quantity)
+                .sum::<i32>()
+                * item_input.quantity
+        };
+        let optional_line: i32 = if bundle_id.is_some() {
+            0
+        } else {
+            resolved_optionals
+                .iter()
+                .map(|o| o.price)
+                .sum::<i32>()
+                * item_input.quantity
+        };
 
-        subtotal += item_line + addon_line + optional_line;
+        subtotal += item_line + addon_line + optional_line + component_surcharge;
 
         resolved_items.push(ResolvedItem {
             menu_item_id:      resolved_menu_item_id,
@@ -764,6 +869,7 @@ pub async fn create_order(
             bundle_id,
             bundle_unit_price,
             bundle_components,
+            component_surcharge: component_surcharge,
         });
     }
 
@@ -867,7 +973,8 @@ pub async fn create_order(
     let mut order_items_full: Vec<OrderItemFull> = Vec::new();
 
     for resolved in resolved_items {
-        let line_total = resolved.unit_price * resolved.quantity;
+        let line_total = resolved.unit_price * resolved.quantity
+            + resolved.component_surcharge;
         let snapshot   = serde_json::to_value(&resolved.deductions)
             .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
 
@@ -898,14 +1005,55 @@ pub async fn create_order(
         if let Some(_b_id) = resolved.bundle_id {
             for comp in &resolved.bundle_components {
                 sqlx::query(
-                    "INSERT INTO order_line_bundle_components (order_line_id, item_id, quantity) \
-                     VALUES ($1, $2, $3)"
+                    "INSERT INTO order_line_bundle_components \
+                        (order_line_id, item_id, quantity, size_label) \
+                     VALUES ($1, $2, $3, $4)",
                 )
                 .bind(order_item.id)
                 .bind(comp.item_id)
                 .bind(comp.quantity)
+                .bind(&comp.size_label)
                 .execute(&mut *tx)
                 .await?;
+
+                for addon in &comp.addons {
+                    let addon_line = addon.unit_price * addon.quantity * resolved.quantity;
+                    sqlx::query(
+                        "INSERT INTO order_line_bundle_component_addons \
+                            (order_line_id, component_item_id, addon_item_id, addon_name, \
+                             unit_price, quantity, line_total) \
+                         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    )
+                    .bind(order_item.id)
+                    .bind(comp.item_id)
+                    .bind(addon.addon_item_id)
+                    .bind(&addon.addon_name)
+                    .bind(addon.unit_price)
+                    .bind(addon.quantity)
+                    .bind(addon_line)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+
+                for opt in &comp.optionals {
+                    sqlx::query(
+                        "INSERT INTO order_line_bundle_component_optionals \
+                            (order_line_id, component_item_id, optional_field_id, field_name, \
+                             price, org_ingredient_id, ingredient_name, ingredient_unit, quantity_deducted) \
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                    )
+                    .bind(order_item.id)
+                    .bind(comp.item_id)
+                    .bind(opt.optional_field_id)
+                    .bind(&opt.field_name)
+                    .bind(opt.price)
+                    .bind(opt.org_ingredient_id)
+                    .bind(&opt.ingredient_name)
+                    .bind(&opt.ingredient_unit)
+                    .bind(opt.quantity_used)
+                    .execute(&mut *tx)
+                    .await?;
+                }
             }
         }
 
@@ -989,9 +1137,10 @@ pub async fn create_order(
         }
 
         order_items_full.push(OrderItemFull {
-            item:      order_item,
-            addons:    addon_rows,
-            optionals: optional_rows,
+            item:              order_item,
+            addons:            addon_rows,
+            optionals:         optional_rows,
+            bundle_components: vec![],
         });
     }
 
@@ -1235,7 +1384,7 @@ pub async fn void_order(
 #[derive(Deserialize)]
 pub struct PreviewAddonInput {
     pub addon_item_id: Uuid,
-    #[serde(default = "default_qty")]
+    #[serde(default = "crate::orders::component_resolve::default_qty")]
     pub quantity: i32,
 }
 
@@ -1460,7 +1609,67 @@ async fn fetch_order_items_full(
         .fetch_all(pool)
         .await?;
 
-        result.push(OrderItemFull { item, addons, optionals });
+        let bundle_components = if item.bundle_id.is_some() {
+            let comps: Vec<(Uuid, i32, Option<String>)> = sqlx::query_as(
+                "SELECT item_id, quantity, size_label \
+                 FROM order_line_bundle_components WHERE order_line_id = $1",
+            )
+            .bind(item.id)
+            .fetch_all(pool)
+            .await?;
+
+            let mut out = Vec::new();
+            for (comp_item_id, qty, size_label) in comps {
+                let item_name: String = sqlx::query_scalar(
+                    "SELECT name FROM menu_items WHERE id = $1",
+                )
+                .bind(comp_item_id)
+                .fetch_one(pool)
+                .await?;
+
+                let comp_addons = sqlx::query_as::<_, OrderBundleComponentAddon>(
+                    "SELECT id, order_line_id, component_item_id, addon_item_id, addon_name, \
+                            unit_price, quantity, line_total \
+                     FROM order_line_bundle_component_addons \
+                     WHERE order_line_id = $1 AND component_item_id = $2 \
+                     ORDER BY id",
+                )
+                .bind(item.id)
+                .bind(comp_item_id)
+                .fetch_all(pool)
+                .await?;
+
+                let comp_optionals = sqlx::query_as::<_, OrderBundleComponentOptional>(
+                    "SELECT id, order_line_id, component_item_id, optional_field_id, field_name, price \
+                     FROM order_line_bundle_component_optionals \
+                     WHERE order_line_id = $1 AND component_item_id = $2 \
+                     ORDER BY id",
+                )
+                .bind(item.id)
+                .bind(comp_item_id)
+                .fetch_all(pool)
+                .await?;
+
+                out.push(OrderBundleComponentFull {
+                    item_id: comp_item_id,
+                    item_name,
+                    quantity: qty,
+                    size_label,
+                    addons: comp_addons,
+                    optionals: comp_optionals,
+                });
+            }
+            out
+        } else {
+            vec![]
+        };
+
+        result.push(OrderItemFull {
+            item,
+            addons,
+            optionals,
+            bundle_components,
+        });
     }
     Ok(result)
 }

@@ -186,6 +186,9 @@ pub async fn create_catalog_item(
         return Err(AppError::BadRequest("name cannot be empty".into()));
     }
 
+    let cost = body.cost_per_unit.unwrap_or(Decimal::ZERO);
+    let mut tx = pool.get_ref().begin().await?;
+
     let row = sqlx::query_as::<_, OrgIngredient>(
         r#"
         INSERT INTO org_ingredients (org_id, name, unit, category, description, cost_per_unit)
@@ -199,8 +202,8 @@ pub async fn create_catalog_item(
     .bind(&body.unit)
     .bind(&body.category)
     .bind(&body.description)
-    .bind(body.cost_per_unit.unwrap_or(Decimal::ZERO))
-    .fetch_one(pool.get_ref())
+    .bind(cost)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
         if let sqlx::Error::Database(ref db) = e
@@ -210,6 +213,19 @@ pub async fn create_catalog_item(
         AppError::Db(e)
     })?;
 
+    // Seed the first cost history row.
+    sqlx::query(
+        "INSERT INTO ingredient_cost_history \
+             (org_ingredient_id, cost_per_unit, effective_from, changed_by, note) \
+         VALUES ($1, $2, now(), $3, 'Initial cost')"
+    )
+    .bind(row.id)
+    .bind(cost)
+    .bind(claims.user_id())
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
     Ok(HttpResponse::Created().json(row))
 }
 
@@ -227,6 +243,8 @@ pub async fn update_catalog_item(
     require_org_access(&claims, org_id)?;
 
     if let Some(ref u) = body.unit { validate_unit(u)?; }
+
+    let mut tx = pool.get_ref().begin().await?;
 
     let row = sqlx::query_as::<_, OrgIngredient>(
         r#"
@@ -250,10 +268,46 @@ pub async fn update_catalog_item(
     .bind(body.cost_per_unit)
     .bind(body.is_active)
     .bind(org_id)
-    .fetch_optional(pool.get_ref())
+    .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| AppError::NotFound("Ingredient not found".into()))?;
 
+    // Maintain cost history whenever cost_per_unit actually changed.
+    if let Some(new_cost) = body.cost_per_unit {
+        let current_history_cost: Option<Decimal> = sqlx::query_scalar(
+            "SELECT cost_per_unit FROM ingredient_cost_history \
+             WHERE org_ingredient_id = $1 AND effective_until IS NULL"
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if current_history_cost.map_or(true, |c| c != new_cost) {
+            // Close the currently-active row.
+            sqlx::query(
+                "UPDATE ingredient_cost_history \
+                 SET effective_until = now() \
+                 WHERE org_ingredient_id = $1 AND effective_until IS NULL"
+            )
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+
+            // Open a new row.
+            sqlx::query(
+                "INSERT INTO ingredient_cost_history \
+                     (org_ingredient_id, cost_per_unit, effective_from, changed_by) \
+                 VALUES ($1, $2, now(), $3)"
+            )
+            .bind(id)
+            .bind(new_cost)
+            .bind(claims.user_id())
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    tx.commit().await?;
     Ok(HttpResponse::Ok().json(row))
 }
 

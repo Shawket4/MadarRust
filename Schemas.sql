@@ -1,12 +1,9 @@
-Password: 
 --
 -- PostgreSQL database dump
 --
 
-\restrict higYn0IhbnlLjYjlQJIcbi5gX6oLuF0sGP0QwBwtmGZyBUXcdKQQi4Qa89cL7qf
-
--- Dumped from database version 17.9 (Debian 17.9-0+deb13u1)
--- Dumped by pg_dump version 17.9 (Debian 17.9-0+deb13u1)
+-- Dumped from database version 17.10 (Debian 17.10-0+deb13u1)
+-- Dumped by pg_dump version 17.5
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -47,6 +44,19 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
 
 COMMENT ON EXTENSION pgcrypto IS 'cryptographic functions';
 
+
+--
+-- Name: bundle_status; Type: TYPE; Schema: public; Owner: rue
+--
+
+CREATE TYPE public.bundle_status AS ENUM (
+    'draft',
+    'active',
+    'archived'
+);
+
+
+ALTER TYPE public.bundle_status OWNER TO rue;
 
 --
 -- Name: discount_type; Type: TYPE; Schema: public; Owner: rue
@@ -383,6 +393,62 @@ CREATE TABLE public.branches (
 ALTER TABLE public.branches OWNER TO rue;
 
 --
+-- Name: bundle_branch_availability; Type: TABLE; Schema: public; Owner: rue
+--
+
+CREATE TABLE public.bundle_branch_availability (
+    bundle_id uuid NOT NULL,
+    branch_id uuid NOT NULL
+);
+
+
+ALTER TABLE public.bundle_branch_availability OWNER TO rue;
+
+--
+-- Name: bundle_components; Type: TABLE; Schema: public; Owner: rue
+--
+
+CREATE TABLE public.bundle_components (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    bundle_id uuid NOT NULL,
+    item_id uuid NOT NULL,
+    quantity integer DEFAULT 1 NOT NULL,
+    "position" integer DEFAULT 0 NOT NULL,
+    CONSTRAINT bundle_components_quantity_check CHECK ((quantity > 0))
+);
+
+
+ALTER TABLE public.bundle_components OWNER TO rue;
+
+--
+-- Name: bundles; Type: TABLE; Schema: public; Owner: rue
+--
+
+CREATE TABLE public.bundles (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    org_id uuid NOT NULL,
+    name text NOT NULL,
+    name_translations jsonb DEFAULT '{}'::jsonb NOT NULL,
+    description text,
+    description_translations jsonb DEFAULT '{}'::jsonb NOT NULL,
+    price integer NOT NULL,
+    status public.bundle_status DEFAULT 'draft'::public.bundle_status NOT NULL,
+    image_url text,
+    display_order integer DEFAULT 0 NOT NULL,
+    available_from_time time without time zone,
+    available_until_time time without time zone,
+    available_from_date date,
+    available_until_date date,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by uuid,
+    CONSTRAINT bundles_price_check CHECK ((price >= 0))
+);
+
+
+ALTER TABLE public.bundles OWNER TO rue;
+
+--
 -- Name: categories; Type: TABLE; Schema: public; Owner: rue
 --
 
@@ -563,18 +629,34 @@ ALTER TABLE public.order_item_optionals OWNER TO rue;
 CREATE TABLE public.order_items (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     order_id uuid NOT NULL,
-    menu_item_id uuid NOT NULL,
+    menu_item_id uuid,
     item_name text NOT NULL,
     size_label text,
     unit_price integer NOT NULL,
     quantity integer DEFAULT 1 NOT NULL,
     line_total integer NOT NULL,
     notes text,
-    deductions_snapshot jsonb DEFAULT '[]'::jsonb NOT NULL
+    deductions_snapshot jsonb DEFAULT '[]'::jsonb NOT NULL,
+    bundle_id uuid,
+    bundle_unit_price integer
 );
 
 
 ALTER TABLE public.order_items OWNER TO rue;
+
+--
+-- Name: order_line_bundle_components; Type: TABLE; Schema: public; Owner: rue
+--
+
+CREATE TABLE public.order_line_bundle_components (
+    order_line_id uuid NOT NULL,
+    item_id uuid NOT NULL,
+    quantity integer DEFAULT 1 NOT NULL,
+    CONSTRAINT order_line_bundle_components_quantity_check CHECK ((quantity > 0))
+);
+
+
+ALTER TABLE public.order_line_bundle_components OWNER TO rue;
 
 --
 -- Name: order_payments; Type: TABLE; Schema: public; Owner: rue
@@ -638,11 +720,12 @@ CREATE TABLE public.org_ingredients (
     name text NOT NULL,
     unit public.inventory_unit NOT NULL,
     description text,
-    cost_per_unit integer DEFAULT 0 NOT NULL,
+    cost_per_unit numeric(15,2) DEFAULT 0 NOT NULL,
     is_active boolean DEFAULT true NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    deleted_at timestamp with time zone
+    deleted_at timestamp with time zone,
+    category text DEFAULT 'general'::text NOT NULL
 );
 
 
@@ -893,6 +976,38 @@ ALTER TABLE ONLY public.branches
 
 
 --
+-- Name: bundle_branch_availability bundle_branch_availability_pkey; Type: CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.bundle_branch_availability
+    ADD CONSTRAINT bundle_branch_availability_pkey PRIMARY KEY (bundle_id, branch_id);
+
+
+--
+-- Name: bundle_components bundle_components_bundle_id_item_id_key; Type: CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.bundle_components
+    ADD CONSTRAINT bundle_components_bundle_id_item_id_key UNIQUE (bundle_id, item_id);
+
+
+--
+-- Name: bundle_components bundle_components_pkey; Type: CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.bundle_components
+    ADD CONSTRAINT bundle_components_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: bundles bundles_pkey; Type: CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.bundles
+    ADD CONSTRAINT bundles_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: categories categories_org_id_name_key; Type: CONSTRAINT; Schema: public; Owner: rue
 --
 
@@ -1002,6 +1117,14 @@ ALTER TABLE ONLY public.order_item_optionals
 
 ALTER TABLE ONLY public.order_items
     ADD CONSTRAINT order_items_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: order_line_bundle_components order_line_bundle_components_pkey; Type: CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.order_line_bundle_components
+    ADD CONSTRAINT order_line_bundle_components_pkey PRIMARY KEY (order_line_id, item_id);
 
 
 --
@@ -1194,6 +1317,27 @@ CREATE INDEX idx_branch_inventory_ingredient ON public.branch_inventory USING bt
 --
 
 CREATE INDEX idx_branches_org ON public.branches USING btree (org_id);
+
+
+--
+-- Name: idx_bundle_components_bundle; Type: INDEX; Schema: public; Owner: rue
+--
+
+CREATE INDEX idx_bundle_components_bundle ON public.bundle_components USING btree (bundle_id);
+
+
+--
+-- Name: idx_bundles_org; Type: INDEX; Schema: public; Owner: rue
+--
+
+CREATE INDEX idx_bundles_org ON public.bundles USING btree (org_id);
+
+
+--
+-- Name: idx_bundles_org_status; Type: INDEX; Schema: public; Owner: rue
+--
+
+CREATE INDEX idx_bundles_org_status ON public.bundles USING btree (org_id, status);
 
 
 --
@@ -1449,6 +1593,13 @@ CREATE TRIGGER trg_branches_updated_at BEFORE UPDATE ON public.branches FOR EACH
 
 
 --
+-- Name: bundles trg_bundles_updated_at; Type: TRIGGER; Schema: public; Owner: rue
+--
+
+CREATE TRIGGER trg_bundles_updated_at BEFORE UPDATE ON public.bundles FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
 -- Name: categories trg_categories_updated_at; Type: TRIGGER; Schema: public; Owner: rue
 --
 
@@ -1640,6 +1791,54 @@ ALTER TABLE ONLY public.branches
 
 
 --
+-- Name: bundle_branch_availability bundle_branch_availability_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.bundle_branch_availability
+    ADD CONSTRAINT bundle_branch_availability_branch_id_fkey FOREIGN KEY (branch_id) REFERENCES public.branches(id) ON DELETE CASCADE;
+
+
+--
+-- Name: bundle_branch_availability bundle_branch_availability_bundle_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.bundle_branch_availability
+    ADD CONSTRAINT bundle_branch_availability_bundle_id_fkey FOREIGN KEY (bundle_id) REFERENCES public.bundles(id) ON DELETE CASCADE;
+
+
+--
+-- Name: bundle_components bundle_components_bundle_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.bundle_components
+    ADD CONSTRAINT bundle_components_bundle_id_fkey FOREIGN KEY (bundle_id) REFERENCES public.bundles(id) ON DELETE CASCADE;
+
+
+--
+-- Name: bundle_components bundle_components_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.bundle_components
+    ADD CONSTRAINT bundle_components_item_id_fkey FOREIGN KEY (item_id) REFERENCES public.menu_items(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: bundles bundles_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.bundles
+    ADD CONSTRAINT bundles_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: bundles bundles_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.bundles
+    ADD CONSTRAINT bundles_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
+
+
+--
 -- Name: categories categories_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
 --
 
@@ -1760,6 +1959,14 @@ ALTER TABLE ONLY public.order_item_optionals
 
 
 --
+-- Name: order_items order_items_bundle_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.order_items
+    ADD CONSTRAINT order_items_bundle_id_fkey FOREIGN KEY (bundle_id) REFERENCES public.bundles(id) ON DELETE SET NULL;
+
+
+--
 -- Name: order_items order_items_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
 --
 
@@ -1773,6 +1980,22 @@ ALTER TABLE ONLY public.order_items
 
 ALTER TABLE ONLY public.order_items
     ADD CONSTRAINT order_items_order_id_fkey FOREIGN KEY (order_id) REFERENCES public.orders(id) ON DELETE CASCADE;
+
+
+--
+-- Name: order_line_bundle_components order_line_bundle_components_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.order_line_bundle_components
+    ADD CONSTRAINT order_line_bundle_components_item_id_fkey FOREIGN KEY (item_id) REFERENCES public.menu_items(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: order_line_bundle_components order_line_bundle_components_order_line_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.order_line_bundle_components
+    ADD CONSTRAINT order_line_bundle_components_order_line_id_fkey FOREIGN KEY (order_line_id) REFERENCES public.order_items(id) ON DELETE CASCADE;
 
 
 --
@@ -1947,4 +2170,3 @@ ALTER TABLE ONLY public.users
 -- PostgreSQL database dump complete
 --
 
-\unrestrict higYn0IhbnlLjYjlQJIcbi5gX6oLuF0sGP0QwBwtmGZyBUXcdKQQi4Qa89cL7qf
