@@ -4,6 +4,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use chrono::Utc;
 
 use crate::{
     auth::jwt::Claims,
@@ -62,7 +63,7 @@ pub struct Order {
 pub struct OrderItem {
     pub id:                  Uuid,
     pub order_id:            Uuid,
-    pub menu_item_id:        Uuid,
+    pub menu_item_id:        Option<Uuid>,
     pub item_name:           String,
     pub size_label:          Option<String>,
     pub unit_price:          i32,
@@ -70,6 +71,8 @@ pub struct OrderItem {
     pub line_total:          i32,
     pub notes:               Option<String>,
     pub deductions_snapshot: serde_json::Value,
+    pub bundle_id:           Option<Uuid>,
+    pub bundle_unit_price:   Option<i32>,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -127,7 +130,8 @@ pub struct AddonInput {
 
 #[derive(Deserialize)]
 pub struct OrderItemInput {
-    pub menu_item_id:      Uuid,
+    pub menu_item_id:      Option<Uuid>,
+    pub bundle_id:         Option<Uuid>,
     pub size_label:        Option<String>,
     pub quantity:          i32,
     pub addons:            Vec<AddonInput>,
@@ -323,16 +327,24 @@ pub async fn create_order(
         quantity_used:     Option<f64>,
     }
 
+    struct ResolvedBundleComponent {
+        item_id:  Uuid,
+        quantity: i32,
+    }
+
     struct ResolvedItem {
-        menu_item_id: Uuid,
-        item_name:    String,
-        size_label:   Option<String>,
-        unit_price:   i32,
-        quantity:     i32,
-        notes:        Option<String>,
-        addons:       Vec<ResolvedAddon>,
-        optionals:    Vec<ResolvedOptional>,
-        deductions:   Vec<InventoryDeduction>,
+        menu_item_id:      Option<Uuid>,
+        item_name:         String,
+        size_label:        Option<String>,
+        unit_price:        i32,
+        quantity:          i32,
+        notes:             Option<String>,
+        addons:            Vec<ResolvedAddon>,
+        optionals:         Vec<ResolvedOptional>,
+        deductions:        Vec<InventoryDeduction>,
+        bundle_id:         Option<Uuid>,
+        bundle_unit_price: Option<i32>,
+        bundle_components: Vec<ResolvedBundleComponent>,
     }
 
     struct ResolvedAddon {
@@ -350,247 +362,380 @@ pub async fn create_order(
             return Err(AppError::BadRequest("Item quantity must be > 0".into()));
         }
 
-        let (item_name, base_price): (String, i32) = sqlx::query_as(
-            "SELECT name, base_price FROM menu_items WHERE id = $1 AND deleted_at IS NULL",
-        )
-        .bind(item_input.menu_item_id)
-        .fetch_optional(pool.get_ref())
-        .await?
-        .ok_or_else(|| AppError::NotFound(
-            format!("Menu item {} not found", item_input.menu_item_id)
-        ))?;
-
-        let unit_price: i32 = match &item_input.size_label {
-            Some(size) => {
-                let p: Option<i32> = sqlx::query_scalar(
-                    "SELECT price_override FROM item_sizes \
-                     WHERE menu_item_id = $1 AND label = $2::item_size AND is_active = true"
-                )
-                .bind(item_input.menu_item_id)
-                .bind(size)
-                .fetch_optional(pool.get_ref())
-                .await?
-                .flatten();
-                p.unwrap_or(base_price)
-            }
-            None => base_price,
-        };
-
         let mut deductions: Vec<InventoryDeduction> = Vec::new();
+        let mut resolved_addons: Vec<ResolvedAddon> = Vec::new();
+        let mut resolved_optionals: Vec<ResolvedOptional> = Vec::new();
+        let mut bundle_components = Vec::new();
 
-        // ── 1. Base drink recipe ──────────────────────────────
-        let recipe_rows: Vec<(Option<Uuid>, f64, String, String, String)> =
-            if let Some(size) = &item_input.size_label {
-                sqlx::query_as(
-                    r#"SELECT r.org_ingredient_id, r.quantity_used::float8,
-                              r.ingredient_name, r.ingredient_unit,
-                              COALESCE(i.category, 'general') as category
-                       FROM   menu_item_recipes r
-                       LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id
-                       WHERE  r.menu_item_id = $1 AND r.size_label = $2::item_size"#,
+        let (resolved_menu_item_id, item_name, unit_price, bundle_id, bundle_unit_price) = if let Some(b_id) = item_input.bundle_id {
+            // ── 1. Resolve Bundle ─────────────────────────────
+            let bundle: (Uuid, String, i32, String) = sqlx::query_as(
+                "SELECT id, name, price, status::text FROM bundles WHERE id = $1 AND org_id = $2"
+            )
+            .bind(b_id)
+            .bind(claims.org_id())
+            .fetch_optional(pool.get_ref())
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Bundle {} not found", b_id)))?;
+
+            if bundle.3 != "active" {
+                return Err(AppError::BadRequest(format!("Bundle {} is not active", bundle.1)));
+            }
+
+            // Branch availability
+            let available_in_branch: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                    SELECT 1 FROM bundle_branch_availability WHERE bundle_id = $1 AND branch_id = $2
+                 ) OR NOT EXISTS(
+                    SELECT 1 FROM bundle_branch_availability WHERE bundle_id = $1
+                 )"
+            )
+            .bind(bundle.0)
+            .bind(body.branch_id)
+            .fetch_one(pool.get_ref())
+            .await?;
+
+            if !available_in_branch {
+                return Err(AppError::BadRequest(format!("Bundle {} is not available in branch {}", bundle.1, body.branch_id)));
+            }
+
+            // Date / Time window validation
+            let order_time = body.created_at.unwrap_or_else(Utc::now);
+            let branch_tz: String = sqlx::query_scalar(
+                "SELECT timezone FROM branches WHERE id = $1"
+            )
+            .bind(body.branch_id)
+            .fetch_one(pool.get_ref())
+            .await?;
+
+            let local_dt_rows: Option<(chrono::NaiveDate, chrono::NaiveTime)> = sqlx::query_as(
+                "SELECT ($1::timestamptz AT TIME ZONE $2)::date, ($1::timestamptz AT TIME ZONE $2)::time"
+            )
+            .bind(order_time)
+            .bind(&branch_tz)
+            .fetch_optional(pool.get_ref())
+            .await?;
+
+            if let Some((local_date, local_time)) = local_dt_rows {
+                let bundle_limits: (Option<chrono::NaiveDate>, Option<chrono::NaiveDate>, Option<chrono::NaiveTime>, Option<chrono::NaiveTime>) = sqlx::query_as(
+                    "SELECT available_from_date, available_until_date, available_from_time, available_until_time \
+                     FROM bundles WHERE id = $1"
                 )
-                .bind(item_input.menu_item_id)
-                .bind(size)
-                .fetch_all(pool.get_ref())
-                .await?
-            } else {
-                sqlx::query_as(
+                .bind(bundle.0)
+                .fetch_one(pool.get_ref())
+                .await?;
+
+                if let Some(from_d) = bundle_limits.0 {
+                    if local_date < from_d {
+                        return Err(AppError::BadRequest(format!("Bundle {} is not yet available", bundle.1)));
+                    }
+                }
+                if let Some(until_d) = bundle_limits.1 {
+                    if local_date > until_d {
+                        return Err(AppError::BadRequest(format!("Bundle {} availability has expired", bundle.1)));
+                    }
+                }
+                if let Some(from_t) = bundle_limits.2 {
+                    if local_time < from_t {
+                        return Err(AppError::BadRequest(format!("Bundle {} is not available at this hour", bundle.1)));
+                    }
+                }
+                if let Some(until_t) = bundle_limits.3 {
+                    if local_time > until_t {
+                        return Err(AppError::BadRequest(format!("Bundle {} is not available at this hour", bundle.1)));
+                    }
+                }
+            }
+
+            // Resolve Components
+            let comps: Vec<(Uuid, i32, String)> = sqlx::query_as(
+                "SELECT bc.item_id, bc.quantity, mi.name \
+                 FROM bundle_components bc \
+                 JOIN menu_items mi ON mi.id = bc.item_id \
+                 WHERE bc.bundle_id = $1"
+            )
+            .bind(bundle.0)
+            .fetch_all(pool.get_ref())
+            .await?;
+
+            for comp in comps {
+                bundle_components.push(ResolvedBundleComponent {
+                    item_id: comp.0,
+                    quantity: comp.1,
+                });
+
+                let component_qty = comp.1 * item_input.quantity;
+
+                // Component base recipe deduction
+                let recipe_rows: Vec<(Option<Uuid>, f64, String, String, String)> = sqlx::query_as(
                     r#"SELECT r.org_ingredient_id, r.quantity_used::float8,
                               r.ingredient_name, r.ingredient_unit,
                               COALESCE(i.category, 'general') as category
                        FROM   menu_item_recipes r
                        LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id
                        WHERE  r.menu_item_id = $1
-                         AND  r.size_label = (
-                             SELECT size_label FROM menu_item_recipes
-                             WHERE  menu_item_id = $1 LIMIT 1
+                         AND  r.size_label = COALESCE(
+                             (SELECT size_label FROM menu_item_recipes WHERE menu_item_id = $1 LIMIT 1),
+                             'one_size'::item_size
                          )"#,
                 )
-                .bind(item_input.menu_item_id)
+                .bind(comp.0)
                 .fetch_all(pool.get_ref())
-                .await?
-            };
+                .await?;
 
-        for (ing_id, qty, name, unit, category) in recipe_rows {
-            deductions.push(InventoryDeduction {
-                org_ingredient_id: ing_id,
-                ingredient_name:   name,
-                unit,
-                quantity:          qty * item_input.quantity as f64,
-                source:            "drink_recipe".into(),
-                category,
-            });
-        }
+                for (ing_id, qty, name, unit, category) in recipe_rows {
+                    deductions.push(InventoryDeduction {
+                        org_ingredient_id: ing_id,
+                        ingredient_name:   name,
+                        unit,
+                        quantity:          qty * component_qty as f64,
+                        source:            format!("bundle_component_{}", comp.2),
+                        category,
+                    });
+                }
+            }
 
-        // ── 2. Addon ingredients (flat — no overrides) ────────
-        let mut resolved_addons: Vec<ResolvedAddon> = Vec::new();
-
-        for addon_input in &item_input.addons {
-            let addon_qty = addon_input.quantity.max(1) as f64;
-
-            let (addon_name, default_price, addon_type): (String, i32, String) = sqlx::query_as(
-                "SELECT name, default_price, type FROM addon_items WHERE id = $1"
+            (None, bundle.1, bundle.2, Some(bundle.0), Some(bundle.2))
+        } else if let Some(m_item_id) = item_input.menu_item_id {
+            // ── 2. Resolve Menu Item ──────────────────────────
+            let (item_name, base_price): (String, i32) = sqlx::query_as(
+                "SELECT name, base_price FROM menu_items WHERE id = $1 AND deleted_at IS NULL",
             )
-            .bind(addon_input.addon_item_id)
+            .bind(m_item_id)
             .fetch_optional(pool.get_ref())
             .await?
             .ok_or_else(|| AppError::NotFound(
-                format!("Addon {} not found", addon_input.addon_item_id)
+                format!("Menu item {} not found", m_item_id)
             ))?;
 
-            resolved_addons.push(ResolvedAddon {
-                addon_item_id: addon_input.addon_item_id,
-                addon_name:    addon_name.clone(),
-                unit_price:    default_price,
-                quantity:      addon_input.quantity.max(1),
-            });
-
-            let addon_rows: Vec<(Option<Uuid>, f64, String, String)> = sqlx::query_as(
-                "SELECT org_ingredient_id, quantity_used::float8,
-                        ingredient_name, ingredient_unit
-                 FROM   addon_item_ingredients
-                 WHERE  addon_item_id = $1",
-            )
-            .bind(addon_input.addon_item_id)
-            .fetch_all(pool.get_ref())
-            .await?;
-
-            // Dynamic swap logic for milk and coffee types
-            let target_category = match addon_type.as_str() {
-                "milk_type" => Some("milk"),
-                "coffee_type" => Some("coffee_bean"),
-                _ => None,
+            let unit_price: i32 = match &item_input.size_label {
+                Some(size) => {
+                    let p: Option<i32> = sqlx::query_scalar(
+                        "SELECT price_override FROM item_sizes \
+                         WHERE menu_item_id = $1 AND label = $2::item_size AND is_active = true"
+                    )
+                    .bind(m_item_id)
+                    .bind(size)
+                    .fetch_optional(pool.get_ref())
+                    .await?
+                    .flatten();
+                    p.unwrap_or(base_price)
+                }
+                None => base_price,
             };
 
-            if let Some(cat) = target_category {
-                // Find the base recipe's ingredient for this category
-                let base_ing_id = deductions.iter()
-                    .find(|d| d.source == "drink_recipe" && d.category == cat)
-                    .and_then(|d| d.org_ingredient_id);
+            // Base drink recipe
+            let recipe_rows: Vec<(Option<Uuid>, f64, String, String, String)> =
+                if let Some(size) = &item_input.size_label {
+                    sqlx::query_as(
+                        r#"SELECT r.org_ingredient_id, r.quantity_used::float8,
+                                  r.ingredient_name, r.ingredient_unit,
+                                  COALESCE(i.category, 'general') as category
+                           FROM   menu_item_recipes r
+                           LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id
+                           WHERE  r.menu_item_id = $1 AND r.size_label = $2::item_size"#,
+                    )
+                    .bind(m_item_id)
+                    .bind(size)
+                    .fetch_all(pool.get_ref())
+                    .await?
+                } else {
+                    sqlx::query_as(
+                        r#"SELECT r.org_ingredient_id, r.quantity_used::float8,
+                                  r.ingredient_name, r.ingredient_unit,
+                                  COALESCE(i.category, 'general') as category
+                           FROM   menu_item_recipes r
+                           LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id
+                           WHERE  r.menu_item_id = $1
+                             AND  r.size_label = (
+                                 SELECT size_label FROM menu_item_recipes
+                                 WHERE  menu_item_id = $1 LIMIT 1
+                             )"#,
+                    )
+                    .bind(m_item_id)
+                    .fetch_all(pool.get_ref())
+                    .await?
+                };
 
-                // Find the addon's ingredient
-                let addon_ing_id = addon_rows.first()
-                    .and_then(|(id, _, _, _)| *id);
-
-                // If both point to the same org_ingredient → this IS the base, not a swap
-                let is_base = base_ing_id.is_some()
-                    && addon_ing_id.is_some()
-                    && base_ing_id == addon_ing_id;
-
-                if is_base {
-                    // No charge — the drink already uses this ingredient as its base
-                    if let Some(last) = resolved_addons.last_mut() {
-                        last.unit_price = 0;
-                    }
-                    // Don't touch deductions — recipe already has the right ingredient
-                } else if let Some((repl_id, _, repl_name, repl_unit)) = addon_rows.first() {
-                    // Real swap — calculate price difference
-                    let base_addon_price: i32 = if let Some(base_id) = base_ing_id {
-                        sqlx::query_scalar(
-                            "SELECT COALESCE(MAX(a.default_price), 0)
-                             FROM addon_items a
-                             JOIN addon_item_ingredients i ON i.addon_item_id = a.id
-                             WHERE i.org_ingredient_id = $1 AND a.type = $2"
-                        )
-                        .bind(base_id)
-                        .bind(addon_type.as_str())
-                        .fetch_optional(pool.get_ref())
-                        .await?
-                        .flatten()
-                        .unwrap_or(0)
-                    } else {
-                        0
-                    };
-
-                    let new_price = (default_price - base_addon_price).max(0);
-                    if let Some(last) = resolved_addons.last_mut() {
-                        last.unit_price = new_price;
-                    }
-
-                    // Replace base ingredient
-                    let mut swapped = false;
-                    for ded in deductions.iter_mut() {
-                        if ded.source == "drink_recipe" && ded.category == cat {
-                            ded.org_ingredient_id = *repl_id;
-                            ded.ingredient_name = repl_name.clone();
-                            ded.unit = repl_unit.clone();
-                            ded.source = format!("addon_swap:{}", addon_name);
-                            swapped = true;
-                        }
-                    }
-                    if !swapped {
-                        tracing::warn!(addon_name = %addon_name, cat = %cat, "Addon swap failed, no base ingredient found with category");
-                    }
-                }
-                continue; // Skip the normal additive deduction for these addon types
-            }
-
-            for (ing_id, qty, name, unit) in addon_rows {
+            for (ing_id, qty, name, unit, category) in recipe_rows {
                 deductions.push(InventoryDeduction {
                     org_ingredient_id: ing_id,
                     ingredient_name:   name,
                     unit,
-                    quantity:          qty * item_input.quantity as f64 * addon_qty,
-                    source:            "addon".into(),
-                    category:          "general".into(),
+                    quantity:          qty * item_input.quantity as f64,
+                    source:            "drink_recipe".into(),
+                    category,
                 });
             }
-        }
 
-        // ── 3. Optional fields ────────────────────────────────
-        let mut resolved_optionals: Vec<ResolvedOptional> = Vec::new();
+            // ── 2. Addon ingredients (flat — no overrides) ────────
+            for addon_input in &item_input.addons {
+                let addon_qty = addon_input.quantity.max(1) as f64;
 
-        for &field_id in &item_input.optional_field_ids {
-            // Explicit type annotation fixes the inference issue
-            let row_result = sqlx::query_as::<_, (String, i32, Option<Uuid>, Option<String>, Option<String>, Option<f64>, Option<String>)>(
-                r#"SELECT name, price, org_ingredient_id,
-                          ingredient_name, ingredient_unit,
-                          quantity_used::float8, size_label::text
-                   FROM menu_item_optional_fields
-                   WHERE id = $1 AND menu_item_id = $2 AND is_active = true"#,
-            )
-            .bind(field_id)
-            .bind(item_input.menu_item_id)
-            .fetch_optional(pool.get_ref())
-            .await?;
-        
-            // Skip silently if field not found or not for this item  
-            let Some((fname, fprice, ing_id, ing_name, ing_unit, qty_used, field_size)) = row_result else {
-                tracing::warn!(field_id = %field_id, "Optional field not found or inactive — skipping");
-                continue;
-            };
+                let (addon_name, default_price, addon_type): (String, i32, String) = sqlx::query_as(
+                    "SELECT name, default_price, type FROM addon_items WHERE id = $1"
+                )
+                .bind(addon_input.addon_item_id)
+                .fetch_optional(pool.get_ref())
+                .await?
+                .ok_or_else(|| AppError::NotFound(
+                    format!("Addon {} not found", addon_input.addon_item_id)
+                ))?;
 
-            // If field is size-restricted, check it matches
-            if let Some(fs) = &field_size
-                && item_input.size_label.as_deref() != Some(fs.as_str()) {
-                    tracing::warn!(field_id = %field_id, "Optional field size mismatch — skipping");
-                    continue;
+                resolved_addons.push(ResolvedAddon {
+                    addon_item_id: addon_input.addon_item_id,
+                    addon_name:    addon_name.clone(),
+                    unit_price:    default_price,
+                    quantity:      addon_input.quantity.max(1),
+                });
+
+                let addon_rows: Vec<(Option<Uuid>, f64, String, String)> = sqlx::query_as(
+                    "SELECT org_ingredient_id, quantity_used::float8,
+                            ingredient_name, ingredient_unit
+                     FROM   addon_item_ingredients
+                     WHERE  addon_item_id = $1",
+                )
+                .bind(addon_input.addon_item_id)
+                .fetch_all(pool.get_ref())
+                .await?;
+
+                // Dynamic swap logic for milk and coffee types
+                let target_category = match addon_type.as_str() {
+                    "milk_type" => Some("milk"),
+                    "coffee_type" => Some("coffee_bean"),
+                    _ => None,
+                };
+
+                if let Some(cat) = target_category {
+                    // Find the base recipe's ingredient for this category
+                    let base_ing_id = deductions.iter()
+                        .find(|d| d.source == "drink_recipe" && d.category == cat)
+                        .and_then(|d| d.org_ingredient_id);
+
+                    // Find the addon's ingredient
+                    let addon_ing_id = addon_rows.first()
+                        .and_then(|(id, _, _, _)| *id);
+
+                    // If both point to the same org_ingredient → this IS the base, not a swap
+                    let is_base = base_ing_id.is_some()
+                        && addon_ing_id.is_some()
+                        && base_ing_id == addon_ing_id;
+
+                    if is_base {
+                        // No charge — the drink already uses this ingredient as its base
+                        if let Some(last) = resolved_addons.last_mut() {
+                            last.unit_price = 0;
+                        }
+                        // Don't touch deductions — recipe already has the right ingredient
+                    } else if let Some((repl_id, _, repl_name, repl_unit)) = addon_rows.first() {
+                        // Real swap — calculate price difference
+                        let base_addon_price: i32 = if let Some(base_id) = base_ing_id {
+                            sqlx::query_scalar(
+                                "SELECT COALESCE(MAX(a.default_price), 0)
+                                 FROM addon_items a
+                                 JOIN addon_item_ingredients i ON i.addon_item_id = a.id
+                                 WHERE i.org_ingredient_id = $1 AND a.type = $2"
+                            )
+                            .bind(base_id)
+                            .bind(addon_type.as_str())
+                            .fetch_optional(pool.get_ref())
+                            .await?
+                            .flatten()
+                            .unwrap_or(0)
+                        } else {
+                            0
+                        };
+
+                        let new_price = (default_price - base_addon_price).max(0);
+                        if let Some(last) = resolved_addons.last_mut() {
+                            last.unit_price = new_price;
+                        }
+
+                        // Replace base ingredient
+                        let mut swapped = false;
+                        for ded in deductions.iter_mut() {
+                            if ded.source == "drink_recipe" && ded.category == cat {
+                                ded.org_ingredient_id = *repl_id;
+                                ded.ingredient_name = repl_name.clone();
+                                ded.unit = repl_unit.clone();
+                                ded.source = format!("addon_swap:{}", addon_name);
+                                swapped = true;
+                            }
+                        }
+                        if !swapped {
+                            tracing::warn!(addon_name = %addon_name, cat = %cat, "Addon swap failed, no base ingredient found with category");
+                        }
+                    }
+                    continue; // Skip the normal additive deduction for these addon types
                 }
 
-            // Add ingredient deduction if configured
-            if let (Some(ref name), Some(ref unit), Some(qty)) =
-                (ing_name.clone(), ing_unit.clone(), qty_used)
-            {
-                deductions.push(InventoryDeduction {
+                for (ing_id, qty, name, unit) in addon_rows {
+                    deductions.push(InventoryDeduction {
+                        org_ingredient_id: ing_id,
+                        ingredient_name:   name,
+                        unit,
+                        quantity:          qty * item_input.quantity as f64 * addon_qty,
+                        source:            "addon".into(),
+                        category:          "general".into(),
+                    });
+                }
+            }
+
+            // ── 3. Optional fields ────────────────────────────────
+            for &field_id in &item_input.optional_field_ids {
+                let row_result = sqlx::query_as::<_, (String, i32, Option<Uuid>, Option<String>, Option<String>, Option<f64>, Option<String>)>(
+                    r#"SELECT name, price, org_ingredient_id,
+                              ingredient_name, ingredient_unit,
+                              quantity_used::float8, size_label::text
+                       FROM menu_item_optional_fields
+                       WHERE id = $1 AND menu_item_id = $2 AND is_active = true"#,
+                )
+                .bind(field_id)
+                .bind(m_item_id)
+                .fetch_optional(pool.get_ref())
+                .await?;
+            
+                let Some((fname, fprice, ing_id, ing_name, ing_unit, qty_used, field_size)) = row_result else {
+                    tracing::warn!(field_id = %field_id, "Optional field not found or inactive — skipping");
+                    continue;
+                };
+
+                // If field is size-restricted, check it matches
+                if let Some(fs) = &field_size
+                    && item_input.size_label.as_deref() != Some(fs.as_str()) {
+                        tracing::warn!(field_id = %field_id, "Optional field size mismatch — skipping");
+                        continue;
+                    }
+
+                // Add ingredient deduction if configured
+                if let (Some(ref name), Some(ref unit), Some(qty)) =
+                    (ing_name.clone(), ing_unit.clone(), qty_used)
+                {
+                    deductions.push(InventoryDeduction {
+                        org_ingredient_id: ing_id,
+                        ingredient_name:   name.clone(),
+                        unit:              unit.clone(),
+                        quantity:          qty * item_input.quantity as f64,
+                        source:            "optional".into(),
+                        category:          "general".into(),
+                    });
+                }
+
+                resolved_optionals.push(ResolvedOptional {
+                    optional_field_id: field_id,
+                    field_name:        fname,
+                    price:             fprice,
                     org_ingredient_id: ing_id,
-                    ingredient_name:   name.clone(),
-                    unit:              unit.clone(),
-                    quantity:          qty * item_input.quantity as f64,
-                    source:            "optional".into(),
-                    category:          "general".into(),
+                    ingredient_name:   ing_name,
+                    ingredient_unit:   ing_unit,
+                    quantity_used:     qty_used,
                 });
             }
 
-            resolved_optionals.push(ResolvedOptional {
-                optional_field_id: field_id,
-                field_name:        fname,
-                price:             fprice,
-                org_ingredient_id: ing_id,
-                ingredient_name:   ing_name,
-                ingredient_unit:   ing_unit,
-                quantity_used:     qty_used,
-            });
-        }
+            (Some(m_item_id), item_name, unit_price, None, None)
+        } else {
+            return Err(AppError::BadRequest("Each line item must have either menu_item_id or bundle_id".into()));
+        };
 
         let item_line      = unit_price * item_input.quantity;
         let addon_line: i32 = resolved_addons
@@ -607,15 +752,18 @@ pub async fn create_order(
         subtotal += item_line + addon_line + optional_line;
 
         resolved_items.push(ResolvedItem {
-            menu_item_id: item_input.menu_item_id,
+            menu_item_id:      resolved_menu_item_id,
             item_name,
-            size_label:   item_input.size_label.clone(),
+            size_label:        item_input.size_label.clone(),
             unit_price,
-            quantity:     item_input.quantity,
-            notes:        item_input.notes.clone(),
-            addons:       resolved_addons,
-            optionals:    resolved_optionals,
+            quantity:          item_input.quantity,
+            notes:             item_input.notes.clone(),
+            addons:            resolved_addons,
+            optionals:         resolved_optionals,
             deductions,
+            bundle_id,
+            bundle_unit_price,
+            bundle_components,
         });
     }
 
@@ -726,10 +874,12 @@ pub async fn create_order(
         let order_item = sqlx::query_as::<_, OrderItem>(
             r#"INSERT INTO order_items
                 (order_id, menu_item_id, item_name, size_label,
-                 unit_price, quantity, line_total, notes, deductions_snapshot)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 unit_price, quantity, line_total, notes, deductions_snapshot,
+                 bundle_id, bundle_unit_price)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                RETURNING id, order_id, menu_item_id, item_name, size_label,
-                         unit_price, quantity, line_total, notes, deductions_snapshot"#,
+                         unit_price, quantity, line_total, notes, deductions_snapshot,
+                         bundle_id, bundle_unit_price"#,
         )
         .bind(order.id)
         .bind(resolved.menu_item_id)
@@ -740,8 +890,24 @@ pub async fn create_order(
         .bind(line_total)
         .bind(&resolved.notes)
         .bind(snapshot)
+        .bind(resolved.bundle_id)
+        .bind(resolved.bundle_unit_price)
         .fetch_one(&mut *tx)
         .await?;
+
+        if let Some(_b_id) = resolved.bundle_id {
+            for comp in &resolved.bundle_components {
+                sqlx::query(
+                    "INSERT INTO order_line_bundle_components (order_line_id, item_id, quantity) \
+                     VALUES ($1, $2, $3)"
+                )
+                .bind(order_item.id)
+                .bind(comp.item_id)
+                .bind(comp.quantity)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
 
         // Addons
         let mut addon_rows: Vec<OrderItemAddon> = Vec::new();
@@ -1266,7 +1432,8 @@ async fn fetch_order_items_full(
 ) -> Result<Vec<OrderItemFull>, AppError> {
     let items = sqlx::query_as::<_, OrderItem>(
         "SELECT id, order_id, menu_item_id, item_name, size_label, \
-                unit_price, quantity, line_total, notes, deductions_snapshot \
+                unit_price, quantity, line_total, notes, deductions_snapshot, \
+                bundle_id, bundle_unit_price \
          FROM order_items WHERE order_id = $1 ORDER BY id",
     )
     .bind(order_id)

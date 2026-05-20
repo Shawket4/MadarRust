@@ -359,7 +359,7 @@ pub async fn branch_sales(
 
     let top_items = sqlx::query_as::<_, ItemSales>(
         r#"
-        SELECT oi.menu_item_id, oi.item_name,
+        SELECT COALESCE(oi.menu_item_id, oi.bundle_id) AS menu_item_id, oi.item_name,
                SUM(oi.quantity)::bigint   AS quantity_sold,
                SUM(oi.line_total)::bigint AS revenue
         FROM order_items oi
@@ -367,7 +367,7 @@ pub async fn branch_sales(
         WHERE o.branch_id = $1 AND o.status != 'voided'
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        GROUP BY oi.menu_item_id, oi.item_name
+        GROUP BY COALESCE(oi.menu_item_id, oi.bundle_id), oi.item_name
         ORDER BY revenue DESC
         LIMIT $4
         "#,
@@ -387,19 +387,32 @@ pub async fn branch_sales(
 
     let cat_rows = sqlx::query_as::<_, CategoryItemRow>(
         r#"
-        SELECT m.category_id, c.name AS category_name,
-               oi.menu_item_id, oi.item_name,
-               SUM(oi.quantity)::bigint   AS quantity_sold,
-               SUM(oi.line_total)::bigint AS revenue
+        SELECT 
+            CASE 
+                WHEN oi.bundle_id IS NOT NULL THEN '00000000-0000-0000-0000-000000000000'::uuid
+                ELSE m.category_id
+            END AS category_id,
+            COALESCE(c.name, CASE WHEN oi.bundle_id IS NOT NULL THEN 'Bundles' ELSE 'Uncategorized' END) AS category_name,
+            COALESCE(oi.menu_item_id, oi.bundle_id) AS menu_item_id,
+            oi.item_name,
+            SUM(oi.quantity)::bigint   AS quantity_sold,
+            SUM(oi.line_total)::bigint AS revenue
         FROM order_items oi
         JOIN orders o     ON o.id  = oi.order_id
-        JOIN menu_items m ON m.id  = oi.menu_item_id
+        LEFT JOIN menu_items m ON m.id  = oi.menu_item_id
         LEFT JOIN categories c ON c.id = m.category_id
         WHERE o.branch_id = $1 AND o.status != 'voided'
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        GROUP BY m.category_id, c.name, oi.menu_item_id, oi.item_name
-        ORDER BY c.name NULLS LAST, revenue DESC
+        GROUP BY 
+            CASE 
+                WHEN oi.bundle_id IS NOT NULL THEN '00000000-0000-0000-0000-000000000000'::uuid
+                ELSE m.category_id
+            END,
+            COALESCE(c.name, CASE WHEN oi.bundle_id IS NOT NULL THEN 'Bundles' ELSE 'Uncategorized' END),
+            COALESCE(oi.menu_item_id, oi.bundle_id),
+            oi.item_name
+        ORDER BY category_name NULLS LAST, revenue DESC
         "#,
     )
     .bind(*branch_id).bind(query.from).bind(query.to)
@@ -798,4 +811,124 @@ async fn require_branch_access(
     }
 
     Ok(())
+}
+
+// ── Bundles Reporting ────────────────────────────────────────
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct BundleSalesRow {
+    pub bundle_id:     Option<Uuid>,
+    pub bundle_name:   String,
+    pub quantity_sold: i64,
+    pub revenue:       i64,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct CombinedItemSalesRow {
+    pub item_id:       Option<Uuid>,
+    pub item_name:     String,
+    pub standalone_qty: i64,
+    pub bundle_qty:    i64,
+    pub total_qty:     i64,
+}
+
+// GET /reports/branches/:id/bundles
+pub async fn branch_bundle_sales(
+    req:       HttpRequest,
+    pool:      web::Data<PgPool>,
+    branch_id: web::Path<Uuid>,
+    query:     web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "orders", "read").await?;
+    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+
+    let rows = sqlx::query_as::<_, BundleSalesRow>(
+        r#"
+        SELECT
+            oi.bundle_id AS bundle_id,
+            oi.item_name AS bundle_name,
+            SUM(oi.quantity)::bigint AS quantity_sold,
+            SUM(oi.line_total)::bigint AS revenue
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        WHERE o.branch_id = $1
+          AND o.status != 'voided'
+          AND oi.bundle_id IS NOT NULL
+          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
+          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+        GROUP BY oi.bundle_id, oi.item_name
+        ORDER BY quantity_sold DESC
+        "#,
+    )
+    .bind(*branch_id)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+// GET /reports/branches/:id/items-combined
+pub async fn branch_combined_item_sales(
+    req:       HttpRequest,
+    pool:      web::Data<PgPool>,
+    branch_id: web::Path<Uuid>,
+    query:     web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "orders", "read").await?;
+    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+
+    let rows = sqlx::query_as::<_, CombinedItemSalesRow>(
+        r#"
+        WITH standalone_sales AS (
+            SELECT
+                oi.menu_item_id AS item_id,
+                oi.item_name    AS item_name,
+                SUM(oi.quantity)::bigint AS qty
+            FROM order_items oi
+            JOIN orders o ON o.id = oi.order_id
+            WHERE o.branch_id = $1
+              AND o.status != 'voided'
+              AND oi.menu_item_id IS NOT NULL
+              AND ($2::timestamptz IS NULL OR o.created_at >= $2)
+              AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+            GROUP BY oi.menu_item_id, oi.item_name
+        ),
+        bundle_component_sales AS (
+            SELECT
+                bc.item_id   AS item_id,
+                mi.name      AS item_name,
+                SUM(oi.quantity * bc.quantity)::bigint AS qty
+            FROM order_line_bundle_components bc
+            JOIN order_items oi ON oi.id = bc.order_line_id
+            JOIN orders o ON o.id = oi.order_id
+            JOIN menu_items mi ON mi.id = bc.item_id
+            WHERE o.branch_id = $1
+              AND o.status != 'voided'
+              AND oi.bundle_id IS NOT NULL
+              AND ($2::timestamptz IS NULL OR o.created_at >= $2)
+              AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+            GROUP BY bc.item_id, mi.name
+        )
+        SELECT
+            COALESCE(s.item_id, b.item_id) AS item_id,
+            COALESCE(s.item_name, b.item_name) AS item_name,
+            COALESCE(s.qty, 0)::bigint AS standalone_qty,
+            COALESCE(b.qty, 0)::bigint AS bundle_qty,
+            (COALESCE(s.qty, 0) + COALESCE(b.qty, 0))::bigint AS total_qty
+        FROM standalone_sales s
+        FULL OUTER JOIN bundle_component_sales b ON b.item_id = s.item_id
+        ORDER BY total_qty DESC
+        "#,
+    )
+    .bind(*branch_id)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(rows))
 }

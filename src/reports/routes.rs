@@ -13,6 +13,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/branches/{branch_id}/tellers",          web::get().to(handlers::branch_teller_stats))
             .route("/branches/{branch_id}/addons",           web::get().to(handlers::branch_addon_sales))
             .route("/branches/{branch_id}/stock",            web::get().to(handlers::branch_stock))
+            .route("/branches/{branch_id}/bundles",          web::get().to(handlers::branch_bundle_sales))
+            .route("/branches/{branch_id}/items-combined",   web::get().to(handlers::branch_combined_item_sales))
             .route("/orgs/{org_id}/comparison",              web::get().to(handlers::org_branch_comparison)),
     );
 }
