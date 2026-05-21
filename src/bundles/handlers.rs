@@ -137,10 +137,17 @@ pub struct UpdateBundleRequest {
     pub price: Option<i32>,
     pub image_url: Option<String>,
     pub display_order: Option<i32>,
-    pub available_from_time: Option<NaiveTime>,
-    pub available_until_time: Option<NaiveTime>,
-    pub available_from_date: Option<NaiveDate>,
-    pub available_until_date: Option<NaiveDate>,
+    /// `null`  → clear the field (no start time restriction)
+    /// omitted → keep the existing value
+    /// a value → set to that time
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub available_from_time: Option<Option<NaiveTime>>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub available_until_time: Option<Option<NaiveTime>>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub available_from_date: Option<Option<NaiveDate>>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub available_until_date: Option<Option<NaiveDate>>,
     pub components: Option<Vec<CreateBundleComponentInput>>,
     pub branch_ids: Option<Vec<Uuid>>,
 }
@@ -170,6 +177,23 @@ pub struct BundlePerformanceResponse {
     pub gross_revenue: i64,
     pub net_profit: i64,
     pub component_popularity: Vec<ComponentPopularity>,
+}
+
+// ── Serde Helpers ─────────────────────────────────────────────
+
+/// Deserializer that maps:
+///   - absent field  → `None`          (caller did not touch the field)
+///   - explicit null → `Some(None)`    (caller wants to clear the field)
+///   - a real value  → `Some(Some(v))` (caller wants to set a new value)
+///
+/// Apply with `#[serde(default, deserialize_with = "deserialize_optional_field")]`
+/// on `Option<Option<T>>` fields.
+fn deserialize_optional_field<'de, T, D>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<T>::deserialize(de)?))
 }
 
 // ── Helper Functions ──────────────────────────────────────────
@@ -552,10 +576,26 @@ pub async fn update_bundle(
     let price = body.price.unwrap_or(original.bundle.price);
     let image_url = body.image_url.as_ref().or(original.bundle.image_url.as_ref());
     let display_order = body.display_order.unwrap_or(original.bundle.display_order);
-    let available_from_time = body.available_from_time.or(original.bundle.available_from_time);
-    let available_until_time = body.available_until_time.or(original.bundle.available_until_time);
-    let available_from_date = body.available_from_date.or(original.bundle.available_from_date);
-    let available_until_date = body.available_until_date.or(original.bundle.available_until_date);
+    // Option<Option<T>> semantics:
+    //   None        → field was absent from the request → keep existing value
+    //   Some(None)  → field was explicitly `null`       → clear (no restriction)
+    //   Some(Some(v)) → field was set to a new value    → use new value
+    let available_from_time = match body.available_from_time {
+        Some(v) => v,                                    // Some(None) clears, Some(Some(t)) sets
+        None    => original.bundle.available_from_time,  // omitted → keep
+    };
+    let available_until_time = match body.available_until_time {
+        Some(v) => v,
+        None    => original.bundle.available_until_time,
+    };
+    let available_from_date = match body.available_from_date {
+        Some(v) => v,
+        None    => original.bundle.available_from_date,
+    };
+    let available_until_date = match body.available_until_date {
+        Some(v) => v,
+        None    => original.bundle.available_until_date,
+    };
 
     // If components are being updated
     let mut updated_components = Vec::new();

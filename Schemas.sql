@@ -652,11 +652,49 @@ CREATE TABLE public.order_line_bundle_components (
     order_line_id uuid NOT NULL,
     item_id uuid NOT NULL,
     quantity integer DEFAULT 1 NOT NULL,
+    size_label text,
     CONSTRAINT order_line_bundle_components_quantity_check CHECK ((quantity > 0))
 );
 
 
 ALTER TABLE public.order_line_bundle_components OWNER TO rue;
+
+--
+-- Name: order_line_bundle_component_addons; Type: TABLE; Schema: public; Owner: rue
+--
+
+CREATE TABLE public.order_line_bundle_component_addons (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    order_line_id uuid NOT NULL,
+    component_item_id uuid NOT NULL,
+    addon_item_id uuid NOT NULL,
+    addon_name text NOT NULL,
+    unit_price integer NOT NULL,
+    quantity integer DEFAULT 1 NOT NULL,
+    line_total integer NOT NULL
+);
+
+ALTER TABLE public.order_line_bundle_component_addons OWNER TO rue;
+
+--
+-- Name: order_line_bundle_component_optionals; Type: TABLE; Schema: public; Owner: rue
+--
+
+CREATE TABLE public.order_line_bundle_component_optionals (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    order_line_id uuid NOT NULL,
+    component_item_id uuid NOT NULL,
+    optional_field_id uuid,
+    field_name text NOT NULL,
+    price integer DEFAULT 0 NOT NULL,
+    org_ingredient_id uuid,
+    ingredient_name text,
+    ingredient_unit text,
+    quantity_deducted numeric(12,3)
+);
+
+ALTER TABLE public.order_line_bundle_component_optionals OWNER TO rue;
+
 
 --
 -- Name: order_payments; Type: TABLE; Schema: public; Owner: rue
@@ -1128,6 +1166,23 @@ ALTER TABLE ONLY public.order_line_bundle_components
 
 
 --
+-- Name: order_line_bundle_component_addons order_line_bundle_component_addons_pkey; Type: CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.order_line_bundle_component_addons
+    ADD CONSTRAINT order_line_bundle_component_addons_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: order_line_bundle_component_optionals order_line_bundle_component_optionals_pkey; Type: CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.order_line_bundle_component_optionals
+    ADD CONSTRAINT order_line_bundle_component_optionals_pkey PRIMARY KEY (id);
+
+
+--
+
 -- Name: order_payments order_payments_pkey; Type: CONSTRAINT; Schema: public; Owner: rue
 --
 
@@ -1996,6 +2051,38 @@ ALTER TABLE ONLY public.order_line_bundle_components
 
 ALTER TABLE ONLY public.order_line_bundle_components
     ADD CONSTRAINT order_line_bundle_components_order_line_id_fkey FOREIGN KEY (order_line_id) REFERENCES public.order_items(id) ON DELETE CASCADE;
+
+
+--
+-- Name: order_line_bundle_component_addons order_line_bundle_component_addons_order_line_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.order_line_bundle_component_addons
+    ADD CONSTRAINT order_line_bundle_component_addons_order_line_fkey FOREIGN KEY (order_line_id) REFERENCES public.order_items(id) ON DELETE CASCADE;
+
+
+--
+-- Name: order_line_bundle_component_addons order_line_bundle_component_addons_item_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.order_line_bundle_component_addons
+    ADD CONSTRAINT order_line_bundle_component_addons_item_fkey FOREIGN KEY (component_item_id) REFERENCES public.menu_items(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: order_line_bundle_component_addons order_line_bundle_component_addons_addon_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.order_line_bundle_component_addons
+    ADD CONSTRAINT order_line_bundle_component_addons_addon_fkey FOREIGN KEY (addon_item_id) REFERENCES public.addon_items(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: order_line_bundle_component_optionals order_line_bundle_component_optionals_order_line_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.order_line_bundle_component_optionals
+    ADD CONSTRAINT order_line_bundle_component_optionals_order_line_fkey FOREIGN KEY (order_line_id) REFERENCES public.order_items(id) ON DELETE CASCADE;
 
 
 --
