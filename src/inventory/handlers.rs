@@ -282,7 +282,7 @@ pub async fn update_catalog_item(
         .fetch_optional(&mut *tx)
         .await?;
 
-        if current_history_cost.map_or(true, |c| c != new_cost) {
+        if current_history_cost != Some(new_cost) {
             // Close the currently-active row.
             sqlx::query(
                 "UPDATE ingredient_cost_history \

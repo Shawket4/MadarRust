@@ -519,6 +519,18 @@ pub async fn create_bundle(
         }
     }
 
+    // Seed initial price epoch for the advisor.
+    sqlx::query(
+        "INSERT INTO bundle_price_epochs \
+             (bundle_id, price, effective_from, changed_by) \
+         VALUES ($1, $2, now(), $3)"
+    )
+    .bind(bundle.id)
+    .bind(body.price)
+    .bind(claims.user_id())
+    .execute(&mut *tx)
+    .await?;
+
     tx.commit().await?;
 
     let full = fetch_bundle_full(pool.get_ref(), bundle.id)
@@ -690,6 +702,29 @@ pub async fn update_bundle(
     .bind(original.bundle.id)
     .execute(&mut *tx)
     .await?;
+
+    // Maintain bundle price epoch whenever price actually changed.
+    if price != original.bundle.price {
+        sqlx::query(
+            "UPDATE bundle_price_epochs \
+             SET effective_until = now() \
+             WHERE bundle_id = $1 AND effective_until IS NULL"
+        )
+        .bind(original.bundle.id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO bundle_price_epochs \
+                 (bundle_id, price, effective_from, changed_by) \
+             VALUES ($1, $2, now(), $3)"
+        )
+        .bind(original.bundle.id)
+        .bind(price)
+        .bind(claims.user_id())
+        .execute(&mut *tx)
+        .await?;
+    }
 
     tx.commit().await?;
 
@@ -1001,11 +1036,10 @@ pub async fn bundle_performance(
                 if let (Some(qty), Some(ing_id_str)) = (
                     d.get("quantity").and_then(|v| v.as_f64()),
                     d.get("org_ingredient_id").and_then(|v| v.as_str()),
-                ) {
-                    if let Ok(ing_id) = Uuid::parse_str(ing_id_str) {
+                )
+                    && let Ok(ing_id) = Uuid::parse_str(ing_id_str) {
                         *ing_qty_map.entry(ing_id).or_insert(0.0) += qty;
                     }
-                }
             }
         }
     }

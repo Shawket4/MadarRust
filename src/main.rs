@@ -15,6 +15,7 @@ mod reports;
 mod discounts;
 mod uploads;
 mod bundles;
+mod menu_advisor;
 
 use actix_cors::Cors;
 use actix_files::Files;
@@ -90,6 +91,7 @@ async fn main() -> std::io::Result<()> {
             .configure(reports::routes::configure)
             .configure(uploads::routes::configure)
             .configure(bundles::routes::configure)
+            .configure(menu_advisor::routes::configure)
             .service(Files::new("/uploads", &uploads_clone).use_last_modified(true))
     });
 

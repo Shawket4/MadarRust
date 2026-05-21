@@ -356,6 +356,7 @@ pub async fn create_order(
         quantity_used:     Option<f64>,
     }
 
+    #[allow(dead_code)]
     struct ResolvedBundleComponent {
         item_id:    Uuid,
         item_name:  String,
@@ -460,26 +461,22 @@ pub async fn create_order(
                 .fetch_one(pool.get_ref())
                 .await?;
 
-                if let Some(from_d) = bundle_limits.0 {
-                    if local_date < from_d {
+                if let Some(from_d) = bundle_limits.0
+                    && local_date < from_d {
                         return Err(AppError::BadRequest(format!("Bundle {} is not yet available", bundle.1)));
                     }
-                }
-                if let Some(until_d) = bundle_limits.1 {
-                    if local_date > until_d {
+                if let Some(until_d) = bundle_limits.1
+                    && local_date > until_d {
                         return Err(AppError::BadRequest(format!("Bundle {} availability has expired", bundle.1)));
                     }
-                }
-                if let Some(from_t) = bundle_limits.2 {
-                    if local_time < from_t {
+                if let Some(from_t) = bundle_limits.2
+                    && local_time < from_t {
                         return Err(AppError::BadRequest(format!("Bundle {} is not available at this hour", bundle.1)));
                     }
-                }
-                if let Some(until_t) = bundle_limits.3 {
-                    if local_time > until_t {
+                if let Some(until_t) = bundle_limits.3
+                    && local_time > until_t {
                         return Err(AppError::BadRequest(format!("Bundle {} is not available at this hour", bundle.1)));
                     }
-                }
             }
 
             // Resolve components (client snapshot or catalog defaults)
@@ -869,7 +866,7 @@ pub async fn create_order(
             bundle_id,
             bundle_unit_price,
             bundle_components,
-            component_surcharge: component_surcharge,
+            component_surcharge,
         });
     }
 

@@ -531,6 +531,8 @@ pub async fn create_menu_item(
     check_permission(pool.get_ref(), &claims, "menu_items", "create").await?;
     require_same_org(&claims, Some(body.org_id))?;
 
+    let mut tx = pool.get_ref().begin().await?;
+
     let item = sqlx::query_as::<_, MenuItem>(
         "INSERT INTO menu_items
              (org_id, category_id, name, description, image_url, base_price, display_order)
@@ -547,13 +549,22 @@ pub async fn create_menu_item(
     .bind(&body.image_url)
     .bind(body.base_price)
     .bind(body.display_order.unwrap_or(0))
-    .fetch_one(pool.get_ref())
+    .fetch_one(&mut *tx)
     .await?;
 
-    // No auto-attach of option groups — global addon types (milk_type,
-    // coffee_type, extra) are shown on every drink by the POS without
-    // per-item linking. Custom slots are added by the admin via the
-    // /addon-slots endpoints.
+    // Seed initial price epoch for the advisor.
+    sqlx::query(
+        "INSERT INTO menu_item_price_epochs \
+             (menu_item_id, size_label, price, effective_from, changed_by) \
+         VALUES ($1, NULL, $2, now(), $3)"
+    )
+    .bind(item.id)
+    .bind(body.base_price)
+    .bind(claims.user_id())
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
 
     Ok(HttpResponse::Created().json(MenuItemFull {
         item,
@@ -578,6 +589,8 @@ pub async fn update_menu_item(
 
     let image_url_is_present = body.image_url.is_some();
     let image_url_val = body.image_url.as_ref().and_then(|o| o.clone());
+
+    let mut tx = pool.get_ref().begin().await?;
 
     let item = sqlx::query_as::<_, MenuItem>(
         "UPDATE menu_items SET
@@ -611,9 +624,35 @@ pub async fn update_menu_item(
     .bind(body.display_order)
     .bind(body.is_active)
     .bind(image_url_is_present)
-    .fetch_optional(pool.get_ref())
+    .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| AppError::NotFound("Menu item not found".into()))?;
+
+    // Maintain price epoch whenever base_price actually changed.
+    if let Some(new_price) = body.base_price
+        && new_price != existing.base_price {
+            sqlx::query(
+                "UPDATE menu_item_price_epochs \
+                 SET effective_until = now() \
+                 WHERE menu_item_id = $1 AND size_label IS NULL AND effective_until IS NULL"
+            )
+            .bind(*id)
+            .execute(&mut *tx)
+            .await?;
+
+            sqlx::query(
+                "INSERT INTO menu_item_price_epochs \
+                     (menu_item_id, size_label, price, effective_from, changed_by) \
+                 VALUES ($1, NULL, $2, now(), $3)"
+            )
+            .bind(*id)
+            .bind(new_price)
+            .bind(claims.user_id())
+            .execute(&mut *tx)
+            .await?;
+        }
+
+    tx.commit().await?;
 
     // If explicit null, cleanup old image from storage
     if body.image_url == Some(None)
@@ -661,6 +700,19 @@ pub async fn upsert_size(
     let item = fetch_menu_item(pool.get_ref(), *id).await?;
     require_same_org(&claims, Some(item.org_id))?;
 
+    // Capture old price (if exists) before the upsert.
+    let old_price: Option<i32> = sqlx::query_scalar(
+        "SELECT price_override FROM item_sizes \
+         WHERE menu_item_id = $1 AND label = $2::item_size"
+    )
+    .bind(*id)
+    .bind(&body.label)
+    .fetch_optional(pool.get_ref())
+    .await?
+    .flatten();
+
+    let mut tx = pool.get_ref().begin().await?;
+
     let row = sqlx::query_as::<_, ItemSize>(
         "INSERT INTO item_sizes (menu_item_id, label, price_override, display_order)
          VALUES ($1, $2::item_size, $3, $4)
@@ -674,8 +726,36 @@ pub async fn upsert_size(
     .bind(&body.label)
     .bind(body.price_override)
     .bind(body.display_order.unwrap_or(0))
-    .fetch_one(pool.get_ref())
+    .fetch_one(&mut *tx)
     .await?;
+
+    // Write price epoch if this is new or the price changed.
+    if old_price.is_none_or(|p| p != body.price_override) {
+        if old_price.is_some() {
+            sqlx::query(
+                "UPDATE menu_item_price_epochs \
+                 SET effective_until = now() \
+                 WHERE menu_item_id = $1 AND size_label = $2 AND effective_until IS NULL"
+            )
+            .bind(*id)
+            .bind(&body.label)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query(
+            "INSERT INTO menu_item_price_epochs \
+                 (menu_item_id, size_label, price, effective_from, changed_by) \
+             VALUES ($1, $2, $3, now(), $4)"
+        )
+        .bind(*id)
+        .bind(&body.label)
+        .bind(body.price_override)
+        .bind(claims.user_id())
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
 
     Ok(HttpResponse::Ok().json(row))
 }
