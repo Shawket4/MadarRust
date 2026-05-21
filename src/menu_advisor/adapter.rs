@@ -88,8 +88,8 @@ pub async fn load_inputs(
                            ON  c.org_ingredient_id = r.org_ingredient_id
                            AND c.effective_until IS NULL          -- current epoch
                     WHERE  r.menu_item_id = mi.id
-                      AND  r.size_label   = COALESCE(sz.label, (
-                                                SELECT size_label
+                      AND  r.size_label::text   = COALESCE(sz.label::text, (
+                                                SELECT size_label::text
                                                 FROM   menu_item_recipes
                                                 WHERE  menu_item_id = mi.id
                                                 LIMIT  1
@@ -153,9 +153,9 @@ pub async fn load_inputs(
                            AND c.effective_from   <= o.created_at
                            AND (c.effective_until IS NULL OR c.effective_until > o.created_at)
                     WHERE  r.menu_item_id = oi.menu_item_id
-                      AND  r.size_label   = COALESCE(
-                                               oi.size_label,
-                                               (SELECT size_label
+                      AND  r.size_label::text   = COALESCE(
+                                               oi.size_label::text,
+                                               (SELECT size_label::text
                                                 FROM   menu_item_recipes
                                                 WHERE  menu_item_id = oi.menu_item_id
                                                 LIMIT  1)
