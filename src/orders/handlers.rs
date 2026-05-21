@@ -544,7 +544,7 @@ pub async fn create_order(
                 )
                 .await?;
 
-                component_surcharge += (config.addon_line + config.optional_line) * item_input.quantity;
+                component_surcharge += (config.addon_line + config.optional_line) * comp_in.quantity * item_input.quantity;
 
                 for d in config.deductions {
                     deductions.push(InventoryDeduction {
@@ -1017,7 +1017,7 @@ pub async fn create_order(
                 .await?;
 
                 for addon in &comp.addons {
-                    let addon_line = addon.unit_price * addon.quantity * resolved.quantity;
+                    let addon_line = addon.unit_price * addon.quantity * comp.quantity * resolved.quantity;
                     sqlx::query(
                         "INSERT INTO order_line_bundle_component_addons \
                             (order_line_id, component_item_id, addon_item_id, addon_name, \
