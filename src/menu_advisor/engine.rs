@@ -752,32 +752,47 @@ fn raw_candidate_price(
 
     match quadrant {
         Quadrant::Star => {
-            // Hold by default. Two exceptions.
-            if cur < anchors.peer_median * 0.95 {
-                // Check if margin is below median Star margin in same category.
-                let focus_cat = snaps.get(&kpi.key).and_then(|s| s.category_id);
-                let star_margins: Vec<f64> = all_kpis.values()
-                    .filter(|k| {
-                        snaps.get(&k.key).and_then(|s| s.category_id) == focus_cat
-                        && k.key != kpi.key
-                    })
-                    .map(|k| k.margin_pct)
-                    .collect();
-                let mut sm = star_margins;
-                let med_star_margin = median(&mut sm);
-
-                if kpi.margin_pct < med_star_margin {
-                    // Small increase toward peer_anchor, capped at +8%.
+            if kpi.cost_missing {
+                if cur < anchors.peer_median * 0.95 {
                     let target = anchors.peer_median.min(cur * 1.08);
                     return (
                         target,
                         Action::RaisePrice,
                         format!(
-                            "Star item priced below peer median ({:.0} vs {:.0}) with below-median margin. \
-                             Small increase suggested toward peer pricing.",
+                            "Star item: very popular, but priced below peer median ({:.0} vs {:.0}). \
+                             Small increase suggested.",
                             cur, anchors.peer_median
                         ),
                     );
+                }
+            } else {
+                // Hold by default. Two exceptions.
+                if cur < anchors.peer_median * 0.95 {
+                    // Check if margin is below median Star margin in same category.
+                    let focus_cat = snaps.get(&kpi.key).and_then(|s| s.category_id);
+                    let star_margins: Vec<f64> = all_kpis.values()
+                        .filter(|k| {
+                            snaps.get(&k.key).and_then(|s| s.category_id) == focus_cat
+                            && k.key != kpi.key
+                        })
+                        .map(|k| k.margin_pct)
+                        .collect();
+                    let mut sm = star_margins;
+                    let med_star_margin = median(&mut sm);
+
+                    if kpi.margin_pct < med_star_margin {
+                        // Small increase toward peer_anchor, capped at +8%.
+                        let target = anchors.peer_median.min(cur * 1.08);
+                        return (
+                            target,
+                            Action::RaisePrice,
+                            format!(
+                                "Star item priced below peer median ({:.0} vs {:.0}) with below-median margin. \
+                                 Small increase suggested toward peer pricing.",
+                                cur, anchors.peer_median
+                            ),
+                        );
+                    }
                 }
             }
             if cur > anchors.peer_median * 1.10 {
@@ -788,6 +803,15 @@ fn raw_candidate_price(
         }
 
         Quadrant::Plowhorse => {
+            if kpi.cost_missing {
+                let target = (cur * 1.05).min(anchors.peer_median.max(cur * 1.01));
+                return (
+                    target,
+                    Action::RaisePrice,
+                    "Plowhorse: highly popular item. Missing cost data, so a standard 5% \
+                     price increase is suggested to capitalize on demand.".into()
+                );
+            }
             // Raise toward cost_plus by enough to lift margin 3–5 pp,
             // constrained to Δ ∈ [+3%, +10%].
             let target_margin = kpi.margin_pct + 0.04; // target mid of 3–5 pp lift
@@ -827,6 +851,13 @@ fn raw_candidate_price(
         }
 
         Quadrant::Dog => {
+            if kpi.cost_missing {
+                return (
+                    cur,
+                    Action::Remove,
+                    "Dog: unpopular and underperforming. Consider removing from menu.".into()
+                );
+            }
             // No price increase on a Dog. Suggest removal or reformulation.
             if kpi.food_cost_pct > 0.45 {
                 return (
@@ -1835,5 +1866,75 @@ mod tests {
         // k2.cm = 40  < 288 → low profit
         assert_eq!(quads[&k1], Quadrant::Star);
         assert_eq!(quads[&k2], Quadrant::Dog);
+    }
+
+    #[test]
+    fn test_zero_cost_star_raise_price() {
+        let config = AnalysisConfig::default();
+        let k1 = key("00000000-0000-0000-0000-000000000001");
+        
+        let kpi = ItemKpi {
+            key: k1.clone(), sufficient: true, raw_units_sold: 100.0,
+            weighted_units_sold: 100.0, weighted_revenue: 10_000.0, weighted_cost: 0.0,
+            contribution_margin: 10_000.0, cm_per_unit: 100.0, effective_price: 100.0,
+            effective_cost: 0.0, margin_pct: 1.0, food_cost_pct: 0.0,
+            popularity_share: 0.80, popularity_ci: WilsonInterval { lo: 0.72, hi: 0.88 },
+            current_price: 100, cost_per_serving: 0, was_inactive: false, cost_volatility_high: false,
+            cost_missing: true,
+        };
+
+        let anchors = PriceAnchors {
+            cost_plus: 0.0,
+            peer_median: 120.0, // Peer is higher
+            status_quo: 100.0,
+        };
+
+        let mut all_kpis = HashMap::new();
+        all_kpis.insert(k1.clone(), kpi.clone());
+        let snaps = HashMap::new();
+
+        let (target, action, reason) = super::raw_candidate_price(
+            &kpi, &Quadrant::Star, &anchors, &config, &all_kpis, &snaps
+        );
+
+        assert_eq!(action, Action::RaisePrice);
+        // capped at 8% increase -> 108.0
+        assert_eq!(target, 108.0);
+        assert!(reason.contains("priced below peer median"));
+    }
+
+    #[test]
+    fn test_zero_cost_plowhorse_raise_price() {
+        let config = AnalysisConfig::default();
+        let k1 = key("00000000-0000-0000-0000-000000000001");
+        
+        let kpi = ItemKpi {
+            key: k1.clone(), sufficient: true, raw_units_sold: 100.0,
+            weighted_units_sold: 100.0, weighted_revenue: 10_000.0, weighted_cost: 0.0,
+            contribution_margin: 10_000.0, cm_per_unit: 100.0, effective_price: 100.0,
+            effective_cost: 0.0, margin_pct: 1.0, food_cost_pct: 0.0,
+            popularity_share: 0.80, popularity_ci: WilsonInterval { lo: 0.72, hi: 0.88 },
+            current_price: 100, cost_per_serving: 0, was_inactive: false, cost_volatility_high: false,
+            cost_missing: true,
+        };
+
+        let anchors = PriceAnchors {
+            cost_plus: 0.0,
+            peer_median: 110.0, 
+            status_quo: 100.0,
+        };
+
+        let mut all_kpis = HashMap::new();
+        all_kpis.insert(k1.clone(), kpi.clone());
+        let snaps = HashMap::new();
+
+        let (target, action, reason) = super::raw_candidate_price(
+            &kpi, &Quadrant::Plowhorse, &anchors, &config, &all_kpis, &snaps
+        );
+
+        assert_eq!(action, Action::RaisePrice);
+        // standard 5% increase -> 105.0
+        assert_eq!(target, 105.0);
+        assert!(reason.contains("standard 5%"));
     }
 }
