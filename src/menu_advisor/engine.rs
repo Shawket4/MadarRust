@@ -212,6 +212,7 @@ pub struct ItemKpi {
     pub was_inactive:        bool,
     /// Did the cost move >25% within the window?
     pub cost_volatility_high: bool,
+    pub cost_missing:         bool,
 }
 
 // ── Price suggestion ──────────────────────────────────────────
@@ -258,6 +259,7 @@ pub struct PriceSuggestion {
     pub price_changed_in_window: bool,
     /// What-if: if cost_per_serving fell 10%, what would new margin_pct be?
     pub cost_reduction_whatif_margin: Option<f64>,
+    pub cost_missing:                bool,
 }
 
 // ── Bundle suggestion ─────────────────────────────────────────
@@ -304,6 +306,7 @@ pub struct BundleSuggestion {
     pub forecast:                BundleForecast,
     pub guard_clips:             Vec<GuardClip>,
     pub explanation:             String,
+    pub missing_costs:           bool,
 }
 
 // ── Removal scenario ──────────────────────────────────────────
@@ -498,10 +501,8 @@ pub fn compute_item_kpis(
         let current_price = snap.current_price;
         let cost_serving  = snap.cost_per_serving;
 
-        // Skip zero-cost items (e.g. complimentary water) — spec §10.
-        if cost_serving == 0 {
-            continue;
-        }
+        // Flag zero-cost items (e.g. complimentary water or missing ingredients)
+        let cost_missing = cost_serving == 0;
 
         let acc = accs.get(&snap.key);
         let raw_units = acc.map_or(0.0, |a| a.raw_units);
@@ -521,8 +522,8 @@ pub fn compute_item_kpis(
         let cm_per_unit         = if w_units > 0.0 { contribution_margin / w_units } else { 0.0 };
         let effective_price     = if w_units > 0.0 { w_revenue / w_units } else { current_price as f64 };
         let effective_cost      = if w_units > 0.0 { w_cost / w_units } else { cost_serving as f64 };
-        let margin_pct          = if effective_price > 0.0 { cm_per_unit / effective_price } else { 0.0 };
-        let food_cost_pct       = if effective_price > 0.0 { effective_cost / effective_price } else { 1.0 };
+        let margin_pct          = if effective_price > 0.0 { cm_per_unit / effective_price } else if cost_serving == 0 { 1.0 } else { 0.0 };
+        let food_cost_pct       = if effective_price > 0.0 { effective_cost / effective_price } else if cost_serving == 0 { 0.0 } else { 1.0 };
 
         // popularity_share: exclude bundle-only and inactive.
         let popularity_share = if !snap.bundle_only && is_active && total_w_units > 0.0 {
@@ -553,6 +554,7 @@ pub fn compute_item_kpis(
             cost_per_serving:     cost_serving,
             was_inactive:         !is_active && raw_units > 0.0,
             cost_volatility_high,
+            cost_missing,
         });
     }
 
@@ -965,6 +967,7 @@ pub fn suggest_prices(
                 peer_comparison:  None,
                 price_changed_in_window: price_changed_keys.contains(&kpi.key),
                 cost_reduction_whatif_margin: None,
+                cost_missing:     kpi.cost_missing,
             };
         }
 
@@ -1029,6 +1032,7 @@ pub fn suggest_prices(
             peer_comparison: peer_cmp,
             price_changed_in_window: price_changed_keys.contains(&kpi.key),
             cost_reduction_whatif_margin,
+            cost_missing:    kpi.cost_missing,
         }
     }).collect()
 }
@@ -1372,6 +1376,8 @@ pub fn suggest_bundles(
                 },
                 guard_clips: vec![GuardClip::CulturalRounding],
                 explanation,
+                missing_costs: kpis.get(&focus.key).map_or(false, |k| k.cost_missing)
+                               || kpis.get(p1_key).map_or(false, |k| k.cost_missing),
             });
 
             // Size 3 bundles: add a second partner.
@@ -1419,7 +1425,7 @@ pub fn suggest_bundles(
 
                     bundle_candidates.push(BundleSuggestion {
                         focus_item:             focus.key.clone(),
-                        bundle_items:           items3,
+                        bundle_items:           items3.clone(),
                         bundle_list_price:      bundle_list_price3,
                         bundle_suggested_price: bundle_price3,
                         bundle_discount_pct:    discount3,
@@ -1454,6 +1460,8 @@ pub fn suggest_bundles(
                         },
                         guard_clips: vec![GuardClip::CulturalRounding],
                         explanation: expl3,
+                        missing_costs: kpis.get(&focus.key).map_or(false, |k| k.cost_missing)
+                                       || items3.iter().any(|k| kpis.get(k).map_or(false, |k2| k2.cost_missing)),
                     });
 
                     // Only generate one 3-bundle candidate per p1 partner to avoid combinatorial explosion.
@@ -1802,7 +1810,7 @@ mod tests {
             contribution_margin: 35_000.0, cm_per_unit: 350.0, effective_price: 500.0,
             effective_cost: 150.0, margin_pct: 0.70, food_cost_pct: 0.30,
             popularity_share: 0.80, popularity_ci: WilsonInterval { lo: 0.72, hi: 0.88 },
-            current_price: 500, cost_per_serving: 150, was_inactive: false, cost_volatility_high: false,
+            current_price: 500, cost_per_serving: 150, was_inactive: false, cost_volatility_high: false, cost_missing: false,
         };
         // k2: dog — low popularity, low cm.
         let kpi2 = ItemKpi {
@@ -1811,7 +1819,7 @@ mod tests {
             contribution_margin: 1_000.0, cm_per_unit: 40.0, effective_price: 200.0,
             effective_cost: 160.0, margin_pct: 0.20, food_cost_pct: 0.80,
             popularity_share: 0.20, popularity_ci: WilsonInterval { lo: 0.12, hi: 0.30 },
-            current_price: 200, cost_per_serving: 160, was_inactive: false, cost_volatility_high: false,
+            current_price: 200, cost_per_serving: 160, was_inactive: false, cost_volatility_high: false, cost_missing: false,
         };
 
         let mut kpis = HashMap::new();
