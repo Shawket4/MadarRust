@@ -1,14 +1,24 @@
-//! Adapter: queries the Sufrix DB and shapes data into engine input types.
+//! Adapter — bridges Sufrix's schema into the engine's input types.
 //!
-//! `cost_at_sale` is calculated at query time by joining
-//! `ingredient_cost_history` against the order timestamp — no cached proxy.
+//! Cost-optional rollup contract:
+//!   - `ItemSnapshot.cost_per_serving = None` ⟺ any ingredient in the recipe
+//!     lacks a current cost in `ingredient_cost_history`, OR the item has no
+//!     recipe defined at all.
+//!   - `SaleEvent.unit_cost_at_sale = None` ⟺ any ingredient lacked a cost
+//!     epoch covering the order's timestamp.
 //!
-//! `price_changed_in_window` is detected by checking `menu_item_price_epochs`
-//! and `bundle_price_epochs` for any new epoch that started inside the window.
+//! `COALESCE(..., 0)` is NEVER used for cost — zero would collide with
+//! genuinely free items (complimentary water, refills). The SQL uses
+//! `bool_or(cost IS NULL)` to short-circuit the rollup to NULL when any
+//! component is missing.
+//!
+//! Size-label matching uses `IS NOT DISTINCT FROM` so that NULL size_labels
+//! (non-sized items) match correctly with recipe rows that also use NULL.
 
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
+use rust_decimal::prelude::ToPrimitive;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -18,264 +28,403 @@ use super::engine::{
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Internal query row types
+// Row types
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(sqlx::FromRow)]
-struct MenuItemRow {
-    menu_item_id:    Uuid,
-    size_label:      String,   // "one_size" | actual label
-    item_name:       String,
-    category_id:     Option<Uuid>,
-    current_price:   i32,
-    is_active:       bool,
-    cost_per_serving: sqlx::types::BigDecimal,
+struct SnapshotRow {
+    menu_item_id: Uuid,
+    size_label: String,
+    item_name: String,
+    category_id: Option<Uuid>,
+    current_price: i64,
+    is_active: bool,
+    cost_per_serving: Option<sqlx::types::BigDecimal>,
 }
 
-/// A raw sale event row — cost_at_sale computed via epoch join.
 #[derive(sqlx::FromRow)]
 struct SaleRow {
-    transaction_id:   Uuid,
-    menu_item_id:     Uuid,
-    size_label:       String,
-    quantity_sold:    i64,
-    unit_price_paid:  i32,
-    unit_cost_at_sale: sqlx::types::BigDecimal,
-    sold_at:          DateTime<Utc>,
+    menu_item_id: Uuid,
+    size_label: String,
+    quantity_sold: i64,
+    unit_price_paid: i64,
+    unit_cost_at_sale: Option<sqlx::types::BigDecimal>,
+    sold_at: DateTime<Utc>,
+}
+
+#[derive(sqlx::FromRow)]
+struct BasketRow {
+    order_id: Uuid,
+    menu_item_id: Uuid,
+    size_label: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct BundleOnlyRow {
+    menu_item_id: Uuid,
+    size_label: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct PriceChangedRow {
+    menu_item_id: Uuid,
+    size_label: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Public API
+// Public surface
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct AdapterInputs {
-    pub snapshots:           Vec<ItemSnapshot>,
-    pub sales:               Vec<SaleEvent>,
-    pub baskets:             Vec<Basket>,
-    pub price_changed_keys:  HashSet<ItemKey>,
+    pub snapshots: Vec<ItemSnapshot>,
+    pub sales: Vec<SaleEvent>,
+    pub baskets: Vec<Basket>,
+    pub price_changed_keys: HashSet<ItemKey>,
 }
 
-/// Load all engine inputs for `org_id` over a window ending at `now`.
+/// Load all engine inputs for `branch_id` over a window ending at `now`.
+///
+/// Snapshot prices reflect what a customer of `branch_id` currently sees:
+/// `branch_menu_overrides.price_override` → `item_sizes.price_override`
+/// → `menu_items.base_price` (whichever is most specific).
 pub async fn load_inputs(
-    pool:   &PgPool,
+    pool: &PgPool,
     org_id: Uuid,
-    now:    DateTime<Utc>,
+    branch_id: Uuid,
+    now: DateTime<Utc>,
     config: &AnalysisConfig,
 ) -> Result<AdapterInputs, AppError> {
     let window_start = now - Duration::seconds((config.analysis_window_days * 86_400.0) as i64);
 
-    // ── 1. Item snapshots ─────────────────────────────────────
-    //
-    // We expand each menu item into one row per active size (or "one_size" for
-    // base-price items).  Cost is computed via the cost-per-serving formula:
-    //   sum over recipe ingredients of (quantity_used × current cost_per_unit).
-    //
-    let snap_rows: Vec<MenuItemRow> = sqlx::query_as::<_, MenuItemRow>(
+    let snapshots = load_snapshots(pool, org_id, branch_id, &window_start, &now).await?;
+    let sales = load_sales(pool, org_id, branch_id, &window_start, &now).await?;
+    let baskets = load_baskets(pool, org_id, branch_id, &window_start, &now).await?;
+    let price_changed_keys =
+        load_price_changed(pool, org_id, branch_id, &window_start, &now).await?;
+
+    Ok(AdapterInputs { snapshots, sales, baskets, price_changed_keys })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. Snapshots
+// ─────────────────────────────────────────────────────────────────────────────
+
+async fn load_snapshots(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Uuid,
+    window_start: &DateTime<Utc>,
+    now: &DateTime<Utc>,
+) -> Result<Vec<ItemSnapshot>, AppError> {
+    // bundle_only detection: an SKU is bundle_only iff every order_item row in
+    // the window has bundle_id IS NOT NULL.
+    let bundle_only_rows: Vec<BundleOnlyRow> = sqlx::query_as::<_, BundleOnlyRow>(
         r#"
         SELECT
-            mi.id                                               AS menu_item_id,
-            COALESCE(sz.label::text, 'one_size')               AS size_label,
-            mi.name                                            AS item_name,
-            mi.category_id,
-            COALESCE(sz.price_override, mi.base_price)::int    AS current_price,
-            mi.is_active,
-            COALESCE(
-                (
-                    SELECT COALESCE(SUM(r.quantity_used * c.cost_per_unit), 0)
-                    FROM   menu_item_recipes r
-                    JOIN   org_ingredients  oi ON oi.id  = r.org_ingredient_id
-                    JOIN   ingredient_cost_history c
-                           ON  c.org_ingredient_id = r.org_ingredient_id
-                           AND c.effective_until IS NULL          -- current epoch
-                    WHERE  r.menu_item_id = mi.id
-                      AND  r.size_label::text   = COALESCE(sz.label::text, (
-                                                SELECT size_label::text
-                                                FROM   menu_item_recipes
-                                                WHERE  menu_item_id = mi.id
-                                                LIMIT  1
-                                           ))
-                ),
-                0
-            )                                                  AS cost_per_serving
-        FROM  menu_items mi
-        LEFT JOIN item_sizes sz
-               ON  sz.menu_item_id = mi.id
-               AND sz.is_active    = true
-        WHERE mi.org_id      = $1
-          AND mi.deleted_at  IS NULL
-        "#,
-    )
-    .bind(org_id)
-    .fetch_all(pool)
-    .await?;
-
-    let snapshots: Vec<ItemSnapshot> = snap_rows.into_iter().map(|r| {
-        use rust_decimal::prelude::ToPrimitive;
-        let cost: i64 = r.cost_per_serving
-            .to_i64()
-            .unwrap_or(0);
-
-        ItemSnapshot {
-            key: ItemKey {
-                menu_item_id: r.menu_item_id,
-                size_label:   r.size_label,
-            },
-            category_id:      r.category_id,
-            name:             r.item_name,
-            current_price:    r.current_price as i64,
-            cost_per_serving: cost,
-            is_active:        r.is_active,
-            variant_of:       Some(r.menu_item_id), // all sizes share same parent
-            bundle_only:      false,
-        }
-    }).collect();
-
-    // ── 2. Sale events (cost-at-sale via epoch join) ──────────
-    //
-    // For each order_item in the window we compute the ingredient cost as it
-    // stood *at the time of the sale* using the effective_from / effective_until
-    // range in ingredient_cost_history.
-    //
-    let sale_rows: Vec<SaleRow> = sqlx::query_as::<_, SaleRow>(
-        r#"
-        SELECT
-            oi.order_id                                         AS transaction_id,
             oi.menu_item_id,
-            COALESCE(oi.size_label, 'one_size')                AS size_label,
-            oi.quantity::bigint                                AS quantity_sold,
-            oi.unit_price::int                                 AS unit_price_paid,
-            COALESCE(
-                (
-                    SELECT COALESCE(SUM(r.quantity_used * c.cost_per_unit), 0)
-                    FROM   menu_item_recipes r
-                    JOIN   ingredient_cost_history c
-                           ON  c.org_ingredient_id = r.org_ingredient_id
-                           AND c.effective_from   <= o.created_at
-                           AND (c.effective_until IS NULL OR c.effective_until > o.created_at)
-                    WHERE  r.menu_item_id = oi.menu_item_id
-                      AND  r.size_label::text   = COALESCE(
-                                               oi.size_label::text,
-                                               (SELECT size_label::text
-                                                FROM   menu_item_recipes
-                                                WHERE  menu_item_id = oi.menu_item_id
-                                                LIMIT  1)
-                                           )
-                ),
-                0
-            )                                                  AS unit_cost_at_sale,
-            o.created_at                                       AS sold_at
-        FROM   order_items oi
-        JOIN   orders      o  ON o.id = oi.order_id
-        JOIN   branches    b  ON b.id = o.branch_id
-        WHERE  b.org_id         = $1
-          AND  o.created_at    >= $2
-          AND  o.created_at    <= $3
-          AND  o.status        = 'completed'
-          AND  oi.menu_item_id IS NOT NULL
-          AND  oi.bundle_id    IS NULL      -- exclude bundle order lines (counted separately)
+            COALESCE(oi.size_label::text, 'one_size') AS size_label
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        JOIN branches b ON b.id = o.branch_id
+        WHERE b.org_id = $1
+          AND o.branch_id = $2
+          AND o.created_at >= $3
+          AND o.created_at <= $4
+          AND o.status = 'completed'
+          AND oi.menu_item_id IS NOT NULL
+        GROUP BY oi.menu_item_id, COALESCE(oi.size_label::text, 'one_size')
+        HAVING bool_and(oi.bundle_id IS NOT NULL) = TRUE
         "#,
     )
     .bind(org_id)
+    .bind(branch_id)
     .bind(window_start)
     .bind(now)
     .fetch_all(pool)
     .await?;
 
-    let sales: Vec<SaleEvent> = sale_rows.into_iter().map(|r| {
-        use rust_decimal::prelude::ToPrimitive;
-        let cost: i64 = r.unit_cost_at_sale.to_i64().unwrap_or(0);
-        SaleEvent {
-            transaction_id:   r.transaction_id,
+    let bundle_only_set: HashSet<(Uuid, String)> = bundle_only_rows
+        .into_iter()
+        .map(|r| (r.menu_item_id, r.size_label))
+        .collect();
+
+    // Cost rollup is a correlated subquery that returns NULL whenever any
+    // recipe ingredient lacks a current cost — that's the cost-optional
+    // signal the engine relies on.
+    let rows: Vec<SnapshotRow> = sqlx::query_as::<_, SnapshotRow>(
+        r#"
+        WITH expanded AS (
+            SELECT
+                mi.id            AS menu_item_id,
+                mi.name          AS item_name,
+                mi.category_id,
+                mi.is_active,
+                mi.base_price,
+                sz.label         AS size_label_enum,
+                COALESCE(sz.label::text, 'one_size') AS size_label_text,
+                sz.price_override AS size_price_override
+            FROM menu_items mi
+            LEFT JOIN item_sizes sz
+                   ON sz.menu_item_id = mi.id
+                  AND sz.is_active = TRUE
+            WHERE mi.org_id = $1
+              AND mi.deleted_at IS NULL
+        )
+        SELECT
+            e.menu_item_id,
+            e.size_label_text AS size_label,
+            e.item_name,
+            e.category_id,
+            COALESCE(
+                bmo.price_override,
+                e.size_price_override,
+                e.base_price
+            )::bigint AS current_price,
+            e.is_active,
+            (
+                SELECT
+                    CASE
+                        WHEN COUNT(*) = 0 THEN NULL
+                        WHEN bool_or(ich.cost_per_unit IS NULL) THEN NULL
+                        ELSE SUM(r.quantity_used * ich.cost_per_unit)
+                    END
+                FROM menu_item_recipes r
+                LEFT JOIN ingredient_cost_history ich
+                       ON ich.org_ingredient_id = r.org_ingredient_id
+                      AND ich.effective_until IS NULL
+                WHERE r.menu_item_id = e.menu_item_id
+                  AND r.size_label IS NOT DISTINCT FROM e.size_label_enum
+            ) AS cost_per_serving
+        FROM expanded e
+        LEFT JOIN branch_menu_overrides bmo
+               ON bmo.menu_item_id = e.menu_item_id
+              AND bmo.branch_id    = $2
+        ORDER BY e.item_name, e.size_label_text
+        "#,
+    )
+    .bind(org_id)
+    .bind(branch_id)
+    .fetch_all(pool)
+    .await?;
+
+    let _ = (window_start, now); // bundle_only_set already bounded by window
+
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let cost = r.cost_per_serving.and_then(|d| d.to_i64());
+            let bundle_only =
+                bundle_only_set.contains(&(r.menu_item_id, r.size_label.clone()));
+            ItemSnapshot {
+                key: ItemKey {
+                    menu_item_id: r.menu_item_id,
+                    size_label: r.size_label,
+                },
+                category_id: r.category_id,
+                name: r.item_name,
+                current_price: r.current_price,
+                cost_per_serving: cost,
+                is_active: r.is_active,
+                bundle_only,
+            }
+        })
+        .collect())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2. Sale events
+// ─────────────────────────────────────────────────────────────────────────────
+
+async fn load_sales(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Uuid,
+    window_start: &DateTime<Utc>,
+    now: &DateTime<Utc>,
+) -> Result<Vec<SaleEvent>, AppError> {
+    let rows: Vec<SaleRow> = sqlx::query_as::<_, SaleRow>(
+        r#"
+        SELECT
+            oi.menu_item_id,
+            COALESCE(oi.size_label::text, 'one_size')  AS size_label,
+            oi.quantity::bigint                        AS quantity_sold,
+            oi.unit_price::bigint                      AS unit_price_paid,
+            (
+                SELECT
+                    CASE
+                        WHEN COUNT(*) = 0 THEN NULL
+                        WHEN bool_or(ich.cost_per_unit IS NULL) THEN NULL
+                        ELSE SUM(r.quantity_used * ich.cost_per_unit)
+                    END
+                FROM menu_item_recipes r
+                LEFT JOIN ingredient_cost_history ich
+                       ON ich.org_ingredient_id = r.org_ingredient_id
+                      AND ich.effective_from   <= o.created_at
+                      AND (ich.effective_until IS NULL OR ich.effective_until > o.created_at)
+                WHERE r.menu_item_id = oi.menu_item_id
+                  AND r.size_label IS NOT DISTINCT FROM oi.size_label
+            )                                          AS unit_cost_at_sale,
+            o.created_at                               AS sold_at
+        FROM order_items oi
+        JOIN orders   o ON o.id = oi.order_id
+        JOIN branches b ON b.id = o.branch_id
+        WHERE b.org_id        = $1
+          AND o.branch_id     = $2
+          AND o.created_at   >= $3
+          AND o.created_at   <= $4
+          AND o.status        = 'completed'
+          AND oi.menu_item_id IS NOT NULL
+          AND oi.bundle_id    IS NULL  -- only standalone lines count toward sales
+        "#,
+    )
+    .bind(org_id)
+    .bind(branch_id)
+    .bind(window_start)
+    .bind(now)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| SaleEvent {
             key: ItemKey {
                 menu_item_id: r.menu_item_id,
-                size_label:   r.size_label,
+                size_label: r.size_label,
             },
-            quantity_sold:    r.quantity_sold,
-            unit_price_paid:  r.unit_price_paid as i64,
-            unit_cost_at_sale: cost,
-            sold_at:          r.sold_at,
-        }
-    }).collect();
+            quantity_sold: r.quantity_sold,
+            unit_price_paid: r.unit_price_paid,
+            unit_cost_at_sale: r.unit_cost_at_sale.and_then(|d| d.to_i64()),
+            sold_at: r.sold_at,
+        })
+        .collect())
+}
 
-    // ── 3. Baskets (one per completed order) ──────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// 3. Baskets
+// ─────────────────────────────────────────────────────────────────────────────
 
-    // Fetch distinct (order_id, menu_item_id, size_label) tuples.
-    #[derive(sqlx::FromRow)]
-    struct BasketRow {
-        order_id:     Uuid,
-        menu_item_id: Uuid,
-        size_label:   String,
-    }
-
-    let basket_rows: Vec<BasketRow> = sqlx::query_as::<_, BasketRow>(
+async fn load_baskets(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Uuid,
+    window_start: &DateTime<Utc>,
+    now: &DateTime<Utc>,
+) -> Result<Vec<Basket>, AppError> {
+    // Bundle components are included — a basket reflects what the customer
+    // actually took home. Dedup by (menu_item_id, size_label) within order.
+    let rows: Vec<BasketRow> = sqlx::query_as::<_, BasketRow>(
         r#"
         SELECT DISTINCT
             oi.order_id,
             oi.menu_item_id,
-            COALESCE(oi.size_label, 'one_size') AS size_label
-        FROM   order_items oi
-        JOIN   orders      o  ON o.id = oi.order_id
-        JOIN   branches    b  ON b.id = o.branch_id
-        WHERE  b.org_id         = $1
-          AND  o.created_at    >= $2
-          AND  o.created_at    <= $3
-          AND  o.status        = 'completed'
-          AND  oi.menu_item_id IS NOT NULL
+            COALESCE(oi.size_label::text, 'one_size') AS size_label
+        FROM order_items oi
+        JOIN orders   o ON o.id = oi.order_id
+        JOIN branches b ON b.id = o.branch_id
+        WHERE b.org_id        = $1
+          AND o.branch_id     = $2
+          AND o.created_at   >= $3
+          AND o.created_at   <= $4
+          AND o.status        = 'completed'
+          AND oi.menu_item_id IS NOT NULL
         "#,
     )
     .bind(org_id)
+    .bind(branch_id)
     .bind(window_start)
     .bind(now)
     .fetch_all(pool)
     .await?;
 
-    // Group by order_id → basket.
-    let mut basket_map: HashMap<Uuid, Vec<ItemKey>> = HashMap::new();
-    for row in basket_rows {
-        basket_map
-            .entry(row.order_id)
-            .or_default()
-            .push(ItemKey { menu_item_id: row.menu_item_id, size_label: row.size_label });
-    }
-    let baskets: Vec<Basket> = basket_map.into_values().collect();
-
-    // ── 4. Detect items with price changes inside the window ──
-
-    // Menu item price epochs that started within the window.
-    #[derive(sqlx::FromRow)]
-    struct PriceChangedRow {
-        menu_item_id: Uuid,
-        size_label:   Option<String>,
-    }
-
-    let changed_menu: Vec<PriceChangedRow> = sqlx::query_as::<_, PriceChangedRow>(
-        r#"
-        SELECT DISTINCT e.menu_item_id, e.size_label
-        FROM   menu_item_price_epochs e
-        JOIN   menu_items             mi ON mi.id = e.menu_item_id
-        WHERE  mi.org_id       = $1
-          AND  e.effective_from > $2
-          AND  e.effective_from <= $3
-        "#,
-    )
-    .bind(org_id)
-    .bind(window_start)
-    .bind(now)
-    .fetch_all(pool)
-    .await?;
-
-    let mut price_changed_keys: HashSet<ItemKey> = HashSet::new();
-    for r in changed_menu {
-        price_changed_keys.insert(ItemKey {
+    let mut by_order: HashMap<Uuid, Vec<ItemKey>> = HashMap::new();
+    for r in rows {
+        by_order.entry(r.order_id).or_default().push(ItemKey {
             menu_item_id: r.menu_item_id,
-            size_label:   r.size_label.unwrap_or_else(|| "one_size".into()),
+            size_label: r.size_label,
+        });
+    }
+    Ok(by_order.into_values().collect())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. Price-changed-in-window detection
+// ─────────────────────────────────────────────────────────────────────────────
+
+async fn load_price_changed(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Uuid,
+    window_start: &DateTime<Utc>,
+    now: &DateTime<Utc>,
+) -> Result<HashSet<ItemKey>, AppError> {
+    // Epochs covering: base_price (size_label NULL, branch_id NULL),
+    //                  item_sizes.price_override (size_label set, branch_id NULL),
+    //                  branch_menu_overrides (branch_id set).
+    // Any epoch whose effective_from falls inside the window flags that SKU.
+    let rows: Vec<PriceChangedRow> = sqlx::query_as::<_, PriceChangedRow>(
+        r#"
+        SELECT DISTINCT
+            e.menu_item_id,
+            COALESCE(e.size_label, 'one_size') AS size_label
+        FROM menu_item_price_epochs e
+        JOIN menu_items mi ON mi.id = e.menu_item_id
+        WHERE mi.org_id            = $1
+          AND (e.branch_id IS NULL OR e.branch_id = $2)
+          AND e.effective_from    > $3
+          AND e.effective_from   <= $4
+        "#,
+    )
+    .bind(org_id)
+    .bind(branch_id)
+    .bind(window_start)
+    .bind(now)
+    .fetch_all(pool)
+    .await?;
+
+    let mut set: HashSet<ItemKey> = HashSet::new();
+    for r in rows {
+        set.insert(ItemKey {
+            menu_item_id: r.menu_item_id,
+            size_label: r.size_label.unwrap_or_else(|| "one_size".into()),
         });
     }
 
-    Ok(AdapterInputs {
-        snapshots,
-        sales,
-        baskets,
-        price_changed_keys,
-    })
+    // Fan out: if a row was inserted with size_label = 'one_size' representing
+    // a base_price change on a sized item, fan it across all that item's sizes.
+    #[derive(sqlx::FromRow)]
+    struct SizeRow { menu_item_id: Uuid, size_label: String }
+
+    let touched_items: Vec<Uuid> = set.iter().map(|k| k.menu_item_id).collect();
+    if !touched_items.is_empty() {
+        let size_rows: Vec<SizeRow> = sqlx::query_as::<_, SizeRow>(
+            r#"
+            SELECT sz.menu_item_id,
+                   COALESCE(sz.label::text, 'one_size') AS size_label
+            FROM item_sizes sz
+            WHERE sz.menu_item_id = ANY($1)
+              AND sz.is_active = TRUE
+            "#,
+        )
+        .bind(&touched_items)
+        .fetch_all(pool)
+        .await?;
+
+        // Fan out only for keys where size_label was the fallback 'one_size'
+        // AND there exist real size rows.
+        let touched_one_size: HashSet<Uuid> = set
+            .iter()
+            .filter(|k| k.size_label == "one_size")
+            .map(|k| k.menu_item_id)
+            .collect();
+        for sr in size_rows {
+            if touched_one_size.contains(&sr.menu_item_id) {
+                set.insert(ItemKey {
+                    menu_item_id: sr.menu_item_id,
+                    size_label: sr.size_label,
+                });
+            }
+        }
+    }
+
+    Ok(set)
 }
