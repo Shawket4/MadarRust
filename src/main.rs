@@ -1,3 +1,4 @@
+
 mod auth;
 mod errors;
 mod models;
@@ -46,8 +47,7 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("Failed to connect to PostgreSQL");
 
-    tracing::info!("Running database migrations...");
-    sqlx::migrate!().run(&pool).await.expect("Failed to run migrations");
+    // Migrations have been removed as requested.
 
     tracing::info!("Seeding default role permissions into database...");
     permissions::seeder::seed_role_permissions(&pool)
