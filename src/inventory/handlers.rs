@@ -13,7 +13,7 @@ use crate::{
 
 // ── Response models ───────────────────────────────────────────
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
 pub struct OrgIngredient {
     pub id:            Uuid,
     pub org_id:        Uuid,
@@ -28,7 +28,7 @@ pub struct OrgIngredient {
     pub updated_at:    chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
 pub struct BranchInventoryItem {
     pub id:                Uuid,
     pub branch_id:         Uuid,
@@ -45,7 +45,7 @@ pub struct BranchInventoryItem {
     pub updated_at:        chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
 pub struct BranchInventoryAdjustment {
     pub id:                  Uuid,
     pub branch_id:           Uuid,
@@ -61,7 +61,7 @@ pub struct BranchInventoryAdjustment {
     pub created_at:          chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
 pub struct BranchInventoryTransfer {
     pub id:                      Uuid,
     pub org_id:                  Uuid,
@@ -327,13 +327,11 @@ pub async fn delete_catalog_item(
     let referenced: bool = sqlx::query_scalar(
         r#"
         SELECT EXISTS (
-            SELECT 1 FROM menu_item_recipes              WHERE org_ingredient_id = $1
+            SELECT 1 FROM menu_item_recipes      WHERE org_ingredient_id = $1
             UNION ALL
-            SELECT 1 FROM addon_item_ingredients         WHERE org_ingredient_id = $1
+            SELECT 1 FROM addon_item_ingredients WHERE org_ingredient_id = $1
             UNION ALL
-            SELECT 1 FROM drink_option_ingredient_overrides WHERE org_ingredient_id = $1
-            UNION ALL
-            SELECT 1 FROM branch_inventory               WHERE org_ingredient_id = $1
+            SELECT 1 FROM branch_inventory       WHERE org_ingredient_id = $1
         )
         "#,
     )

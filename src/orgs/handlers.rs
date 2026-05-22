@@ -14,7 +14,7 @@ use crate::{
 
 // ── Models ────────────────────────────────────────────────────
 
-#[derive(Debug, sqlx::FromRow, Serialize)]
+#[derive(Debug, sqlx::FromRow, Serialize, Deserialize)]
 pub struct Org {
     pub id:             Uuid,
     pub name:           String,

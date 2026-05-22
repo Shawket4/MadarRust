@@ -11,7 +11,7 @@ use crate::{
 
 // ── Models ────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
 pub struct DrinkRecipe {
     pub id:               Uuid,
     pub menu_item_id:     Uuid,
@@ -22,7 +22,7 @@ pub struct DrinkRecipe {
     pub quantity_used:    sqlx::types::BigDecimal,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
 pub struct AddonIngredient {
     pub id:                Uuid,
     pub addon_item_id:     Uuid,
@@ -34,7 +34,7 @@ pub struct AddonIngredient {
 
 // ── Request types ─────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct UpsertDrinkRecipeRequest {
     pub size_label:        String,
     pub org_ingredient_id: Option<Uuid>,
@@ -44,7 +44,7 @@ pub struct UpsertDrinkRecipeRequest {
     pub quantity_used:     f64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct UpsertAddonIngredientRequest {
     pub org_ingredient_id: Option<Uuid>,
     pub ingredient_name:   String,

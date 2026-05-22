@@ -1,0 +1,529 @@
+use actix_web::{test, App, web};
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::auth::jwt::JwtSecret;
+use crate::models::UserRole;
+use crate::permissions::routes;
+use crate::permissions::handlers::{
+    Permission, RolePermission, PermissionMatrix,
+    UpsertPermissionRequest, UpsertRolePermissionRequest,
+};
+
+fn get_secret() -> JwtSecret {
+    JwtSecret("secret".to_string())
+}
+
+fn generate_token(user_id: Uuid, org_id: Option<Uuid>, role: UserRole) -> String {
+    crate::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
+}
+
+async fn seed_org(pool: &PgPool) -> Uuid {
+    let org_id = Uuid::new_v4();
+    let name = format!("Test Org {}", org_id);
+    let slug = format!("test-org-{}", org_id);
+    sqlx::query(
+        "INSERT INTO organizations (id, name, slug) VALUES ($1, $2, $3)"
+    )
+    .bind(org_id)
+    .bind(&name)
+    .bind(&slug)
+    .execute(pool)
+    .await
+    .unwrap();
+    org_id
+}
+
+async fn seed_user(pool: &PgPool, org_id: Uuid, name: &str, role: UserRole, email: &str) -> Uuid {
+    let user_id = Uuid::new_v4();
+    let role_str = match role {
+        UserRole::SuperAdmin => "super_admin",
+        UserRole::OrgAdmin => "org_admin",
+        UserRole::BranchManager => "branch_manager",
+        UserRole::Teller => "teller",
+    };
+    sqlx::query(
+        "INSERT INTO users (id, org_id, name, role, email, password_hash) VALUES ($1, $2, $3, $4::user_role, $5, 'h')"
+    )
+    .bind(user_id)
+    .bind(org_id)
+    .bind(name)
+    .bind(role_str)
+    .bind(email)
+    .execute(pool)
+    .await
+    .unwrap();
+    user_id
+}
+
+async fn seed_super_admin(pool: &PgPool, name: &str, email: &str) -> Uuid {
+    let user_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO users (id, org_id, name, role, email, password_hash) VALUES ($1, NULL, $2, 'super_admin'::user_role, $3, 'h')"
+    )
+    .bind(user_id)
+    .bind(name)
+    .bind(email)
+    .execute(pool)
+    .await
+    .unwrap();
+    user_id
+}
+
+#[sqlx::test]
+async fn test_get_role_permissions_success(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+
+    let org_id = seed_org(&pool).await;
+    let user_id = seed_user(&pool, org_id, "Admin User", UserRole::OrgAdmin, "admin@t.com").await;
+    let token = generate_token(user_id, Some(org_id), UserRole::OrgAdmin);
+
+    let req = test::TestRequest::get()
+        .uri("/permissions/roles")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+
+    let perms: Vec<RolePermission> = test::read_body_json(resp).await;
+    assert!(!perms.is_empty());
+    // org_admin should have full access, check that at least orgs-create is there
+    let has_orgs_create = perms.iter().any(|p| p.role == "org_admin" && p.resource == "orgs" && p.action == "create" && p.granted);
+    assert!(has_orgs_create);
+}
+
+#[sqlx::test]
+async fn test_get_role_permissions_forbidden(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+
+    let org_id = seed_org(&pool).await;
+    let user_id = seed_user(&pool, org_id, "Teller User", UserRole::Teller, "teller@t.com").await;
+    let token = generate_token(user_id, Some(org_id), UserRole::Teller);
+
+    let req = test::TestRequest::get()
+        .uri("/permissions/roles")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn test_upsert_role_permission_success(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    let admin_id = seed_super_admin(&pool, "Super Admin", "super@t.com").await;
+    let token = generate_token(admin_id, None, UserRole::SuperAdmin);
+
+    let req = test::TestRequest::put()
+        .uri("/permissions/roles")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&UpsertRolePermissionRequest {
+            role: "branch_manager".to_string(),
+            resource: "permissions".to_string(),
+            action: "create".to_string(),
+            granted: true,
+        })
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+
+    let role_perm: RolePermission = test::read_body_json(resp).await;
+    assert_eq!(role_perm.role, "branch_manager");
+    assert_eq!(role_perm.resource, "permissions");
+    assert_eq!(role_perm.action, "create");
+    assert!(role_perm.granted);
+}
+
+#[sqlx::test]
+async fn test_upsert_role_permission_forbidden(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    let org_id = seed_org(&pool).await;
+    let admin_id = seed_user(&pool, org_id, "Admin User", UserRole::OrgAdmin, "admin@t.com").await;
+    let token = generate_token(admin_id, Some(org_id), UserRole::OrgAdmin);
+
+    let req = test::TestRequest::put()
+        .uri("/permissions/roles")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&UpsertRolePermissionRequest {
+            role: "branch_manager".to_string(),
+            resource: "permissions".to_string(),
+            action: "create".to_string(),
+            granted: true,
+        })
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn test_get_permission_matrix_success(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+
+    let org_id = seed_org(&pool).await;
+    let admin_id = seed_user(&pool, org_id, "Admin User", UserRole::OrgAdmin, "admin@t.com").await;
+    let target_user_id = seed_user(&pool, org_id, "Teller User", UserRole::Teller, "teller@t.com").await;
+    let token = generate_token(admin_id, Some(org_id), UserRole::OrgAdmin);
+
+    // Insert user override
+    sqlx::query(
+        "INSERT INTO permissions (user_id, resource, action, granted) VALUES ($1, 'orders'::permission_resource, 'delete'::permission_action, true)"
+    )
+    .bind(target_user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/permissions/matrix/{}", target_user_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+
+    let matrix: Vec<PermissionMatrix> = test::read_body_json(resp).await;
+    assert!(!matrix.is_empty());
+
+    // Check custom override
+    let orders_delete = matrix.iter().find(|m| m.resource == "orders" && m.action == "delete").unwrap();
+    assert_eq!(orders_delete.user_override, Some(true));
+    assert!(orders_delete.effective);
+
+    // Check standard default
+    let orders_create = matrix.iter().find(|m| m.resource == "orders" && m.action == "create").unwrap();
+    assert_eq!(orders_create.role_default, Some(true));
+    assert_eq!(orders_create.user_override, None);
+    assert!(orders_create.effective);
+}
+
+#[sqlx::test]
+async fn test_get_permission_matrix_different_org(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+
+    let org_a = seed_org(&pool).await;
+    let org_b = seed_org(&pool).await;
+
+    let admin_a = seed_user(&pool, org_a, "Admin A", UserRole::OrgAdmin, "admina@t.com").await;
+    let teller_b = seed_user(&pool, org_b, "Teller B", UserRole::Teller, "tellerb@t.com").await;
+    let token = generate_token(admin_a, Some(org_a), UserRole::OrgAdmin);
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/permissions/matrix/{}", teller_b))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn test_get_permission_matrix_user_not_found(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+
+    let admin_id = seed_super_admin(&pool, "Super Admin", "super@t.com").await;
+    let token = generate_token(admin_id, None, UserRole::SuperAdmin);
+
+    let random_uuid = Uuid::new_v4();
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/permissions/matrix/{}", random_uuid))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
+}
+
+#[sqlx::test]
+async fn test_get_user_permissions_success(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+
+    let org_id = seed_org(&pool).await;
+    let admin_id = seed_user(&pool, org_id, "Admin User", UserRole::OrgAdmin, "admin@t.com").await;
+    let target_user_id = seed_user(&pool, org_id, "Teller User", UserRole::Teller, "teller@t.com").await;
+    let token = generate_token(admin_id, Some(org_id), UserRole::OrgAdmin);
+
+    // Seed override
+    sqlx::query(
+        "INSERT INTO permissions (user_id, resource, action, granted) VALUES ($1, 'orders'::permission_resource, 'delete'::permission_action, true)"
+    )
+    .bind(target_user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/permissions/user/{}", target_user_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+
+    let perms: Vec<Permission> = test::read_body_json(resp).await;
+    assert_eq!(perms.len(), 1);
+    assert_eq!(perms[0].user_id, target_user_id);
+    assert_eq!(perms[0].resource, "orders");
+    assert_eq!(perms[0].action, "delete");
+    assert!(perms[0].granted);
+}
+
+#[sqlx::test]
+async fn test_get_user_permissions_different_org(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+
+    let org_a = seed_org(&pool).await;
+    let org_b = seed_org(&pool).await;
+
+    let admin_a = seed_user(&pool, org_a, "Admin A", UserRole::OrgAdmin, "admina@t.com").await;
+    let teller_b = seed_user(&pool, org_b, "Teller B", UserRole::Teller, "tellerb@t.com").await;
+    let token = generate_token(admin_a, Some(org_a), UserRole::OrgAdmin);
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/permissions/user/{}", teller_b))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn test_upsert_user_permission_success(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+
+    let org_id = seed_org(&pool).await;
+    let admin_id = seed_user(&pool, org_id, "Admin User", UserRole::OrgAdmin, "admin@t.com").await;
+    let target_user_id = seed_user(&pool, org_id, "Teller User", UserRole::Teller, "teller@t.com").await;
+    let token = generate_token(admin_id, Some(org_id), UserRole::OrgAdmin);
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/permissions/user/{}", target_user_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&UpsertPermissionRequest {
+            resource: "orders".to_string(),
+            action: "delete".to_string(),
+            granted: true,
+        })
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+
+    let perm: Permission = test::read_body_json(resp).await;
+    assert_eq!(perm.user_id, target_user_id);
+    assert_eq!(perm.resource, "orders");
+    assert_eq!(perm.action, "delete");
+    assert!(perm.granted);
+
+    // Verify it is actually saved in DB
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM permissions WHERE user_id = $1 AND resource = 'orders' AND action = 'delete' AND granted = true")
+        .bind(target_user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[sqlx::test]
+async fn test_upsert_user_permission_different_org(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+
+    let org_a = seed_org(&pool).await;
+    let org_b = seed_org(&pool).await;
+
+    let admin_a = seed_user(&pool, org_a, "Admin A", UserRole::OrgAdmin, "admina@t.com").await;
+    let teller_b = seed_user(&pool, org_b, "Teller B", UserRole::Teller, "tellerb@t.com").await;
+    let token = generate_token(admin_a, Some(org_a), UserRole::OrgAdmin);
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/permissions/user/{}", teller_b))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&UpsertPermissionRequest {
+            resource: "orders".to_string(),
+            action: "delete".to_string(),
+            granted: true,
+        })
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn test_upsert_user_permission_invalid_enum(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+
+    let org_id = seed_org(&pool).await;
+    let admin_id = seed_user(&pool, org_id, "Admin User", UserRole::OrgAdmin, "admin@t.com").await;
+    let target_user_id = seed_user(&pool, org_id, "Teller User", UserRole::Teller, "teller@t.com").await;
+    let token = generate_token(admin_id, Some(org_id), UserRole::OrgAdmin);
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/permissions/user/{}", target_user_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&UpsertPermissionRequest {
+            resource: "invalid_resource".to_string(),
+            action: "delete".to_string(),
+            granted: true,
+        })
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert!(!resp.status().is_success()); // Expect failure since it cannot cast "invalid_resource" to permission_resource enum
+}
+
+#[sqlx::test]
+async fn test_delete_user_permission_success(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+
+    let org_id = seed_org(&pool).await;
+    let admin_id = seed_user(&pool, org_id, "Admin User", UserRole::OrgAdmin, "admin@t.com").await;
+    let target_user_id = seed_user(&pool, org_id, "Teller User", UserRole::Teller, "teller@t.com").await;
+    let token = generate_token(admin_id, Some(org_id), UserRole::OrgAdmin);
+
+    // Seed override
+    sqlx::query(
+        "INSERT INTO permissions (user_id, resource, action, granted) VALUES ($1, 'orders'::permission_resource, 'delete'::permission_action, true)"
+    )
+    .bind(target_user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let req = test::TestRequest::delete()
+        .uri(&format!("/permissions/user/{}/orders/delete", target_user_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::NO_CONTENT);
+
+    // Verify it is gone from DB
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM permissions WHERE user_id = $1 AND resource = 'orders' AND action = 'delete'")
+        .bind(target_user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[sqlx::test]
+async fn test_delete_user_permission_different_org(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+
+    let org_a = seed_org(&pool).await;
+    let org_b = seed_org(&pool).await;
+
+    let admin_a = seed_user(&pool, org_a, "Admin A", UserRole::OrgAdmin, "admina@t.com").await;
+    let teller_b = seed_user(&pool, org_b, "Teller B", UserRole::Teller, "tellerb@t.com").await;
+    let token = generate_token(admin_a, Some(org_a), UserRole::OrgAdmin);
+
+    let req = test::TestRequest::delete()
+        .uri(&format!("/permissions/user/{}/orders/delete", teller_b))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::FORBIDDEN);
+}

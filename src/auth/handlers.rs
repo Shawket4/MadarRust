@@ -21,13 +21,13 @@ pub struct LoginRequest {
     pub branch_id: Option<Uuid>,    // keep optional, unused for teller login now
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct LoginResponse {
     pub token: String,
     pub user:  UserPublic,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct MeResponse {
     pub user: UserPublic,
 }
@@ -202,14 +202,14 @@ pub async fn me(
 
 // ── GET /auth/permissions ────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct UserPermissionItem {
     pub resource: String,
     pub action:   String,
     pub granted:  bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct AuthPermissionsResponse {
     pub permissions: Vec<UserPermissionItem>,
 }

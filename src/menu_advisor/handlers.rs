@@ -30,7 +30,7 @@ fn extract_claims(req: &HttpRequest) -> Result<crate::auth::jwt::Claims, AppErro
 // Runs
 // ═══════════════════════════════════════════════════════════════════
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct CreateRunBody {
     pub config: Option<AnalysisConfig>,
 }
@@ -64,7 +64,7 @@ pub async fn create_run_handler(
     let run_id = persistence::create_run(pool.get_ref(), branch_org_id, branch_id, &config).await?;
 
     let pool_clone = pool.get_ref().clone();
-    actix_web::rt::spawn(async move {
+    tokio::spawn(async move {
         run_advisor_task(pool_clone, run_id, branch_org_id, branch_id, config).await;
     });
 
@@ -270,7 +270,7 @@ pub async fn get_removal_scenario_handler(
 // Decisions & Calibration
 // ═══════════════════════════════════════════════════════════════════
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct RecordDecisionBody {
     pub suggestion_id: Uuid,
     pub suggestion_kind: SuggestionKind,
@@ -325,7 +325,7 @@ pub async fn list_decisions_handler(
     Ok(HttpResponse::Ok().json(decisions))
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct PromoteBundleBody {
     pub bundle_id: Uuid,
 }

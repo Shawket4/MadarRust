@@ -35,7 +35,7 @@ pub struct User {
     pub deleted_at:    Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct UserPublic {
     pub id:        Uuid,
     pub org_id:    Option<Uuid>,

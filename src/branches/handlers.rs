@@ -19,7 +19,7 @@ pub enum PrinterBrand {
     Epson,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Branch {
     pub id:            Uuid,
     pub org_id:        Uuid,

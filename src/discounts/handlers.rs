@@ -11,7 +11,7 @@ use crate::{
     permissions::checker::check_permission,
 };
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct Discount {
     pub id:         Uuid,
     pub org_id:     Uuid,
@@ -28,7 +28,7 @@ pub struct ListQuery {
     pub org_id: Uuid,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct CreateDiscountRequest {
     pub org_id:    Uuid,
     pub name:      String,
@@ -37,7 +37,7 @@ pub struct CreateDiscountRequest {
     pub is_active: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct UpdateDiscountRequest {
     pub name:      Option<String>,
     pub dtype:     Option<String>,

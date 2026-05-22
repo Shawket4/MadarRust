@@ -30,7 +30,7 @@ const ORDER_SELECT: &str =
 
 // ── Models ────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Order {
     pub id:                 Uuid,
     pub branch_id:          Uuid,
@@ -59,7 +59,7 @@ pub struct Order {
     pub created_at:         chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct OrderItem {
     pub id:                  Uuid,
     pub order_id:            Uuid,
@@ -75,7 +75,7 @@ pub struct OrderItem {
     pub bundle_unit_price:   Option<i32>,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct OrderItemAddon {
     pub id:            Uuid,
     pub order_item_id: Uuid,
@@ -86,7 +86,7 @@ pub struct OrderItemAddon {
     pub line_total:    i32,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct OrderItemOptional {
     pub id:               Uuid,
     pub order_item_id:    Uuid,
@@ -99,14 +99,14 @@ pub struct OrderItemOptional {
     pub quantity_deducted: Option<sqlx::types::BigDecimal>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct OrderFull {
     #[serde(flatten)]
     pub order: Order,
     pub items: Vec<OrderItemFull>,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct OrderBundleComponentAddon {
     pub id:                Uuid,
     pub order_line_id:     Uuid,
@@ -118,7 +118,7 @@ pub struct OrderBundleComponentAddon {
     pub line_total:        i32,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct OrderBundleComponentOptional {
     pub id:                Uuid,
     pub order_line_id:     Uuid,
@@ -128,7 +128,7 @@ pub struct OrderBundleComponentOptional {
     pub price:             i32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct OrderBundleComponentFull {
     pub item_id:    Uuid,
     pub item_name:  String,
@@ -138,7 +138,7 @@ pub struct OrderBundleComponentFull {
     pub optionals:  Vec<OrderBundleComponentOptional>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct OrderItemFull {
     #[serde(flatten)]
     pub item:              OrderItem,
@@ -148,7 +148,7 @@ pub struct OrderItemFull {
     pub bundle_components: Vec<OrderBundleComponentFull>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct PaymentSplitInput {
     pub method:    String,
     pub amount:    i32,
@@ -157,7 +157,7 @@ pub struct PaymentSplitInput {
 
 pub use crate::orders::component_resolve::AddonInput;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct OrderItemInput {
     pub menu_item_id:      Option<Uuid>,
     pub bundle_id:         Option<Uuid>,
@@ -170,7 +170,7 @@ pub struct OrderItemInput {
     pub notes:             Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct CreateOrderRequest {
     pub branch_id:          Uuid,
     pub shift_id:           Uuid,
@@ -188,7 +188,7 @@ pub struct CreateOrderRequest {
     pub created_at:         Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct VoidOrderRequest {
     pub reason:            String,
     pub voided_at:         Option<chrono::DateTime<chrono::Utc>>,
@@ -209,7 +209,7 @@ pub struct ListOrdersQuery {
     pub to:             Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct OrderSummary {
     pub revenue:   i64,
     pub completed: i64,
@@ -218,7 +218,7 @@ pub struct OrderSummary {
     pub tips:      i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct PaginatedOrders {
     pub data:        Vec<Order>,
     pub total:       i64,
@@ -254,7 +254,7 @@ pub struct ExportResponse {
     pub ingredient_costs: std::collections::HashMap<Uuid, i32>,  // NEW: org_ingredient_id → cost_per_unit (piastres)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct ExportOrdersQuery {
     pub branch_id:      Option<Uuid>,
     pub shift_id:       Option<Uuid>,
@@ -1320,6 +1320,12 @@ pub async fn void_order(
     validate_void_reason(&body.reason)?;
     let voided_at = body.voided_at.unwrap_or_else(chrono::Utc::now);
 
+    let items_to_restore = if body.restore_inventory.unwrap_or(false) {
+        Some(fetch_order_items_full(pool.get_ref(), *order_id).await?)
+    } else {
+        None
+    };
+
     let mut tx = pool.begin().await?;
 
     let updated = sqlx::query_as::<_, Order>(
@@ -1346,8 +1352,7 @@ pub async fn void_order(
     .fetch_one(&mut *tx)
     .await?;
 
-    if body.restore_inventory.unwrap_or(false) {
-        let items = fetch_order_items_full(pool.get_ref(), *order_id).await?;
+    if let Some(items) = items_to_restore {
         for item in items {
             if let Some(deductions) = item.item.deductions_snapshot.as_array() {
                 for d in deductions {
@@ -1378,14 +1383,14 @@ pub async fn void_order(
 
 // ── POST /orders/preview-recipe ───────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct PreviewAddonInput {
     pub addon_item_id: Uuid,
     #[serde(default = "crate::orders::component_resolve::default_qty")]
     pub quantity: i32,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct PreviewRecipeRequest {
     pub menu_item_id:      Uuid,
     pub size_label:        Option<String>,

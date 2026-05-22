@@ -12,7 +12,7 @@ use crate::{
 
 // ── Models ────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct Shift {
     pub id:                       Uuid,
     pub branch_id:                Uuid,
@@ -35,7 +35,7 @@ pub struct Shift {
     pub notes:                    Option<String>,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct CashMovement {
     pub id:            Uuid,
     pub shift_id:      Uuid,
@@ -46,21 +46,21 @@ pub struct CashMovement {
     pub created_at:    chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ShiftPreFill {
     pub has_open_shift:         bool,
     pub open_shift:             Option<Shift>,
     pub suggested_opening_cash: i32,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct PaymentSummaryRow {
     pub payment_method: String,
     pub total:          i64,
     pub order_count:    i64,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct CashMovementSummaryRow {
     pub amount:        i32,
     pub note:          String,
@@ -68,7 +68,7 @@ pub struct CashMovementSummaryRow {
     pub created_at:    chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ShiftReportResponse {
     pub shift:               Shift,
     pub payment_summary:     Vec<PaymentSummaryRow>,
@@ -85,7 +85,7 @@ pub struct ShiftReportResponse {
 
 // ── Request types ─────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct OpenShiftRequest {
     pub id:                  Option<Uuid>,
     pub opening_cash:        i32,
@@ -94,20 +94,20 @@ pub struct OpenShiftRequest {
     pub opened_at:           Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct CashMovementRequest {
     pub amount: i32,
     pub note:   String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct InventoryCountInput {
     pub branch_inventory_id: Uuid,
     pub actual_stock:        f64,
     pub note:                Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct CloseShiftRequest {
     pub closing_cash_declared: i32,
     pub cash_note:             Option<String>,
@@ -115,7 +115,7 @@ pub struct CloseShiftRequest {
     pub closed_at:             Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct ForceCloseRequest {
     pub reason: Option<String>,
 }
@@ -508,7 +508,7 @@ pub async fn list_cash_movements(
 
 // ── POST /shifts/:shift_id/close ──────────────────────────────
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct InventoryCountRow {
     pub branch_inventory_id: Uuid,
     pub ingredient_name:     String,
@@ -520,7 +520,7 @@ pub struct InventoryCountRow {
     pub note:                Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CloseShiftResponse {
     pub shift:            Shift,
     pub inventory_counts: Vec<InventoryCountRow>,

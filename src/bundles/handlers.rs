@@ -24,7 +24,7 @@ pub enum BundleStatus {
     Archived,
 }
 
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Bundle {
     pub id: Uuid,
     pub org_id: Uuid,
@@ -55,7 +55,7 @@ pub struct BundleComponent {
     pub position: i32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BundleComponentHydrated {
     pub id: Uuid,
     pub bundle_id: Uuid,
@@ -67,7 +67,7 @@ pub struct BundleComponentHydrated {
     pub item_cost: i32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BundleWithComponents {
     #[serde(flatten)]
     pub bundle: Bundle,
@@ -94,7 +94,7 @@ pub struct ListBundlesQuery {
     pub per_page: Option<i64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PaginatedBundles {
     pub data: Vec<BundleWithComponents>,
     pub total: i64,
@@ -103,14 +103,14 @@ pub struct PaginatedBundles {
     pub total_pages: i64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct CreateBundleComponentInput {
     pub item_id: Uuid,
     pub quantity: i32,
     pub position: Option<i32>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct CreateBundleRequest {
     pub org_id: Uuid,
     pub name: String,
@@ -128,7 +128,7 @@ pub struct CreateBundleRequest {
     pub branch_ids: Option<Vec<Uuid>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct UpdateBundleRequest {
     pub name: Option<String>,
     pub name_translations: Option<serde_json::Value>,
@@ -164,14 +164,14 @@ pub struct PerformanceQuery {
     pub end_date: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct ComponentPopularity {
     pub item_id: Uuid,
     pub item_name: String,
     pub quantity_sold: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct BundlePerformanceResponse {
     pub sales_volume: i64,
     pub gross_revenue: i64,
@@ -770,6 +770,11 @@ pub async fn delete_bundle(
     }
 
     // Hard delete
+    sqlx::query("DELETE FROM bundle_price_epochs WHERE bundle_id = $1")
+        .bind(*id)
+        .execute(pool.get_ref())
+        .await?;
+
     sqlx::query("DELETE FROM bundles WHERE id = $1")
         .bind(*id)
         .execute(pool.get_ref())

@@ -30,7 +30,7 @@ pub struct TimeseriesQuery {
 
 // ── Response types ────────────────────────────────────────────
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ShiftSummary {
     pub shift_id:               Uuid,
     pub branch_id:              Uuid,
@@ -57,7 +57,7 @@ pub struct ShiftSummary {
     pub total_tax:              i64,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct InventoryDiscrepancy {
     pub branch_inventory_id: Uuid,
     pub ingredient_name:     String,
@@ -68,7 +68,7 @@ pub struct InventoryDiscrepancy {
     pub note:                Option<String>,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct DeductionLogRow {
     pub id:                Uuid,
     pub order_id:          Option<Uuid>,
@@ -81,7 +81,7 @@ pub struct DeductionLogRow {
     pub created_at:        DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CategorySales {
     pub category_id:   Option<Uuid>,
     pub category_name: Option<String>,
@@ -91,7 +91,7 @@ pub struct CategorySales {
     pub items:         Vec<ItemSales>,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ItemSales {
     pub menu_item_id:  Uuid,
     pub item_name:     String,
@@ -99,7 +99,7 @@ pub struct ItemSales {
     pub revenue:       i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct BranchSalesReport {
     pub branch_id:              Uuid,
     pub branch_name:            String,
@@ -121,7 +121,7 @@ pub struct BranchSalesReport {
     pub by_category:            Vec<CategorySales>,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct StockRow {
     pub branch_inventory_id: Uuid,
     pub ingredient_name:     String,
@@ -133,7 +133,7 @@ pub struct StockRow {
     pub below_reorder:       bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct BranchStockReport {
     pub branch_id:   Uuid,
     pub branch_name: String,
@@ -141,7 +141,7 @@ pub struct BranchStockReport {
 }
 
 // Timeseries now includes per-payment-method breakdown
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct TimeseriesPoint {
     pub period:                 String,
     pub orders:                 i64,
@@ -157,7 +157,7 @@ pub struct TimeseriesPoint {
     pub talabat_cash_revenue:   i64,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct TellerStats {
     pub teller_id:       Uuid,
     pub teller_name:     String,
@@ -168,7 +168,7 @@ pub struct TellerStats {
     pub shifts:          i64,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AddonSalesRow {
     pub addon_item_id: Uuid,
     pub addon_name:    String,
@@ -177,7 +177,7 @@ pub struct AddonSalesRow {
     pub revenue:       i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct BranchComparison {
     pub branch_id:              Uuid,
     pub branch_name:            String,
@@ -194,7 +194,7 @@ pub struct BranchComparison {
     pub void_rate_pct:          f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct OrgComparisonReport {
     pub org_id:   Uuid,
     pub from:     Option<DateTime<Utc>>,
@@ -815,7 +815,7 @@ async fn require_branch_access(
 
 // ── Bundles Reporting ────────────────────────────────────────
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct BundleSalesRow {
     pub bundle_id:     Option<Uuid>,
     pub bundle_name:   String,
@@ -823,7 +823,7 @@ pub struct BundleSalesRow {
     pub revenue:       i64,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct CombinedItemSalesRow {
     pub item_id:       Option<Uuid>,
     pub item_name:     String,

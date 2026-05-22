@@ -120,7 +120,7 @@ pub struct DecisionRecord {
     pub decided_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PriceSuggestionRecord {
     pub id: Uuid,
     pub run_id: Uuid,
@@ -131,7 +131,7 @@ pub struct PriceSuggestionRecord {
     pub suggestion: PriceSuggestion,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BundleSuggestionRecord {
     pub id: Uuid,
     pub run_id: Uuid,
@@ -143,7 +143,7 @@ pub struct BundleSuggestionRecord {
     pub suggestion: BundleSuggestion,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemovalScenarioRecord {
     pub id: Uuid,
     pub run_id: Uuid,
@@ -909,7 +909,7 @@ pub async fn get_price_suggestion(
             ps.guard_clips_json, ps.price_changed_in_window,
             ps.cost_reduction_whatif_margin, ps.cost_missing,
             ps.created_at,
-            d.id, d.decision, d.notes, d.decided_by, d.decided_at
+            d.id AS decision_id, d.decision AS decision, d.notes AS decision_notes, d.decided_by AS decision_decided_by, d.decided_at AS decision_decided_at
         FROM menu_advisor_price_suggestions ps
         LEFT JOIN LATERAL (
             SELECT id, decision, notes, decided_by, decided_at
@@ -950,7 +950,7 @@ pub async fn get_latest_item_kpi(
             ps.guard_clips_json, ps.price_changed_in_window,
             ps.cost_reduction_whatif_margin, ps.cost_missing,
             ps.created_at,
-            d.id, d.decision, d.notes, d.decided_by, d.decided_at
+            d.id AS decision_id, d.decision AS decision, d.notes AS decision_notes, d.decided_by AS decision_decided_by, d.decided_at AS decision_decided_at
         FROM menu_advisor_price_suggestions ps
         JOIN menu_advisor_runs r ON r.id = ps.run_id
         LEFT JOIN LATERAL (
@@ -1083,7 +1083,7 @@ pub async fn list_bundle_suggestions(
             bs.association_json, bs.forecast_json,
             bs.guard_clips_json, bs.explanation, bs.missing_costs,
             bs.promoted_bundle_id, bs.created_at,
-            d.id, d.decision, d.notes, d.decided_by, d.decided_at
+            d.id AS decision_id, d.decision AS decision, d.notes AS decision_notes, d.decided_by AS decision_decided_by, d.decided_at AS decision_decided_at
         FROM menu_advisor_bundle_suggestions bs
         LEFT JOIN LATERAL (
             SELECT id, decision, notes, decided_by, decided_at
@@ -1126,7 +1126,7 @@ pub async fn get_bundle_suggestion(
             bs.association_json, bs.forecast_json,
             bs.guard_clips_json, bs.explanation, bs.missing_costs,
             bs.promoted_bundle_id, bs.created_at,
-            d.id, d.decision, d.notes, d.decided_by, d.decided_at
+            d.id AS decision_id, d.decision AS decision, d.notes AS decision_notes, d.decided_by AS decision_decided_by, d.decided_at AS decision_decided_at
         FROM menu_advisor_bundle_suggestions bs
         LEFT JOIN LATERAL (
             SELECT id, decision, notes, decided_by, decided_at
@@ -1245,7 +1245,7 @@ pub async fn list_removal_scenarios(
             rs.baseline_cm, rs.absorbed_by_json, rs.complementary_losses_json,
             rs.net_cm_change, rs.net_cm_change_lo, rs.net_cm_change_hi,
             rs.recommendation, rs.explanation, rs.created_at,
-            d.id, d.decision, d.notes, d.decided_by, d.decided_at
+            d.id AS decision_id, d.decision AS decision, d.notes AS decision_notes, d.decided_by AS decision_decided_by, d.decided_at AS decision_decided_at
         FROM menu_advisor_removal_scenarios rs
         LEFT JOIN LATERAL (
             SELECT id, decision, notes, decided_by, decided_at
@@ -1283,7 +1283,7 @@ pub async fn get_removal_scenario(
             rs.baseline_cm, rs.absorbed_by_json, rs.complementary_losses_json,
             rs.net_cm_change, rs.net_cm_change_lo, rs.net_cm_change_hi,
             rs.recommendation, rs.explanation, rs.created_at,
-            d.id, d.decision, d.notes, d.decided_by, d.decided_at
+            d.id AS decision_id, d.decision AS decision, d.notes AS decision_notes, d.decided_by AS decision_decided_by, d.decided_at AS decision_decided_at
         FROM menu_advisor_removal_scenarios rs
         LEFT JOIN LATERAL (
             SELECT id, decision, notes, decided_by, decided_at
@@ -1477,11 +1477,10 @@ pub async fn get_calibration(
             ps.suggested_delta_pct,
             d.decided_at,
             (
-                SELECT e.price_minor
+                SELECT e.price::bigint
                 FROM   menu_item_price_epochs e
                 WHERE  e.menu_item_id = ps.menu_item_id
                   AND  (e.size_label IS NULL OR e.size_label = ps.size_label)
-                  AND  (e.branch_id IS NULL OR e.branch_id = ps.branch_id)
                   AND  e.effective_from > d.decided_at
                 ORDER BY e.effective_from ASC
                 LIMIT 1
@@ -1491,7 +1490,6 @@ pub async fn get_calibration(
                 FROM   menu_item_price_epochs e
                 WHERE  e.menu_item_id = ps.menu_item_id
                   AND  (e.size_label IS NULL OR e.size_label = ps.size_label)
-                  AND  (e.branch_id IS NULL OR e.branch_id = ps.branch_id)
                   AND  e.effective_from > d.decided_at
                 ORDER BY e.effective_from ASC
                 LIMIT 1

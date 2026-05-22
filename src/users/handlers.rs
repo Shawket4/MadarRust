@@ -32,7 +32,7 @@ pub struct AssignBranchRequest {
     pub branch_id: Uuid,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct CreateUserResponse {
     pub user: UserPublic,
 }
@@ -571,7 +571,7 @@ pub async fn update_user(
     Ok(HttpResponse::Ok().json(UserPublic::from(user)))
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct UserBranch {
     pub branch_id:   Uuid,
     pub branch_name: String,

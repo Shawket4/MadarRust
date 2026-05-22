@@ -12,7 +12,7 @@ use crate::{
 
 // ── Models ────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
 pub struct Permission {
     pub id:       Uuid,
     pub user_id:  Uuid,
@@ -21,7 +21,7 @@ pub struct Permission {
     pub granted:  bool,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
 pub struct RolePermission {
     pub role:     String,
     pub resource: String,
@@ -31,14 +31,14 @@ pub struct RolePermission {
 
 // ── Request types ─────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpsertPermissionRequest {
     pub resource: String,
     pub action:   String,
     pub granted:  bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpsertRolePermissionRequest {
     pub role:     String,
     pub resource: String,
@@ -70,7 +70,7 @@ pub async fn get_user_permissions(
 
 // ── GET /permissions/matrix/:user_id ─────────────────────────
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct PermissionMatrix {
     pub resource:      String,
     pub action:        String,

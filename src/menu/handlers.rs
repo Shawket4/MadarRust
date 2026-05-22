@@ -14,7 +14,7 @@ use crate::{
 
 // ── Models ────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
 pub struct Category {
     pub id:            Uuid,
     pub org_id:        Uuid,
@@ -28,7 +28,7 @@ pub struct Category {
     pub deleted_at:    Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
 pub struct MenuItem {
     pub id:            Uuid,
     pub org_id:        Uuid,
@@ -46,7 +46,7 @@ pub struct MenuItem {
     pub default_milk_addon_id: Option<String>,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
 pub struct ItemSize {
     pub id:             Uuid,
     pub menu_item_id:   Uuid,
@@ -56,7 +56,7 @@ pub struct ItemSize {
     pub is_active:      bool,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
 pub struct AddonItem {
     pub id:            Uuid,
     pub org_id:        Uuid,
@@ -75,7 +75,7 @@ pub struct AddonItem {
 
 // ── Addon Slot models ─────────────────────────────────────────
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
 pub struct AddonSlot {
     pub id:             Uuid,
     pub menu_item_id:   Uuid,
@@ -90,7 +90,7 @@ pub struct AddonSlot {
 
 // ── Addon Override models ─────────────────────────────────────
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
 pub struct AddonOverride {
     pub id:                         Uuid,
     pub menu_item_id:               Uuid,
@@ -109,7 +109,7 @@ pub struct AddonOverride {
     pub updated_at:                 DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
 pub struct MenuItemRecipe {
     pub org_ingredient_id: Option<Uuid>,
     pub quantity_used:     sqlx::types::BigDecimal,
@@ -119,7 +119,7 @@ pub struct MenuItemRecipe {
     pub size_label:        String,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
 pub struct AddonItemIngredient {
     pub org_ingredient_id: Option<Uuid>,
     pub quantity_used:     sqlx::types::BigDecimal,
@@ -129,7 +129,7 @@ pub struct AddonItemIngredient {
 
 // ── MenuItemFull — slots embedded instead of option_groups ────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct MenuItemFull {
     #[serde(flatten)]
     pub item:            MenuItem,
@@ -141,7 +141,7 @@ pub struct MenuItemFull {
 
 // ── Public Menu Models ────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct PublicMenuResponse {
     pub org_id:     Uuid,
     pub org_name:   String,
@@ -150,7 +150,7 @@ pub struct PublicMenuResponse {
     pub categories: Vec<PublicCategory>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct PublicCategory {
     pub id:            Uuid,
     pub name:          String,
@@ -160,7 +160,7 @@ pub struct PublicCategory {
     pub items:         Vec<PublicMenuItem>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct PublicMenuItem {
     pub id:            Uuid,
     pub name:          String,
@@ -173,14 +173,14 @@ pub struct PublicMenuItem {
     pub addon_slots:   Vec<PublicAddonSlot>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct PublicItemSize {
     pub id:             Uuid,
     pub label:          String,
     pub price_override: i32,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct PublicAddonSlot {
     pub id:             Uuid,
     pub addon_type:     String,
@@ -191,7 +191,7 @@ pub struct PublicAddonSlot {
     pub addon_items:    Vec<PublicAddonItem>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct PublicAddonItem {
     pub id:            Uuid,
     pub name:          String,
@@ -218,7 +218,7 @@ pub struct AddonItemQuery {
     pub addon_type: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct CreateCategoryRequest {
     pub org_id:        Uuid,
     pub name:          String,
@@ -226,7 +226,7 @@ pub struct CreateCategoryRequest {
     pub display_order: Option<i32>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct UpdateCategoryRequest {
     pub name:          Option<String>,
     #[serde(default, deserialize_with = "deserialize_double_option")]
@@ -235,7 +235,7 @@ pub struct UpdateCategoryRequest {
     pub is_active:     Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct CreateMenuItemRequest {
     pub org_id:        Uuid,
     pub category_id:   Uuid,
@@ -246,7 +246,7 @@ pub struct CreateMenuItemRequest {
     pub display_order: Option<i32>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct UpdateMenuItemRequest {
     pub category_id:   Option<Uuid>,
     pub name:          Option<String>,
@@ -258,7 +258,7 @@ pub struct UpdateMenuItemRequest {
     pub is_active:     Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct CreateAddonItemRequest {
     pub org_id:        Uuid,
     pub name:          String,
@@ -267,7 +267,7 @@ pub struct CreateAddonItemRequest {
     pub display_order: Option<i32>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct UpdateAddonItemRequest {
     pub name:          Option<String>,
     pub addon_type:    Option<String>,
@@ -276,14 +276,14 @@ pub struct UpdateAddonItemRequest {
     pub is_active:     Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct UpsertSizeRequest {
     pub label:          String,
     pub price_override: i32,
     pub display_order:  Option<i32>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct CreateAddonSlotRequest {
     pub addon_type:     String,
     pub label:          Option<String>,
@@ -293,7 +293,7 @@ pub struct CreateAddonSlotRequest {
     pub display_order:  Option<i32>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct UpdateAddonSlotRequest {
     pub label:          Option<String>,
     pub is_required:    Option<bool>,
@@ -302,7 +302,7 @@ pub struct UpdateAddonSlotRequest {
     pub display_order:  Option<i32>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct UpsertAddonOverrideRequest {
     pub addon_item_id:              Uuid,
     pub size_label:                 Option<String>,
@@ -540,7 +540,7 @@ pub async fn create_menu_item(
          RETURNING id, org_id, category_id, name, description, image_url,
                    base_price, is_active, display_order,
                    created_at, updated_at, deleted_at,
-                   NULL AS default_milk_addon_id",
+                   NULL::text AS default_milk_addon_id",
     )
     .bind(body.org_id)
     .bind(body.category_id)
@@ -673,16 +673,24 @@ pub async fn delete_menu_item(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "delete").await?;
 
-    let existing = fetch_menu_item(pool.get_ref(), *id).await?;
-    require_same_org(&claims, Some(existing.org_id))?;
+    let mut tx = pool.get_ref().begin().await?;
 
+    // Close base-price epoch AND every size epoch in one shot.
     sqlx::query(
-        "UPDATE menu_items SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL",
+        "UPDATE menu_item_price_epochs \
+         SET effective_until = now() \
+         WHERE menu_item_id = $1 AND effective_until IS NULL"
     )
     .bind(*id)
-    .execute(pool.get_ref())
+    .execute(&mut *tx)
     .await?;
 
+    sqlx::query("UPDATE menu_items SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL")
+        .bind(*id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -730,30 +738,32 @@ pub async fn upsert_size(
     .await?;
 
     // Write price epoch if this is new or the price changed.
-    if old_price.is_none_or(|p| p != body.price_override) {
-        if old_price.is_some() {
-            sqlx::query(
-                "UPDATE menu_item_price_epochs \
-                 SET effective_until = now() \
-                 WHERE menu_item_id = $1 AND size_label = $2 AND effective_until IS NULL"
-            )
-            .bind(*id)
-            .bind(&body.label)
-            .execute(&mut *tx)
-            .await?;
-        }
-        sqlx::query(
-            "INSERT INTO menu_item_price_epochs \
-                 (menu_item_id, size_label, price, effective_from, changed_by) \
-             VALUES ($1, $2, $3, now(), $4)"
-        )
-        .bind(*id)
-        .bind(&body.label)
-        .bind(body.price_override)
-        .bind(claims.user_id())
-        .execute(&mut *tx)
-        .await?;
-    }
+// Write price epoch if this is new or the price changed.
+if old_price.is_none_or(|p| p != body.price_override) {
+    // Always close any open epoch first. Idempotent when there's nothing
+    // open; correct when an orphan epoch was left behind by a prior delete.
+    sqlx::query(
+        "UPDATE menu_item_price_epochs \
+         SET effective_until = now() \
+         WHERE menu_item_id = $1 AND size_label = $2 AND effective_until IS NULL"
+    )
+    .bind(*id)
+    .bind(&body.label)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO menu_item_price_epochs \
+             (menu_item_id, size_label, price, effective_from, changed_by) \
+         VALUES ($1, $2, $3, now(), $4)"
+    )
+    .bind(*id)
+    .bind(&body.label)
+    .bind(body.price_override)
+    .bind(claims.user_id())
+    .execute(&mut *tx)
+    .await?;
+}
 
     tx.commit().await?;
 
@@ -772,12 +782,36 @@ pub async fn delete_size(
     let item = fetch_menu_item(pool.get_ref(), item_id).await?;
     require_same_org(&claims, Some(item.org_id))?;
 
+    let mut tx = pool.get_ref().begin().await?;
+
+    // Capture the label before we delete the row so we can close the epoch.
+    let label: Option<String> = sqlx::query_scalar(
+        "SELECT label::text FROM item_sizes WHERE id = $1 AND menu_item_id = $2"
+    )
+    .bind(sid)
+    .bind(item_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if let Some(lbl) = label.as_ref() {
+        sqlx::query(
+            "UPDATE menu_item_price_epochs \
+             SET effective_until = now() \
+             WHERE menu_item_id = $1 AND size_label = $2 AND effective_until IS NULL"
+        )
+        .bind(item_id)
+        .bind(lbl)
+        .execute(&mut *tx)
+        .await?;
+    }
+
     sqlx::query("DELETE FROM item_sizes WHERE id = $1 AND menu_item_id = $2")
         .bind(sid)
         .bind(item_id)
-        .execute(pool.get_ref())
+        .execute(&mut *tx)
         .await?;
 
+    tx.commit().await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -1239,7 +1273,7 @@ pub async fn delete_addon_override(
 // OPTIONAL FIELDS
 // ═══════════════════════════════════════════════════════════════
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
 pub struct OptionalField {
     pub id:                Uuid,
     pub menu_item_id:      Uuid,
@@ -1256,7 +1290,7 @@ pub struct OptionalField {
     pub updated_at:        DateTime<Utc>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct CreateOptionalFieldRequest {
     pub name:              String,
     pub price:             Option<i32>,
@@ -1268,7 +1302,7 @@ pub struct CreateOptionalFieldRequest {
     pub display_order:     Option<i32>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct UpdateOptionalFieldRequest {
     pub name:              Option<String>,
     pub price:             Option<i32>,
@@ -1479,7 +1513,7 @@ pub async fn get_public_menu(
     let items = sqlx::query_as::<_, MenuItem>(
         "SELECT id, org_id, category_id, name, description, image_url, base_price, is_active, display_order, 
                 created_at, updated_at, deleted_at, 
-                NULL as default_milk_addon_id 
+                NULL::text as default_milk_addon_id
          FROM menu_items 
          WHERE org_id = $1 AND deleted_at IS NULL AND is_active = true 
          ORDER BY display_order ASC",

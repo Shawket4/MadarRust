@@ -2,7 +2,7 @@ use actix_multipart::Multipart;
 use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
 use futures::StreamExt;
 use image::ImageReader;
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use sqlx::PgPool;
 use std::{io::Cursor, path::{Path, PathBuf}};
 use uuid::Uuid;
@@ -14,7 +14,7 @@ const ALLOWED_MIME: &[&str] = &[
 ];
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct UploadResponse {
     #[serde(serialize_with = "serialize_url")]
     pub image_url: String,

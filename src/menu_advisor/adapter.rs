@@ -175,11 +175,7 @@ async fn load_snapshots(
             e.size_label_text AS size_label,
             e.item_name,
             e.category_id,
-            COALESCE(
-                bmo.price_override,
-                e.size_price_override,
-                e.base_price
-            )::bigint AS current_price,
+            COALESCE(e.size_price_override, e.base_price)::bigint AS current_price,
             e.is_active,
             (
                 SELECT
@@ -196,18 +192,12 @@ async fn load_snapshots(
                   AND r.size_label IS NOT DISTINCT FROM e.size_label_enum
             ) AS cost_per_serving
         FROM expanded e
-        LEFT JOIN branch_menu_overrides bmo
-               ON bmo.menu_item_id = e.menu_item_id
-              AND bmo.branch_id    = $2
         ORDER BY e.item_name, e.size_label_text
         "#,
     )
     .bind(org_id)
-    .bind(branch_id)
     .fetch_all(pool)
     .await?;
-
-    let _ = (window_start, now); // bundle_only_set already bounded by window
 
     Ok(rows
         .into_iter()
@@ -369,17 +359,17 @@ async fn load_price_changed(
         FROM menu_item_price_epochs e
         JOIN menu_items mi ON mi.id = e.menu_item_id
         WHERE mi.org_id            = $1
-          AND (e.branch_id IS NULL OR e.branch_id = $2)
-          AND e.effective_from    > $3
-          AND e.effective_from   <= $4
+          AND e.effective_from    > $2
+          AND e.effective_from   <= $3
         "#,
     )
     .bind(org_id)
-    .bind(branch_id)
     .bind(window_start)
     .bind(now)
     .fetch_all(pool)
     .await?;
+
+    let _ = branch_id; // branch-specific overrides not yet tracked in epochs
 
     let mut set: HashSet<ItemKey> = HashSet::new();
     for r in rows {
