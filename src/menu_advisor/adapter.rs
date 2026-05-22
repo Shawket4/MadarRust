@@ -13,8 +13,8 @@
 //! `bool_or(cost IS NULL)` to short-circuit the rollup to NULL when any
 //! component is missing.
 //!
-//! Size-label matching uses `IS NOT DISTINCT FROM` so that NULL size_labels
-//! (non-sized items) match correctly with recipe rows that also use NULL.
+//! Size-label matching forces `text` comparison using `COALESCE(col::text, 'one_size')`
+//! to completely avoid Postgres "operator does not exist: item_size = text" errors.
 
 use std::collections::{HashMap, HashSet};
 
@@ -161,7 +161,6 @@ async fn load_snapshots(
                 mi.category_id,
                 mi.is_active,
                 mi.base_price,
-                sz.label         AS size_label_enum,
                 COALESCE(sz.label::text, 'one_size') AS size_label_text,
                 sz.price_override AS size_price_override
             FROM menu_items mi
@@ -190,8 +189,8 @@ async fn load_snapshots(
                        ON ich.org_ingredient_id = r.org_ingredient_id
                       AND ich.effective_until IS NULL
                 WHERE r.menu_item_id = e.menu_item_id
-                  -- Explicit cast to text prevents "operator does not exist: item_size = text" 
-                  AND r.size_label::text IS NOT DISTINCT FROM e.size_label_enum::text
+                  -- Force strict text-to-text equality comparison to evade enum type mapping issues
+                  AND COALESCE(r.size_label::text, 'one_size') = e.size_label_text
             ) AS cost_per_serving
         FROM expanded e
         ORDER BY e.item_name, e.size_label_text
@@ -254,8 +253,8 @@ async fn load_sales(
                       AND ich.effective_from   <= o.created_at
                       AND (ich.effective_until IS NULL OR ich.effective_until > o.created_at)
                 WHERE r.menu_item_id = oi.menu_item_id
-                  -- Explicit cast to text fixes type mismatch between item_size enum and text fields
-                  AND r.size_label::text IS NOT DISTINCT FROM oi.size_label::text
+                  -- Force strict text-to-text equality comparison to evade enum type mapping issues
+                  AND COALESCE(r.size_label::text, 'one_size') = COALESCE(oi.size_label::text, 'one_size')
             )                                          AS unit_cost_at_sale,
             o.created_at                               AS sold_at
         FROM order_items oi
@@ -358,7 +357,6 @@ async fn load_price_changed(
         r#"
         SELECT DISTINCT
             e.menu_item_id,
-            -- Added ::text cast here to avoid enum vs text mismatches inside COALESCE
             COALESCE(e.size_label::text, 'one_size') AS size_label
         FROM menu_item_price_epochs e
         JOIN menu_items mi ON mi.id = e.menu_item_id
