@@ -1,3 +1,4 @@
+
 //! Adapter — bridges Sufrix's schema into the engine's input types.
 //!
 //! Cost-optional rollup contract:
@@ -189,7 +190,8 @@ async fn load_snapshots(
                        ON ich.org_ingredient_id = r.org_ingredient_id
                       AND ich.effective_until IS NULL
                 WHERE r.menu_item_id = e.menu_item_id
-                  AND r.size_label IS NOT DISTINCT FROM e.size_label_enum
+                  -- Explicit cast to text prevents "operator does not exist: item_size = text" 
+                  AND r.size_label::text IS NOT DISTINCT FROM e.size_label_enum::text
             ) AS cost_per_serving
         FROM expanded e
         ORDER BY e.item_name, e.size_label_text
@@ -252,7 +254,8 @@ async fn load_sales(
                       AND ich.effective_from   <= o.created_at
                       AND (ich.effective_until IS NULL OR ich.effective_until > o.created_at)
                 WHERE r.menu_item_id = oi.menu_item_id
-                  AND r.size_label IS NOT DISTINCT FROM oi.size_label
+                  -- Explicit cast to text fixes type mismatch between item_size enum and text fields
+                  AND r.size_label::text IS NOT DISTINCT FROM oi.size_label::text
             )                                          AS unit_cost_at_sale,
             o.created_at                               AS sold_at
         FROM order_items oi
@@ -355,7 +358,8 @@ async fn load_price_changed(
         r#"
         SELECT DISTINCT
             e.menu_item_id,
-            COALESCE(e.size_label, 'one_size') AS size_label
+            -- Added ::text cast here to avoid enum vs text mismatches inside COALESCE
+            COALESCE(e.size_label::text, 'one_size') AS size_label
         FROM menu_item_price_epochs e
         JOIN menu_items mi ON mi.id = e.menu_item_id
         WHERE mi.org_id            = $1
