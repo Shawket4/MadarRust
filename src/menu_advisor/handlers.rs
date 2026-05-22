@@ -43,7 +43,7 @@ pub async fn create_run_handler(
 ) -> Result<HttpResponse, AppError> {
     let branch_id = path.into_inner();
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "write").await?;
+    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
     
     // We assume there's a way to get org_id from branch_id, but here we can just query it.
     // However, it's safer to just lookup the branch org_id.
@@ -285,7 +285,7 @@ pub async fn record_decision_handler(
     body: web::Json<RecordDecisionBody>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "write").await?;
+    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
     
     let decision = Decision::parse(&body.decision)
         .ok_or_else(|| AppError::BadRequest("Invalid decision".into()))?;
@@ -338,7 +338,7 @@ pub async fn set_bundle_promoted_handler(
 ) -> Result<HttpResponse, AppError> {
     let suggestion_id = path.into_inner();
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "write").await?;
+    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
     
     persistence::set_bundle_promoted(pool.get_ref(), suggestion_id, body.bundle_id).await?;
     Ok(HttpResponse::Ok().finish())

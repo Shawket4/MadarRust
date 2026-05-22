@@ -421,6 +421,23 @@ CREATE TABLE public.bundle_components (
 ALTER TABLE public.bundle_components OWNER TO rue;
 
 --
+-- Name: bundle_price_epochs; Type: TABLE; Schema: public; Owner: rue
+--
+
+CREATE TABLE public.bundle_price_epochs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    bundle_id uuid NOT NULL,
+    price integer NOT NULL,
+    effective_from timestamp with time zone NOT NULL,
+    effective_until timestamp with time zone,
+    changed_by uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+ALTER TABLE public.bundle_price_epochs OWNER TO rue;
+
+--
 -- Name: bundles; Type: TABLE; Schema: public; Owner: rue
 --
 
@@ -486,6 +503,24 @@ CREATE TABLE public.discounts (
 ALTER TABLE public.discounts OWNER TO rue;
 
 --
+-- Name: ingredient_cost_history; Type: TABLE; Schema: public; Owner: rue
+--
+
+CREATE TABLE public.ingredient_cost_history (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    org_ingredient_id uuid NOT NULL,
+    cost_per_unit numeric(15,2) NOT NULL,
+    effective_from timestamp with time zone NOT NULL,
+    effective_until timestamp with time zone,
+    changed_by uuid,
+    note text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+ALTER TABLE public.ingredient_cost_history OWNER TO rue;
+
+--
 -- Name: item_sizes; Type: TABLE; Schema: public; Owner: rue
 --
 
@@ -500,6 +535,141 @@ CREATE TABLE public.item_sizes (
 
 
 ALTER TABLE public.item_sizes OWNER TO rue;
+
+--
+-- Name: menu_advisor_bundle_suggestions; Type: TABLE; Schema: public; Owner: rue
+--
+
+CREATE TABLE public.menu_advisor_bundle_suggestions (
+    id uuid NOT NULL,
+    run_id uuid NOT NULL,
+    branch_id uuid NOT NULL,
+    focus_menu_item_id uuid NOT NULL,
+    focus_size_label text,
+    components_json jsonb NOT NULL,
+    bundle_list_price bigint NOT NULL,
+    bundle_suggested_price bigint NOT NULL,
+    bundle_discount_pct double precision NOT NULL,
+    bundle_cost double precision,
+    bundle_cm double precision,
+    bundle_margin_pct double precision,
+    association_json jsonb NOT NULL,
+    forecast_json jsonb NOT NULL,
+    guard_clips_json jsonb NOT NULL,
+    explanation text NOT NULL,
+    missing_costs boolean NOT NULL,
+    promoted_bundle_id uuid,
+    created_at timestamp with time zone NOT NULL
+);
+
+
+ALTER TABLE public.menu_advisor_bundle_suggestions OWNER TO rue;
+
+--
+-- Name: menu_advisor_decisions; Type: TABLE; Schema: public; Owner: rue
+--
+
+CREATE TABLE public.menu_advisor_decisions (
+    id uuid NOT NULL,
+    suggestion_id uuid NOT NULL,
+    suggestion_kind text NOT NULL,
+    branch_id uuid NOT NULL,
+    decision text NOT NULL,
+    notes text,
+    decided_by uuid NOT NULL,
+    decided_at timestamp with time zone NOT NULL
+);
+
+
+ALTER TABLE public.menu_advisor_decisions OWNER TO rue;
+
+--
+-- Name: menu_advisor_price_suggestions; Type: TABLE; Schema: public; Owner: rue
+--
+
+CREATE TABLE public.menu_advisor_price_suggestions (
+    id uuid NOT NULL,
+    run_id uuid NOT NULL,
+    branch_id uuid NOT NULL,
+    menu_item_id uuid NOT NULL,
+    size_label text,
+    item_name text NOT NULL,
+    category_id uuid,
+    classification_mode text NOT NULL,
+    cm_quadrant text,
+    revenue_class text,
+    current_price bigint NOT NULL,
+    units_sold_raw double precision NOT NULL,
+    effective_price double precision NOT NULL,
+    popularity_share double precision NOT NULL,
+    cm_per_unit double precision,
+    margin_pct double precision,
+    food_cost_pct double precision,
+    anchors_json jsonb NOT NULL,
+    peer_comparison_json jsonb,
+    suggested_price bigint,
+    suggested_delta_abs bigint,
+    suggested_delta_pct double precision,
+    action text NOT NULL,
+    confidence text NOT NULL,
+    explanation text NOT NULL,
+    guard_clips_json jsonb NOT NULL,
+    price_changed_in_window boolean NOT NULL,
+    cost_reduction_whatif_margin double precision,
+    cost_missing boolean NOT NULL,
+    created_at timestamp with time zone NOT NULL
+);
+
+
+ALTER TABLE public.menu_advisor_price_suggestions OWNER TO rue;
+
+--
+-- Name: menu_advisor_removal_scenarios; Type: TABLE; Schema: public; Owner: rue
+--
+
+CREATE TABLE public.menu_advisor_removal_scenarios (
+    id uuid NOT NULL,
+    run_id uuid NOT NULL,
+    branch_id uuid NOT NULL,
+    menu_item_id uuid NOT NULL,
+    size_label text,
+    item_name text NOT NULL,
+    baseline_cm double precision NOT NULL,
+    absorbed_by_json jsonb NOT NULL,
+    complementary_losses_json jsonb NOT NULL,
+    net_cm_change double precision NOT NULL,
+    net_cm_change_lo double precision NOT NULL,
+    net_cm_change_hi double precision NOT NULL,
+    recommendation text NOT NULL,
+    explanation text NOT NULL,
+    created_at timestamp with time zone NOT NULL
+);
+
+
+ALTER TABLE public.menu_advisor_removal_scenarios OWNER TO rue;
+
+--
+-- Name: menu_advisor_runs; Type: TABLE; Schema: public; Owner: rue
+--
+
+CREATE TABLE public.menu_advisor_runs (
+    id uuid NOT NULL,
+    branch_id uuid NOT NULL,
+    org_id uuid NOT NULL,
+    status text NOT NULL,
+    config_json jsonb NOT NULL,
+    error_message text,
+    items_total integer,
+    items_cm_tracked integer,
+    items_revenue_only integer,
+    items_insufficient integer,
+    window_days double precision,
+    started_at timestamp with time zone NOT NULL,
+    completed_at timestamp with time zone
+);
+
+
+ALTER TABLE public.menu_advisor_runs OWNER TO rue;
 
 --
 -- Name: menu_item_addon_slots; Type: TABLE; Schema: public; Owner: rue
@@ -543,6 +713,24 @@ CREATE TABLE public.menu_item_optional_fields (
 
 
 ALTER TABLE public.menu_item_optional_fields OWNER TO rue;
+
+--
+-- Name: menu_item_price_epochs; Type: TABLE; Schema: public; Owner: rue
+--
+
+CREATE TABLE public.menu_item_price_epochs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    menu_item_id uuid NOT NULL,
+    size_label text,
+    price integer NOT NULL,
+    effective_from timestamp with time zone NOT NULL,
+    effective_until timestamp with time zone,
+    changed_by uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+ALTER TABLE public.menu_item_price_epochs OWNER TO rue;
 
 --
 -- Name: menu_item_recipes; Type: TABLE; Schema: public; Owner: rue
@@ -1039,6 +1227,14 @@ ALTER TABLE ONLY public.bundle_components
 
 
 --
+-- Name: bundle_price_epochs bundle_price_epochs_pkey; Type: CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.bundle_price_epochs
+    ADD CONSTRAINT bundle_price_epochs_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: bundles bundles_pkey; Type: CONSTRAINT; Schema: public; Owner: rue
 --
 
@@ -1071,6 +1267,14 @@ ALTER TABLE ONLY public.discounts
 
 
 --
+-- Name: ingredient_cost_history ingredient_cost_history_pkey; Type: CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.ingredient_cost_history
+    ADD CONSTRAINT ingredient_cost_history_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: item_sizes item_sizes_menu_item_id_label_key; Type: CONSTRAINT; Schema: public; Owner: rue
 --
 
@@ -1084,6 +1288,46 @@ ALTER TABLE ONLY public.item_sizes
 
 ALTER TABLE ONLY public.item_sizes
     ADD CONSTRAINT item_sizes_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: menu_advisor_bundle_suggestions menu_advisor_bundle_suggestions_pkey; Type: CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.menu_advisor_bundle_suggestions
+    ADD CONSTRAINT menu_advisor_bundle_suggestions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: menu_advisor_decisions menu_advisor_decisions_pkey; Type: CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.menu_advisor_decisions
+    ADD CONSTRAINT menu_advisor_decisions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: menu_advisor_price_suggestions menu_advisor_price_suggestions_pkey; Type: CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.menu_advisor_price_suggestions
+    ADD CONSTRAINT menu_advisor_price_suggestions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: menu_advisor_removal_scenarios menu_advisor_removal_scenarios_pkey; Type: CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.menu_advisor_removal_scenarios
+    ADD CONSTRAINT menu_advisor_removal_scenarios_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: menu_advisor_runs menu_advisor_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.menu_advisor_runs
+    ADD CONSTRAINT menu_advisor_runs_pkey PRIMARY KEY (id);
 
 
 --
@@ -1108,6 +1352,14 @@ ALTER TABLE ONLY public.menu_item_addon_slots
 
 ALTER TABLE ONLY public.menu_item_optional_fields
     ADD CONSTRAINT menu_item_optional_fields_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: menu_item_price_epochs menu_item_price_epochs_pkey; Type: CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.menu_item_price_epochs
+    ADD CONSTRAINT menu_item_price_epochs_pkey PRIMARY KEY (id);
 
 
 --
@@ -1316,6 +1568,13 @@ ALTER TABLE ONLY public.users
 
 ALTER TABLE ONLY public.users
     ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: bundle_price_epochs_bundle_from_idx; Type: INDEX; Schema: public; Owner: rue
+--
+
+CREATE INDEX bundle_price_epochs_bundle_from_idx ON public.bundle_price_epochs USING btree (bundle_id, effective_from DESC);
 
 
 --
@@ -1606,6 +1865,20 @@ CREATE INDEX idx_users_org ON public.users USING btree (org_id);
 
 
 --
+-- Name: ingredient_cost_history_ingredient_from_idx; Type: INDEX; Schema: public; Owner: rue
+--
+
+CREATE INDEX ingredient_cost_history_ingredient_from_idx ON public.ingredient_cost_history USING btree (org_ingredient_id, effective_from DESC);
+
+
+--
+-- Name: menu_item_price_epochs_item_from_idx; Type: INDEX; Schema: public; Owner: rue
+--
+
+CREATE INDEX menu_item_price_epochs_item_from_idx ON public.menu_item_price_epochs USING btree (menu_item_id, effective_from DESC);
+
+
+--
 -- Name: orders_idempotency_key_idx; Type: INDEX; Schema: public; Owner: rue
 --
 
@@ -1878,6 +2151,22 @@ ALTER TABLE ONLY public.bundle_components
 
 
 --
+-- Name: bundle_price_epochs bundle_price_epochs_bundle_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.bundle_price_epochs
+    ADD CONSTRAINT bundle_price_epochs_bundle_id_fkey FOREIGN KEY (bundle_id) REFERENCES public.bundles(id);
+
+
+--
+-- Name: bundle_price_epochs bundle_price_epochs_changed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.bundle_price_epochs
+    ADD CONSTRAINT bundle_price_epochs_changed_by_fkey FOREIGN KEY (changed_by) REFERENCES public.users(id);
+
+
+--
 -- Name: bundles bundles_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
 --
 
@@ -1918,11 +2207,131 @@ ALTER TABLE ONLY public.branch_inventory_adjustments
 
 
 --
+-- Name: ingredient_cost_history ingredient_cost_history_changed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.ingredient_cost_history
+    ADD CONSTRAINT ingredient_cost_history_changed_by_fkey FOREIGN KEY (changed_by) REFERENCES public.users(id);
+
+
+--
+-- Name: ingredient_cost_history ingredient_cost_history_org_ingredient_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.ingredient_cost_history
+    ADD CONSTRAINT ingredient_cost_history_org_ingredient_id_fkey FOREIGN KEY (org_ingredient_id) REFERENCES public.org_ingredients(id);
+
+
+--
 -- Name: item_sizes item_sizes_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
 --
 
 ALTER TABLE ONLY public.item_sizes
     ADD CONSTRAINT item_sizes_menu_item_id_fkey FOREIGN KEY (menu_item_id) REFERENCES public.menu_items(id) ON DELETE CASCADE;
+
+
+--
+-- Name: menu_advisor_bundle_suggestions menu_advisor_bundle_suggestions_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.menu_advisor_bundle_suggestions
+    ADD CONSTRAINT menu_advisor_bundle_suggestions_branch_id_fkey FOREIGN KEY (branch_id) REFERENCES public.branches(id);
+
+
+--
+-- Name: menu_advisor_bundle_suggestions menu_advisor_bundle_suggestions_focus_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.menu_advisor_bundle_suggestions
+    ADD CONSTRAINT menu_advisor_bundle_suggestions_focus_menu_item_id_fkey FOREIGN KEY (focus_menu_item_id) REFERENCES public.menu_items(id);
+
+
+--
+-- Name: menu_advisor_bundle_suggestions menu_advisor_bundle_suggestions_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.menu_advisor_bundle_suggestions
+    ADD CONSTRAINT menu_advisor_bundle_suggestions_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.menu_advisor_runs(id);
+
+
+--
+-- Name: menu_advisor_decisions menu_advisor_decisions_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.menu_advisor_decisions
+    ADD CONSTRAINT menu_advisor_decisions_branch_id_fkey FOREIGN KEY (branch_id) REFERENCES public.branches(id);
+
+
+--
+-- Name: menu_advisor_decisions menu_advisor_decisions_decided_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.menu_advisor_decisions
+    ADD CONSTRAINT menu_advisor_decisions_decided_by_fkey FOREIGN KEY (decided_by) REFERENCES public.users(id);
+
+
+--
+-- Name: menu_advisor_price_suggestions menu_advisor_price_suggestions_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.menu_advisor_price_suggestions
+    ADD CONSTRAINT menu_advisor_price_suggestions_branch_id_fkey FOREIGN KEY (branch_id) REFERENCES public.branches(id);
+
+
+--
+-- Name: menu_advisor_price_suggestions menu_advisor_price_suggestions_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.menu_advisor_price_suggestions
+    ADD CONSTRAINT menu_advisor_price_suggestions_menu_item_id_fkey FOREIGN KEY (menu_item_id) REFERENCES public.menu_items(id);
+
+
+--
+-- Name: menu_advisor_price_suggestions menu_advisor_price_suggestions_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.menu_advisor_price_suggestions
+    ADD CONSTRAINT menu_advisor_price_suggestions_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.menu_advisor_runs(id);
+
+
+--
+-- Name: menu_advisor_removal_scenarios menu_advisor_removal_scenarios_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.menu_advisor_removal_scenarios
+    ADD CONSTRAINT menu_advisor_removal_scenarios_branch_id_fkey FOREIGN KEY (branch_id) REFERENCES public.branches(id);
+
+
+--
+-- Name: menu_advisor_removal_scenarios menu_advisor_removal_scenarios_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.menu_advisor_removal_scenarios
+    ADD CONSTRAINT menu_advisor_removal_scenarios_menu_item_id_fkey FOREIGN KEY (menu_item_id) REFERENCES public.menu_items(id);
+
+
+--
+-- Name: menu_advisor_removal_scenarios menu_advisor_removal_scenarios_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.menu_advisor_removal_scenarios
+    ADD CONSTRAINT menu_advisor_removal_scenarios_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.menu_advisor_runs(id);
+
+
+--
+-- Name: menu_advisor_runs menu_advisor_runs_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.menu_advisor_runs
+    ADD CONSTRAINT menu_advisor_runs_branch_id_fkey FOREIGN KEY (branch_id) REFERENCES public.branches(id);
+
+
+--
+-- Name: menu_advisor_runs menu_advisor_runs_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.menu_advisor_runs
+    ADD CONSTRAINT menu_advisor_runs_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.organizations(id);
 
 
 --
@@ -1947,6 +2356,22 @@ ALTER TABLE ONLY public.menu_item_optional_fields
 
 ALTER TABLE ONLY public.menu_item_optional_fields
     ADD CONSTRAINT menu_item_optional_fields_org_ingredient_id_fkey FOREIGN KEY (org_ingredient_id) REFERENCES public.org_ingredients(id) ON DELETE SET NULL;
+
+
+--
+-- Name: menu_item_price_epochs menu_item_price_epochs_changed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.menu_item_price_epochs
+    ADD CONSTRAINT menu_item_price_epochs_changed_by_fkey FOREIGN KEY (changed_by) REFERENCES public.users(id);
+
+
+--
+-- Name: menu_item_price_epochs menu_item_price_epochs_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: rue
+--
+
+ALTER TABLE ONLY public.menu_item_price_epochs
+    ADD CONSTRAINT menu_item_price_epochs_menu_item_id_fkey FOREIGN KEY (menu_item_id) REFERENCES public.menu_items(id);
 
 
 --
