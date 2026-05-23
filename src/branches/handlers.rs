@@ -4,14 +4,15 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 use actix_web::HttpMessage;
+use utoipa::{IntoParams, ToSchema};
 
 use crate::{
     auth::{guards::require_same_org, jwt::Claims},
-    errors::AppError,
+    errors::{AppError, AppErrorResponse},
     permissions::checker::check_permission,
 };
 
-#[derive(Debug, Serialize, Deserialize, sqlx::Type, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, sqlx::Type, Clone, PartialEq, ToSchema)]
 #[sqlx(type_name = "printer_brand", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum PrinterBrand {
@@ -19,47 +20,65 @@ pub enum PrinterBrand {
     Epson,
 }
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct Branch {
     pub id:            Uuid,
     pub org_id:        Uuid,
+    #[schema(example = "Zamalek")]
     pub name:          String,
+    #[schema(example = "26 July Corridor, Zamalek, Cairo")]
     pub address:       Option<String>,
+    #[schema(example = "+201234567890")]
     pub phone:         Option<String>,
+    /// IANA timezone name. Defaults to `Africa/Cairo`.
+    #[schema(example = "Africa/Cairo")]
     pub timezone:      String,
     pub printer_brand: Option<PrinterBrand>,
+    #[schema(example = "192.168.1.50")]
     pub printer_ip:    Option<String>,
+    #[schema(example = 9100)]
     pub printer_port:  Option<i32>,
     pub is_active:     bool,
+    /// Convenience field — populated from the parent org's `logo_url`.
     pub org_logo_url:  Option<String>,
     pub created_at:    DateTime<Utc>,
     pub updated_at:    DateTime<Utc>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListBranchesQuery {
+    /// Organization whose branches to list. Must match the caller's JWT org.
     pub org_id: Uuid,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateBranchRequest {
     pub org_id:        Uuid,
+    #[schema(example = "Zamalek")]
     pub name:          String,
     pub address:       Option<String>,
     pub phone:         Option<String>,
+    /// IANA timezone name. Defaults to `Africa/Cairo` if absent.
+    #[schema(example = "Africa/Cairo")]
     pub timezone:      Option<String>,
     pub printer_brand: Option<PrinterBrand>,
     pub printer_ip:    Option<String>,
+    /// TCP port for the receipt printer. Defaults to `9100` if absent.
+    #[schema(example = 9100)]
     pub printer_port:  Option<i32>,
 }
 
-// UpdateBranchRequest uses Option<Option<T>> (double-option) so that:
-//   - field absent from JSON  → outer None → don't touch DB column
-//   - field present as null   → outer Some(None) → set DB column to NULL
-//   - field present as value  → outer Some(Some(v)) → update DB column
-//
-// Serde's `default` + `deserialize_with` handles this via a small helper.
-#[derive(Deserialize)]
+/// PATCH-style update. Fields fall into three categories:
+///
+/// - **Absent** from JSON → keep existing value.
+/// - **Present as `null`** (only the `printer_*` fields) → clear the column.
+/// - **Present as a value** → set to that value.
+///
+/// OpenAPI cannot express the absent-vs-null distinction cleanly, so all
+/// fields are documented as optional and nullable. Clients targeting this
+/// endpoint should send only the fields they want to change.
+#[derive(Deserialize, ToSchema)]
 pub struct UpdateBranchRequest {
     pub name:      Option<String>,
     pub address:   Option<String>,
@@ -67,12 +86,19 @@ pub struct UpdateBranchRequest {
     pub timezone:  Option<String>,
     pub is_active: Option<bool>,
 
-    // Nullable fields — use double-option pattern
+    // Nullable fields — use double-option pattern (see fn below).
+    // The `value_type` override collapses the inner Option<Option<T>>
+    // into a single nullable T for the generated schema.
     #[serde(default, deserialize_with = "double_option")]
+    #[schema(nullable, value_type = Option<PrinterBrand>)]
     pub printer_brand: Option<Option<PrinterBrand>>,
+
     #[serde(default, deserialize_with = "double_option")]
+    #[schema(nullable, value_type = Option<String>)]
     pub printer_ip:    Option<Option<String>>,
+
     #[serde(default, deserialize_with = "double_option")]
+    #[schema(nullable, value_type = Option<i32>)]
     pub printer_port:  Option<Option<i32>>,
 }
 
@@ -88,6 +114,17 @@ where
     serde::Deserialize::deserialize(de).map(Some)
 }
 
+#[utoipa::path(
+    get,
+    path = "/branches",
+    tag = "branches",
+    params(ListBranchesQuery),
+    responses(
+        (status = 200, description = "List of branches in the organization", body = Vec<Branch>),
+        AppErrorResponse,
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_branches(
     req:   HttpRequest,
     pool:  web::Data<PgPool>,
@@ -134,6 +171,19 @@ pub async fn list_branches(
     Ok(HttpResponse::Ok().json(branches))
 }
 
+#[utoipa::path(
+    get,
+    path = "/branches/{id}",
+    tag = "branches",
+    params(
+        ("id" = Uuid, Path, description = "Branch ID")
+    ),
+    responses(
+        (status = 200, description = "The requested branch", body = Branch),
+        AppErrorResponse,
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn get_branch(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -148,6 +198,17 @@ pub async fn get_branch(
     Ok(HttpResponse::Ok().json(branch))
 }
 
+#[utoipa::path(
+    post,
+    path = "/branches",
+    tag = "branches",
+    request_body = CreateBranchRequest,
+    responses(
+        (status = 201, description = "Branch created", body = Branch),
+        AppErrorResponse,
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn create_branch(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -187,6 +248,20 @@ pub async fn create_branch(
     Ok(HttpResponse::Created().json(branch))
 }
 
+#[utoipa::path(
+    put,
+    path = "/branches/{id}",
+    tag = "branches",
+    params(
+        ("id" = Uuid, Path, description = "Branch ID")
+    ),
+    request_body = UpdateBranchRequest,
+    responses(
+        (status = 200, description = "Branch updated", body = Branch),
+        AppErrorResponse,
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn update_branch(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -207,8 +282,6 @@ pub async fn update_branch(
     let new_printer_ip:    Option<Option<String>>       = body.printer_ip.clone();
     let new_printer_port:  Option<Option<i32>>          = body.printer_port;
 
-    // We build an explicit UPDATE rather than relying on COALESCE for
-    // nullable fields, so that an explicit null can clear the column.
     let branch = sqlx::query_as::<_, Branch>(
         r#"
         WITH updated AS (
@@ -248,13 +321,10 @@ pub async fn update_branch(
     .bind(&body.phone)
     .bind(&body.timezone)
     .bind(body.is_active)
-    // printer_brand: $7 = should_update (bool), $8 = new value (nullable)
     .bind(new_printer_brand.is_some())
     .bind(new_printer_brand.as_ref().and_then(|o| o.clone()))
-    // printer_ip: $9 = should_update, $10 = new value
     .bind(new_printer_ip.is_some())
     .bind(new_printer_ip.as_ref().and_then(|o| o.clone()))
-    // printer_port: $11 = should_update, $12 = new value
     .bind(new_printer_port.is_some())
     .bind(new_printer_port.and_then(|o| o))
     .fetch_optional(pool.get_ref())
@@ -264,6 +334,19 @@ pub async fn update_branch(
     Ok(HttpResponse::Ok().json(branch))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/branches/{id}",
+    tag = "branches",
+    params(
+        ("id" = Uuid, Path, description = "Branch ID")
+    ),
+    responses(
+        (status = 204, description = "Branch deleted (soft delete)"),
+        AppErrorResponse,
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn delete_branch(
     req:  HttpRequest,
     pool: web::Data<PgPool>,

@@ -1,0 +1,213 @@
+# Module: recipes
+
+### Route: GET /drinks/{menu_item_id} -> list_drink_recipes
+```rust
+pub async fn list_drink_recipes(
+    req:          HttpRequest,
+    pool:         web::Data<PgPool>,
+    menu_item_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "recipes", "read").await?;
+    require_menu_item_org(pool.get_ref(), &claims, *menu_item_id).await?;
+
+    let rows = sqlx::query_as::<_, DrinkRecipe>(
+        r#"
+        SELECT id, menu_item_id, size_label::text,
+               org_ingredient_id,
+               ingredient_name,
+               ingredient_unit AS unit,
+               quantity_used
+        FROM menu_item_recipes
+        WHERE menu_item_id = $1
+        ORDER BY size_label, ingredient_name
+        "#,
+    )
+    .bind(*menu_item_id)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+```
+
+### Route: POST /drinks/{menu_item_id} -> upsert_drink_recipe
+```rust
+pub async fn upsert_drink_recipe(
+    req:          HttpRequest,
+    pool:         web::Data<PgPool>,
+    menu_item_id: web::Path<Uuid>,
+    body:         web::Json<UpsertDrinkRecipeRequest>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "recipes", "create").await?;
+    require_menu_item_org(pool.get_ref(), &claims, *menu_item_id).await?;
+
+    if body.quantity_used < 0.0 {
+        return Err(AppError::BadRequest("quantity_used cannot be negative".into()));
+    }
+
+    let row = sqlx::query_as::<_, DrinkRecipe>(
+        r#"
+        INSERT INTO menu_item_recipes
+            (menu_item_id, size_label, org_ingredient_id, ingredient_name, ingredient_unit, quantity_used)
+        VALUES ($1, $2::item_size, $3, $4, $5, $6)
+        ON CONFLICT (menu_item_id, size_label, ingredient_name)
+        DO UPDATE SET
+            org_ingredient_id = EXCLUDED.org_ingredient_id,
+            ingredient_unit   = EXCLUDED.ingredient_unit,
+            quantity_used     = EXCLUDED.quantity_used
+        RETURNING id, menu_item_id, size_label::text,
+                  org_ingredient_id,
+                  ingredient_name,
+                  ingredient_unit AS unit,
+                  quantity_used
+        "#,
+    )
+    .bind(*menu_item_id)
+    .bind(&body.size_label)
+    .bind(body.org_ingredient_id)
+    .bind(&body.ingredient_name)
+    .bind(&body.ingredient_unit)
+    .bind(body.quantity_used)
+    .fetch_one(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(row))
+}
+```
+
+### Route: DELETE /drinks/{menu_item_id}/{size} -> delete_drink_recipe
+```rust
+pub async fn delete_drink_recipe(
+    req:   HttpRequest,
+    pool:  web::Data<PgPool>,
+    path:  web::Path<(Uuid, String)>,
+    query: web::Query<DeleteRecipeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "recipes", "delete").await?;
+
+    let (menu_item_id, size_label) = path.into_inner();
+    require_menu_item_org(pool.get_ref(), &claims, menu_item_id).await?;
+
+    sqlx::query(
+        r#"
+        DELETE FROM menu_item_recipes
+        WHERE menu_item_id    = $1
+          AND size_label      = $2::item_size
+          AND ingredient_name = $3
+        "#,
+    )
+    .bind(menu_item_id)
+    .bind(&size_label)
+    .bind(&query.ingredient_name)
+    .execute(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::NoContent().finish())
+}
+```
+
+### Route: GET /addons/{addon_item_id} -> list_addon_ingredients
+```rust
+pub async fn list_addon_ingredients(
+    req:           HttpRequest,
+    pool:          web::Data<PgPool>,
+    addon_item_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "recipes", "read").await?;
+    require_addon_org(pool.get_ref(), &claims, *addon_item_id).await?;
+
+    let rows = sqlx::query_as::<_, AddonIngredient>(
+        r#"
+        SELECT id, addon_item_id,
+               org_ingredient_id,
+               ingredient_name,
+               ingredient_unit AS unit,
+               quantity_used
+        FROM addon_item_ingredients
+        WHERE addon_item_id = $1
+        ORDER BY ingredient_name
+        "#,
+    )
+    .bind(*addon_item_id)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+```
+
+### Route: POST /addons/{addon_item_id} -> upsert_addon_ingredient
+```rust
+pub async fn upsert_addon_ingredient(
+    req:           HttpRequest,
+    pool:          web::Data<PgPool>,
+    addon_item_id: web::Path<Uuid>,
+    body:          web::Json<UpsertAddonIngredientRequest>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "recipes", "create").await?;
+    require_addon_org(pool.get_ref(), &claims, *addon_item_id).await?;
+
+    if body.quantity_used < 0.0 {
+        return Err(AppError::BadRequest("quantity_used cannot be negative".into()));
+    }
+
+    let row = sqlx::query_as::<_, AddonIngredient>(
+        r#"
+        INSERT INTO addon_item_ingredients
+            (addon_item_id, org_ingredient_id, ingredient_name, ingredient_unit, quantity_used)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (addon_item_id, ingredient_name)
+        DO UPDATE SET
+            org_ingredient_id = EXCLUDED.org_ingredient_id,
+            ingredient_unit   = EXCLUDED.ingredient_unit,
+            quantity_used     = EXCLUDED.quantity_used
+        RETURNING id, addon_item_id,
+                  org_ingredient_id,
+                  ingredient_name,
+                  ingredient_unit AS unit,
+                  quantity_used
+        "#,
+    )
+    .bind(*addon_item_id)
+    .bind(body.org_ingredient_id)
+    .bind(&body.ingredient_name)
+    .bind(&body.ingredient_unit)
+    .bind(body.quantity_used)
+    .fetch_one(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(row))
+}
+```
+
+### Route: DELETE /addons/{addon_item_id} -> delete_addon_ingredient
+```rust
+pub async fn delete_addon_ingredient(
+    req:   HttpRequest,
+    pool:  web::Data<PgPool>,
+    path:  web::Path<Uuid>,
+    query: web::Query<DeleteRecipeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "recipes", "delete").await?;
+
+    let addon_item_id = path.into_inner();
+    require_addon_org(pool.get_ref(), &claims, addon_item_id).await?;
+
+    sqlx::query(
+        "DELETE FROM addon_item_ingredients WHERE addon_item_id = $1 AND ingredient_name = $2"
+    )
+    .bind(addon_item_id)
+    .bind(&query.ingredient_name)
+    .execute(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::NoContent().finish())
+}
+```
+

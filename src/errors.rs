@@ -1,6 +1,10 @@
+use std::collections::BTreeMap;
+
 use actix_web::HttpResponse;
 use serde::Serialize;
 use thiserror::Error;
+use utoipa::openapi::{ContentBuilder, Ref, RefOr, Response, ResponseBuilder};
+use utoipa::{IntoResponses, ToSchema};
 
 #[derive(Debug, Error)]
 pub enum AppError {
@@ -26,9 +30,13 @@ pub enum AppError {
     Internal,
 }
 
-#[derive(Serialize)]
-struct ErrorBody {
-    error: String,
+/// Wire shape of every error JSON. Keep in lockstep with
+/// `AppError::error_response` below.
+#[derive(Serialize, ToSchema)]
+pub struct ErrorBody {
+    /// Human-readable error message.
+    #[schema(example = "Branch not found")]
+    pub error: String,
 }
 
 impl actix_web::ResponseError for AppError {
@@ -43,5 +51,43 @@ impl actix_web::ResponseError for AppError {
             AppError::Db(_)           => HttpResponse::InternalServerError().json(body),
             AppError::Internal        => HttpResponse::InternalServerError().json(body),
         }
+    }
+}
+
+/// Marker type used in `#[utoipa::path(responses(..., AppErrorResponse))]`
+/// to attach the shared error-response set to a handler in one token.
+///
+/// The `IntoResponses` impl below is manual rather than derived because
+/// utoipa's derive macro either inlines the body schema at every error
+/// site (with `#[to_schema]`) or requires a `ToResponse` wrapper plus
+/// `components(responses(...))` registration. The hand-rolled impl gives
+/// us exactly what we want: each status emits a `$ref` to the registered
+/// `ErrorBody` schema, so the spec stays compact and generated TS/Dart
+/// clients get one shared `ErrorBody` type instead of one per error site.
+pub struct AppErrorResponse;
+
+impl IntoResponses for AppErrorResponse {
+    fn responses() -> BTreeMap<String, RefOr<Response>> {
+        // Helper: build a JSON response with `$ref` to ErrorBody.
+        fn err(description: &str) -> RefOr<Response> {
+            let content = ContentBuilder::new()
+                .schema(Some(Ref::from_schema_name("ErrorBody")))
+                .build();
+            RefOr::T(
+                ResponseBuilder::new()
+                    .description(description)
+                    .content("application/json", content)
+                    .build(),
+            )
+        }
+
+        BTreeMap::from([
+            ("400".to_string(), err("Bad request — validation failed or malformed input")),
+            ("401".to_string(), err("Unauthorized — missing or invalid bearer token")),
+            ("403".to_string(), err("Forbidden — insufficient permission or wrong org")),
+            ("404".to_string(), err("Not found")),
+            ("409".to_string(), err("Conflict — FK or domain invariant violation")),
+            ("500".to_string(), err("Internal server error")),
+        ])
     }
 }

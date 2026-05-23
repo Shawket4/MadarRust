@@ -1,11 +1,12 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::Type;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 // ── Enums ────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type, ToSchema)]
 #[sqlx(type_name = "user_role", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum UserRole {
@@ -35,15 +36,30 @@ pub struct User {
     pub deleted_at:    Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UserPublic {
+    #[schema(example = "550e8400-e29b-41d4-a716-446655440000")]
     pub id:        Uuid,
+    
+    #[schema(example = "a20e8400-e29b-41d4-a716-446655440011")]
     pub org_id:    Option<Uuid>,
+    
+    #[schema(example = "b30e8400-e29b-41d4-a716-446655440022")]
     pub branch_id: Option<Uuid>,
+    
+    #[schema(example = "Ahmad Ghazal")]
     pub name:      String,
+    
+    #[schema(example = "ahmad@sufrix.com")]
     pub email:     Option<String>,
+    
+    #[schema(example = "+201001234567")]
     pub phone:     Option<String>,
+    
+    #[schema(example = "branch_manager")]
     pub role:      UserRole,
+    
+    #[schema(example = true)]
     pub is_active: bool,
 }
 
@@ -65,15 +81,28 @@ impl From<User> for UserPublic {
 // ── Discount ──────────────────────────────────────────────────
 
 #[allow(dead_code)]
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct Discount {
+    #[schema(example = "770e8400-e29b-41d4-a716-446655440033")]
     pub id:         Uuid,
+    
+    #[schema(example = "a20e8400-e29b-41d4-a716-446655440011")]
     pub org_id:     Uuid,
+    
+    #[schema(example = "Summer Promo")]
     pub name:       String,
+    
     #[serde(rename = "type")]
+    #[schema(example = "percentage")]
     pub dtype:      String,   // "percentage" | "fixed"
+    
+    #[schema(example = 15)]
     pub value:      i32,
+    
+    #[schema(example = true)]
     pub is_active:  bool,
+    
     pub created_at: DateTime<Utc>,
+    
     pub updated_at: DateTime<Utc>,
 }

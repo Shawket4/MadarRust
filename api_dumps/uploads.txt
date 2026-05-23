@@ -1,0 +1,103 @@
+# Module: uploads
+
+### Route: POST /{menu_item_id} -> upload_menu_item_image
+```rust
+pub async fn upload_menu_item_image(
+    req:          HttpRequest,
+    pool:         web::Data<PgPool>,
+    menu_item_id: web::Path<Uuid>,
+    mut payload:  Multipart,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
+
+    let row: Option<(Uuid, Option<String>)> = sqlx::query_as(
+        "SELECT org_id, image_url FROM menu_items WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(*menu_item_id)
+    .fetch_optional(pool.get_ref())
+    .await?;
+
+    let (org_id, old_image_url) = row
+        .ok_or_else(|| AppError::NotFound("Menu item not found".into()))?;
+
+    if claims.role != UserRole::SuperAdmin
+        && claims.org_id() != Some(org_id) {
+            return Err(AppError::Forbidden("Menu item belongs to a different org".into()));
+        }
+
+    let uploads_dir = std::env::var("UPLOADS_DIR").map_err(|_| AppError::Internal)?;
+    let base_url    = std::env::var("UPLOADS_BASE_URL").map_err(|_| AppError::Internal)?;
+
+    let mut file_bytes: Option<Vec<u8>> = None;
+
+    while let Some(item) = payload.next().await {
+        let mut field = item.map_err(|_| AppError::BadRequest("Invalid multipart data".into()))?;
+        let content_type = field.content_type().map(|m| m.to_string()).unwrap_or_default();
+        let field_name   = field
+            .content_disposition()
+            .and_then(|cd| cd.get_name())
+            .unwrap_or("")
+            .to_string();
+
+        if field_name != "image" { continue; }
+        if !ALLOWED_MIME.contains(&content_type.as_str()) {
+            return Err(AppError::BadRequest(format!("Unsupported image type: {}", content_type)));
+        }
+
+        let mut bytes = Vec::new();
+        while let Some(chunk) = field.next().await {
+            let chunk = chunk.map_err(|_| AppError::BadRequest("Failed reading upload".into()))?;
+            bytes.extend_from_slice(&chunk);
+            if bytes.len() > 20 * 1024 * 1024 {
+                return Err(AppError::BadRequest("File too large (max 20 MB raw)".into()));
+            }
+        }
+        file_bytes = Some(bytes);
+        break;
+    }
+
+    let raw_bytes = file_bytes
+        .ok_or_else(|| AppError::BadRequest("No image field found in upload".into()))?;
+
+    let jpeg_bytes = compress_to_jpeg(&raw_bytes)?;
+
+    let filename  = format!("{}.jpg", Uuid::new_v4());
+    let dir_path  = Path::new(&uploads_dir).join(org_id.to_string()).join("menu-items");
+    tokio::fs::create_dir_all(&dir_path).await.map_err(|e| {
+        tracing::error!("Failed to create upload dir: {}", e); AppError::Internal
+    })?;
+    let file_path: PathBuf = dir_path.join(&filename);
+
+    // 1. Write new file to disk first
+    tokio::fs::write(&file_path, &jpeg_bytes).await.map_err(|e| {
+        tracing::error!("Failed to write image: {}", e); AppError::Internal
+    })?;
+
+    let base      = base_url.trim_end_matches('/');
+    let image_url = format!("{}/{}/menu-items/{}", base, org_id, filename);
+
+    // 2. Update DB — if this fails, clean up the newly written file
+    if let Err(e) = sqlx::query("UPDATE menu_items SET image_url = $1 WHERE id = $2")
+        .bind(&image_url)
+        .bind(*menu_item_id)
+        .execute(pool.get_ref())
+        .await
+    {
+        let _ = tokio::fs::remove_file(&file_path).await;
+        tracing::error!("DB update failed, cleaned up new file: {}", e);
+        return Err(AppError::from(e));
+    }
+
+    // 3. Delete old image ONLY after successful DB update
+    if let Some(old_url) = old_image_url {
+        delete_old_image(&old_url, &base_url, &uploads_dir).await;
+    }
+
+    tracing::info!("Uploaded image for menu_item {} → {} ({} KB)",
+        menu_item_id, image_url, jpeg_bytes.len() / 1024);
+
+    Ok(HttpResponse::Ok().json(UploadResponse { image_url }))
+}
+```
+

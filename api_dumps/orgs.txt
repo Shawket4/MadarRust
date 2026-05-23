@@ -1,124 +1,7 @@
-use actix_multipart::Multipart;
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
-use futures::TryStreamExt;
-use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
-use utoipa::ToSchema;
-use uuid::Uuid;
+# Module: orgs
 
-use crate::{
-    auth::{guards::{require_super_admin, require_same_org}, jwt::Claims},
-    errors::{AppError, AppErrorResponse},
-    permissions::checker::check_permission,
-    uploads::handlers::delete_old_image,
-};
-
-// ── Models ────────────────────────────────────────────────────
-
-#[derive(Debug, sqlx::FromRow, Serialize, Deserialize, ToSchema)]
-pub struct Org {
-    pub id:             Uuid,
-    #[schema(example = "The Rue")]
-    pub name:           String,
-    #[schema(example = "the-rue")]
-    pub slug:           String,
-    #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
-    pub logo_url:       Option<String>,
-    #[schema(example = "EGP")]
-    pub currency_code:  String,
-    /// Tax rate as a decimal (e.g. `0.14` for 14% VAT).
-    /// Stored as `BigDecimal` internally; transmitted as a JSON number.
-    #[schema(value_type = f64, example = 0.14)]
-    pub tax_rate:       sqlx::types::BigDecimal,
-    pub receipt_footer: Option<String>,
-    pub is_active:      bool,
-}
-
-// ── Request types ─────────────────────────────────────────────
-
-// CreateOrgRequest is consumed from multipart fields, not JSON.
-// We keep this struct for the non-file fields parsed out of the form.
-#[derive(Default)]
-struct CreateOrgFields {
-    name:           Option<String>,
-    slug:           Option<String>,
-    currency_code:  Option<String>,
-    tax_rate:       Option<f64>,
-    receipt_footer: Option<String>,
-}
-
-#[derive(Deserialize, ToSchema)]
-pub struct UpdateOrgRequest {
-    pub name:           Option<String>,
-    pub slug:           Option<String>,
-    pub currency_code:  Option<String>,
-    #[schema(example = 0.14)]
-    pub tax_rate:       Option<f64>,
-    pub receipt_footer: Option<String>,
-    pub is_active:      Option<bool>,
-    /// `null` clears the logo; absent leaves it unchanged. To set a new
-    /// logo, use `PUT /orgs/{id}/logo` (multipart) instead — JSON updates
-    /// only accept the clear-to-null case here.
-    #[serde(default, deserialize_with = "crate::menu::handlers::deserialize_double_option")]
-    #[schema(nullable, value_type = Option<String>)]
-    pub logo_url:       Option<Option<String>>,
-}
-
-// ── OpenAPI-only multipart schemas ────────────────────────────
-//
-// These structs exist solely to describe the shape of multipart/form-data
-// request bodies in the generated spec. They are never constructed at
-// runtime — the handlers parse multipart fields directly. Keeping them
-// `pub` and `ToSchema`-derived lets `#[utoipa::path]` reference them.
-
-#[derive(ToSchema)]
-#[allow(dead_code)]
-pub struct CreateOrgMultipart {
-    #[schema(example = "The Rue")]
-    pub name: String,
-
-    #[schema(example = "the-rue")]
-    pub slug: String,
-
-    #[schema(example = "EGP")]
-    pub currency_code: Option<String>,
-
-    #[schema(example = 0.14)]
-    pub tax_rate: Option<f64>,
-
-    pub receipt_footer: Option<String>,
-
-    /// Logo image file. PNG, JPEG, or WebP. Optional — omit the field
-    /// entirely to create the org without a logo.
-    #[schema(format = Binary, content_media_type = "image/*")]
-    pub logo: Option<String>,
-}
-
-#[derive(ToSchema)]
-#[allow(dead_code)]
-pub struct UploadLogoMultipart {
-    /// Logo image file. PNG, JPEG, or WebP. Required.
-    #[schema(format = Binary, content_media_type = "image/*")]
-    pub logo: String,
-}
-
-// ── POST /orgs  (super_admin only, multipart/form-data) ──────
-
-#[utoipa::path(
-    post,
-    path = "/orgs",
-    tag = "orgs",
-    request_body(
-        content = CreateOrgMultipart,
-        content_type = "multipart/form-data",
-        description = "Multipart form with text fields and an optional logo file."
-    ),
-    responses(
-        (status = 201, description = "Organization created", body = Org),
-        AppErrorResponse,
-    ),
-    security(("bearer_jwt" = []))
-)]
+### Route: POST  -> create_org
+```rust
 pub async fn create_org(
     req:     HttpRequest,
     pool:    web::Data<PgPool>,
@@ -134,6 +17,7 @@ pub async fn create_org(
     let mut fields    = CreateOrgFields::default();
     let mut logo_url: Option<String> = None;
 
+    // ── Parse multipart ──────────────────────────────────────
     while let Some(mut field) = mp.try_next().await.map_err(|e| {
         AppError::BadRequest(format!("Multipart error: {e}"))
     })? {
@@ -141,6 +25,7 @@ pub async fn create_org(
 
         match name.as_str() {
             "logo" => {
+                // Collect bytes
                 let mut bytes = Vec::new();
                 while let Some(chunk) = field.try_next().await.map_err(|e| {
                     AppError::BadRequest(format!("Upload read error: {e}"))
@@ -182,6 +67,7 @@ pub async fn create_org(
     let name = fields.name.ok_or_else(|| AppError::BadRequest("name is required".into()))?;
     let slug = fields.slug.ok_or_else(|| AppError::BadRequest("slug is required".into()))?;
 
+    // ── Slug uniqueness ──────────────────────────────────────
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM organizations WHERE slug = $1)"
     )
@@ -214,19 +100,10 @@ pub async fn create_org(
 
     Ok(HttpResponse::Created().json(org))
 }
+```
 
-// ── GET /orgs  (super_admin only) ────────────────────────────
-
-#[utoipa::path(
-    get,
-    path = "/orgs",
-    tag = "orgs",
-    responses(
-        (status = 200, description = "List of all organizations", body = Vec<Org>),
-        AppErrorResponse,
-    ),
-    security(("bearer_jwt" = []))
-)]
+### Route: GET  -> list_orgs
+```rust
 pub async fn list_orgs(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -248,22 +125,10 @@ pub async fn list_orgs(
 
     Ok(HttpResponse::Ok().json(orgs))
 }
+```
 
-// ── GET /orgs/:id  (org-scoped read) ─────────────────────────
-
-#[utoipa::path(
-    get,
-    path = "/orgs/{id}",
-    tag = "orgs",
-    params(
-        ("id" = Uuid, Path, description = "Organization ID")
-    ),
-    responses(
-        (status = 200, description = "The requested organization", body = Org),
-        AppErrorResponse,
-    ),
-    security(("bearer_jwt" = []))
-)]
+### Route: GET /{id} -> get_org
+```rust
 pub async fn get_org(
     req:    HttpRequest,
     pool:   web::Data<PgPool>,
@@ -276,24 +141,10 @@ pub async fn get_org(
     let org = fetch_org(pool.get_ref(), *org_id).await?;
     Ok(HttpResponse::Ok().json(org))
 }
+```
 
-// ── PATCH /orgs/:id  (super_admin only) ──────────────────────
-// JSON only — logo swap uses PUT /orgs/{id}/logo.
-
-#[utoipa::path(
-    patch,
-    path = "/orgs/{id}",
-    tag = "orgs",
-    params(
-        ("id" = Uuid, Path, description = "Organization ID")
-    ),
-    request_body = UpdateOrgRequest,
-    responses(
-        (status = 200, description = "Organization updated", body = Org),
-        AppErrorResponse,
-    ),
-    security(("bearer_jwt" = []))
-)]
+### Route: PATCH /{id} -> update_org
+```rust
 pub async fn update_org(
     req:    HttpRequest,
     pool:   web::Data<PgPool>,
@@ -320,6 +171,10 @@ pub async fn update_org(
         }
     }
 
+    // logo_url field handling — mirrors category/menu-item pattern:
+    //   absent          → leave unchanged  (logo_url_is_present = false)
+    //   null            → clear            (logo_url_val = None, present = true)
+    //   "https://..."   → won't be set via JSON; use PUT /orgs/:id/logo instead
     let logo_url_is_present = body.logo_url.is_some();
     let logo_url_val        = body.logo_url.as_ref().and_then(|o| o.clone());
 
@@ -351,6 +206,7 @@ pub async fn update_org(
     .await?
     .ok_or_else(|| AppError::NotFound("Org not found".into()))?;
 
+    // Clear old logo from disk if explicitly nulled
     if body.logo_url == Some(None)
         && let Some(old_url) = existing.logo_url {
             let uploads_dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
@@ -360,27 +216,37 @@ pub async fn update_org(
 
     Ok(HttpResponse::Ok().json(org))
 }
+```
 
-// ── PUT /orgs/:id/logo  (super_admin only, multipart) ────────
+### Route: DELETE /{id} -> delete_org
+```rust
+pub async fn delete_org(
+    req:    HttpRequest,
+    pool:   web::Data<PgPool>,
+    org_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "orgs", "delete").await?;
+    require_super_admin(&claims)?;
 
-#[utoipa::path(
-    put,
-    path = "/orgs/{id}/logo",
-    tag = "orgs",
-    params(
-        ("id" = Uuid, Path, description = "Organization ID")
-    ),
-    request_body(
-        content = UploadLogoMultipart,
-        content_type = "multipart/form-data",
-        description = "Multipart form with a single `logo` file field."
-    ),
-    responses(
-        (status = 200, description = "Logo replaced; updated organization returned", body = Org),
-        AppErrorResponse,
-    ),
-    security(("bearer_jwt" = []))
-)]
+    let rows_affected = sqlx::query(
+        "UPDATE organizations SET deleted_at = NOW(), is_active = false WHERE id = $1 AND deleted_at IS NULL"
+    )
+    .bind(*org_id)
+    .execute(pool.get_ref())
+    .await?
+    .rows_affected();
+
+    if rows_affected == 0 {
+        return Err(AppError::NotFound("Org not found".into()));
+    }
+
+    Ok(HttpResponse::NoContent().finish())
+}
+```
+
+### Route: PUT /{id}/logo -> upload_org_logo
+```rust
 pub async fn upload_org_logo(
     req:    HttpRequest,
     pool:   web::Data<PgPool>,
@@ -448,86 +314,12 @@ pub async fn upload_org_logo(
     .await?
     .ok_or_else(|| AppError::NotFound("Org not found".into()))?;
 
+    // Delete old logo from disk now that DB is updated
     if let Some(old_url) = existing.logo_url {
         delete_old_image(&old_url, &base_url, &uploads_dir).await;
     }
 
     Ok(HttpResponse::Ok().json(org))
 }
+```
 
-// ── DELETE /orgs/:id  (super_admin only) ─────────────────────
-
-#[utoipa::path(
-    delete,
-    path = "/orgs/{id}",
-    tag = "orgs",
-    params(
-        ("id" = Uuid, Path, description = "Organization ID")
-    ),
-    responses(
-        (status = 204, description = "Organization deleted (soft delete)"),
-        AppErrorResponse,
-    ),
-    security(("bearer_jwt" = []))
-)]
-pub async fn delete_org(
-    req:    HttpRequest,
-    pool:   web::Data<PgPool>,
-    org_id: web::Path<Uuid>,
-) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "orgs", "delete").await?;
-    require_super_admin(&claims)?;
-
-    let rows_affected = sqlx::query(
-        "UPDATE organizations SET deleted_at = NOW(), is_active = false WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(*org_id)
-    .execute(pool.get_ref())
-    .await?
-    .rows_affected();
-
-    if rows_affected == 0 {
-        return Err(AppError::NotFound("Org not found".into()));
-    }
-
-    Ok(HttpResponse::NoContent().finish())
-}
-
-// ── Helpers ───────────────────────────────────────────────────
-
-fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
-    req.extensions()
-        .get::<Claims>()
-        .cloned()
-        .ok_or_else(|| AppError::Unauthorized("Missing claims".into()))
-}
-
-async fn fetch_org(pool: &PgPool, id: Uuid) -> Result<Org, AppError> {
-    sqlx::query_as::<_, Org>(
-        "SELECT id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, is_active
-         FROM organizations
-         WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Org not found".into()))
-}
-
-async fn drain_field(field: &mut actix_multipart::Field) -> Result<(), AppError> {
-    while field.try_next().await.map_err(|e| AppError::BadRequest(e.to_string()))?.is_some() {}
-    Ok(())
-}
-
-async fn text_field(field: &mut actix_multipart::Field) -> Result<Option<String>, AppError> {
-    let mut buf = Vec::new();
-    while let Some(chunk) = field.try_next().await.map_err(|e| AppError::BadRequest(e.to_string()))? {
-        buf.extend_from_slice(chunk.as_ref());
-    }
-    Ok(if buf.is_empty() {
-        None
-    } else {
-        Some(String::from_utf8(buf).map_err(|_| AppError::BadRequest("Invalid UTF-8 in field".into()))?)
-    })
-}

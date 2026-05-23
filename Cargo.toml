@@ -34,3 +34,15 @@ utoipa-swagger-ui = { version = "9.0.2", features = ["actix-web"] }
 [dev-dependencies]
 tempfile = "3.27.0"
 
+
+[[bin]]
+name = "sufrix-rust"
+path = "src/main.rs"
+
+[[bin]]
+name = "export-openapi"
+path = "src/bin/export_openapi.rs"
+
+[lib]
+name = "sufrix_rust"
+path = "src/lib.rs"

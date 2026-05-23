@@ -1,86 +1,7 @@
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
-use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
-use utoipa::ToSchema;
-use uuid::Uuid;
+# Module: auth
 
-use crate::{
-    auth::jwt::{create_token, Claims, JwtSecret},
-    errors::{AppError, AppErrorResponse},
-    models::{User, UserPublic, UserRole},
-};
-
-// ── Request / Response types ─────────────────────────────────
-
-/// Login is dual-mode:
-///
-/// - **Email + password** (admins, managers, super-admins): supply
-///   `email` and `password`. `org_id` is optional — if provided, the
-///   user must belong to that org; if omitted, lookup is by email only.
-/// - **PIN + name** (tellers): supply `name` and `pin`. The first
-///   active teller with a matching name and a `pin_hash` that verifies
-///   wins. `branch_id` may be supplied to lock the issued JWT to that
-///   branch; tellers without a branch lock can later be reassigned.
-#[derive(Deserialize, ToSchema)]
-pub struct LoginRequest {
-    pub org_id:    Option<Uuid>,
-    #[schema(format = Email, example = "ahmed@therue.cafe")]
-    pub email:     Option<String>,
-    pub password:  Option<String>,
-    #[schema(pattern = "^[0-9]{4,6}$", min_length = 4, max_length = 6, example = "1234")]
-    pub pin:       Option<String>,
-    /// Teller's display name (required for PIN login, unused otherwise).
-    #[schema(example = "Mariam")]
-    pub name:      Option<String>,
-    /// Teller-only: locks the issued JWT to a specific branch.
-    pub branch_id: Option<Uuid>,
-}
-
-#[derive(Serialize, Deserialize, ToSchema)]
-pub struct LoginResponse {
-    /// JWT to send as `Authorization: Bearer <token>` on subsequent requests.
-    pub token: String,
-    pub user:  UserPublic,
-}
-
-#[derive(Serialize, Deserialize, ToSchema)]
-pub struct MeResponse {
-    pub user: UserPublic,
-}
-
-#[derive(Serialize, Deserialize, ToSchema)]
-pub struct UserPermissionItem {
-    #[schema(example = "menu_items")]
-    pub resource: String,
-    #[schema(example = "read")]
-    pub action:   String,
-    pub granted:  bool,
-}
-
-#[derive(Serialize, Deserialize, ToSchema)]
-pub struct AuthPermissionsResponse {
-    pub permissions: Vec<UserPermissionItem>,
-}
-
-#[derive(sqlx::FromRow)]
-struct DbPermission {
-    pub resource: String,
-    pub action:   String,
-    pub granted:  bool,
-}
-
-// ── POST /auth/login ─────────────────────────────────────────
-
-#[utoipa::path(
-    post,
-    path = "/auth/login",
-    tag = "auth",
-    request_body = LoginRequest,
-    responses(
-        (status = 200, description = "Authentication succeeded; JWT issued", body = LoginResponse),
-        AppErrorResponse,
-    )
-)]
+### Route: POST /login -> login
+```rust
 pub async fn login(
     pool:   web::Data<PgPool>,
     secret: web::Data<JwtSecret>,
@@ -89,6 +10,7 @@ pub async fn login(
 
     let user: User = match (&body.email, &body.pin) {
 
+        // Email + password login (org_admin, branch_manager, super_admin)
         (Some(email), None) => {
             let password = body.password.as_deref().ok_or_else(|| {
                 AppError::BadRequest("password is required for email login".into())
@@ -112,6 +34,7 @@ pub async fn login(
             .await?
             .ok_or_else(|| AppError::Unauthorized("Invalid credentials".into()))?;
 
+            // Verify password
             let hash = u.password_hash.as_deref().ok_or_else(|| {
                 AppError::Unauthorized("No password set for this account".into())
             })?;
@@ -121,11 +44,12 @@ pub async fn login(
             u
         }
 
+        // PIN login (tellers only)
         (None, Some(pin)) => {
             let name = body.name.as_deref().ok_or_else(|| {
                 AppError::BadRequest("name is required for PIN login".into())
             })?;
-
+        
             let tellers = sqlx::query_as::<_, User>(
                 r#"
                 SELECT id, org_id, name, email, phone,
@@ -142,7 +66,7 @@ pub async fn login(
             .bind(name)
             .fetch_all(pool.get_ref())
             .await?;
-
+        
             tellers
                 .into_iter()
                 .find(|u| {
@@ -158,10 +82,12 @@ pub async fn login(
         )),
     };
 
+    // Account must be active
     if !user.is_active {
         return Err(AppError::Unauthorized("Account is disabled".into()));
     }
 
+    // Lock tellers to their branch in the token
     let token_branch_id = if user.role == UserRole::Teller {
         body.branch_id
     } else {
@@ -173,46 +99,38 @@ pub async fn login(
     let token = create_token(
         &secret,
         user.id,
-        user.org_id,
+        user.org_id,         // Option<Uuid> — jwt.rs expects Option now
         user.role.clone(),
         token_branch_id,
         hours,
     )
     .map_err(|_| AppError::Internal)?;
 
+    // Update last_login_at
     sqlx::query("UPDATE users SET last_login_at = NOW() WHERE id = $1")
         .bind(user.id)
         .execute(pool.get_ref())
         .await?;
 
-    let branch_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT branch_id FROM user_branch_assignments WHERE user_id = $1 LIMIT 1"
-    )
-    .bind(user.id)
-    .fetch_optional(pool.get_ref())
-    .await?;
-
-    let mut user_public = UserPublic::from(user);
-    user_public.branch_id = branch_id;
-
-    Ok(HttpResponse::Ok().json(LoginResponse {
-        token,
-        user: user_public,
-    }))
+        let branch_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT branch_id FROM user_branch_assignments WHERE user_id = $1 LIMIT 1"
+        )
+        .bind(user.id)
+        .fetch_optional(pool.get_ref())
+        .await?;
+        
+        let mut user_public = UserPublic::from(user);
+        user_public.branch_id = branch_id;
+        
+        Ok(HttpResponse::Ok().json(LoginResponse {
+            token,
+            user: user_public,
+        }))
 }
+```
 
-// ── GET /auth/me ─────────────────────────────────────────────
-
-#[utoipa::path(
-    get,
-    path = "/auth/me",
-    tag = "auth",
-    responses(
-        (status = 200, description = "Current authenticated user", body = MeResponse),
-        AppErrorResponse,
-    ),
-    security(("bearer_jwt" = []))
-)]
+### Route: GET /me -> me
+```rust
 pub async fn me(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -250,23 +168,10 @@ pub async fn me(
 
     Ok(HttpResponse::Ok().json(MeResponse { user: user_public }))
 }
+```
 
-// ── GET /auth/permissions ────────────────────────────────────
-
-#[utoipa::path(
-    get,
-    path = "/auth/permissions",
-    tag = "auth",
-    // operation_id overrides the default `permissions` (the function name)
-    // to avoid collision with the permissions module's handlers and to
-    // give generated clients a clearer method name (`getMyPermissions`).
-    operation_id = "get_my_permissions",
-    responses(
-        (status = 200, description = "Effective permission grants for the authenticated user", body = AuthPermissionsResponse),
-        AppErrorResponse,
-    ),
-    security(("bearer_jwt" = []))
-)]
+### Route: GET /permissions -> permissions
+```rust
 pub async fn permissions(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -277,6 +182,7 @@ pub async fn permissions(
         .cloned()
         .ok_or_else(|| AppError::Unauthorized("Missing claims".into()))?;
 
+    // Query user role
     let role: String = sqlx::query_scalar(
         "SELECT role::text FROM users WHERE id = $1 AND deleted_at IS NULL"
     )
@@ -285,6 +191,7 @@ pub async fn permissions(
     .await?
     .ok_or_else(|| AppError::NotFound("User not found".into()))?;
 
+    // Query role defaults
     let role_defaults = sqlx::query_as::<_, DbPermission>(
         "SELECT resource::text as resource, action::text as action, granted
          FROM role_permissions WHERE role = $1::user_role",
@@ -293,6 +200,7 @@ pub async fn permissions(
     .fetch_all(pool.get_ref())
     .await?;
 
+    // Query user overrides
     let user_overrides = sqlx::query_as::<_, DbPermission>(
         "SELECT resource::text as resource, action::text as action, granted
          FROM permissions WHERE user_id = $1",
@@ -337,4 +245,5 @@ pub async fn permissions(
     }
 
     Ok(HttpResponse::Ok().json(AuthPermissionsResponse { permissions }))
-}
+}```
+

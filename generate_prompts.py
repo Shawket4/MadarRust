@@ -1,44 +1,62 @@
 import os
+import re
 
-modules = [
-    "orgs", "branches", "users", "auth", "menu", "inventory", 
-    "recipes", "adjustments", "shifts", "orders", "reports", 
-    "discounts", "uploads", "bundles", "menu_advisor", "permissions"
-]
+def extract_context():
+    os.makedirs("api_dumps", exist_ok=True)
+    
+    for root, _, files in os.walk("src"):
+        if "routes.rs" not in files or "handlers.rs" not in files:
+            continue
+            
+        module_name = os.path.basename(root)
+        if module_name == "src": continue
+        
+        # 1. Map routes to handlers
+        routes_path = os.path.join(root, "routes.rs")
+        with open(routes_path, 'r', encoding='utf-8') as f:
+            routes_content = f.read()
+            
+        # Match .route("/path", web::method().to(handlers::func))
+        route_pattern = re.compile(r'\.route\("([^"]*)",\s*web::([a-z]+)\(\)\.to\((?:handlers::)?([a-zA-Z0-9_]+)\)\)')
+        route_mappings = route_pattern.findall(routes_content)
+        
+        if not route_mappings:
+            continue
 
-os.makedirs("agent_prompts", exist_ok=True)
+        # 2. Extract handler code
+        handlers_path = os.path.join(root, "handlers.rs")
+        with open(handlers_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
 
-template = """# Role
-You are an expert Rust backend developer writing robust integration tests for a production Actix-web server using `sqlx::test`.
+        dump_content = f"# Module: {module_name}\n\n"
+        
+        for (path, method, func_name) in route_mappings:
+            dump_content += f"### Route: {method.upper()} {path} -> {func_name}\n"
+            dump_content += '`' * 3 + 'rust\n'
+            
+            in_func = False
+            brace_count = 0
+            
+            for line in lines:
+                if re.match(rf'^\s*pub\s+async\s+fn\s+{func_name}\b', line):
+                    in_func = True
+                
+                if in_func:
+                    dump_content += line
+                    brace_count += line.count('{')
+                    brace_count -= line.count('}')
+                    
+                    if brace_count == 0 and ('{' in line or '}' in line):
+                        dump_content += '`' * 3 + '\n\n'
+                        in_func = False
+                        break
 
-# Task
-Your task is to write exhaustive tests for the `{module_name}` module in the `SufrixRust` project.
+        # Save to dump file
+        dump_path = os.path.join("api_dumps", f"{module_name}.txt")
+        with open(dump_path, 'w', encoding='utf-8') as f:
+            f.write(dump_content)
+            
+    print("✅ Extracted endpoint context into ./api_dumps/")
 
-# Context to Gather First
-Before writing any test code, you MUST use your file reading tools to deeply understand the module. Please read:
-1. `src/{module_name}/handlers.rs` (the controller logic and the SQL queries being executed)
-2. `src/{module_name}/routes.rs` (the Actix route configurations)
-3. `src/{module_name}/mod.rs` (domain models and specific structs)
-4. `migrations/20260522071724_initial_schema.sql` (Search this file to understand the exact DB schema and foreign key constraints related to this module).
-5. `src/auth/jwt.rs` (to understand how to mock authentication claims and generate JWT tokens).
-
-# Guidelines for Writing Tests
-1. **DB Isolation**: Use `#[sqlx::test]` to automatically provision an ephemeral Postgres database for each test function.
-2. **HTTP Mocking**: Use `actix_web::test::init_service(App::new().app_data(...).configure(routes::configure))` and `actix_web::test::TestRequest` to simulate HTTP requests against the endpoints.
-3. **Auth Mocking**: The app requires JWT authentication. Generate a valid token using `crate::auth::jwt::create_token` with a dummy `JwtSecret` (which you inject into `app_data`), and attach it to your `TestRequest` via the `Authorization: Bearer <token>` header.
-4. **Data Seeding**: Since `sqlx::test` starts with an empty database (post-migrations), you must seed required parent records first. For example, if testing a Branch, you must first run `sqlx::query!(...)` to insert an Organization.
-5. **Coverage**: Write tests for *every single scenario* (Happy paths, validation errors, Not Found errors, unauthorized access, missing foreign keys).
-
-# Execution Loop
-1. Create `src/{module_name}/tests.rs` containing your test suite.
-2. Update `src/{module_name}/mod.rs` to include `#[cfg(test)] mod tests;`.
-3. Run `cargo test {module_name}`.
-4. **CRITICAL**: If a test fails, you MUST analyze the failure and fix the test (or fix the bug in the module) iteratively. Do not stop until all tests for this module pass perfectly.
-"""
-
-for mod in modules:
-    content = template.format(module_name=mod)
-    with open(f"agent_prompts/test_prompt_{mod}.md", "w") as f:
-        f.write(content)
-
-print(f"Generated {len(modules)} prompt files in the agent_prompts/ directory.")
+if __name__ == "__main__":
+    extract_context()

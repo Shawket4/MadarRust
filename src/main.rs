@@ -1,35 +1,24 @@
-
-mod auth;
-mod errors;
-mod models;
-mod orgs;
-mod permissions;
-mod users;
-mod branches;
-mod menu;
-mod inventory;
-mod recipes;
-mod adjustments;
-mod shifts;
-mod orders;
-mod reports;
-mod discounts;
-mod uploads;
-mod bundles;
-mod menu_advisor;
-
-#[cfg(test)]
-mod e2e_tests;
+//! Server entry point. The actual app lives in the library crate so the
+//! OpenAPI exporter binary can reach `ApiDoc` without booting the server.
 
 use actix_cors::Cors;
 use actix_files::Files;
-use actix_web::{web, App, HttpServer};
 use actix_web::middleware::Compress;
+use actix_web::{web, App, HttpServer};
 
 use dotenvy::dotenv;
 use sqlx::postgres::PgPoolOptions;
 use std::{env, fs};
 use tracing_subscriber::EnvFilter;
+
+use sufrix_rust::openapi::ApiDoc;
+use sufrix_rust::{
+    adjustments, auth, branches, bundles, discounts, inventory, menu, menu_advisor,
+    orders, orgs, permissions, recipes, reports, shifts, uploads, users,
+};
+
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -51,8 +40,6 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("Failed to connect to PostgreSQL");
 
-    // Migrations have been removed as requested.
-
     tracing::info!("Seeding default role permissions into database...");
     permissions::seeder::seed_role_permissions(&pool)
         .await
@@ -65,10 +52,23 @@ async fn main() -> std::io::Result<()> {
     let https_port    = env::var("HTTPS_PORT").unwrap_or_else(|_| "8443".to_string());
     let https_addr    = format!("0.0.0.0:{}", https_port);
 
+    // Swagger UI is dev/staging only. In production leave the env var
+    // unset (or set to a falsy value) and front the spec endpoint with
+    // nginx basic auth if you need to expose it to a partner.
+    let enable_swagger_ui = env::var("SUFRIX_ENABLE_SWAGGER_UI")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+
     let tls_config = build_tls_config();
 
     tracing::info!("Starting sufrix-rust");
     tracing::info!("Uploads directory: {}", uploads_dir);
+    if enable_swagger_ui {
+        tracing::info!("Swagger UI enabled at /api-docs/swagger-ui/");
+        tracing::info!("OpenAPI JSON at /api-docs/openapi.json");
+    } else {
+        tracing::info!("Swagger UI disabled (set SUFRIX_ENABLE_SWAGGER_UI=true to enable)");
+    }
 
     let server = HttpServer::new(move || {
         let cors = Cors::default()
@@ -77,7 +77,9 @@ async fn main() -> std::io::Result<()> {
             .allow_any_header()
             .max_age(3600);
 
-        App::new()
+        // Build the App. All `.wrap()` calls happen first so the App's
+        // generic type is stable when we conditionally add Swagger UI.
+        let mut app = App::new()
             .wrap(cors)
             .wrap(Compress::default())
             .app_data(pool.clone())
@@ -98,9 +100,16 @@ async fn main() -> std::io::Result<()> {
             .configure(reports::routes::configure)
             .configure(uploads::routes::configure)
             .configure(bundles::routes::configure)
-            .configure(menu_advisor::routes::configure)
-            
-            .service(Files::new("/uploads", &uploads_clone).use_last_modified(true))
+            .configure(menu_advisor::routes::configure);
+
+        if enable_swagger_ui {
+            app = app.service(
+                SwaggerUi::new("/api-docs/swagger-ui/{_:.*}")
+                    .url("/api-docs/openapi.json", ApiDoc::openapi()),
+            );
+        }
+
+        app.service(Files::new("/uploads", &uploads_clone).use_last_modified(true))
     });
 
     if let Some(tls) = tls_config {

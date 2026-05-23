@@ -1,53 +1,86 @@
 use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
     auth::{guards::{require_super_admin, require_same_org}, jwt::Claims},
-    errors::AppError,
+    errors::{AppError, AppErrorResponse},
     models::UserRole,
     permissions::checker::check_permission,
 };
 
 // ── Models ────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct Permission {
     pub id:       Uuid,
     pub user_id:  Uuid,
+    #[schema(example = "menu_items")]
     pub resource: String,
+    #[schema(example = "update")]
     pub action:   String,
     pub granted:  bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct RolePermission {
+    #[schema(example = "branch_manager")]
     pub role:     String,
+    #[schema(example = "menu_items")]
     pub resource: String,
+    #[schema(example = "update")]
     pub action:   String,
     pub granted:  bool,
 }
 
 // ── Request types ─────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UpsertPermissionRequest {
+    #[schema(example = "menu_items")]
     pub resource: String,
+    #[schema(example = "update")]
     pub action:   String,
     pub granted:  bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UpsertRolePermissionRequest {
+    #[schema(example = "branch_manager")]
     pub role:     String,
+    #[schema(example = "menu_items")]
     pub resource: String,
+    #[schema(example = "update")]
     pub action:   String,
     pub granted:  bool,
+}
+
+/// One cell of the resolved permission matrix for a user.
+/// `effective` = `user_override` if present, else `role_default`, else false.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+pub struct PermissionMatrix {
+    pub resource:      String,
+    pub action:        String,
+    pub role_default:  Option<bool>,
+    pub user_override: Option<bool>,
+    pub effective:     bool,
 }
 
 // ── GET /permissions/user/:user_id ────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/permissions/user/{user_id}",
+    tag = "permissions",
+    params(("user_id" = Uuid, Path, description = "User ID")),
+    responses(
+        (status = 200, description = "Per-user permission overrides", body = Vec<Permission>),
+        AppErrorResponse,
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn get_user_permissions(
     req:     HttpRequest,
     pool:    web::Data<PgPool>,
@@ -70,15 +103,17 @@ pub async fn get_user_permissions(
 
 // ── GET /permissions/matrix/:user_id ─────────────────────────
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-pub struct PermissionMatrix {
-    pub resource:      String,
-    pub action:        String,
-    pub role_default:  Option<bool>,
-    pub user_override: Option<bool>,
-    pub effective:     bool,
-}
-
+#[utoipa::path(
+    get,
+    path = "/permissions/matrix/{user_id}",
+    tag = "permissions",
+    params(("user_id" = Uuid, Path, description = "User ID")),
+    responses(
+        (status = 200, description = "Fully resolved permission matrix for the user", body = Vec<PermissionMatrix>),
+        AppErrorResponse,
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn get_permission_matrix(
     req:     HttpRequest,
     pool:    web::Data<PgPool>,
@@ -150,6 +185,18 @@ pub async fn get_permission_matrix(
 
 // ── PUT /permissions/user/:user_id ────────────────────────────
 
+#[utoipa::path(
+    put,
+    path = "/permissions/user/{user_id}",
+    tag = "permissions",
+    params(("user_id" = Uuid, Path, description = "User ID")),
+    request_body = UpsertPermissionRequest,
+    responses(
+        (status = 200, description = "Permission upserted", body = Permission),
+        AppErrorResponse,
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn upsert_user_permission(
     req:     HttpRequest,
     pool:    web::Data<PgPool>,
@@ -179,8 +226,23 @@ pub async fn upsert_user_permission(
     Ok(HttpResponse::Ok().json(perm))
 }
 
-// ── DELETE /permissions/user/:user_id/resource/:resource/action/:action
+// ── DELETE /permissions/user/:user_id/:resource/:action ──────
 
+#[utoipa::path(
+    delete,
+    path = "/permissions/user/{user_id}/{resource}/{action}",
+    tag = "permissions",
+    params(
+        ("user_id"  = Uuid,   Path, description = "User ID"),
+        ("resource" = String, Path, description = "Resource name (e.g. menu_items, orders)", example = "menu_items"),
+        ("action"   = String, Path, description = "Action (create | read | update | delete)", example = "update"),
+    ),
+    responses(
+        (status = 204, description = "Permission override removed"),
+        AppErrorResponse,
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn delete_user_permission(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -207,6 +269,16 @@ pub async fn delete_user_permission(
 
 // ── GET /permissions/roles ────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/permissions/roles",
+    tag = "permissions",
+    responses(
+        (status = 200, description = "All role permission defaults", body = Vec<RolePermission>),
+        AppErrorResponse,
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn get_role_permissions(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -226,6 +298,17 @@ pub async fn get_role_permissions(
 
 // ── PUT /permissions/roles  (super_admin only) ────────────────
 
+#[utoipa::path(
+    put,
+    path = "/permissions/roles",
+    tag = "permissions",
+    request_body = UpsertRolePermissionRequest,
+    responses(
+        (status = 200, description = "Role permission default upserted", body = RolePermission),
+        AppErrorResponse,
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn upsert_role_permission(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -262,8 +345,6 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
         .ok_or_else(|| AppError::Unauthorized("Missing claims".into()))
 }
 
-/// Ensure the target user belongs to the same org as the caller.
-/// super_admin bypasses this check entirely.
 async fn require_same_org_as_target(
     pool:    &PgPool,
     claims:  &Claims,

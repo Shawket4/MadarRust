@@ -1,98 +1,7 @@
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
-use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
-use utoipa::{IntoParams, ToSchema};
-use uuid::Uuid;
+# Module: users
 
-use crate::{
-    auth::{
-        guards::{require_org_admin, require_same_org, require_super_admin},
-        jwt::Claims,
-    },
-    errors::{AppError, AppErrorResponse},
-    models::{User, UserPublic, UserRole},
-    permissions::checker::check_permission,
-};
-
-// ── Request types ─────────────────────────────────────────────
-
-#[derive(Deserialize, ToSchema)]
-pub struct CreateUserRequest {
-    pub org_id:     Uuid,
-    #[schema(example = "Ahmed Hassan")]
-    pub name:       String,
-    /// Required for admins and managers; ignored for tellers.
-    #[schema(format = Email, example = "ahmed@therue.cafe")]
-    pub email:      Option<String>,
-    #[schema(example = "+201234567890")]
-    pub phone:      Option<String>,
-    pub role:       UserRole,
-    /// Required when `role` is anything other than `teller`. Plain text;
-    /// hashed server-side with bcrypt before storage.
-    pub password:   Option<String>,
-    /// Required when `role = teller`. 4–6 ASCII digits.
-    #[schema(pattern = "^[0-9]{4,6}$", min_length = 4, max_length = 6, example = "1234")]
-    pub pin:        Option<String>,
-    /// Branches to assign the new user to immediately. Branch managers
-    /// can only assign to branches they themselves are assigned to.
-    pub branch_ids: Option<Vec<Uuid>>,
-}
-
-#[derive(Deserialize, ToSchema)]
-pub struct AssignBranchRequest {
-    pub branch_id: Uuid,
-}
-
-#[derive(Serialize, Deserialize, ToSchema)]
-pub struct CreateUserResponse {
-    pub user: UserPublic,
-}
-
-#[derive(Deserialize, IntoParams)]
-#[into_params(parameter_in = Query)]
-pub struct ListUsersQuery {
-    /// Filter to a specific organization. Optional for super-admins
-    /// (who see all orgs when omitted); required-by-policy for everyone
-    /// else (overridden server-side to the caller's own org).
-    pub org_id: Option<Uuid>,
-}
-
-#[derive(Deserialize, ToSchema)]
-pub struct UpdateUserRequest {
-    pub name:      Option<String>,
-    #[schema(format = Email)]
-    pub email:     Option<String>,
-    pub phone:     Option<String>,
-    /// Plain-text new password. Server-side bcrypt-hashed.
-    pub password:  Option<String>,
-    #[schema(pattern = "^[0-9]{4,6}$", min_length = 4, max_length = 6)]
-    pub pin:       Option<String>,
-    /// Only org-admins and above can change roles. Promoting to
-    /// `super_admin` requires the caller to be a super-admin.
-    pub role:      Option<UserRole>,
-    pub is_active: Option<bool>,
-}
-
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
-pub struct UserBranch {
-    pub branch_id:   Uuid,
-    #[schema(example = "Zamalek")]
-    pub branch_name: String,
-}
-
-// ── POST /users  ──────────────────────────────────────────────
-
-#[utoipa::path(
-    post,
-    path = "/users",
-    tag = "users",
-    request_body = CreateUserRequest,
-    responses(
-        (status = 201, description = "User created", body = CreateUserResponse),
-        AppErrorResponse,
-    ),
-    security(("bearer_jwt" = []))
-)]
+### Route: POST  -> create_user
+```rust
 pub async fn create_user(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -100,9 +9,11 @@ pub async fn create_user(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
 
+    // Permission checks
     check_permission(pool.get_ref(), &claims, "users", "create").await?;
     require_same_org(&claims, Some(body.org_id))?;
 
+    // branch_managers can only create tellers in their own assigned branches
     if claims.role == UserRole::BranchManager {
         if body.role != UserRole::Teller {
             return Err(AppError::Forbidden(
@@ -129,12 +40,14 @@ pub async fn create_user(
         }
     }
 
+    // org_admins cannot create super_admins
     if claims.role == UserRole::OrgAdmin && body.role == UserRole::SuperAdmin {
         return Err(AppError::Forbidden(
             "Only super admins can create super admin accounts".into(),
         ));
     }
 
+    // Validate login method
     match body.role {
         UserRole::Teller => {
             if body.pin.is_none() {
@@ -159,6 +72,7 @@ pub async fn create_user(
         }
     }
 
+    // Check email uniqueness
     if let Some(email) = &body.email {
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM users WHERE email = $1 AND deleted_at IS NULL)"
@@ -172,6 +86,7 @@ pub async fn create_user(
         }
     }
 
+    // Hash credentials
     let password_hash = body
         .password
         .as_deref()
@@ -186,6 +101,7 @@ pub async fn create_user(
         .transpose()
         .map_err(|_| AppError::Internal)?;
 
+    // Insert user
     let user = sqlx::query_as::<_, User>(
         r#"
         INSERT INTO users (org_id, name, email, phone, role, password_hash, pin_hash)
@@ -206,6 +122,7 @@ pub async fn create_user(
     .fetch_one(pool.get_ref())
     .await?;
 
+    // Assign branches if provided
     if let Some(branch_ids) = &body.branch_ids {
         for bid in branch_ids {
             sqlx::query(
@@ -225,20 +142,10 @@ pub async fn create_user(
 
     Ok(HttpResponse::Created().json(CreateUserResponse { user: user.into() }))
 }
+```
 
-// ── GET /users?org_id=  ───────────────────────────────────────
-
-#[utoipa::path(
-    get,
-    path = "/users",
-    tag = "users",
-    params(ListUsersQuery),
-    responses(
-        (status = 200, description = "Users visible to the caller", body = Vec<UserPublic>),
-        AppErrorResponse,
-    ),
-    security(("bearer_jwt" = []))
-)]
+### Route: GET  -> list_users
+```rust
 pub async fn list_users(
     req:   HttpRequest,
     pool:  web::Data<PgPool>,
@@ -247,8 +154,9 @@ pub async fn list_users(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "users", "read").await?;
 
+    // Non-super-admins must be scoped to their own org
     let org_id = if claims.role == UserRole::SuperAdmin {
-        query.org_id
+        query.org_id  // can be None (all orgs) or Some (filtered)
     } else {
         let own = claims.org_id()
             .ok_or_else(|| AppError::Forbidden("No org assigned".into()))?;
@@ -317,20 +225,10 @@ pub async fn list_users(
     let public: Vec<UserPublic> = users.into_iter().map(Into::into).collect();
     Ok(HttpResponse::Ok().json(public))
 }
+```
 
-// ── GET /users/:id  ───────────────────────────────────────────
-
-#[utoipa::path(
-    get,
-    path = "/users/{id}",
-    tag = "users",
-    params(("id" = Uuid, Path, description = "User ID")),
-    responses(
-        (status = 200, description = "The requested user", body = UserPublic),
-        AppErrorResponse,
-    ),
-    security(("bearer_jwt" = []))
-)]
+### Route: GET /{id} -> get_user
+```rust
 pub async fn get_user(
     req:     HttpRequest,
     pool:    web::Data<PgPool>,
@@ -354,8 +252,10 @@ pub async fn get_user(
     .await?
     .ok_or_else(|| AppError::NotFound("User not found".into()))?;
 
+    // Non-super-admins can only see users within their own org
     require_same_org(&claims, user.org_id)?;
 
+    // Branch managers can only see users assigned to at least one of their assigned branches, or themselves
     if claims.role == UserRole::BranchManager && claims.user_id() != *user_id {
         let same_branch: bool = sqlx::query_scalar(
             r#"
@@ -378,21 +278,110 @@ pub async fn get_user(
 
     Ok(HttpResponse::Ok().json(UserPublic::from(user)))
 }
+```
 
-// ── PATCH /users/:id  ─────────────────────────────────────────
+### Route: DELETE /{id} -> delete_user
+```rust
+pub async fn delete_user(
+    req:     HttpRequest,
+    pool:    web::Data<PgPool>,
+    user_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "users", "delete").await?;
 
-#[utoipa::path(
-    patch,
-    path = "/users/{id}",
-    tag = "users",
-    params(("id" = Uuid, Path, description = "User ID")),
-    request_body = UpdateUserRequest,
-    responses(
-        (status = 200, description = "User updated", body = UserPublic),
-        AppErrorResponse,
-    ),
-    security(("bearer_jwt" = []))
-)]
+    // Fetch target user to check org
+    let user = sqlx::query_as::<_, User>(
+        "SELECT id, org_id, name, email, phone, password_hash, pin_hash, role,
+                is_active, last_login_at, created_at, updated_at, deleted_at
+         FROM users WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(*user_id)
+    .fetch_optional(pool.get_ref())
+    .await?
+    .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+
+    require_same_org(&claims, user.org_id)?;
+
+    // Cannot delete a super_admin unless you are one
+    if user.role == UserRole::SuperAdmin {
+        require_super_admin(&claims)?;
+    }
+
+    // Branch managers can only delete users assigned to at least one of their assigned branches
+    if claims.role == UserRole::BranchManager {
+        let same_branch: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM user_branch_assignments uba1
+                JOIN user_branch_assignments uba2 ON uba2.branch_id = uba1.branch_id
+                WHERE uba1.user_id = $1 AND uba2.user_id = $2
+            )
+            "#,
+        )
+        .bind(*user_id)
+        .bind(claims.user_id())
+        .fetch_one(pool.get_ref())
+        .await?;
+
+        if !same_branch {
+            return Err(AppError::Forbidden("You can only delete users assigned to your branches".into()));
+        }
+    }
+
+    sqlx::query("UPDATE users SET deleted_at = NOW() WHERE id = $1")
+        .bind(*user_id)
+        .execute(pool.get_ref())
+        .await?;
+
+    Ok(HttpResponse::NoContent().finish())
+}
+```
+
+### Route: POST /{id}/branches -> assign_branch
+```rust
+pub async fn assign_branch(
+    req:     HttpRequest,
+    pool:    web::Data<PgPool>,
+    user_id: web::Path<Uuid>,
+    body:    web::Json<AssignBranchRequest>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "users", "update").await?;
+
+    // If branch manager, verify they are assigned to that branch
+    if claims.role == UserRole::BranchManager {
+        let is_assigned: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)"
+        )
+        .bind(claims.user_id())
+        .bind(body.branch_id)
+        .fetch_one(pool.get_ref())
+        .await?;
+        if !is_assigned {
+            return Err(AppError::Forbidden("You cannot assign a user to a branch you are not assigned to".into()));
+        }
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO user_branch_assignments (user_id, branch_id, assigned_by)
+        VALUES ($1, $2, $3)
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(*user_id)
+    .bind(body.branch_id)
+    .bind(claims.user_id())
+    .execute(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::NoContent().finish())
+}
+```
+
+### Route: PATCH /{id} -> update_user
+```rust
 pub async fn update_user(
     req:     HttpRequest,
     pool:    web::Data<PgPool>,
@@ -414,6 +403,7 @@ pub async fn update_user(
 
     require_same_org(&claims, existing.org_id)?;
 
+    // Branch managers can only update users assigned to at least one of their assigned branches, or themselves
     if claims.role == UserRole::BranchManager && claims.user_id() != *user_id {
         let same_branch: bool = sqlx::query_scalar(
             r#"
@@ -434,10 +424,12 @@ pub async fn update_user(
         }
     }
 
+    // Only org_admin+ can change roles
     if body.role.is_some() {
         require_org_admin(&claims)?;
     }
 
+    // Cannot promote to super_admin unless you are one
     if body.role == Some(UserRole::SuperAdmin) {
         require_super_admin(&claims)?;
     }
@@ -483,187 +475,10 @@ pub async fn update_user(
 
     Ok(HttpResponse::Ok().json(UserPublic::from(user)))
 }
+```
 
-// ── DELETE /users/:id  (soft delete) ─────────────────────────
-
-#[utoipa::path(
-    delete,
-    path = "/users/{id}",
-    tag = "users",
-    params(("id" = Uuid, Path, description = "User ID")),
-    responses(
-        (status = 204, description = "User deleted (soft delete)"),
-        AppErrorResponse,
-    ),
-    security(("bearer_jwt" = []))
-)]
-pub async fn delete_user(
-    req:     HttpRequest,
-    pool:    web::Data<PgPool>,
-    user_id: web::Path<Uuid>,
-) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "users", "delete").await?;
-
-    let user = sqlx::query_as::<_, User>(
-        "SELECT id, org_id, name, email, phone, password_hash, pin_hash, role,
-                is_active, last_login_at, created_at, updated_at, deleted_at
-         FROM users WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(*user_id)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .ok_or_else(|| AppError::NotFound("User not found".into()))?;
-
-    require_same_org(&claims, user.org_id)?;
-
-    if user.role == UserRole::SuperAdmin {
-        require_super_admin(&claims)?;
-    }
-
-    if claims.role == UserRole::BranchManager {
-        let same_branch: bool = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS(
-                SELECT 1 FROM user_branch_assignments uba1
-                JOIN user_branch_assignments uba2 ON uba2.branch_id = uba1.branch_id
-                WHERE uba1.user_id = $1 AND uba2.user_id = $2
-            )
-            "#,
-        )
-        .bind(*user_id)
-        .bind(claims.user_id())
-        .fetch_one(pool.get_ref())
-        .await?;
-
-        if !same_branch {
-            return Err(AppError::Forbidden("You can only delete users assigned to your branches".into()));
-        }
-    }
-
-    sqlx::query("UPDATE users SET deleted_at = NOW() WHERE id = $1")
-        .bind(*user_id)
-        .execute(pool.get_ref())
-        .await?;
-
-    Ok(HttpResponse::NoContent().finish())
-}
-
-// ── POST /users/:id/branches  ────────────────────────────────
-
-#[utoipa::path(
-    post,
-    path = "/users/{id}/branches",
-    tag = "users",
-    params(("id" = Uuid, Path, description = "User ID")),
-    request_body = AssignBranchRequest,
-    responses(
-        (status = 204, description = "Branch assigned"),
-        AppErrorResponse,
-    ),
-    security(("bearer_jwt" = []))
-)]
-pub async fn assign_branch(
-    req:     HttpRequest,
-    pool:    web::Data<PgPool>,
-    user_id: web::Path<Uuid>,
-    body:    web::Json<AssignBranchRequest>,
-) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "users", "update").await?;
-
-    if claims.role == UserRole::BranchManager {
-        let is_assigned: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)"
-        )
-        .bind(claims.user_id())
-        .bind(body.branch_id)
-        .fetch_one(pool.get_ref())
-        .await?;
-        if !is_assigned {
-            return Err(AppError::Forbidden("You cannot assign a user to a branch you are not assigned to".into()));
-        }
-    }
-
-    sqlx::query(
-        r#"
-        INSERT INTO user_branch_assignments (user_id, branch_id, assigned_by)
-        VALUES ($1, $2, $3)
-        ON CONFLICT DO NOTHING
-        "#,
-    )
-    .bind(*user_id)
-    .bind(body.branch_id)
-    .bind(claims.user_id())
-    .execute(pool.get_ref())
-    .await?;
-
-    Ok(HttpResponse::NoContent().finish())
-}
-
-// ── DELETE /users/:id/branches/:branch_id  ───────────────────
-
-#[utoipa::path(
-    delete,
-    path = "/users/{id}/branches/{branch_id}",
-    tag = "users",
-    params(
-        ("id" = Uuid, Path, description = "User ID"),
-        ("branch_id" = Uuid, Path, description = "Branch ID"),
-    ),
-    responses(
-        (status = 204, description = "Branch unassigned"),
-        AppErrorResponse,
-    ),
-    security(("bearer_jwt" = []))
-)]
-pub async fn unassign_branch(
-    req:      HttpRequest,
-    pool:     web::Data<PgPool>,
-    path:     web::Path<(Uuid, Uuid)>,
-) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "users", "update").await?;
-
-    let (user_id, branch_id) = path.into_inner();
-
-    if claims.role == UserRole::BranchManager {
-        let is_assigned: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)"
-        )
-        .bind(claims.user_id())
-        .bind(branch_id)
-        .fetch_one(pool.get_ref())
-        .await?;
-        if !is_assigned {
-            return Err(AppError::Forbidden("You cannot unassign a user from a branch you are not assigned to".into()));
-        }
-    }
-
-    sqlx::query(
-        "DELETE FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2"
-    )
-    .bind(user_id)
-    .bind(branch_id)
-    .execute(pool.get_ref())
-    .await?;
-
-    Ok(HttpResponse::NoContent().finish())
-}
-
-// ── GET /users/:id/branches  ─────────────────────────────────
-
-#[utoipa::path(
-    get,
-    path = "/users/{id}/branches",
-    tag = "users",
-    params(("id" = Uuid, Path, description = "User ID")),
-    responses(
-        (status = 200, description = "Branches assigned to the user", body = Vec<UserBranch>),
-        AppErrorResponse,
-    ),
-    security(("bearer_jwt" = []))
-)]
+### Route: GET /{id}/branches -> list_user_branches
+```rust
 pub async fn list_user_branches(
     req:     HttpRequest,
     pool:    web::Data<PgPool>,
@@ -672,6 +487,7 @@ pub async fn list_user_branches(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "users", "read").await?;
 
+    // If branch manager, verify they have access to this user
     if claims.role == UserRole::BranchManager && claims.user_id() != *user_id {
         let same_branch: bool = sqlx::query_scalar(
             r#"
@@ -705,13 +521,43 @@ pub async fn list_user_branches(
     .await?;
 
     Ok(HttpResponse::Ok().json(rows))
-}
+}```
 
-// ── Helper ────────────────────────────────────────────────────
+### Route: DELETE /{id}/branches/{branch_id} -> unassign_branch
+```rust
+pub async fn unassign_branch(
+    req:      HttpRequest,
+    pool:     web::Data<PgPool>,
+    path:     web::Path<(Uuid, Uuid)>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "users", "update").await?;
 
-fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
-    req.extensions()
-        .get::<Claims>()
-        .cloned()
-        .ok_or_else(|| AppError::Unauthorized("Missing claims".into()))
+    let (user_id, branch_id) = path.into_inner();
+
+    // If branch manager, verify they are assigned to that branch
+    if claims.role == UserRole::BranchManager {
+        let is_assigned: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)"
+        )
+        .bind(claims.user_id())
+        .bind(branch_id)
+        .fetch_one(pool.get_ref())
+        .await?;
+        if !is_assigned {
+            return Err(AppError::Forbidden("You cannot unassign a user from a branch you are not assigned to".into()));
+        }
+    }
+
+    sqlx::query(
+        "DELETE FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2"
+    )
+    .bind(user_id)
+    .bind(branch_id)
+    .execute(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::NoContent().finish())
 }
+```
+
