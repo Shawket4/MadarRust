@@ -13,7 +13,7 @@ use tracing_subscriber::EnvFilter;
 
 use sufrix_rust::openapi::ApiDoc;
 use sufrix_rust::{
-    adjustments, auth, branches, bundles, discounts, inventory, menu, menu_advisor,
+    auth, branches, bundles, discounts, inventory, menu, menu_advisor,
     orders, orgs, permissions, recipes, reports, shifts, uploads, users,
 };
 
@@ -93,7 +93,6 @@ async fn main() -> std::io::Result<()> {
             .configure(menu::routes::configure)
             .configure(inventory::routes::configure)
             .configure(recipes::routes::configure)
-            .configure(adjustments::routes::configure)
             .configure(shifts::routes::configure)
             .configure(orders::routes::configure)
             .configure(discounts::routes::configure)

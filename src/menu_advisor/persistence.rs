@@ -31,7 +31,7 @@ use super::engine::{
 // Public types — what the HTTP layer returns
 // ═══════════════════════════════════════════════════════════════════
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
     InProgress,
@@ -50,7 +50,7 @@ impl RunStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PersistedRun {
     pub id: Uuid,
     pub branch_id: Uuid,
@@ -64,7 +64,7 @@ pub struct PersistedRun {
     pub window_days: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Decision {
     Accepted,
@@ -90,7 +90,7 @@ impl Decision {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SuggestionKind {
     Price,
@@ -108,7 +108,7 @@ impl SuggestionKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DecisionRecord {
     pub id: Uuid,
     pub suggestion_id: Uuid,
@@ -120,7 +120,7 @@ pub struct DecisionRecord {
     pub decided_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PriceSuggestionRecord {
     pub id: Uuid,
     pub run_id: Uuid,
@@ -131,7 +131,7 @@ pub struct PriceSuggestionRecord {
     pub suggestion: PriceSuggestion,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct BundleSuggestionRecord {
     pub id: Uuid,
     pub run_id: Uuid,
@@ -143,7 +143,7 @@ pub struct BundleSuggestionRecord {
     pub suggestion: BundleSuggestion,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RemovalScenarioRecord {
     pub id: Uuid,
     pub run_id: Uuid,

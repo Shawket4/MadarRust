@@ -6,14 +6,15 @@ use uuid::Uuid;
 
 use crate::{
     auth::jwt::Claims,
-    errors::AppError,
+    errors::{AppError, AppErrorResponse},
     models::UserRole,
     permissions::checker::check_permission,
 };
+use utoipa::{IntoParams, ToSchema};
 
 // ── Response models ───────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct OrgIngredient {
     pub id:            Uuid,
     pub org_id:        Uuid,
@@ -22,13 +23,14 @@ pub struct OrgIngredient {
     pub category:      String,
     pub description:   Option<String>,
     #[serde(with = "rust_decimal::serde::float")]
+    #[schema(value_type = f64)]
     pub cost_per_unit: Decimal,
     pub is_active:     bool,
     pub created_at:    chrono::DateTime<chrono::Utc>,
     pub updated_at:    chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct BranchInventoryItem {
     pub id:                Uuid,
     pub branch_id:         Uuid,
@@ -37,15 +39,18 @@ pub struct BranchInventoryItem {
     pub unit:              String,
     pub description:       Option<String>,
     #[serde(with = "rust_decimal::serde::float")]
+    #[schema(value_type = f64)]
     pub cost_per_unit:     Decimal,
+    #[schema(value_type = f64)]
     pub current_stock:     sqlx::types::BigDecimal,
+    #[schema(value_type = f64)]
     pub reorder_threshold: sqlx::types::BigDecimal,
     pub below_reorder:     bool,
     pub created_at:        chrono::DateTime<chrono::Utc>,
     pub updated_at:        chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct BranchInventoryAdjustment {
     pub id:                  Uuid,
     pub branch_id:           Uuid,
@@ -53,6 +58,7 @@ pub struct BranchInventoryAdjustment {
     pub ingredient_name:     String,
     pub unit:                String,
     pub adjustment_type:     String,
+    #[schema(value_type = f64)]
     pub quantity:            sqlx::types::BigDecimal,
     pub note:                String,
     pub transfer_id:         Option<Uuid>,
@@ -61,7 +67,7 @@ pub struct BranchInventoryAdjustment {
     pub created_at:          chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct BranchInventoryTransfer {
     pub id:                      Uuid,
     pub org_id:                  Uuid,
@@ -72,6 +78,7 @@ pub struct BranchInventoryTransfer {
     pub org_ingredient_id:       Uuid,
     pub ingredient_name:         String,
     pub unit:                    String,
+    #[schema(value_type = f64)]
     pub quantity:                sqlx::types::BigDecimal,
     pub note:                    Option<String>,
     pub initiated_by:            Uuid,
@@ -81,41 +88,43 @@ pub struct BranchInventoryTransfer {
 
 // ── Request types ─────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateCatalogItemRequest {
     pub name:          String,
     pub unit:          String,
     pub category:      String,
     pub description:   Option<String>,
     #[serde(with = "rust_decimal::serde::float_option")]
+    #[schema(value_type = Option<f64>)]
     pub cost_per_unit: Option<Decimal>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct UpdateCatalogItemRequest {
     pub name:          Option<String>,
     pub unit:          Option<String>,
     pub category:      Option<String>,
     pub description:   Option<String>,
     #[serde(with = "rust_decimal::serde::float_option")]
+    #[schema(value_type = Option<f64>)]
     pub cost_per_unit: Option<Decimal>,
     pub is_active:     Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct AddToStockRequest {
     pub org_ingredient_id: Uuid,
     pub current_stock:     Option<f64>,
     pub reorder_threshold: Option<f64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct UpdateStockRequest {
     pub reorder_threshold: Option<f64>,
     pub current_stock:     Option<f64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateAdjustmentRequest {
     pub branch_inventory_id: Uuid,
     pub adjustment_type:     String, // "add" | "remove"
@@ -123,7 +132,7 @@ pub struct CreateAdjustmentRequest {
     pub note:                String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateTransferRequest {
     pub source_branch_id:      Uuid,
     pub destination_branch_id: Uuid,
@@ -132,18 +141,27 @@ pub struct CreateTransferRequest {
     pub note:                  Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct UpdateTransferRequest {
     pub note: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListTransfersQuery {
     pub direction: Option<String>, // "incoming" | "outgoing" | None = both
 }
 
 // ── GET /inventory/orgs/:org_id/catalog ──────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/inventory/orgs/{org_id}/catalog",
+    tag = "inventory",
+    params(("org_id" = Uuid, Path, description = "Organization ID")),
+    responses((status = 200, description = "List catalog items", body = Vec<OrgIngredient>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_catalog(
     req:    HttpRequest,
     pool:   web::Data<PgPool>,
@@ -171,6 +189,15 @@ pub async fn list_catalog(
 
 // ── POST /inventory/orgs/:org_id/catalog ─────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/inventory/orgs/{org_id}/catalog",
+    tag = "inventory",
+    params(("org_id" = Uuid, Path, description = "Organization ID")),
+    request_body = CreateCatalogItemRequest,
+    responses((status = 201, description = "Catalog item created", body = OrgIngredient), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn create_catalog_item(
     req:    HttpRequest,
     pool:   web::Data<PgPool>,
@@ -231,6 +258,18 @@ pub async fn create_catalog_item(
 
 // ── PATCH /inventory/orgs/:org_id/catalog/:id ────────────────
 
+#[utoipa::path(
+    patch,
+    path = "/inventory/orgs/{org_id}/catalog/{id}",
+    tag = "inventory",
+    params(
+        ("org_id" = Uuid, Path, description = "Organization ID"),
+        ("id" = Uuid, Path, description = "Ingredient ID")
+    ),
+    request_body = UpdateCatalogItemRequest,
+    responses((status = 200, description = "Catalog item updated", body = OrgIngredient), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn update_catalog_item(
     req:    HttpRequest,
     pool:   web::Data<PgPool>,
@@ -313,6 +352,17 @@ pub async fn update_catalog_item(
 
 // ── DELETE /inventory/orgs/:org_id/catalog/:id ───────────────
 
+#[utoipa::path(
+    delete,
+    path = "/inventory/orgs/{org_id}/catalog/{id}",
+    tag = "inventory",
+    params(
+        ("org_id" = Uuid, Path, description = "Organization ID"),
+        ("id" = Uuid, Path, description = "Ingredient ID")
+    ),
+    responses((status = 204, description = "Catalog item deleted"), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn delete_catalog_item(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -356,6 +406,14 @@ pub async fn delete_catalog_item(
 
 // ── GET /inventory/branches/:branch_id/stock ─────────────────
 
+#[utoipa::path(
+    get,
+    path = "/inventory/branches/{branch_id}/stock",
+    tag = "inventory",
+    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    responses((status = 200, description = "List branch stock", body = Vec<BranchInventoryItem>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_branch_stock(
     req:       HttpRequest,
     pool:      web::Data<PgPool>,
@@ -392,6 +450,15 @@ pub async fn list_branch_stock(
 
 // ── POST /inventory/branches/:branch_id/stock ────────────────
 
+#[utoipa::path(
+    post,
+    path = "/inventory/branches/{branch_id}/stock",
+    tag = "inventory",
+    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    request_body = AddToStockRequest,
+    responses((status = 201, description = "Added to branch stock", body = BranchInventoryItem), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn add_to_branch_stock(
     req:       HttpRequest,
     pool:      web::Data<PgPool>,
@@ -461,6 +528,18 @@ pub async fn add_to_branch_stock(
 
 // ── PATCH /inventory/branches/:branch_id/stock/:id ───────────
 
+#[utoipa::path(
+    patch,
+    path = "/inventory/branches/{branch_id}/stock/{id}",
+    tag = "inventory",
+    params(
+        ("branch_id" = Uuid, Path, description = "Branch ID"),
+        ("id" = Uuid, Path, description = "Stock ID")
+    ),
+    request_body = UpdateStockRequest,
+    responses((status = 200, description = "Branch stock updated", body = BranchInventoryItem), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn update_branch_stock(
     req:       HttpRequest,
     pool:      web::Data<PgPool>,
@@ -502,6 +581,17 @@ pub async fn update_branch_stock(
 
 // ── DELETE /inventory/branches/:branch_id/stock/:id ──────────
 
+#[utoipa::path(
+    delete,
+    path = "/inventory/branches/{branch_id}/stock/{id}",
+    tag = "inventory",
+    params(
+        ("branch_id" = Uuid, Path, description = "Branch ID"),
+        ("id" = Uuid, Path, description = "Stock ID")
+    ),
+    responses((status = 204, description = "Removed from branch stock"), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn remove_from_branch_stock(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -532,6 +622,15 @@ pub async fn remove_from_branch_stock(
 
 // ── POST /inventory/branches/:branch_id/adjustments ──────────
 
+#[utoipa::path(
+    post,
+    path = "/inventory/branches/{branch_id}/adjustments",
+    tag = "inventory",
+    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    request_body = CreateAdjustmentRequest,
+    responses((status = 201, description = "Adjustment created", body = BranchInventoryAdjustment), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn create_adjustment(
     req:       HttpRequest,
     pool:      web::Data<PgPool>,
@@ -632,6 +731,14 @@ pub async fn create_adjustment(
 
 // ── GET /inventory/branches/:branch_id/adjustments ───────────
 
+#[utoipa::path(
+    get,
+    path = "/inventory/branches/{branch_id}/adjustments",
+    tag = "inventory",
+    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    responses((status = 200, description = "List adjustments", body = Vec<BranchInventoryAdjustment>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_adjustments(
     req:       HttpRequest,
     pool:      web::Data<PgPool>,
@@ -668,6 +775,14 @@ pub async fn list_adjustments(
 
 // ── POST /inventory/transfers ─────────────────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/inventory/transfers",
+    tag = "inventory",
+    request_body = CreateTransferRequest,
+    responses((status = 201, description = "Transfer created", body = BranchInventoryTransfer), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn create_transfer(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -855,6 +970,15 @@ pub async fn create_transfer(
 
 // ── GET /inventory/branches/:branch_id/transfers ─────────────
 
+#[utoipa::path(
+    get,
+    path = "/inventory/branches/{branch_id}/transfers",
+    tag = "inventory",
+    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    params(ListTransfersQuery),
+    responses((status = 200, description = "List transfers", body = Vec<BranchInventoryTransfer>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_transfers(
     req:       HttpRequest,
     pool:      web::Data<PgPool>,
@@ -907,6 +1031,15 @@ pub async fn list_transfers(
 
 // ── PATCH /inventory/transfers/:id ───────────────────────────
 
+#[utoipa::path(
+    patch,
+    path = "/inventory/transfers/{id}",
+    tag = "inventory",
+    params(("id" = Uuid, Path, description = "Transfer ID")),
+    request_body = UpdateTransferRequest,
+    responses((status = 200, description = "Transfer updated", body = BranchInventoryTransfer), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn update_transfer(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -974,6 +1107,14 @@ pub async fn update_transfer(
 
 // ── DELETE /inventory/transfers/:id ──────────────────────────
 
+#[utoipa::path(
+    delete,
+    path = "/inventory/transfers/{id}",
+    tag = "inventory",
+    params(("id" = Uuid, Path, description = "Transfer ID")),
+    responses((status = 204, description = "Transfer deleted"), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn delete_transfer(
     req:  HttpRequest,
     pool: web::Data<PgPool>,

@@ -6,12 +6,13 @@ use uuid::Uuid;
 
 use crate::{
     auth::jwt::Claims,
-    errors::AppError,
+    errors::{AppError, AppErrorResponse},
     models::UserRole,
     permissions::checker::check_permission,
 };
+use utoipa::{IntoParams, ToSchema};
 
-#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct Discount {
     pub id:         Uuid,
     pub org_id:     Uuid,
@@ -23,12 +24,13 @@ pub struct Discount {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListQuery {
     pub org_id: Uuid,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CreateDiscountRequest {
     pub org_id:    Uuid,
     pub name:      String,
@@ -37,7 +39,7 @@ pub struct CreateDiscountRequest {
     pub is_active: Option<bool>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpdateDiscountRequest {
     pub name:      Option<String>,
     pub dtype:     Option<String>,
@@ -45,6 +47,14 @@ pub struct UpdateDiscountRequest {
     pub is_active: Option<bool>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/discounts",
+    tag = "discounts",
+    params(ListQuery),
+    responses((status = 200, description = "List discounts", body = Vec<Discount>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_discounts(
     req:   HttpRequest,
     pool:  web::Data<PgPool>,
@@ -69,6 +79,14 @@ pub async fn list_discounts(
     Ok(HttpResponse::Ok().json(rows))
 }
 
+#[utoipa::path(
+    post,
+    path = "/discounts",
+    tag = "discounts",
+    request_body = CreateDiscountRequest,
+    responses((status = 201, description = "Discount created", body = Discount), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn create_discount(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -98,6 +116,15 @@ pub async fn create_discount(
     Ok(HttpResponse::Created().json(row))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/discounts/{id}",
+    tag = "discounts",
+    params(("id" = Uuid, Path, description = "Discount ID")),
+    request_body = UpdateDiscountRequest,
+    responses((status = 200, description = "Discount updated", body = Discount), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn update_discount(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -136,6 +163,14 @@ pub async fn update_discount(
     Ok(HttpResponse::Ok().json(row))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/discounts/{id}",
+    tag = "discounts",
+    params(("id" = Uuid, Path, description = "Discount ID")),
+    responses((status = 204, description = "Discount deleted"), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn delete_discount(
     req:  HttpRequest,
     pool: web::Data<PgPool>,

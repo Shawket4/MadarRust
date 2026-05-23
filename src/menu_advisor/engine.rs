@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 /// One sellable SKU: a (menu_item_id, size_label) pair.
 /// `size_label = "one_size"` for items without sizes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ItemKey {
     pub menu_item_id: Uuid,
     pub size_label: String,
@@ -38,7 +38,7 @@ pub struct ItemKey {
 /// (any ingredient missing a cost in `ingredient_cost_history`). This is the
 /// engine's single source of truth for "do we know what this costs?". The
 /// adapter MUST NOT use `Some(0)` as a sentinel for missing data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ItemSnapshot {
     pub key: ItemKey,
     pub category_id: Option<Uuid>,
@@ -75,7 +75,7 @@ pub type Basket = Vec<ItemKey>;
 // §2  CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AnalysisConfig {
     pub analysis_window_days: f64,
     pub recency_half_life_days: f64,
@@ -120,7 +120,7 @@ impl Default for AnalysisConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub enum PriceRoundingRule {
     /// Nearest 5 EGP, or 2.5 EGP for items < 25 EGP. No .99 endings.
     EgyptianCafe,
@@ -131,7 +131,7 @@ pub enum PriceRoundingRule {
 // §3  CLASSIFICATION (two parallel taxonomies)
 // ═══════════════════════════════════════════════════════════════════
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CmQuadrant {
     Star,
@@ -140,7 +140,7 @@ pub enum CmQuadrant {
     Dog,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RevenueClass {
     /// High pop + high price/unit  (analog of Star)
@@ -156,7 +156,7 @@ pub enum RevenueClass {
 /// The only function that produces this is `classify_items`. By construction:
 ///   `Cm(_)` ⟹ `kpi.cost_metrics.is_some()`
 ///   `Revenue(_)` ⟹ `kpi.cost_metrics.is_none()`
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum Classification {
     Cm { quadrant: CmQuadrant },
@@ -168,7 +168,7 @@ pub enum Classification {
 // §4  COMMON OUTPUT TYPES
 // ═══════════════════════════════════════════════════════════════════
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
     Hold,
@@ -180,7 +180,7 @@ pub enum Action {
     Monitor,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Confidence {
     Low,
@@ -188,7 +188,7 @@ pub enum Confidence {
     High,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GuardClip {
     MarginFloor,
@@ -196,13 +196,13 @@ pub enum GuardClip {
     CulturalRounding,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct WilsonInterval {
     pub lo: f64,
     pub hi: f64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Triplet {
     pub lo: f64,
     pub mid: f64,
@@ -213,7 +213,7 @@ pub struct Triplet {
 // §5  KPI TYPES
 // ═══════════════════════════════════════════════════════════════════
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ItemKpi {
     pub key: ItemKey,
     /// Whether raw unit volume crosses the classification threshold.
@@ -235,7 +235,7 @@ pub struct ItemKpi {
     pub cost_metrics: Option<CostMetrics>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CostMetrics {
     pub cost_per_serving: i64,
     pub weighted_cost: f64,
@@ -252,7 +252,7 @@ pub struct CostMetrics {
 // §6  PRICE SUGGESTION
 // ═══════════════════════════════════════════════════════════════════
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PeerComparison {
     pub same_category_count: usize,
     pub median_effective_price_peers: f64,
@@ -262,7 +262,7 @@ pub struct PeerComparison {
     pub your_position: PeerPosition,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PeerPosition {
     Above,
@@ -272,14 +272,14 @@ pub enum PeerPosition {
 
 /// Two anchors are universal; the cost-plus anchor is only meaningful with
 /// cost data, so it's optional.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PriceAnchors {
     pub cost_plus: Option<f64>,
     pub peer_median: f64,
     pub status_quo: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PriceSuggestion {
     pub key: ItemKey,
     pub item_name: String,
@@ -317,7 +317,7 @@ pub struct PriceSuggestion {
 // §7  BUNDLE SUGGESTION
 // ═══════════════════════════════════════════════════════════════════
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct BundleItemPair {
     pub item_a: ItemKey,
     pub item_b: ItemKey,
@@ -326,13 +326,13 @@ pub struct BundleItemPair {
     pub confidence_ab: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct BundleAssociation {
     pub pair_lifts: Vec<BundleItemPair>,
     pub composite_score: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct BundleForecast {
     pub expected_velocity: Triplet,
     pub inside_bundle_units_x: f64,
@@ -342,7 +342,7 @@ pub struct BundleForecast {
     pub incremental_cm: Option<Triplet>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct BundleSuggestion {
     pub focus_item: ItemKey,
     pub bundle_items: Vec<ItemKey>,
@@ -365,21 +365,21 @@ pub struct BundleSuggestion {
 // §8  REMOVAL SCENARIO (CM-tracked items only)
 // ═══════════════════════════════════════════════════════════════════
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AbsorbedBy {
     pub key: ItemKey,
     pub absorbed_units: f64,
     pub absorbed_cm: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ComplementaryLoss {
     pub key: ItemKey,
     pub lost_units: f64,
     pub lost_cm: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RemovalRecommendation {
     Remove,
@@ -388,7 +388,7 @@ pub enum RemovalRecommendation {
     NoStrongSignal,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RemovalScenario {
     pub key: ItemKey,
     pub item_name: String,
@@ -406,7 +406,7 @@ pub struct RemovalScenario {
 // §9  TOP-LEVEL REPORT
 // ═══════════════════════════════════════════════════════════════════
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, utoipa::ToSchema)]
 pub struct ModeSummary {
     pub items_total: usize,
     pub items_cm_tracked: usize,
@@ -414,7 +414,7 @@ pub struct ModeSummary {
     pub items_insufficient: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AdvisorReport {
     pub generated_at: DateTime<Utc>,
     pub window_days: f64,

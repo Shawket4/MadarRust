@@ -5,13 +5,14 @@ use uuid::Uuid;
 
 use crate::{
     auth::jwt::Claims,
-    errors::AppError,
+    errors::{AppError, AppErrorResponse},
     permissions::checker::check_permission,
 };
+use utoipa::{IntoParams, ToSchema};
 
 // ── Models ────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct DrinkRecipe {
     pub id:               Uuid,
     pub menu_item_id:     Uuid,
@@ -19,22 +20,24 @@ pub struct DrinkRecipe {
     pub org_ingredient_id: Option<Uuid>,
     pub ingredient_name:  String,
     pub unit:             String,
+    #[schema(value_type = f64)]
     pub quantity_used:    sqlx::types::BigDecimal,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct AddonIngredient {
     pub id:                Uuid,
     pub addon_item_id:     Uuid,
     pub org_ingredient_id: Option<Uuid>,
     pub ingredient_name:   String,
     pub unit:              String,
+    #[schema(value_type = f64)]
     pub quantity_used:     sqlx::types::BigDecimal,
 }
 
 // ── Request types ─────────────────────────────────────────────
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpsertDrinkRecipeRequest {
     pub size_label:        String,
     pub org_ingredient_id: Option<Uuid>,
@@ -44,7 +47,7 @@ pub struct UpsertDrinkRecipeRequest {
     pub quantity_used:     f64,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpsertAddonIngredientRequest {
     pub org_ingredient_id: Option<Uuid>,
     pub ingredient_name:   String,
@@ -53,13 +56,22 @@ pub struct UpsertAddonIngredientRequest {
     pub quantity_used:     f64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct DeleteRecipeQuery {
     pub ingredient_name: String,
 }
 
 // ── GET /recipes/drinks/:menu_item_id ─────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/recipes/drinks/{menu_item_id}",
+    tag = "recipes",
+    params(("menu_item_id" = Uuid, Path, description = "Menu item ID")),
+    responses((status = 200, description = "List drink recipes", body = Vec<DrinkRecipe>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_drink_recipes(
     req:          HttpRequest,
     pool:         web::Data<PgPool>,
@@ -90,6 +102,15 @@ pub async fn list_drink_recipes(
 
 // ── POST /recipes/drinks/:menu_item_id ────────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/recipes/drinks/{menu_item_id}",
+    tag = "recipes",
+    params(("menu_item_id" = Uuid, Path, description = "Menu item ID")),
+    request_body = UpsertDrinkRecipeRequest,
+    responses((status = 200, description = "Drink recipe upserted", body = DrinkRecipe), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn upsert_drink_recipe(
     req:          HttpRequest,
     pool:         web::Data<PgPool>,
@@ -135,6 +156,18 @@ pub async fn upsert_drink_recipe(
 
 // ── DELETE /recipes/drinks/:menu_item_id/:size ────────────────
 
+#[utoipa::path(
+    delete,
+    path = "/recipes/drinks/{menu_item_id}/{size}",
+    tag = "recipes",
+    params(
+        ("menu_item_id" = Uuid, Path, description = "Menu item ID"),
+        ("size" = String, Path, description = "Size label")
+    ),
+    params(DeleteRecipeQuery),
+    responses((status = 204, description = "Drink recipe deleted"), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn delete_drink_recipe(
     req:   HttpRequest,
     pool:  web::Data<PgPool>,
@@ -166,6 +199,14 @@ pub async fn delete_drink_recipe(
 
 // ── GET /recipes/addons/:addon_item_id ────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/recipes/addons/{addon_item_id}",
+    tag = "recipes",
+    params(("addon_item_id" = Uuid, Path, description = "Addon item ID")),
+    responses((status = 200, description = "List addon ingredients", body = Vec<AddonIngredient>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_addon_ingredients(
     req:           HttpRequest,
     pool:          web::Data<PgPool>,
@@ -196,6 +237,15 @@ pub async fn list_addon_ingredients(
 
 // ── POST /recipes/addons/:addon_item_id ───────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/recipes/addons/{addon_item_id}",
+    tag = "recipes",
+    params(("addon_item_id" = Uuid, Path, description = "Addon item ID")),
+    request_body = UpsertAddonIngredientRequest,
+    responses((status = 200, description = "Addon ingredient upserted", body = AddonIngredient), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn upsert_addon_ingredient(
     req:           HttpRequest,
     pool:          web::Data<PgPool>,
@@ -240,6 +290,15 @@ pub async fn upsert_addon_ingredient(
 
 // ── DELETE /recipes/addons/:addon_item_id ─────────────────────
 
+#[utoipa::path(
+    delete,
+    path = "/recipes/addons/{addon_item_id}",
+    tag = "recipes",
+    params(("addon_item_id" = Uuid, Path, description = "Addon item ID")),
+    params(DeleteRecipeQuery),
+    responses((status = 204, description = "Addon ingredient deleted"), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn delete_addon_ingredient(
     req:   HttpRequest,
     pool:  web::Data<PgPool>,

@@ -5,14 +5,15 @@ use uuid::Uuid;
 
 use crate::{
     auth::jwt::Claims,
-    errors::AppError,
+    errors::{AppError, AppErrorResponse},
     models::UserRole,
     permissions::checker::check_permission,
 };
+use utoipa::ToSchema;
 
 // ── Models ────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct Shift {
     pub id:                       Uuid,
     pub branch_id:                Uuid,
@@ -35,7 +36,7 @@ pub struct Shift {
     pub notes:                    Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct CashMovement {
     pub id:            Uuid,
     pub shift_id:      Uuid,
@@ -46,21 +47,21 @@ pub struct CashMovement {
     pub created_at:    chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct ShiftPreFill {
     pub has_open_shift:         bool,
     pub open_shift:             Option<Shift>,
     pub suggested_opening_cash: i32,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct PaymentSummaryRow {
     pub payment_method: String,
     pub total:          i64,
     pub order_count:    i64,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct CashMovementSummaryRow {
     pub amount:        i32,
     pub note:          String,
@@ -68,7 +69,7 @@ pub struct CashMovementSummaryRow {
     pub created_at:    chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct ShiftReportResponse {
     pub shift:               Shift,
     pub payment_summary:     Vec<PaymentSummaryRow>,
@@ -85,7 +86,7 @@ pub struct ShiftReportResponse {
 
 // ── Request types ─────────────────────────────────────────────
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct OpenShiftRequest {
     pub id:                  Option<Uuid>,
     pub opening_cash:        i32,
@@ -94,20 +95,20 @@ pub struct OpenShiftRequest {
     pub opened_at:           Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CashMovementRequest {
     pub amount: i32,
     pub note:   String,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct InventoryCountInput {
     pub branch_inventory_id: Uuid,
     pub actual_stock:        f64,
     pub note:                Option<String>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CloseShiftRequest {
     pub closing_cash_declared: i32,
     pub cash_note:             Option<String>,
@@ -115,7 +116,7 @@ pub struct CloseShiftRequest {
     pub closed_at:             Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct ForceCloseRequest {
     pub reason: Option<String>,
 }
@@ -124,6 +125,14 @@ pub struct ForceCloseRequest {
 
 // ── GET /shifts/branches/:branch_id/current ───────────────────
 
+#[utoipa::path(
+    get,
+    path = "/shifts/branches/{branch_id}/current",
+    tag = "shifts",
+    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    responses((status = 200, description = "Current shift info", body = ShiftPreFill), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn get_current_shift(
     req:       HttpRequest,
     pool:      web::Data<PgPool>,
@@ -187,6 +196,15 @@ pub async fn get_current_shift(
 
 // ── POST /shifts/branches/:branch_id/open ─────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/shifts/branches/{branch_id}/open",
+    tag = "shifts",
+    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    request_body = OpenShiftRequest,
+    responses((status = 201, description = "Shift opened", body = Shift), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn open_shift(
     req:       HttpRequest,
     pool:      web::Data<PgPool>,
@@ -284,6 +302,14 @@ pub async fn open_shift(
 
 // ── GET /shifts/branches/:branch_id ───────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/shifts/branches/{branch_id}",
+    tag = "shifts",
+    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    responses((status = 200, description = "List shifts", body = Vec<Shift>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_shifts(
     req:       HttpRequest,
     pool:      web::Data<PgPool>,
@@ -320,6 +346,14 @@ pub async fn list_shifts(
 
 // ── GET /shifts/:shift_id ─────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/shifts/{shift_id}",
+    tag = "shifts",
+    params(("shift_id" = Uuid, Path, description = "Shift ID")),
+    responses((status = 200, description = "Get shift", body = Shift), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn get_shift(
     req:      HttpRequest,
     pool:     web::Data<PgPool>,
@@ -340,6 +374,14 @@ pub async fn get_shift(
 // (open or closed). printed_at is always NOW() so the client can
 // use: closed_at if available, otherwise printed_at.
 
+#[utoipa::path(
+    get,
+    path = "/shifts/{shift_id}/report",
+    tag = "shifts",
+    params(("shift_id" = Uuid, Path, description = "Shift ID")),
+    responses((status = 200, description = "Get shift report", body = ShiftReportResponse), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn get_shift_report(
     req:      HttpRequest,
     pool:     web::Data<PgPool>,
@@ -428,6 +470,15 @@ pub async fn get_shift_report(
 
 // ── POST /shifts/:shift_id/cash-movements ─────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/shifts/{shift_id}/cash-movements",
+    tag = "shifts",
+    params(("shift_id" = Uuid, Path, description = "Shift ID")),
+    request_body = CashMovementRequest,
+    responses((status = 201, description = "Add cash movement", body = CashMovement), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn add_cash_movement(
     req:      HttpRequest,
     pool:     web::Data<PgPool>,
@@ -476,6 +527,14 @@ pub async fn add_cash_movement(
 
 // ── GET /shifts/:shift_id/cash-movements ──────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/shifts/{shift_id}/cash-movements",
+    tag = "shifts",
+    params(("shift_id" = Uuid, Path, description = "Shift ID")),
+    responses((status = 200, description = "List cash movements", body = Vec<CashMovement>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_cash_movements(
     req:      HttpRequest,
     pool:     web::Data<PgPool>,
@@ -508,24 +567,36 @@ pub async fn list_cash_movements(
 
 // ── POST /shifts/:shift_id/close ──────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct InventoryCountRow {
     pub branch_inventory_id: Uuid,
     pub ingredient_name:     String,
     pub unit:                String,
+    #[schema(value_type = f64)]
     pub expected_stock:      sqlx::types::BigDecimal,
+    #[schema(value_type = f64)]
     pub actual_stock:        sqlx::types::BigDecimal,
+    #[schema(value_type = f64)]
     pub discrepancy:         sqlx::types::BigDecimal,
     pub is_suspicious:       bool,
     pub note:                Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct CloseShiftResponse {
     pub shift:            Shift,
     pub inventory_counts: Vec<InventoryCountRow>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/shifts/{shift_id}/close",
+    tag = "shifts",
+    params(("shift_id" = Uuid, Path, description = "Shift ID")),
+    request_body = CloseShiftRequest,
+    responses((status = 200, description = "Close shift", body = CloseShiftResponse), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn close_shift(
     req:      HttpRequest,
     pool:     web::Data<PgPool>,
@@ -683,6 +754,15 @@ pub async fn close_shift(
 
 // ── POST /shifts/:shift_id/force-close ────────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/shifts/{shift_id}/force-close",
+    tag = "shifts",
+    params(("shift_id" = Uuid, Path, description = "Shift ID")),
+    request_body = ForceCloseRequest,
+    responses((status = 200, description = "Force close shift", body = Shift), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn force_close_shift(
     req:      HttpRequest,
     pool:     web::Data<PgPool>,
@@ -738,6 +818,14 @@ pub async fn force_close_shift(
 
 // ── DELETE /shifts/:shift_id ──────────────────────────────────
 
+#[utoipa::path(
+    delete,
+    path = "/shifts/{shift_id}",
+    tag = "shifts",
+    params(("shift_id" = Uuid, Path, description = "Shift ID")),
+    responses((status = 204, description = "Shift deleted"), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn delete_shift(
     req:      HttpRequest,
     pool:     web::Data<PgPool>,

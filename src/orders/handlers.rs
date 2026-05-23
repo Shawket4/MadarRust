@@ -8,10 +8,11 @@ use chrono::Utc;
 
 use crate::{
     auth::jwt::Claims,
-    errors::AppError,
+    errors::{AppError, AppErrorResponse},
     models::UserRole,
     permissions::checker::check_permission,
 };
+use utoipa::{IntoParams, ToSchema};
 
 /// Default page size when listing orders for a single shift (POS home stats, shift history).
 const DEFAULT_PER_PAGE_SHIFT: i64 = 1000;
@@ -30,7 +31,7 @@ const ORDER_SELECT: &str =
 
 // ── Models ────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct Order {
     pub id:                 Uuid,
     pub branch_id:          Uuid,
@@ -59,7 +60,7 @@ pub struct Order {
     pub created_at:         chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct OrderItem {
     pub id:                  Uuid,
     pub order_id:            Uuid,
@@ -75,7 +76,7 @@ pub struct OrderItem {
     pub bundle_unit_price:   Option<i32>,
 }
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct OrderItemAddon {
     pub id:            Uuid,
     pub order_item_id: Uuid,
@@ -86,7 +87,7 @@ pub struct OrderItemAddon {
     pub line_total:    i32,
 }
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct OrderItemOptional {
     pub id:               Uuid,
     pub order_item_id:    Uuid,
@@ -96,17 +97,18 @@ pub struct OrderItemOptional {
     pub org_ingredient_id: Option<Uuid>,
     pub ingredient_name:  Option<String>,
     pub ingredient_unit:  Option<String>,
+    #[schema(value_type = Option<f64>)]
     pub quantity_deducted: Option<sqlx::types::BigDecimal>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct OrderFull {
     #[serde(flatten)]
     pub order: Order,
     pub items: Vec<OrderItemFull>,
 }
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct OrderBundleComponentAddon {
     pub id:                Uuid,
     pub order_line_id:     Uuid,
@@ -118,7 +120,7 @@ pub struct OrderBundleComponentAddon {
     pub line_total:        i32,
 }
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct OrderBundleComponentOptional {
     pub id:                Uuid,
     pub order_line_id:     Uuid,
@@ -128,7 +130,7 @@ pub struct OrderBundleComponentOptional {
     pub price:             i32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct OrderBundleComponentFull {
     pub item_id:    Uuid,
     pub item_name:  String,
@@ -138,7 +140,7 @@ pub struct OrderBundleComponentFull {
     pub optionals:  Vec<OrderBundleComponentOptional>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct OrderItemFull {
     #[serde(flatten)]
     pub item:              OrderItem,
@@ -148,7 +150,7 @@ pub struct OrderItemFull {
     pub bundle_components: Vec<OrderBundleComponentFull>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, ToSchema)]
 pub struct PaymentSplitInput {
     pub method:    String,
     pub amount:    i32,
@@ -157,7 +159,7 @@ pub struct PaymentSplitInput {
 
 pub use crate::orders::component_resolve::AddonInput;
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, ToSchema)]
 pub struct OrderItemInput {
     pub menu_item_id:      Option<Uuid>,
     pub bundle_id:         Option<Uuid>,
@@ -170,7 +172,7 @@ pub struct OrderItemInput {
     pub notes:             Option<String>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, ToSchema)]
 pub struct CreateOrderRequest {
     pub branch_id:          Uuid,
     pub shift_id:           Uuid,
@@ -188,14 +190,15 @@ pub struct CreateOrderRequest {
     pub created_at:         Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, ToSchema)]
 pub struct VoidOrderRequest {
     pub reason:            String,
     pub voided_at:         Option<chrono::DateTime<chrono::Utc>>,
     pub restore_inventory: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListOrdersQuery {
     pub branch_id:      Option<Uuid>,
     pub shift_id:       Option<Uuid>,
@@ -209,7 +212,7 @@ pub struct ListOrdersQuery {
     pub to:             Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct OrderSummary {
     pub revenue:   i64,
     pub completed: i64,
@@ -218,7 +221,7 @@ pub struct OrderSummary {
     pub tips:      i64,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct PaginatedOrders {
     pub data:        Vec<Order>,
     pub total:       i64,
@@ -228,7 +231,7 @@ pub struct PaginatedOrders {
     pub summary:     OrderSummary,   // ← add this
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
 pub struct OrderPayment {
     pub id:        Uuid,
     pub order_id:  Uuid,
@@ -237,7 +240,7 @@ pub struct OrderPayment {
     pub reference: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct OrderExport {
     #[serde(flatten)]
     pub order:    Order,
@@ -245,7 +248,7 @@ pub struct OrderExport {
     pub payments: Vec<OrderPayment>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ExportResponse {
     pub data:             Vec<OrderExport>,
     pub total:            i64,
@@ -254,7 +257,8 @@ pub struct ExportResponse {
     pub ingredient_costs: std::collections::HashMap<Uuid, i32>,  // NEW: org_ingredient_id → cost_per_unit (piastres)
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ExportOrdersQuery {
     pub branch_id:      Option<Uuid>,
     pub shift_id:       Option<Uuid>,
@@ -279,6 +283,14 @@ struct InventoryDeduction {
 
 // ── POST /orders ──────────────────────────────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/orders",
+    tag = "orders",
+    request_body = CreateOrderRequest,
+    responses((status = 201, description = "Order created", body = OrderFull), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn create_order(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -1147,6 +1159,14 @@ pub async fn create_order(
 
 // ── GET /orders ───────────────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/orders",
+    tag = "orders",
+    params(ListOrdersQuery),
+    responses((status = 200, description = "List orders", body = PaginatedOrders), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_orders(
     req:   HttpRequest,
     pool:  web::Data<PgPool>,
@@ -1291,6 +1311,14 @@ pub async fn list_orders(
 
 // ── GET /orders/:id ───────────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/orders/{order_id}",
+    tag = "orders",
+    params(("order_id" = Uuid, Path, description = "Order ID")),
+    responses((status = 200, description = "Get order", body = OrderFull), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn get_order(
     req:      HttpRequest,
     pool:     web::Data<PgPool>,
@@ -1306,6 +1334,15 @@ pub async fn get_order(
 
 // ── POST /orders/:id/void ─────────────────────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/orders/{order_id}/void",
+    tag = "orders",
+    params(("order_id" = Uuid, Path, description = "Order ID")),
+    request_body = VoidOrderRequest,
+    responses((status = 200, description = "Void order", body = Order), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn void_order(
     req:      HttpRequest,
     pool:     web::Data<PgPool>,
@@ -1383,14 +1420,14 @@ pub async fn void_order(
 
 // ── POST /orders/preview-recipe ───────────────────────────────
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, ToSchema)]
 pub struct PreviewAddonInput {
     pub addon_item_id: Uuid,
     #[serde(default = "crate::orders::component_resolve::default_qty")]
     pub quantity: i32,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, ToSchema)]
 pub struct PreviewRecipeRequest {
     pub menu_item_id:      Uuid,
     pub size_label:        Option<String>,
@@ -1398,7 +1435,7 @@ pub struct PreviewRecipeRequest {
     pub optional_field_ids: Vec<Uuid>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, ToSchema)]
 pub struct PreviewIngredient {
     pub org_ingredient_id: Option<Uuid>,
     pub ingredient_name: String,
@@ -1408,6 +1445,14 @@ pub struct PreviewIngredient {
     pub category:        String,
 }
 
+#[utoipa::path(
+    post,
+    path = "/orders/preview-recipe",
+    tag = "orders",
+    request_body = PreviewRecipeRequest,
+    responses((status = 200, description = "Preview recipe", body = Vec<PreviewIngredient>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn preview_recipe(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -1763,6 +1808,14 @@ fn validate_void_reason(reason: &str) -> Result<(), AppError> {
 }
 
 #[allow(unused_assignments)]
+#[utoipa::path(
+    get,
+    path = "/orders/export",
+    tag = "orders",
+    params(ExportOrdersQuery),
+    responses((status = 200, description = "Export orders", body = ExportResponse), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn export_orders(
     req:   HttpRequest,
     pool:  web::Data<PgPool>,

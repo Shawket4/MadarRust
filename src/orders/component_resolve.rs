@@ -5,8 +5,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 use crate::errors::AppError;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone, ToSchema)]
 pub struct AddonInput {
     pub addon_item_id: Uuid,
     #[serde(default = "default_qty")]
@@ -15,7 +16,7 @@ pub struct AddonInput {
 
 pub fn default_qty() -> i32 { 1 }
 
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone, ToSchema)]
 pub struct BundleComponentInput {
     pub item_id: Uuid,
     pub quantity: i32,

@@ -9,13 +9,14 @@ use actix_web::HttpMessage;
 
 use crate::{
     auth::{guards::require_same_org, jwt::Claims},
-    errors::AppError,
+    errors::{AppError, AppErrorResponse},
     permissions::checker::check_permission,
 };
+use utoipa::{IntoParams, ToSchema};
 
 // ── Models & Enums ────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type, ToSchema)]
 #[sqlx(type_name = "bundle_status", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum BundleStatus {
@@ -24,7 +25,7 @@ pub enum BundleStatus {
     Archived,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct Bundle {
     pub id: Uuid,
     pub org_id: Uuid,
@@ -46,7 +47,7 @@ pub struct Bundle {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow, ToSchema)]
 pub struct BundleComponent {
     pub id: Uuid,
     pub bundle_id: Uuid,
@@ -55,7 +56,7 @@ pub struct BundleComponent {
     pub position: i32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct BundleComponentHydrated {
     pub id: Uuid,
     pub bundle_id: Uuid,
@@ -67,7 +68,7 @@ pub struct BundleComponentHydrated {
     pub item_cost: i32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct BundleWithComponents {
     #[serde(flatten)]
     pub bundle: Bundle,
@@ -79,12 +80,14 @@ pub struct BundleWithComponents {
 // ── Payloads & Queries ────────────────────────────────────────
 
 #[allow(dead_code)]
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct OrgQuery {
     pub org_id: Uuid,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListBundlesQuery {
     pub org_id: Option<Uuid>,
     pub status: Option<BundleStatus>,
@@ -94,7 +97,7 @@ pub struct ListBundlesQuery {
     pub per_page: Option<i64>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
 pub struct PaginatedBundles {
     pub data: Vec<BundleWithComponents>,
     pub total: i64,
@@ -103,14 +106,14 @@ pub struct PaginatedBundles {
     pub total_pages: i64,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CreateBundleComponentInput {
     pub item_id: Uuid,
     pub quantity: i32,
     pub position: Option<i32>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CreateBundleRequest {
     pub org_id: Uuid,
     pub name: String,
@@ -128,7 +131,7 @@ pub struct CreateBundleRequest {
     pub branch_ids: Option<Vec<Uuid>>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpdateBundleRequest {
     pub name: Option<String>,
     pub name_translations: Option<serde_json::Value>,
@@ -152,26 +155,28 @@ pub struct UpdateBundleRequest {
     pub branch_ids: Option<Vec<Uuid>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct AvailableBundlesQuery {
     pub branch_id: Uuid,
     pub at: Option<DateTime<Utc>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct PerformanceQuery {
     pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct ComponentPopularity {
     pub item_id: Uuid,
     pub item_name: String,
     pub quantity_sold: i64,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
 pub struct BundlePerformanceResponse {
     pub sales_volume: i64,
     pub gross_revenue: i64,
@@ -363,6 +368,14 @@ async fn validate_bundle_rules(
 
 // ── CRUD Handlers ─────────────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/bundles",
+    tag = "bundles",
+    params(ListBundlesQuery),
+    responses((status = 200, description = "List bundles", body = PaginatedBundles), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_bundles(
     req: HttpRequest,
     pool: web::Data<PgPool>,
@@ -444,6 +457,14 @@ pub async fn list_bundles(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/bundles",
+    tag = "bundles",
+    request_body = CreateBundleRequest,
+    responses((status = 201, description = "Bundle created", body = BundleWithComponents), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn create_bundle(
     req: HttpRequest,
     pool: web::Data<PgPool>,
@@ -540,6 +561,14 @@ pub async fn create_bundle(
     Ok(HttpResponse::Created().json(full))
 }
 
+#[utoipa::path(
+    get,
+    path = "/bundles/{id}",
+    tag = "bundles",
+    params(("id" = Uuid, Path, description = "Bundle ID")),
+    responses((status = 200, description = "Get bundle", body = BundleWithComponents), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn get_bundle(
     req: HttpRequest,
     pool: web::Data<PgPool>,
@@ -558,6 +587,15 @@ pub async fn get_bundle(
     Ok(HttpResponse::Ok().json(full))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/bundles/{id}",
+    tag = "bundles",
+    params(("id" = Uuid, Path, description = "Bundle ID")),
+    request_body = UpdateBundleRequest,
+    responses((status = 200, description = "Bundle updated", body = BundleWithComponents), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn update_bundle(
     req: HttpRequest,
     pool: web::Data<PgPool>,
@@ -735,6 +773,14 @@ pub async fn update_bundle(
     Ok(HttpResponse::Ok().json(full))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/bundles/{id}",
+    tag = "bundles",
+    params(("id" = Uuid, Path, description = "Bundle ID")),
+    responses((status = 200, description = "Bundle deleted"), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn delete_bundle(
     req: HttpRequest,
     pool: web::Data<PgPool>,
@@ -785,6 +831,14 @@ pub async fn delete_bundle(
 
 // ── Lifecycle Handlers ────────────────────────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/bundles/{id}/activate",
+    tag = "bundles",
+    params(("id" = Uuid, Path, description = "Bundle ID")),
+    responses((status = 200, description = "Bundle activated", body = BundleWithComponents), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn activate_bundle(
     req: HttpRequest,
     pool: web::Data<PgPool>,
@@ -840,6 +894,14 @@ pub async fn activate_bundle(
     Ok(HttpResponse::Ok().json(activated))
 }
 
+#[utoipa::path(
+    post,
+    path = "/bundles/{id}/archive",
+    tag = "bundles",
+    params(("id" = Uuid, Path, description = "Bundle ID")),
+    responses((status = 200, description = "Bundle archived", body = BundleWithComponents), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn archive_bundle(
     req: HttpRequest,
     pool: web::Data<PgPool>,
@@ -878,6 +940,14 @@ pub async fn archive_bundle(
 
 // ── POS Available Catalog Handler ──────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/bundles/available",
+    tag = "bundles",
+    params(AvailableBundlesQuery),
+    responses((status = 200, description = "List available bundles", body = Vec<BundleWithComponents>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn available_bundles(
     req: HttpRequest,
     pool: web::Data<PgPool>,
@@ -950,6 +1020,15 @@ pub async fn available_bundles(
 
 // ── Performance Handler ────────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/bundles/{id}/performance",
+    tag = "bundles",
+    params(("id" = Uuid, Path, description = "Bundle ID")),
+    params(PerformanceQuery),
+    responses((status = 200, description = "Bundle performance", body = BundlePerformanceResponse), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn bundle_performance(
     req: HttpRequest,
     pool: web::Data<PgPool>,

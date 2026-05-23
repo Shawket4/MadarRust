@@ -7,7 +7,6 @@
 //! `cargo run --bin export-openapi` reach `ApiDoc` without spinning up
 //! the HTTP server.
 
-pub mod adjustments;
 pub mod auth;
 pub mod branches;
 pub mod bundles;

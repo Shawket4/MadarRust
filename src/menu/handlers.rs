@@ -7,14 +7,15 @@ use actix_web::HttpMessage;
 
 use crate::{
     auth::{guards::require_same_org, jwt::Claims},
-    errors::AppError,
+    errors::{AppError, AppErrorResponse},
     permissions::checker::check_permission,
     uploads::handlers::delete_old_image,
 };
+use utoipa::{IntoParams, ToSchema};
 
 // ── Models ────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct Category {
     pub id:            Uuid,
     pub org_id:        Uuid,
@@ -28,7 +29,7 @@ pub struct Category {
     pub deleted_at:    Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct MenuItem {
     pub id:            Uuid,
     pub org_id:        Uuid,
@@ -46,7 +47,7 @@ pub struct MenuItem {
     pub default_milk_addon_id: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct ItemSize {
     pub id:             Uuid,
     pub menu_item_id:   Uuid,
@@ -56,7 +57,7 @@ pub struct ItemSize {
     pub is_active:      bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct AddonItem {
     pub id:            Uuid,
     pub org_id:        Uuid,
@@ -75,7 +76,7 @@ pub struct AddonItem {
 
 // ── Addon Slot models ─────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct AddonSlot {
     pub id:             Uuid,
     pub menu_item_id:   Uuid,
@@ -90,7 +91,7 @@ pub struct AddonSlot {
 
 // ── Addon Override models ─────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct AddonOverride {
     pub id:                         Uuid,
     pub menu_item_id:               Uuid,
@@ -100,6 +101,7 @@ pub struct AddonOverride {
     pub ingredient_name:            String,
     pub org_ingredient_id:          Option<Uuid>,
     pub ingredient_unit:            String,
+    #[schema(value_type = f64)]
     pub quantity_used:              sqlx::types::BigDecimal,
     pub replaces_org_ingredient_id: Option<Uuid>,
     pub replaces_ingredient_name:   Option<String>,
@@ -109,9 +111,10 @@ pub struct AddonOverride {
     pub updated_at:                 DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct MenuItemRecipe {
     pub org_ingredient_id: Option<Uuid>,
+    #[schema(value_type = f64)]
     pub quantity_used:     sqlx::types::BigDecimal,
     pub ingredient_name:   String,
     pub ingredient_unit:   String,
@@ -119,9 +122,10 @@ pub struct MenuItemRecipe {
     pub size_label:        String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct AddonItemIngredient {
     pub org_ingredient_id: Option<Uuid>,
+    #[schema(value_type = f64)]
     pub quantity_used:     sqlx::types::BigDecimal,
     pub ingredient_name:   String,
     pub ingredient_unit:   String,
@@ -129,7 +133,7 @@ pub struct AddonItemIngredient {
 
 // ── MenuItemFull — slots embedded instead of option_groups ────
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
 pub struct MenuItemFull {
     #[serde(flatten)]
     pub item:            MenuItem,
@@ -141,7 +145,7 @@ pub struct MenuItemFull {
 
 // ── Public Menu Models ────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
 pub struct PublicMenuResponse {
     pub org_id:     Uuid,
     pub org_name:   String,
@@ -150,7 +154,7 @@ pub struct PublicMenuResponse {
     pub categories: Vec<PublicCategory>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
 pub struct PublicCategory {
     pub id:            Uuid,
     pub name:          String,
@@ -160,7 +164,7 @@ pub struct PublicCategory {
     pub items:         Vec<PublicMenuItem>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
 pub struct PublicMenuItem {
     pub id:            Uuid,
     pub name:          String,
@@ -173,14 +177,14 @@ pub struct PublicMenuItem {
     pub addon_slots:   Vec<PublicAddonSlot>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
 pub struct PublicItemSize {
     pub id:             Uuid,
     pub label:          String,
     pub price_override: i32,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
 pub struct PublicAddonSlot {
     pub id:             Uuid,
     pub addon_type:     String,
@@ -191,7 +195,7 @@ pub struct PublicAddonSlot {
     pub addon_items:    Vec<PublicAddonItem>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
 pub struct PublicAddonItem {
     pub id:            Uuid,
     pub name:          String,
@@ -200,25 +204,28 @@ pub struct PublicAddonItem {
 
 // ── Request types ─────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct OrgQuery {
     pub org_id: Uuid,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct MenuItemQuery {
     pub org_id:      Uuid,
     pub category_id: Option<Uuid>,
     pub full:        Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct AddonItemQuery {
     pub org_id:     Uuid,
     pub addon_type: Option<String>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CreateCategoryRequest {
     pub org_id:        Uuid,
     pub name:          String,
@@ -226,7 +233,7 @@ pub struct CreateCategoryRequest {
     pub display_order: Option<i32>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpdateCategoryRequest {
     pub name:          Option<String>,
     #[serde(default, deserialize_with = "deserialize_double_option")]
@@ -235,7 +242,7 @@ pub struct UpdateCategoryRequest {
     pub is_active:     Option<bool>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CreateMenuItemRequest {
     pub org_id:        Uuid,
     pub category_id:   Uuid,
@@ -246,7 +253,7 @@ pub struct CreateMenuItemRequest {
     pub display_order: Option<i32>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpdateMenuItemRequest {
     pub category_id:   Option<Uuid>,
     pub name:          Option<String>,
@@ -258,7 +265,7 @@ pub struct UpdateMenuItemRequest {
     pub is_active:     Option<bool>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CreateAddonItemRequest {
     pub org_id:        Uuid,
     pub name:          String,
@@ -267,7 +274,7 @@ pub struct CreateAddonItemRequest {
     pub display_order: Option<i32>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpdateAddonItemRequest {
     pub name:          Option<String>,
     pub addon_type:    Option<String>,
@@ -276,14 +283,14 @@ pub struct UpdateAddonItemRequest {
     pub is_active:     Option<bool>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpsertSizeRequest {
     pub label:          String,
     pub price_override: i32,
     pub display_order:  Option<i32>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CreateAddonSlotRequest {
     pub addon_type:     String,
     pub label:          Option<String>,
@@ -293,7 +300,7 @@ pub struct CreateAddonSlotRequest {
     pub display_order:  Option<i32>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpdateAddonSlotRequest {
     pub label:          Option<String>,
     pub is_required:    Option<bool>,
@@ -302,7 +309,7 @@ pub struct UpdateAddonSlotRequest {
     pub display_order:  Option<i32>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpsertAddonOverrideRequest {
     pub addon_item_id:              Uuid,
     pub size_label:                 Option<String>,
@@ -316,6 +323,14 @@ pub struct UpsertAddonOverrideRequest {
 
 // ── Categories ────────────────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/categories",
+    tag = "menu",
+    params(OrgQuery),
+    responses((status = 200, description = "List categories", body = Vec<Category>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_categories(
     req:   HttpRequest,
     pool:  web::Data<PgPool>,
@@ -339,6 +354,14 @@ pub async fn list_categories(
     Ok(HttpResponse::Ok().json(rows))
 }
 
+#[utoipa::path(
+    post,
+    path = "/categories",
+    tag = "menu",
+    request_body = CreateCategoryRequest,
+    responses((status = 201, description = "Category created", body = Category), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn create_category(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -364,6 +387,15 @@ pub async fn create_category(
     Ok(HttpResponse::Created().json(row))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/categories/{id}",
+    tag = "menu",
+    params(("id" = Uuid, Path, description = "Category ID")),
+    request_body = UpdateCategoryRequest,
+    responses((status = 200, description = "Category updated", body = Category), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn update_category(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -410,6 +442,14 @@ pub async fn update_category(
     Ok(HttpResponse::Ok().json(row))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/categories/{id}",
+    tag = "menu",
+    params(("id" = Uuid, Path, description = "Category ID")),
+    responses((status = 204, description = "Category deleted"), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn delete_category(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -433,6 +473,14 @@ pub async fn delete_category(
 
 // ── Menu Items ────────────────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/menu-items",
+    tag = "menu",
+    params(MenuItemQuery),
+    responses((status = 200, description = "List menu items", body = Vec<MenuItemFull>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_menu_items(
     req:   HttpRequest,
     pool:  web::Data<PgPool>,
@@ -503,6 +551,14 @@ pub async fn list_menu_items(
     Ok(HttpResponse::Ok().json(items))
 }
 
+#[utoipa::path(
+    get,
+    path = "/menu-items/{id}",
+    tag = "menu",
+    params(("id" = Uuid, Path, description = "Menu item ID")),
+    responses((status = 200, description = "Get menu item", body = MenuItemFull), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn get_menu_item(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -522,6 +578,14 @@ pub async fn get_menu_item(
     Ok(HttpResponse::Ok().json(MenuItemFull { item, sizes, addon_slots, optional_fields, recipes }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/menu-items",
+    tag = "menu",
+    request_body = CreateMenuItemRequest,
+    responses((status = 201, description = "Menu item created", body = MenuItemFull), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn create_menu_item(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -575,6 +639,15 @@ pub async fn create_menu_item(
     }))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/menu-items/{id}",
+    tag = "menu",
+    params(("id" = Uuid, Path, description = "Menu item ID")),
+    request_body = UpdateMenuItemRequest,
+    responses((status = 200, description = "Menu item updated", body = MenuItem), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn update_menu_item(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -665,6 +738,14 @@ pub async fn update_menu_item(
     Ok(HttpResponse::Ok().json(item))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/menu-items/{id}",
+    tag = "menu",
+    params(("id" = Uuid, Path, description = "Menu item ID")),
+    responses((status = 204, description = "Menu item deleted"), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn delete_menu_item(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -696,6 +777,15 @@ pub async fn delete_menu_item(
 
 // ── Sizes ─────────────────────────────────────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/menu-items/{id}/sizes",
+    tag = "menu",
+    params(("id" = Uuid, Path, description = "Menu item ID")),
+    request_body = UpsertSizeRequest,
+    responses((status = 200, description = "Size upserted", body = ItemSize), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn upsert_size(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -770,6 +860,17 @@ if old_price.is_none_or(|p| p != body.price_override) {
     Ok(HttpResponse::Ok().json(row))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/menu-items/{id}/sizes/{sid}",
+    tag = "menu",
+    params(
+        ("id" = Uuid, Path, description = "Menu item ID"),
+        ("sid" = Uuid, Path, description = "Size ID")
+    ),
+    responses((status = 204, description = "Size deleted"), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn delete_size(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -817,6 +918,14 @@ pub async fn delete_size(
 
 // ── Addon Items ───────────────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/addon-items",
+    tag = "menu",
+    params(AddonItemQuery),
+    responses((status = 200, description = "List addon items", body = Vec<AddonItem>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_addon_items(
     req:   HttpRequest,
     pool:  web::Data<PgPool>,
@@ -860,6 +969,14 @@ pub async fn list_addon_items(
     Ok(HttpResponse::Ok().json(rows))
 }
 
+#[utoipa::path(
+    post,
+    path = "/addon-items",
+    tag = "menu",
+    request_body = CreateAddonItemRequest,
+    responses((status = 201, description = "Addon item created", body = AddonItem), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn create_addon_item(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -889,6 +1006,15 @@ pub async fn create_addon_item(
     Ok(HttpResponse::Created().json(row))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/addon-items/{id}",
+    tag = "menu",
+    params(("id" = Uuid, Path, description = "Addon item ID")),
+    request_body = UpdateAddonItemRequest,
+    responses((status = 200, description = "Addon item updated", body = AddonItem), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn update_addon_item(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -928,6 +1054,14 @@ pub async fn update_addon_item(
     Ok(HttpResponse::Ok().json(row))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/addon-items/{id}",
+    tag = "menu",
+    params(("id" = Uuid, Path, description = "Addon item ID")),
+    responses((status = 204, description = "Addon item deleted"), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn delete_addon_item(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -949,6 +1083,14 @@ pub async fn delete_addon_item(
 
 // ── Addon Slots ───────────────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/menu-items/{id}/addon-slots",
+    tag = "menu",
+    params(("id" = Uuid, Path, description = "Menu item ID")),
+    responses((status = 200, description = "List addon slots", body = Vec<AddonSlot>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_addon_slots(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -964,6 +1106,15 @@ pub async fn list_addon_slots(
     Ok(HttpResponse::Ok().json(slots))
 }
 
+#[utoipa::path(
+    post,
+    path = "/menu-items/{id}/addon-slots",
+    tag = "menu",
+    params(("id" = Uuid, Path, description = "Menu item ID")),
+    request_body = CreateAddonSlotRequest,
+    responses((status = 201, description = "Addon slot created", body = AddonSlot), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn create_addon_slot(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -1003,6 +1154,18 @@ pub async fn create_addon_slot(
     Ok(HttpResponse::Created().json(row))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/menu-items/{id}/addon-slots/{slot_id}",
+    tag = "menu",
+    params(
+        ("id" = Uuid, Path, description = "Menu item ID"),
+        ("slot_id" = Uuid, Path, description = "Addon slot ID")
+    ),
+    request_body = UpdateAddonSlotRequest,
+    responses((status = 200, description = "Addon slot updated", body = AddonSlot), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn update_addon_slot(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -1041,6 +1204,17 @@ pub async fn update_addon_slot(
     Ok(HttpResponse::Ok().json(row))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/menu-items/{id}/addon-slots/{slot_id}",
+    tag = "menu",
+    params(
+        ("id" = Uuid, Path, description = "Menu item ID"),
+        ("slot_id" = Uuid, Path, description = "Addon slot ID")
+    ),
+    responses((status = 204, description = "Addon slot deleted"), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn delete_addon_slot(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -1066,6 +1240,14 @@ pub async fn delete_addon_slot(
 
 // ── Addon Overrides ───────────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/menu-items/{id}/overrides",
+    tag = "menu",
+    params(("id" = Uuid, Path, description = "Menu item ID")),
+    responses((status = 200, description = "List addon overrides", body = Vec<AddonOverride>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_addon_overrides(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -1111,6 +1293,15 @@ pub async fn list_addon_overrides(
     Ok(HttpResponse::Ok().json(rows))
 }
 
+#[utoipa::path(
+    post,
+    path = "/menu-items/{id}/overrides",
+    tag = "menu",
+    params(("id" = Uuid, Path, description = "Menu item ID")),
+    request_body = UpsertAddonOverrideRequest,
+    responses((status = 200, description = "Addon override upserted", body = AddonOverride), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn upsert_addon_override(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -1246,6 +1437,17 @@ pub async fn upsert_addon_override(
     Ok(HttpResponse::Ok().json(row))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/menu-items/{id}/overrides/{override_id}",
+    tag = "menu",
+    params(
+        ("id" = Uuid, Path, description = "Menu item ID"),
+        ("override_id" = Uuid, Path, description = "Override ID")
+    ),
+    responses((status = 204, description = "Addon override deleted"), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn delete_addon_override(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -1273,7 +1475,7 @@ pub async fn delete_addon_override(
 // OPTIONAL FIELDS
 // ═══════════════════════════════════════════════════════════════
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct OptionalField {
     pub id:                Uuid,
     pub menu_item_id:      Uuid,
@@ -1282,6 +1484,7 @@ pub struct OptionalField {
     pub org_ingredient_id: Option<Uuid>,
     pub ingredient_name:   Option<String>,
     pub ingredient_unit:   Option<String>,
+    #[schema(value_type = Option<f64>)]
     pub quantity_used:     Option<sqlx::types::BigDecimal>,
     pub size_label:        Option<String>,
     pub display_order:     i32,
@@ -1290,7 +1493,7 @@ pub struct OptionalField {
     pub updated_at:        DateTime<Utc>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CreateOptionalFieldRequest {
     pub name:              String,
     pub price:             Option<i32>,
@@ -1302,7 +1505,7 @@ pub struct CreateOptionalFieldRequest {
     pub display_order:     Option<i32>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpdateOptionalFieldRequest {
     pub name:              Option<String>,
     pub price:             Option<i32>,
@@ -1315,6 +1518,14 @@ pub struct UpdateOptionalFieldRequest {
     pub is_active:         Option<bool>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/menu-items/{id}/optionals",
+    tag = "menu",
+    params(("id" = Uuid, Path, description = "Menu item ID")),
+    responses((status = 200, description = "List optional fields", body = Vec<OptionalField>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_optional_fields(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -1343,6 +1554,15 @@ pub async fn list_optional_fields(
     Ok(HttpResponse::Ok().json(rows))
 }
 
+#[utoipa::path(
+    post,
+    path = "/menu-items/{id}/optionals",
+    tag = "menu",
+    params(("id" = Uuid, Path, description = "Menu item ID")),
+    request_body = CreateOptionalFieldRequest,
+    responses((status = 201, description = "Optional field created", body = OptionalField), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn create_optional_field(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -1403,6 +1623,18 @@ pub async fn create_optional_field(
     Ok(HttpResponse::Created().json(row))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/menu-items/{id}/optionals/{field_id}",
+    tag = "menu",
+    params(
+        ("id" = Uuid, Path, description = "Menu item ID"),
+        ("field_id" = Uuid, Path, description = "Field ID")
+    ),
+    request_body = UpdateOptionalFieldRequest,
+    responses((status = 200, description = "Optional field updated", body = OptionalField), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn update_optional_field(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -1457,6 +1689,17 @@ pub async fn update_optional_field(
     Ok(HttpResponse::Ok().json(row))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/menu-items/{id}/optionals/{field_id}",
+    tag = "menu",
+    params(
+        ("id" = Uuid, Path, description = "Menu item ID"),
+        ("field_id" = Uuid, Path, description = "Field ID")
+    ),
+    responses((status = 204, description = "Optional field deleted"), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn delete_optional_field(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
@@ -1481,6 +1724,13 @@ pub async fn delete_optional_field(
 
 // ── Public Menu ───────────────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/menu/public/{org_id}",
+    tag = "menu",
+    params(("org_id" = Uuid, Path, description = "Organization ID")),
+    responses((status = 200, description = "Public menu", body = PublicMenuResponse), AppErrorResponse)
+)]
 pub async fn get_public_menu(
     pool:   web::Data<PgPool>,
     org_id: web::Path<Uuid>,

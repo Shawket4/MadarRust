@@ -7,21 +7,24 @@ use uuid::Uuid;
 
 use crate::{
     auth::jwt::Claims,
-    errors::AppError,
+    errors::{AppError, AppErrorResponse},
     models::UserRole,
     permissions::checker::check_permission,
 };
+use utoipa::{IntoParams, ToSchema};
 
 // ── Query params ──────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct DateRangeQuery {
     pub from:  Option<DateTime<Utc>>,
     pub to:    Option<DateTime<Utc>>,
     pub limit: Option<i64>, // for top_items (default 20)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct TimeseriesQuery {
     pub from:        Option<DateTime<Utc>>,
     pub to:          Option<DateTime<Utc>>,
@@ -30,7 +33,7 @@ pub struct TimeseriesQuery {
 
 // ── Response types ────────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct ShiftSummary {
     pub shift_id:               Uuid,
     pub branch_id:              Uuid,
@@ -57,7 +60,7 @@ pub struct ShiftSummary {
     pub total_tax:              i64,
 }
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct InventoryDiscrepancy {
     pub branch_inventory_id: Uuid,
     pub ingredient_name:     String,
@@ -68,7 +71,7 @@ pub struct InventoryDiscrepancy {
     pub note:                Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct DeductionLogRow {
     pub id:                Uuid,
     pub order_id:          Option<Uuid>,
@@ -81,7 +84,7 @@ pub struct DeductionLogRow {
     pub created_at:        DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CategorySales {
     pub category_id:   Option<Uuid>,
     pub category_name: Option<String>,
@@ -91,7 +94,7 @@ pub struct CategorySales {
     pub items:         Vec<ItemSales>,
 }
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct ItemSales {
     pub menu_item_id:  Uuid,
     pub item_name:     String,
@@ -99,7 +102,7 @@ pub struct ItemSales {
     pub revenue:       i64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct BranchSalesReport {
     pub branch_id:              Uuid,
     pub branch_name:            String,
@@ -121,7 +124,7 @@ pub struct BranchSalesReport {
     pub by_category:            Vec<CategorySales>,
 }
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct StockRow {
     pub branch_inventory_id: Uuid,
     pub ingredient_name:     String,
@@ -129,11 +132,12 @@ pub struct StockRow {
     pub current_stock:       f64,
     pub reorder_threshold:   f64,
     #[serde(with = "rust_decimal::serde::float")]
+    #[schema(value_type = f64)]
     pub cost_per_unit:       Decimal,
     pub below_reorder:       bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct BranchStockReport {
     pub branch_id:   Uuid,
     pub branch_name: String,
@@ -141,7 +145,7 @@ pub struct BranchStockReport {
 }
 
 // Timeseries now includes per-payment-method breakdown
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct TimeseriesPoint {
     pub period:                 String,
     pub orders:                 i64,
@@ -157,7 +161,7 @@ pub struct TimeseriesPoint {
     pub talabat_cash_revenue:   i64,
 }
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct TellerStats {
     pub teller_id:       Uuid,
     pub teller_name:     String,
@@ -168,7 +172,7 @@ pub struct TellerStats {
     pub shifts:          i64,
 }
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct AddonSalesRow {
     pub addon_item_id: Uuid,
     pub addon_name:    String,
@@ -177,7 +181,7 @@ pub struct AddonSalesRow {
     pub revenue:       i64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct BranchComparison {
     pub branch_id:              Uuid,
     pub branch_name:            String,
@@ -194,7 +198,7 @@ pub struct BranchComparison {
     pub void_rate_pct:          f64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct OrgComparisonReport {
     pub org_id:   Uuid,
     pub from:     Option<DateTime<Utc>>,
@@ -204,6 +208,14 @@ pub struct OrgComparisonReport {
 
 // ── GET /reports/shifts/:id/summary ──────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/reports/shifts/{shift_id}/summary",
+    tag = "reports",
+    params(("shift_id" = Uuid, Path, description = "Shift ID")),
+    responses((status = 200, description = "Shift summary", body = ShiftSummary), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn shift_summary(
     req:      HttpRequest,
     pool:     web::Data<PgPool>,
@@ -258,6 +270,14 @@ pub async fn shift_summary(
 
 // ── GET /reports/shifts/:id/inventory ────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/reports/shifts/{shift_id}/inventory",
+    tag = "reports",
+    params(("shift_id" = Uuid, Path, description = "Shift ID")),
+    responses((status = 200, description = "Shift inventory discrepancies", body = Vec<InventoryDiscrepancy>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn shift_inventory_discrepancies(
     req:      HttpRequest,
     pool:     web::Data<PgPool>,
@@ -293,6 +313,14 @@ pub async fn shift_inventory_discrepancies(
 
 // ── GET /reports/shifts/:id/deductions ───────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/reports/shifts/{shift_id}/deductions",
+    tag = "reports",
+    params(("shift_id" = Uuid, Path, description = "Shift ID")),
+    responses((status = 200, description = "Shift deductions", body = Vec<DeductionLogRow>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn shift_deductions(
     req:      HttpRequest,
     pool:     web::Data<PgPool>,
@@ -310,6 +338,15 @@ pub async fn shift_deductions(
 
 // ── GET /reports/branches/:id/sales ──────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/reports/branches/{branch_id}/sales",
+    tag = "reports",
+    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    params(DateRangeQuery),
+    responses((status = 200, description = "Branch sales", body = BranchSalesReport), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn branch_sales(
     req:       HttpRequest,
     pool:      web::Data<PgPool>,
@@ -470,6 +507,14 @@ pub async fn branch_sales(
 
 // ── GET /reports/branches/:id/stock ──────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/reports/branches/{branch_id}/stock",
+    tag = "reports",
+    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    responses((status = 200, description = "Branch stock", body = BranchStockReport), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn branch_stock(
     req:       HttpRequest,
     pool:      web::Data<PgPool>,
@@ -514,6 +559,15 @@ pub async fn branch_stock(
 
 // ── GET /reports/branches/:id/sales/timeseries ───────────────
 
+#[utoipa::path(
+    get,
+    path = "/reports/branches/{branch_id}/sales/timeseries",
+    tag = "reports",
+    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    params(TimeseriesQuery),
+    responses((status = 200, description = "Branch sales timeseries", body = Vec<TimeseriesPoint>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn branch_sales_timeseries(
     req:       HttpRequest,
     pool:      web::Data<PgPool>,
@@ -572,6 +626,15 @@ pub async fn branch_sales_timeseries(
 
 // ── GET /reports/branches/:id/tellers ────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/reports/branches/{branch_id}/tellers",
+    tag = "reports",
+    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    params(DateRangeQuery),
+    responses((status = 200, description = "Branch teller stats", body = Vec<TellerStats>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn branch_teller_stats(
     req:       HttpRequest,
     pool:      web::Data<PgPool>,
@@ -618,6 +681,15 @@ pub async fn branch_teller_stats(
 
 // ── GET /reports/branches/:id/addons ─────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/reports/branches/{branch_id}/addons",
+    tag = "reports",
+    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    params(DateRangeQuery),
+    responses((status = 200, description = "Branch addon sales", body = Vec<AddonSalesRow>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn branch_addon_sales(
     req:       HttpRequest,
     pool:      web::Data<PgPool>,
@@ -659,6 +731,15 @@ pub async fn branch_addon_sales(
 
 // ── GET /reports/orgs/:org_id/comparison ─────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/reports/orgs/{org_id}/comparison",
+    tag = "reports",
+    params(("org_id" = Uuid, Path, description = "Org ID")),
+    params(DateRangeQuery),
+    responses((status = 200, description = "Org comparison report", body = OrgComparisonReport), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn org_branch_comparison(
     req:    HttpRequest,
     pool:   web::Data<PgPool>,
@@ -815,7 +896,7 @@ async fn require_branch_access(
 
 // ── Bundles Reporting ────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct BundleSalesRow {
     pub bundle_id:     Option<Uuid>,
     pub bundle_name:   String,
@@ -823,7 +904,7 @@ pub struct BundleSalesRow {
     pub revenue:       i64,
 }
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct CombinedItemSalesRow {
     pub item_id:       Option<Uuid>,
     pub item_name:     String,
@@ -833,6 +914,15 @@ pub struct CombinedItemSalesRow {
 }
 
 // GET /reports/branches/:id/bundles
+#[utoipa::path(
+    get,
+    path = "/reports/branches/{branch_id}/bundles",
+    tag = "reports",
+    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    params(DateRangeQuery),
+    responses((status = 200, description = "Branch bundle sales", body = Vec<BundleSalesRow>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn branch_bundle_sales(
     req:       HttpRequest,
     pool:      web::Data<PgPool>,
@@ -871,6 +961,15 @@ pub async fn branch_bundle_sales(
 }
 
 // GET /reports/branches/:id/items-combined
+#[utoipa::path(
+    get,
+    path = "/reports/branches/{branch_id}/items-combined",
+    tag = "reports",
+    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    params(DateRangeQuery),
+    responses((status = 200, description = "Branch combined item sales", body = Vec<CombinedItemSalesRow>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
 pub async fn branch_combined_item_sales(
     req:       HttpRequest,
     pool:      web::Data<PgPool>,

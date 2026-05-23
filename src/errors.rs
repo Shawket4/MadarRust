@@ -35,7 +35,7 @@ pub enum AppError {
 #[derive(Serialize, ToSchema)]
 pub struct ErrorBody {
     /// Human-readable error message.
-    #[schema(example = "Branch not found")]
+    #[schema(example = "Something went wrong")]
     pub error: String,
 }
 

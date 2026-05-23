@@ -6,7 +6,8 @@ use serde::{Serialize, Deserialize};
 use sqlx::PgPool;
 use std::{io::Cursor, path::{Path, PathBuf}};
 use uuid::Uuid;
-use crate::{auth::jwt::Claims, errors::AppError, models::UserRole, permissions::checker::check_permission};
+use crate::{auth::jwt::Claims, errors::{AppError, AppErrorResponse}, models::UserRole, permissions::checker::check_permission};
+use utoipa::ToSchema;
 
 const ALLOWED_MIME: &[&str] = &[
     "image/jpeg","image/png","image/gif","image/webp",
@@ -14,12 +15,38 @@ const ALLOWED_MIME: &[&str] = &[
 ];
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct UploadResponse {
     #[serde(serialize_with = "serialize_url")]
     pub image_url: String,
 }
 
+#[derive(ToSchema)]
+#[allow(dead_code)]
+pub struct UploadImageMultipart {
+    /// Image file. PNG, JPEG, or WebP. Required.
+    #[schema(format = Binary, content_media_type = "image/*")]
+    pub image: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/uploads/menu-items/{menu_item_id}",
+    tag = "uploads",
+    params(
+        ("menu_item_id" = Uuid, Path, description = "Menu item ID")
+    ),
+    request_body(
+        content = UploadImageMultipart,
+        content_type = "multipart/form-data",
+        description = "Multipart form with a single `image` file field."
+    ),
+    responses(
+        (status = 200, description = "Image uploaded", body = UploadResponse),
+        AppErrorResponse,
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn upload_menu_item_image(
     req:          HttpRequest,
     pool:         web::Data<PgPool>,
