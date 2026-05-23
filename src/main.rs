@@ -18,10 +18,31 @@ mod uploads;
 mod bundles;
 mod menu_advisor;
 
+#[cfg(test)]
+mod e2e_tests;
+
 use actix_cors::Cors;
 use actix_files::Files;
 use actix_web::{web, App, HttpServer};
 use actix_web::middleware::Compress;
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        // TODO: Auto-populate this
+    ),
+    components(
+        schemas(
+            // TODO: Auto-populate this
+        )
+    ),
+    tags(
+        (name = "sufrix", description = "Sufrix POS API")
+    )
+)]
+struct ApiDoc;
 use dotenvy::dotenv;
 use sqlx::postgres::PgPoolOptions;
 use std::{env, fs};
@@ -95,6 +116,10 @@ async fn main() -> std::io::Result<()> {
             .configure(uploads::routes::configure)
             .configure(bundles::routes::configure)
             .configure(menu_advisor::routes::configure)
+            .service(
+                SwaggerUi::new("/swagger-ui/{_:.*}")
+                    .url("/api-docs/openapi.json", ApiDoc::openapi()),
+            )
             .service(Files::new("/uploads", &uploads_clone).use_last_modified(true))
     });
 
