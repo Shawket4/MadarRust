@@ -125,20 +125,6 @@ CREATE TYPE public.order_status AS ENUM (
 
 
 --
--- Name: payment_method; Type: TYPE; Schema: public; Owner: -
---
-
-CREATE TYPE public.payment_method AS ENUM (
-    'cash',
-    'card',
-    'digital_wallet',
-    'mixed',
-    'talabat_online',
-    'talabat_cash'
-);
-
-
---
 -- Name: permission_action; Type: TYPE; Schema: public; Owner: -
 --
 
@@ -837,7 +823,7 @@ CREATE TABLE public.order_line_bundle_components (
 CREATE TABLE public.order_payments (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     order_id uuid NOT NULL,
-    method public.payment_method NOT NULL,
+    method text NOT NULL,
     amount integer NOT NULL,
     reference text,
     created_at timestamp with time zone DEFAULT now() NOT NULL
@@ -855,7 +841,7 @@ CREATE TABLE public.orders (
     teller_id uuid NOT NULL,
     order_number integer NOT NULL,
     status public.order_status DEFAULT 'pending'::public.order_status NOT NULL,
-    payment_method public.payment_method NOT NULL,
+    payment_method text NOT NULL,
     subtotal integer DEFAULT 0 NOT NULL,
     discount_type public.discount_type,
     discount_value integer DEFAULT 0 NOT NULL,
@@ -894,6 +880,25 @@ CREATE TABLE public.org_ingredients (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     deleted_at timestamp with time zone,
     category text DEFAULT 'general'::text NOT NULL
+);
+
+
+--
+-- Name: org_payment_methods; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.org_payment_methods (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    org_id uuid NOT NULL,
+    name text NOT NULL,
+    label_translations jsonb DEFAULT '{}'::jsonb NOT NULL,
+    color text NOT NULL,
+    icon text NOT NULL,
+    is_cash boolean DEFAULT false NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    display_order integer DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -1412,6 +1417,22 @@ ALTER TABLE ONLY public.org_ingredients
 
 
 --
+-- Name: org_payment_methods org_payment_methods_org_id_name_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.org_payment_methods
+    ADD CONSTRAINT org_payment_methods_org_id_name_key UNIQUE (org_id, name);
+
+
+--
+-- Name: org_payment_methods org_payment_methods_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.org_payment_methods
+    ADD CONSTRAINT org_payment_methods_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: organizations organizations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1911,6 +1932,13 @@ CREATE TRIGGER trg_orders_updated_at BEFORE UPDATE ON public.orders FOR EACH ROW
 --
 
 CREATE TRIGGER trg_org_ingredients_updated_at BEFORE UPDATE ON public.org_ingredients FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: org_payment_methods trg_org_payment_methods_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_org_payment_methods_updated_at BEFORE UPDATE ON public.org_payment_methods FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
@@ -2508,6 +2536,14 @@ ALTER TABLE ONLY public.orders
 
 ALTER TABLE ONLY public.org_ingredients
     ADD CONSTRAINT org_ingredients_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.organizations(id);
+
+
+--
+-- Name: org_payment_methods org_payment_methods_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.org_payment_methods
+    ADD CONSTRAINT org_payment_methods_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
 
 
 --
