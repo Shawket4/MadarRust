@@ -14,7 +14,7 @@ use tracing_subscriber::EnvFilter;
 use sufrix_rust::openapi::ApiDoc;
 use sufrix_rust::{
     auth, branches, bundles, discounts, inventory, menu, menu_advisor,
-    orders, orgs, permissions, recipes, reports, shifts, uploads, users,
+    orders, orgs, payment_methods, permissions, recipes, reports, shifts, uploads, users,
 };
 
 use utoipa::OpenApi;
@@ -99,7 +99,8 @@ async fn main() -> std::io::Result<()> {
             .configure(reports::routes::configure)
             .configure(uploads::routes::configure)
             .configure(bundles::routes::configure)
-            .configure(menu_advisor::routes::configure);
+            .configure(menu_advisor::routes::configure)
+            .configure(payment_methods::routes::configure);
 
         if enable_swagger_ui {
             app = app.service(

@@ -19,14 +19,15 @@ use utoipa::{
 #[derive(OpenApi)]
 #[openapi(
     info(
-        title = "Sufrix API",
-        version = env!("CARGO_PKG_VERSION"),
-        description = "Sufrix POS — multi-tenant cafe and restaurant management. \
-                       The Rust backend is the source of truth for this spec; \
-                       the Flutter teller app and React management dashboard \
-                       consume the generated openapi.json.",
-        contact(name = "Sufrix", url = "https://sufrix.app")
-    ),
+    title = "Sufrix API",
+    version = env!("CARGO_PKG_VERSION"),
+    description = "Sufrix POS — multi-tenant cafe and restaurant management. \
+                   The Rust backend is the source of truth for this spec; \
+                   the Flutter teller app and React management dashboard \
+                   consume the generated openapi.json.",
+    contact(name = "Sufrix", url = "https://sufrix.app"),
+    license(name = "Proprietary", identifier = "LicenseRef-Sufrix-Proprietary")
+),
     servers(
         (url = "http://localhost:8080", description = "Local development"),
         (url = "https://api.sufrix.app", description = "Production")
@@ -47,7 +48,8 @@ use utoipa::{
         (name = "bundles",      description = "Combo bundles and bundle pricing."),
         (name = "reports",      description = "Sales analytics and reporting."),
         (name = "menu_advisor", description = "Read-only pricing, bundle, and removal suggestions. Never edits menus — the differentiator vs. generic POS."),
-        (name = "uploads",      description = "Logo and image uploads.")
+        (name = "uploads",      description = "Logo and image uploads."),
+        (name = "payment_methods", description = "Dynamic payment methods configuration.")
     ),
 paths(
         // ── auth ────────────────────────────────────────────────────
@@ -180,6 +182,12 @@ paths(
         crate::reports::handlers::org_branch_comparison,
         crate::reports::handlers::branch_bundle_sales,
         crate::reports::handlers::branch_combined_item_sales,
+        // ── payment_methods ───────────────────────────────────────────
+        crate::payment_methods::handlers::list_payment_methods,
+        crate::payment_methods::handlers::create_payment_method,
+        crate::payment_methods::handlers::update_payment_method,
+        crate::payment_methods::handlers::activate_payment_method,
+        crate::payment_methods::handlers::deactivate_payment_method,
     ),
     components(schemas(
         // Most schemas are pulled in transitively via path responses, but

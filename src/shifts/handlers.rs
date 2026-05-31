@@ -640,13 +640,16 @@ pub async fn close_shift(
     let cash_from_orders: i32 = sqlx::query_scalar(
         r#"
         SELECT COALESCE(SUM(total_amount), 0)::int
-        FROM orders
-        WHERE shift_id = $1
-          AND payment_method = 'cash'
-          AND status NOT IN ('voided', 'refunded')
+        FROM orders o
+        JOIN branches b ON b.id = $2
+        JOIN org_payment_methods opm ON opm.name = o.payment_method AND opm.org_id = b.org_id
+        WHERE o.shift_id = $1
+          AND opm.is_cash = true
+          AND o.status NOT IN ('voided', 'refunded')
         "#,
     )
     .bind(*shift_id)
+    .bind(shift.branch_id)
     .fetch_one(pool.get_ref())
     .await?;
 

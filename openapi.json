@@ -8,7 +8,8 @@
       "url": "https://sufrix.app"
     },
     "license": {
-      "name": ""
+      "name": "Proprietary",
+      "identifier": "LicenseRef-Sufrix-Proprietary"
     },
     "version": "0.1.0"
   },
@@ -7554,6 +7555,488 @@
         ]
       }
     },
+    "/payment-methods": {
+      "get": {
+        "tags": [
+          "payment_methods"
+        ],
+        "operationId": "list_payment_methods",
+        "responses": {
+          "200": {
+            "description": "List of payment methods",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OrgPaymentMethod"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "payment_methods"
+        ],
+        "operationId": "create_payment_method",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePaymentMethodRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created payment method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgPaymentMethod"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/payment-methods/{id}": {
+      "put": {
+        "tags": [
+          "payment_methods"
+        ],
+        "operationId": "update_payment_method",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Payment Method ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdatePaymentMethodRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated payment method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgPaymentMethod"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/payment-methods/{id}/activate": {
+      "post": {
+        "tags": [
+          "payment_methods"
+        ],
+        "operationId": "activate_payment_method",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Payment Method ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Activated payment method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgPaymentMethod"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/payment-methods/{id}/deactivate": {
+      "post": {
+        "tags": [
+          "payment_methods"
+        ],
+        "operationId": "deactivate_payment_method",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Payment Method ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deactivated payment method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgPaymentMethod"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/permissions/matrix/{user_id}": {
       "get": {
         "tags": [
@@ -12387,12 +12870,7 @@
           "total_orders",
           "voided_orders",
           "total_revenue",
-          "cash_revenue",
-          "card_revenue",
-          "digital_wallet_revenue",
-          "mixed_revenue",
-          "talabat_online_revenue",
-          "talabat_cash_revenue",
+          "revenue_by_method",
           "avg_order_value",
           "void_rate_pct"
         ],
@@ -12408,30 +12886,7 @@
           "branch_name": {
             "type": "string"
           },
-          "card_revenue": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "cash_revenue": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "digital_wallet_revenue": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "mixed_revenue": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "talabat_cash_revenue": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "talabat_online_revenue": {
-            "type": "integer",
-            "format": "int64"
-          },
+          "revenue_by_method": {},
           "total_orders": {
             "type": "integer",
             "format": "int64"
@@ -12663,12 +13118,7 @@
           "total_discount",
           "total_tax",
           "total_revenue",
-          "cash_revenue",
-          "card_revenue",
-          "digital_wallet_revenue",
-          "mixed_revenue",
-          "talabat_online_revenue",
-          "talabat_cash_revenue",
+          "revenue_by_method",
           "top_items",
           "by_category"
         ],
@@ -12686,18 +13136,6 @@
               "$ref": "#/components/schemas/CategorySales"
             }
           },
-          "card_revenue": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "cash_revenue": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "digital_wallet_revenue": {
-            "type": "integer",
-            "format": "int64"
-          },
           "from": {
             "type": [
               "string",
@@ -12705,19 +13143,8 @@
             ],
             "format": "date-time"
           },
-          "mixed_revenue": {
-            "type": "integer",
-            "format": "int64"
-          },
+          "revenue_by_method": {},
           "subtotal": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "talabat_cash_revenue": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "talabat_online_revenue": {
             "type": "integer",
             "format": "int64"
           },
@@ -13940,6 +14367,52 @@
             ],
             "format": "double",
             "example": 0.14
+          }
+        }
+      },
+      "CreatePaymentMethodRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "label_translations",
+          "color",
+          "icon",
+          "is_cash"
+        ],
+        "properties": {
+          "color": {
+            "type": "string"
+          },
+          "display_order": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "icon": {
+            "type": "string"
+          },
+          "is_active": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "is_cash": {
+            "type": "boolean"
+          },
+          "label_translations": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
           }
         }
       },
@@ -15564,6 +16037,60 @@
           }
         }
       },
+      "OrgPaymentMethod": {
+        "type": "object",
+        "required": [
+          "id",
+          "org_id",
+          "name",
+          "label_translations",
+          "color",
+          "icon",
+          "is_cash",
+          "is_active",
+          "display_order",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "color": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "display_order": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "icon": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "is_active": {
+            "type": "boolean"
+          },
+          "is_cash": {
+            "type": "boolean"
+          },
+          "label_translations": {},
+          "name": {
+            "type": "string"
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "PaginatedBundles": {
         "type": "object",
         "required": [
@@ -16280,12 +16807,7 @@
           "total_orders",
           "voided_orders",
           "total_revenue",
-          "cash_revenue",
-          "card_revenue",
-          "digital_wallet_revenue",
-          "mixed_revenue",
-          "talabat_online_revenue",
-          "talabat_cash_revenue",
+          "revenue_by_method",
           "total_discount",
           "total_tax"
         ],
@@ -16297,19 +16819,11 @@
           "branch_name": {
             "type": "string"
           },
-          "card_revenue": {
-            "type": "integer",
-            "format": "int64"
-          },
           "cash_discrepancy": {
             "type": [
               "integer",
               "null"
             ],
-            "format": "int64"
-          },
-          "cash_revenue": {
-            "type": "integer",
             "format": "int64"
           },
           "closed_at": {
@@ -16333,14 +16847,6 @@
             ],
             "format": "int64"
           },
-          "digital_wallet_revenue": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "mixed_revenue": {
-            "type": "integer",
-            "format": "int64"
-          },
           "opened_at": {
             "type": "string",
             "format": "date-time"
@@ -16349,20 +16855,13 @@
             "type": "integer",
             "format": "int64"
           },
+          "revenue_by_method": {},
           "shift_id": {
             "type": "string",
             "format": "uuid"
           },
           "status": {
             "type": "string"
-          },
-          "talabat_cash_revenue": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "talabat_online_revenue": {
-            "type": "integer",
-            "format": "int64"
           },
           "teller_id": {
             "type": "string",
@@ -16482,31 +16981,10 @@
           "voided",
           "discount",
           "tax",
-          "cash_revenue",
-          "card_revenue",
-          "digital_wallet_revenue",
-          "mixed_revenue",
-          "talabat_online_revenue",
-          "talabat_cash_revenue"
+          "revenue_by_method"
         ],
         "properties": {
-          "card_revenue": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "cash_revenue": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "digital_wallet_revenue": {
-            "type": "integer",
-            "format": "int64"
-          },
           "discount": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "mixed_revenue": {
             "type": "integer",
             "format": "int64"
           },
@@ -16521,14 +16999,7 @@
             "type": "integer",
             "format": "int64"
           },
-          "talabat_cash_revenue": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "talabat_online_revenue": {
-            "type": "integer",
-            "format": "int64"
-          },
+          "revenue_by_method": {},
           "tax": {
             "type": "integer",
             "format": "int64"
@@ -17020,6 +17491,60 @@
             ],
             "format": "double",
             "example": 0.14
+          }
+        }
+      },
+      "UpdatePaymentMethodRequest": {
+        "type": "object",
+        "properties": {
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "display_order": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "icon": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_active": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "is_cash": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "label_translations": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -17527,6 +18052,10 @@
     {
       "name": "uploads",
       "description": "Logo and image uploads."
+    },
+    {
+      "name": "payment_methods",
+      "description": "Dynamic payment methods configuration."
     }
   ]
 }

@@ -196,6 +196,8 @@ pub async fn create_org(
     let currency = fields.currency_code.as_deref().unwrap_or("EGP");
     let tax_rate = fields.tax_rate.unwrap_or(0.14);
 
+    let mut tx = pool.begin().await?;
+
     let org = sqlx::query_as::<_, Org>(
         r#"
         INSERT INTO organizations (name, slug, logo_url, currency_code, tax_rate, receipt_footer)
@@ -209,8 +211,26 @@ pub async fn create_org(
     .bind(currency)
     .bind(tax_rate)
     .bind(&fields.receipt_footer)
-    .fetch_one(pool.get_ref())
+    .fetch_one(&mut *tx)
     .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash, display_order)
+        VALUES 
+            ($1, 'cash', '{"en": "Cash", "ar": "نقدي"}', 'emerald', 'payments_outlined', true, 1),
+            ($1, 'card', '{"en": "Card", "ar": "بطاقة"}', 'blue', 'credit_card_rounded', false, 2),
+            ($1, 'digital_wallet', '{"en": "Digital Wallet", "ar": "محفظة رقمية"}', 'purple', 'account_balance_wallet_rounded', false, 3),
+            ($1, 'mixed', '{"en": "Mixed", "ar": "مختلط"}', 'amber', 'pie_chart_rounded', false, 4),
+            ($1, 'talabat_online', '{"en": "Talabat Online", "ar": "طلبات أونلاين"}', 'orange', 'delivery_dining_rounded', false, 5),
+            ($1, 'talabat_cash', '{"en": "Talabat Cash", "ar": "طلبات كاش"}', 'orange', 'delivery_dining_rounded', true, 6)
+        "#
+    )
+    .bind(org.id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
 
     Ok(HttpResponse::Created().json(org))
 }

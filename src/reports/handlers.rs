@@ -50,12 +50,7 @@ pub struct ShiftSummary {
     pub total_orders:           i64,
     pub voided_orders:          i64,
     pub total_revenue:          i64,
-    pub cash_revenue:           i64,
-    pub card_revenue:           i64,
-    pub digital_wallet_revenue: i64,
-    pub mixed_revenue:          i64,
-    pub talabat_online_revenue: i64,
-    pub talabat_cash_revenue:   i64,
+    pub revenue_by_method:      serde_json::Value,
     pub total_discount:         i64,
     pub total_tax:              i64,
 }
@@ -114,12 +109,7 @@ pub struct BranchSalesReport {
     pub total_discount:         i64,
     pub total_tax:              i64,
     pub total_revenue:          i64,
-    pub cash_revenue:           i64,
-    pub card_revenue:           i64,
-    pub digital_wallet_revenue: i64,
-    pub mixed_revenue:          i64,
-    pub talabat_online_revenue: i64,
-    pub talabat_cash_revenue:   i64,
+    pub revenue_by_method:      serde_json::Value,
     pub top_items:              Vec<ItemSales>,
     pub by_category:            Vec<CategorySales>,
 }
@@ -153,12 +143,7 @@ pub struct TimeseriesPoint {
     pub voided:                 i64,
     pub discount:               i64,
     pub tax:                    i64,
-    pub cash_revenue:           i64,
-    pub card_revenue:           i64,
-    pub digital_wallet_revenue: i64,
-    pub mixed_revenue:          i64,
-    pub talabat_online_revenue: i64,
-    pub talabat_cash_revenue:   i64,
+    pub revenue_by_method:      serde_json::Value,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -188,12 +173,7 @@ pub struct BranchComparison {
     pub total_orders:           i64,
     pub voided_orders:          i64,
     pub total_revenue:          i64,
-    pub cash_revenue:           i64,
-    pub card_revenue:           i64,
-    pub digital_wallet_revenue: i64,
-    pub mixed_revenue:          i64,
-    pub talabat_online_revenue: i64,
-    pub talabat_cash_revenue:   i64,
+    pub revenue_by_method:      serde_json::Value,
     pub avg_order_value:        i64,
     pub void_rate_pct:          f64,
 }
@@ -243,12 +223,15 @@ pub async fn shift_summary(
             COUNT(o.id) FILTER (WHERE o.status != 'voided')::bigint     AS total_orders,
             COUNT(o.id) FILTER (WHERE o.status = 'voided')::bigint      AS voided_orders,
             COALESCE(SUM(o.total_amount) FILTER (WHERE o.status != 'voided'), 0)::bigint AS total_revenue,
-            COALESCE(SUM(op.amount) FILTER (WHERE o.status != 'voided' AND op.method = 'cash'),           0)::bigint AS cash_revenue,
-            COALESCE(SUM(op.amount) FILTER (WHERE o.status != 'voided' AND op.method = 'card'),           0)::bigint AS card_revenue,
-            COALESCE(SUM(op.amount) FILTER (WHERE o.status != 'voided' AND op.method = 'digital_wallet'), 0)::bigint AS digital_wallet_revenue,
-            COALESCE(SUM(op.amount) FILTER (WHERE o.status != 'voided' AND op.method = 'mixed'),          0)::bigint AS mixed_revenue,
-            COALESCE(SUM(op.amount) FILTER (WHERE o.status != 'voided' AND op.method = 'talabat_online'), 0)::bigint AS talabat_online_revenue,
-            COALESCE(SUM(op.amount) FILTER (WHERE o.status != 'voided' AND op.method = 'talabat_cash'),   0)::bigint AS talabat_cash_revenue,
+            COALESCE((
+              SELECT json_object_agg(method, rev) FROM (
+                SELECT op.method, SUM(op.amount)::bigint AS rev
+                FROM order_payments op
+                JOIN orders o2 ON o2.id = op.order_id
+                WHERE o2.shift_id = s.id AND o2.status != 'voided'
+                GROUP BY op.method
+              ) sub
+            ), '{}'::json) AS revenue_by_method,
             COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status != 'voided'), 0)::bigint AS total_discount,
             COALESCE(SUM(o.tax_amount)      FILTER (WHERE o.status != 'voided'), 0)::bigint AS total_tax
         FROM shifts s
@@ -366,23 +349,26 @@ pub async fn branch_sales(
     .flatten()
     .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
 
-    // 12-column aggregate — includes talabat variants
-    #[allow(clippy::type_complexity)]
-    let totals: (i64,i64,i64,i64,i64,i64,i64,i64,i64,i64,i64,i64) = sqlx::query_as(
+    let totals: (i64, i64, i64, i64, i64, i64, serde_json::Value) = sqlx::query_as(
         r#"
         SELECT
-            COUNT(*) FILTER (WHERE status != 'voided'),
-            COUNT(*) FILTER (WHERE status = 'voided'),
-            COALESCE(SUM(subtotal)        FILTER (WHERE status != 'voided'), 0),
-            COALESCE(SUM(discount_amount) FILTER (WHERE status != 'voided'), 0),
-            COALESCE(SUM(tax_amount)      FILTER (WHERE status != 'voided'), 0),
-            COALESCE(SUM(total_amount)    FILTER (WHERE status != 'voided'), 0),
-                        COALESCE((SELECT SUM(op.amount) FROM order_payments op JOIN orders oi ON oi.id = op.order_id WHERE oi.branch_id = $1 AND oi.status != 'voided' AND ($2::timestamptz IS NULL OR oi.created_at >= $2) AND ($3::timestamptz IS NULL OR oi.created_at <= $3) AND op.method = 'cash'), 0),
-            COALESCE((SELECT SUM(op.amount) FROM order_payments op JOIN orders oi ON oi.id = op.order_id WHERE oi.branch_id = $1 AND oi.status != 'voided' AND ($2::timestamptz IS NULL OR oi.created_at >= $2) AND ($3::timestamptz IS NULL OR oi.created_at <= $3) AND op.method = 'card'), 0),
-            COALESCE((SELECT SUM(op.amount) FROM order_payments op JOIN orders oi ON oi.id = op.order_id WHERE oi.branch_id = $1 AND oi.status != 'voided' AND ($2::timestamptz IS NULL OR oi.created_at >= $2) AND ($3::timestamptz IS NULL OR oi.created_at <= $3) AND op.method = 'digital_wallet'), 0),
-            COALESCE((SELECT SUM(op.amount) FROM order_payments op JOIN orders oi ON oi.id = op.order_id WHERE oi.branch_id = $1 AND oi.status != 'voided' AND ($2::timestamptz IS NULL OR oi.created_at >= $2) AND ($3::timestamptz IS NULL OR oi.created_at <= $3) AND op.method = 'mixed'), 0),
-            COALESCE((SELECT SUM(op.amount) FROM order_payments op JOIN orders oi ON oi.id = op.order_id WHERE oi.branch_id = $1 AND oi.status != 'voided' AND ($2::timestamptz IS NULL OR oi.created_at >= $2) AND ($3::timestamptz IS NULL OR oi.created_at <= $3) AND op.method = 'talabat_online'), 0),
-            COALESCE((SELECT SUM(op.amount) FROM order_payments op JOIN orders oi ON oi.id = op.order_id WHERE oi.branch_id = $1 AND oi.status != 'voided' AND ($2::timestamptz IS NULL OR oi.created_at >= $2) AND ($3::timestamptz IS NULL OR oi.created_at <= $3) AND op.method = 'talabat_cash'), 0)
+            COUNT(*) FILTER (WHERE status != 'voided')::bigint,
+            COUNT(*) FILTER (WHERE status = 'voided')::bigint,
+            COALESCE(SUM(subtotal)        FILTER (WHERE status != 'voided'), 0)::bigint,
+            COALESCE(SUM(discount_amount) FILTER (WHERE status != 'voided'), 0)::bigint,
+            COALESCE(SUM(tax_amount)      FILTER (WHERE status != 'voided'), 0)::bigint,
+            COALESCE(SUM(total_amount)    FILTER (WHERE status != 'voided'), 0)::bigint,
+            COALESCE((
+              SELECT json_object_agg(method, rev) FROM (
+                SELECT op.method, SUM(op.amount)::bigint AS rev
+                FROM order_payments op
+                JOIN orders o2 ON o2.id = op.order_id
+                WHERE o2.branch_id = $1 AND o2.status != 'voided'
+                  AND ($2::timestamptz IS NULL OR o2.created_at >= $2)
+                  AND ($3::timestamptz IS NULL OR o2.created_at <= $3)
+                GROUP BY op.method
+              ) sub
+            ), '{}'::json)
         FROM orders
         WHERE branch_id = $1
           AND ($2::timestamptz IS NULL OR created_at >= $2)
@@ -494,12 +480,7 @@ pub async fn branch_sales(
         total_discount:         totals.3,
         total_tax:              totals.4,
         total_revenue:          totals.5,
-        cash_revenue:           totals.6,
-        card_revenue:           totals.7,
-        digital_wallet_revenue: totals.8,
-        mixed_revenue:          totals.9,
-        talabat_online_revenue: totals.10,
-        talabat_cash_revenue:   totals.11,
+        revenue_by_method:      totals.6,
         top_items,
         by_category,
     }))
@@ -587,29 +568,43 @@ pub async fn branch_sales_timeseries(
     // trunc is server-controlled — not user input, safe to interpolate
     let sql = format!(
         r#"
+        WITH periods AS (
+            SELECT
+                date_trunc('{trunc}', o.created_at AT TIME ZONE 'Africa/Cairo') AS period_val,
+                to_char(
+                    date_trunc('{trunc}', o.created_at AT TIME ZONE 'Africa/Cairo'),
+                    'YYYY-MM-DD"T"HH24:MI:SS'
+                ) AS period_str,
+                COUNT(o.id)   FILTER (WHERE o.status != 'voided')::bigint  AS orders,
+                COALESCE(SUM(o.total_amount)    FILTER (WHERE o.status != 'voided'), 0)::bigint AS revenue,
+                COUNT(o.id)   FILTER (WHERE o.status  = 'voided')::bigint  AS voided,
+                COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status != 'voided'), 0)::bigint AS discount,
+                COALESCE(SUM(o.tax_amount)      FILTER (WHERE o.status != 'voided'), 0)::bigint AS tax
+            FROM orders o
+            WHERE o.branch_id = $1
+              AND ($2::timestamptz IS NULL OR o.created_at >= $2)
+              AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+            GROUP BY date_trunc('{trunc}', o.created_at AT TIME ZONE 'Africa/Cairo')
+        )
         SELECT
-            to_char(
-                date_trunc('{trunc}', o.created_at AT TIME ZONE 'Africa/Cairo'),
-                'YYYY-MM-DD"T"HH24:MI:SS'
-            ) AS period,
-            COUNT(o.id)   FILTER (WHERE o.status != 'voided')::bigint  AS orders,
-            COALESCE(SUM(o.total_amount)    FILTER (WHERE o.status != 'voided'), 0)::bigint AS revenue,
-            COUNT(o.id)   FILTER (WHERE o.status  = 'voided')::bigint  AS voided,
-            COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status != 'voided'), 0)::bigint AS discount,
-            COALESCE(SUM(o.tax_amount)      FILTER (WHERE o.status != 'voided'), 0)::bigint AS tax,
-            COALESCE(SUM(op.amount) FILTER (WHERE o.status != 'voided' AND op.method = 'cash'),           0)::bigint AS cash_revenue,
-            COALESCE(SUM(op.amount) FILTER (WHERE o.status != 'voided' AND op.method = 'card'),           0)::bigint AS card_revenue,
-            COALESCE(SUM(op.amount) FILTER (WHERE o.status != 'voided' AND op.method = 'digital_wallet'), 0)::bigint AS digital_wallet_revenue,
-            COALESCE(SUM(op.amount) FILTER (WHERE o.status != 'voided' AND op.method = 'mixed'),          0)::bigint AS mixed_revenue,
-            COALESCE(SUM(op.amount) FILTER (WHERE o.status != 'voided' AND op.method = 'talabat_online'), 0)::bigint AS talabat_online_revenue,
-            COALESCE(SUM(op.amount) FILTER (WHERE o.status != 'voided' AND op.method = 'talabat_cash'),   0)::bigint AS talabat_cash_revenue
-        FROM orders o
-        LEFT JOIN order_payments op ON op.order_id = o.id
-        WHERE o.branch_id = $1
-          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        GROUP BY date_trunc('{trunc}', o.created_at AT TIME ZONE 'Africa/Cairo')
-        ORDER BY 1 ASC
+            p.period_str AS period,
+            p.orders,
+            p.revenue,
+            p.voided,
+            p.discount,
+            p.tax,
+            COALESCE((
+              SELECT json_object_agg(method, rev) FROM (
+                SELECT op2.method, SUM(op2.amount)::bigint AS rev
+                FROM order_payments op2
+                JOIN orders o2 ON o2.id = op2.order_id
+                WHERE o2.branch_id = $1 AND o2.status != 'voided'
+                  AND date_trunc('{trunc}', o2.created_at AT TIME ZONE 'Africa/Cairo') = p.period_val
+                GROUP BY op2.method
+              ) sub
+            ), '{{}}'::json) AS revenue_by_method
+        FROM periods p
+        ORDER BY p.period_val ASC
         "#,
         trunc = trunc
     );
@@ -761,12 +756,7 @@ pub async fn org_branch_comparison(
         total_orders:           i64,
         voided_orders:          i64,
         total_revenue:          i64,
-        cash_revenue:           i64,
-        card_revenue:           i64,
-        digital_wallet_revenue: i64,
-        mixed_revenue:          i64,
-        talabat_online_revenue: i64,
-        talabat_cash_revenue:   i64,
+        revenue_by_method:      serde_json::Value,
     }
 
     let rows = sqlx::query_as::<_, Row>(
@@ -777,12 +767,17 @@ pub async fn org_branch_comparison(
             COUNT(DISTINCT o.id) FILTER (WHERE o.status != 'voided')::bigint AS total_orders,
             COUNT(DISTINCT o.id) FILTER (WHERE o.status  = 'voided')::bigint AS voided_orders,
             COALESCE(SUM(o.total_amount) FILTER (WHERE o.status != 'voided'), 0)::bigint AS total_revenue,
-            COALESCE(SUM(op.amount) FILTER (WHERE o.status != 'voided' AND op.method = 'cash'),           0)::bigint AS cash_revenue,
-            COALESCE(SUM(op.amount) FILTER (WHERE o.status != 'voided' AND op.method = 'card'),           0)::bigint AS card_revenue,
-            COALESCE(SUM(op.amount) FILTER (WHERE o.status != 'voided' AND op.method = 'digital_wallet'), 0)::bigint AS digital_wallet_revenue,
-            COALESCE(SUM(op.amount) FILTER (WHERE o.status != 'voided' AND op.method = 'mixed'),          0)::bigint AS mixed_revenue,
-            COALESCE(SUM(op.amount) FILTER (WHERE o.status != 'voided' AND op.method = 'talabat_online'), 0)::bigint AS talabat_online_revenue,
-            COALESCE(SUM(op.amount) FILTER (WHERE o.status != 'voided' AND op.method = 'talabat_cash'),   0)::bigint AS talabat_cash_revenue
+            COALESCE((
+              SELECT json_object_agg(method, rev) FROM (
+                SELECT op.method, SUM(op.amount)::bigint AS rev
+                FROM order_payments op
+                JOIN orders o2 ON o2.id = op.order_id
+                WHERE o2.branch_id = b.id AND o2.status != 'voided'
+                  AND ($2::timestamptz IS NULL OR o2.created_at >= $2)
+                  AND ($3::timestamptz IS NULL OR o2.created_at <= $3)
+                GROUP BY op.method
+              ) sub
+            ), '{}'::json) AS revenue_by_method
         FROM branches b
         LEFT JOIN orders o          ON o.branch_id = b.id
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
@@ -805,12 +800,7 @@ pub async fn org_branch_comparison(
         total_orders:           r.total_orders,
         voided_orders:          r.voided_orders,
         total_revenue:          r.total_revenue,
-        cash_revenue:           r.cash_revenue,
-        card_revenue:           r.card_revenue,
-        digital_wallet_revenue: r.digital_wallet_revenue,
-        mixed_revenue:          r.mixed_revenue,
-        talabat_online_revenue: r.talabat_online_revenue,
-        talabat_cash_revenue:   r.talabat_cash_revenue,
+        revenue_by_method:      r.revenue_by_method,
         avg_order_value: if r.total_orders == 0 { 0 }
                          else { r.total_revenue / r.total_orders },
         void_rate_pct:   if (r.total_orders + r.voided_orders) == 0 { 0.0 }

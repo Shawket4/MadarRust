@@ -38,6 +38,17 @@ async fn seed_org(pool: &PgPool) -> Uuid {
         .execute(pool)
         .await
         .unwrap();
+
+    sqlx::query(
+        "INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash, is_active, display_order) VALUES 
+        ($1, 'cash', '{}', 'emerald', 'payments_outlined', true, true, 1),
+        ($1, 'card', '{}', 'blue', 'credit_card_rounded', false, true, 2)"
+    )
+    .bind(org_id)
+    .execute(pool)
+    .await
+    .unwrap();
+
     org_id
 }
 

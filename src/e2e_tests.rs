@@ -61,6 +61,18 @@ async fn seed_default_permissions(pool: &PgPool) {
         .expect("Failed to seed default role permissions");
 }
 
+async fn seed_payment_methods(pool: &PgPool, org_id: Uuid) {
+    sqlx::query(
+        "INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash, is_active, display_order) VALUES 
+        ($1, 'cash', '{}', 'emerald', 'payments_outlined', true, true, 1),
+        ($1, 'card', '{}', 'blue', 'credit_card_rounded', false, true, 2)"
+    )
+    .bind(org_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 // -----------------------------------------------------------------------------
 // 1. Scenario A: The Merchant Setup and Operation Workflow (Happy Path)
 // -----------------------------------------------------------------------------
@@ -262,6 +274,8 @@ async fn test_e2e_tenant_and_role_isolation_security_violation_path(pool: PgPool
 
     sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Org A', 'org-a'), ($2, 'Org B', 'org-b')")
         .bind(org_a_id).bind(org_b_id).execute(&pool).await.unwrap();
+    seed_payment_methods(&pool, org_a_id).await;
+    seed_payment_methods(&pool, org_b_id).await;
 
     // Create branch in Org B
     let branch_b_id = Uuid::new_v4();
@@ -362,6 +376,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
     let org_id = Uuid::new_v4();
     sqlx::query("INSERT INTO organizations (id, name, slug, currency_code, tax_rate) VALUES ($1, 'Kitchen E2E Org', 'kitchen-org', 'USD', 0.10)")
         .bind(org_id).execute(&pool).await.unwrap();
+    seed_payment_methods(&pool, org_id).await;
 
     let branch_id = Uuid::new_v4();
     sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'POS Kitchen Branch')")
@@ -618,7 +633,11 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
         test::TestRequest::post().uri("/orders").insert_header(("Authorization", format!("Bearer {}", teller_token)))
             .set_json(&order_payload).to_request()
     ).await;
-    assert_eq!(resp.status(), actix_web::http::StatusCode::CREATED);
+    let status = resp.status();
+    if !status.is_success() {
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        panic!("Status: {:?}, Body: {:?}", status, body);
+    }
     let order: Order = test::read_body_json(resp).await;
 
     // Assert Pricing is correct:
@@ -790,6 +809,7 @@ async fn test_e2e_menu_advisor_bundle_promotion_workflow(pool: PgPool) {
     let org_id = Uuid::new_v4();
     sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Advisor E2E Org', 'adv-org')")
         .bind(org_id).execute(&pool).await.unwrap();
+    seed_payment_methods(&pool, org_id).await;
 
     let branch_id = Uuid::new_v4();
     sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'POS Advisor Branch')")

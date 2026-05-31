@@ -19,6 +19,7 @@ pub mod models;
 pub mod openapi;
 pub mod orders;
 pub mod orgs;
+pub mod payment_methods;
 pub mod permissions;
 pub mod recipes;
 pub mod reports;

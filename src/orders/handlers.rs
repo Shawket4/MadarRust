@@ -330,9 +330,11 @@ pub async fn create_order(
         ));
     }
 
-    validate_payment_method(&body.payment_method)?;
+    let org_id = claims.org_id().unwrap();
+
+    validate_payment_method(pool.get_ref(), org_id, &body.payment_method).await?;
     if let Some(dt)  = &body.discount_type      { validate_discount_type(dt)?; }
-    if let Some(tpm) = &body.tip_payment_method { validate_payment_method(tpm)?; }
+    if let Some(tpm) = &body.tip_payment_method { validate_payment_method(pool.get_ref(), org_id, tpm).await?; }
 
     let (resolved_discount_type, resolved_discount_value) =
         if let Some(disc_id) = body.discount_id {
@@ -917,7 +919,7 @@ pub async fn create_order(
              amount_tendered, change_given, tip_amount, tip_payment_method,
              discount_id, customer_name, notes, status,
              idempotency_key, created_at)
-        VALUES ($1, $2, $3, $4, $5::payment_method, $6, $7::discount_type, $8,
+        VALUES ($1, $2, $3, $4, $5, $6, $7::discount_type, $8,
                 $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'completed', $19, $20)
         RETURNING
             id, branch_id, shift_id, teller_id,
@@ -955,10 +957,10 @@ pub async fn create_order(
     // Payment splits
     if let Some(splits) = &body.payment_splits {
         for split in splits {
-            validate_payment_method(&split.method)?;
+            validate_payment_method(pool.get_ref(), org_id, &split.method).await?;
             sqlx::query(
                 "INSERT INTO order_payments (order_id, method, amount, reference) \
-                 VALUES ($1, $2::payment_method, $3, $4)",
+                 VALUES ($1, $2, $3, $4)",
             )
             .bind(order.id)
             .bind(&split.method)
@@ -970,7 +972,7 @@ pub async fn create_order(
     } else {
         sqlx::query(
             "INSERT INTO order_payments (order_id, method, amount) \
-             VALUES ($1, $2::payment_method, $3)",
+             VALUES ($1, $2, $3)",
         )
         .bind(order.id)
         .bind(&body.payment_method)
@@ -1184,9 +1186,11 @@ pub async fn list_orders(
     let per_page = query.per_page.unwrap_or(default_per_page).clamp(1, 999999);
     let offset   = (page - 1) * per_page;
 
+    let org_id = claims.org_id().unwrap();
+
     let parsed_payment_methods = match &query.payment_method {
         Some(pm) => {
-            let methods = parse_payment_methods(pm)?;
+            let methods = parse_payment_methods(pool.get_ref(), org_id, pm).await?;
             if methods.is_empty() {
                 None
             } else {
@@ -1759,20 +1763,28 @@ async fn require_branch_access(
     Ok(())
 }
 
-fn validate_payment_method(method: &str) -> Result<(), AppError> {
-    match method {
-        "cash" | "card" | "digital_wallet" | "mixed"
-        | "talabat_online" | "talabat_cash" => Ok(()),
-        _ => Err(AppError::BadRequest("Invalid payment_method".into())),
+async fn validate_payment_method(pool: &PgPool, org_id: Uuid, method: &str) -> Result<(), AppError> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM org_payment_methods WHERE org_id = $1 AND name = $2 AND is_active = true)"
+    )
+    .bind(org_id)
+    .bind(method)
+    .fetch_one(pool)
+    .await?;
+
+    if exists {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(format!("Invalid or inactive payment_method: {}", method)))
     }
 }
 
-fn parse_payment_methods(raw: &str) -> Result<Vec<String>, AppError> {
+async fn parse_payment_methods(pool: &PgPool, org_id: Uuid, raw: &str) -> Result<Vec<String>, AppError> {
     let mut methods = Vec::new();
     for part in raw.split(',') {
         let trimmed = part.trim();
         if !trimmed.is_empty() {
-            validate_payment_method(trimmed)?;
+            validate_payment_method(pool, org_id, trimmed).await?;
             methods.push(trimmed.to_string());
         }
     }
@@ -1841,9 +1853,11 @@ pub async fn export_orders(
 
     require_branch_access(pool.get_ref(), &claims, branch_id).await?;
 
+    let org_id = claims.org_id().unwrap();
+
     let parsed_payment_methods = match &query.payment_method {
         Some(pm) => {
-            let methods = parse_payment_methods(pm)?;
+            let methods = parse_payment_methods(pool.get_ref(), org_id, pm).await?;
             if methods.is_empty() {
                 None
             } else {
