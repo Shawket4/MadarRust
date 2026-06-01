@@ -83,6 +83,8 @@ pub struct DeductionLogRow {
 pub struct CategorySales {
     pub category_id:   Option<Uuid>,
     pub category_name: Option<String>,
+    #[schema(value_type = Object)]
+    pub category_name_translations: Option<serde_json::Value>,
     pub item_count:    i64,
     pub quantity_sold: i64,
     pub revenue:       i64,
@@ -93,6 +95,8 @@ pub struct CategorySales {
 pub struct ItemSales {
     pub menu_item_id:  Uuid,
     pub item_name:     String,
+    #[schema(value_type = Object)]
+    pub item_name_translations: serde_json::Value,
     pub quantity_sold: i64,
     pub revenue:       i64,
 }
@@ -161,6 +165,8 @@ pub struct TellerStats {
 pub struct AddonSalesRow {
     pub addon_item_id: Uuid,
     pub addon_name:    String,
+    #[schema(value_type = Object)]
+    pub addon_name_translations: serde_json::Value,
     pub addon_type:    String,
     pub quantity_sold: i64,
     pub revenue:       i64,
@@ -383,6 +389,7 @@ pub async fn branch_sales(
     let top_items = sqlx::query_as::<_, ItemSales>(
         r#"
         SELECT COALESCE(oi.menu_item_id, oi.bundle_id) AS menu_item_id, oi.item_name,
+               COALESCE((array_agg(oi.name_translations))[1], '{}'::jsonb) AS item_name_translations,
                SUM(oi.quantity)::bigint   AS quantity_sold,
                SUM(oi.line_total)::bigint AS revenue
         FROM order_items oi
@@ -402,8 +409,10 @@ pub async fn branch_sales(
     struct CategoryItemRow {
         category_id:   Option<Uuid>,
         category_name: Option<String>,
+        category_name_translations: Option<serde_json::Value>,
         menu_item_id:  Uuid,
         item_name:     String,
+        item_name_translations: serde_json::Value,
         quantity_sold: i64,
         revenue:       i64,
     }
@@ -416,8 +425,10 @@ pub async fn branch_sales(
                 ELSE m.category_id
             END AS category_id,
             COALESCE(c.name, CASE WHEN oi.bundle_id IS NOT NULL THEN 'Bundles' ELSE 'Uncategorized' END) AS category_name,
+            (array_agg(c.name_translations))[1] AS category_name_translations,
             COALESCE(oi.menu_item_id, oi.bundle_id) AS menu_item_id,
             oi.item_name,
+            COALESCE((array_agg(oi.name_translations))[1], '{}'::jsonb) AS item_name_translations,
             SUM(oi.quantity)::bigint   AS quantity_sold,
             SUM(oi.line_total)::bigint AS revenue
         FROM order_items oi
@@ -446,6 +457,7 @@ pub async fn branch_sales(
         let item = ItemSales {
             menu_item_id:  row.menu_item_id,
             item_name:     row.item_name,
+            item_name_translations: row.item_name_translations,
             quantity_sold: row.quantity_sold,
             revenue:       row.revenue,
         };
@@ -460,6 +472,7 @@ pub async fn branch_sales(
                 by_category.push(CategorySales {
                     category_id:   row.category_id,
                     category_name: row.category_name,
+                    category_name_translations: row.category_name_translations,
                     item_count:    1,
                     quantity_sold: item.quantity_sold,
                     revenue:       item.revenue,
@@ -898,6 +911,8 @@ pub struct BundleSalesRow {
 pub struct CombinedItemSalesRow {
     pub item_id:       Option<Uuid>,
     pub item_name:     String,
+    #[schema(value_type = Object)]
+    pub item_name_translations: serde_json::Value,
     pub standalone_qty: i64,
     pub bundle_qty:    i64,
     pub total_qty:     i64,

@@ -480,8 +480,18 @@ pub async fn create_bundle(
 
     let mut tx = pool.begin().await?;
 
-    let name_translations = body.name_translations.clone().unwrap_or_else(|| serde_json::json!({}));
-    let description_translations = body.description_translations.clone().unwrap_or_else(|| serde_json::json!({}));
+    let mut mut_body = body.into_inner();
+    let mut name_translations = mut_body.name_translations.clone().unwrap_or_else(|| serde_json::json!({}));
+    crate::translation::ensure_translations_json(&mut name_translations, Some(&mut_body.name))
+        .await
+        .map_err(|_| AppError::Internal)?;
+
+    let mut description_translations = mut_body.description_translations.clone().unwrap_or_else(|| serde_json::json!({}));
+    if let Some(desc) = &mut_body.description {
+        crate::translation::ensure_translations_json(&mut description_translations, Some(desc))
+            .await
+            .map_err(|_| AppError::Internal)?;
+    }
 
     // Create bundle row (always defaults to Draft)
     let bundle = sqlx::query_as::<_, Bundle>(
@@ -495,24 +505,24 @@ pub async fn create_bundle(
         RETURNING *
         "#
     )
-    .bind(body.org_id)
-    .bind(&body.name)
+    .bind(mut_body.org_id)
+    .bind(&mut_body.name)
     .bind(name_translations)
-    .bind(&body.description)
+    .bind(&mut_body.description)
     .bind(description_translations)
-    .bind(body.price)
-    .bind(&body.image_url)
-    .bind(body.display_order.unwrap_or(0))
-    .bind(body.available_from_time)
-    .bind(body.available_until_time)
-    .bind(body.available_from_date)
-    .bind(body.available_until_date)
+    .bind(mut_body.price)
+    .bind(&mut_body.image_url)
+    .bind(mut_body.display_order.unwrap_or(0))
+    .bind(mut_body.available_from_time)
+    .bind(mut_body.available_until_time)
+    .bind(mut_body.available_from_date)
+    .bind(mut_body.available_until_date)
     .bind(claims.user_id())
     .fetch_one(&mut *tx)
     .await?;
 
     // Insert components
-    for (i, c) in body.components.iter().enumerate() {
+    for (i, c) in mut_body.components.iter().enumerate() {
         sqlx::query(
             r#"
             INSERT INTO bundle_components (bundle_id, item_id, quantity, position)
@@ -528,7 +538,7 @@ pub async fn create_bundle(
     }
 
     // Insert branch availability
-    if let Some(branch_ids) = &body.branch_ids {
+    if let Some(branch_ids) = &mut_body.branch_ids {
         for b_id in branch_ids {
             sqlx::query(
                 "INSERT INTO bundle_branch_availability (bundle_id, branch_id) VALUES ($1, $2)"
@@ -547,7 +557,7 @@ pub async fn create_bundle(
          VALUES ($1, $2, now(), $3)"
     )
     .bind(bundle.id)
-    .bind(body.price)
+    .bind(mut_body.price)
     .bind(claims.user_id())
     .execute(&mut *tx)
     .await?;
@@ -616,40 +626,65 @@ pub async fn update_bundle(
         return Err(AppError::BadRequest("Archived bundles cannot be modified".into()));
     }
 
+    let mut mut_body = body.into_inner();
     let mut tx = pool.begin().await?;
 
+    let mut name_translations = original.bundle.name_translations.clone();
+    if let Some(new_name) = &mut_body.name {
+        crate::translation::ensure_translations_json(&mut name_translations, Some(new_name))
+            .await
+            .map_err(|_| AppError::Internal)?;
+    } else if let Some(new_tr) = mut_body.name_translations {
+        name_translations = new_tr;
+        crate::translation::ensure_translations_json(&mut name_translations, Some(&original.bundle.name))
+            .await
+            .map_err(|_| AppError::Internal)?;
+    }
+
+    let mut description_translations = original.bundle.description_translations.clone();
+    if let Some(new_desc) = &mut_body.description {
+        crate::translation::ensure_translations_json(&mut description_translations, Some(new_desc))
+            .await
+            .map_err(|_| AppError::Internal)?;
+    } else if let Some(new_tr) = mut_body.description_translations {
+        description_translations = new_tr;
+        if let Some(desc) = &original.bundle.description {
+            crate::translation::ensure_translations_json(&mut description_translations, Some(desc))
+                .await
+                .map_err(|_| AppError::Internal)?;
+        }
+    }
+
     // Prepare updated values
-    let name = body.name.as_ref().unwrap_or(&original.bundle.name);
-    let name_translations = body.name_translations.as_ref().unwrap_or(&original.bundle.name_translations);
-    let description = body.description.as_ref().or(original.bundle.description.as_ref());
-    let description_translations = body.description_translations.as_ref().unwrap_or(&original.bundle.description_translations);
-    let price = body.price.unwrap_or(original.bundle.price);
-    let image_url = body.image_url.as_ref().or(original.bundle.image_url.as_ref());
-    let display_order = body.display_order.unwrap_or(original.bundle.display_order);
+    let name = mut_body.name.as_ref().unwrap_or(&original.bundle.name);
+    let description = mut_body.description.as_ref().or(original.bundle.description.as_ref());
+    let price = mut_body.price.unwrap_or(original.bundle.price);
+    let image_url = mut_body.image_url.as_ref().or(original.bundle.image_url.as_ref());
+    let display_order = mut_body.display_order.unwrap_or(original.bundle.display_order);
     // Option<Option<T>> semantics:
     //   None        → field was absent from the request → keep existing value
     //   Some(None)  → field was explicitly `null`       → clear (no restriction)
     //   Some(Some(v)) → field was set to a new value    → use new value
-    let available_from_time = match body.available_from_time {
+    let available_from_time = match mut_body.available_from_time {
         Some(v) => v,                                    // Some(None) clears, Some(Some(t)) sets
         None    => original.bundle.available_from_time,  // omitted → keep
     };
-    let available_until_time = match body.available_until_time {
+    let available_until_time = match mut_body.available_until_time {
         Some(v) => v,
         None    => original.bundle.available_until_time,
     };
-    let available_from_date = match body.available_from_date {
+    let available_from_date = match mut_body.available_from_date {
         Some(v) => v,
         None    => original.bundle.available_from_date,
     };
-    let available_until_date = match body.available_until_date {
+    let available_until_date = match mut_body.available_until_date {
         Some(v) => v,
         None    => original.bundle.available_until_date,
     };
 
     // If components are being updated
     let mut updated_components = Vec::new();
-    if let Some(comp_inputs) = &body.components {
+    if let Some(comp_inputs) = &mut_body.components {
         // Delete old components
         sqlx::query("DELETE FROM bundle_components WHERE bundle_id = $1")
             .bind(original.bundle.id)
@@ -687,7 +722,7 @@ pub async fn update_bundle(
     }
 
     // If branch scopes are being updated
-    if let Some(branch_ids) = &body.branch_ids {
+    if let Some(branch_ids) = &mut_body.branch_ids {
         sqlx::query("DELETE FROM bundle_branch_availability WHERE bundle_id = $1")
             .bind(original.bundle.id)
             .execute(&mut *tx)
@@ -727,9 +762,9 @@ pub async fn update_bundle(
         "#
     )
     .bind(name)
-    .bind(name_translations)
+    .bind(&name_translations)
     .bind(description)
-    .bind(description_translations)
+    .bind(&description_translations)
     .bind(price)
     .bind(image_url)
     .bind(display_order)

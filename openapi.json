@@ -12674,6 +12674,7 @@
         "required": [
           "addon_item_id",
           "addon_name",
+          "addon_name_translations",
           "addon_type",
           "quantity_sold",
           "revenue"
@@ -12685,6 +12686,9 @@
           },
           "addon_name": {
             "type": "string"
+          },
+          "addon_name_translations": {
+            "type": "object"
           },
           "addon_type": {
             "type": "string"
@@ -13630,6 +13634,7 @@
       "CategorySales": {
         "type": "object",
         "required": [
+          "category_name_translations",
           "item_count",
           "quantity_sold",
           "revenue",
@@ -13648,6 +13653,9 @@
               "string",
               "null"
             ]
+          },
+          "category_name_translations": {
+            "type": "object"
           },
           "item_count": {
             "type": "integer",
@@ -13723,6 +13731,7 @@
         "type": "object",
         "required": [
           "item_name",
+          "item_name_translations",
           "standalone_qty",
           "bundle_qty",
           "total_qty"
@@ -13741,6 +13750,9 @@
           },
           "item_name": {
             "type": "string"
+          },
+          "item_name_translations": {
+            "type": "object"
           },
           "standalone_qty": {
             "type": "integer",
@@ -14905,12 +14917,16 @@
         "required": [
           "menu_item_id",
           "item_name",
+          "item_name_translations",
           "quantity_sold",
           "revenue"
         ],
         "properties": {
           "item_name": {
             "type": "string"
+          },
+          "item_name_translations": {
+            "type": "object"
           },
           "menu_item_id": {
             "type": "string",
