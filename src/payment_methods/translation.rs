@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 #[derive(Serialize)]
 struct GoogleTranslateRequest<'a> {
-    q: &'a str,
+    q: Vec<&'a str>,
     target: &'a str,
     source: &'a str,
     format: &'a str,
@@ -52,47 +52,77 @@ pub async fn ensure_translations(
 
     // We need a source to translate from. Prefer 'en', else pick the first available.
     let source_lang = if translations.contains_key("en") && !translations["en"].trim().is_empty() {
-        "en"
+        "en".to_string()
     } else {
-        translations.keys().next().cloned().unwrap_or_else(|| "en".to_string()).leak()
+        translations.keys().next().cloned().unwrap_or_else(|| "en".to_string())
     };
 
-    let source_text = match translations.get(source_lang) {
+    let source_text = match translations.get(&source_lang) {
         Some(t) => t.clone(),
         None => return Err("No source text provided for translation".into()),
     };
 
+    let client = Client::new();
+
     if api_key.is_empty() || api_key == "your_api_key_here" {
         // Fallback for local development if no API key is provided
-        tracing::warn!("GOOGLE_TRANSLATE_API_KEY is not set. Falling back to source text for missing languages.");
-        for lang in missing_langs {
-            translations.insert(lang.to_string(), source_text.clone());
+        tracing::warn!("GOOGLE_TRANSLATE_API_KEY is not set. Using free Google Translate API fallback.");
+        
+        for target_lang in missing_langs {
+            if target_lang == &source_lang {
+                continue;
+            }
+
+            let encoded_text = urlencoding::encode(&source_text);
+            let url = format!(
+                "https://translate.googleapis.com/translate_a/single?client=gtx&sl={}&tl={}&dt=t&q={}",
+                source_lang, target_lang, encoded_text
+            );
+
+            let mut success = false;
+            match client.get(&url).send().await {
+                Ok(resp) => {
+                    if let Ok(body) = resp.json::<serde_json::Value>().await {
+                        if let Some(text) = body.get(0).and_then(|v| v.get(0)).and_then(|v| v.get(0)).and_then(|v| v.as_str()) {
+                            translations.insert(target_lang.to_string(), text.to_string());
+                            success = true;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to reach free Google Translate API: {}", e);
+                }
+            }
+
+            if !success {
+                translations.insert(target_lang.to_string(), source_text.clone());
+            }
         }
         return Ok(());
     }
 
-    let client = Client::new();
     let url = format!("https://translation.googleapis.com/language/translate/v2?key={}", api_key);
 
     for target_lang in missing_langs {
-        if target_lang == source_lang {
+        if target_lang == &source_lang {
             continue;
         }
 
         let req_body = GoogleTranslateRequest {
-            q: &source_text,
+            q: vec![&source_text],
             target: target_lang,
-            source: source_lang,
+            source: &source_lang,
             format: "text",
         };
 
+        let mut success = false;
         match client.post(&url).json(&req_body).send().await {
             Ok(resp) => {
                 if let Ok(body) = resp.json::<GoogleTranslateResponse>().await {
                     if let Some(data) = body.data {
                         if let Some(t) = data.translations.first() {
                             translations.insert(target_lang.to_string(), t.translated_text.clone());
-                            continue;
+                            success = true;
                         }
                     } else {
                         tracing::error!("Google Translate Error: {:?}", body.error);
@@ -104,8 +134,10 @@ pub async fn ensure_translations(
             }
         }
         
-        // Fallback on error
-        translations.insert(target_lang.to_string(), source_text.clone());
+        if !success {
+            // Fallback on error
+            translations.insert(target_lang.to_string(), source_text.clone());
+        }
     }
 
     Ok(())

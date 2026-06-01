@@ -3772,6 +3772,7 @@ dependencies = [
  "tracing",
  "tracing-actix-web",
  "tracing-subscriber",
+ "urlencoding",
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",
