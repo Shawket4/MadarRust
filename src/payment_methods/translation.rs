@@ -33,12 +33,10 @@ struct GoogleTranslation {
 pub async fn ensure_translations(
     translations: &mut HashMap<String, String>,
 ) -> Result<(), String> {
-    // Read config
     let api_key = std::env::var("GOOGLE_TRANSLATE_API_KEY").unwrap_or_default();
     let supported_str = std::env::var("SUPPORTED_LANGUAGES").unwrap_or_else(|_| "en,ar".into());
     let supported_langs: Vec<&str> = supported_str.split(',').map(|s| s.trim()).collect();
 
-    // Do we have all supported languages?
     let mut missing_langs = Vec::new();
     for lang in &supported_langs {
         if !translations.contains_key(*lang) || translations[*lang].trim().is_empty() {
@@ -50,7 +48,6 @@ pub async fn ensure_translations(
         return Ok(());
     }
 
-    // We need a source to translate from. Prefer 'en', else pick the first available.
     let source_lang = if translations.contains_key("en") && !translations["en"].trim().is_empty() {
         "en".to_string()
     } else {
@@ -64,81 +61,74 @@ pub async fn ensure_translations(
 
     let client = Client::new();
 
-    if api_key.is_empty() || api_key == "your_api_key_here" {
-        // Fallback for local development if no API key is provided
-        tracing::warn!("GOOGLE_TRANSLATE_API_KEY is not set. Using free Google Translate API fallback.");
-        
-        for target_lang in missing_langs {
-            if target_lang == &source_lang {
-                continue;
-            }
+    for target_lang in missing_langs {
+        if target_lang == &source_lang {
+            continue;
+        }
 
+        let mut success = false;
+
+        // Attempt Paid API if key exists
+        if !api_key.is_empty() && api_key != "your_api_key_here" {
+            let url = format!("https://translation.googleapis.com/language/translate/v2?key={}", api_key);
+            let req_body = GoogleTranslateRequest {
+                q: vec![&source_text],
+                target: target_lang,
+                source: &source_lang,
+                format: "text",
+            };
+
+            match client.post(&url).json(&req_body).send().await {
+                Ok(resp) => {
+                    if let Ok(body) = resp.json::<GoogleTranslateResponse>().await {
+                        if let Some(data) = body.data {
+                            if let Some(t) = data.translations.first() {
+                                translations.insert(target_lang.to_string(), t.translated_text.clone());
+                                success = true;
+                            }
+                        } else {
+                            tracing::error!("Google Translate Paid Error: {:?}", body.error);
+                        }
+                    } else {
+                        tracing::error!("Google Translate Paid Failed to parse JSON response");
+                    }
+                }
+                Err(e) => tracing::error!("Google Translate Paid Request Error: {}", e),
+            }
+        }
+
+        // Attempt Free API fallback if paid API failed or was not configured
+        if !success {
             let encoded_text = urlencoding::encode(&source_text);
             let url = format!(
                 "https://translate.googleapis.com/translate_a/single?client=gtx&sl={}&tl={}&dt=t&q={}",
                 source_lang, target_lang, encoded_text
             );
 
-            let mut success = false;
             match client.get(&url).send().await {
                 Ok(resp) => {
+                    let status = resp.status();
                     if let Ok(body) = resp.json::<serde_json::Value>().await {
                         if let Some(text) = body.get(0).and_then(|v| v.get(0)).and_then(|v| v.get(0)).and_then(|v| v.as_str()) {
                             translations.insert(target_lang.to_string(), text.to_string());
                             success = true;
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Failed to reach free Google Translate API: {}", e);
-                }
-            }
-
-            if !success {
-                translations.insert(target_lang.to_string(), source_text.clone());
-            }
-        }
-        return Ok(());
-    }
-
-    let url = format!("https://translation.googleapis.com/language/translate/v2?key={}", api_key);
-
-    for target_lang in missing_langs {
-        if target_lang == &source_lang {
-            continue;
-        }
-
-        let req_body = GoogleTranslateRequest {
-            q: vec![&source_text],
-            target: target_lang,
-            source: &source_lang,
-            format: "text",
-        };
-
-        let mut success = false;
-        match client.post(&url).json(&req_body).send().await {
-            Ok(resp) => {
-                if let Ok(body) = resp.json::<GoogleTranslateResponse>().await {
-                    if let Some(data) = body.data {
-                        if let Some(t) = data.translations.first() {
-                            translations.insert(target_lang.to_string(), t.translated_text.clone());
-                            success = true;
+                        } else {
+                            tracing::error!("Google Translate Free API Unexpected JSON structure: {}", body);
                         }
                     } else {
-                        tracing::error!("Google Translate Error: {:?}", body.error);
+                        tracing::error!("Google Translate Free API Failed to parse JSON, status: {}", status);
                     }
                 }
-            }
-            Err(e) => {
-                tracing::error!("Failed to reach Google Translate API: {}", e);
+                Err(e) => tracing::error!("Google Translate Free API Request Error: {}", e),
             }
         }
-        
+
         if !success {
-            // Fallback on error
+            tracing::warn!("All translation attempts failed for {}, falling back to source text", target_lang);
             translations.insert(target_lang.to_string(), source_text.clone());
         }
     }
 
     Ok(())
 }
+
