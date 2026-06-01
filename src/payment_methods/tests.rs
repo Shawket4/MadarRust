@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::payment_methods::translation::ensure_translations;
+    use crate::translation::ensure_translations;
     use std::collections::HashMap;
 
     #[tokio::test]

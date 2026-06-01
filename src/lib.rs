@@ -24,6 +24,7 @@ pub mod permissions;
 pub mod recipes;
 pub mod reports;
 pub mod shifts;
+pub mod translation;
 pub mod uploads;
 pub mod users;
 

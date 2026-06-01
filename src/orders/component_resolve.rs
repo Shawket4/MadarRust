@@ -42,6 +42,7 @@ pub struct InventoryDeduction {
 pub struct ResolvedAddon {
     pub addon_item_id: Uuid,
     pub addon_name:    String,
+    pub name_translations: serde_json::Value,
     pub unit_price:    i32,
     pub quantity:      i32,
 }
@@ -131,8 +132,8 @@ pub async fn resolve_menu_item_configuration(
     for addon_input in addons {
         let addon_qty = addon_input.quantity.max(1) as f64;
 
-        let (addon_name, default_price, addon_type): (String, i32, String) = sqlx::query_as(
-            "SELECT name, default_price, type FROM addon_items WHERE id = $1",
+        let (addon_name, name_translations, default_price, addon_type): (String, serde_json::Value, i32, String) = sqlx::query_as(
+            "SELECT name, name_translations, default_price, type FROM addon_items WHERE id = $1",
         )
         .bind(addon_input.addon_item_id)
         .fetch_optional(pool)
@@ -142,6 +143,7 @@ pub async fn resolve_menu_item_configuration(
         resolved_addons.push(ResolvedAddon {
             addon_item_id: addon_input.addon_item_id,
             addon_name:    addon_name.clone(),
+            name_translations: name_translations.clone(),
             unit_price:    default_price,
             quantity:      addon_input.quantity.max(1),
         });

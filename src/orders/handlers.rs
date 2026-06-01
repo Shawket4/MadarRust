@@ -374,6 +374,7 @@ pub async fn create_order(
     struct ResolvedBundleComponent {
         item_id:    Uuid,
         item_name:  String,
+        name_translations: serde_json::Value,
         quantity:   i32,
         size_label: Option<String>,
         addons:     Vec<ResolvedAddon>,
@@ -383,6 +384,7 @@ pub async fn create_order(
     struct ResolvedItem {
         menu_item_id:      Option<Uuid>,
         item_name:         String,
+        name_translations: serde_json::Value,
         size_label:        Option<String>,
         unit_price:        i32,
         quantity:          i32,
@@ -399,6 +401,7 @@ pub async fn create_order(
     struct ResolvedAddon {
         addon_item_id: Uuid,
         addon_name:    String,
+        name_translations: serde_json::Value,
         unit_price:    i32,
         quantity:      i32,
     }
@@ -417,7 +420,7 @@ pub async fn create_order(
         let mut bundle_components = Vec::new();
 
         let mut component_surcharge: i32 = 0;
-        let (resolved_menu_item_id, item_name, unit_price, bundle_id, bundle_unit_price) = if let Some(b_id) = item_input.bundle_id {
+        let (resolved_menu_item_id, item_name, name_translations, unit_price, bundle_id, bundle_unit_price) = if let Some(b_id) = item_input.bundle_id {
             // ── 1. Resolve Bundle ─────────────────────────────
             let bundle: (Uuid, String, i32, String) = sqlx::query_as(
                 "SELECT id, name, price, status::text FROM bundles WHERE id = $1 AND org_id = $2"
@@ -494,8 +497,8 @@ pub async fn create_order(
             }
 
             // Resolve components (client snapshot or catalog defaults)
-            let catalog: Vec<(Uuid, i32, String)> = sqlx::query_as(
-                "SELECT bc.item_id, bc.quantity, mi.name \
+            let catalog: Vec<(Uuid, i32, String, serde_json::Value)> = sqlx::query_as(
+                "SELECT bc.item_id, bc.quantity, mi.name, mi.name_translations \
                  FROM bundle_components bc \
                  JOIN menu_items mi ON mi.id = bc.item_id \
                  WHERE bc.bundle_id = $1 \
@@ -509,16 +512,16 @@ pub async fn create_order(
                 return Err(AppError::BadRequest(format!("Bundle {} has no components", bundle.1)));
             }
 
-            let catalog_map: std::collections::HashMap<Uuid, (i32, String)> = catalog
+            let catalog_map: std::collections::HashMap<Uuid, (i32, String, serde_json::Value)> = catalog
                 .iter()
-                .map(|(id, qty, name)| (*id, (*qty, name.clone())))
+                .map(|(id, qty, name, tr)| (*id, (*qty, name.clone(), tr.clone())))
                 .collect();
 
             let component_inputs: Vec<crate::orders::component_resolve::BundleComponentInput> =
                 if item_input.bundle_components.is_empty() {
                     catalog
                         .iter()
-                        .map(|(id, qty, _)| crate::orders::component_resolve::BundleComponentInput {
+                        .map(|(id, qty, _, _)| crate::orders::component_resolve::BundleComponentInput {
                             item_id: *id,
                             quantity: *qty,
                             size_label: None,
@@ -531,7 +534,7 @@ pub async fn create_order(
                 };
 
             for comp_in in component_inputs {
-                let Some((catalog_qty, item_name)) = catalog_map.get(&comp_in.item_id) else {
+                let Some((catalog_qty, item_name, name_translations)) = catalog_map.get(&comp_in.item_id) else {
                     return Err(AppError::BadRequest(format!(
                         "Item {} is not a component of bundle {}",
                         comp_in.item_id, bundle.1
@@ -574,6 +577,7 @@ pub async fn create_order(
                     .map(|a| ResolvedAddon {
                         addon_item_id: a.addon_item_id,
                         addon_name:    a.addon_name,
+                        name_translations: a.name_translations,
                         unit_price:    a.unit_price,
                         quantity:      a.quantity,
                     })
@@ -596,6 +600,7 @@ pub async fn create_order(
                 bundle_components.push(ResolvedBundleComponent {
                     item_id:    comp_in.item_id,
                     item_name:  item_name.clone(),
+                    name_translations: name_translations.clone(),
                     quantity:   comp_in.quantity,
                     size_label: comp_in.size_label.clone(),
                     addons:     comp_addons,
@@ -603,11 +608,11 @@ pub async fn create_order(
                 });
             }
 
-            (None, bundle.1, bundle.2, Some(bundle.0), Some(bundle.2))
+            (None, bundle.1, serde_json::json!({}), bundle.2, Some(bundle.0), Some(bundle.2))
         } else if let Some(m_item_id) = item_input.menu_item_id {
             // ── 2. Resolve Menu Item ──────────────────────────
-            let (item_name, base_price): (String, i32) = sqlx::query_as(
-                "SELECT name, base_price FROM menu_items WHERE id = $1 AND deleted_at IS NULL",
+            let (item_name, name_translations, base_price): (String, serde_json::Value, i32) = sqlx::query_as(
+                "SELECT name, name_translations, base_price FROM menu_items WHERE id = $1 AND deleted_at IS NULL",
             )
             .bind(m_item_id)
             .fetch_optional(pool.get_ref())
@@ -680,8 +685,8 @@ pub async fn create_order(
             for addon_input in &item_input.addons {
                 let addon_qty = addon_input.quantity.max(1) as f64;
 
-                let (addon_name, default_price, addon_type): (String, i32, String) = sqlx::query_as(
-                    "SELECT name, default_price, type FROM addon_items WHERE id = $1"
+                let (addon_name, addon_name_translations, default_price, addon_type): (String, serde_json::Value, i32, String) = sqlx::query_as(
+                    "SELECT name, name_translations, default_price, type FROM addon_items WHERE id = $1"
                 )
                 .bind(addon_input.addon_item_id)
                 .fetch_optional(pool.get_ref())
@@ -693,6 +698,7 @@ pub async fn create_order(
                 resolved_addons.push(ResolvedAddon {
                     addon_item_id: addon_input.addon_item_id,
                     addon_name:    addon_name.clone(),
+                    name_translations: addon_name_translations.clone(),
                     unit_price:    default_price,
                     quantity:      addon_input.quantity.max(1),
                 });
@@ -840,7 +846,7 @@ pub async fn create_order(
                 });
             }
 
-            (Some(m_item_id), item_name, unit_price, None, None)
+            (Some(m_item_id), item_name, name_translations, unit_price, None, None)
         } else {
             return Err(AppError::BadRequest("Each line item must have either menu_item_id or bundle_id".into()));
         };
@@ -870,6 +876,7 @@ pub async fn create_order(
         resolved_items.push(ResolvedItem {
             menu_item_id:      resolved_menu_item_id,
             item_name,
+            name_translations,
             size_label:        item_input.size_label.clone(),
             unit_price,
             quantity:          item_input.quantity,
@@ -991,17 +998,18 @@ pub async fn create_order(
 
         let order_item = sqlx::query_as::<_, OrderItem>(
             r#"INSERT INTO order_items
-                (order_id, menu_item_id, item_name, size_label,
+                (order_id, menu_item_id, item_name, name_translations, size_label,
                  unit_price, quantity, line_total, notes, deductions_snapshot,
                  bundle_id, bundle_unit_price)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                RETURNING id, order_id, menu_item_id, item_name, size_label,
                          unit_price, quantity, line_total, notes, deductions_snapshot,
-                         bundle_id, bundle_unit_price"#,
+                         bundle_id, bundle_unit_price"#, // Did not fetch translations back explicitly
         )
         .bind(order.id)
         .bind(resolved.menu_item_id)
         .bind(&resolved.item_name)
+        .bind(&resolved.name_translations)
         .bind(&resolved.size_label)
         .bind(resolved.unit_price)
         .bind(resolved.quantity)
@@ -1017,13 +1025,14 @@ pub async fn create_order(
             for comp in &resolved.bundle_components {
                 sqlx::query(
                     "INSERT INTO order_line_bundle_components \
-                        (order_line_id, item_id, quantity, size_label) \
-                     VALUES ($1, $2, $3, $4)",
+                        (order_line_id, item_id, quantity, size_label, name_translations) \
+                     VALUES ($1, $2, $3, $4, $5)",
                 )
                 .bind(order_item.id)
                 .bind(comp.item_id)
                 .bind(comp.quantity)
                 .bind(&comp.size_label)
+                .bind(&comp.name_translations)
                 .execute(&mut *tx)
                 .await?;
 
@@ -1031,14 +1040,15 @@ pub async fn create_order(
                     let addon_line = addon.unit_price * addon.quantity * comp.quantity * resolved.quantity;
                     sqlx::query(
                         "INSERT INTO order_line_bundle_component_addons \
-                            (order_line_id, component_item_id, addon_item_id, addon_name, \
+                            (order_line_id, component_item_id, addon_item_id, addon_name, name_translations, \
                              unit_price, quantity, line_total) \
-                         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                     )
                     .bind(order_item.id)
                     .bind(comp.item_id)
                     .bind(addon.addon_item_id)
                     .bind(&addon.addon_name)
+                    .bind(&addon.name_translations)
                     .bind(addon.unit_price)
                     .bind(addon.quantity)
                     .bind(addon_line)
@@ -1074,14 +1084,15 @@ pub async fn create_order(
             let addon_line = addon.unit_price * addon.quantity * resolved.quantity;
             let row = sqlx::query_as::<_, OrderItemAddon>(
                 r#"INSERT INTO order_item_addons
-                    (order_item_id, addon_item_id, addon_name, unit_price, quantity, line_total)
-                   VALUES ($1, $2, $3, $4, $5, $6)
+                    (order_item_id, addon_item_id, addon_name, name_translations, unit_price, quantity, line_total)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7)
                    RETURNING id, order_item_id, addon_item_id, addon_name,
                              unit_price, quantity, line_total"#,
             )
             .bind(order_item.id)
             .bind(addon.addon_item_id)
             .bind(&addon.addon_name)
+            .bind(&addon.name_translations)
             .bind(addon.unit_price)
             .bind(addon.quantity)
             .bind(addon_line)

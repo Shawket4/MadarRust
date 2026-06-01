@@ -12,7 +12,7 @@ use crate::{
     permissions::checker::check_permission,
 };
 
-use super::translation::ensure_translations;
+use crate::translation::ensure_translations;
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct OrgPaymentMethod {

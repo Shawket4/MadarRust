@@ -27,9 +27,12 @@ struct GoogleTranslation {
     translated_text: String,
 }
 
-/// Hybrid approach: ensures all supported languages exist in `translations`.
+/// Ensures all supported languages exist in `translations`.
 /// If `translations` is missing a language, it will automatically translate it
 /// from English (or the first available language) using Google Translate API.
+///
+/// Tries the paid API first (if `GOOGLE_TRANSLATE_API_KEY` is set),
+/// then falls back to the free `translate.googleapis.com` endpoint.
 pub async fn ensure_translations(
     translations: &mut HashMap<String, String>,
 ) -> Result<(), String> {
@@ -132,3 +135,33 @@ pub async fn ensure_translations(
     Ok(())
 }
 
+/// Convenience wrapper for modules that store translations as `serde_json::Value`
+/// (e.g. bundles). Converts the JSON value to a `HashMap`, runs `ensure_translations`,
+/// and converts back.
+///
+/// If the input value is `null` or `{}`, it creates an empty map. If the `source_name`
+/// is provided, it is used as the English source text when the JSON object has no "en" key.
+pub async fn ensure_translations_json(
+    value: &mut serde_json::Value,
+    source_name: Option<&str>,
+) -> Result<(), String> {
+    let mut map: HashMap<String, String> = match value.as_object() {
+        Some(obj) => obj
+            .iter()
+            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect(),
+        None => HashMap::new(),
+    };
+
+    // If the JSON had no "en" key but we have a source name, seed it
+    if let Some(name) = source_name {
+        if !map.contains_key("en") || map["en"].trim().is_empty() {
+            map.insert("en".to_string(), name.to_string());
+        }
+    }
+
+    ensure_translations(&mut map).await?;
+
+    *value = serde_json::to_value(&map).unwrap_or_default();
+    Ok(())
+}
