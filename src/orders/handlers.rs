@@ -66,6 +66,7 @@ pub struct OrderItem {
     pub order_id:            Uuid,
     pub menu_item_id:        Option<Uuid>,
     pub item_name:           String,
+    #[schema(value_type = Object)] pub name_translations: serde_json::Value,
     pub size_label:          Option<String>,
     pub unit_price:          i32,
     pub quantity:            i32,
@@ -82,6 +83,7 @@ pub struct OrderItemAddon {
     pub order_item_id: Uuid,
     pub addon_item_id: Uuid,
     pub addon_name:    String,
+    #[schema(value_type = Object)] pub name_translations: serde_json::Value,
     pub unit_price:    i32,
     pub quantity:      i32,
     pub line_total:    i32,
@@ -93,6 +95,7 @@ pub struct OrderItemOptional {
     pub order_item_id:    Uuid,
     pub optional_field_id: Option<Uuid>,
     pub field_name:       String,
+    #[schema(value_type = Object)] pub name_translations: serde_json::Value,
     pub price:            i32,
     pub org_ingredient_id: Option<Uuid>,
     pub ingredient_name:  Option<String>,
@@ -115,6 +118,7 @@ pub struct OrderBundleComponentAddon {
     pub component_item_id: Uuid,
     pub addon_item_id:     Uuid,
     pub addon_name:        String,
+    #[schema(value_type = Object)] pub name_translations: serde_json::Value,
     pub unit_price:        i32,
     pub quantity:          i32,
     pub line_total:        i32,
@@ -127,6 +131,7 @@ pub struct OrderBundleComponentOptional {
     pub component_item_id: Uuid,
     pub optional_field_id: Option<Uuid>,
     pub field_name:        String,
+    #[schema(value_type = Object)] pub name_translations: serde_json::Value,
     pub price:             i32,
 }
 
@@ -134,6 +139,7 @@ pub struct OrderBundleComponentOptional {
 pub struct OrderBundleComponentFull {
     pub item_id:    Uuid,
     pub item_name:  String,
+    #[schema(value_type = Object)] pub name_translations: serde_json::Value,
     pub quantity:   i32,
     pub size_label: Option<String>,
     pub addons:     Vec<OrderBundleComponentAddon>,
@@ -363,6 +369,7 @@ pub async fn create_order(
     struct ResolvedOptional {
         optional_field_id: Uuid,
         field_name:        String,
+        name_translations: serde_json::Value,
         price:             i32,
         org_ingredient_id: Option<Uuid>,
         ingredient_name:   Option<String>,
@@ -589,6 +596,7 @@ pub async fn create_order(
                     .map(|o| ResolvedOptional {
                         optional_field_id: o.optional_field_id,
                         field_name:        o.field_name,
+                        name_translations: o.name_translations,
                         price:             o.price,
                         org_ingredient_id: o.org_ingredient_id,
                         ingredient_name:   o.ingredient_name,
@@ -795,12 +803,12 @@ pub async fn create_order(
                 }
             }
 
-            // ── 3. Optional fields ────────────────────────────────
             for &field_id in &item_input.optional_field_ids {
-                let row_result = sqlx::query_as::<_, (String, i32, Option<Uuid>, Option<String>, Option<String>, Option<f64>, Option<String>)>(
+                let row_result = sqlx::query_as::<_, (String, i32, Option<Uuid>, Option<String>, Option<String>, Option<f64>, Option<String>, serde_json::Value)>(
                     r#"SELECT name, price, org_ingredient_id,
                               ingredient_name, ingredient_unit,
-                              quantity_used::float8, size_label::text
+                              quantity_used::float8, size_label::text,
+                              name_translations
                        FROM menu_item_optional_fields
                        WHERE id = $1 AND menu_item_id = $2 AND is_active = true"#,
                 )
@@ -809,7 +817,7 @@ pub async fn create_order(
                 .fetch_optional(pool.get_ref())
                 .await?;
             
-                let Some((fname, fprice, ing_id, ing_name, ing_unit, qty_used, field_size)) = row_result else {
+                let Some((fname, fprice, ing_id, ing_name, ing_unit, qty_used, field_size, name_translations)) = row_result else {
                     tracing::warn!(field_id = %field_id, "Optional field not found or inactive — skipping");
                     continue;
                 };
@@ -838,6 +846,7 @@ pub async fn create_order(
                 resolved_optionals.push(ResolvedOptional {
                     optional_field_id: field_id,
                     field_name:        fname,
+                    name_translations,
                     price:             fprice,
                     org_ingredient_id: ing_id,
                     ingredient_name:   ing_name,
@@ -1002,9 +1011,9 @@ pub async fn create_order(
                  unit_price, quantity, line_total, notes, deductions_snapshot,
                  bundle_id, bundle_unit_price)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-               RETURNING id, order_id, menu_item_id, item_name, size_label,
+               RETURNING id, order_id, menu_item_id, item_name, name_translations, size_label,
                          unit_price, quantity, line_total, notes, deductions_snapshot,
-                         bundle_id, bundle_unit_price"#, // Did not fetch translations back explicitly
+                         bundle_id, bundle_unit_price"#,
         )
         .bind(order.id)
         .bind(resolved.menu_item_id)
@@ -1059,14 +1068,15 @@ pub async fn create_order(
                 for opt in &comp.optionals {
                     sqlx::query(
                         "INSERT INTO order_line_bundle_component_optionals \
-                            (order_line_id, component_item_id, optional_field_id, field_name, \
+                            (order_line_id, component_item_id, optional_field_id, field_name, name_translations, \
                              price, org_ingredient_id, ingredient_name, ingredient_unit, quantity_deducted) \
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                     )
                     .bind(order_item.id)
                     .bind(comp.item_id)
                     .bind(opt.optional_field_id)
                     .bind(&opt.field_name)
+                    .bind(&opt.name_translations)
                     .bind(opt.price)
                     .bind(opt.org_ingredient_id)
                     .bind(&opt.ingredient_name)
@@ -1086,7 +1096,7 @@ pub async fn create_order(
                 r#"INSERT INTO order_item_addons
                     (order_item_id, addon_item_id, addon_name, name_translations, unit_price, quantity, line_total)
                    VALUES ($1, $2, $3, $4, $5, $6, $7)
-                   RETURNING id, order_item_id, addon_item_id, addon_name,
+                   RETURNING id, order_item_id, addon_item_id, addon_name, name_translations,
                              unit_price, quantity, line_total"#,
             )
             .bind(order_item.id)
@@ -1106,15 +1116,16 @@ pub async fn create_order(
         for opt in &resolved.optionals {
             let row = sqlx::query_as::<_, OrderItemOptional>(
                 r#"INSERT INTO order_item_optionals
-                    (order_item_id, optional_field_id, field_name, price,
+                    (order_item_id, optional_field_id, field_name, name_translations, price,
                      org_ingredient_id, ingredient_name, ingredient_unit, quantity_deducted)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                   RETURNING id, order_item_id, optional_field_id, field_name, price,
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                   RETURNING id, order_item_id, optional_field_id, field_name, name_translations, price,
                              org_ingredient_id, ingredient_name, ingredient_unit, quantity_deducted"#,
             )
             .bind(order_item.id)
             .bind(opt.optional_field_id)
             .bind(&opt.field_name)
+            .bind(&opt.name_translations)
             .bind(opt.price)
             .bind(opt.org_ingredient_id)
             .bind(&opt.ingredient_name)
@@ -1642,7 +1653,7 @@ async fn fetch_order_items_full(
     order_id: Uuid,
 ) -> Result<Vec<OrderItemFull>, AppError> {
     let items = sqlx::query_as::<_, OrderItem>(
-        "SELECT id, order_id, menu_item_id, item_name, size_label, \
+        "SELECT id, order_id, menu_item_id, item_name, name_translations, size_label, \
                 unit_price, quantity, line_total, notes, deductions_snapshot, \
                 bundle_id, bundle_unit_price \
          FROM order_items WHERE order_id = $1 ORDER BY id",
@@ -1654,7 +1665,7 @@ async fn fetch_order_items_full(
     let mut result = Vec::new();
     for item in items {
         let addons = sqlx::query_as::<_, OrderItemAddon>(
-            "SELECT id, order_item_id, addon_item_id, addon_name, \
+            "SELECT id, order_item_id, addon_item_id, addon_name, name_translations, \
                     unit_price, quantity, line_total \
              FROM order_item_addons WHERE order_item_id = $1 ORDER BY id",
         )
@@ -1663,7 +1674,7 @@ async fn fetch_order_items_full(
         .await?;
 
         let optionals = sqlx::query_as::<_, OrderItemOptional>(
-            "SELECT id, order_item_id, optional_field_id, field_name, price, \
+            "SELECT id, order_item_id, optional_field_id, field_name, name_translations, price, \
                     org_ingredient_id, ingredient_name, ingredient_unit, quantity_deducted \
              FROM order_item_optionals WHERE order_item_id = $1 ORDER BY id",
         )
@@ -1672,8 +1683,8 @@ async fn fetch_order_items_full(
         .await?;
 
         let bundle_components = if item.bundle_id.is_some() {
-            let comps: Vec<(Uuid, i32, Option<String>)> = sqlx::query_as(
-                "SELECT item_id, quantity, size_label \
+            let comps: Vec<(Uuid, i32, Option<String>, serde_json::Value)> = sqlx::query_as(
+                "SELECT item_id, quantity, size_label, name_translations \
                  FROM order_line_bundle_components WHERE order_line_id = $1",
             )
             .bind(item.id)
@@ -1681,7 +1692,7 @@ async fn fetch_order_items_full(
             .await?;
 
             let mut out = Vec::new();
-            for (comp_item_id, qty, size_label) in comps {
+            for (comp_item_id, qty, size_label, name_translations) in comps {
                 let item_name: String = sqlx::query_scalar(
                     "SELECT name FROM menu_items WHERE id = $1",
                 )
@@ -1690,7 +1701,7 @@ async fn fetch_order_items_full(
                 .await?;
 
                 let comp_addons = sqlx::query_as::<_, OrderBundleComponentAddon>(
-                    "SELECT id, order_line_id, component_item_id, addon_item_id, addon_name, \
+                    "SELECT id, order_line_id, component_item_id, addon_item_id, addon_name, name_translations, \
                             unit_price, quantity, line_total \
                      FROM order_line_bundle_component_addons \
                      WHERE order_line_id = $1 AND component_item_id = $2 \
@@ -1702,7 +1713,7 @@ async fn fetch_order_items_full(
                 .await?;
 
                 let comp_optionals = sqlx::query_as::<_, OrderBundleComponentOptional>(
-                    "SELECT id, order_line_id, component_item_id, optional_field_id, field_name, price \
+                    "SELECT id, order_line_id, component_item_id, optional_field_id, field_name, name_translations, price \
                      FROM order_line_bundle_component_optionals \
                      WHERE order_line_id = $1 AND component_item_id = $2 \
                      ORDER BY id",
@@ -1715,6 +1726,7 @@ async fn fetch_order_items_full(
                 out.push(OrderBundleComponentFull {
                     item_id: comp_item_id,
                     item_name,
+                    name_translations,
                     quantity: qty,
                     size_label,
                     addons: comp_addons,

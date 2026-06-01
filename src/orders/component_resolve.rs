@@ -51,6 +51,7 @@ pub struct ResolvedAddon {
 pub struct ResolvedOptional {
     pub optional_field_id: Uuid,
     pub field_name:        String,
+    pub name_translations: serde_json::Value,
     pub price:             i32,
     pub org_ingredient_id: Option<Uuid>,
     pub ingredient_name:   Option<String>,
@@ -240,9 +241,10 @@ pub async fn resolve_menu_item_configuration(
             Option<String>,
             Option<f64>,
             Option<String>,
+            serde_json::Value,
         )>(
             r#"SELECT name, price, org_ingredient_id, ingredient_name, ingredient_unit,
-                      quantity_used::float8, size_label::text
+                      quantity_used::float8, size_label::text, name_translations
                FROM menu_item_optional_fields
                WHERE id = $1 AND menu_item_id = $2 AND is_active = true"#,
         )
@@ -251,7 +253,7 @@ pub async fn resolve_menu_item_configuration(
         .fetch_optional(pool)
         .await?;
 
-        let Some((fname, fprice, ing_id, ing_name, ing_unit, qty_used, field_size)) = row_result
+        let Some((fname, fprice, ing_id, ing_name, ing_unit, qty_used, field_size, name_translations)) = row_result
         else {
             tracing::warn!(field_id = %field_id, "Optional field not found — skipping");
             continue;
@@ -280,6 +282,7 @@ pub async fn resolve_menu_item_configuration(
         resolved_optionals.push(ResolvedOptional {
             optional_field_id: field_id,
             field_name:        fname,
+            name_translations,
             price:             fprice,
             org_ingredient_id: ing_id,
             ingredient_name:   ing_name,

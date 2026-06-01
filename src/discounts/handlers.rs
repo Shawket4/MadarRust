@@ -17,6 +17,8 @@ pub struct Discount {
     pub id:         Uuid,
     pub org_id:     Uuid,
     pub name:       String,
+    #[schema(value_type = Object)]
+    pub name_translations: serde_json::Value,
     pub dtype:      String,
     pub value:      i32,
     pub is_active:  bool,
@@ -34,6 +36,8 @@ pub struct ListQuery {
 pub struct CreateDiscountRequest {
     pub org_id:    Uuid,
     pub name:      String,
+    #[schema(value_type = Option<Object>)]
+    pub name_translations: Option<serde_json::Value>,
     pub dtype:     String,
     pub value:     i32,
     pub is_active: Option<bool>,
@@ -42,6 +46,8 @@ pub struct CreateDiscountRequest {
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpdateDiscountRequest {
     pub name:      Option<String>,
+    #[schema(value_type = Option<Object>)]
+    pub name_translations: Option<serde_json::Value>,
     pub dtype:     Option<String>,
     pub value:     Option<i32>,
     pub is_active: Option<bool>,
@@ -66,7 +72,7 @@ pub async fn list_discounts(
 
     let rows = sqlx::query_as::<_, Discount>(
         r#"
-        SELECT id, org_id, name, type::text AS dtype, value, is_active, created_at, updated_at
+        SELECT id, org_id, name, name_translations, type::text AS dtype, value, is_active, created_at, updated_at
         FROM discounts
         WHERE org_id = $1
         ORDER BY name
@@ -98,18 +104,25 @@ pub async fn create_discount(
     validate_dtype(&body.dtype)?;
     validate_value(body.value, &body.dtype)?;
 
+    let mut mut_body = body.into_inner();
+    let mut name_translations = mut_body.name_translations.unwrap_or_else(|| serde_json::json!({}));
+    crate::translation::ensure_translations_json(&mut name_translations, Some(&mut_body.name))
+        .await
+        .map_err(|_| AppError::Internal)?;
+
     let row = sqlx::query_as::<_, Discount>(
         r#"
-        INSERT INTO discounts (org_id, name, type, value, is_active)
-        VALUES ($1, $2, $3::discount_type, $4, $5)
-        RETURNING id, org_id, name, type::text AS dtype, value, is_active, created_at, updated_at
+        INSERT INTO discounts (org_id, name, name_translations, type, value, is_active)
+        VALUES ($1, $2, $3, $4::discount_type, $5, $6)
+        RETURNING id, org_id, name, name_translations, type::text AS dtype, value, is_active, created_at, updated_at
         "#,
     )
-    .bind(body.org_id)
-    .bind(&body.name)
-    .bind(&body.dtype)
-    .bind(body.value)
-    .bind(body.is_active.unwrap_or(true))
+    .bind(mut_body.org_id)
+    .bind(&mut_body.name)
+    .bind(name_translations)
+    .bind(&mut_body.dtype)
+    .bind(mut_body.value)
+    .bind(mut_body.is_active.unwrap_or(true))
     .fetch_one(pool.get_ref())
     .await?;
 
@@ -136,26 +149,42 @@ pub async fn update_discount(
     let existing = fetch_or_404(pool.get_ref(), *id).await?;
     require_org_access(&claims, existing.org_id)?;
 
-    if let Some(ref dt) = body.dtype { validate_dtype(dt)?; }
-    if let (Some(v), Some(dt)) = (body.value, &body.dtype) { validate_value(v, dt)?; }
+    let mut mut_body = body.into_inner();
+
+    if let Some(ref dt) = mut_body.dtype { validate_dtype(dt)?; }
+    if let (Some(v), Some(dt)) = (mut_body.value, &mut_body.dtype) { validate_value(v, dt)?; }
+
+    let mut name_translations = existing.name_translations;
+    if let Some(new_name) = &mut_body.name {
+        crate::translation::ensure_translations_json(&mut name_translations, Some(new_name))
+            .await
+            .map_err(|_| AppError::Internal)?;
+    } else if let Some(new_tr) = mut_body.name_translations {
+        name_translations = new_tr;
+        crate::translation::ensure_translations_json(&mut name_translations, Some(&existing.name))
+            .await
+            .map_err(|_| AppError::Internal)?;
+    }
 
     let row = sqlx::query_as::<_, Discount>(
         r#"
         UPDATE discounts SET
-            name       = COALESCE($2, name),
-            type       = COALESCE($3::discount_type, type),
-            value      = COALESCE($4, value),
-            is_active  = COALESCE($5, is_active),
-            updated_at = NOW()
+            name              = COALESCE($2, name),
+            name_translations = $3,
+            type              = COALESCE($4::discount_type, type),
+            value             = COALESCE($5, value),
+            is_active         = COALESCE($6, is_active),
+            updated_at        = NOW()
         WHERE id = $1
-        RETURNING id, org_id, name, type::text AS dtype, value, is_active, created_at, updated_at
+        RETURNING id, org_id, name, name_translations, type::text AS dtype, value, is_active, created_at, updated_at
         "#,
     )
     .bind(*id)
-    .bind(&body.name)
-    .bind(&body.dtype)
-    .bind(body.value)
-    .bind(body.is_active)
+    .bind(&mut_body.name)
+    .bind(name_translations)
+    .bind(&mut_body.dtype)
+    .bind(mut_body.value)
+    .bind(mut_body.is_active)
     .fetch_optional(pool.get_ref())
     .await?
     .ok_or_else(|| AppError::NotFound("Discount not found".into()))?;
@@ -198,7 +227,7 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 
 async fn fetch_or_404(pool: &PgPool, id: Uuid) -> Result<Discount, AppError> {
     sqlx::query_as::<_, Discount>(
-        "SELECT id, org_id, name, type::text AS dtype, value, is_active, created_at, updated_at
+        "SELECT id, org_id, name, name_translations, type::text AS dtype, value, is_active, created_at, updated_at
          FROM discounts WHERE id = $1",
     )
     .bind(id)

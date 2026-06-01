@@ -12705,6 +12705,7 @@
           "id",
           "menu_item_id",
           "addon_type",
+          "label_translations",
           "is_required",
           "min_selections",
           "display_order",
@@ -12734,6 +12735,9 @@
               "string",
               "null"
             ]
+          },
+          "label_translations": {
+            "type": "object"
           },
           "max_selections": {
             "type": [
@@ -13809,12 +13813,12 @@
       },
       "CreateAddonSlotRequest": {
         "type": "object",
-        "required": [
-          "addon_type"
-        ],
         "properties": {
           "addon_type": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "display_order": {
             "type": [
@@ -13832,6 +13836,12 @@
           "label": {
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "label_translations": {
+            "type": [
+              "object",
               "null"
             ]
           },
@@ -14135,6 +14145,12 @@
           "name": {
             "type": "string"
           },
+          "name_translations": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "org_id": {
             "type": "string",
             "format": "uuid"
@@ -14229,6 +14245,12 @@
           },
           "name": {
             "type": "string"
+          },
+          "name_translations": {
+            "type": [
+              "object",
+              "null"
+            ]
           },
           "org_ingredient_id": {
             "type": [
@@ -14617,6 +14639,7 @@
           "id",
           "org_id",
           "name",
+          "name_translations",
           "dtype",
           "value",
           "is_active",
@@ -14640,6 +14663,9 @@
           },
           "name": {
             "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
           },
           "org_id": {
             "type": "string",
@@ -15221,6 +15247,7 @@
           "id",
           "menu_item_id",
           "name",
+          "name_translations",
           "price",
           "display_order",
           "is_active",
@@ -15261,6 +15288,9 @@
           },
           "name": {
             "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
           },
           "org_ingredient_id": {
             "type": [
@@ -15446,6 +15476,7 @@
           "component_item_id",
           "addon_item_id",
           "addon_name",
+          "name_translations",
           "unit_price",
           "quantity",
           "line_total"
@@ -15470,6 +15501,9 @@
             "type": "integer",
             "format": "int32"
           },
+          "name_translations": {
+            "type": "object"
+          },
           "order_line_id": {
             "type": "string",
             "format": "uuid"
@@ -15489,6 +15523,7 @@
         "required": [
           "item_id",
           "item_name",
+          "name_translations",
           "quantity",
           "addons",
           "optionals"
@@ -15506,6 +15541,9 @@
           },
           "item_name": {
             "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
           },
           "optionals": {
             "type": "array",
@@ -15532,6 +15570,7 @@
           "order_line_id",
           "component_item_id",
           "field_name",
+          "name_translations",
           "price"
         ],
         "properties": {
@@ -15545,6 +15584,9 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "name_translations": {
+            "type": "object"
           },
           "optional_field_id": {
             "type": [
@@ -15618,6 +15660,7 @@
           "id",
           "order_id",
           "item_name",
+          "name_translations",
           "unit_price",
           "quantity",
           "line_total",
@@ -15657,6 +15700,9 @@
             ],
             "format": "uuid"
           },
+          "name_translations": {
+            "type": "object"
+          },
           "notes": {
             "type": [
               "string",
@@ -15690,6 +15736,7 @@
           "order_item_id",
           "addon_item_id",
           "addon_name",
+          "name_translations",
           "unit_price",
           "quantity",
           "line_total"
@@ -15709,6 +15756,9 @@
           "line_total": {
             "type": "integer",
             "format": "int32"
+          },
+          "name_translations": {
+            "type": "object"
           },
           "order_item_id": {
             "type": "string",
@@ -15823,6 +15873,7 @@
           "id",
           "order_item_id",
           "field_name",
+          "name_translations",
           "price"
         ],
         "properties": {
@@ -15844,6 +15895,9 @@
               "string",
               "null"
             ]
+          },
+          "name_translations": {
+            "type": "object"
           },
           "optional_field_id": {
             "type": [
@@ -16430,6 +16484,7 @@
         "required": [
           "id",
           "addon_type",
+          "label_translations",
           "is_required",
           "min_selections",
           "addon_items"
@@ -16456,6 +16511,9 @@
               "string",
               "null"
             ]
+          },
+          "label_translations": {
+            "type": "object"
           },
           "max_selections": {
             "type": [
@@ -17131,6 +17189,12 @@
               "null"
             ]
           },
+          "label_translations": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "max_selections": {
             "type": [
               "integer",
@@ -17390,6 +17454,12 @@
               "null"
             ]
           },
+          "name_translations": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "value": {
             "type": [
               "integer",
@@ -17492,6 +17562,12 @@
           "name": {
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "name_translations": {
+            "type": [
+              "object",
               "null"
             ]
           },
