@@ -12494,6 +12494,7 @@
           "id",
           "org_id",
           "name",
+          "name_translations",
           "addon_type",
           "default_price",
           "is_active",
@@ -12532,6 +12533,9 @@
           },
           "name": {
             "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
           },
           "org_id": {
             "type": "string",
@@ -13568,6 +13572,7 @@
           "id",
           "org_id",
           "name",
+          "name_translations",
           "display_order",
           "is_active",
           "created_at",
@@ -13604,6 +13609,9 @@
           },
           "name": {
             "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
           },
           "org_id": {
             "type": "string",
@@ -13786,6 +13794,12 @@
           },
           "name": {
             "type": "string"
+          },
+          "name_translations": {
+            "type": [
+              "object",
+              "null"
+            ]
           },
           "org_id": {
             "type": "string",
@@ -14088,6 +14102,12 @@
           "name": {
             "type": "string"
           },
+          "name_translations": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "org_id": {
             "type": "string",
             "format": "uuid"
@@ -14148,6 +14168,12 @@
               "null"
             ]
           },
+          "description_translations": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "display_order": {
             "type": [
               "integer",
@@ -14163,6 +14189,12 @@
           },
           "name": {
             "type": "string"
+          },
+          "name_translations": {
+            "type": [
+              "object",
+              "null"
+            ]
           },
           "org_id": {
             "type": "string",
@@ -14989,6 +15021,8 @@
           "id",
           "org_id",
           "name",
+          "name_translations",
+          "description_translations",
           "base_price",
           "is_active",
           "display_order",
@@ -15030,6 +15064,9 @@
               "null"
             ]
           },
+          "description_translations": {
+            "type": "object"
+          },
           "display_order": {
             "type": "integer",
             "format": "int32"
@@ -15049,6 +15086,9 @@
           },
           "name": {
             "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
           },
           "org_id": {
             "type": "string",
@@ -16365,6 +16405,7 @@
         "required": [
           "id",
           "name",
+          "name_translations",
           "default_price"
         ],
         "properties": {
@@ -16378,6 +16419,9 @@
           },
           "name": {
             "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
           }
         }
       },
@@ -16431,6 +16475,7 @@
         "required": [
           "id",
           "name",
+          "name_translations",
           "display_order",
           "items"
         ],
@@ -16457,6 +16502,9 @@
           },
           "name": {
             "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
           }
         }
       },
@@ -16486,6 +16534,8 @@
         "required": [
           "id",
           "name",
+          "name_translations",
+          "description_translations",
           "base_price",
           "display_order",
           "sizes",
@@ -16508,6 +16558,9 @@
               "null"
             ]
           },
+          "description_translations": {
+            "type": "object"
+          },
           "display_order": {
             "type": "integer",
             "format": "int32"
@@ -16524,6 +16577,9 @@
           },
           "name": {
             "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
           },
           "sizes": {
             "type": "array",
@@ -17044,6 +17100,12 @@
               "string",
               "null"
             ]
+          },
+          "name_translations": {
+            "type": [
+              "object",
+              "null"
+            ]
           }
         }
       },
@@ -17298,6 +17360,12 @@
               "string",
               "null"
             ]
+          },
+          "name_translations": {
+            "type": [
+              "object",
+              "null"
+            ]
           }
         }
       },
@@ -17354,6 +17422,12 @@
               "null"
             ]
           },
+          "description_translations": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "display_order": {
             "type": [
               "integer",
@@ -17376,6 +17450,12 @@
           "name": {
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "name_translations": {
+            "type": [
+              "object",
               "null"
             ]
           }
