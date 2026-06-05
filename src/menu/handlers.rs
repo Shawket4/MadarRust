@@ -1258,7 +1258,7 @@ pub async fn create_addon_slot(
     let item = fetch_menu_item(pool.get_ref(), *id).await?;
     require_same_org(&claims, Some(item.org_id))?;
 
-    let mut mut_body = body.into_inner();
+    let mut_body = body.into_inner();
     let mut label_translations = mut_body.label_translations.clone().unwrap_or_else(|| serde_json::json!({}));
     if let Some(lbl) = &mut_body.label {
         crate::translation::ensure_translations_json(&mut label_translations, Some(lbl))
@@ -1329,7 +1329,7 @@ pub async fn update_addon_slot(
     .await?
     .ok_or_else(|| AppError::NotFound("Addon slot not found".into()))?;
 
-    let mut mut_body = body.into_inner();
+    let mut_body = body.into_inner();
     let mut label_translations = existing.label_translations;
     if let Some(new_label) = &mut_body.label {
         crate::translation::ensure_translations_json(&mut label_translations, Some(new_label))
@@ -1768,7 +1768,7 @@ pub async fn create_optional_field(
             }
     }
 
-    let mut mut_body = body.into_inner();
+    let mut_body = body.into_inner();
     let trimmed_name = mut_body.name.trim().to_string();
     let mut name_translations = mut_body.name_translations.unwrap_or_else(|| serde_json::json!({}));
     crate::translation::ensure_translations_json(&mut name_translations, Some(&trimmed_name))
@@ -1841,7 +1841,7 @@ pub async fn update_optional_field(
     .await?
     .ok_or_else(|| AppError::NotFound("Optional field not found".into()))?;
 
-    let mut mut_body = body.into_inner();
+    let mut_body = body.into_inner();
     let mut name_translations = existing.name_translations;
     if let Some(new_name) = &mut_body.name {
         crate::translation::ensure_translations_json(&mut name_translations, Some(new_name))

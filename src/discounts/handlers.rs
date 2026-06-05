@@ -104,7 +104,7 @@ pub async fn create_discount(
     validate_dtype(&body.dtype)?;
     validate_value(body.value, &body.dtype)?;
 
-    let mut mut_body = body.into_inner();
+    let mut_body = body.into_inner();
     let mut name_translations = mut_body.name_translations.unwrap_or_else(|| serde_json::json!({}));
     crate::translation::ensure_translations_json(&mut name_translations, Some(&mut_body.name))
         .await
@@ -149,7 +149,7 @@ pub async fn update_discount(
     let existing = fetch_or_404(pool.get_ref(), *id).await?;
     require_org_access(&claims, existing.org_id)?;
 
-    let mut mut_body = body.into_inner();
+    let mut_body = body.into_inner();
 
     if let Some(ref dt) = mut_body.dtype { validate_dtype(dt)?; }
     if let (Some(v), Some(dt)) = (mut_body.value, &mut_body.dtype) { validate_value(v, dt)?; }

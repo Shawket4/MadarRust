@@ -480,7 +480,7 @@ pub async fn create_bundle(
 
     let mut tx = pool.begin().await?;
 
-    let mut mut_body = body.into_inner();
+    let mut_body = body.into_inner();
     let mut name_translations = mut_body.name_translations.clone().unwrap_or_else(|| serde_json::json!({}));
     crate::translation::ensure_translations_json(&mut name_translations, Some(&mut_body.name))
         .await
@@ -626,7 +626,7 @@ pub async fn update_bundle(
         return Err(AppError::BadRequest("Archived bundles cannot be modified".into()));
     }
 
-    let mut mut_body = body.into_inner();
+    let mut_body = body.into_inner();
     let mut tx = pool.begin().await?;
 
     let mut name_translations = original.bundle.name_translations.clone();
