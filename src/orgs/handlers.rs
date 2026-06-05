@@ -561,6 +561,10 @@ pub struct PublicOrg {
     #[schema(nullable, example = "https://sufrix-pos.ddns.net/api/uploads/logos/123.png")]
     pub logo_url: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    #[schema(example = 5)]
+    pub branch_count: Option<i64>,
+    #[schema(example = "Cairo, Egypt")]
+    pub address: Option<String>,
 }
 
 #[utoipa::path(
@@ -577,10 +581,15 @@ pub async fn list_public_orgs(
 ) -> Result<HttpResponse, AppError> {
     let orgs = sqlx::query_as::<_, PublicOrg>(
         r#"
-        SELECT name, logo_url, created_at
-        FROM organizations
-        WHERE deleted_at IS NULL AND is_active = true
-        ORDER BY created_at ASC
+        SELECT 
+            o.name, 
+            o.logo_url, 
+            o.created_at,
+            (SELECT COUNT(*)::bigint FROM branches b WHERE b.org_id = o.id AND b.deleted_at IS NULL) as branch_count,
+            (SELECT address FROM branches b WHERE b.org_id = o.id AND b.deleted_at IS NULL AND b.address IS NOT NULL ORDER BY b.created_at ASC LIMIT 1) as address
+        FROM organizations o
+        WHERE o.deleted_at IS NULL AND o.is_active = true
+        ORDER BY o.created_at ASC
         "#,
     )
     .fetch_all(pool.get_ref())

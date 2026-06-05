@@ -16782,6 +16782,21 @@
           "created_at"
         ],
         "properties": {
+          "address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "Cairo, Egypt"
+          },
+          "branch_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "example": 5
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
