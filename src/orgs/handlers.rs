@@ -551,3 +551,40 @@ async fn text_field(field: &mut actix_multipart::Field) -> Result<Option<String>
         Some(String::from_utf8(buf).map_err(|_| AppError::BadRequest("Invalid UTF-8 in field".into()))?)
     })
 }
+
+// ── GET /public/orgs  (Unauthenticated) ──────────────────────
+
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct PublicOrg {
+    #[schema(example = "The Rue")]
+    pub name: String,
+    #[schema(nullable, example = "https://sufrix-pos.ddns.net/api/uploads/logos/123.png")]
+    pub logo_url: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/public/orgs",
+    tag = "orgs",
+    responses(
+        (status = 200, description = "List of public organizations", body = Vec<PublicOrg>),
+        AppErrorResponse,
+    )
+)]
+pub async fn list_public_orgs(
+    pool: web::Data<PgPool>,
+) -> Result<HttpResponse, AppError> {
+    let orgs = sqlx::query_as::<_, PublicOrg>(
+        r#"
+        SELECT name, logo_url, created_at
+        FROM organizations
+        WHERE deleted_at IS NULL AND is_active = true
+        ORDER BY created_at ASC
+        "#,
+    )
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(orgs))
+}

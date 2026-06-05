@@ -12,4 +12,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/{id}",      web::delete().to(handlers::delete_org))
             .route("/{id}/logo", web::put().to(handlers::upload_org_logo)),
     );
+
+    cfg.service(
+        web::scope("/public/orgs")
+            .route("", web::get().to(handlers::list_public_orgs)),
+    );
 }
