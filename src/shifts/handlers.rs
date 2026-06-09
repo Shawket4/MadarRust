@@ -395,13 +395,24 @@ pub async fn get_shift_report(
 
     let payment_summary = sqlx::query_as::<_, PaymentSummaryRow>(
         r#"
+        WITH all_payments AS (
+            SELECT op.method AS payment_method, op.amount, op.order_id
+            FROM order_payments op
+            JOIN orders o ON o.id = op.order_id
+            WHERE o.shift_id = $1
+              AND o.status NOT IN ('voided', 'refunded')
+            UNION ALL
+            SELECT COALESCE(o.tip_payment_method, o.payment_method) AS payment_method, o.tip_amount AS amount, o.id AS order_id
+            FROM orders o
+            WHERE o.shift_id = $1
+              AND o.tip_amount IS NOT NULL
+              AND o.status NOT IN ('voided', 'refunded')
+        )
         SELECT
             payment_method::text,
-            COALESCE(SUM(total_amount), 0)::bigint AS total,
-            COUNT(*)::bigint                        AS order_count
-        FROM orders
-        WHERE shift_id = $1
-          AND status NOT IN ('voided', 'refunded')
+            COALESCE(SUM(amount), 0)::bigint AS total,
+            COUNT(DISTINCT order_id)::bigint AS order_count
+        FROM all_payments
         GROUP BY payment_method
         ORDER BY payment_method
         "#,
@@ -639,13 +650,25 @@ pub async fn close_shift(
 
     let cash_from_orders: i32 = sqlx::query_scalar(
         r#"
-        SELECT COALESCE(SUM(total_amount), 0)::int
-        FROM orders o
-        JOIN branches b ON b.id = $2
-        JOIN org_payment_methods opm ON opm.name = o.payment_method AND opm.org_id = b.org_id
-        WHERE o.shift_id = $1
-          AND opm.is_cash = true
-          AND o.status NOT IN ('voided', 'refunded')
+        SELECT COALESCE(
+            (
+                SELECT COALESCE(SUM(op.amount), 0)::int
+                FROM order_payments op
+                JOIN orders o ON o.id = op.order_id
+                JOIN branches b ON b.id = $2
+                JOIN org_payment_methods opm ON opm.name = op.method AND opm.org_id = b.org_id
+                WHERE o.shift_id = $1
+                  AND opm.is_cash = true
+                  AND o.status NOT IN ('voided', 'refunded')
+            ) + (
+                SELECT COALESCE(SUM(o.tip_amount), 0)::int
+                FROM orders o
+                JOIN branches b ON b.id = $2
+                JOIN org_payment_methods opm ON opm.name = COALESCE(o.tip_payment_method, o.payment_method) AND opm.org_id = b.org_id
+                WHERE o.shift_id = $1
+                  AND opm.is_cash = true
+                  AND o.status NOT IN ('voided', 'refunded')
+            ), 0)
         "#,
     )
     .bind(*shift_id)
