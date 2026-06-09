@@ -57,6 +57,7 @@ pub struct ShiftPreFill {
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct PaymentSummaryRow {
     pub payment_method: String,
+    pub is_cash:        bool,
     pub total:          i64,
     pub order_count:    i64,
 }
@@ -409,15 +410,19 @@ pub async fn get_shift_report(
               AND o.status NOT IN ('voided', 'refunded')
         )
         SELECT
-            payment_method::text,
-            COALESCE(SUM(amount), 0)::bigint AS total,
-            COUNT(DISTINCT order_id)::bigint AS order_count
-        FROM all_payments
-        GROUP BY payment_method
-        ORDER BY payment_method
+            ap.payment_method::text,
+            COALESCE(opm.is_cash, ap.payment_method = 'cash') AS is_cash,
+            COALESCE(SUM(ap.amount), 0)::bigint AS total,
+            COUNT(DISTINCT ap.order_id)::bigint AS order_count
+        FROM all_payments ap
+        LEFT JOIN branches b ON b.id = $2
+        LEFT JOIN org_payment_methods opm ON opm.name = ap.payment_method AND opm.org_id = b.org_id
+        GROUP BY ap.payment_method, opm.is_cash
+        ORDER BY ap.payment_method
         "#,
     )
     .bind(*shift_id)
+    .bind(shift.branch_id)
     .fetch_all(pool.get_ref())
     .await?;
 
