@@ -84,6 +84,7 @@ async fn test_discounts_crud_success(pool: PgPool) {
         .uri("/discounts")
         .insert_header(("Authorization", format!("Bearer {}", token)))
         .set_json(&CreateDiscountRequest {
+            name_translations: None,
             org_id,
             name: "Summer Sale".into(),
             dtype: "percentage".into(),
@@ -114,6 +115,7 @@ async fn test_discounts_crud_success(pool: PgPool) {
         .uri(&format!("/discounts/{}", discount.id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
         .set_json(&UpdateDiscountRequest {
+            name_translations: None,
             name: Some("Winter Sale".into()),
             dtype: Some("fixed".into()),
             value: Some(500), // e.g. $5.00
@@ -165,6 +167,7 @@ async fn test_discounts_validation_failures(pool: PgPool) {
         .uri("/discounts")
         .insert_header(("Authorization", format!("Bearer {}", token)))
         .set_json(&CreateDiscountRequest {
+            name_translations: None,
             org_id,
             name: "Sale".into(),
             dtype: "magic".into(), // Invalid
@@ -180,6 +183,7 @@ async fn test_discounts_validation_failures(pool: PgPool) {
         .uri("/discounts")
         .insert_header(("Authorization", format!("Bearer {}", token)))
         .set_json(&CreateDiscountRequest {
+            name_translations: None,
             org_id,
             name: "Sale".into(),
             dtype: "fixed".into(),
@@ -195,6 +199,7 @@ async fn test_discounts_validation_failures(pool: PgPool) {
         .uri("/discounts")
         .insert_header(("Authorization", format!("Bearer {}", token)))
         .set_json(&CreateDiscountRequest {
+            name_translations: None,
             org_id,
             name: "Sale".into(),
             dtype: "percentage".into(),
@@ -228,6 +233,7 @@ async fn test_discounts_wrong_org(pool: PgPool) {
         .uri("/discounts")
         .insert_header(("Authorization", format!("Bearer {}", token_a)))
         .set_json(&CreateDiscountRequest {
+            name_translations: None,
             org_id: org_id_b,
             name: "Sale".into(),
             dtype: "percentage".into(),

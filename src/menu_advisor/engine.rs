@@ -711,10 +711,18 @@ pub fn classify_items(
         .partition(|k| k.cost_metrics.is_some());
 
     // ── 2. CM-tracked classification (Kasavana-Smith) ─────────
+    // Popularity is judged WITHIN the population: the 70% rule threshold
+    // (0.70/n) assumes menu-mix shares that sum to 1 across the n items
+    // being classified. Global shares against a per-population threshold
+    // cross-contaminate the modes — the exact failure the dual taxonomy
+    // exists to avoid.
     if !cm_eligible.is_empty() {
         let n = cm_eligible.len() as f64;
         let pop_threshold = 0.70 / n;
         let total_w_units: f64 = cm_eligible.iter().map(|k| k.weighted_units_sold).sum();
+        let pop_share = |k: &ItemKpi| {
+            if total_w_units > 0.0 { k.weighted_units_sold / total_w_units } else { 0.0 }
+        };
         let cm_threshold = if total_w_units > 0.0 {
             cm_eligible
                 .iter()
@@ -729,14 +737,15 @@ pub fn classify_items(
 
         for kpi in &cm_eligible {
             let cm = kpi.cost_metrics.as_ref().unwrap();
-            let mut high_pop = kpi.popularity_share >= pop_threshold;
+            let share = pop_share(kpi);
+            let mut high_pop = share >= pop_threshold;
             let mut high_prof = cm.cm_per_unit >= cm_threshold;
 
             // Hysteresis: hold previous classification if within 5% of either threshold.
             if let Some(prev_map) = previous
                 && let Some(Classification::Cm { quadrant: prev_q }) = prev_map.get(&kpi.key) {
                     let pop_dist =
-                        (kpi.popularity_share - pop_threshold).abs() / pop_threshold.max(1e-9);
+                        (share - pop_threshold).abs() / pop_threshold.max(1e-9);
                     let prof_dist =
                         (cm.cm_per_unit - cm_threshold).abs() / cm_threshold.abs().max(1e-9);
                     if pop_dist < 0.05 {
@@ -762,6 +771,9 @@ pub fn classify_items(
         let n = rev_eligible.len() as f64;
         let pop_threshold = 0.70 / n;
         let total_w_units: f64 = rev_eligible.iter().map(|k| k.weighted_units_sold).sum();
+        let pop_share = |k: &ItemKpi| {
+            if total_w_units > 0.0 { k.weighted_units_sold / total_w_units } else { 0.0 }
+        };
         // "Profit" axis proxy: weighted-average effective_price across revenue-only items.
         let price_threshold = if total_w_units > 0.0 {
             rev_eligible
@@ -774,13 +786,14 @@ pub fn classify_items(
         };
 
         for kpi in &rev_eligible {
-            let mut high_pop = kpi.popularity_share >= pop_threshold;
+            let share = pop_share(kpi);
+            let mut high_pop = share >= pop_threshold;
             let mut high_price = kpi.effective_price >= price_threshold;
 
             if let Some(prev_map) = previous
                 && let Some(Classification::Revenue { class: prev_c }) = prev_map.get(&kpi.key) {
                     let pop_dist =
-                        (kpi.popularity_share - pop_threshold).abs() / pop_threshold.max(1e-9);
+                        (share - pop_threshold).abs() / pop_threshold.max(1e-9);
                     let price_dist =
                         (kpi.effective_price - price_threshold).abs() / price_threshold.max(1e-9);
                     if pop_dist < 0.05 {
@@ -957,10 +970,11 @@ fn raw_candidate(
     config: &AnalysisConfig,
     all_kpis: &HashMap<ItemKey, ItemKpi>,
     snaps: &HashMap<ItemKey, &ItemSnapshot>,
+    classifications: &HashMap<ItemKey, Classification>,
 ) -> (f64, Action, String) {
     match (classification, &kpi.cost_metrics) {
         (Classification::Cm { quadrant }, Some(cm)) => {
-            cm_raw_candidate(kpi, cm, quadrant, anchors, all_kpis, snaps)
+            cm_raw_candidate(kpi, cm, quadrant, anchors, all_kpis, snaps, classifications)
         }
         (Classification::Revenue { class }, None) => {
             revenue_raw_candidate(kpi, class, anchors, config)
@@ -988,21 +1002,37 @@ fn cm_raw_candidate(
     anchors: &PriceAnchors,
     all_kpis: &HashMap<ItemKey, ItemKpi>,
     snaps: &HashMap<ItemKey, &ItemSnapshot>,
+    classifications: &HashMap<ItemKey, Classification>,
 ) -> (f64, Action, String) {
     let cur = kpi.current_price as f64;
     match quadrant {
         CmQuadrant::Star => {
             if cur < anchors.peer_median * 0.95 {
-                // Check Star margin vs same-category Star margins.
+                // Check Star margin vs same-category STAR margins only —
+                // mixing in Dogs/Puzzles drags the benchmark and was firing
+                // raises against the wrong peer set.
                 let focus_cat = snaps.get(&kpi.key).and_then(|s| s.category_id);
                 let mut star_margins: Vec<f64> = all_kpis
                     .values()
                     .filter(|k| {
                         k.key != kpi.key
                             && snaps.get(&k.key).and_then(|s| s.category_id) == focus_cat
+                            && matches!(
+                                classifications.get(&k.key),
+                                Some(Classification::Cm { quadrant: CmQuadrant::Star })
+                            )
                     })
                     .filter_map(|k| k.cost_metrics.as_ref().map(|c| c.margin_pct))
                     .collect();
+                if star_margins.is_empty() {
+                    return (
+                        cur,
+                        Action::Hold,
+                        "Star item: popular and profitable, no same-category Star \
+                         benchmark to justify a raise. Hold current price."
+                            .into(),
+                    );
+                }
                 let med_star_margin = median(&mut star_margins);
                 if cm.margin_pct < med_star_margin {
                     let target = anchors.peer_median.min(cur * 1.08);
@@ -1297,8 +1327,21 @@ pub fn suggest_prices(
         let anchors = compute_anchors(kpi, kpis, &snap_map, config);
         let peer_cmp = build_peer_comparison(kpi, kpis, &snap_map);
 
-        let (raw, mut action, explanation) =
-            raw_candidate(kpi, classification, &anchors, config, kpis, &snap_map);
+        let (raw, mut action, mut explanation) =
+            raw_candidate(kpi, classification, &anchors, config, kpis, &snap_map, classifications);
+
+        // Epoch suppression: an SKU repriced inside the window has not had
+        // time to show the demand response — a fresh move would compound an
+        // unmeasured one. Demote price moves to Hold; non-price actions
+        // (Bundle / Remove / Reformulate / Monitor) stand.
+        let recently_repriced = price_changed_keys.contains(&kpi.key);
+        if recently_repriced && matches!(action, Action::RaisePrice | Action::LowerPrice) {
+            action = Action::Hold;
+            explanation.push_str(
+                " Suppressed: price already changed inside the analysis window — \
+                 let the new price accumulate sales before moving again.",
+            );
+        }
 
         let (guarded, mut clips) =
             apply_guards(raw, kpi.current_price as f64, kpi.cost_metrics.as_ref(), config);

@@ -538,3 +538,156 @@ async fn test_preview_recipe(pool: PgPool) {
     let resp = test::call_service(&app, req).await;
     let status = resp.status(); if !status.is_success() { panic!("Status {:?}", status); }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Cost engine — sale-time snapshots
+// ═══════════════════════════════════════════════════════════════════
+
+#[sqlx::test]
+async fn test_order_cost_snapshot_with_recipe_and_addon(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "teller").await;
+    assign_user_to_branch(&pool, user_id, branch_id).await;
+    grant_permission(&pool, "teller", "orders", "create").await;
+    let token = generate_teller_token(user_id, org_id, branch_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    // 20 g coffee @ 100 EGP/g → recipe cost 2 000 EGP = 200 000 piastres
+    let coffee = seed_ingredient(&pool, org_id, "Coffee Beans", "g").await;
+    seed_branch_inventory(&pool, branch_id, coffee, 1000.0).await;
+    add_menu_item_recipe(&pool, menu_item_id, coffee, 20.0).await;
+
+    // Additive addon: 5 ml syrup @ 100 EGP/ml → 500 EGP = 50 000 piastres
+    let syrup = seed_ingredient(&pool, org_id, "Syrup", "ml").await;
+    seed_branch_inventory(&pool, branch_id, syrup, 1000.0).await;
+    let addon_id = seed_addon_item(&pool, org_id, "Vanilla Syrup", "extra", 100).await;
+    add_addon_ingredient(&pool, addon_id, syrup, 5.0).await;
+
+    let req_body = CreateOrderRequest {
+        branch_id,
+        shift_id,
+        payment_method: "cash".to_string(),
+        customer_name: None,
+        notes: None,
+        discount_type: None,
+        discount_value: None,
+        discount_id: None,
+        amount_tendered: None,
+        tip_amount: None,
+        tip_payment_method: None,
+        payment_splits: None,
+        items: vec![OrderItemInput {
+            menu_item_id: Some(menu_item_id),
+            bundle_id: None,
+            size_label: None,
+            quantity: 2,
+            addons: vec![crate::orders::component_resolve::AddonInput {
+                addon_item_id: addon_id,
+                quantity: 1,
+            }],
+            optional_field_ids: vec![],
+            bundle_components: vec![],
+            notes: None,
+        }],
+        created_at: None,
+    };
+
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&req_body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success(), "got {:?}", resp.status());
+
+    let order_full: OrderFull = test::read_body_json(resp).await;
+    let item = &order_full.items[0].item;
+
+    // Recipe scope per unit: 20 g × 100 EGP × 100 = 200 000 piastres / unit.
+    assert_eq!(item.unit_cost, Some(200_000));
+    // Full line: recipe 2 units (400 000) + addon 5 ml × 2 units (100 000).
+    assert_eq!(item.line_cost, Some(500_000));
+    assert!(!item.cost_missing);
+
+    // Addon line cost: 5 ml × 100 EGP × qty 1 × item qty 2 × 100 = 100 000.
+    let addon_row = &order_full.items[0].addons[0];
+    assert_eq!(addon_row.line_cost, Some(100_000));
+
+    // Snapshot entries carry per-entry costs for audit.
+    let entries = item.deductions_snapshot.as_array().unwrap();
+    assert!(entries.iter().all(|e| e.get("cost_per_unit").is_some()));
+    assert!(entries.iter().all(|e| e.get("line_cost").is_some()));
+}
+
+#[sqlx::test]
+async fn test_order_cost_missing_without_recipe(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "teller").await;
+    assign_user_to_branch(&pool, user_id, branch_id).await;
+    grant_permission(&pool, "teller", "orders", "create").await;
+    let token = generate_teller_token(user_id, org_id, branch_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+
+    let cat_id = seed_category(&pool, org_id).await;
+    // No recipe rows at all → cost unknown, never zero.
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    let req_body = CreateOrderRequest {
+        branch_id,
+        shift_id,
+        payment_method: "cash".to_string(),
+        customer_name: None,
+        notes: None,
+        discount_type: None,
+        discount_value: None,
+        discount_id: None,
+        amount_tendered: None,
+        tip_amount: None,
+        tip_payment_method: None,
+        payment_splits: None,
+        items: vec![OrderItemInput {
+            menu_item_id: Some(menu_item_id),
+            bundle_id: None,
+            size_label: None,
+            quantity: 1,
+            addons: vec![],
+            optional_field_ids: vec![],
+            bundle_components: vec![],
+            notes: None,
+        }],
+        created_at: None,
+    };
+
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&req_body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+
+    let order_full: OrderFull = test::read_body_json(resp).await;
+    let item = &order_full.items[0].item;
+    assert_eq!(item.line_cost, None);
+    assert_eq!(item.unit_cost, None);
+    assert!(item.cost_missing);
+}

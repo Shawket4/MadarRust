@@ -261,7 +261,7 @@ async fn test_create_run_conflict(pool: PgPool) {
         .to_request();
 
     let resp = actix_web::test::call_service(&app, req).await;
-    assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), actix_web::http::StatusCode::CONFLICT);
 }
 
 #[sqlx::test]
@@ -516,4 +516,78 @@ async fn test_latest_kpi(pool: PgPool) {
         .to_request();
     let resp = actix_web::test::call_service(&app, req).await;
     assert!(resp.status().is_success());
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Adapter — cost sourcing in piastres
+// ═══════════════════════════════════════════════════════════════════
+
+#[sqlx::test]
+async fn test_adapter_costs_in_piastres_with_snapshot_priority(pool: PgPool) {
+    use chrono::Utc;
+
+    let org_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'O', $2)")
+        .bind(org_id).bind(format!("adp-{org_id}")).execute(&pool).await.unwrap();
+    let branch_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'B')")
+        .bind(branch_id).bind(org_id).execute(&pool).await.unwrap();
+    let user_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, org_id, name, email, password_hash, role) VALUES ($1, $2, 'U', $3, 'h', 'teller'::user_role)")
+        .bind(user_id).bind(org_id).bind(format!("a-{user_id}@t.com")).execute(&pool).await.unwrap();
+    let shift_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO shifts (id, branch_id, teller_id, status, opening_cash) VALUES ($1, $2, $3, 'open', 0)")
+        .bind(shift_id).bind(branch_id).bind(user_id).execute(&pool).await.unwrap();
+
+    let cat = Uuid::new_v4();
+    sqlx::query("INSERT INTO categories (id, org_id, name) VALUES ($1, $2, 'C')")
+        .bind(cat).bind(org_id).execute(&pool).await.unwrap();
+    let item = Uuid::new_v4();
+    sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price, is_active) VALUES ($1, $2, $3, 'Latte', 7000, true)")
+        .bind(item).bind(org_id).bind(cat).execute(&pool).await.unwrap();
+
+    // Recipe: 10 g @ 2.50 EGP/g → snapshot rollup must be 2 500 piastres,
+    // resolved via the org_ingredients fallback (no history rows seeded).
+    let ing = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1, $2, 'Beans', 'g'::inventory_unit, 2.50, 'coffee_bean')")
+        .bind(ing).bind(org_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1, $2, 10.0, 'one_size', 'Beans', 'g')")
+        .bind(item).bind(ing).execute(&pool).await.unwrap();
+
+    // Completed order with an explicit sale-time snapshot (unit_cost = 3 000
+    // piastres ≠ current rollup) — adapter must prefer the snapshot.
+    let order = Uuid::new_v4();
+    sqlx::query("INSERT INTO orders (id, branch_id, shift_id, teller_id, order_number, payment_method, subtotal, discount_value, discount_amount, tax_amount, total_amount, status) VALUES ($1, $2, $3, $4, 1, 'cash', 7000, 0, 0, 0, 7000, 'completed')")
+        .bind(order).bind(branch_id).bind(shift_id).bind(user_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO order_items (id, order_id, menu_item_id, item_name, quantity, unit_price, line_total, unit_cost, line_cost, cost_missing) VALUES ($1, $2, $3, 'Latte', 1, 7000, 7000, 3000, 3000, false)")
+        .bind(Uuid::new_v4()).bind(order).bind(item).execute(&pool).await.unwrap();
+
+    // Legacy line without snapshot — adapter must reconstruct 2 500 piastres
+    // from the recipe rollup (× 100 fix), not 25.
+    let order2 = Uuid::new_v4();
+    sqlx::query("INSERT INTO orders (id, branch_id, shift_id, teller_id, order_number, payment_method, subtotal, discount_value, discount_amount, tax_amount, total_amount, status) VALUES ($1, $2, $3, $4, 2, 'cash', 7000, 0, 0, 0, 7000, 'completed')")
+        .bind(order2).bind(branch_id).bind(shift_id).bind(user_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO order_items (id, order_id, menu_item_id, item_name, quantity, unit_price, line_total) VALUES ($1, $2, $3, 'Latte', 1, 7000, 7000)")
+        .bind(Uuid::new_v4()).bind(order2).bind(item).execute(&pool).await.unwrap();
+
+    let config = AnalysisConfig::default();
+    let inputs = crate::menu_advisor::adapter::load_inputs(&pool, org_id, branch_id, Utc::now(), &config)
+        .await
+        .unwrap();
+
+    let snap = inputs
+        .snapshots
+        .iter()
+        .find(|s| s.key.menu_item_id == item)
+        .unwrap();
+    assert_eq!(snap.cost_per_serving, Some(2_500), "snapshot rollup must be piastres");
+
+    let mut costs: Vec<Option<i64>> = inputs
+        .sales
+        .iter()
+        .filter(|s| s.key.menu_item_id == item)
+        .map(|s| s.unit_cost_at_sale)
+        .collect();
+    costs.sort();
+    assert_eq!(costs, vec![Some(2_500), Some(3_000)], "snapshot preferred, fallback in piastres");
 }

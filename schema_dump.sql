@@ -8,23 +8,23 @@
 SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
--- SET transaction_timeout = 0; (PG17 only — commented for local PG16 test run)
+SET transaction_timeout = 0;
 SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
--- SELECT pg_catalog.set_config('search_path', '', false);
--- (removed: clearing search_path persists on the migration connection and
---  breaks sqlx's own _sqlx_migrations bookkeeping — all objects below are
---  schema-qualified anyway)
+SELECT pg_catalog.set_config('search_path', '', false);
 SET check_function_bodies = false;
 SET xmloption = content;
 SET client_min_messages = warning;
 SET row_security = off;
 
 --
--- Name: _sqlx_test; Type: SCHEMA; Schema: -; Owner: -
+-- Name: _sqlx_test; Type: SCHEMA; Schema: -; Owner: sufrix
 --
 
+CREATE SCHEMA _sqlx_test;
 
+
+ALTER SCHEMA _sqlx_test OWNER TO sufrix;
 
 --
 -- Name: pg_trgm; Type: EXTENSION; Schema: -; Owner: -
@@ -34,7 +34,7 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public;
 
 
 --
--- Name: EXTENSION pg_trgm; Type: COMMENT; Schema: -; Owner: -
+-- Name: EXTENSION pg_trgm; Type: COMMENT; Schema: -; Owner: 
 --
 
 COMMENT ON EXTENSION pg_trgm IS 'text similarity measurement and index searching based on trigrams';
@@ -48,14 +48,14 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
 
 
 --
--- Name: EXTENSION pgcrypto; Type: COMMENT; Schema: -; Owner: -
+-- Name: EXTENSION pgcrypto; Type: COMMENT; Schema: -; Owner: 
 --
 
 COMMENT ON EXTENSION pgcrypto IS 'cryptographic functions';
 
 
 --
--- Name: bundle_status; Type: TYPE; Schema: public; Owner: -
+-- Name: bundle_status; Type: TYPE; Schema: public; Owner: sufrix
 --
 
 CREATE TYPE public.bundle_status AS ENUM (
@@ -65,8 +65,10 @@ CREATE TYPE public.bundle_status AS ENUM (
 );
 
 
+ALTER TYPE public.bundle_status OWNER TO sufrix;
+
 --
--- Name: discount_type; Type: TYPE; Schema: public; Owner: -
+-- Name: discount_type; Type: TYPE; Schema: public; Owner: sufrix
 --
 
 CREATE TYPE public.discount_type AS ENUM (
@@ -75,8 +77,10 @@ CREATE TYPE public.discount_type AS ENUM (
 );
 
 
+ALTER TYPE public.discount_type OWNER TO sufrix;
+
 --
--- Name: inventory_adjustment_type; Type: TYPE; Schema: public; Owner: -
+-- Name: inventory_adjustment_type; Type: TYPE; Schema: public; Owner: sufrix
 --
 
 CREATE TYPE public.inventory_adjustment_type AS ENUM (
@@ -87,8 +91,10 @@ CREATE TYPE public.inventory_adjustment_type AS ENUM (
 );
 
 
+ALTER TYPE public.inventory_adjustment_type OWNER TO sufrix;
+
 --
--- Name: inventory_unit; Type: TYPE; Schema: public; Owner: -
+-- Name: inventory_unit; Type: TYPE; Schema: public; Owner: sufrix
 --
 
 CREATE TYPE public.inventory_unit AS ENUM (
@@ -100,8 +106,10 @@ CREATE TYPE public.inventory_unit AS ENUM (
 );
 
 
+ALTER TYPE public.inventory_unit OWNER TO sufrix;
+
 --
--- Name: item_size; Type: TYPE; Schema: public; Owner: -
+-- Name: item_size; Type: TYPE; Schema: public; Owner: sufrix
 --
 
 CREATE TYPE public.item_size AS ENUM (
@@ -113,8 +121,10 @@ CREATE TYPE public.item_size AS ENUM (
 );
 
 
+ALTER TYPE public.item_size OWNER TO sufrix;
+
 --
--- Name: order_status; Type: TYPE; Schema: public; Owner: -
+-- Name: order_status; Type: TYPE; Schema: public; Owner: sufrix
 --
 
 CREATE TYPE public.order_status AS ENUM (
@@ -127,8 +137,10 @@ CREATE TYPE public.order_status AS ENUM (
 );
 
 
+ALTER TYPE public.order_status OWNER TO sufrix;
+
 --
--- Name: permission_action; Type: TYPE; Schema: public; Owner: -
+-- Name: permission_action; Type: TYPE; Schema: public; Owner: sufrix
 --
 
 CREATE TYPE public.permission_action AS ENUM (
@@ -139,8 +151,10 @@ CREATE TYPE public.permission_action AS ENUM (
 );
 
 
+ALTER TYPE public.permission_action OWNER TO sufrix;
+
 --
--- Name: permission_resource; Type: TYPE; Schema: public; Owner: -
+-- Name: permission_resource; Type: TYPE; Schema: public; Owner: sufrix
 --
 
 CREATE TYPE public.permission_resource AS ENUM (
@@ -165,8 +179,10 @@ CREATE TYPE public.permission_resource AS ENUM (
 );
 
 
+ALTER TYPE public.permission_resource OWNER TO sufrix;
+
 --
--- Name: printer_brand; Type: TYPE; Schema: public; Owner: -
+-- Name: printer_brand; Type: TYPE; Schema: public; Owner: sufrix
 --
 
 CREATE TYPE public.printer_brand AS ENUM (
@@ -175,8 +191,10 @@ CREATE TYPE public.printer_brand AS ENUM (
 );
 
 
+ALTER TYPE public.printer_brand OWNER TO sufrix;
+
 --
--- Name: shift_status; Type: TYPE; Schema: public; Owner: -
+-- Name: shift_status; Type: TYPE; Schema: public; Owner: sufrix
 --
 
 CREATE TYPE public.shift_status AS ENUM (
@@ -186,8 +204,10 @@ CREATE TYPE public.shift_status AS ENUM (
 );
 
 
+ALTER TYPE public.shift_status OWNER TO sufrix;
+
 --
--- Name: user_role; Type: TYPE; Schema: public; Owner: -
+-- Name: user_role; Type: TYPE; Schema: public; Owner: sufrix
 --
 
 CREATE TYPE public.user_role AS ENUM (
@@ -198,8 +218,10 @@ CREATE TYPE public.user_role AS ENUM (
 );
 
 
+ALTER TYPE public.user_role OWNER TO sufrix;
+
 --
--- Name: void_reason; Type: TYPE; Schema: public; Owner: -
+-- Name: void_reason; Type: TYPE; Schema: public; Owner: sufrix
 --
 
 CREATE TYPE public.void_reason AS ENUM (
@@ -210,8 +232,10 @@ CREATE TYPE public.void_reason AS ENUM (
 );
 
 
+ALTER TYPE public.void_reason OWNER TO sufrix;
+
 --
--- Name: set_updated_at(); Type: FUNCTION; Schema: public; Owner: -
+-- Name: set_updated_at(); Type: FUNCTION; Schema: public; Owner: sufrix
 --
 
 CREATE FUNCTION public.set_updated_at() RETURNS trigger
@@ -224,32 +248,57 @@ END;
 $$;
 
 
+ALTER FUNCTION public.set_updated_at() OWNER TO sufrix;
+
 --
--- Name: database_ids; Type: SEQUENCE; Schema: _sqlx_test; Owner: -
+-- Name: database_ids; Type: SEQUENCE; Schema: _sqlx_test; Owner: sufrix
 --
 
--- (removed: sqlx test artifact — never belongs in a migration)
+CREATE SEQUENCE _sqlx_test.database_ids
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
 
+
+ALTER SEQUENCE _sqlx_test.database_ids OWNER TO sufrix;
 
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
 
 --
--- Name: databases; Type: TABLE; Schema: _sqlx_test; Owner: -
+-- Name: databases; Type: TABLE; Schema: _sqlx_test; Owner: sufrix
 --
 
--- (removed: sqlx test artifact — never belongs in a migration)
+CREATE TABLE _sqlx_test.databases (
+    db_name text NOT NULL,
+    test_path text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
 
+
+ALTER TABLE _sqlx_test.databases OWNER TO sufrix;
 
 --
--- Name: _sqlx_migrations; Type: TABLE; Schema: public; Owner: -
+-- Name: _sqlx_migrations; Type: TABLE; Schema: public; Owner: sufrix
 --
 
+CREATE TABLE public._sqlx_migrations (
+    version bigint NOT NULL,
+    description text NOT NULL,
+    installed_on timestamp with time zone DEFAULT now() NOT NULL,
+    success boolean NOT NULL,
+    checksum bytea NOT NULL,
+    execution_time bigint NOT NULL
+);
 
+
+ALTER TABLE public._sqlx_migrations OWNER TO sufrix;
 
 --
--- Name: addon_item_ingredients; Type: TABLE; Schema: public; Owner: -
+-- Name: addon_item_ingredients; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.addon_item_ingredients (
@@ -264,8 +313,10 @@ CREATE TABLE public.addon_item_ingredients (
 );
 
 
+ALTER TABLE public.addon_item_ingredients OWNER TO sufrix;
+
 --
--- Name: addon_items; Type: TABLE; Schema: public; Owner: -
+-- Name: addon_items; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.addon_items (
@@ -277,12 +328,15 @@ CREATE TABLE public.addon_items (
     is_active boolean DEFAULT true NOT NULL,
     display_order integer DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    name_translations jsonb DEFAULT '{}'::jsonb NOT NULL
 );
 
 
+ALTER TABLE public.addon_items OWNER TO sufrix;
+
 --
--- Name: branch_inventory; Type: TABLE; Schema: public; Owner: -
+-- Name: branch_inventory; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.branch_inventory (
@@ -296,8 +350,10 @@ CREATE TABLE public.branch_inventory (
 );
 
 
+ALTER TABLE public.branch_inventory OWNER TO sufrix;
+
 --
--- Name: branch_inventory_adjustments; Type: TABLE; Schema: public; Owner: -
+-- Name: branch_inventory_adjustments; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.branch_inventory_adjustments (
@@ -313,8 +369,10 @@ CREATE TABLE public.branch_inventory_adjustments (
 );
 
 
+ALTER TABLE public.branch_inventory_adjustments OWNER TO sufrix;
+
 --
--- Name: branch_inventory_transfers; Type: TABLE; Schema: public; Owner: -
+-- Name: branch_inventory_transfers; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.branch_inventory_transfers (
@@ -331,8 +389,10 @@ CREATE TABLE public.branch_inventory_transfers (
 );
 
 
+ALTER TABLE public.branch_inventory_transfers OWNER TO sufrix;
+
 --
--- Name: branch_menu_overrides; Type: TABLE; Schema: public; Owner: -
+-- Name: branch_menu_overrides; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.branch_menu_overrides (
@@ -344,8 +404,10 @@ CREATE TABLE public.branch_menu_overrides (
 );
 
 
+ALTER TABLE public.branch_menu_overrides OWNER TO sufrix;
+
 --
--- Name: branches; Type: TABLE; Schema: public; Owner: -
+-- Name: branches; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.branches (
@@ -365,8 +427,10 @@ CREATE TABLE public.branches (
 );
 
 
+ALTER TABLE public.branches OWNER TO sufrix;
+
 --
--- Name: bundle_branch_availability; Type: TABLE; Schema: public; Owner: -
+-- Name: bundle_branch_availability; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.bundle_branch_availability (
@@ -375,8 +439,10 @@ CREATE TABLE public.bundle_branch_availability (
 );
 
 
+ALTER TABLE public.bundle_branch_availability OWNER TO sufrix;
+
 --
--- Name: bundle_components; Type: TABLE; Schema: public; Owner: -
+-- Name: bundle_components; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.bundle_components (
@@ -389,8 +455,10 @@ CREATE TABLE public.bundle_components (
 );
 
 
+ALTER TABLE public.bundle_components OWNER TO sufrix;
+
 --
--- Name: bundle_price_epochs; Type: TABLE; Schema: public; Owner: -
+-- Name: bundle_price_epochs; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.bundle_price_epochs (
@@ -404,8 +472,10 @@ CREATE TABLE public.bundle_price_epochs (
 );
 
 
+ALTER TABLE public.bundle_price_epochs OWNER TO sufrix;
+
 --
--- Name: bundles; Type: TABLE; Schema: public; Owner: -
+-- Name: bundles; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.bundles (
@@ -430,8 +500,10 @@ CREATE TABLE public.bundles (
 );
 
 
+ALTER TABLE public.bundles OWNER TO sufrix;
+
 --
--- Name: categories; Type: TABLE; Schema: public; Owner: -
+-- Name: categories; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.categories (
@@ -443,12 +515,15 @@ CREATE TABLE public.categories (
     is_active boolean DEFAULT true NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    deleted_at timestamp with time zone
+    deleted_at timestamp with time zone,
+    name_translations jsonb DEFAULT '{}'::jsonb NOT NULL
 );
 
 
+ALTER TABLE public.categories OWNER TO sufrix;
+
 --
--- Name: discounts; Type: TABLE; Schema: public; Owner: -
+-- Name: discounts; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.discounts (
@@ -459,12 +534,15 @@ CREATE TABLE public.discounts (
     value integer NOT NULL,
     is_active boolean DEFAULT true NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    name_translations jsonb DEFAULT '{}'::jsonb NOT NULL
 );
 
 
+ALTER TABLE public.discounts OWNER TO sufrix;
+
 --
--- Name: ingredient_cost_history; Type: TABLE; Schema: public; Owner: -
+-- Name: ingredient_cost_history; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.ingredient_cost_history (
@@ -479,8 +557,10 @@ CREATE TABLE public.ingredient_cost_history (
 );
 
 
+ALTER TABLE public.ingredient_cost_history OWNER TO sufrix;
+
 --
--- Name: item_sizes; Type: TABLE; Schema: public; Owner: -
+-- Name: item_sizes; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.item_sizes (
@@ -493,8 +573,10 @@ CREATE TABLE public.item_sizes (
 );
 
 
+ALTER TABLE public.item_sizes OWNER TO sufrix;
+
 --
--- Name: menu_advisor_bundle_suggestions; Type: TABLE; Schema: public; Owner: -
+-- Name: menu_advisor_bundle_suggestions; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.menu_advisor_bundle_suggestions (
@@ -520,8 +602,10 @@ CREATE TABLE public.menu_advisor_bundle_suggestions (
 );
 
 
+ALTER TABLE public.menu_advisor_bundle_suggestions OWNER TO sufrix;
+
 --
--- Name: menu_advisor_decisions; Type: TABLE; Schema: public; Owner: -
+-- Name: menu_advisor_decisions; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.menu_advisor_decisions (
@@ -536,8 +620,10 @@ CREATE TABLE public.menu_advisor_decisions (
 );
 
 
+ALTER TABLE public.menu_advisor_decisions OWNER TO sufrix;
+
 --
--- Name: menu_advisor_price_suggestions; Type: TABLE; Schema: public; Owner: -
+-- Name: menu_advisor_price_suggestions; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.menu_advisor_price_suggestions (
@@ -574,8 +660,10 @@ CREATE TABLE public.menu_advisor_price_suggestions (
 );
 
 
+ALTER TABLE public.menu_advisor_price_suggestions OWNER TO sufrix;
+
 --
--- Name: menu_advisor_removal_scenarios; Type: TABLE; Schema: public; Owner: -
+-- Name: menu_advisor_removal_scenarios; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.menu_advisor_removal_scenarios (
@@ -597,8 +685,10 @@ CREATE TABLE public.menu_advisor_removal_scenarios (
 );
 
 
+ALTER TABLE public.menu_advisor_removal_scenarios OWNER TO sufrix;
+
 --
--- Name: menu_advisor_runs; Type: TABLE; Schema: public; Owner: -
+-- Name: menu_advisor_runs; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.menu_advisor_runs (
@@ -618,8 +708,10 @@ CREATE TABLE public.menu_advisor_runs (
 );
 
 
+ALTER TABLE public.menu_advisor_runs OWNER TO sufrix;
+
 --
--- Name: menu_item_addon_slots; Type: TABLE; Schema: public; Owner: -
+-- Name: menu_item_addon_slots; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.menu_item_addon_slots (
@@ -631,12 +723,15 @@ CREATE TABLE public.menu_item_addon_slots (
     max_selections integer,
     display_order integer DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    label text
+    label text,
+    label_translations jsonb DEFAULT '{}'::jsonb NOT NULL
 );
 
 
+ALTER TABLE public.menu_item_addon_slots OWNER TO sufrix;
+
 --
--- Name: menu_item_optional_fields; Type: TABLE; Schema: public; Owner: -
+-- Name: menu_item_optional_fields; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.menu_item_optional_fields (
@@ -653,12 +748,15 @@ CREATE TABLE public.menu_item_optional_fields (
     is_active boolean DEFAULT true NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    name_translations jsonb DEFAULT '{}'::jsonb NOT NULL,
     CONSTRAINT chk_optional_ingredient CHECK ((((org_ingredient_id IS NULL) AND (ingredient_name IS NULL) AND (ingredient_unit IS NULL) AND (quantity_used IS NULL)) OR ((ingredient_name IS NOT NULL) AND (ingredient_unit IS NOT NULL) AND (quantity_used IS NOT NULL))))
 );
 
 
+ALTER TABLE public.menu_item_optional_fields OWNER TO sufrix;
+
 --
--- Name: menu_item_price_epochs; Type: TABLE; Schema: public; Owner: -
+-- Name: menu_item_price_epochs; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.menu_item_price_epochs (
@@ -673,8 +771,10 @@ CREATE TABLE public.menu_item_price_epochs (
 );
 
 
+ALTER TABLE public.menu_item_price_epochs OWNER TO sufrix;
+
 --
--- Name: menu_item_recipes; Type: TABLE; Schema: public; Owner: -
+-- Name: menu_item_recipes; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.menu_item_recipes (
@@ -690,8 +790,10 @@ CREATE TABLE public.menu_item_recipes (
 );
 
 
+ALTER TABLE public.menu_item_recipes OWNER TO sufrix;
+
 --
--- Name: menu_items; Type: TABLE; Schema: public; Owner: -
+-- Name: menu_items; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.menu_items (
@@ -706,12 +808,16 @@ CREATE TABLE public.menu_items (
     display_order integer DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    deleted_at timestamp with time zone
+    deleted_at timestamp with time zone,
+    name_translations jsonb DEFAULT '{}'::jsonb NOT NULL,
+    description_translations jsonb DEFAULT '{}'::jsonb NOT NULL
 );
 
 
+ALTER TABLE public.menu_items OWNER TO sufrix;
+
 --
--- Name: order_item_addons; Type: TABLE; Schema: public; Owner: -
+-- Name: order_item_addons; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.order_item_addons (
@@ -721,12 +827,15 @@ CREATE TABLE public.order_item_addons (
     addon_name text NOT NULL,
     unit_price integer NOT NULL,
     quantity integer DEFAULT 1 NOT NULL,
-    line_total integer NOT NULL
+    line_total integer NOT NULL,
+    name_translations jsonb DEFAULT '{}'::jsonb NOT NULL
 );
 
 
+ALTER TABLE public.order_item_addons OWNER TO sufrix;
+
 --
--- Name: order_item_optionals; Type: TABLE; Schema: public; Owner: -
+-- Name: order_item_optionals; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.order_item_optionals (
@@ -739,12 +848,15 @@ CREATE TABLE public.order_item_optionals (
     ingredient_name text,
     ingredient_unit text,
     quantity_deducted numeric(12,3),
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    name_translations jsonb DEFAULT '{}'::jsonb NOT NULL
 );
 
 
+ALTER TABLE public.order_item_optionals OWNER TO sufrix;
+
 --
--- Name: order_items; Type: TABLE; Schema: public; Owner: -
+-- Name: order_items; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.order_items (
@@ -759,12 +871,15 @@ CREATE TABLE public.order_items (
     notes text,
     deductions_snapshot jsonb DEFAULT '[]'::jsonb NOT NULL,
     bundle_id uuid,
-    bundle_unit_price integer
+    bundle_unit_price integer,
+    name_translations jsonb DEFAULT '{}'::jsonb NOT NULL
 );
 
 
+ALTER TABLE public.order_items OWNER TO sufrix;
+
 --
--- Name: order_line_bundle_component_addons; Type: TABLE; Schema: public; Owner: -
+-- Name: order_line_bundle_component_addons; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.order_line_bundle_component_addons (
@@ -775,12 +890,15 @@ CREATE TABLE public.order_line_bundle_component_addons (
     addon_name text NOT NULL,
     unit_price integer NOT NULL,
     quantity integer DEFAULT 1 NOT NULL,
-    line_total integer NOT NULL
+    line_total integer NOT NULL,
+    name_translations jsonb DEFAULT '{}'::jsonb NOT NULL
 );
 
 
+ALTER TABLE public.order_line_bundle_component_addons OWNER TO sufrix;
+
 --
--- Name: order_line_bundle_component_optionals; Type: TABLE; Schema: public; Owner: -
+-- Name: order_line_bundle_component_optionals; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.order_line_bundle_component_optionals (
@@ -793,12 +911,15 @@ CREATE TABLE public.order_line_bundle_component_optionals (
     org_ingredient_id uuid,
     ingredient_name text,
     ingredient_unit text,
-    quantity_deducted numeric(12,3)
+    quantity_deducted numeric(12,3),
+    name_translations jsonb DEFAULT '{}'::jsonb NOT NULL
 );
 
 
+ALTER TABLE public.order_line_bundle_component_optionals OWNER TO sufrix;
+
 --
--- Name: order_line_bundle_components; Type: TABLE; Schema: public; Owner: -
+-- Name: order_line_bundle_components; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.order_line_bundle_components (
@@ -806,12 +927,15 @@ CREATE TABLE public.order_line_bundle_components (
     item_id uuid NOT NULL,
     quantity integer DEFAULT 1 NOT NULL,
     size_label text,
+    name_translations jsonb DEFAULT '{}'::jsonb NOT NULL,
     CONSTRAINT order_line_bundle_components_quantity_check CHECK ((quantity > 0))
 );
 
 
+ALTER TABLE public.order_line_bundle_components OWNER TO sufrix;
+
 --
--- Name: order_payments; Type: TABLE; Schema: public; Owner: -
+-- Name: order_payments; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.order_payments (
@@ -824,8 +948,10 @@ CREATE TABLE public.order_payments (
 );
 
 
+ALTER TABLE public.order_payments OWNER TO sufrix;
+
 --
--- Name: orders; Type: TABLE; Schema: public; Owner: -
+-- Name: orders; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.orders (
@@ -858,8 +984,10 @@ CREATE TABLE public.orders (
 );
 
 
+ALTER TABLE public.orders OWNER TO sufrix;
+
 --
--- Name: org_ingredients; Type: TABLE; Schema: public; Owner: -
+-- Name: org_ingredients; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.org_ingredients (
@@ -877,8 +1005,10 @@ CREATE TABLE public.org_ingredients (
 );
 
 
+ALTER TABLE public.org_ingredients OWNER TO sufrix;
+
 --
--- Name: org_payment_methods; Type: TABLE; Schema: public; Owner: -
+-- Name: org_payment_methods; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.org_payment_methods (
@@ -896,8 +1026,10 @@ CREATE TABLE public.org_payment_methods (
 );
 
 
+ALTER TABLE public.org_payment_methods OWNER TO sufrix;
+
 --
--- Name: organizations; Type: TABLE; Schema: public; Owner: -
+-- Name: organizations; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.organizations (
@@ -915,8 +1047,10 @@ CREATE TABLE public.organizations (
 );
 
 
+ALTER TABLE public.organizations OWNER TO sufrix;
+
 --
--- Name: permissions; Type: TABLE; Schema: public; Owner: -
+-- Name: permissions; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.permissions (
@@ -929,8 +1063,10 @@ CREATE TABLE public.permissions (
 );
 
 
+ALTER TABLE public.permissions OWNER TO sufrix;
+
 --
--- Name: role_permissions; Type: TABLE; Schema: public; Owner: -
+-- Name: role_permissions; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.role_permissions (
@@ -941,8 +1077,10 @@ CREATE TABLE public.role_permissions (
 );
 
 
+ALTER TABLE public.role_permissions OWNER TO sufrix;
+
 --
--- Name: shift_cash_movements; Type: TABLE; Schema: public; Owner: -
+-- Name: shift_cash_movements; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.shift_cash_movements (
@@ -955,8 +1093,10 @@ CREATE TABLE public.shift_cash_movements (
 );
 
 
+ALTER TABLE public.shift_cash_movements OWNER TO sufrix;
+
 --
--- Name: shift_inventory_counts; Type: TABLE; Schema: public; Owner: -
+-- Name: shift_inventory_counts; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.shift_inventory_counts (
@@ -973,8 +1113,10 @@ CREATE TABLE public.shift_inventory_counts (
 );
 
 
+ALTER TABLE public.shift_inventory_counts OWNER TO sufrix;
+
 --
--- Name: shifts; Type: TABLE; Schema: public; Owner: -
+-- Name: shifts; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.shifts (
@@ -1001,8 +1143,10 @@ CREATE TABLE public.shifts (
 );
 
 
+ALTER TABLE public.shifts OWNER TO sufrix;
+
 --
--- Name: user_branch_assignments; Type: TABLE; Schema: public; Owner: -
+-- Name: user_branch_assignments; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.user_branch_assignments (
@@ -1013,8 +1157,10 @@ CREATE TABLE public.user_branch_assignments (
 );
 
 
+ALTER TABLE public.user_branch_assignments OWNER TO sufrix;
+
 --
--- Name: users; Type: TABLE; Schema: public; Owner: -
+-- Name: users; Type: TABLE; Schema: public; Owner: sufrix
 --
 
 CREATE TABLE public.users (
@@ -1036,21 +1182,26 @@ CREATE TABLE public.users (
 );
 
 
---
--- Name: databases databases_pkey; Type: CONSTRAINT; Schema: _sqlx_test; Owner: -
---
-
--- (removed: sqlx test artifact)
-
+ALTER TABLE public.users OWNER TO sufrix;
 
 --
--- Name: _sqlx_migrations _sqlx_migrations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: databases databases_pkey; Type: CONSTRAINT; Schema: _sqlx_test; Owner: sufrix
 --
 
+ALTER TABLE ONLY _sqlx_test.databases
+    ADD CONSTRAINT databases_pkey PRIMARY KEY (db_name);
 
 
 --
--- Name: addon_item_ingredients addon_item_ingredients_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: _sqlx_migrations _sqlx_migrations_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
+--
+
+ALTER TABLE ONLY public._sqlx_migrations
+    ADD CONSTRAINT _sqlx_migrations_pkey PRIMARY KEY (version);
+
+
+--
+-- Name: addon_item_ingredients addon_item_ingredients_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.addon_item_ingredients
@@ -1058,7 +1209,7 @@ ALTER TABLE ONLY public.addon_item_ingredients
 
 
 --
--- Name: addon_item_ingredients addon_item_ingredients_unique; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: addon_item_ingredients addon_item_ingredients_unique; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.addon_item_ingredients
@@ -1066,7 +1217,7 @@ ALTER TABLE ONLY public.addon_item_ingredients
 
 
 --
--- Name: addon_items addon_items_org_id_name_type_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: addon_items addon_items_org_id_name_type_key; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.addon_items
@@ -1074,7 +1225,7 @@ ALTER TABLE ONLY public.addon_items
 
 
 --
--- Name: addon_items addon_items_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: addon_items addon_items_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.addon_items
@@ -1082,7 +1233,7 @@ ALTER TABLE ONLY public.addon_items
 
 
 --
--- Name: branch_inventory_adjustments branch_inventory_adjustments_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: branch_inventory_adjustments branch_inventory_adjustments_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.branch_inventory_adjustments
@@ -1090,7 +1241,7 @@ ALTER TABLE ONLY public.branch_inventory_adjustments
 
 
 --
--- Name: branch_inventory branch_inventory_branch_id_org_ingredient_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: branch_inventory branch_inventory_branch_id_org_ingredient_id_key; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.branch_inventory
@@ -1098,7 +1249,7 @@ ALTER TABLE ONLY public.branch_inventory
 
 
 --
--- Name: branch_inventory branch_inventory_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: branch_inventory branch_inventory_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.branch_inventory
@@ -1106,7 +1257,7 @@ ALTER TABLE ONLY public.branch_inventory
 
 
 --
--- Name: branch_inventory_transfers branch_inventory_transfers_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: branch_inventory_transfers branch_inventory_transfers_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.branch_inventory_transfers
@@ -1114,7 +1265,7 @@ ALTER TABLE ONLY public.branch_inventory_transfers
 
 
 --
--- Name: branch_menu_overrides branch_menu_overrides_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: branch_menu_overrides branch_menu_overrides_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.branch_menu_overrides
@@ -1122,7 +1273,7 @@ ALTER TABLE ONLY public.branch_menu_overrides
 
 
 --
--- Name: branches branches_org_id_name_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: branches branches_org_id_name_key; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.branches
@@ -1130,7 +1281,7 @@ ALTER TABLE ONLY public.branches
 
 
 --
--- Name: branches branches_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: branches branches_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.branches
@@ -1138,7 +1289,7 @@ ALTER TABLE ONLY public.branches
 
 
 --
--- Name: bundle_branch_availability bundle_branch_availability_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: bundle_branch_availability bundle_branch_availability_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.bundle_branch_availability
@@ -1146,7 +1297,7 @@ ALTER TABLE ONLY public.bundle_branch_availability
 
 
 --
--- Name: bundle_components bundle_components_bundle_id_item_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: bundle_components bundle_components_bundle_id_item_id_key; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.bundle_components
@@ -1154,7 +1305,7 @@ ALTER TABLE ONLY public.bundle_components
 
 
 --
--- Name: bundle_components bundle_components_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: bundle_components bundle_components_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.bundle_components
@@ -1162,7 +1313,7 @@ ALTER TABLE ONLY public.bundle_components
 
 
 --
--- Name: bundle_price_epochs bundle_price_epochs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: bundle_price_epochs bundle_price_epochs_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.bundle_price_epochs
@@ -1170,7 +1321,7 @@ ALTER TABLE ONLY public.bundle_price_epochs
 
 
 --
--- Name: bundles bundles_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: bundles bundles_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.bundles
@@ -1178,7 +1329,7 @@ ALTER TABLE ONLY public.bundles
 
 
 --
--- Name: categories categories_org_id_name_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: categories categories_org_id_name_key; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.categories
@@ -1186,7 +1337,7 @@ ALTER TABLE ONLY public.categories
 
 
 --
--- Name: categories categories_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: categories categories_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.categories
@@ -1194,7 +1345,7 @@ ALTER TABLE ONLY public.categories
 
 
 --
--- Name: discounts discounts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: discounts discounts_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.discounts
@@ -1202,7 +1353,7 @@ ALTER TABLE ONLY public.discounts
 
 
 --
--- Name: ingredient_cost_history ingredient_cost_history_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: ingredient_cost_history ingredient_cost_history_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.ingredient_cost_history
@@ -1210,7 +1361,7 @@ ALTER TABLE ONLY public.ingredient_cost_history
 
 
 --
--- Name: item_sizes item_sizes_menu_item_id_label_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: item_sizes item_sizes_menu_item_id_label_key; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.item_sizes
@@ -1218,7 +1369,7 @@ ALTER TABLE ONLY public.item_sizes
 
 
 --
--- Name: item_sizes item_sizes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: item_sizes item_sizes_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.item_sizes
@@ -1226,7 +1377,7 @@ ALTER TABLE ONLY public.item_sizes
 
 
 --
--- Name: menu_advisor_bundle_suggestions menu_advisor_bundle_suggestions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_advisor_bundle_suggestions menu_advisor_bundle_suggestions_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_advisor_bundle_suggestions
@@ -1234,7 +1385,7 @@ ALTER TABLE ONLY public.menu_advisor_bundle_suggestions
 
 
 --
--- Name: menu_advisor_decisions menu_advisor_decisions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_advisor_decisions menu_advisor_decisions_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_advisor_decisions
@@ -1242,7 +1393,7 @@ ALTER TABLE ONLY public.menu_advisor_decisions
 
 
 --
--- Name: menu_advisor_price_suggestions menu_advisor_price_suggestions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_advisor_price_suggestions menu_advisor_price_suggestions_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_advisor_price_suggestions
@@ -1250,7 +1401,7 @@ ALTER TABLE ONLY public.menu_advisor_price_suggestions
 
 
 --
--- Name: menu_advisor_removal_scenarios menu_advisor_removal_scenarios_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_advisor_removal_scenarios menu_advisor_removal_scenarios_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_advisor_removal_scenarios
@@ -1258,7 +1409,7 @@ ALTER TABLE ONLY public.menu_advisor_removal_scenarios
 
 
 --
--- Name: menu_advisor_runs menu_advisor_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_advisor_runs menu_advisor_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_advisor_runs
@@ -1266,7 +1417,7 @@ ALTER TABLE ONLY public.menu_advisor_runs
 
 
 --
--- Name: menu_item_addon_slots menu_item_addon_slots_menu_item_id_addon_type_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_item_addon_slots menu_item_addon_slots_menu_item_id_addon_type_key; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_item_addon_slots
@@ -1274,7 +1425,7 @@ ALTER TABLE ONLY public.menu_item_addon_slots
 
 
 --
--- Name: menu_item_addon_slots menu_item_addon_slots_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_item_addon_slots menu_item_addon_slots_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_item_addon_slots
@@ -1282,7 +1433,7 @@ ALTER TABLE ONLY public.menu_item_addon_slots
 
 
 --
--- Name: menu_item_optional_fields menu_item_optional_fields_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_item_optional_fields menu_item_optional_fields_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_item_optional_fields
@@ -1290,7 +1441,7 @@ ALTER TABLE ONLY public.menu_item_optional_fields
 
 
 --
--- Name: menu_item_price_epochs menu_item_price_epochs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_item_price_epochs menu_item_price_epochs_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_item_price_epochs
@@ -1298,7 +1449,7 @@ ALTER TABLE ONLY public.menu_item_price_epochs
 
 
 --
--- Name: menu_item_recipes menu_item_recipes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_item_recipes menu_item_recipes_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_item_recipes
@@ -1306,7 +1457,7 @@ ALTER TABLE ONLY public.menu_item_recipes
 
 
 --
--- Name: menu_item_recipes menu_item_recipes_unique; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_item_recipes menu_item_recipes_unique; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_item_recipes
@@ -1314,7 +1465,7 @@ ALTER TABLE ONLY public.menu_item_recipes
 
 
 --
--- Name: menu_items menu_items_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_items menu_items_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_items
@@ -1322,7 +1473,7 @@ ALTER TABLE ONLY public.menu_items
 
 
 --
--- Name: order_item_addons order_item_addons_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: order_item_addons order_item_addons_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.order_item_addons
@@ -1330,7 +1481,7 @@ ALTER TABLE ONLY public.order_item_addons
 
 
 --
--- Name: order_item_optionals order_item_optionals_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: order_item_optionals order_item_optionals_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.order_item_optionals
@@ -1338,7 +1489,7 @@ ALTER TABLE ONLY public.order_item_optionals
 
 
 --
--- Name: order_items order_items_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: order_items order_items_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.order_items
@@ -1346,7 +1497,7 @@ ALTER TABLE ONLY public.order_items
 
 
 --
--- Name: order_line_bundle_component_addons order_line_bundle_component_addons_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: order_line_bundle_component_addons order_line_bundle_component_addons_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.order_line_bundle_component_addons
@@ -1354,7 +1505,7 @@ ALTER TABLE ONLY public.order_line_bundle_component_addons
 
 
 --
--- Name: order_line_bundle_component_optionals order_line_bundle_component_optionals_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: order_line_bundle_component_optionals order_line_bundle_component_optionals_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.order_line_bundle_component_optionals
@@ -1362,7 +1513,7 @@ ALTER TABLE ONLY public.order_line_bundle_component_optionals
 
 
 --
--- Name: order_line_bundle_components order_line_bundle_components_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: order_line_bundle_components order_line_bundle_components_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.order_line_bundle_components
@@ -1370,7 +1521,7 @@ ALTER TABLE ONLY public.order_line_bundle_components
 
 
 --
--- Name: order_payments order_payments_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: order_payments order_payments_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.order_payments
@@ -1378,7 +1529,7 @@ ALTER TABLE ONLY public.order_payments
 
 
 --
--- Name: orders orders_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: orders orders_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.orders
@@ -1386,7 +1537,7 @@ ALTER TABLE ONLY public.orders
 
 
 --
--- Name: orders orders_shift_id_order_number_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: orders orders_shift_id_order_number_key; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.orders
@@ -1394,7 +1545,7 @@ ALTER TABLE ONLY public.orders
 
 
 --
--- Name: org_ingredients org_ingredients_org_id_name_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: org_ingredients org_ingredients_org_id_name_key; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.org_ingredients
@@ -1402,7 +1553,7 @@ ALTER TABLE ONLY public.org_ingredients
 
 
 --
--- Name: org_ingredients org_ingredients_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: org_ingredients org_ingredients_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.org_ingredients
@@ -1410,7 +1561,7 @@ ALTER TABLE ONLY public.org_ingredients
 
 
 --
--- Name: org_payment_methods org_payment_methods_org_id_name_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: org_payment_methods org_payment_methods_org_id_name_key; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.org_payment_methods
@@ -1418,7 +1569,7 @@ ALTER TABLE ONLY public.org_payment_methods
 
 
 --
--- Name: org_payment_methods org_payment_methods_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: org_payment_methods org_payment_methods_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.org_payment_methods
@@ -1426,7 +1577,7 @@ ALTER TABLE ONLY public.org_payment_methods
 
 
 --
--- Name: organizations organizations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: organizations organizations_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.organizations
@@ -1434,7 +1585,7 @@ ALTER TABLE ONLY public.organizations
 
 
 --
--- Name: organizations organizations_slug_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: organizations organizations_slug_key; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.organizations
@@ -1442,7 +1593,7 @@ ALTER TABLE ONLY public.organizations
 
 
 --
--- Name: permissions permissions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: permissions permissions_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.permissions
@@ -1450,7 +1601,7 @@ ALTER TABLE ONLY public.permissions
 
 
 --
--- Name: permissions permissions_user_id_resource_action_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: permissions permissions_user_id_resource_action_key; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.permissions
@@ -1458,7 +1609,7 @@ ALTER TABLE ONLY public.permissions
 
 
 --
--- Name: role_permissions role_permissions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: role_permissions role_permissions_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.role_permissions
@@ -1466,7 +1617,7 @@ ALTER TABLE ONLY public.role_permissions
 
 
 --
--- Name: shift_cash_movements shift_cash_movements_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: shift_cash_movements shift_cash_movements_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.shift_cash_movements
@@ -1474,7 +1625,7 @@ ALTER TABLE ONLY public.shift_cash_movements
 
 
 --
--- Name: shift_inventory_counts shift_inventory_counts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: shift_inventory_counts shift_inventory_counts_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.shift_inventory_counts
@@ -1482,7 +1633,7 @@ ALTER TABLE ONLY public.shift_inventory_counts
 
 
 --
--- Name: shift_inventory_counts shift_inventory_counts_shift_id_branch_inventory_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: shift_inventory_counts shift_inventory_counts_shift_id_branch_inventory_id_key; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.shift_inventory_counts
@@ -1490,7 +1641,7 @@ ALTER TABLE ONLY public.shift_inventory_counts
 
 
 --
--- Name: shifts shifts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: shifts shifts_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.shifts
@@ -1498,7 +1649,7 @@ ALTER TABLE ONLY public.shifts
 
 
 --
--- Name: user_branch_assignments user_branch_assignments_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: user_branch_assignments user_branch_assignments_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.user_branch_assignments
@@ -1506,7 +1657,7 @@ ALTER TABLE ONLY public.user_branch_assignments
 
 
 --
--- Name: users users_email_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: users users_email_key; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.users
@@ -1514,7 +1665,7 @@ ALTER TABLE ONLY public.users
 
 
 --
--- Name: users users_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: users users_pkey; Type: CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.users
@@ -1522,441 +1673,441 @@ ALTER TABLE ONLY public.users
 
 
 --
--- Name: databases_created_at; Type: INDEX; Schema: _sqlx_test; Owner: -
+-- Name: databases_created_at; Type: INDEX; Schema: _sqlx_test; Owner: sufrix
 --
 
--- (removed: sqlx test artifact — never belongs in a migration)
+CREATE INDEX databases_created_at ON _sqlx_test.databases USING btree (created_at);
 
 
 --
--- Name: bundle_price_epochs_bundle_from_idx; Type: INDEX; Schema: public; Owner: -
+-- Name: bundle_price_epochs_bundle_from_idx; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX bundle_price_epochs_bundle_from_idx ON public.bundle_price_epochs USING btree (bundle_id, effective_from DESC);
 
 
 --
--- Name: idx_bia_branch; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_bia_branch; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_bia_branch ON public.branch_inventory_adjustments USING btree (branch_id);
 
 
 --
--- Name: idx_bia_inv; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_bia_inv; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_bia_inv ON public.branch_inventory_adjustments USING btree (branch_inventory_id);
 
 
 --
--- Name: idx_bit_dest; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_bit_dest; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_bit_dest ON public.branch_inventory_transfers USING btree (destination_branch_id);
 
 
 --
--- Name: idx_bit_ingredient; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_bit_ingredient; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_bit_ingredient ON public.branch_inventory_transfers USING btree (org_ingredient_id);
 
 
 --
--- Name: idx_bit_source; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_bit_source; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_bit_source ON public.branch_inventory_transfers USING btree (source_branch_id);
 
 
 --
--- Name: idx_branch_inventory_branch; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_branch_inventory_branch; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_branch_inventory_branch ON public.branch_inventory USING btree (branch_id);
 
 
 --
--- Name: idx_branch_inventory_ingredient; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_branch_inventory_ingredient; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_branch_inventory_ingredient ON public.branch_inventory USING btree (org_ingredient_id);
 
 
 --
--- Name: idx_branches_org; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_branches_org; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_branches_org ON public.branches USING btree (org_id);
 
 
 --
--- Name: idx_bundle_components_bundle; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_bundle_components_bundle; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_bundle_components_bundle ON public.bundle_components USING btree (bundle_id);
 
 
 --
--- Name: idx_bundles_org; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_bundles_org; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_bundles_org ON public.bundles USING btree (org_id);
 
 
 --
--- Name: idx_bundles_org_status; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_bundles_org_status; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_bundles_org_status ON public.bundles USING btree (org_id, status);
 
 
 --
--- Name: idx_discounts_org_id; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_discounts_org_id; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_discounts_org_id ON public.discounts USING btree (org_id);
 
 
 --
--- Name: idx_menu_item_recipes_item_size; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_menu_item_recipes_item_size; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_menu_item_recipes_item_size ON public.menu_item_recipes USING btree (menu_item_id, size_label);
 
 
 --
--- Name: idx_menu_items_category; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_menu_items_category; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_menu_items_category ON public.menu_items USING btree (category_id);
 
 
 --
--- Name: idx_menu_items_name_trgm; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_menu_items_name_trgm; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_menu_items_name_trgm ON public.menu_items USING gin (name public.gin_trgm_ops);
 
 
 --
--- Name: idx_menu_items_org; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_menu_items_org; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_menu_items_org ON public.menu_items USING btree (org_id);
 
 
 --
--- Name: idx_mias_menu_item; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_mias_menu_item; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_mias_menu_item ON public.menu_item_addon_slots USING btree (menu_item_id);
 
 
 --
--- Name: idx_miof_ingredient; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_miof_ingredient; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_miof_ingredient ON public.menu_item_optional_fields USING btree (org_ingredient_id) WHERE (org_ingredient_id IS NOT NULL);
 
 
 --
--- Name: idx_miof_menu_item; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_miof_menu_item; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_miof_menu_item ON public.menu_item_optional_fields USING btree (menu_item_id);
 
 
 --
--- Name: idx_oio_order_item; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_oio_order_item; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_oio_order_item ON public.order_item_optionals USING btree (order_item_id);
 
 
 --
--- Name: idx_order_item_addons_oi; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_order_item_addons_oi; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_order_item_addons_oi ON public.order_item_addons USING btree (order_item_id);
 
 
 --
--- Name: idx_order_items_order; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_order_items_order; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_order_items_order ON public.order_items USING btree (order_id);
 
 
 --
--- Name: idx_order_payments_order; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_order_payments_order; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_order_payments_order ON public.order_payments USING btree (order_id);
 
 
 --
--- Name: idx_order_payments_order_id; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_order_payments_order_id; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_order_payments_order_id ON public.order_payments USING btree (order_id);
 
 
 --
--- Name: idx_orders_branch; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_orders_branch; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_orders_branch ON public.orders USING btree (branch_id);
 
 
 --
--- Name: idx_orders_branch_id; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_orders_branch_id; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_orders_branch_id ON public.orders USING btree (branch_id);
 
 
 --
--- Name: idx_orders_created_at; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_orders_created_at; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_orders_created_at ON public.orders USING btree (created_at);
 
 
 --
--- Name: idx_orders_shift; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_orders_shift; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_orders_shift ON public.orders USING btree (shift_id);
 
 
 --
--- Name: idx_orders_shift_id; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_orders_shift_id; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_orders_shift_id ON public.orders USING btree (shift_id);
 
 
 --
--- Name: idx_orders_status; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_orders_status; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_orders_status ON public.orders USING btree (status);
 
 
 --
--- Name: idx_orders_teller; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_orders_teller; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_orders_teller ON public.orders USING btree (teller_id);
 
 
 --
--- Name: idx_org_ingredients_org; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_org_ingredients_org; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_org_ingredients_org ON public.org_ingredients USING btree (org_id);
 
 
 --
--- Name: idx_permissions_user; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_permissions_user; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_permissions_user ON public.permissions USING btree (user_id);
 
 
 --
--- Name: idx_shift_cash_movements_shift; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_shift_cash_movements_shift; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_shift_cash_movements_shift ON public.shift_cash_movements USING btree (shift_id);
 
 
 --
--- Name: idx_shifts_branch; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_shifts_branch; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_shifts_branch ON public.shifts USING btree (branch_id);
 
 
 --
--- Name: idx_shifts_one_open_per_branch; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_shifts_one_open_per_branch; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE UNIQUE INDEX idx_shifts_one_open_per_branch ON public.shifts USING btree (branch_id) WHERE (status = 'open'::public.shift_status);
 
 
 --
--- Name: idx_shifts_opened_at; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_shifts_opened_at; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_shifts_opened_at ON public.shifts USING btree (opened_at);
 
 
 --
--- Name: idx_shifts_teller; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_shifts_teller; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_shifts_teller ON public.shifts USING btree (teller_id);
 
 
 --
--- Name: idx_sic_shift; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_sic_shift; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_sic_shift ON public.shift_inventory_counts USING btree (shift_id);
 
 
 --
--- Name: idx_users_email; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_users_email; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_users_email ON public.users USING btree (email) WHERE (email IS NOT NULL);
 
 
 --
--- Name: idx_users_org; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_users_org; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX idx_users_org ON public.users USING btree (org_id);
 
 
 --
--- Name: ingredient_cost_history_ingredient_from_idx; Type: INDEX; Schema: public; Owner: -
+-- Name: ingredient_cost_history_ingredient_from_idx; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX ingredient_cost_history_ingredient_from_idx ON public.ingredient_cost_history USING btree (org_ingredient_id, effective_from DESC);
 
 
 --
--- Name: menu_item_price_epochs_item_from_idx; Type: INDEX; Schema: public; Owner: -
+-- Name: menu_item_price_epochs_item_from_idx; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE INDEX menu_item_price_epochs_item_from_idx ON public.menu_item_price_epochs USING btree (menu_item_id, effective_from DESC);
 
 
 --
--- Name: orders_idempotency_key_idx; Type: INDEX; Schema: public; Owner: -
+-- Name: orders_idempotency_key_idx; Type: INDEX; Schema: public; Owner: sufrix
 --
 
 CREATE UNIQUE INDEX orders_idempotency_key_idx ON public.orders USING btree (idempotency_key) WHERE (idempotency_key IS NOT NULL);
 
 
 --
--- Name: orders orders_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+-- Name: orders orders_set_updated_at; Type: TRIGGER; Schema: public; Owner: sufrix
 --
 
 CREATE TRIGGER orders_set_updated_at BEFORE UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
--- Name: addon_item_ingredients trg_addon_item_ingredients_updated_at; Type: TRIGGER; Schema: public; Owner: -
+-- Name: addon_item_ingredients trg_addon_item_ingredients_updated_at; Type: TRIGGER; Schema: public; Owner: sufrix
 --
 
 CREATE TRIGGER trg_addon_item_ingredients_updated_at BEFORE UPDATE ON public.addon_item_ingredients FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
--- Name: addon_items trg_addon_items_updated_at; Type: TRIGGER; Schema: public; Owner: -
+-- Name: addon_items trg_addon_items_updated_at; Type: TRIGGER; Schema: public; Owner: sufrix
 --
 
 CREATE TRIGGER trg_addon_items_updated_at BEFORE UPDATE ON public.addon_items FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
--- Name: branch_inventory trg_branch_inventory_updated_at; Type: TRIGGER; Schema: public; Owner: -
+-- Name: branch_inventory trg_branch_inventory_updated_at; Type: TRIGGER; Schema: public; Owner: sufrix
 --
 
 CREATE TRIGGER trg_branch_inventory_updated_at BEFORE UPDATE ON public.branch_inventory FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
--- Name: branches trg_branches_updated_at; Type: TRIGGER; Schema: public; Owner: -
+-- Name: branches trg_branches_updated_at; Type: TRIGGER; Schema: public; Owner: sufrix
 --
 
 CREATE TRIGGER trg_branches_updated_at BEFORE UPDATE ON public.branches FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
--- Name: bundles trg_bundles_updated_at; Type: TRIGGER; Schema: public; Owner: -
+-- Name: bundles trg_bundles_updated_at; Type: TRIGGER; Schema: public; Owner: sufrix
 --
 
 CREATE TRIGGER trg_bundles_updated_at BEFORE UPDATE ON public.bundles FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
--- Name: categories trg_categories_updated_at; Type: TRIGGER; Schema: public; Owner: -
+-- Name: categories trg_categories_updated_at; Type: TRIGGER; Schema: public; Owner: sufrix
 --
 
 CREATE TRIGGER trg_categories_updated_at BEFORE UPDATE ON public.categories FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
--- Name: menu_item_recipes trg_menu_item_recipes_updated_at; Type: TRIGGER; Schema: public; Owner: -
+-- Name: menu_item_recipes trg_menu_item_recipes_updated_at; Type: TRIGGER; Schema: public; Owner: sufrix
 --
 
 CREATE TRIGGER trg_menu_item_recipes_updated_at BEFORE UPDATE ON public.menu_item_recipes FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
--- Name: menu_items trg_menu_items_updated_at; Type: TRIGGER; Schema: public; Owner: -
+-- Name: menu_items trg_menu_items_updated_at; Type: TRIGGER; Schema: public; Owner: sufrix
 --
 
 CREATE TRIGGER trg_menu_items_updated_at BEFORE UPDATE ON public.menu_items FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
--- Name: menu_item_optional_fields trg_miof_updated_at; Type: TRIGGER; Schema: public; Owner: -
+-- Name: menu_item_optional_fields trg_miof_updated_at; Type: TRIGGER; Schema: public; Owner: sufrix
 --
 
 CREATE TRIGGER trg_miof_updated_at BEFORE UPDATE ON public.menu_item_optional_fields FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
--- Name: orders trg_orders_updated_at; Type: TRIGGER; Schema: public; Owner: -
+-- Name: orders trg_orders_updated_at; Type: TRIGGER; Schema: public; Owner: sufrix
 --
 
 CREATE TRIGGER trg_orders_updated_at BEFORE UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
--- Name: org_ingredients trg_org_ingredients_updated_at; Type: TRIGGER; Schema: public; Owner: -
+-- Name: org_ingredients trg_org_ingredients_updated_at; Type: TRIGGER; Schema: public; Owner: sufrix
 --
 
 CREATE TRIGGER trg_org_ingredients_updated_at BEFORE UPDATE ON public.org_ingredients FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
--- Name: org_payment_methods trg_org_payment_methods_updated_at; Type: TRIGGER; Schema: public; Owner: -
+-- Name: org_payment_methods trg_org_payment_methods_updated_at; Type: TRIGGER; Schema: public; Owner: sufrix
 --
 
 CREATE TRIGGER trg_org_payment_methods_updated_at BEFORE UPDATE ON public.org_payment_methods FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
--- Name: organizations trg_organizations_updated_at; Type: TRIGGER; Schema: public; Owner: -
+-- Name: organizations trg_organizations_updated_at; Type: TRIGGER; Schema: public; Owner: sufrix
 --
 
 CREATE TRIGGER trg_organizations_updated_at BEFORE UPDATE ON public.organizations FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
--- Name: shifts trg_shifts_updated_at; Type: TRIGGER; Schema: public; Owner: -
+-- Name: shifts trg_shifts_updated_at; Type: TRIGGER; Schema: public; Owner: sufrix
 --
 
 CREATE TRIGGER trg_shifts_updated_at BEFORE UPDATE ON public.shifts FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
--- Name: users trg_users_updated_at; Type: TRIGGER; Schema: public; Owner: -
+-- Name: users trg_users_updated_at; Type: TRIGGER; Schema: public; Owner: sufrix
 --
 
 CREATE TRIGGER trg_users_updated_at BEFORE UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
--- Name: addon_item_ingredients addon_item_ingredients_addon_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: addon_item_ingredients addon_item_ingredients_addon_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.addon_item_ingredients
@@ -1964,7 +2115,7 @@ ALTER TABLE ONLY public.addon_item_ingredients
 
 
 --
--- Name: addon_item_ingredients addon_item_ingredients_org_ingredient_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: addon_item_ingredients addon_item_ingredients_org_ingredient_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.addon_item_ingredients
@@ -1972,7 +2123,7 @@ ALTER TABLE ONLY public.addon_item_ingredients
 
 
 --
--- Name: addon_items addon_items_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: addon_items addon_items_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.addon_items
@@ -1980,7 +2131,7 @@ ALTER TABLE ONLY public.addon_items
 
 
 --
--- Name: branch_inventory_adjustments branch_inventory_adjustments_adjusted_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: branch_inventory_adjustments branch_inventory_adjustments_adjusted_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.branch_inventory_adjustments
@@ -1988,7 +2139,7 @@ ALTER TABLE ONLY public.branch_inventory_adjustments
 
 
 --
--- Name: branch_inventory_adjustments branch_inventory_adjustments_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: branch_inventory_adjustments branch_inventory_adjustments_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.branch_inventory_adjustments
@@ -1996,7 +2147,7 @@ ALTER TABLE ONLY public.branch_inventory_adjustments
 
 
 --
--- Name: branch_inventory_adjustments branch_inventory_adjustments_branch_inventory_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: branch_inventory_adjustments branch_inventory_adjustments_branch_inventory_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.branch_inventory_adjustments
@@ -2004,7 +2155,7 @@ ALTER TABLE ONLY public.branch_inventory_adjustments
 
 
 --
--- Name: branch_inventory branch_inventory_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: branch_inventory branch_inventory_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.branch_inventory
@@ -2012,7 +2163,7 @@ ALTER TABLE ONLY public.branch_inventory
 
 
 --
--- Name: branch_inventory branch_inventory_org_ingredient_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: branch_inventory branch_inventory_org_ingredient_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.branch_inventory
@@ -2020,7 +2171,7 @@ ALTER TABLE ONLY public.branch_inventory
 
 
 --
--- Name: branch_inventory_transfers branch_inventory_transfers_destination_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: branch_inventory_transfers branch_inventory_transfers_destination_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.branch_inventory_transfers
@@ -2028,7 +2179,7 @@ ALTER TABLE ONLY public.branch_inventory_transfers
 
 
 --
--- Name: branch_inventory_transfers branch_inventory_transfers_initiated_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: branch_inventory_transfers branch_inventory_transfers_initiated_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.branch_inventory_transfers
@@ -2036,7 +2187,7 @@ ALTER TABLE ONLY public.branch_inventory_transfers
 
 
 --
--- Name: branch_inventory_transfers branch_inventory_transfers_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: branch_inventory_transfers branch_inventory_transfers_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.branch_inventory_transfers
@@ -2044,7 +2195,7 @@ ALTER TABLE ONLY public.branch_inventory_transfers
 
 
 --
--- Name: branch_inventory_transfers branch_inventory_transfers_org_ingredient_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: branch_inventory_transfers branch_inventory_transfers_org_ingredient_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.branch_inventory_transfers
@@ -2052,7 +2203,7 @@ ALTER TABLE ONLY public.branch_inventory_transfers
 
 
 --
--- Name: branch_inventory_transfers branch_inventory_transfers_source_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: branch_inventory_transfers branch_inventory_transfers_source_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.branch_inventory_transfers
@@ -2060,7 +2211,7 @@ ALTER TABLE ONLY public.branch_inventory_transfers
 
 
 --
--- Name: branch_menu_overrides branch_menu_overrides_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: branch_menu_overrides branch_menu_overrides_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.branch_menu_overrides
@@ -2068,7 +2219,7 @@ ALTER TABLE ONLY public.branch_menu_overrides
 
 
 --
--- Name: branch_menu_overrides branch_menu_overrides_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: branch_menu_overrides branch_menu_overrides_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.branch_menu_overrides
@@ -2076,7 +2227,7 @@ ALTER TABLE ONLY public.branch_menu_overrides
 
 
 --
--- Name: branches branches_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: branches branches_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.branches
@@ -2084,7 +2235,7 @@ ALTER TABLE ONLY public.branches
 
 
 --
--- Name: bundle_branch_availability bundle_branch_availability_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: bundle_branch_availability bundle_branch_availability_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.bundle_branch_availability
@@ -2092,7 +2243,7 @@ ALTER TABLE ONLY public.bundle_branch_availability
 
 
 --
--- Name: bundle_branch_availability bundle_branch_availability_bundle_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: bundle_branch_availability bundle_branch_availability_bundle_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.bundle_branch_availability
@@ -2100,7 +2251,7 @@ ALTER TABLE ONLY public.bundle_branch_availability
 
 
 --
--- Name: bundle_components bundle_components_bundle_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: bundle_components bundle_components_bundle_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.bundle_components
@@ -2108,7 +2259,7 @@ ALTER TABLE ONLY public.bundle_components
 
 
 --
--- Name: bundle_components bundle_components_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: bundle_components bundle_components_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.bundle_components
@@ -2116,7 +2267,7 @@ ALTER TABLE ONLY public.bundle_components
 
 
 --
--- Name: bundle_price_epochs bundle_price_epochs_bundle_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: bundle_price_epochs bundle_price_epochs_bundle_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.bundle_price_epochs
@@ -2124,7 +2275,7 @@ ALTER TABLE ONLY public.bundle_price_epochs
 
 
 --
--- Name: bundle_price_epochs bundle_price_epochs_changed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: bundle_price_epochs bundle_price_epochs_changed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.bundle_price_epochs
@@ -2132,7 +2283,7 @@ ALTER TABLE ONLY public.bundle_price_epochs
 
 
 --
--- Name: bundles bundles_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: bundles bundles_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.bundles
@@ -2140,7 +2291,7 @@ ALTER TABLE ONLY public.bundles
 
 
 --
--- Name: bundles bundles_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: bundles bundles_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.bundles
@@ -2148,7 +2299,7 @@ ALTER TABLE ONLY public.bundles
 
 
 --
--- Name: categories categories_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: categories categories_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.categories
@@ -2156,7 +2307,7 @@ ALTER TABLE ONLY public.categories
 
 
 --
--- Name: discounts discounts_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: discounts discounts_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.discounts
@@ -2164,7 +2315,7 @@ ALTER TABLE ONLY public.discounts
 
 
 --
--- Name: branch_inventory_adjustments fk_bia_transfer; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: branch_inventory_adjustments fk_bia_transfer; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.branch_inventory_adjustments
@@ -2172,7 +2323,7 @@ ALTER TABLE ONLY public.branch_inventory_adjustments
 
 
 --
--- Name: ingredient_cost_history ingredient_cost_history_changed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: ingredient_cost_history ingredient_cost_history_changed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.ingredient_cost_history
@@ -2180,7 +2331,7 @@ ALTER TABLE ONLY public.ingredient_cost_history
 
 
 --
--- Name: ingredient_cost_history ingredient_cost_history_org_ingredient_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: ingredient_cost_history ingredient_cost_history_org_ingredient_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.ingredient_cost_history
@@ -2188,7 +2339,7 @@ ALTER TABLE ONLY public.ingredient_cost_history
 
 
 --
--- Name: item_sizes item_sizes_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: item_sizes item_sizes_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.item_sizes
@@ -2196,7 +2347,7 @@ ALTER TABLE ONLY public.item_sizes
 
 
 --
--- Name: menu_advisor_bundle_suggestions menu_advisor_bundle_suggestions_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_advisor_bundle_suggestions menu_advisor_bundle_suggestions_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_advisor_bundle_suggestions
@@ -2204,7 +2355,7 @@ ALTER TABLE ONLY public.menu_advisor_bundle_suggestions
 
 
 --
--- Name: menu_advisor_bundle_suggestions menu_advisor_bundle_suggestions_focus_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_advisor_bundle_suggestions menu_advisor_bundle_suggestions_focus_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_advisor_bundle_suggestions
@@ -2212,7 +2363,7 @@ ALTER TABLE ONLY public.menu_advisor_bundle_suggestions
 
 
 --
--- Name: menu_advisor_bundle_suggestions menu_advisor_bundle_suggestions_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_advisor_bundle_suggestions menu_advisor_bundle_suggestions_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_advisor_bundle_suggestions
@@ -2220,7 +2371,7 @@ ALTER TABLE ONLY public.menu_advisor_bundle_suggestions
 
 
 --
--- Name: menu_advisor_decisions menu_advisor_decisions_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_advisor_decisions menu_advisor_decisions_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_advisor_decisions
@@ -2228,7 +2379,7 @@ ALTER TABLE ONLY public.menu_advisor_decisions
 
 
 --
--- Name: menu_advisor_decisions menu_advisor_decisions_decided_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_advisor_decisions menu_advisor_decisions_decided_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_advisor_decisions
@@ -2236,7 +2387,7 @@ ALTER TABLE ONLY public.menu_advisor_decisions
 
 
 --
--- Name: menu_advisor_price_suggestions menu_advisor_price_suggestions_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_advisor_price_suggestions menu_advisor_price_suggestions_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_advisor_price_suggestions
@@ -2244,7 +2395,7 @@ ALTER TABLE ONLY public.menu_advisor_price_suggestions
 
 
 --
--- Name: menu_advisor_price_suggestions menu_advisor_price_suggestions_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_advisor_price_suggestions menu_advisor_price_suggestions_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_advisor_price_suggestions
@@ -2252,7 +2403,7 @@ ALTER TABLE ONLY public.menu_advisor_price_suggestions
 
 
 --
--- Name: menu_advisor_price_suggestions menu_advisor_price_suggestions_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_advisor_price_suggestions menu_advisor_price_suggestions_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_advisor_price_suggestions
@@ -2260,7 +2411,7 @@ ALTER TABLE ONLY public.menu_advisor_price_suggestions
 
 
 --
--- Name: menu_advisor_removal_scenarios menu_advisor_removal_scenarios_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_advisor_removal_scenarios menu_advisor_removal_scenarios_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_advisor_removal_scenarios
@@ -2268,7 +2419,7 @@ ALTER TABLE ONLY public.menu_advisor_removal_scenarios
 
 
 --
--- Name: menu_advisor_removal_scenarios menu_advisor_removal_scenarios_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_advisor_removal_scenarios menu_advisor_removal_scenarios_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_advisor_removal_scenarios
@@ -2276,7 +2427,7 @@ ALTER TABLE ONLY public.menu_advisor_removal_scenarios
 
 
 --
--- Name: menu_advisor_removal_scenarios menu_advisor_removal_scenarios_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_advisor_removal_scenarios menu_advisor_removal_scenarios_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_advisor_removal_scenarios
@@ -2284,7 +2435,7 @@ ALTER TABLE ONLY public.menu_advisor_removal_scenarios
 
 
 --
--- Name: menu_advisor_runs menu_advisor_runs_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_advisor_runs menu_advisor_runs_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_advisor_runs
@@ -2292,7 +2443,7 @@ ALTER TABLE ONLY public.menu_advisor_runs
 
 
 --
--- Name: menu_advisor_runs menu_advisor_runs_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_advisor_runs menu_advisor_runs_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_advisor_runs
@@ -2300,7 +2451,7 @@ ALTER TABLE ONLY public.menu_advisor_runs
 
 
 --
--- Name: menu_item_addon_slots menu_item_addon_slots_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_item_addon_slots menu_item_addon_slots_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_item_addon_slots
@@ -2308,7 +2459,7 @@ ALTER TABLE ONLY public.menu_item_addon_slots
 
 
 --
--- Name: menu_item_optional_fields menu_item_optional_fields_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_item_optional_fields menu_item_optional_fields_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_item_optional_fields
@@ -2316,7 +2467,7 @@ ALTER TABLE ONLY public.menu_item_optional_fields
 
 
 --
--- Name: menu_item_optional_fields menu_item_optional_fields_org_ingredient_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_item_optional_fields menu_item_optional_fields_org_ingredient_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_item_optional_fields
@@ -2324,7 +2475,7 @@ ALTER TABLE ONLY public.menu_item_optional_fields
 
 
 --
--- Name: menu_item_price_epochs menu_item_price_epochs_changed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_item_price_epochs menu_item_price_epochs_changed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_item_price_epochs
@@ -2332,7 +2483,7 @@ ALTER TABLE ONLY public.menu_item_price_epochs
 
 
 --
--- Name: menu_item_price_epochs menu_item_price_epochs_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_item_price_epochs menu_item_price_epochs_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_item_price_epochs
@@ -2340,7 +2491,7 @@ ALTER TABLE ONLY public.menu_item_price_epochs
 
 
 --
--- Name: menu_item_recipes menu_item_recipes_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_item_recipes menu_item_recipes_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_item_recipes
@@ -2348,7 +2499,7 @@ ALTER TABLE ONLY public.menu_item_recipes
 
 
 --
--- Name: menu_item_recipes menu_item_recipes_org_ingredient_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_item_recipes menu_item_recipes_org_ingredient_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_item_recipes
@@ -2356,7 +2507,7 @@ ALTER TABLE ONLY public.menu_item_recipes
 
 
 --
--- Name: menu_items menu_items_category_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_items menu_items_category_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_items
@@ -2364,7 +2515,7 @@ ALTER TABLE ONLY public.menu_items
 
 
 --
--- Name: menu_items menu_items_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: menu_items menu_items_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.menu_items
@@ -2372,7 +2523,7 @@ ALTER TABLE ONLY public.menu_items
 
 
 --
--- Name: order_item_addons order_item_addons_addon_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: order_item_addons order_item_addons_addon_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.order_item_addons
@@ -2380,7 +2531,7 @@ ALTER TABLE ONLY public.order_item_addons
 
 
 --
--- Name: order_item_addons order_item_addons_order_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: order_item_addons order_item_addons_order_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.order_item_addons
@@ -2388,7 +2539,7 @@ ALTER TABLE ONLY public.order_item_addons
 
 
 --
--- Name: order_item_optionals order_item_optionals_optional_field_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: order_item_optionals order_item_optionals_optional_field_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.order_item_optionals
@@ -2396,7 +2547,7 @@ ALTER TABLE ONLY public.order_item_optionals
 
 
 --
--- Name: order_item_optionals order_item_optionals_order_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: order_item_optionals order_item_optionals_order_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.order_item_optionals
@@ -2404,7 +2555,7 @@ ALTER TABLE ONLY public.order_item_optionals
 
 
 --
--- Name: order_items order_items_bundle_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: order_items order_items_bundle_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.order_items
@@ -2412,7 +2563,7 @@ ALTER TABLE ONLY public.order_items
 
 
 --
--- Name: order_items order_items_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: order_items order_items_menu_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.order_items
@@ -2420,7 +2571,7 @@ ALTER TABLE ONLY public.order_items
 
 
 --
--- Name: order_items order_items_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: order_items order_items_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.order_items
@@ -2428,7 +2579,7 @@ ALTER TABLE ONLY public.order_items
 
 
 --
--- Name: order_line_bundle_component_addons order_line_bundle_component_addons_addon_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: order_line_bundle_component_addons order_line_bundle_component_addons_addon_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.order_line_bundle_component_addons
@@ -2436,7 +2587,7 @@ ALTER TABLE ONLY public.order_line_bundle_component_addons
 
 
 --
--- Name: order_line_bundle_component_addons order_line_bundle_component_addons_item_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: order_line_bundle_component_addons order_line_bundle_component_addons_item_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.order_line_bundle_component_addons
@@ -2444,7 +2595,7 @@ ALTER TABLE ONLY public.order_line_bundle_component_addons
 
 
 --
--- Name: order_line_bundle_component_addons order_line_bundle_component_addons_order_line_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: order_line_bundle_component_addons order_line_bundle_component_addons_order_line_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.order_line_bundle_component_addons
@@ -2452,7 +2603,7 @@ ALTER TABLE ONLY public.order_line_bundle_component_addons
 
 
 --
--- Name: order_line_bundle_component_optionals order_line_bundle_component_optionals_order_line_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: order_line_bundle_component_optionals order_line_bundle_component_optionals_order_line_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.order_line_bundle_component_optionals
@@ -2460,7 +2611,7 @@ ALTER TABLE ONLY public.order_line_bundle_component_optionals
 
 
 --
--- Name: order_line_bundle_components order_line_bundle_components_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: order_line_bundle_components order_line_bundle_components_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.order_line_bundle_components
@@ -2468,7 +2619,7 @@ ALTER TABLE ONLY public.order_line_bundle_components
 
 
 --
--- Name: order_line_bundle_components order_line_bundle_components_order_line_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: order_line_bundle_components order_line_bundle_components_order_line_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.order_line_bundle_components
@@ -2476,7 +2627,7 @@ ALTER TABLE ONLY public.order_line_bundle_components
 
 
 --
--- Name: order_payments order_payments_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: order_payments order_payments_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.order_payments
@@ -2484,7 +2635,7 @@ ALTER TABLE ONLY public.order_payments
 
 
 --
--- Name: orders orders_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: orders orders_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.orders
@@ -2492,7 +2643,7 @@ ALTER TABLE ONLY public.orders
 
 
 --
--- Name: orders orders_discount_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: orders orders_discount_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.orders
@@ -2500,7 +2651,7 @@ ALTER TABLE ONLY public.orders
 
 
 --
--- Name: orders orders_shift_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: orders orders_shift_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.orders
@@ -2508,7 +2659,7 @@ ALTER TABLE ONLY public.orders
 
 
 --
--- Name: orders orders_teller_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: orders orders_teller_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.orders
@@ -2516,7 +2667,7 @@ ALTER TABLE ONLY public.orders
 
 
 --
--- Name: orders orders_voided_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: orders orders_voided_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.orders
@@ -2524,7 +2675,7 @@ ALTER TABLE ONLY public.orders
 
 
 --
--- Name: org_ingredients org_ingredients_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: org_ingredients org_ingredients_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.org_ingredients
@@ -2532,7 +2683,7 @@ ALTER TABLE ONLY public.org_ingredients
 
 
 --
--- Name: org_payment_methods org_payment_methods_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: org_payment_methods org_payment_methods_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.org_payment_methods
@@ -2540,7 +2691,7 @@ ALTER TABLE ONLY public.org_payment_methods
 
 
 --
--- Name: permissions permissions_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: permissions permissions_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.permissions
@@ -2548,7 +2699,7 @@ ALTER TABLE ONLY public.permissions
 
 
 --
--- Name: shift_cash_movements shift_cash_movements_moved_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: shift_cash_movements shift_cash_movements_moved_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.shift_cash_movements
@@ -2556,7 +2707,7 @@ ALTER TABLE ONLY public.shift_cash_movements
 
 
 --
--- Name: shift_cash_movements shift_cash_movements_shift_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: shift_cash_movements shift_cash_movements_shift_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.shift_cash_movements
@@ -2564,7 +2715,7 @@ ALTER TABLE ONLY public.shift_cash_movements
 
 
 --
--- Name: shift_inventory_counts shift_inventory_counts_branch_inventory_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: shift_inventory_counts shift_inventory_counts_branch_inventory_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.shift_inventory_counts
@@ -2572,7 +2723,7 @@ ALTER TABLE ONLY public.shift_inventory_counts
 
 
 --
--- Name: shift_inventory_counts shift_inventory_counts_counted_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: shift_inventory_counts shift_inventory_counts_counted_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.shift_inventory_counts
@@ -2580,7 +2731,7 @@ ALTER TABLE ONLY public.shift_inventory_counts
 
 
 --
--- Name: shift_inventory_counts shift_inventory_counts_shift_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: shift_inventory_counts shift_inventory_counts_shift_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.shift_inventory_counts
@@ -2588,7 +2739,7 @@ ALTER TABLE ONLY public.shift_inventory_counts
 
 
 --
--- Name: shifts shifts_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: shifts shifts_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.shifts
@@ -2596,7 +2747,7 @@ ALTER TABLE ONLY public.shifts
 
 
 --
--- Name: shifts shifts_closed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: shifts shifts_closed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.shifts
@@ -2604,7 +2755,7 @@ ALTER TABLE ONLY public.shifts
 
 
 --
--- Name: shifts shifts_force_closed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: shifts shifts_force_closed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.shifts
@@ -2612,7 +2763,7 @@ ALTER TABLE ONLY public.shifts
 
 
 --
--- Name: shifts shifts_teller_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: shifts shifts_teller_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.shifts
@@ -2620,7 +2771,7 @@ ALTER TABLE ONLY public.shifts
 
 
 --
--- Name: user_branch_assignments user_branch_assignments_assigned_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: user_branch_assignments user_branch_assignments_assigned_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.user_branch_assignments
@@ -2628,7 +2779,7 @@ ALTER TABLE ONLY public.user_branch_assignments
 
 
 --
--- Name: user_branch_assignments user_branch_assignments_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: user_branch_assignments user_branch_assignments_branch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.user_branch_assignments
@@ -2636,7 +2787,7 @@ ALTER TABLE ONLY public.user_branch_assignments
 
 
 --
--- Name: user_branch_assignments user_branch_assignments_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: user_branch_assignments user_branch_assignments_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.user_branch_assignments
@@ -2644,7 +2795,7 @@ ALTER TABLE ONLY public.user_branch_assignments
 
 
 --
--- Name: users users_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: users users_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: sufrix
 --
 
 ALTER TABLE ONLY public.users

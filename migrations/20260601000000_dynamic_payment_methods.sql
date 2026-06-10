@@ -1,5 +1,5 @@
 -- Create the new org_payment_methods table
-CREATE TABLE public.org_payment_methods (
+CREATE TABLE IF NOT EXISTS public.org_payment_methods (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     org_id UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
@@ -15,6 +15,7 @@ CREATE TABLE public.org_payment_methods (
 );
 
 -- Trigger for updated_at
+DROP TRIGGER IF EXISTS trg_org_payment_methods_updated_at ON public.org_payment_methods;
 CREATE TRIGGER trg_org_payment_methods_updated_at 
 BEFORE UPDATE ON public.org_payment_methods 
 FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
@@ -38,7 +39,8 @@ CROSS JOIN (
         ('mixed', '{"en": "Mixed", "ar": "مختلط"}', 'amber', 'pie_chart_rounded', false, 4),
         ('talabat_online', '{"en": "Talabat Online", "ar": "طلبات أونلاين"}', 'orange', 'delivery_dining_rounded', false, 5),
         ('talabat_cash', '{"en": "Talabat Cash", "ar": "طلبات كاش"}', 'orange', 'delivery_dining_rounded', true, 6)
-) AS pm(name, label_translations, color, icon, is_cash, display_order);
+) AS pm(name, label_translations, color, icon, is_cash, display_order)
+ON CONFLICT (org_id, name) DO NOTHING;
 
 -- Alter existing columns that use the ENUM
 ALTER TABLE public.orders 
@@ -48,4 +50,4 @@ ALTER TABLE public.order_payments
     ALTER COLUMN method TYPE TEXT USING method::text;
 
 -- Drop the ENUM type
-DROP TYPE public.payment_method;
+DROP TYPE IF EXISTS public.payment_method;

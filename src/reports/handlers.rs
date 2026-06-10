@@ -713,6 +713,7 @@ pub async fn branch_addon_sales(
         SELECT
             oia.addon_item_id,
             oia.addon_name,
+            COALESCE((array_agg(oia.name_translations))[1], '{}'::jsonb) AS addon_name_translations,
             COALESCE(ai.type, 'extra') AS addon_type,
             SUM(oia.quantity)::bigint  AS quantity_sold,
             SUM(oia.line_total)::bigint AS revenue
@@ -991,6 +992,8 @@ pub async fn branch_combined_item_sales(
             SELECT
                 oi.menu_item_id AS item_id,
                 oi.item_name    AS item_name,
+                COALESCE((array_agg(oi.name_translations))[1], '{}'::jsonb)
+                    AS item_name_translations,
                 SUM(oi.quantity)::bigint AS qty
             FROM order_items oi
             JOIN orders o ON o.id = oi.order_id
@@ -1005,6 +1008,8 @@ pub async fn branch_combined_item_sales(
             SELECT
                 bc.item_id   AS item_id,
                 mi.name      AS item_name,
+                COALESCE((array_agg(mi.name_translations))[1], '{}'::jsonb)
+                    AS item_name_translations,
                 SUM(oi.quantity * bc.quantity)::bigint AS qty
             FROM order_line_bundle_components bc
             JOIN order_items oi ON oi.id = bc.order_line_id
@@ -1020,6 +1025,8 @@ pub async fn branch_combined_item_sales(
         SELECT
             COALESCE(s.item_id, b.item_id) AS item_id,
             COALESCE(s.item_name, b.item_name) AS item_name,
+            COALESCE(s.item_name_translations, b.item_name_translations, '{}'::jsonb)
+                AS item_name_translations,
             COALESCE(s.qty, 0)::bigint AS standalone_qty,
             COALESCE(b.qty, 0)::bigint AS bundle_qty,
             (COALESCE(s.qty, 0) + COALESCE(b.qty, 0))::bigint AS total_qty
@@ -1035,4 +1042,218 @@ pub async fn branch_combined_item_sales(
     .await?;
 
     Ok(HttpResponse::Ok().json(rows))
+}
+
+// ── GET /reports/branches/:id/menu-engineering ────────────────
+//
+// Foodics-vocabulary menu engineering table, computed from sale-time cost
+// snapshots (order_items.line_cost / unit_cost) — not from current recipe
+// costs, so history stays truthful when ingredient prices move.
+//
+// Column semantics mirror the Foodics report so migrating owners read it
+// without relearning: Sales, Quantity, Total Cost, Item Profit, Total
+// Profit, Popularity %, Profit Category, Popularity Category, Class.
+// Classification here is the simple single-window high/low split (what
+// Foodics shows); the Menu Advisor remains the statistically serious view.
+
+#[derive(Serialize, ToSchema)]
+pub struct MenuEngineeringRow {
+    pub menu_item_id:   Uuid,
+    /// `"one_size"` for items without sizes.
+    pub size_label:     String,
+    pub item_name:      String,
+    pub category_id:    Option<Uuid>,
+    pub category_name:  Option<String>,
+    /// Units sold (standalone lines only — bundle lines are excluded so the
+    /// per-unit economics stay clean; bundle performance has its own report).
+    pub quantity_sold:  i64,
+    /// Revenue from those lines, piastres.
+    pub sales:          i64,
+    /// COGS from sale-time snapshots, piastres. `null` ⟺ at least one line
+    /// in the window had unresolved cost.
+    pub total_cost:     Option<i64>,
+    /// Average profit per unit, piastres (`(sales - cost) / qty`).
+    pub item_profit:    Option<i64>,
+    /// `sales - total_cost`, piastres.
+    pub total_profit:   Option<i64>,
+    /// Share of units among rows in this report.
+    pub popularity_pct: f64,
+    /// Lines in the window whose cost could not be resolved.
+    pub cost_missing_lines: i64,
+    /// "high" | "low" — vs weighted-average per-unit profit (cost-tracked rows only).
+    pub profit_category:     Option<String>,
+    /// "high" | "low" — Kasavana-Smith 70% rule (0.70 / n).
+    pub popularity_category: String,
+    /// star | workhorse | challenge | dog (Foodics names) — only for
+    /// cost-tracked rows; `null` when cost is unknown.
+    pub class:          Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct MenuEngineeringReport {
+    pub branch_id: Uuid,
+    pub from:      Option<DateTime<Utc>>,
+    pub to:        Option<DateTime<Utc>>,
+    pub rows:      Vec<MenuEngineeringRow>,
+    /// Totals over cost-tracked rows.
+    pub total_sales:  i64,
+    pub total_cost:   i64,
+    pub total_profit: i64,
+    /// Rows excluded from profit math because cost was unresolvable.
+    pub rows_cost_missing: i64,
+}
+
+#[utoipa::path(
+    get,
+    path = "/reports/branches/{branch_id}/menu-engineering",
+    tag = "reports",
+    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    params(DateRangeQuery),
+    responses((status = 200, description = "Foodics-style menu engineering table from sale-time cost snapshots", body = MenuEngineeringReport), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn branch_menu_engineering(
+    req:       HttpRequest,
+    pool:      web::Data<PgPool>,
+    branch_id: web::Path<Uuid>,
+    query:     web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "orders", "read").await?;
+    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        menu_item_id:       Uuid,
+        size_label:         String,
+        item_name:          String,
+        category_id:        Option<Uuid>,
+        category_name:      Option<String>,
+        quantity_sold:      i64,
+        sales:              i64,
+        total_cost:         Option<i64>,
+        cost_missing_lines: i64,
+    }
+
+    let rows: Vec<Row> = sqlx::query_as::<_, Row>(
+        r#"
+        SELECT
+            oi.menu_item_id,
+            COALESCE(oi.size_label::text, 'one_size') AS size_label,
+            (array_agg(oi.item_name ORDER BY o.created_at DESC))[1] AS item_name,
+            mi.category_id,
+            c.name AS category_name,
+            SUM(oi.quantity)::bigint   AS quantity_sold,
+            SUM(oi.line_total)::bigint AS sales,
+            CASE
+                WHEN bool_or(oi.line_cost IS NULL) THEN NULL
+                ELSE SUM(oi.line_cost)::bigint
+            END AS total_cost,
+            COUNT(*) FILTER (WHERE oi.cost_missing)::bigint AS cost_missing_lines
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        JOIN menu_items mi ON mi.id = oi.menu_item_id
+        LEFT JOIN categories c ON c.id = mi.category_id
+        WHERE o.branch_id = $1
+          AND o.status != 'voided'
+          AND oi.menu_item_id IS NOT NULL
+          AND oi.bundle_id IS NULL
+          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
+          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+        GROUP BY oi.menu_item_id, COALESCE(oi.size_label::text, 'one_size'),
+                 mi.category_id, c.name
+        ORDER BY sales DESC
+        "#,
+    )
+    .bind(*branch_id)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    let total_units: i64 = rows.iter().map(|r| r.quantity_sold).sum();
+    let n = rows.len().max(1) as f64;
+    let pop_threshold = 0.70 / n;
+
+    // Weighted-average per-unit profit across cost-tracked rows — the
+    // profit axis split (Kasavana-Smith uses the average CM as the line).
+    let (tracked_profit, tracked_units): (i64, i64) = rows
+        .iter()
+        .filter_map(|r| r.total_cost.map(|c| (r.sales - c, r.quantity_sold)))
+        .fold((0_i64, 0_i64), |acc, (p, q)| (acc.0 + p, acc.1 + q));
+    let avg_unit_profit = if tracked_units > 0 {
+        tracked_profit as f64 / tracked_units as f64
+    } else {
+        0.0
+    };
+
+    let mut out_rows = Vec::with_capacity(rows.len());
+    let mut total_sales = 0_i64;
+    let mut total_cost = 0_i64;
+    let mut rows_cost_missing = 0_i64;
+
+    for r in rows {
+        let popularity_pct = if total_units > 0 {
+            r.quantity_sold as f64 / total_units as f64
+        } else {
+            0.0
+        };
+        let high_pop = popularity_pct >= pop_threshold;
+        let popularity_category = if high_pop { "high" } else { "low" }.to_string();
+
+        let (item_profit, total_profit, profit_category, class) = match r.total_cost {
+            Some(c) => {
+                let tp = r.sales - c;
+                let ip = if r.quantity_sold > 0 { tp / r.quantity_sold } else { 0 };
+                let high_profit = (ip as f64) >= avg_unit_profit;
+                let class = match (high_pop, high_profit) {
+                    (true, true)   => "star",
+                    (true, false)  => "workhorse",
+                    (false, true)  => "challenge",
+                    (false, false) => "dog",
+                };
+                total_sales += r.sales;
+                total_cost += c;
+                (
+                    Some(ip),
+                    Some(tp),
+                    Some(if high_profit { "high" } else { "low" }.to_string()),
+                    Some(class.to_string()),
+                )
+            }
+            None => {
+                rows_cost_missing += 1;
+                (None, None, None, None)
+            }
+        };
+
+        out_rows.push(MenuEngineeringRow {
+            menu_item_id: r.menu_item_id,
+            size_label: r.size_label,
+            item_name: r.item_name,
+            category_id: r.category_id,
+            category_name: r.category_name,
+            quantity_sold: r.quantity_sold,
+            sales: r.sales,
+            total_cost: r.total_cost,
+            item_profit,
+            total_profit,
+            popularity_pct,
+            cost_missing_lines: r.cost_missing_lines,
+            profit_category,
+            popularity_category,
+            class,
+        });
+    }
+
+    Ok(HttpResponse::Ok().json(MenuEngineeringReport {
+        branch_id: *branch_id,
+        from: query.from,
+        to: query.to,
+        total_profit: total_sales - total_cost,
+        total_sales,
+        total_cost,
+        rows: out_rows,
+        rows_cost_missing,
+    }))
 }

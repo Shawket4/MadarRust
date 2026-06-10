@@ -1,12 +1,24 @@
 
 //! Adapter — bridges Sufrix's schema into the engine's input types.
 //!
+//! ALL money leaving this module is integer **piastres**. Ingredient costs
+//! are stored in EGP (`numeric(15,2)`); every rollup multiplies by 100
+//! before handing values to the engine. (The pre-rebuild adapter skipped
+//! this conversion, which silently deflated every cost ~100× against
+//! piastre prices — the root cause of nonsense CM classifications.)
+//!
+//! Cost sourcing, in priority order:
+//!   1. `order_items.unit_cost` — the recipe-scope cost snapshotted at sale
+//!      time by the order pipeline (already piastres, swap-aware, immutable).
+//!   2. Point-in-time rollup: `menu_item_recipes` × the
+//!      `ingredient_cost_history` epoch covering the order timestamp,
+//!      falling back to `org_ingredients.cost_per_unit` for legacy rows.
+//!
 //! Cost-optional rollup contract:
 //!   - `ItemSnapshot.cost_per_serving = None` ⟺ any ingredient in the recipe
-//!     lacks a current cost in `ingredient_cost_history`, OR the item has no
-//!     recipe defined at all.
-//!   - `SaleEvent.unit_cost_at_sale = None` ⟺ any ingredient lacked a cost
-//!     epoch covering the order's timestamp.
+//!     lacks a resolvable cost, OR the item has no recipe at all.
+//!   - `SaleEvent.unit_cost_at_sale = None` ⟺ no snapshot and no resolvable
+//!     point-in-time rollup.
 //!
 //! `COALESCE(..., 0)` is NEVER used for cost — zero would collide with
 //! genuinely free items (complimentary water, refills). The SQL uses
@@ -85,9 +97,8 @@ pub struct AdapterInputs {
 
 /// Load all engine inputs for `branch_id` over a window ending at `now`.
 ///
-/// Snapshot prices reflect what a customer of `branch_id` currently sees:
-/// `branch_menu_overrides.price_override` → `item_sizes.price_override`
-/// → `menu_items.base_price` (whichever is most specific).
+/// Snapshot prices reflect what a customer currently sees:
+/// `item_sizes.price_override` → `menu_items.base_price`.
 pub async fn load_inputs(
     pool: &PgPool,
     org_id: Uuid,
@@ -181,10 +192,15 @@ async fn load_snapshots(
                 SELECT
                     CASE
                         WHEN COUNT(*) = 0 THEN NULL
-                        WHEN bool_or(ich.cost_per_unit IS NULL) THEN NULL
-                        ELSE SUM(r.quantity_used * ich.cost_per_unit)
+                        WHEN bool_or(r.org_ingredient_id IS NULL
+                                     OR COALESCE(ich.cost_per_unit, oi.cost_per_unit) IS NULL)
+                            THEN NULL
+                        -- EGP → piastres: × 100 to match price units
+                        ELSE round(SUM(r.quantity_used
+                                 * COALESCE(ich.cost_per_unit, oi.cost_per_unit)) * 100)
                     END
                 FROM menu_item_recipes r
+                LEFT JOIN org_ingredients oi ON oi.id = r.org_ingredient_id
                 LEFT JOIN ingredient_cost_history ich
                        ON ich.org_ingredient_id = r.org_ingredient_id
                       AND ich.effective_until IS NULL
@@ -240,21 +256,32 @@ async fn load_sales(
             COALESCE(oi.size_label::text, 'one_size')  AS size_label,
             oi.quantity::bigint                        AS quantity_sold,
             oi.unit_price::bigint                      AS unit_price_paid,
-            (
-                SELECT
-                    CASE
-                        WHEN COUNT(*) = 0 THEN NULL
-                        WHEN bool_or(ich.cost_per_unit IS NULL) THEN NULL
-                        ELSE SUM(r.quantity_used * ich.cost_per_unit)
-                    END
-                FROM menu_item_recipes r
-                LEFT JOIN ingredient_cost_history ich
-                       ON ich.org_ingredient_id = r.org_ingredient_id
-                      AND ich.effective_from   <= o.created_at
-                      AND (ich.effective_until IS NULL OR ich.effective_until > o.created_at)
-                WHERE r.menu_item_id = oi.menu_item_id
-                  -- Force strict text-to-text equality comparison to evade enum type mapping issues
-                  AND COALESCE(r.size_label::text, 'one_size') = COALESCE(oi.size_label::text, 'one_size')
+            COALESCE(
+                -- 1. Sale-time snapshot written by the order pipeline
+                --    (recipe scope, piastres, swap-aware).
+                oi.unit_cost::numeric,
+                -- 2. Point-in-time reconstruction for legacy lines.
+                (
+                    SELECT
+                        CASE
+                            WHEN COUNT(*) = 0 THEN NULL
+                            WHEN bool_or(r.org_ingredient_id IS NULL
+                                         OR COALESCE(ich.cost_per_unit, ing.cost_per_unit) IS NULL)
+                                THEN NULL
+                            -- EGP → piastres: × 100 to match price units
+                            ELSE round(SUM(r.quantity_used
+                                     * COALESCE(ich.cost_per_unit, ing.cost_per_unit)) * 100)
+                        END
+                    FROM menu_item_recipes r
+                    LEFT JOIN org_ingredients ing ON ing.id = r.org_ingredient_id
+                    LEFT JOIN ingredient_cost_history ich
+                           ON ich.org_ingredient_id = r.org_ingredient_id
+                          AND ich.effective_from   <= o.created_at
+                          AND (ich.effective_until IS NULL OR ich.effective_until > o.created_at)
+                    WHERE r.menu_item_id = oi.menu_item_id
+                      -- Force strict text-to-text equality comparison to evade enum type mapping issues
+                      AND COALESCE(r.size_label::text, 'one_size') = COALESCE(oi.size_label::text, 'one_size')
+                )
             )                                          AS unit_cost_at_sale,
             o.created_at                               AS sold_at
         FROM order_items oi
@@ -349,9 +376,8 @@ async fn load_price_changed(
     window_start: &DateTime<Utc>,
     now: &DateTime<Utc>,
 ) -> Result<HashSet<ItemKey>, AppError> {
-    // Epochs covering: base_price (size_label NULL, branch_id NULL),
-    //                  item_sizes.price_override (size_label set, branch_id NULL),
-    //                  branch_menu_overrides (branch_id set).
+    // Epochs covering: base_price (size_label NULL) and
+    //                  item_sizes.price_override (size_label set).
     // Any epoch whose effective_from falls inside the window flags that SKU.
     let rows: Vec<PriceChangedRow> = sqlx::query_as::<_, PriceChangedRow>(
         r#"

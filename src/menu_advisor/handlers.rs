@@ -55,10 +55,35 @@ pub async fn create_run_handler(
     require_same_org(&claims, Some(branch_org_id))?;
 
     let config = body.into_inner().config.unwrap_or_default();
-    
-    // Check if there's already an active run
-    if persistence::get_in_progress_run(pool.get_ref(), branch_id).await?.is_some() {
-        return Err(AppError::BadRequest("A run is already in progress for this branch".into()));
+
+    // Check if there's already an active run. Runs older than the takeover
+    // threshold are presumed dead (panicked task / process restart) — mark
+    // them failed and proceed, otherwise a single crash blocks the branch
+    // forever.
+    const STALE_RUN_TAKEOVER_MINUTES: i64 = 15;
+    if let Some(active) = persistence::get_in_progress_run(pool.get_ref(), branch_id).await? {
+        let age = Utc::now() - active.started_at;
+        if age < chrono::Duration::minutes(STALE_RUN_TAKEOVER_MINUTES) {
+            return Err(AppError::Conflict(
+                "A run is already in progress for this branch".into(),
+            ));
+        }
+        tracing::warn!(
+            run_id = %active.id,
+            branch_id = %branch_id,
+            age_minutes = age.num_minutes(),
+            "Taking over stale in-progress advisor run"
+        );
+        persistence::mark_run_failed(
+            pool.get_ref(),
+            active.id,
+            &format!(
+                "Run abandoned: still in_progress after {} minutes (process restart or panic). \
+                 Superseded by a new run.",
+                age.num_minutes()
+            ),
+        )
+        .await?;
     }
 
     let run_id = persistence::create_run(pool.get_ref(), branch_org_id, branch_id, &config).await?;
@@ -84,38 +109,70 @@ async fn run_advisor_task(
     config: AnalysisConfig,
 ) {
     let now = Utc::now();
-    match adapter::load_inputs(&pool, org_id, branch_id, now, &config).await {
-        Ok(inputs) => {
-            let mut snaps_by_key = HashMap::new();
-            for s in &inputs.snapshots {
-                snaps_by_key.insert(s.key.clone(), (s.category_id, s.name.clone()));
-            }
 
-            match run_advisor(
-                &inputs.snapshots,
-                &inputs.sales,
-                &inputs.baskets,
-                now,
-                &config,
-                None, // We could load previous quadrants if needed, but not supported yet
-                &inputs.price_changed_keys,
-            ) {
-                Ok(report) => {
-                    if let Err(e) = persistence::save_completed_report(
-                        &pool, run_id, branch_id, &snaps_by_key, &report,
-                    ).await {
-                        let _ = persistence::mark_run_failed(&pool, run_id, &e.to_string()).await;
-                    }
-                }
-                Err(e) => {
-                    let _ = persistence::mark_run_failed(&pool, run_id, &e.to_string()).await;
-                }
-            }
-        }
-        Err(e) => {
-            let _ = persistence::mark_run_failed(&pool, run_id, &e.to_string()).await;
+    async fn fail(pool: &PgPool, run_id: Uuid, stage: &str, msg: String) {
+        tracing::error!(run_id = %run_id, stage = %stage, error = %msg, "Menu advisor run failed");
+        if let Err(e) = persistence::mark_run_failed(pool, run_id, &format!("[{stage}] {msg}")).await {
+            tracing::error!(run_id = %run_id, error = %e, "Could not mark advisor run failed");
         }
     }
+
+    let inputs = match adapter::load_inputs(&pool, org_id, branch_id, now, &config).await {
+        Ok(i) => i,
+        Err(e) => return fail(&pool, run_id, "adapter", e.to_string()).await,
+    };
+    tracing::info!(
+        run_id = %run_id,
+        snapshots = inputs.snapshots.len(),
+        sales = inputs.sales.len(),
+        baskets = inputs.baskets.len(),
+        "Menu advisor inputs loaded"
+    );
+
+    let mut snaps_by_key = HashMap::new();
+    for s in &inputs.snapshots {
+        snaps_by_key.insert(s.key.clone(), (s.category_id, s.name.clone()));
+    }
+
+    // The engine is pure CPU — catch panics so a math edge case can never
+    // strand the run in `in_progress` (the old failure mode: silent forever).
+    let engine_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_advisor(
+            &inputs.snapshots,
+            &inputs.sales,
+            &inputs.baskets,
+            now,
+            &config,
+            None, // previous quadrants: not loaded yet (hysteresis input)
+            &inputs.price_changed_keys,
+        )
+    }));
+
+    let report = match engine_result {
+        Ok(Ok(report)) => report,
+        Ok(Err(e)) => return fail(&pool, run_id, "engine", e.to_string()).await,
+        Err(panic) => {
+            let msg = panic
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "engine panicked (non-string payload)".into());
+            return fail(&pool, run_id, "engine-panic", msg).await;
+        }
+    };
+
+    if let Err(e) =
+        persistence::save_completed_report(&pool, run_id, branch_id, &snaps_by_key, &report).await
+    {
+        return fail(&pool, run_id, "persistence", e.to_string()).await;
+    }
+    tracing::info!(
+        run_id = %run_id,
+        price_suggestions = report.price_suggestions.len(),
+        bundle_suggestions = report.bundle_suggestions.len(),
+        removal_scenarios = report.removal_scenarios.len(),
+        "Menu advisor run completed"
+    );
 }
 
 #[derive(Deserialize)]
@@ -139,16 +196,29 @@ pub async fn list_runs_handler(
     Ok(HttpResponse::Ok().json(runs))
 }
 
+#[derive(Deserialize)]
+pub struct LatestRunQuery {
+    /// When true, return the latest run regardless of status so the client
+    /// can show failed runs (error_message) instead of an empty state.
+    #[serde(default)]
+    pub any_status: bool,
+}
+
 pub async fn get_latest_run_handler(
     req: HttpRequest,
     pool: web::Data<PgPool>,
     path: web::Path<Uuid>, // branch_id
+    query: web::Query<LatestRunQuery>,
 ) -> Result<HttpResponse, AppError> {
     let branch_id = path.into_inner();
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
-    
-    let run = persistence::get_latest_completed_run(pool.get_ref(), branch_id).await?;
+
+    let run = if query.any_status {
+        persistence::get_latest_run_any(pool.get_ref(), branch_id).await?
+    } else {
+        persistence::get_latest_completed_run(pool.get_ref(), branch_id).await?
+    };
     Ok(HttpResponse::Ok().json(run))
 }
 

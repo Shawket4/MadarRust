@@ -694,6 +694,29 @@ pub async fn get_latest_completed_run(
     Ok(row.map(row_to_run))
 }
 
+/// Latest run regardless of status — lets the dashboard surface failed runs
+/// (`error_message`) instead of rendering an unexplained empty state.
+pub async fn get_latest_run_any(
+    pool: &PgPool,
+    branch_id: Uuid,
+) -> Result<Option<PersistedRun>, AppError> {
+    let row: Option<RunRow> = sqlx::query_as::<_, RunRow>(
+        r#"
+        SELECT id, branch_id, org_id, status, config_json, error_message,
+               items_total, items_cm_tracked, items_revenue_only, items_insufficient,
+               window_days, started_at, completed_at
+        FROM   menu_advisor_runs
+        WHERE  branch_id = $1
+        ORDER BY started_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(branch_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(row_to_run))
+}
+
 pub async fn get_in_progress_run(
     pool: &PgPool,
     branch_id: Uuid,

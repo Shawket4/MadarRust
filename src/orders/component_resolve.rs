@@ -36,6 +36,10 @@ pub struct InventoryDeduction {
     pub quantity:          f64,
     pub source:            String,
     pub category:          String,
+    /// Set for additive-addon deductions — attribution for per-addon costing.
+    pub addon_item_id:     Option<Uuid>,
+    /// Set for optional-field deductions.
+    pub optional_field_id: Option<Uuid>,
 }
 
 #[derive(Clone)]
@@ -126,6 +130,8 @@ pub async fn resolve_menu_item_configuration(
             quantity:          qty * line_quantity as f64,
             source:            "drink_recipe".into(),
             category,
+            addon_item_id:     None,
+            optional_field_id: None,
         });
     }
 
@@ -227,6 +233,8 @@ pub async fn resolve_menu_item_configuration(
                 quantity:          qty * line_quantity as f64 * addon_qty,
                 source:            "addon".into(),
                 category:          "general".into(),
+                addon_item_id:     Some(addon_input.addon_item_id),
+                optional_field_id: None,
             });
         }
     }
@@ -276,6 +284,8 @@ pub async fn resolve_menu_item_configuration(
                 quantity:          qty * line_quantity as f64,
                 source:            "optional".into(),
                 category:          "general".into(),
+                addon_item_id:     None,
+                optional_field_id: Some(field_id),
             });
         }
 

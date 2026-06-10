@@ -49,9 +49,14 @@ use utoipa::{
         (name = "reports",      description = "Sales analytics and reporting."),
         (name = "menu_advisor", description = "Read-only pricing, bundle, and removal suggestions. Never edits menus — the differentiator vs. generic POS."),
         (name = "uploads",      description = "Logo and image uploads."),
-        (name = "payment_methods", description = "Dynamic payment methods configuration.")
+        (name = "payment_methods", description = "Dynamic payment methods configuration."),
+        (name = "costing",      description = "Canonical recipe/addon cost rollups in piastres. NULL cost = unknown, never zero.")
     ),
 paths(
+        // ── costing ─────────────────────────────────────────────────
+        crate::costing::handlers::list_sku_costs,
+        crate::costing::handlers::list_addon_costs,
+        crate::reports::handlers::branch_menu_engineering,
         // ── auth ────────────────────────────────────────────────────
         crate::auth::handlers::login,
         crate::auth::handlers::me,

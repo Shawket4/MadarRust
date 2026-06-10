@@ -182,6 +182,7 @@ async fn test_create_category_success(pool: PgPool) {
 
     let req_body = CreateCategoryRequest {
         org_id,
+        name_translations: None,
         name: "New Category".to_string(),
         image_url: None,
         display_order: Some(1),
@@ -218,6 +219,7 @@ async fn test_update_category_success(pool: PgPool) {
     let cat_id = seed_category(&pool, org_id, "Old Name").await;
 
     let req_body = UpdateCategoryRequest {
+        name_translations: None,
         name: Some("Updated Name".to_string()),
         image_url: None,
         display_order: Some(2),
@@ -315,6 +317,8 @@ async fn test_create_menu_item_success(pool: PgPool) {
 
     let req_body = CreateMenuItemRequest {
         org_id,
+        name_translations: None,
+        description_translations: None,
         category_id: cat_id,
         name: "New Item".to_string(),
         description: Some("Tasty".to_string()),
@@ -366,6 +370,8 @@ async fn test_update_menu_item_success(pool: PgPool) {
     let item_id = seed_menu_item(&pool, org_id, cat_id, "Old Item", 1000).await;
 
     let req_body = UpdateMenuItemRequest {
+        name_translations: None,
+        description_translations: None,
         category_id: None,
         name: Some("Updated Item".to_string()),
         description: None,
@@ -540,7 +546,8 @@ async fn test_addon_slots_success(pool: PgPool) {
 
     // Create a slot
     let req_body = CreateAddonSlotRequest {
-        addon_type: "Milk".to_string(),
+        addon_type: Some("Milk".to_string()),
+        label_translations: None,
         max_selections: Some(1),
         min_selections: Some(0),
         display_order: Some(1),
@@ -597,6 +604,7 @@ async fn test_addon_items_crud(pool: PgPool) {
 
     let req_body = CreateAddonItemRequest {
         org_id,
+        name_translations: None,
         name: "Extra Cheese".to_string(),
         addon_type: "Topping".to_string(),
         default_price: 200,
@@ -631,6 +639,7 @@ async fn test_addon_items_crud(pool: PgPool) {
 
     // Update
     let req_update = UpdateAddonItemRequest {
+        name_translations: None,
         name: Some("Super Cheese".to_string()),
         addon_type: None,
         default_price: None,
@@ -679,6 +688,7 @@ async fn test_optional_fields_crud(pool: PgPool) {
     let item_id = seed_menu_item(&pool, org_id, cat_id, "Coffee", 500).await;
 
     let req_body = CreateOptionalFieldRequest {
+        name_translations: None,
         name: "No Sugar".to_string(),
         price: Some(0),
         org_ingredient_id: None,

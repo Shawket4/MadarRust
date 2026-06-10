@@ -75,6 +75,14 @@ pub struct OrderItem {
     pub deductions_snapshot: serde_json::Value,
     pub bundle_id:           Option<Uuid>,
     pub bundle_unit_price:   Option<i32>,
+    /// Full line COGS in piastres (recipe + addons + optionals + components).
+    /// `null` ⟺ unknown.
+    pub line_cost:           Option<i64>,
+    /// Recipe-only cost per unit in piastres (incl. swaps). `null` ⟺ unknown
+    /// or bundle line.
+    pub unit_cost:           Option<i64>,
+    /// True when any cost component could not be resolved.
+    pub cost_missing:        bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -87,6 +95,9 @@ pub struct OrderItemAddon {
     pub unit_price:    i32,
     pub quantity:      i32,
     pub line_total:    i32,
+    /// Ingredient cost of this addon line in piastres. `null` ⟺ unknown, or
+    /// a swap addon (its cost lives in the item's recipe cost).
+    pub line_cost:     Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -102,6 +113,9 @@ pub struct OrderItemOptional {
     pub ingredient_unit:  Option<String>,
     #[schema(value_type = Option<f64>)]
     pub quantity_deducted: Option<sqlx::types::BigDecimal>,
+    /// Ingredient cost per parent-item unit in piastres. `null` ⟺ unknown or
+    /// no ingredient linked.
+    pub cost:             Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -283,8 +297,78 @@ struct InventoryDeduction {
     ingredient_name:   String,
     unit:              String,
     quantity:          f64,
-    source:            String, // "drink_recipe" | "addon" | "optional"
+    source:            String, // "drink_recipe" | "addon" | "addon_swap:<name>" | "optional" | "bundle_component:<name>"
     category:          String,
+    /// Additive-addon attribution (None for recipe/swap/optional entries).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    addon_item_id:     Option<Uuid>,
+    /// Optional-field attribution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    optional_field_id: Option<Uuid>,
+    /// Bundle-component attribution (which component this entry belongs to).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    component_item_id: Option<Uuid>,
+    /// EGP cost per ingredient unit at sale time. None ⟺ unknown.
+    cost_per_unit:     Option<f64>,
+    /// quantity × cost_per_unit in piastres, rounded. None ⟺ unknown.
+    line_cost:         Option<i64>,
+}
+
+struct LineCostSummary {
+    line_cost:    Option<i64>,
+    unit_cost:    Option<i64>,
+    cost_missing: bool,
+}
+
+/// Roll a line's enriched deductions up into the stored cost columns.
+///
+/// * `line_cost` — full COGS in piastres; `None` when anything is unknown.
+/// * `unit_cost` — recipe-scope (drink_recipe + addon_swap) cost ÷ quantity;
+///   `None` for bundle lines and whenever recipe cost is unknown.
+/// * `cost_missing` — any unresolved entry, a menu line with no recipe at
+///   all, or an additive addon with no ingredient rows.
+fn summarize_line_costs(
+    deductions: &[InventoryDeduction],
+    quantity: i32,
+    is_bundle_line: bool,
+    has_uncosted_addon: bool,
+) -> LineCostSummary {
+    let mut cost_missing = deductions.iter().any(|d| d.line_cost.is_none())
+        || deductions.is_empty()
+        || has_uncosted_addon;
+
+    let total_egp: f64 = deductions
+        .iter()
+        .filter_map(|d| d.cost_per_unit.map(|c| c * d.quantity))
+        .sum();
+    let line_cost = if cost_missing {
+        None
+    } else {
+        Some((total_egp * 100.0).round() as i64)
+    };
+
+    let recipe_scope =
+        |d: &&InventoryDeduction| d.source == "drink_recipe" || d.source.starts_with("addon_swap:");
+    let unit_cost = if is_bundle_line {
+        None
+    } else {
+        let entries: Vec<&InventoryDeduction> = deductions.iter().filter(recipe_scope).collect();
+        if entries.is_empty() || entries.iter().any(|d| d.cost_per_unit.is_none()) {
+            None
+        } else {
+            let egp: f64 = entries
+                .iter()
+                .map(|d| d.cost_per_unit.unwrap() * d.quantity)
+                .sum();
+            Some((egp * 100.0 / quantity.max(1) as f64).round() as i64)
+        }
+    };
+
+    if is_bundle_line && deductions.is_empty() {
+        cost_missing = true;
+    }
+
+    LineCostSummary { line_cost, unit_cost, cost_missing }
 }
 
 // ── POST /orders ──────────────────────────────────────────────
@@ -411,6 +495,12 @@ pub async fn create_order(
         name_translations: serde_json::Value,
         unit_price:    i32,
         quantity:      i32,
+        /// False when the addon has no ingredient rows (additive addons only
+        /// — swap addons fold into the recipe). No ingredients ⟹ cost-missing.
+        has_ingredients: bool,
+        /// True when this addon acted as a milk/coffee swap (cost lives in
+        /// the recipe-scope deduction it replaced).
+        is_swap:       bool,
     }
 
     let mut resolved_items: Vec<ResolvedItem> = Vec::new();
@@ -575,6 +665,11 @@ pub async fn create_order(
                         quantity:          d.quantity,
                         source:            format!("bundle_component:{}", item_name),
                         category:          d.category,
+                        addon_item_id:     d.addon_item_id,
+                        optional_field_id: d.optional_field_id,
+                        component_item_id: Some(comp_in.item_id),
+                        cost_per_unit:     None,
+                        line_cost:         None,
                     });
                 }
 
@@ -587,6 +682,8 @@ pub async fn create_order(
                         name_translations: a.name_translations,
                         unit_price:    a.unit_price,
                         quantity:      a.quantity,
+                        has_ingredients: true, // component-level costing rolls up via deductions
+                        is_swap:       false,
                     })
                     .collect();
 
@@ -686,6 +783,11 @@ pub async fn create_order(
                     quantity:          qty * item_input.quantity as f64,
                     source:            "drink_recipe".into(),
                     category,
+                    addon_item_id:     None,
+                    optional_field_id: None,
+                    component_item_id: None,
+                    cost_per_unit:     None,
+                    line_cost:         None,
                 });
             }
 
@@ -709,6 +811,8 @@ pub async fn create_order(
                     name_translations: addon_name_translations.clone(),
                     unit_price:    default_price,
                     quantity:      addon_input.quantity.max(1),
+                    has_ingredients: false, // patched below once addon_rows is known
+                    is_swap:       false,
                 });
 
                 let addon_rows: Vec<(Option<Uuid>, f64, String, String)> = sqlx::query_as(
@@ -747,6 +851,7 @@ pub async fn create_order(
                         // No charge — the drink already uses this ingredient as its base
                         if let Some(last) = resolved_addons.last_mut() {
                             last.unit_price = 0;
+                            last.is_swap = true;
                         }
                         // Don't touch deductions — recipe already has the right ingredient
                     } else if let Some((repl_id, _, repl_name, repl_unit)) = addon_rows.first() {
@@ -771,6 +876,7 @@ pub async fn create_order(
                         let new_price = (default_price - base_addon_price).max(0);
                         if let Some(last) = resolved_addons.last_mut() {
                             last.unit_price = new_price;
+                            last.is_swap = true;
                         }
 
                         // Replace base ingredient
@@ -791,6 +897,9 @@ pub async fn create_order(
                     continue; // Skip the normal additive deduction for these addon types
                 }
 
+                if let Some(last) = resolved_addons.last_mut() {
+                    last.has_ingredients = !addon_rows.is_empty();
+                }
                 for (ing_id, qty, name, unit) in addon_rows {
                     deductions.push(InventoryDeduction {
                         org_ingredient_id: ing_id,
@@ -799,6 +908,11 @@ pub async fn create_order(
                         quantity:          qty * item_input.quantity as f64 * addon_qty,
                         source:            "addon".into(),
                         category:          "general".into(),
+                        addon_item_id:     Some(addon_input.addon_item_id),
+                        optional_field_id: None,
+                        component_item_id: None,
+                        cost_per_unit:     None,
+                        line_cost:         None,
                     });
                 }
             }
@@ -840,6 +954,11 @@ pub async fn create_order(
                         quantity:          qty * item_input.quantity as f64,
                         source:            "optional".into(),
                         category:          "general".into(),
+                        addon_item_id:     None,
+                        optional_field_id: Some(field_id),
+                        component_item_id: None,
+                        cost_per_unit:     None,
+                        line_cost:         None,
                     });
                 }
 
@@ -911,6 +1030,32 @@ pub async fn create_order(
     let total_amount = taxable + tax_amount;
     let change_given = body.amount_tendered.map(|t| (t - total_amount).max(0));
     let created_at   = body.created_at.unwrap_or_else(chrono::Utc::now);
+
+    // ── Cost snapshot ─────────────────────────────────────────
+    // Resolve point-in-time ingredient costs once for the whole order and
+    // stamp them onto the deduction entries; per-line / per-addon /
+    // per-optional rollups happen at insert time.
+    {
+        let ingredient_ids: Vec<Uuid> = resolved_items
+            .iter()
+            .flat_map(|ri| ri.deductions.iter().filter_map(|d| d.org_ingredient_id))
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        let ingredient_costs =
+            crate::costing::ingredient_costs_at(pool.get_ref(), &ingredient_ids, created_at)
+                .await?;
+        for ri in &mut resolved_items {
+            for d in &mut ri.deductions {
+                let egp = d
+                    .org_ingredient_id
+                    .and_then(|id| ingredient_costs.get(&id))
+                    .and_then(|c| c.to_f64());
+                d.cost_per_unit = egp;
+                d.line_cost = egp.map(|c| (d.quantity * c * 100.0).round() as i64);
+            }
+        }
+    }
 
     let mut tx = pool.get_ref().begin().await?;
 
@@ -1005,15 +1150,26 @@ pub async fn create_order(
         let snapshot   = serde_json::to_value(&resolved.deductions)
             .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
 
+        let has_uncosted_addon = resolved
+            .addons
+            .iter()
+            .any(|a| !a.is_swap && !a.has_ingredients);
+        let costs = summarize_line_costs(
+            &resolved.deductions,
+            resolved.quantity,
+            resolved.bundle_id.is_some(),
+            has_uncosted_addon,
+        );
+
         let order_item = sqlx::query_as::<_, OrderItem>(
             r#"INSERT INTO order_items
                 (order_id, menu_item_id, item_name, name_translations, size_label,
                  unit_price, quantity, line_total, notes, deductions_snapshot,
-                 bundle_id, bundle_unit_price)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                 bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                RETURNING id, order_id, menu_item_id, item_name, name_translations, size_label,
                          unit_price, quantity, line_total, notes, deductions_snapshot,
-                         bundle_id, bundle_unit_price"#,
+                         bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing"#,
         )
         .bind(order.id)
         .bind(resolved.menu_item_id)
@@ -1027,21 +1183,45 @@ pub async fn create_order(
         .bind(snapshot)
         .bind(resolved.bundle_id)
         .bind(resolved.bundle_unit_price)
+        .bind(costs.line_cost)
+        .bind(costs.unit_cost)
+        .bind(costs.cost_missing)
         .fetch_one(&mut *tx)
         .await?;
 
         if let Some(_b_id) = resolved.bundle_id {
             for comp in &resolved.bundle_components {
+                // Per-component cost: every enriched deduction attributed to
+                // this component. None when any entry is unknown or the
+                // component contributed no deductions (no recipe).
+                let comp_entries: Vec<&InventoryDeduction> = resolved
+                    .deductions
+                    .iter()
+                    .filter(|d| d.component_item_id == Some(comp.item_id))
+                    .collect();
+                let comp_cost: Option<i64> = if comp_entries.is_empty()
+                    || comp_entries.iter().any(|d| d.cost_per_unit.is_none())
+                {
+                    None
+                } else {
+                    let egp: f64 = comp_entries
+                        .iter()
+                        .map(|d| d.cost_per_unit.unwrap() * d.quantity)
+                        .sum();
+                    Some((egp * 100.0).round() as i64)
+                };
+
                 sqlx::query(
                     "INSERT INTO order_line_bundle_components \
-                        (order_line_id, item_id, quantity, size_label, name_translations) \
-                     VALUES ($1, $2, $3, $4, $5)",
+                        (order_line_id, item_id, quantity, size_label, name_translations, line_cost) \
+                     VALUES ($1, $2, $3, $4, $5, $6)",
                 )
                 .bind(order_item.id)
                 .bind(comp.item_id)
                 .bind(comp.quantity)
                 .bind(&comp.size_label)
                 .bind(&comp.name_translations)
+                .bind(comp_cost)
                 .execute(&mut *tx)
                 .await?;
 
@@ -1092,12 +1272,36 @@ pub async fn create_order(
         let mut addon_rows: Vec<OrderItemAddon> = Vec::new();
         for addon in &resolved.addons {
             let addon_line = addon.unit_price * addon.quantity * resolved.quantity;
+
+            // Additive addons: rollup of their attributed deduction entries.
+            // Swap addons keep NULL — their cost lives in the recipe scope.
+            let addon_cost: Option<i64> = if addon.is_swap || !addon.has_ingredients {
+                None
+            } else {
+                let entries: Vec<&InventoryDeduction> = resolved
+                    .deductions
+                    .iter()
+                    .filter(|d| {
+                        d.source == "addon" && d.addon_item_id == Some(addon.addon_item_id)
+                    })
+                    .collect();
+                if entries.is_empty() || entries.iter().any(|d| d.cost_per_unit.is_none()) {
+                    None
+                } else {
+                    let egp: f64 = entries
+                        .iter()
+                        .map(|d| d.cost_per_unit.unwrap() * d.quantity)
+                        .sum();
+                    Some((egp * 100.0).round() as i64)
+                }
+            };
+
             let row = sqlx::query_as::<_, OrderItemAddon>(
                 r#"INSERT INTO order_item_addons
-                    (order_item_id, addon_item_id, addon_name, name_translations, unit_price, quantity, line_total)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    (order_item_id, addon_item_id, addon_name, name_translations, unit_price, quantity, line_total, line_cost)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                    RETURNING id, order_item_id, addon_item_id, addon_name, name_translations,
-                             unit_price, quantity, line_total"#,
+                             unit_price, quantity, line_total, line_cost"#,
             )
             .bind(order_item.id)
             .bind(addon.addon_item_id)
@@ -1106,6 +1310,7 @@ pub async fn create_order(
             .bind(addon.unit_price)
             .bind(addon.quantity)
             .bind(addon_line)
+            .bind(addon_cost)
             .fetch_one(&mut *tx)
             .await?;
             addon_rows.push(row);
@@ -1114,13 +1319,26 @@ pub async fn create_order(
         // Optionals
         let mut optional_rows: Vec<OrderItemOptional> = Vec::new();
         for opt in &resolved.optionals {
+            // Cost per parent-item unit (matches quantity_deducted semantics):
+            // unit cost comes from the enriched deduction for this field.
+            let opt_cost: Option<i64> = match (opt.quantity_used, opt.org_ingredient_id) {
+                (Some(qty), Some(_)) => resolved
+                    .deductions
+                    .iter()
+                    .find(|d| d.optional_field_id == Some(opt.optional_field_id))
+                    .and_then(|d| d.cost_per_unit)
+                    .map(|egp| (qty * egp * 100.0).round() as i64),
+                // No ingredient linked ⟹ genuinely zero marginal cost.
+                _ => Some(0),
+            };
+
             let row = sqlx::query_as::<_, OrderItemOptional>(
                 r#"INSERT INTO order_item_optionals
                     (order_item_id, optional_field_id, field_name, name_translations, price,
-                     org_ingredient_id, ingredient_name, ingredient_unit, quantity_deducted)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                     org_ingredient_id, ingredient_name, ingredient_unit, quantity_deducted, cost)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                    RETURNING id, order_item_id, optional_field_id, field_name, name_translations, price,
-                             org_ingredient_id, ingredient_name, ingredient_unit, quantity_deducted"#,
+                             org_ingredient_id, ingredient_name, ingredient_unit, quantity_deducted, cost"#,
             )
             .bind(order_item.id)
             .bind(opt.optional_field_id)
@@ -1131,6 +1349,7 @@ pub async fn create_order(
             .bind(&opt.ingredient_name)
             .bind(&opt.ingredient_unit)
             .bind(opt.quantity_used)
+            .bind(opt_cost)
             .fetch_one(&mut *tx)
             .await?;
             optional_rows.push(row);
@@ -1655,7 +1874,7 @@ async fn fetch_order_items_full(
     let items = sqlx::query_as::<_, OrderItem>(
         "SELECT id, order_id, menu_item_id, item_name, name_translations, size_label, \
                 unit_price, quantity, line_total, notes, deductions_snapshot, \
-                bundle_id, bundle_unit_price \
+                bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing \
          FROM order_items WHERE order_id = $1 ORDER BY id",
     )
     .bind(order_id)
@@ -1666,7 +1885,7 @@ async fn fetch_order_items_full(
     for item in items {
         let addons = sqlx::query_as::<_, OrderItemAddon>(
             "SELECT id, order_item_id, addon_item_id, addon_name, name_translations, \
-                    unit_price, quantity, line_total \
+                    unit_price, quantity, line_total, line_cost \
              FROM order_item_addons WHERE order_item_id = $1 ORDER BY id",
         )
         .bind(item.id)
@@ -1675,7 +1894,7 @@ async fn fetch_order_items_full(
 
         let optionals = sqlx::query_as::<_, OrderItemOptional>(
             "SELECT id, order_item_id, optional_field_id, field_name, name_translations, price, \
-                    org_ingredient_id, ingredient_name, ingredient_unit, quantity_deducted \
+                    org_ingredient_id, ingredient_name, ingredient_unit, quantity_deducted, cost \
              FROM order_item_optionals WHERE order_item_id = $1 ORDER BY id",
         )
         .bind(item.id)

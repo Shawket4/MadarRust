@@ -2487,6 +2487,204 @@
         ]
       }
     },
+    "/costing/addon-items": {
+      "get": {
+        "tags": [
+          "costing"
+        ],
+        "operationId": "list_addon_costs",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current ingredient-cost rollup per addon (piastres)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AddonCost"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/costing/menu-items": {
+      "get": {
+        "tags": [
+          "costing"
+        ],
+        "operationId": "list_sku_costs",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current recipe-cost rollup per SKU (piastres)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SkuCost"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/discounts": {
       "get": {
         "tags": [
@@ -9704,6 +9902,129 @@
         ]
       }
     },
+    "/reports/branches/{branch_id}/menu-engineering": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "operationId": "branch_menu_engineering",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "branch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Foodics-style menu engineering table from sale-time cost snapshots",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MenuEngineeringReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/reports/branches/{branch_id}/sales": {
       "get": {
         "tags": [
@@ -12518,6 +12839,52 @@
           }
         }
       },
+      "AddonCost": {
+        "type": "object",
+        "description": "Computed cost for one addon item.",
+        "required": [
+          "addon_item_id",
+          "name",
+          "addon_type",
+          "price",
+          "cost_missing"
+        ],
+        "properties": {
+          "addon_item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "addon_type": {
+            "type": "string"
+          },
+          "cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Ingredient cost rollup in piastres. `null` ⟺ unknown."
+          },
+          "cost_missing": {
+            "type": "boolean"
+          },
+          "margin_pct": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "name": {
+            "type": "string"
+          },
+          "price": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Default price in piastres."
+          }
+        }
+      },
       "AddonIngredient": {
         "type": "object",
         "required": [
@@ -15140,6 +15507,162 @@
           }
         }
       },
+      "MenuEngineeringReport": {
+        "type": "object",
+        "required": [
+          "branch_id",
+          "rows",
+          "total_sales",
+          "total_cost",
+          "total_profit",
+          "rows_cost_missing"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MenuEngineeringRow"
+            }
+          },
+          "rows_cost_missing": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows excluded from profit math because cost was unresolvable."
+          },
+          "to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "total_cost": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total_profit": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total_sales": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Totals over cost-tracked rows."
+          }
+        }
+      },
+      "MenuEngineeringRow": {
+        "type": "object",
+        "required": [
+          "menu_item_id",
+          "size_label",
+          "item_name",
+          "quantity_sold",
+          "sales",
+          "popularity_pct",
+          "cost_missing_lines",
+          "popularity_category"
+        ],
+        "properties": {
+          "category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "category_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "class": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "star | workhorse | challenge | dog (Foodics names) — only for\ncost-tracked rows; `null` when cost is unknown."
+          },
+          "cost_missing_lines": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Lines in the window whose cost could not be resolved."
+          },
+          "item_name": {
+            "type": "string"
+          },
+          "item_profit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Average profit per unit, piastres (`(sales - cost) / qty`)."
+          },
+          "menu_item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "popularity_category": {
+            "type": "string",
+            "description": "\"high\" | \"low\" — Kasavana-Smith 70% rule (0.70 / n)."
+          },
+          "popularity_pct": {
+            "type": "number",
+            "format": "double",
+            "description": "Share of units among rows in this report."
+          },
+          "profit_category": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "\"high\" | \"low\" — vs weighted-average per-unit profit (cost-tracked rows only)."
+          },
+          "quantity_sold": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Units sold (standalone lines only — bundle lines are excluded so the\nper-unit economics stay clean; bundle performance has its own report)."
+          },
+          "sales": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Revenue from those lines, piastres."
+          },
+          "size_label": {
+            "type": "string",
+            "description": "`\"one_size\"` for items without sizes."
+          },
+          "total_cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "COGS from sale-time snapshots, piastres. `null` ⟺ at least one line\nin the window had unresolved cost."
+          },
+          "total_profit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`sales - total_cost`, piastres."
+          }
+        }
+      },
       "MenuItem": {
         "type": "object",
         "required": [
@@ -15763,7 +16286,8 @@
           "unit_price",
           "quantity",
           "line_total",
-          "deductions_snapshot"
+          "deductions_snapshot",
+          "cost_missing"
         ],
         "properties": {
           "bundle_id": {
@@ -15780,6 +16304,10 @@
             ],
             "format": "int32"
           },
+          "cost_missing": {
+            "type": "boolean",
+            "description": "True when any cost component could not be resolved."
+          },
           "deductions_snapshot": {},
           "id": {
             "type": "string",
@@ -15787,6 +16315,14 @@
           },
           "item_name": {
             "type": "string"
+          },
+          "line_cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Full line COGS in piastres (recipe + addons + optionals + components).\n`null` ⟺ unknown."
           },
           "line_total": {
             "type": "integer",
@@ -15822,6 +16358,14 @@
               "null"
             ]
           },
+          "unit_cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Recipe-only cost per unit in piastres (incl. swaps). `null` ⟺ unknown\nor bundle line."
+          },
           "unit_price": {
             "type": "integer",
             "format": "int32"
@@ -15851,6 +16395,14 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "line_cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Ingredient cost of this addon line in piastres. `null` ⟺ unknown, or\na swap addon (its cost lives in the item's recipe cost)."
           },
           "line_total": {
             "type": "integer",
@@ -15976,6 +16528,14 @@
           "price"
         ],
         "properties": {
+          "cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Ingredient cost per parent-item unit in piastres. `null` ⟺ unknown or\nno ingredient linked."
+          },
           "field_name": {
             "type": "string"
           },
@@ -16382,10 +16942,14 @@
         "type": "object",
         "required": [
           "payment_method",
+          "is_cash",
           "total",
           "order_count"
         ],
         "properties": {
+          "is_cash": {
+            "type": "boolean"
+          },
           "order_count": {
             "type": "integer",
             "format": "int64"
@@ -17141,6 +17705,69 @@
           "voided_orders": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "SkuCost": {
+        "type": "object",
+        "description": "Computed cost for one sellable SKU (menu item × size).",
+        "required": [
+          "menu_item_id",
+          "size_label",
+          "item_name",
+          "price",
+          "cost_missing"
+        ],
+        "properties": {
+          "category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Recipe cost rollup in piastres. `null` ⟺ unknown (no recipe, or any\ningredient unlinked / missing a cost)."
+          },
+          "cost_missing": {
+            "type": "boolean"
+          },
+          "food_cost_pct": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "`cost / price` when both known and price > 0."
+          },
+          "item_name": {
+            "type": "string"
+          },
+          "margin_pct": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "`(price - cost) / price` when both known and price > 0."
+          },
+          "menu_item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "price": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Current price in piastres for this SKU."
+          },
+          "size_label": {
+            "type": "string",
+            "description": "`\"one_size\"` when the item has no sizes."
           }
         }
       },
@@ -18350,6 +18977,10 @@
     {
       "name": "payment_methods",
       "description": "Dynamic payment methods configuration."
+    },
+    {
+      "name": "costing",
+      "description": "Canonical recipe/addon cost rollups in piastres. NULL cost = unknown, never zero."
     }
   ]
 }
