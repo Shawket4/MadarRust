@@ -235,7 +235,7 @@ async fn test_create_catalog_item_success(pool: PgPool) {
     let ingredient: OrgIngredient = test::read_body_json(resp).await;
     assert_eq!(ingredient.name, "Onion");
     assert_eq!(ingredient.unit, "kg");
-    assert_eq!(ingredient.cost_per_unit, Decimal::from_str("1.25").unwrap());
+    assert_eq!(ingredient.cost_per_unit, Some(Decimal::from_str("1.25").unwrap()));
 
     // Verify cost history was seeded
     let cost_history_exists: bool = sqlx::query_scalar(
@@ -368,7 +368,7 @@ async fn test_update_catalog_item_success(pool: PgPool) {
 
     let ingredient: OrgIngredient = test::read_body_json(resp).await;
     assert_eq!(ingredient.name, "Super Tomato");
-    assert_eq!(ingredient.cost_per_unit, Decimal::from_str("3.75").unwrap());
+    assert_eq!(ingredient.cost_per_unit, Some(Decimal::from_str("3.75").unwrap()));
 
     // Verify a new cost history entry was made
     let cost_history_count: i64 = sqlx::query_scalar(

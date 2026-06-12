@@ -1,11 +1,9 @@
-
 //! Adapter — bridges Sufrix's schema into the engine's input types.
 //!
 //! ALL money leaving this module is integer **piastres**. Ingredient costs
-//! are stored in EGP (`numeric(15,2)`); every rollup multiplies by 100
-//! before handing values to the engine. (The pre-rebuild adapter skipped
-//! this conversion, which silently deflated every cost ~100× against
-//! piastre prices — the root cause of nonsense CM classifications.)
+//! (`org_ingredients` / `ingredient_cost_history` `cost_per_unit`) are also
+//! stored in piastres — the dashboard converts EGP input on entry — so the
+//! rollups here sum and round, with no currency conversion anywhere.
 //!
 //! Cost sourcing, in priority order:
 //!   1. `order_items.unit_cost` — the recipe-scope cost snapshotted at sale
@@ -14,19 +12,22 @@
 //!      `ingredient_cost_history` epoch covering the order timestamp,
 //!      falling back to `org_ingredients.cost_per_unit` for legacy rows.
 //!
-//! Cost-optional rollup contract:
-//!   - `ItemSnapshot.cost_per_serving = None` ⟺ any ingredient in the recipe
-//!     lacks a resolvable cost, OR the item has no recipe at all.
-//!   - `SaleEvent.unit_cost_at_sale = None` ⟺ no snapshot and no resolvable
-//!     point-in-time rollup.
-//!
-//! `COALESCE(..., 0)` is NEVER used for cost — zero would collide with
-//! genuinely free items (complimentary water, refills). The SQL uses
-//! `bool_or(cost IS NULL)` to short-circuit the rollup to NULL when any
+//! Cost-optional contract: `COALESCE(..., 0)` is NEVER used for cost — zero
+//! would collide with genuinely free items. The SQL uses
+//! `bool_or(cost IS NULL)` to short-circuit a rollup to NULL when any
 //! component is missing.
 //!
-//! Size-label matching forces `text` comparison using `COALESCE(col::text, 'one_size')`
-//! to completely avoid Postgres "operator does not exist: item_size = text" errors.
+//! Bundle handling (the schema facts the old adapter got wrong): a bundle
+//! purchase stores ONE `order_items` row with `menu_item_id = NULL` and
+//! `bundle_id` set; the contained SKUs live in `order_line_bundle_components`.
+//! Therefore:
+//!   - sales (price signal) come from standalone `order_items` lines only;
+//!   - baskets (co-occurrence signal) UNION in the bundle component lines;
+//!   - `bundle_only` SKUs are those appearing in component lines but never
+//!     standalone, detected via EXCEPT.
+//!
+//! Size labels: enum columns are always compared as
+//! `COALESCE(col::text, 'one_size')` to avoid enum/text operator errors.
 
 use std::collections::{HashMap, HashSet};
 
@@ -36,13 +37,12 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::errors::AppError;
-use super::engine::{
-    AnalysisConfig, Basket, ItemKey, ItemSnapshot, SaleEvent,
-};
+use crate::menu_advisor::dto::{AnalysisConfig, ItemKey};
+use super::engine::{Basket, ItemSnapshot, SaleEvent};
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
 // Row types
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
 
 #[derive(sqlx::FromRow)]
 struct SnapshotRow {
@@ -73,20 +73,14 @@ struct BasketRow {
 }
 
 #[derive(sqlx::FromRow)]
-struct BundleOnlyRow {
+struct KeyRow {
     menu_item_id: Uuid,
     size_label: String,
 }
 
-#[derive(sqlx::FromRow)]
-struct PriceChangedRow {
-    menu_item_id: Uuid,
-    size_label: Option<String>,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
 // Public surface
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
 
 pub struct AdapterInputs {
     pub snapshots: Vec<ItemSnapshot>,
@@ -111,15 +105,27 @@ pub async fn load_inputs(
     let snapshots = load_snapshots(pool, org_id, branch_id, &window_start, &now).await?;
     let sales = load_sales(pool, org_id, branch_id, &window_start, &now).await?;
     let baskets = load_baskets(pool, org_id, branch_id, &window_start, &now).await?;
-    let price_changed_keys =
-        load_price_changed(pool, org_id, branch_id, &window_start, &now).await?;
+    let price_changed_keys = load_price_changed(pool, org_id, &window_start, &now).await?;
+
+    // Sales for SKUs with no snapshot (item hard-deleted since) are dropped —
+    // observably, not silently.
+    let snapshot_keys: HashSet<&ItemKey> = snapshots.iter().map(|s| &s.key).collect();
+    let (sales, orphaned): (Vec<_>, Vec<_>) =
+        sales.into_iter().partition(|s| snapshot_keys.contains(&s.key));
+    for s in &orphaned {
+        tracing::warn!(
+            menu_item_id = %s.key.menu_item_id,
+            size_label = %s.key.size_label,
+            "Dropping sale rows for SKU with no menu snapshot (deleted item?)"
+        );
+    }
 
     Ok(AdapterInputs { snapshots, sales, baskets, price_changed_keys })
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
 // 1. Snapshots
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
 
 async fn load_snapshots(
     pool: &PgPool,
@@ -128,24 +134,35 @@ async fn load_snapshots(
     window_start: &DateTime<Utc>,
     now: &DateTime<Utc>,
 ) -> Result<Vec<ItemSnapshot>, AppError> {
-    // bundle_only detection: an SKU is bundle_only iff every order_item row in
-    // the window has bundle_id IS NOT NULL.
-    let bundle_only_rows: Vec<BundleOnlyRow> = sqlx::query_as::<_, BundleOnlyRow>(
+    // bundle_only: SKUs that moved inside bundles this window (component
+    // lines) and never as a standalone order line.
+    let bundle_only_rows: Vec<KeyRow> = sqlx::query_as::<_, KeyRow>(
         r#"
-        SELECT
-            oi.menu_item_id,
-            COALESCE(oi.size_label::text, 'one_size') AS size_label
-        FROM order_items oi
-        JOIN orders o ON o.id = oi.order_id
-        JOIN branches b ON b.id = o.branch_id
-        WHERE b.org_id = $1
-          AND o.branch_id = $2
-          AND o.created_at >= $3
-          AND o.created_at <= $4
-          AND o.status = 'completed'
-          AND oi.menu_item_id IS NOT NULL
-        GROUP BY oi.menu_item_id, COALESCE(oi.size_label::text, 'one_size')
-        HAVING bool_and(oi.bundle_id IS NOT NULL) = TRUE
+        SELECT t.menu_item_id, t.size_label FROM (
+            SELECT c.item_id AS menu_item_id,
+                   COALESCE(c.size_label::text, 'one_size') AS size_label
+            FROM order_line_bundle_components c
+            JOIN order_items oi ON oi.id = c.order_line_id
+            JOIN orders o       ON o.id = oi.order_id
+            JOIN branches b     ON b.id = o.branch_id
+            WHERE b.org_id = $1
+              AND o.branch_id = $2
+              AND o.created_at >= $3
+              AND o.created_at <= $4
+              AND o.status = 'completed'
+            EXCEPT
+            SELECT oi.menu_item_id,
+                   COALESCE(oi.size_label::text, 'one_size')
+            FROM order_items oi
+            JOIN orders o   ON o.id = oi.order_id
+            JOIN branches b ON b.id = o.branch_id
+            WHERE b.org_id = $1
+              AND o.branch_id = $2
+              AND o.created_at >= $3
+              AND o.created_at <= $4
+              AND o.status = 'completed'
+              AND oi.menu_item_id IS NOT NULL
+        ) t
         "#,
     )
     .bind(org_id)
@@ -160,9 +177,10 @@ async fn load_snapshots(
         .map(|r| (r.menu_item_id, r.size_label))
         .collect();
 
-    // Cost rollup is a correlated subquery that returns NULL whenever any
-    // recipe ingredient lacks a current cost — that's the cost-optional
-    // signal the engine relies on.
+    // Current-cost rollup: a correlated subquery returning NULL whenever any
+    // recipe ingredient lacks a resolvable cost. The open cost-history epoch
+    // is read through a LATERAL so accidental duplicate open epochs can't
+    // multiply rows.
     let rows: Vec<SnapshotRow> = sqlx::query_as::<_, SnapshotRow>(
         r#"
         WITH expanded AS (
@@ -193,19 +211,23 @@ async fn load_snapshots(
                     CASE
                         WHEN COUNT(*) = 0 THEN NULL
                         WHEN bool_or(r.org_ingredient_id IS NULL
-                                     OR COALESCE(ich.cost_per_unit, oi.cost_per_unit) IS NULL)
+                                     OR COALESCE(ich.cost_per_unit, oing.cost_per_unit) IS NULL)
                             THEN NULL
-                        -- EGP → piastres: × 100 to match price units
+                        -- costs are stored in piastres; round the fractional sum
                         ELSE round(SUM(r.quantity_used
-                                 * COALESCE(ich.cost_per_unit, oi.cost_per_unit)) * 100)
+                                 * COALESCE(ich.cost_per_unit, oing.cost_per_unit)))
                     END
                 FROM menu_item_recipes r
-                LEFT JOIN org_ingredients oi ON oi.id = r.org_ingredient_id
-                LEFT JOIN ingredient_cost_history ich
-                       ON ich.org_ingredient_id = r.org_ingredient_id
-                      AND ich.effective_until IS NULL
+                LEFT JOIN org_ingredients oing ON oing.id = r.org_ingredient_id
+                LEFT JOIN LATERAL (
+                    SELECT h.cost_per_unit
+                    FROM ingredient_cost_history h
+                    WHERE h.org_ingredient_id = r.org_ingredient_id
+                      AND h.effective_until IS NULL
+                    ORDER BY h.effective_from DESC
+                    LIMIT 1
+                ) ich ON TRUE
                 WHERE r.menu_item_id = e.menu_item_id
-                  -- Force strict text-to-text equality comparison to evade enum type mapping issues
                   AND COALESCE(r.size_label::text, 'one_size') = e.size_label_text
             ) AS cost_per_serving
         FROM expanded e
@@ -223,10 +245,7 @@ async fn load_snapshots(
             let bundle_only =
                 bundle_only_set.contains(&(r.menu_item_id, r.size_label.clone()));
             ItemSnapshot {
-                key: ItemKey {
-                    menu_item_id: r.menu_item_id,
-                    size_label: r.size_label,
-                },
+                key: ItemKey { menu_item_id: r.menu_item_id, size_label: r.size_label },
                 category_id: r.category_id,
                 name: r.item_name,
                 current_price: r.current_price,
@@ -238,9 +257,9 @@ async fn load_snapshots(
         .collect())
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 2. Sale events
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
+// 2. Sale events (standalone lines only — price signal)
+// ─────────────────────────────────────────────────────────────────────
 
 async fn load_sales(
     pool: &PgPool,
@@ -249,6 +268,11 @@ async fn load_sales(
     window_start: &DateTime<Utc>,
     now: &DateTime<Utc>,
 ) -> Result<Vec<SaleEvent>, AppError> {
+    // unit_price is kept GROSS of order-level discounts: loyalty/order
+    // discounts are not item price signals and would contaminate the
+    // effective price. The point-in-time reconstruct only runs for legacy
+    // rows (COALESCE evaluates lazily) and reads the epoch covering the
+    // order timestamp through an overlap-safe LATERAL.
     let rows: Vec<SaleRow> = sqlx::query_as::<_, SaleRow>(
         r#"
         SELECT
@@ -257,10 +281,7 @@ async fn load_sales(
             oi.quantity::bigint                        AS quantity_sold,
             oi.unit_price::bigint                      AS unit_price_paid,
             COALESCE(
-                -- 1. Sale-time snapshot written by the order pipeline
-                --    (recipe scope, piastres, swap-aware).
                 oi.unit_cost::numeric,
-                -- 2. Point-in-time reconstruction for legacy lines.
                 (
                     SELECT
                         CASE
@@ -268,19 +289,24 @@ async fn load_sales(
                             WHEN bool_or(r.org_ingredient_id IS NULL
                                          OR COALESCE(ich.cost_per_unit, ing.cost_per_unit) IS NULL)
                                 THEN NULL
-                            -- EGP → piastres: × 100 to match price units
+                            -- costs are stored in piastres; round the fractional sum
                             ELSE round(SUM(r.quantity_used
-                                     * COALESCE(ich.cost_per_unit, ing.cost_per_unit)) * 100)
+                                     * COALESCE(ich.cost_per_unit, ing.cost_per_unit)))
                         END
                     FROM menu_item_recipes r
                     LEFT JOIN org_ingredients ing ON ing.id = r.org_ingredient_id
-                    LEFT JOIN ingredient_cost_history ich
-                           ON ich.org_ingredient_id = r.org_ingredient_id
-                          AND ich.effective_from   <= o.created_at
-                          AND (ich.effective_until IS NULL OR ich.effective_until > o.created_at)
+                    LEFT JOIN LATERAL (
+                        SELECT h.cost_per_unit
+                        FROM ingredient_cost_history h
+                        WHERE h.org_ingredient_id = r.org_ingredient_id
+                          AND h.effective_from <= o.created_at
+                          AND (h.effective_until IS NULL OR h.effective_until > o.created_at)
+                        ORDER BY h.effective_from DESC
+                        LIMIT 1
+                    ) ich ON TRUE
                     WHERE r.menu_item_id = oi.menu_item_id
-                      -- Force strict text-to-text equality comparison to evade enum type mapping issues
-                      AND COALESCE(r.size_label::text, 'one_size') = COALESCE(oi.size_label::text, 'one_size')
+                      AND COALESCE(r.size_label::text, 'one_size')
+                          = COALESCE(oi.size_label::text, 'one_size')
                 )
             )                                          AS unit_cost_at_sale,
             o.created_at                               AS sold_at
@@ -293,7 +319,8 @@ async fn load_sales(
           AND o.created_at   <= $4
           AND o.status        = 'completed'
           AND oi.menu_item_id IS NOT NULL
-          AND oi.bundle_id    IS NULL  -- only standalone lines count toward sales
+          AND oi.bundle_id    IS NULL  -- standalone lines only (defensive; bundle
+                                       -- lines have menu_item_id NULL anyway)
         "#,
     )
     .bind(org_id)
@@ -306,10 +333,7 @@ async fn load_sales(
     Ok(rows
         .into_iter()
         .map(|r| SaleEvent {
-            key: ItemKey {
-                menu_item_id: r.menu_item_id,
-                size_label: r.size_label,
-            },
+            key: ItemKey { menu_item_id: r.menu_item_id, size_label: r.size_label },
             quantity_sold: r.quantity_sold,
             unit_price_paid: r.unit_price_paid,
             unit_cost_at_sale: r.unit_cost_at_sale.and_then(|d| d.to_i64()),
@@ -318,9 +342,9 @@ async fn load_sales(
         .collect())
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 3. Baskets
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
+// 3. Baskets (co-occurrence signal — bundle components INCLUDED)
+// ─────────────────────────────────────────────────────────────────────
 
 async fn load_baskets(
     pool: &PgPool,
@@ -329,23 +353,38 @@ async fn load_baskets(
     window_start: &DateTime<Utc>,
     now: &DateTime<Utc>,
 ) -> Result<Vec<Basket>, AppError> {
-    // Bundle components are included — a basket reflects what the customer
-    // actually took home. Dedup by (menu_item_id, size_label) within order.
+    // A basket reflects what the customer actually took home, so bundle
+    // component lines count toward co-occurrence while staying out of
+    // standalone velocity. Dedup by SKU within order.
     let rows: Vec<BasketRow> = sqlx::query_as::<_, BasketRow>(
         r#"
-        SELECT DISTINCT
-            oi.order_id,
-            oi.menu_item_id,
-            COALESCE(oi.size_label::text, 'one_size') AS size_label
-        FROM order_items oi
-        JOIN orders   o ON o.id = oi.order_id
-        JOIN branches b ON b.id = o.branch_id
-        WHERE b.org_id        = $1
-          AND o.branch_id     = $2
-          AND o.created_at   >= $3
-          AND o.created_at   <= $4
-          AND o.status        = 'completed'
-          AND oi.menu_item_id IS NOT NULL
+        SELECT DISTINCT t.order_id, t.menu_item_id, t.size_label FROM (
+            SELECT oi.order_id,
+                   oi.menu_item_id,
+                   COALESCE(oi.size_label::text, 'one_size') AS size_label
+            FROM order_items oi
+            JOIN orders o   ON o.id = oi.order_id
+            JOIN branches b ON b.id = o.branch_id
+            WHERE b.org_id = $1
+              AND o.branch_id = $2
+              AND o.created_at >= $3
+              AND o.created_at <= $4
+              AND o.status = 'completed'
+              AND oi.menu_item_id IS NOT NULL
+            UNION ALL
+            SELECT oi.order_id,
+                   c.item_id AS menu_item_id,
+                   COALESCE(c.size_label::text, 'one_size') AS size_label
+            FROM order_line_bundle_components c
+            JOIN order_items oi ON oi.id = c.order_line_id
+            JOIN orders o       ON o.id = oi.order_id
+            JOIN branches b     ON b.id = o.branch_id
+            WHERE b.org_id = $1
+              AND o.branch_id = $2
+              AND o.created_at >= $3
+              AND o.created_at <= $4
+              AND o.status = 'completed'
+        ) t
         "#,
     )
     .bind(org_id)
@@ -365,30 +404,42 @@ async fn load_baskets(
     Ok(by_order.into_values().collect())
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
 // 4. Price-changed-in-window detection
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
 
 async fn load_price_changed(
     pool: &PgPool,
     org_id: Uuid,
-    branch_id: Uuid,
     window_start: &DateTime<Utc>,
     now: &DateTime<Utc>,
 ) -> Result<HashSet<ItemKey>, AppError> {
-    // Epochs covering: base_price (size_label NULL) and
-    //                  item_sizes.price_override (size_label set).
-    // Any epoch whose effective_from falls inside the window flags that SKU.
-    let rows: Vec<PriceChangedRow> = sqlx::query_as::<_, PriceChangedRow>(
+    // Only GENUINE changes count: item creation seeds a first epoch
+    // (menu/handlers.rs), so an epoch only flags the SKU when an EARLIER
+    // epoch exists for the same scope.
+    //
+    // No size fan-out: `item_sizes.price_override` is NOT NULL, so a sized
+    // SKU's customer-visible price only ever changes via size epochs
+    // (size_label set); base-price epochs (size_label NULL → 'one_size')
+    // only affect the 'one_size' SKU, which exists exactly when the item
+    // has no size rows.
+    let rows: Vec<KeyRow> = sqlx::query_as::<_, KeyRow>(
         r#"
         SELECT DISTINCT
             e.menu_item_id,
             COALESCE(e.size_label::text, 'one_size') AS size_label
         FROM menu_item_price_epochs e
         JOIN menu_items mi ON mi.id = e.menu_item_id
-        WHERE mi.org_id            = $1
-          AND e.effective_from    > $2
-          AND e.effective_from   <= $3
+        WHERE mi.org_id          = $1
+          AND e.effective_from  >  $2
+          AND e.effective_from  <= $3
+          AND EXISTS (
+              SELECT 1 FROM menu_item_price_epochs p
+              WHERE p.menu_item_id = e.menu_item_id
+                AND COALESCE(p.size_label::text, 'one_size')
+                    = COALESCE(e.size_label::text, 'one_size')
+                AND p.effective_from < e.effective_from
+          )
         "#,
     )
     .bind(org_id)
@@ -397,52 +448,8 @@ async fn load_price_changed(
     .fetch_all(pool)
     .await?;
 
-    let _ = branch_id; // branch-specific overrides not yet tracked in epochs
-
-    let mut set: HashSet<ItemKey> = HashSet::new();
-    for r in rows {
-        set.insert(ItemKey {
-            menu_item_id: r.menu_item_id,
-            size_label: r.size_label.unwrap_or_else(|| "one_size".into()),
-        });
-    }
-
-    // Fan out: if a row was inserted with size_label = 'one_size' representing
-    // a base_price change on a sized item, fan it across all that item's sizes.
-    #[derive(sqlx::FromRow)]
-    struct SizeRow { menu_item_id: Uuid, size_label: String }
-
-    let touched_items: Vec<Uuid> = set.iter().map(|k| k.menu_item_id).collect();
-    if !touched_items.is_empty() {
-        let size_rows: Vec<SizeRow> = sqlx::query_as::<_, SizeRow>(
-            r#"
-            SELECT sz.menu_item_id,
-                   COALESCE(sz.label::text, 'one_size') AS size_label
-            FROM item_sizes sz
-            WHERE sz.menu_item_id = ANY($1)
-              AND sz.is_active = TRUE
-            "#,
-        )
-        .bind(&touched_items)
-        .fetch_all(pool)
-        .await?;
-
-        // Fan out only for keys where size_label was the fallback 'one_size'
-        // AND there exist real size rows.
-        let touched_one_size: HashSet<Uuid> = set
-            .iter()
-            .filter(|k| k.size_label == "one_size")
-            .map(|k| k.menu_item_id)
-            .collect();
-        for sr in size_rows {
-            if touched_one_size.contains(&sr.menu_item_id) {
-                set.insert(ItemKey {
-                    menu_item_id: sr.menu_item_id,
-                    size_label: sr.size_label,
-                });
-            }
-        }
-    }
-
-    Ok(set)
+    Ok(rows
+        .into_iter()
+        .map(|r| ItemKey { menu_item_id: r.menu_item_id, size_label: r.size_label })
+        .collect())
 }

@@ -10,17 +10,21 @@ use uuid::Uuid;
 
 use crate::errors::AppError;
 
-/// Convert an EGP decimal cost to integer piastres, rounding half away from
-/// zero (Decimal::round defaults to banker's rounding, which would send
-/// 0.005 EGP to 0 piastres).
-pub fn egp_to_piastres(egp: Decimal) -> i64 {
-    (egp * Decimal::from(100))
+/// Round a fractional-piastre Decimal (e.g. a per-gram rollup) to integer
+/// piastres, half away from zero (Decimal::round defaults to banker's
+/// rounding, which would send 0.5 piastres to 0).
+///
+/// `org_ingredients.cost_per_unit` / `ingredient_cost_history.cost_per_unit`
+/// are stored in PIASTRES (the dashboard converts EGP input on entry);
+/// there is deliberately no ×100 anywhere in the backend.
+pub fn round_piastres(piastres: Decimal) -> i64 {
+    piastres
         .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::MidpointAwayFromZero)
         .to_i64()
         .unwrap_or(0)
 }
 
-/// Resolve point-in-time EGP cost per unit for a set of ingredients at `at`.
+/// Resolve point-in-time PIASTRE cost per unit for a set of ingredients at `at`.
 ///
 /// Resolution order per ingredient:
 ///   1. `ingredient_cost_history` epoch covering `at`
@@ -37,21 +41,26 @@ pub async fn ingredient_costs_at(
     if ingredient_ids.is_empty() {
         return Ok(HashMap::new());
     }
+    // Rows whose resolved cost is NULL (never entered) are filtered out:
+    // "absent from the result" IS the unknown signal callers rely on.
     let rows: Vec<(Uuid, Decimal)> = sqlx::query_as(
         r#"
-        SELECT oi.id,
-               COALESCE(
-                   (SELECT h.cost_per_unit
-                    FROM ingredient_cost_history h
-                    WHERE h.org_ingredient_id = oi.id
-                      AND h.effective_from <= $2
-                      AND (h.effective_until IS NULL OR h.effective_until > $2)
-                    ORDER BY h.effective_from DESC
-                    LIMIT 1),
-                   oi.cost_per_unit
-               ) AS cost_per_unit
-        FROM org_ingredients oi
-        WHERE oi.id = ANY($1)
+        SELECT id, cost_per_unit FROM (
+            SELECT oi.id,
+                   COALESCE(
+                       (SELECT h.cost_per_unit
+                        FROM ingredient_cost_history h
+                        WHERE h.org_ingredient_id = oi.id
+                          AND h.effective_from <= $2
+                          AND (h.effective_until IS NULL OR h.effective_until > $2)
+                        ORDER BY h.effective_from DESC
+                        LIMIT 1),
+                       oi.cost_per_unit
+                   ) AS cost_per_unit
+            FROM org_ingredients oi
+            WHERE oi.id = ANY($1)
+        ) resolved
+        WHERE cost_per_unit IS NOT NULL
         "#,
     )
     .bind(ingredient_ids)
@@ -94,7 +103,7 @@ pub async fn org_sku_costs(pool: &PgPool, org_id: Uuid) -> Result<Vec<SkuCost>, 
         item_name: String,
         category_id: Option<Uuid>,
         price: i64,
-        cost_egp: Option<Decimal>,
+        cost_piastres: Option<Decimal>,
         has_recipe: bool,
     }
 
@@ -120,7 +129,7 @@ pub async fn org_sku_costs(pool: &PgPool, org_id: Uuid) -> Result<Vec<SkuCost>, 
             e.item_name,
             e.category_id,
             e.price,
-            r.cost_egp,
+            r.cost_piastres,
             r.has_recipe
         FROM expanded e
         CROSS JOIN LATERAL (
@@ -131,7 +140,7 @@ pub async fn org_sku_costs(pool: &PgPool, org_id: Uuid) -> Result<Vec<SkuCost>, 
                                  OR COALESCE(ich.cost_per_unit, oi.cost_per_unit) IS NULL)
                         THEN NULL
                     ELSE SUM(r.quantity_used * COALESCE(ich.cost_per_unit, oi.cost_per_unit))
-                END        AS cost_egp,
+                END        AS cost_piastres,
                 COUNT(*) > 0 AS has_recipe
             FROM menu_item_recipes r
             LEFT JOIN org_ingredients oi ON oi.id = r.org_ingredient_id
@@ -151,7 +160,7 @@ pub async fn org_sku_costs(pool: &PgPool, org_id: Uuid) -> Result<Vec<SkuCost>, 
     Ok(rows
         .into_iter()
         .map(|r| {
-            let cost = r.cost_egp.map(egp_to_piastres);
+            let cost = r.cost_piastres.map(round_piastres);
             let (margin_pct, food_cost_pct) = match cost {
                 Some(c) if r.price > 0 => (
                     Some((r.price - c) as f64 / r.price as f64),
@@ -197,7 +206,7 @@ pub async fn org_addon_costs(pool: &PgPool, org_id: Uuid) -> Result<Vec<AddonCos
         name: String,
         addon_type: String,
         price: i64,
-        cost_egp: Option<Decimal>,
+        cost_piastres: Option<Decimal>,
     }
 
     let rows: Vec<Row> = sqlx::query_as::<_, Row>(
@@ -222,7 +231,7 @@ pub async fn org_addon_costs(pool: &PgPool, org_id: Uuid) -> Result<Vec<AddonCos
                        ON ich.org_ingredient_id = ai.org_ingredient_id
                       AND ich.effective_until IS NULL
                 WHERE ai.addon_item_id = a.id
-            ) AS cost_egp
+            ) AS cost_piastres
         FROM addon_items a
         WHERE a.org_id = $1 AND a.is_active = TRUE
         ORDER BY a.name
@@ -235,7 +244,7 @@ pub async fn org_addon_costs(pool: &PgPool, org_id: Uuid) -> Result<Vec<AddonCos
     Ok(rows
         .into_iter()
         .map(|r| {
-            let cost = r.cost_egp.map(egp_to_piastres);
+            let cost = r.cost_piastres.map(round_piastres);
             let margin_pct = match cost {
                 Some(c) if r.price > 0 => Some((r.price - c) as f64 / r.price as f64),
                 _ => None,
@@ -259,10 +268,10 @@ mod unit_tests {
     use rust_decimal_macros::dec;
 
     #[test]
-    fn egp_to_piastres_rounds_half_up() {
-        assert_eq!(egp_to_piastres(dec!(12.50)), 1250);
-        assert_eq!(egp_to_piastres(dec!(0.005)), 1);
-        assert_eq!(egp_to_piastres(dec!(0.004)), 0);
-        assert_eq!(egp_to_piastres(dec!(3)), 300);
+    fn round_piastres_rounds_half_away_from_zero() {
+        assert_eq!(round_piastres(dec!(1250)), 1250);
+        assert_eq!(round_piastres(dec!(0.5)), 1);
+        assert_eq!(round_piastres(dec!(0.4)), 0);
+        assert_eq!(round_piastres(dec!(300.5)), 301);
     }
 }

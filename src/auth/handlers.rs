@@ -1,6 +1,7 @@
 use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::collections::HashMap;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -17,10 +18,9 @@ use crate::{
 /// - **Email + password** (admins, managers, super-admins): supply
 ///   `email` and `password`. `org_id` is optional — if provided, the
 ///   user must belong to that org; if omitted, lookup is by email only.
-/// - **PIN + name** (tellers): supply `name` and `pin`. The first
-///   active teller with a matching name and a `pin_hash` that verifies
-///   wins. `branch_id` may be supplied to lock the issued JWT to that
-///   branch; tellers without a branch lock can later be reassigned.
+/// - **PIN + name** (tellers): supply `name`, `pin`, and **`branch_id`**
+///   (required). The teller must be assigned to that branch. `org_id` is
+///   derived server-side from the branch — never trusted from the client.
 #[derive(Deserialize, ToSchema)]
 pub struct LoginRequest {
     pub org_id:    Option<Uuid>,
@@ -32,8 +32,26 @@ pub struct LoginRequest {
     /// Teller's display name (required for PIN login, unused otherwise).
     #[schema(example = "Mariam")]
     pub name:      Option<String>,
-    /// Teller-only: locks the issued JWT to a specific branch.
+    /// Required for PIN login. The org is derived from this branch server-side.
     pub branch_id: Option<Uuid>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct ResolveBranchRequest {
+    /// Organization to search within.
+    pub org_id:    Uuid,
+    /// Device GPS latitude (WGS-84).
+    pub latitude:  f64,
+    /// Device GPS longitude (WGS-84).
+    pub longitude: f64,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ResolveBranchResponse {
+    pub branch_id:       Uuid,
+    pub branch_name:     String,
+    /// Straight-line distance from the supplied coordinates to the branch, in metres.
+    pub distance_meters: f64,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -126,20 +144,39 @@ pub async fn login(
                 AppError::BadRequest("name is required for PIN login".into())
             })?;
 
+            let branch_id = body.branch_id.ok_or_else(|| {
+                AppError::BadRequest("branch_id is required for PIN login".into())
+            })?;
+
+            // Derive org_id from the branch — never trust the client to supply it
+            let branch_org_id: Uuid = sqlx::query_scalar(
+                "SELECT org_id FROM branches WHERE id = $1 AND is_active = TRUE AND deleted_at IS NULL"
+            )
+            .bind(branch_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .ok_or_else(|| AppError::Unauthorized("Invalid branch".into()))?;
+
+            // Branch-scoped lookup: teller must be assigned to this branch
             let tellers = sqlx::query_as::<_, User>(
                 r#"
-                SELECT id, org_id, name, email, phone,
-                       password_hash, pin_hash, role,
-                       is_active, last_login_at,
-                       created_at, updated_at, deleted_at
-                FROM users
-                WHERE LOWER(name) = LOWER($1)
-                  AND pin_hash    IS NOT NULL
-                  AND is_active   = TRUE
-                  AND deleted_at  IS NULL
+                SELECT u.id, u.org_id, u.name, u.email, u.phone,
+                       u.password_hash, u.pin_hash, u.role,
+                       u.is_active, u.last_login_at,
+                       u.created_at, u.updated_at, u.deleted_at
+                FROM users u
+                JOIN user_branch_assignments uba ON uba.user_id = u.id AND uba.branch_id = $1
+                WHERE LOWER(u.name) = LOWER($2)
+                  AND u.org_id      = $3
+                  AND u.pin_hash    IS NOT NULL
+                  AND u.role        = 'teller'
+                  AND u.is_active   = TRUE
+                  AND u.deleted_at  IS NULL
                 "#,
             )
+            .bind(branch_id)
             .bind(name)
+            .bind(branch_org_id)
             .fetch_all(pool.get_ref())
             .await?;
 
@@ -185,15 +222,22 @@ pub async fn login(
         .execute(pool.get_ref())
         .await?;
 
-    let branch_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT branch_id FROM user_branch_assignments WHERE user_id = $1 LIMIT 1"
-    )
-    .bind(user.id)
-    .fetch_optional(pool.get_ref())
-    .await?;
+    // For tellers, branch_id is already validated above (from body.branch_id).
+    // For other roles, fall back to looking up the first assignment.
+    let branch_id_for_response: Option<Uuid> = if user.role == UserRole::Teller {
+        body.branch_id
+    } else {
+        sqlx::query_scalar(
+            "SELECT branch_id FROM user_branch_assignments WHERE user_id = $1 LIMIT 1"
+        )
+        .bind(user.id)
+        .fetch_optional(pool.get_ref())
+        .await?
+        .flatten()
+    };
 
     let mut user_public = UserPublic::from(user);
-    user_public.branch_id = branch_id;
+    user_public.branch_id = branch_id_for_response;
 
     Ok(HttpResponse::Ok().json(LoginResponse {
         token,
@@ -251,6 +295,68 @@ pub async fn me(
     Ok(HttpResponse::Ok().json(MeResponse { user: user_public }))
 }
 
+// ── POST /auth/resolve-branch ────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/auth/resolve-branch",
+    tag = "auth",
+    request_body = ResolveBranchRequest,
+    responses(
+        (status = 200, description = "Nearest branch within its geofence radius", body = ResolveBranchResponse),
+        AppErrorResponse,
+    )
+)]
+pub async fn resolve_branch(
+    pool: web::Data<PgPool>,
+    body: web::Json<ResolveBranchRequest>,
+) -> Result<HttpResponse, AppError> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        id:              Uuid,
+        name:            String,
+        distance_meters: f64,
+    }
+
+    let row: Option<Row> = sqlx::query_as(
+        r#"
+        SELECT b.id, b.name,
+            (6371000.0 * ACOS(LEAST(1.0,
+                SIN(RADIANS($2)) * SIN(RADIANS(b.latitude))
+              + COS(RADIANS($2)) * COS(RADIANS(b.latitude))
+              * COS(RADIANS(b.longitude - $3))
+            ))) AS distance_meters
+        FROM branches b
+        WHERE b.org_id     = $1
+          AND b.is_active  = TRUE
+          AND b.deleted_at IS NULL
+          AND b.latitude   IS NOT NULL
+          AND b.longitude  IS NOT NULL
+          AND (6371000.0 * ACOS(LEAST(1.0,
+                SIN(RADIANS($2)) * SIN(RADIANS(b.latitude))
+              + COS(RADIANS($2)) * COS(RADIANS(b.latitude))
+              * COS(RADIANS(b.longitude - $3))
+              ))) <= COALESCE(b.geo_radius_meters, 200)
+        ORDER BY distance_meters ASC
+        LIMIT 1
+        "#,
+    )
+    .bind(body.org_id)
+    .bind(body.latitude)
+    .bind(body.longitude)
+    .fetch_optional(pool.get_ref())
+    .await?;
+
+    match row {
+        Some(r) => Ok(HttpResponse::Ok().json(ResolveBranchResponse {
+            branch_id:       r.id,
+            branch_name:     r.name,
+            distance_meters: r.distance_meters,
+        })),
+        None => Err(AppError::NotFound("No branch found within range".into())),
+    }
+}
+
 // ── GET /auth/permissions ────────────────────────────────────
 
 #[utoipa::path(
@@ -301,26 +407,25 @@ pub async fn permissions(
     .fetch_all(pool.get_ref())
     .await?;
 
-    let resources = [
-        "orgs", "branches", "users", "categories",
-        "menu_items", "addon_groups", "shifts",
-        "orders", "order_items", "payments", "permissions",
-        "addon_items", "inventory", "inventory_adjustments", "inventory_transfers",
-        "recipes", "soft_serve_batches", "shift_counts",
-    ];
-    let actions = ["create", "read", "update", "delete"];
+    let resources = crate::permissions::RESOURCES;
+    let actions   = crate::permissions::ACTIONS;
 
-    let mut permissions = Vec::new();
+    // Build O(1) lookup maps so the nested loop is O(n) not O(n²)
+    let role_map: HashMap<(&str, &str), bool> = role_defaults
+        .iter()
+        .map(|r| ((r.resource.as_str(), r.action.as_str()), r.granted))
+        .collect();
+    let override_map: HashMap<(&str, &str), bool> = user_overrides
+        .iter()
+        .map(|p| ((p.resource.as_str(), p.action.as_str()), p.granted))
+        .collect();
+
+    let mut permissions = Vec::with_capacity(resources.len() * actions.len());
 
     for resource in resources {
         for action in actions {
-            let role_default = role_defaults.iter()
-                .find(|r| r.resource == resource && r.action == action)
-                .map(|r| r.granted);
-
-            let user_override = user_overrides.iter()
-                .find(|p| p.resource == resource && p.action == action)
-                .map(|p| p.granted);
+            let role_default  = role_map.get(&(resource, action)).copied();
+            let user_override = override_map.get(&(resource, action)).copied();
 
             let effective = if role == "super_admin" {
                 true

@@ -217,10 +217,10 @@ async fn test_bundle_activation_and_rules(pool: PgPool) {
 
     let cat_id = seed_category(&pool, org_id).await;
     
-    // Ingredient costs: 1.00 each
-    let ing1 = seed_ingredient(&pool, org_id, Decimal::new(100, 2)).await;
-    
-    // Items priced at 5.00 each, and cost 1.00 each (1 unit of ingredient)
+    // Ingredient cost: 100 piastres per unit
+    let ing1 = seed_ingredient(&pool, org_id, Decimal::from(100)).await;
+
+    // Items priced at 500 piastres each, cost 100 piastres each (1 unit of ingredient)
     let item1 = seed_menu_item(&pool, org_id, cat_id, 500).await;
     let item2 = seed_menu_item(&pool, org_id, cat_id, 500).await;
     

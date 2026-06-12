@@ -119,9 +119,8 @@ async fn test_create_org_unauthorized(pool: PgPool) {
         .set_payload(body)
         .to_request();
 
-    use actix_web::dev::Service;
-    let resp = app.call(req).await;
-    assert!(resp.is_err());
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
 }
 
 #[sqlx::test]
@@ -358,4 +357,92 @@ async fn test_upload_org_logo(pool: PgPool) {
 
     let org: Org = test::read_body_json(resp).await;
     assert!(org.logo_url.is_some());
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Onboarding — derived checklist + completion flag
+// ═══════════════════════════════════════════════════════════════════
+
+async fn seed_org_row(pool: &PgPool) -> Uuid {
+    let org_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Onb', $2)")
+        .bind(org_id)
+        .bind(format!("onb-{org_id}"))
+        .execute(pool)
+        .await
+        .unwrap();
+    org_id
+}
+
+async fn grant_org_permission(pool: &PgPool, action: &str) {
+    sqlx::query(&format!(
+        "INSERT INTO role_permissions (role, resource, action, granted) \
+         VALUES ('org_admin'::user_role, 'orgs'::permission_resource, '{action}'::permission_action, true) \
+         ON CONFLICT DO NOTHING"
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test]
+async fn test_onboarding_checklist_and_complete(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org_row(&pool).await;
+    grant_org_permission(&pool, "read").await;
+    grant_org_permission(&pool, "update").await;
+    let token = generate_org_admin_token(org_id);
+
+    // Fresh org: nothing set up → not completable, not completed.
+    let req = test::TestRequest::get()
+        .uri(&format!("/orgs/{org_id}/onboarding"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success(), "got {:?}", resp.status());
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["completed"], false);
+    assert_eq!(body["can_complete"], false);
+    let steps = body["steps"].as_array().unwrap();
+    assert!(steps.iter().all(|s| s["done"] == false));
+
+    // Satisfy the required steps: branch + payment method + category + item.
+    sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'B')")
+        .bind(Uuid::new_v4()).bind(org_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_active) VALUES ($1, 'cash', '{}'::jsonb, '#000', 'cash', true)")
+        .bind(org_id).execute(&pool).await.unwrap();
+    let cat = Uuid::new_v4();
+    sqlx::query("INSERT INTO categories (id, org_id, name) VALUES ($1, $2, 'C')")
+        .bind(cat).bind(org_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price, is_active) VALUES ($1, $2, $3, 'Latte', 7000, true)")
+        .bind(Uuid::new_v4()).bind(org_id).bind(cat).execute(&pool).await.unwrap();
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/orgs/{org_id}/onboarding"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let body: serde_json::Value =
+        test::read_body_json(test::call_service(&app, req).await).await;
+    assert_eq!(body["can_complete"], true);
+    assert_eq!(body["completed"], false);
+
+    // Complete — idempotent, persists, returns the fresh status.
+    for _ in 0..2 {
+        let req = test::TestRequest::post()
+            .uri(&format!("/orgs/{org_id}/onboarding/complete"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["completed"], true);
+        assert!(body["completed_at"].is_string());
+    }
 }

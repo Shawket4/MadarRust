@@ -17,7 +17,7 @@ use crate::{
     shifts::handlers::{Shift, ShiftReportResponse},
     orders::handlers::Order,
     permissions::handlers::PermissionMatrix,
-    menu_advisor::persistence::PersistedRun,
+    menu_advisor::dto::PersistedRun,
 };
 
 // -----------------------------------------------------------------------------
@@ -941,58 +941,67 @@ async fn test_e2e_menu_advisor_bundle_promotion_workflow(pool: PgPool) {
 
     sqlx::query("UPDATE menu_advisor_runs SET status = 'completed', completed_at = NOW() WHERE id = $1").bind(run_id).execute(&pool).await.unwrap();
 
-    // Seed a price suggestion
-    let p_sug_id = Uuid::new_v4();
-    let anchors = serde_json::to_value(crate::menu_advisor::engine::PriceAnchors {
-        cost_plus: Some(100.0),
-        peer_median: 120.0,
-        status_quo: 90.0,
+    // Seed a price suggestion (payload-JSONB layout; scalars are generated columns)
+    use crate::menu_advisor::dto as adv;
+    let price_payload = serde_json::to_value(adv::PriceSuggestion {
+        key: adv::ItemKey { menu_item_id: coffee_id, size_label: "one_size".into() },
+        item_name: "Cold Brew".into(),
+        classification: adv::Classification::Cm { quadrant: adv::CmQuadrant::Star },
+        current_price: 350,
+        units_sold_raw: 10.0,
+        effective_price: 350.0,
+        popularity_share: 0.1,
+        cm_per_unit: Some(290.0),
+        margin_pct: Some(0.82),
+        food_cost_pct: Some(0.18),
+        anchors: adv::PriceAnchors { cost_plus: Some(100.0), peer_median: 120.0, status_quo: 90.0 },
+        suggested_price: Some(400),
+        suggested_delta_abs: Some(50),
+        suggested_delta_pct: Some(0.14),
+        action: adv::Action::RaisePrice,
+        confidence: adv::Confidence::High,
+        explanation: "Stars suggestion".into(),
+        guard_clips: vec![],
+        peer_comparison: None,
+        price_changed_in_window: false,
+        cost_reduction_whatif_margin: None,
+        cost_missing: false,
     }).unwrap();
-    sqlx::query(
-        r#"
-        INSERT INTO menu_advisor_price_suggestions (
-            id, run_id, branch_id, menu_item_id, size_label, item_name,
-            classification_mode, cm_quadrant, current_price, units_sold_raw,
-            effective_price, popularity_share, cm_per_unit, margin_pct, food_cost_pct,
-            anchors_json, suggested_price, suggested_delta_abs, suggested_delta_pct,
-            action, confidence, explanation, guard_clips_json, price_changed_in_window,
-            cost_missing, created_at
-        ) VALUES (
-            $1, $2, $3, $4, 'one_size', 'Cold Brew',
-            'cm', 'star', 350, 10, 350.0, 0.1, 290.0, 0.82, 0.18,
-            $5, 400, 50, 0.14, 'raise_price', 'high', 'Stars suggestion', '[]', false, false, NOW()
-        )
-        "#
+    let p_sug_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO menu_advisor_price_suggestions (run_id, branch_id, payload) \
+         VALUES ($1, $2, $3) RETURNING id",
     )
-    .bind(p_sug_id).bind(run_id).bind(branch_id).bind(coffee_id).bind(anchors)
-    .execute(&pool).await.unwrap();
+    .bind(run_id).bind(branch_id).bind(price_payload)
+    .fetch_one(&pool).await.unwrap();
 
     // Seed a bundle suggestion
-    let b_sug_id = Uuid::new_v4();
-    let components = serde_json::to_value(vec![crate::menu_advisor::engine::ItemKey { menu_item_id: coffee_id, size_label: "one_size".to_string() }]).unwrap();
-    let assoc = serde_json::to_value(crate::menu_advisor::engine::BundleAssociation { pair_lifts: vec![], composite_score: 1.2 }).unwrap();
-    let forecast = serde_json::to_value(crate::menu_advisor::engine::BundleForecast {
-        expected_velocity: crate::menu_advisor::engine::Triplet { lo: 5.0, mid: 10.0, hi: 15.0 },
-        inside_bundle_units_x: 2.0,
-        halo_units_x: 1.0,
-        total_units_uplift_x: 3.0,
-        incremental_cm: None,
+    let bundle_payload = serde_json::to_value(adv::BundleSuggestion {
+        focus_item: adv::ItemKey { menu_item_id: coffee_id, size_label: "one_size".into() },
+        bundle_items: vec![adv::ItemKey { menu_item_id: coffee_id, size_label: "one_size".into() }],
+        bundle_list_price: 350,
+        bundle_suggested_price: 300,
+        bundle_discount_pct: 0.14,
+        bundle_cost: None,
+        bundle_cm: None,
+        bundle_margin_pct: None,
+        association: adv::BundleAssociation { pair_lifts: vec![], composite_score: 1.2 },
+        forecast: adv::BundleForecast {
+            expected_velocity: adv::Triplet { lo: 5.0, mid: 10.0, hi: 15.0 },
+            inside_bundle_units_x: 2.0,
+            halo_units_x: 1.0,
+            total_units_uplift_x: 3.0,
+            incremental_cm: None,
+        },
+        guard_clips: vec![],
+        explanation: "Advise Coffee Bundle".into(),
+        missing_costs: false,
     }).unwrap();
-
-    sqlx::query(
-        r#"
-        INSERT INTO menu_advisor_bundle_suggestions (
-            id, run_id, branch_id, focus_menu_item_id, focus_size_label, components_json,
-            bundle_list_price, bundle_suggested_price, bundle_discount_pct, association_json, forecast_json,
-            guard_clips_json, explanation, missing_costs, created_at
-        ) VALUES (
-            $1, $2, $3, $4, 'one_size', $5,
-            350, 300, 0.14, $6, $7, '[]', 'Advise Coffee Bundle', false, NOW()
-        )
-        "#
+    let b_sug_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO menu_advisor_bundle_suggestions (run_id, branch_id, payload) \
+         VALUES ($1, $2, $3) RETURNING id",
     )
-    .bind(b_sug_id).bind(run_id).bind(branch_id).bind(coffee_id).bind(components).bind(assoc).bind(forecast)
-    .execute(&pool).await.unwrap();
+    .bind(run_id).bind(branch_id).bind(bundle_payload)
+    .fetch_one(&pool).await.unwrap();
 
     // STEP 4.3: Query suggestions and Record Decision
     let req = test::TestRequest::get()

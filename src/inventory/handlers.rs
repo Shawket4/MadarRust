@@ -22,9 +22,11 @@ pub struct OrgIngredient {
     pub unit:          String,
     pub category:      String,
     pub description:   Option<String>,
-    #[serde(with = "rust_decimal::serde::float")]
-    #[schema(value_type = f64)]
-    pub cost_per_unit: Decimal,
+    /// Piastres per unit. `null` ⟺ never entered (unknown, NOT free) —
+    /// recipes using this ingredient are cost-missing everywhere.
+    #[serde(with = "rust_decimal::serde::float_option")]
+    #[schema(value_type = Option<f64>)]
+    pub cost_per_unit: Option<Decimal>,
     pub is_active:     bool,
     pub created_at:    chrono::DateTime<chrono::Utc>,
     pub updated_at:    chrono::DateTime<chrono::Utc>,
@@ -38,9 +40,10 @@ pub struct BranchInventoryItem {
     pub ingredient_name:   String,
     pub unit:              String,
     pub description:       Option<String>,
-    #[serde(with = "rust_decimal::serde::float")]
-    #[schema(value_type = f64)]
-    pub cost_per_unit:     Decimal,
+    /// Piastres per unit; `null` ⟺ cost never entered.
+    #[serde(with = "rust_decimal::serde::float_option")]
+    #[schema(value_type = Option<f64>)]
+    pub cost_per_unit:     Option<Decimal>,
     #[schema(value_type = f64)]
     pub current_stock:     sqlx::types::BigDecimal,
     #[schema(value_type = f64)]
@@ -213,7 +216,8 @@ pub async fn create_catalog_item(
         return Err(AppError::BadRequest("name cannot be empty".into()));
     }
 
-    let cost = body.cost_per_unit.unwrap_or(Decimal::ZERO);
+    // No cost supplied ⟹ stored as NULL = unknown. Never default to 0 —
+    // zero means "genuinely free" and would flow into every cost rollup.
     let mut tx = pool.get_ref().begin().await?;
 
     let row = sqlx::query_as::<_, OrgIngredient>(
@@ -229,7 +233,7 @@ pub async fn create_catalog_item(
     .bind(&body.unit)
     .bind(&body.category)
     .bind(&body.description)
-    .bind(cost)
+    .bind(body.cost_per_unit)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
@@ -240,17 +244,19 @@ pub async fn create_catalog_item(
         AppError::Db(e)
     })?;
 
-    // Seed the first cost history row.
-    sqlx::query(
-        "INSERT INTO ingredient_cost_history \
-             (org_ingredient_id, cost_per_unit, effective_from, changed_by, note) \
-         VALUES ($1, $2, now(), $3, 'Initial cost')"
-    )
-    .bind(row.id)
-    .bind(cost)
-    .bind(claims.user_id())
-    .execute(&mut *tx)
-    .await?;
+    // Seed the first cost history row — only when a cost actually exists.
+    if let Some(cost) = body.cost_per_unit {
+        sqlx::query(
+            "INSERT INTO ingredient_cost_history \
+                 (org_ingredient_id, cost_per_unit, effective_from, changed_by, note) \
+             VALUES ($1, $2, now(), $3, 'Initial cost')"
+        )
+        .bind(row.id)
+        .bind(cost)
+        .bind(claims.user_id())
+        .execute(&mut *tx)
+        .await?;
+    }
 
     tx.commit().await?;
     Ok(HttpResponse::Created().json(row))
@@ -836,13 +842,20 @@ pub async fn create_transfer(
         return Err(AppError::BadRequest("Ingredient does not belong to this organization".into()));
     }
 
-    // Source branch must have sufficient stock
+    let qty = sqlx::types::BigDecimal::try_from(body.quantity)
+        .map_err(|_| AppError::BadRequest("Invalid quantity".into()))?;
+
+    let mut tx = pool.get_ref().begin().await?;
+
+    // Lock source row and validate stock atomically — prevents TOCTOU race
+    // between a concurrent transfer that reads the same stock level.
     let src_stock: Option<sqlx::types::BigDecimal> = sqlx::query_scalar(
-        "SELECT current_stock FROM branch_inventory WHERE branch_id = $1 AND org_ingredient_id = $2"
+        "SELECT current_stock FROM branch_inventory \
+         WHERE branch_id = $1 AND org_ingredient_id = $2 FOR UPDATE"
     )
     .bind(body.source_branch_id)
     .bind(body.org_ingredient_id)
-    .fetch_optional(pool.get_ref())
+    .fetch_optional(&mut *tx)
     .await?
     .flatten();
 
@@ -850,18 +863,13 @@ pub async fn create_transfer(
         "Source branch does not track this ingredient".into()
     ))?;
 
-    let qty = sqlx::types::BigDecimal::try_from(body.quantity)
-        .map_err(|_| AppError::BadRequest("Invalid quantity".into()))?;
-
     if src_stock < qty {
         return Err(AppError::BadRequest(format!(
             "Insufficient stock on source branch. Current: {}, Requested: {}", src_stock, qty
         )));
     }
 
-    let mut tx = pool.get_ref().begin().await?;
-
-    // Deduct from source
+    // Deduct from source (stock already locked above)
     let src_bi_id: Uuid = sqlx::query_scalar(
         "UPDATE branch_inventory SET current_stock = current_stock - $1
          WHERE branch_id = $2 AND org_ingredient_id = $3
@@ -1152,7 +1160,27 @@ pub async fn delete_transfer(
 
     let mut tx = pool.get_ref().begin().await?;
 
-    // Reverse: add back to source (soft — never fails)
+    // Check destination still has enough stock to reverse (lock the row first)
+    let dst_stock: Option<sqlx::types::BigDecimal> = sqlx::query_scalar(
+        "SELECT current_stock FROM branch_inventory \
+         WHERE branch_id = $1 AND org_ingredient_id = $2 FOR UPDATE"
+    )
+    .bind(dst_id)
+    .bind(ing_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .flatten();
+
+    if let Some(ref stock) = dst_stock {
+        if stock < &qty {
+            return Err(AppError::Conflict(format!(
+                "Cannot reverse transfer: destination branch only has {} units remaining (transfer was {} units)",
+                stock, qty
+            )));
+        }
+    }
+
+    // Reverse: add back to source
     sqlx::query(
         "UPDATE branch_inventory SET current_stock = current_stock + $1
          WHERE branch_id = $2 AND org_ingredient_id = $3"
@@ -1163,7 +1191,7 @@ pub async fn delete_transfer(
     .execute(&mut *tx)
     .await?;
 
-    // Reverse: deduct from destination (soft — allow negative)
+    // Reverse: deduct from destination (stock already validated and locked above)
     sqlx::query(
         "UPDATE branch_inventory SET current_stock = current_stock - $1
          WHERE branch_id = $2 AND org_ingredient_id = $3"

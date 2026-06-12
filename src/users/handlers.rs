@@ -172,6 +172,24 @@ pub async fn create_user(
         }
     }
 
+    if body.role == UserRole::Teller {
+        let name_taken: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM users
+             WHERE org_id = $1 AND LOWER(name) = LOWER($2)
+               AND role = 'teller' AND deleted_at IS NULL)"
+        )
+        .bind(body.org_id)
+        .bind(&body.name)
+        .fetch_one(pool.get_ref())
+        .await?;
+
+        if name_taken {
+            return Err(AppError::Conflict(
+                "A teller with this name already exists in this organization".into(),
+            ));
+        }
+    }
+
     let password_hash = body
         .password
         .as_deref()
@@ -461,7 +479,8 @@ pub async fn update_user(
             role          = COALESCE($5, role),
             is_active     = COALESCE($6, is_active),
             password_hash = COALESCE($7, password_hash),
-            pin_hash      = COALESCE($8, pin_hash)
+            pin_hash      = COALESCE($8, pin_hash),
+            updated_at    = NOW()
         WHERE id = $1 AND deleted_at IS NULL
         RETURNING id, org_id, name, email, phone,
                   password_hash, pin_hash, role,

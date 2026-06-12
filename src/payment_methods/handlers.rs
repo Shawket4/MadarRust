@@ -65,8 +65,7 @@ pub async fn list_payment_methods(
     pool: web::Data<PgPool>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    // Requires general read access, or specific if needed. Using orders read as proxy for now.
-    check_permission(pool.get_ref(), &claims, "orders", "read").await?;
+    check_permission(pool.get_ref(), &claims, "payment_methods", "read").await?;
 
     let org_id = claims.org_id().ok_or_else(|| AppError::Forbidden("No org id".into()))?;
 
@@ -99,7 +98,7 @@ pub async fn create_payment_method(
     mut body: web::Json<CreatePaymentMethodRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "orgs", "create").await?;
+    check_permission(pool.get_ref(), &claims, "payment_methods", "create").await?;
     let org_id = claims.org_id().ok_or_else(|| AppError::Forbidden("No org id".into()))?;
 
     ensure_translations(&mut body.label_translations)
@@ -157,7 +156,7 @@ pub async fn update_payment_method(
     mut body: web::Json<UpdatePaymentMethodRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "orgs", "update").await?;
+    check_permission(pool.get_ref(), &claims, "payment_methods", "update").await?;
     let org_id = claims.org_id().ok_or_else(|| AppError::Forbidden("No org id".into()))?;
 
     // Verify ownership
@@ -234,7 +233,7 @@ pub async fn activate_payment_method(
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "orgs", "update").await?;
+    check_permission(pool.get_ref(), &claims, "payment_methods", "update").await?;
     let org_id = claims.org_id().ok_or_else(|| AppError::Forbidden("No org id".into()))?;
 
     let method = sqlx::query_as::<_, OrgPaymentMethod>(
@@ -265,7 +264,7 @@ pub async fn deactivate_payment_method(
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "orgs", "update").await?;
+    check_permission(pool.get_ref(), &claims, "payment_methods", "update").await?;
     let org_id = claims.org_id().ok_or_else(|| AppError::Forbidden("No org id".into()))?;
 
     let method = sqlx::query_as::<_, OrgPaymentMethod>(

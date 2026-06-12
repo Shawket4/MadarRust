@@ -1,4 +1,3 @@
-#![allow(unused_imports, unused_variables, dead_code)]
 use actix_web::{test, App, web};
 use sqlx::PgPool;
 use uuid::Uuid;

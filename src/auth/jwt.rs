@@ -19,7 +19,11 @@ pub struct Claims {
 
 impl Claims {
     pub fn user_id(&self) -> Uuid {
-        Uuid::parse_str(&self.sub).unwrap()
+        Uuid::parse_str(&self.sub).expect("JWT sub field is not a valid UUID — token was issued incorrectly")
+    }
+    pub fn user_id_safe(&self) -> Result<Uuid, crate::errors::AppError> {
+        Uuid::parse_str(&self.sub)
+            .map_err(|_| crate::errors::AppError::Unauthorized("Invalid user ID in token".into()))
     }
     pub fn org_id(&self) -> Option<Uuid> {
         self.org_id.as_deref().and_then(|s| Uuid::parse_str(s).ok())

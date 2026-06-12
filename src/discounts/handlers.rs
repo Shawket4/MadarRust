@@ -67,7 +67,7 @@ pub async fn list_discounts(
     query: web::Query<ListQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
+    check_permission(pool.get_ref(), &claims, "discounts", "read").await?;
     require_org_access(&claims, query.org_id)?;
 
     let rows = sqlx::query_as::<_, Discount>(
@@ -99,7 +99,7 @@ pub async fn create_discount(
     body: web::Json<CreateDiscountRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "create").await?;
+    check_permission(pool.get_ref(), &claims, "discounts", "create").await?;
     require_org_access(&claims, body.org_id)?;
     validate_dtype(&body.dtype)?;
     validate_value(body.value, &body.dtype)?;
@@ -145,7 +145,7 @@ pub async fn update_discount(
     body: web::Json<UpdateDiscountRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
+    check_permission(pool.get_ref(), &claims, "discounts", "update").await?;
     let existing = fetch_or_404(pool.get_ref(), *id).await?;
     require_org_access(&claims, existing.org_id)?;
 
@@ -206,7 +206,7 @@ pub async fn delete_discount(
     id:   web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "delete").await?;
+    check_permission(pool.get_ref(), &claims, "discounts", "delete").await?;
     let existing = fetch_or_404(pool.get_ref(), *id).await?;
     require_org_access(&claims, existing.org_id)?;
 

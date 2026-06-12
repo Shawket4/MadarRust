@@ -1,6 +1,7 @@
 use actix_web::{
+    body::{BoxBody, EitherBody},
     dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform},
-    web, Error, HttpMessage,
+    web, Error, HttpMessage, ResponseError,
 };
 use futures::future::{ready, LocalBoxFuture, Ready};
 use std::rc::Rc;
@@ -16,7 +17,7 @@ where
     S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
     B: 'static,
 {
-    type Response  = ServiceResponse<B>;
+    type Response  = ServiceResponse<EitherBody<B, BoxBody>>;
     type Error     = Error;
     type Transform = JwtMiddlewareService<S>;
     type InitError = ();
@@ -36,7 +37,7 @@ where
     S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
     B: 'static,
 {
-    type Response = ServiceResponse<B>;
+    type Response = ServiceResponse<EitherBody<B, BoxBody>>;
     type Error    = Error;
     type Future   = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
 
@@ -57,9 +58,10 @@ where
             let token = match token {
                 Some(t) => t,
                 None => {
-                    return Err(actix_web::error::ErrorUnauthorized(
-                        AppError::Unauthorized("Missing Authorization header".into()).to_string(),
-                    ))
+                    let resp = AppError::Unauthorized("Missing Authorization header".into())
+                        .error_response()
+                        .map_into_boxed_body();
+                    return Ok(req.into_response(resp).map_into_right_body());
                 }
             };
 
@@ -69,18 +71,19 @@ where
                 .expect("JwtSecret not registered");
 
             let claims = match verify_token(secret, &token) {
-                Ok(c)  => c,
+                Ok(c) => c,
                 Err(_) => {
-                    return Err(actix_web::error::ErrorUnauthorized(
-                        AppError::Unauthorized("Invalid or expired token".into()).to_string(),
-                    ))
+                    let resp = AppError::Unauthorized("Invalid or expired token".into())
+                        .error_response()
+                        .map_into_boxed_body();
+                    return Ok(req.into_response(resp).map_into_right_body());
                 }
             };
 
             // Attach claims to request extensions so handlers can read them
             req.extensions_mut().insert(claims);
 
-            svc.call(req).await
+            svc.call(req).await.map(|r| r.map_into_left_body())
         })
     }
 }

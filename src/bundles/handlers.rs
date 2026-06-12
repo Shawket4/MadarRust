@@ -211,9 +211,17 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 }
 
 pub async fn compute_item_cost(pool: &PgPool, item_id: Uuid) -> Result<i32, sqlx::Error> {
+    // cost_per_unit is stored in piastres — no currency conversion. The
+    // rollup NULL-propagates: any ingredient without an entered cost makes
+    // the whole recipe cost unknown (plain SUM would silently skip NULLs
+    // and undercount). Unknown ⟹ 0 here, meaning "no margin floor to
+    // enforce" for bundle activation — never "free".
     let cost: Option<f64> = sqlx::query_scalar(
         r#"
-        SELECT SUM(r.quantity_used::float8 * i.cost_per_unit::float8 * 100.0)
+        SELECT CASE
+            WHEN bool_or(i.cost_per_unit IS NULL) THEN NULL
+            ELSE SUM(r.quantity_used::float8 * i.cost_per_unit::float8)
+        END
         FROM menu_item_recipes r
         JOIN org_ingredients i ON i.id = r.org_ingredient_id
         WHERE r.menu_item_id = $1
@@ -1166,7 +1174,7 @@ pub async fn bundle_performance(
     let mut total_cost = 0;
     if !ing_qty_map.is_empty() {
         let ing_ids: Vec<Uuid> = ing_qty_map.keys().cloned().collect();
-        let decimal_costs: Vec<(Uuid, Decimal)> = sqlx::query_as(
+        let decimal_costs: Vec<(Uuid, Option<Decimal>)> = sqlx::query_as(
             "SELECT id, cost_per_unit FROM org_ingredients WHERE id = ANY($1)"
         )
         .bind(&ing_ids)
@@ -1174,7 +1182,10 @@ pub async fn bundle_performance(
         .await?;
 
         for (id, cost) in decimal_costs {
-            let piastres = (cost * Decimal::from(100)).round().to_i32().unwrap_or(0);
+            // cost_per_unit is piastres; NULL = never entered, contributes
+            // nothing (the figure is a best-effort profit estimate).
+            let Some(cost) = cost else { continue };
+            let piastres = cost.round().to_i32().unwrap_or(0);
             if let Some(qty) = ing_qty_map.get(&id) {
                 total_cost += (*qty * piastres as f64).round() as i64;
             }

@@ -563,12 +563,12 @@ async fn test_order_cost_snapshot_with_recipe_and_addon(pool: PgPool) {
     let cat_id = seed_category(&pool, org_id).await;
     let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
 
-    // 20 g coffee @ 100 EGP/g → recipe cost 2 000 EGP = 200 000 piastres
+    // 20 g coffee @ 100 piastres/g → recipe cost 2 000 piastres
     let coffee = seed_ingredient(&pool, org_id, "Coffee Beans", "g").await;
     seed_branch_inventory(&pool, branch_id, coffee, 1000.0).await;
     add_menu_item_recipe(&pool, menu_item_id, coffee, 20.0).await;
 
-    // Additive addon: 5 ml syrup @ 100 EGP/ml → 500 EGP = 50 000 piastres
+    // Additive addon: 5 ml syrup @ 100 piastres/ml → 500 piastres
     let syrup = seed_ingredient(&pool, org_id, "Syrup", "ml").await;
     seed_branch_inventory(&pool, branch_id, syrup, 1000.0).await;
     let addon_id = seed_addon_item(&pool, org_id, "Vanilla Syrup", "extra", 100).await;
@@ -614,15 +614,15 @@ async fn test_order_cost_snapshot_with_recipe_and_addon(pool: PgPool) {
     let order_full: OrderFull = test::read_body_json(resp).await;
     let item = &order_full.items[0].item;
 
-    // Recipe scope per unit: 20 g × 100 EGP × 100 = 200 000 piastres / unit.
-    assert_eq!(item.unit_cost, Some(200_000));
-    // Full line: recipe 2 units (400 000) + addon 5 ml × 2 units (100 000).
-    assert_eq!(item.line_cost, Some(500_000));
+    // Recipe scope per unit: 20 g × 100 piastres = 2 000 piastres / unit.
+    assert_eq!(item.unit_cost, Some(2_000));
+    // Full line: recipe 2 units (4 000) + addon 5 ml × 2 units (1 000).
+    assert_eq!(item.line_cost, Some(5_000));
     assert!(!item.cost_missing);
 
-    // Addon line cost: 5 ml × 100 EGP × qty 1 × item qty 2 × 100 = 100 000.
+    // Addon line cost: 5 ml × 100 piastres × qty 1 × item qty 2 = 1 000.
     let addon_row = &order_full.items[0].addons[0];
-    assert_eq!(addon_row.line_cost, Some(100_000));
+    assert_eq!(addon_row.line_cost, Some(1_000));
 
     // Snapshot entries carry per-entry costs for audit.
     let entries = item.deductions_snapshot.as_array().unwrap();

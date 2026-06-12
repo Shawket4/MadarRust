@@ -230,6 +230,11 @@ pub struct ListOrdersQuery {
     pub status:         Option<String>,
     pub from:           Option<chrono::DateTime<chrono::Utc>>,
     pub to:             Option<chrono::DateTime<chrono::Utc>>,
+    /// When true, each order in `data` embeds its full line items
+    /// (addons/optionals/bundle components) — the response shape becomes
+    /// [PaginatedOrdersFull]. Lets offline-first clients cache complete
+    /// orders in one round trip instead of fetching each order separately.
+    pub include_items:  Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -249,6 +254,18 @@ pub struct PaginatedOrders {
     pub per_page:    i64,
     pub total_pages: i64,
     pub summary:     OrderSummary,   // ← add this
+}
+
+/// Same envelope as [PaginatedOrders] but each order carries its line items
+/// (returned when `include_items=true`).
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct PaginatedOrdersFull {
+    pub data:        Vec<OrderFull>,
+    pub total:       i64,
+    pub page:        i64,
+    pub per_page:    i64,
+    pub total_pages: i64,
+    pub summary:     OrderSummary,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
@@ -308,7 +325,7 @@ struct InventoryDeduction {
     /// Bundle-component attribution (which component this entry belongs to).
     #[serde(skip_serializing_if = "Option::is_none")]
     component_item_id: Option<Uuid>,
-    /// EGP cost per ingredient unit at sale time. None ⟺ unknown.
+    /// Piastre cost per ingredient unit at sale time. None ⟺ unknown.
     cost_per_unit:     Option<f64>,
     /// quantity × cost_per_unit in piastres, rounded. None ⟺ unknown.
     line_cost:         Option<i64>,
@@ -337,14 +354,15 @@ fn summarize_line_costs(
         || deductions.is_empty()
         || has_uncosted_addon;
 
-    let total_egp: f64 = deductions
+    // Ingredient costs are stored in piastres; no currency conversion here.
+    let total_cost: f64 = deductions
         .iter()
         .filter_map(|d| d.cost_per_unit.map(|c| c * d.quantity))
         .sum();
     let line_cost = if cost_missing {
         None
     } else {
-        Some((total_egp * 100.0).round() as i64)
+        Some(total_cost.round() as i64)
     };
 
     let recipe_scope =
@@ -356,11 +374,11 @@ fn summarize_line_costs(
         if entries.is_empty() || entries.iter().any(|d| d.cost_per_unit.is_none()) {
             None
         } else {
-            let egp: f64 = entries
+            let cost: f64 = entries
                 .iter()
                 .map(|d| d.cost_per_unit.unwrap() * d.quantity)
                 .sum();
-            Some((egp * 100.0 / quantity.max(1) as f64).round() as i64)
+            Some((cost / quantity.max(1) as f64).round() as i64)
         }
     };
 
@@ -420,7 +438,8 @@ pub async fn create_order(
         ));
     }
 
-    let org_id = claims.org_id().unwrap();
+    let org_id = claims.org_id()
+        .ok_or_else(|| AppError::Forbidden("No org in token".into()))?;
 
     validate_payment_method(pool.get_ref(), org_id, &body.payment_method).await?;
     if let Some(dt)  = &body.discount_type      { validate_discount_type(dt)?; }
@@ -1047,12 +1066,13 @@ pub async fn create_order(
                 .await?;
         for ri in &mut resolved_items {
             for d in &mut ri.deductions {
-                let egp = d
+                // Piastres per ingredient unit, straight from the catalog.
+                let cost = d
                     .org_ingredient_id
                     .and_then(|id| ingredient_costs.get(&id))
                     .and_then(|c| c.to_f64());
-                d.cost_per_unit = egp;
-                d.line_cost = egp.map(|c| (d.quantity * c * 100.0).round() as i64);
+                d.cost_per_unit = cost;
+                d.line_cost = cost.map(|c| (d.quantity * c).round() as i64);
             }
         }
     }
@@ -1204,11 +1224,11 @@ pub async fn create_order(
                 {
                     None
                 } else {
-                    let egp: f64 = comp_entries
+                    let cost: f64 = comp_entries
                         .iter()
                         .map(|d| d.cost_per_unit.unwrap() * d.quantity)
                         .sum();
-                    Some((egp * 100.0).round() as i64)
+                    Some(cost.round() as i64)
                 };
 
                 sqlx::query(
@@ -1288,11 +1308,11 @@ pub async fn create_order(
                 if entries.is_empty() || entries.iter().any(|d| d.cost_per_unit.is_none()) {
                     None
                 } else {
-                    let egp: f64 = entries
+                    let cost: f64 = entries
                         .iter()
                         .map(|d| d.cost_per_unit.unwrap() * d.quantity)
                         .sum();
-                    Some((egp * 100.0).round() as i64)
+                    Some(cost.round() as i64)
                 }
             };
 
@@ -1327,7 +1347,7 @@ pub async fn create_order(
                     .iter()
                     .find(|d| d.optional_field_id == Some(opt.optional_field_id))
                     .and_then(|d| d.cost_per_unit)
-                    .map(|egp| (qty * egp * 100.0).round() as i64),
+                    .map(|cost| (qty * cost).round() as i64),
                 // No ingredient linked ⟹ genuinely zero marginal cost.
                 _ => Some(0),
             };
@@ -1427,7 +1447,8 @@ pub async fn list_orders(
     let per_page = query.per_page.unwrap_or(default_per_page).clamp(1, 999999);
     let offset   = (page - 1) * per_page;
 
-    let org_id = claims.org_id().unwrap();
+    let org_id = claims.org_id()
+        .ok_or_else(|| AppError::Forbidden("No org in token".into()))?;
 
     let parsed_payment_methods = match &query.payment_method {
         Some(pm) => {
@@ -1550,6 +1571,21 @@ pub async fn list_orders(
     .await?;
 
     let total_pages = (total as f64 / per_page as f64).ceil() as i64;
+
+    if query.include_items.unwrap_or(false) {
+        let ids: Vec<Uuid> = data.iter().map(|o| o.id).collect();
+        let mut items_map = fetch_orders_items_full_batch(pool.get_ref(), &ids).await?;
+        let data: Vec<OrderFull> = data
+            .into_iter()
+            .map(|order| {
+                let items = items_map.remove(&order.id).unwrap_or_default();
+                OrderFull { order, items }
+            })
+            .collect();
+        return Ok(HttpResponse::Ok().json(PaginatedOrdersFull {
+            data, total, page, per_page, total_pages, summary,
+        }));
+    }
 
     Ok(HttpResponse::Ok().json(PaginatedOrders { data, total, page, per_page, total_pages, summary }))
 }
@@ -1967,6 +2003,158 @@ async fn fetch_order_items_full(
     Ok(result)
 }
 
+/// Batched variant of [fetch_order_items_full] for `include_items=true` list
+/// responses: one query per table (ANY($1)) instead of N+1 per order.
+async fn fetch_orders_items_full_batch(
+    pool:      &PgPool,
+    order_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, Vec<OrderItemFull>>, AppError> {
+    use std::collections::HashMap;
+
+    let mut by_order: HashMap<Uuid, Vec<OrderItemFull>> = HashMap::new();
+    if order_ids.is_empty() {
+        return Ok(by_order);
+    }
+
+    let items = sqlx::query_as::<_, OrderItem>(
+        "SELECT id, order_id, menu_item_id, item_name, name_translations, size_label, \
+                unit_price, quantity, line_total, notes, deductions_snapshot, \
+                bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing \
+         FROM order_items WHERE order_id = ANY($1) ORDER BY id",
+    )
+    .bind(order_ids)
+    .fetch_all(pool)
+    .await?;
+
+    let item_ids: Vec<Uuid> = items.iter().map(|i| i.id).collect();
+
+    let mut addons_by_item: HashMap<Uuid, Vec<OrderItemAddon>> = HashMap::new();
+    for a in sqlx::query_as::<_, OrderItemAddon>(
+        "SELECT id, order_item_id, addon_item_id, addon_name, name_translations, \
+                unit_price, quantity, line_total, line_cost \
+         FROM order_item_addons WHERE order_item_id = ANY($1) ORDER BY id",
+    )
+    .bind(&item_ids)
+    .fetch_all(pool)
+    .await?
+    {
+        addons_by_item.entry(a.order_item_id).or_default().push(a);
+    }
+
+    let mut optionals_by_item: HashMap<Uuid, Vec<OrderItemOptional>> = HashMap::new();
+    for o in sqlx::query_as::<_, OrderItemOptional>(
+        "SELECT id, order_item_id, optional_field_id, field_name, name_translations, price, \
+                org_ingredient_id, ingredient_name, ingredient_unit, quantity_deducted, cost \
+         FROM order_item_optionals WHERE order_item_id = ANY($1) ORDER BY id",
+    )
+    .bind(&item_ids)
+    .fetch_all(pool)
+    .await?
+    {
+        optionals_by_item.entry(o.order_item_id).or_default().push(o);
+    }
+
+    // ── Bundle components (only for bundle lines) ────────────────────────────
+    let bundle_line_ids: Vec<Uuid> = items
+        .iter()
+        .filter(|i| i.bundle_id.is_some())
+        .map(|i| i.id)
+        .collect();
+
+    let mut comps_by_line: HashMap<Uuid, Vec<OrderBundleComponentFull>> = HashMap::new();
+    if !bundle_line_ids.is_empty() {
+        let comp_rows: Vec<(Uuid, Uuid, i32, Option<String>, serde_json::Value)> =
+            sqlx::query_as(
+                "SELECT order_line_id, item_id, quantity, size_label, name_translations \
+                 FROM order_line_bundle_components WHERE order_line_id = ANY($1)",
+            )
+            .bind(&bundle_line_ids)
+            .fetch_all(pool)
+            .await?;
+
+        let comp_item_ids: Vec<Uuid> = comp_rows.iter().map(|r| r.1).collect();
+        let mut item_names: HashMap<Uuid, String> = HashMap::new();
+        if !comp_item_ids.is_empty() {
+            let name_rows: Vec<(Uuid, String)> = sqlx::query_as(
+                "SELECT id, name FROM menu_items WHERE id = ANY($1)",
+            )
+            .bind(&comp_item_ids)
+            .fetch_all(pool)
+            .await?;
+            item_names.extend(name_rows);
+        }
+
+        let mut comp_addons: HashMap<(Uuid, Uuid), Vec<OrderBundleComponentAddon>> =
+            HashMap::new();
+        for a in sqlx::query_as::<_, OrderBundleComponentAddon>(
+            "SELECT id, order_line_id, component_item_id, addon_item_id, addon_name, name_translations, \
+                    unit_price, quantity, line_total \
+             FROM order_line_bundle_component_addons \
+             WHERE order_line_id = ANY($1) ORDER BY id",
+        )
+        .bind(&bundle_line_ids)
+        .fetch_all(pool)
+        .await?
+        {
+            comp_addons
+                .entry((a.order_line_id, a.component_item_id))
+                .or_default()
+                .push(a);
+        }
+
+        let mut comp_optionals: HashMap<(Uuid, Uuid), Vec<OrderBundleComponentOptional>> =
+            HashMap::new();
+        for o in sqlx::query_as::<_, OrderBundleComponentOptional>(
+            "SELECT id, order_line_id, component_item_id, optional_field_id, field_name, name_translations, price \
+             FROM order_line_bundle_component_optionals \
+             WHERE order_line_id = ANY($1) ORDER BY id",
+        )
+        .bind(&bundle_line_ids)
+        .fetch_all(pool)
+        .await?
+        {
+            comp_optionals
+                .entry((o.order_line_id, o.component_item_id))
+                .or_default()
+                .push(o);
+        }
+
+        for (line_id, comp_item_id, qty, size_label, name_translations) in comp_rows {
+            comps_by_line
+                .entry(line_id)
+                .or_default()
+                .push(OrderBundleComponentFull {
+                    item_id: comp_item_id,
+                    item_name: item_names
+                        .get(&comp_item_id)
+                        .cloned()
+                        .unwrap_or_default(),
+                    name_translations,
+                    quantity: qty,
+                    size_label,
+                    addons: comp_addons
+                        .remove(&(line_id, comp_item_id))
+                        .unwrap_or_default(),
+                    optionals: comp_optionals
+                        .remove(&(line_id, comp_item_id))
+                        .unwrap_or_default(),
+                });
+        }
+    }
+
+    for item in items {
+        let full = OrderItemFull {
+            addons: addons_by_item.remove(&item.id).unwrap_or_default(),
+            optionals: optionals_by_item.remove(&item.id).unwrap_or_default(),
+            bundle_components: comps_by_line.remove(&item.id).unwrap_or_default(),
+            item,
+        };
+        by_order.entry(full.item.order_id).or_default().push(full);
+    }
+
+    Ok(by_order)
+}
+
 async fn require_branch_access(
     pool:      &PgPool,
     claims:    &Claims,
@@ -2095,7 +2283,8 @@ pub async fn export_orders(
 
     require_branch_access(pool.get_ref(), &claims, branch_id).await?;
 
-    let org_id = claims.org_id().unwrap();
+    let org_id = claims.org_id()
+        .ok_or_else(|| AppError::Forbidden("No org in token".into()))?;
 
     let parsed_payment_methods = match &query.payment_method {
         Some(pm) => {
@@ -2249,11 +2438,8 @@ pub async fn export_orders(
 
         decimal_costs.into_iter()
             .map(|(id, cost)| {
-                // Convert from standard currency Decimal (e.g. 5.50 EGP) to i32 piastres (e.g. 550)
-                let piastres = (cost * Decimal::from(100))
-                    .round()
-                    .to_i32()
-                    .unwrap_or(0);
+                // cost_per_unit is stored in piastres; just round to integer.
+                let piastres = cost.round().to_i32().unwrap_or(0);
                 (id, piastres)
             })
             .collect()

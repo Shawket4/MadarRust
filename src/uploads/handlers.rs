@@ -166,11 +166,23 @@ fn compress_to_jpeg(raw: &[u8]) -> Result<Vec<u8>, AppError> {
 
 pub async fn delete_old_image(old_url: &str, _base_url: &str, uploads_dir: &str) {
     let rel = extract_relative_path(old_url);
-    let full = Path::new(uploads_dir).join(rel);
-    if full.exists()
-        && let Err(e) = tokio::fs::remove_file(&full).await {
-            tracing::warn!("Could not delete old image {:?}: {}", full, e);
-        }
+    let uploads_root = match std::fs::canonicalize(uploads_dir) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let candidate = uploads_root.join(rel);
+    // Resolve symlinks and ".." before comparing — prevents path traversal
+    let canonical = match candidate.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    if !canonical.starts_with(&uploads_root) {
+        tracing::warn!("Blocked path traversal attempt: {:?} escapes uploads dir", canonical);
+        return;
+    }
+    if let Err(e) = tokio::fs::remove_file(&canonical).await {
+        tracing::warn!("Could not delete old image {:?}: {}", canonical, e);
+    }
 }
 
 pub fn extract_relative_path(url: &str) -> &str {

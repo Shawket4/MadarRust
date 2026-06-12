@@ -103,9 +103,8 @@ async fn test_create_branch_unauthorized(pool: PgPool) {
         }))
         .to_request();
 
-    use actix_web::dev::Service;
-    let resp = app.call(req).await;
-    assert!(resp.is_err());
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
 }
 
 #[sqlx::test]

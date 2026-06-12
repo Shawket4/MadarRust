@@ -22,27 +22,33 @@ pub enum PrinterBrand {
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct Branch {
-    pub id:            Uuid,
-    pub org_id:        Uuid,
+    pub id:                Uuid,
+    pub org_id:            Uuid,
     #[schema(example = "Zamalek")]
-    pub name:          String,
+    pub name:              String,
     #[schema(example = "26 July Corridor, Zamalek, Cairo")]
-    pub address:       Option<String>,
+    pub address:           Option<String>,
     #[schema(example = "+201234567890")]
-    pub phone:         Option<String>,
+    pub phone:             Option<String>,
     /// IANA timezone name. Defaults to `Africa/Cairo`.
     #[schema(example = "Africa/Cairo")]
-    pub timezone:      String,
-    pub printer_brand: Option<PrinterBrand>,
+    pub timezone:          String,
+    pub printer_brand:     Option<PrinterBrand>,
     #[schema(example = "192.168.1.50")]
-    pub printer_ip:    Option<String>,
+    pub printer_ip:        Option<String>,
     #[schema(example = 9100)]
-    pub printer_port:  Option<i32>,
-    pub is_active:     bool,
+    pub printer_port:      Option<i32>,
+    pub is_active:         bool,
     /// Convenience field — populated from the parent org's `logo_url`.
-    pub org_logo_url:  Option<String>,
-    pub created_at:    DateTime<Utc>,
-    pub updated_at:    DateTime<Utc>,
+    pub org_logo_url:      Option<String>,
+    /// WGS-84 latitude for geofenced branch resolution.
+    pub latitude:          Option<f64>,
+    /// WGS-84 longitude for geofenced branch resolution.
+    pub longitude:         Option<f64>,
+    /// Radius in meters within which this branch is considered a match. Defaults to 200.
+    pub geo_radius_meters: Option<i32>,
+    pub created_at:        DateTime<Utc>,
+    pub updated_at:        DateTime<Utc>,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -54,19 +60,23 @@ pub struct ListBranchesQuery {
 
 #[derive(Deserialize, ToSchema)]
 pub struct CreateBranchRequest {
-    pub org_id:        Uuid,
+    pub org_id:            Uuid,
     #[schema(example = "Zamalek")]
-    pub name:          String,
-    pub address:       Option<String>,
-    pub phone:         Option<String>,
+    pub name:              String,
+    pub address:           Option<String>,
+    pub phone:             Option<String>,
     /// IANA timezone name. Defaults to `Africa/Cairo` if absent.
     #[schema(example = "Africa/Cairo")]
-    pub timezone:      Option<String>,
-    pub printer_brand: Option<PrinterBrand>,
-    pub printer_ip:    Option<String>,
+    pub timezone:          Option<String>,
+    pub printer_brand:     Option<PrinterBrand>,
+    pub printer_ip:        Option<String>,
     /// TCP port for the receipt printer. Defaults to `9100` if absent.
     #[schema(example = 9100)]
-    pub printer_port:  Option<i32>,
+    pub printer_port:      Option<i32>,
+    pub latitude:          Option<f64>,
+    pub longitude:         Option<f64>,
+    /// Geofence radius in meters. Defaults to 200.
+    pub geo_radius_meters: Option<i32>,
 }
 
 /// PATCH-style update. Fields fall into three categories:
@@ -100,6 +110,17 @@ pub struct UpdateBranchRequest {
     #[serde(default, deserialize_with = "double_option")]
     #[schema(nullable, value_type = Option<i32>)]
     pub printer_port:  Option<Option<i32>>,
+
+    // Clearable geo fields
+    #[serde(default, deserialize_with = "double_option")]
+    #[schema(nullable, value_type = Option<f64>)]
+    pub latitude: Option<Option<f64>>,
+
+    #[serde(default, deserialize_with = "double_option")]
+    #[schema(nullable, value_type = Option<f64>)]
+    pub longitude: Option<Option<f64>>,
+
+    pub geo_radius_meters: Option<i32>,
 }
 
 /// Deserializes a field that can be:
@@ -139,7 +160,9 @@ pub async fn list_branches(
             r#"
             SELECT b.id, b.org_id, b.name, b.address, b.phone, b.timezone,
                    b.printer_brand, b.printer_ip::text, b.printer_port,
-                   b.is_active, o.logo_url as org_logo_url, b.created_at, b.updated_at
+                   b.is_active, o.logo_url as org_logo_url,
+                   b.latitude, b.longitude, b.geo_radius_meters,
+                   b.created_at, b.updated_at
             FROM branches b
             JOIN organizations o ON o.id = b.org_id
             JOIN user_branch_assignments uba ON uba.branch_id = b.id
@@ -156,7 +179,9 @@ pub async fn list_branches(
             r#"
             SELECT b.id, b.org_id, b.name, b.address, b.phone, b.timezone,
                    b.printer_brand, b.printer_ip::text, b.printer_port,
-                   b.is_active, o.logo_url as org_logo_url, b.created_at, b.updated_at
+                   b.is_active, o.logo_url as org_logo_url,
+                   b.latitude, b.longitude, b.geo_radius_meters,
+                   b.created_at, b.updated_at
             FROM branches b
             JOIN organizations o ON o.id = b.org_id
             WHERE b.org_id = $1 AND b.deleted_at IS NULL
@@ -221,15 +246,18 @@ pub async fn create_branch(
     let branch = sqlx::query_as::<_, Branch>(
         r#"
         WITH inserted AS (
-            INSERT INTO branches (org_id, name, address, phone, timezone, printer_brand, printer_ip, printer_port)
-            VALUES ($1, $2, $3, $4, $5, $6, $7::inet, $8)
+            INSERT INTO branches (org_id, name, address, phone, timezone, printer_brand, printer_ip, printer_port, latitude, longitude, geo_radius_meters)
+            VALUES ($1, $2, $3, $4, $5, $6, $7::inet, $8, $9, $10, $11)
             RETURNING id, org_id, name, address, phone, timezone,
                       printer_brand, printer_ip, printer_port,
-                      is_active, created_at, updated_at
+                      is_active, latitude, longitude, geo_radius_meters,
+                      created_at, updated_at
         )
         SELECT i.id, i.org_id, i.name, i.address, i.phone, i.timezone,
                i.printer_brand, i.printer_ip::text, i.printer_port,
-               i.is_active, o.logo_url as org_logo_url, i.created_at, i.updated_at
+               i.is_active, o.logo_url as org_logo_url,
+               i.latitude, i.longitude, i.geo_radius_meters,
+               i.created_at, i.updated_at
         FROM inserted i
         JOIN organizations o ON o.id = i.org_id
         "#,
@@ -242,6 +270,9 @@ pub async fn create_branch(
     .bind(&body.printer_brand)
     .bind(&body.printer_ip)
     .bind(body.printer_port.unwrap_or(9100))
+    .bind(body.latitude)
+    .bind(body.longitude)
+    .bind(body.geo_radius_meters)
     .fetch_one(pool.get_ref())
     .await?;
 
@@ -281,36 +312,50 @@ pub async fn update_branch(
     let new_printer_brand: Option<Option<PrinterBrand>> = body.printer_brand.clone();
     let new_printer_ip:    Option<Option<String>>       = body.printer_ip.clone();
     let new_printer_port:  Option<Option<i32>>          = body.printer_port;
+    let new_latitude:      Option<Option<f64>>          = body.latitude;
+    let new_longitude:     Option<Option<f64>>          = body.longitude;
 
     let branch = sqlx::query_as::<_, Branch>(
         r#"
         WITH updated AS (
             UPDATE branches SET
-                name          = COALESCE($2, name),
-                address       = COALESCE($3, address),
-                phone         = COALESCE($4, phone),
-                timezone      = COALESCE($5, timezone),
-                is_active     = COALESCE($6, is_active),
-                printer_brand = CASE
-                                  WHEN $7 THEN $8
-                                  ELSE printer_brand
-                                END,
-                printer_ip    = CASE
-                                  WHEN $9  THEN $10::inet
-                                  ELSE printer_ip
-                                END,
-                printer_port  = CASE
-                                  WHEN $11 THEN $12
-                                  ELSE printer_port
-                                END
+                name              = COALESCE($2, name),
+                address           = COALESCE($3, address),
+                phone             = COALESCE($4, phone),
+                timezone          = COALESCE($5, timezone),
+                is_active         = COALESCE($6, is_active),
+                printer_brand     = CASE
+                                      WHEN $7 THEN $8
+                                      ELSE printer_brand
+                                    END,
+                printer_ip        = CASE
+                                      WHEN $9  THEN $10::inet
+                                      ELSE printer_ip
+                                    END,
+                printer_port      = CASE
+                                      WHEN $11 THEN $12
+                                      ELSE printer_port
+                                    END,
+                latitude          = CASE
+                                      WHEN $13 THEN $14
+                                      ELSE latitude
+                                    END,
+                longitude         = CASE
+                                      WHEN $15 THEN $16
+                                      ELSE longitude
+                                    END,
+                geo_radius_meters = COALESCE($17, geo_radius_meters)
             WHERE id = $1 AND deleted_at IS NULL
             RETURNING id, org_id, name, address, phone, timezone,
                       printer_brand, printer_ip, printer_port,
-                      is_active, created_at, updated_at
+                      is_active, latitude, longitude, geo_radius_meters,
+                      created_at, updated_at
         )
         SELECT u.id, u.org_id, u.name, u.address, u.phone, u.timezone,
                u.printer_brand, u.printer_ip::text, u.printer_port,
-               u.is_active, o.logo_url as org_logo_url, u.created_at, u.updated_at
+               u.is_active, o.logo_url as org_logo_url,
+               u.latitude, u.longitude, u.geo_radius_meters,
+               u.created_at, u.updated_at
         FROM updated u
         JOIN organizations o ON o.id = u.org_id
         "#,
@@ -327,6 +372,11 @@ pub async fn update_branch(
     .bind(new_printer_ip.as_ref().and_then(|o| o.clone()))
     .bind(new_printer_port.is_some())
     .bind(new_printer_port.and_then(|o| o))
+    .bind(new_latitude.is_some())
+    .bind(new_latitude.and_then(|o| o))
+    .bind(new_longitude.is_some())
+    .bind(new_longitude.and_then(|o| o))
+    .bind(body.geo_radius_meters)
     .fetch_optional(pool.get_ref())
     .await?
     .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
@@ -380,7 +430,9 @@ async fn fetch_branch(pool: &PgPool, id: Uuid) -> Result<Branch, AppError> {
         r#"
         SELECT b.id, b.org_id, b.name, b.address, b.phone, b.timezone,
                b.printer_brand, b.printer_ip::text, b.printer_port,
-               b.is_active, o.logo_url as org_logo_url, b.created_at, b.updated_at
+               b.is_active, o.logo_url as org_logo_url,
+               b.latitude, b.longitude, b.geo_radius_meters,
+               b.created_at, b.updated_at
         FROM branches b
         JOIN organizations o ON o.id = b.org_id
         WHERE b.id = $1 AND b.deleted_at IS NULL

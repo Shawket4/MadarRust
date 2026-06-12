@@ -10,7 +10,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/{id}",      web::get().to(handlers::get_org))
             .route("/{id}",      web::patch().to(handlers::update_org))
             .route("/{id}",      web::delete().to(handlers::delete_org))
-            .route("/{id}/logo", web::put().to(handlers::upload_org_logo)),
+            .route("/{id}/logo", web::put().to(handlers::upload_org_logo))
+            .route("/{id}/onboarding",          web::get().to(crate::orgs::onboarding::get_onboarding))
+            .route("/{id}/onboarding/complete", web::post().to(crate::orgs::onboarding::complete_onboarding)),
     );
 
     cfg.service(

@@ -125,9 +125,10 @@ pub struct StockRow {
     pub unit:                String,
     pub current_stock:       f64,
     pub reorder_threshold:   f64,
-    #[serde(with = "rust_decimal::serde::float")]
-    #[schema(value_type = f64)]
-    pub cost_per_unit:       Decimal,
+    /// Piastres per unit; `null` ⟺ cost never entered.
+    #[serde(with = "rust_decimal::serde::float_option")]
+    #[schema(value_type = Option<f64>)]
+    pub cost_per_unit:       Option<Decimal>,
     pub below_reorder:       bool,
 }
 
@@ -572,20 +573,30 @@ pub async fn branch_sales_timeseries(
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
     require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
 
+    let tz: String = sqlx::query_scalar(
+        "SELECT timezone FROM branches WHERE id = $1 AND deleted_at IS NULL"
+    )
+    .bind(*branch_id)
+    .fetch_optional(pool.get_ref())
+    .await?
+    .flatten()
+    .filter(|s: &String| !s.is_empty())
+    .unwrap_or_else(|| "Africa/Cairo".to_string());
+
     let trunc = match query.granularity.as_deref().unwrap_or("daily") {
         "hourly"  => "hour",
         "monthly" => "month",
         _         => "day",
     };
 
-    // trunc is server-controlled — not user input, safe to interpolate
+    // trunc and tz are server-controlled (enum whitelist + DB value) — safe to interpolate
     let sql = format!(
         r#"
         WITH periods AS (
             SELECT
-                date_trunc('{trunc}', o.created_at AT TIME ZONE 'Africa/Cairo') AS period_val,
+                date_trunc('{trunc}', o.created_at AT TIME ZONE '{tz}') AS period_val,
                 to_char(
-                    date_trunc('{trunc}', o.created_at AT TIME ZONE 'Africa/Cairo'),
+                    date_trunc('{trunc}', o.created_at AT TIME ZONE '{tz}'),
                     'YYYY-MM-DD"T"HH24:MI:SS'
                 ) AS period_str,
                 COUNT(o.id)   FILTER (WHERE o.status != 'voided')::bigint  AS orders,
@@ -597,7 +608,7 @@ pub async fn branch_sales_timeseries(
             WHERE o.branch_id = $1
               AND ($2::timestamptz IS NULL OR o.created_at >= $2)
               AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-            GROUP BY date_trunc('{trunc}', o.created_at AT TIME ZONE 'Africa/Cairo')
+            GROUP BY date_trunc('{trunc}', o.created_at AT TIME ZONE '{tz}')
         )
         SELECT
             p.period_str AS period,
@@ -612,14 +623,15 @@ pub async fn branch_sales_timeseries(
                 FROM order_payments op2
                 JOIN orders o2 ON o2.id = op2.order_id
                 WHERE o2.branch_id = $1 AND o2.status != 'voided'
-                  AND date_trunc('{trunc}', o2.created_at AT TIME ZONE 'Africa/Cairo') = p.period_val
+                  AND date_trunc('{trunc}', o2.created_at AT TIME ZONE '{tz}') = p.period_val
                 GROUP BY op2.method
               ) sub
             ), '{{}}'::json) AS revenue_by_method
         FROM periods p
         ORDER BY p.period_val ASC
         "#,
-        trunc = trunc
+        trunc = trunc,
+        tz    = tz,
     );
 
     let rows = sqlx::query_as::<_, TimeseriesPoint>(&sql)
@@ -1046,15 +1058,31 @@ pub async fn branch_combined_item_sales(
 
 // ── GET /reports/branches/:id/menu-engineering ────────────────
 //
-// Foodics-vocabulary menu engineering table, computed from sale-time cost
-// snapshots (order_items.line_cost / unit_cost) — not from current recipe
-// costs, so history stays truthful when ingredient prices move.
+// Foodics-vocabulary menu engineering table. Two cost bases, both pairing
+// ITEM revenue (`line_total`) with ITEM recipe-scope cost — additive addons
+// carry their own revenue AND cost rows and have their own report, so they
+// belong in neither side here:
+//   - `cost_basis=snapshot` (default): sale-time recipe cost snapshots
+//     (order_items.unit_cost × quantity) — history stays truthful when
+//     ingredient prices move; an inventory cost edit only flows in via new
+//     orders (or an operator backfill).
+//   - `cost_basis=current`: TODAY's recipe rollups (costing::org_sku_costs)
+//     applied to realized quantities — answers "how does my menu classify
+//     under current costs?" immediately after editing ingredient costs.
+//
+// Invariant (pinned by tests): right after `backfill-cost-snapshots`, the
+// two bases return identical rows and totals.
 //
 // Column semantics mirror the Foodics report so migrating owners read it
 // without relearning: Sales, Quantity, Total Cost, Item Profit, Total
 // Profit, Popularity %, Profit Category, Popularity Category, Class.
 // Classification here is the simple single-window high/low split (what
 // Foodics shows); the Menu Advisor remains the statistically serious view.
+//
+// Rows whose cost is unresolvable under the chosen basis are EXCLUDED from
+// the report entirely — they are not returned, and their quantities and row
+// count do not enter the popularity/profit thresholds. The response only
+// reports how many were excluded (`rows_cost_missing`).
 
 #[derive(Serialize, ToSchema)]
 pub struct MenuEngineeringRow {
@@ -1069,24 +1097,28 @@ pub struct MenuEngineeringRow {
     pub quantity_sold:  i64,
     /// Revenue from those lines, piastres.
     pub sales:          i64,
-    /// COGS from sale-time snapshots, piastres. `null` ⟺ at least one line
-    /// in the window had unresolved cost.
-    pub total_cost:     Option<i64>,
+    /// Recipe-scope COGS in piastres (additive addons excluded — they have
+    /// their own revenue and their own report). Snapshot basis:
+    /// `SUM(unit_cost × quantity)`; current basis: today's recipe rollup ×
+    /// quantity. Rows where this is unresolvable are excluded from the
+    /// report, so it is always present.
+    pub total_cost:     i64,
     /// Average profit per unit, piastres (`(sales - cost) / qty`).
-    pub item_profit:    Option<i64>,
+    pub item_profit:    i64,
     /// `sales - total_cost`, piastres.
-    pub total_profit:   Option<i64>,
-    /// Share of units among rows in this report.
+    pub total_profit:   i64,
+    /// Share of units among the rows in this report (cost-tracked only).
     pub popularity_pct: f64,
-    /// Lines in the window whose cost could not be resolved.
+    /// Lines in the window whose sale-time cost could not be resolved.
+    /// Always reports snapshot data quality, regardless of `cost_basis` —
+    /// under `current`, an included row can still carry snapshot gaps.
     pub cost_missing_lines: i64,
-    /// "high" | "low" — vs weighted-average per-unit profit (cost-tracked rows only).
-    pub profit_category:     Option<String>,
+    /// "high" | "low" — vs weighted-average per-unit profit.
+    pub profit_category:     String,
     /// "high" | "low" — Kasavana-Smith 70% rule (0.70 / n).
     pub popularity_category: String,
-    /// star | workhorse | challenge | dog (Foodics names) — only for
-    /// cost-tracked rows; `null` when cost is unknown.
-    pub class:          Option<String>,
+    /// star | workhorse | challenge | dog (Foodics names).
+    pub class:          String,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -1094,13 +1126,52 @@ pub struct MenuEngineeringReport {
     pub branch_id: Uuid,
     pub from:      Option<DateTime<Utc>>,
     pub to:        Option<DateTime<Utc>>,
+    /// Cost basis the report was computed with: "snapshot" | "current".
+    pub cost_basis: String,
     pub rows:      Vec<MenuEngineeringRow>,
-    /// Totals over cost-tracked rows.
+    /// Totals over the returned rows.
     pub total_sales:  i64,
     pub total_cost:   i64,
     pub total_profit: i64,
-    /// Rows excluded from profit math because cost was unresolvable.
+    /// SKUs sold in the window but EXCLUDED from this report because their
+    /// cost was unresolvable under the chosen basis.
     pub rows_cost_missing: i64,
+    /// Realized revenue (piastres) carried by the excluded SKUs — explains
+    /// why `total_sales` differs between cost bases: each basis excludes a
+    /// different set of un-costable rows.
+    pub excluded_sales: i64,
+}
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct CostBasisQuery {
+    /// `snapshot` (default) — COGS from sale-time order snapshots.
+    /// `current` — COGS from today's recipe rollups.
+    pub cost_basis: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum CostBasis {
+    Snapshot,
+    Current,
+}
+
+impl CostBasis {
+    fn parse(s: Option<&str>) -> Result<Self, AppError> {
+        match s {
+            None | Some("snapshot") => Ok(Self::Snapshot),
+            Some("current") => Ok(Self::Current),
+            Some(_) => Err(AppError::BadRequest(
+                "cost_basis must be 'snapshot' or 'current'".into(),
+            )),
+        }
+    }
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Snapshot => "snapshot",
+            Self::Current => "current",
+        }
+    }
 }
 
 #[utoipa::path(
@@ -1108,19 +1179,21 @@ pub struct MenuEngineeringReport {
     path = "/reports/branches/{branch_id}/menu-engineering",
     tag = "reports",
     params(("branch_id" = Uuid, Path, description = "Branch ID")),
-    params(DateRangeQuery),
-    responses((status = 200, description = "Foodics-style menu engineering table from sale-time cost snapshots", body = MenuEngineeringReport), AppErrorResponse),
+    params(DateRangeQuery, CostBasisQuery),
+    responses((status = 200, description = "Foodics-style menu engineering table. cost_basis=snapshot (default) uses sale-time cost snapshots; cost_basis=current reclassifies realized sales under today's recipe costs.", body = MenuEngineeringReport), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn branch_menu_engineering(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
-    branch_id: web::Path<Uuid>,
-    query:     web::Query<DateRangeQuery>,
+    req:         HttpRequest,
+    pool:        web::Data<PgPool>,
+    branch_id:   web::Path<Uuid>,
+    query:       web::Query<DateRangeQuery>,
+    basis_query: web::Query<CostBasisQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
     require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+    let basis = CostBasis::parse(basis_query.cost_basis.as_deref())?;
 
     #[derive(sqlx::FromRow)]
     struct Row {
@@ -1135,7 +1208,7 @@ pub async fn branch_menu_engineering(
         cost_missing_lines: i64,
     }
 
-    let rows: Vec<Row> = sqlx::query_as::<_, Row>(
+    let mut rows: Vec<Row> = sqlx::query_as::<_, Row>(
         r#"
         SELECT
             oi.menu_item_id,
@@ -1146,8 +1219,8 @@ pub async fn branch_menu_engineering(
             SUM(oi.quantity)::bigint   AS quantity_sold,
             SUM(oi.line_total)::bigint AS sales,
             CASE
-                WHEN bool_or(oi.line_cost IS NULL) THEN NULL
-                ELSE SUM(oi.line_cost)::bigint
+                WHEN bool_or(oi.unit_cost IS NULL) THEN NULL
+                ELSE SUM(oi.unit_cost * oi.quantity)::bigint
             END AS total_cost,
             COUNT(*) FILTER (WHERE oi.cost_missing)::bigint AS cost_missing_lines
         FROM order_items oi
@@ -1171,12 +1244,53 @@ pub async fn branch_menu_engineering(
     .fetch_all(pool.get_ref())
     .await?;
 
+    // Current basis: swap each row's COGS for today's recipe rollup × qty
+    // BEFORE the exclusion below. SKUs without a resolvable current cost
+    // (no recipe, missing ingredient cost, item deleted/deactivated since
+    // the sale) become unresolvable, exactly like snapshot cost-missing rows.
+    if basis == CostBasis::Current {
+        let org_id: Uuid = sqlx::query_scalar(
+            "SELECT org_id FROM branches WHERE id = $1",
+        )
+        .bind(*branch_id)
+        .fetch_one(pool.get_ref())
+        .await?;
+        let current_costs: std::collections::HashMap<(Uuid, String), Option<i64>> =
+            crate::costing::org_sku_costs(pool.get_ref(), org_id)
+                .await?
+                .into_iter()
+                .map(|s| ((s.menu_item_id, s.size_label), s.cost))
+                .collect();
+        for r in &mut rows {
+            r.total_cost = current_costs
+                .get(&(r.menu_item_id, r.size_label.clone()))
+                .copied()
+                .flatten()
+                .map(|unit_cost| unit_cost * r.quantity_sold);
+        }
+    }
+
+    // Cost-unresolvable rows are dropped HERE, before any threshold math:
+    // they must not be returned, and their quantities/row count must not
+    // sway the popularity split or the average-profit line. Their revenue
+    // is reported so the basis-dependent totals visibly reconcile.
+    let rows_total = rows.len();
+    let mut excluded_sales = 0_i64;
+    rows.retain(|r| {
+        let keep = r.total_cost.is_some();
+        if !keep {
+            excluded_sales += r.sales;
+        }
+        keep
+    });
+    let rows_cost_missing = (rows_total - rows.len()) as i64;
+
     let total_units: i64 = rows.iter().map(|r| r.quantity_sold).sum();
     let n = rows.len().max(1) as f64;
     let pop_threshold = 0.70 / n;
 
-    // Weighted-average per-unit profit across cost-tracked rows — the
-    // profit axis split (Kasavana-Smith uses the average CM as the line).
+    // Weighted-average per-unit profit — the profit axis split
+    // (Kasavana-Smith uses the average CM as the line).
     let (tracked_profit, tracked_units): (i64, i64) = rows
         .iter()
         .filter_map(|r| r.total_cost.map(|c| (r.sales - c, r.quantity_sold)))
@@ -1190,9 +1304,11 @@ pub async fn branch_menu_engineering(
     let mut out_rows = Vec::with_capacity(rows.len());
     let mut total_sales = 0_i64;
     let mut total_cost = 0_i64;
-    let mut rows_cost_missing = 0_i64;
 
     for r in rows {
+        // retain() above guarantees Some; skip defensively rather than panic.
+        let Some(cost) = r.total_cost else { continue };
+
         let popularity_pct = if total_units > 0 {
             r.quantity_sold as f64 / total_units as f64
         } else {
@@ -1201,31 +1317,20 @@ pub async fn branch_menu_engineering(
         let high_pop = popularity_pct >= pop_threshold;
         let popularity_category = if high_pop { "high" } else { "low" }.to_string();
 
-        let (item_profit, total_profit, profit_category, class) = match r.total_cost {
-            Some(c) => {
-                let tp = r.sales - c;
-                let ip = if r.quantity_sold > 0 { tp / r.quantity_sold } else { 0 };
-                let high_profit = (ip as f64) >= avg_unit_profit;
-                let class = match (high_pop, high_profit) {
-                    (true, true)   => "star",
-                    (true, false)  => "workhorse",
-                    (false, true)  => "challenge",
-                    (false, false) => "dog",
-                };
-                total_sales += r.sales;
-                total_cost += c;
-                (
-                    Some(ip),
-                    Some(tp),
-                    Some(if high_profit { "high" } else { "low" }.to_string()),
-                    Some(class.to_string()),
-                )
-            }
-            None => {
-                rows_cost_missing += 1;
-                (None, None, None, None)
-            }
-        };
+        let total_profit = r.sales - cost;
+        let item_profit =
+            if r.quantity_sold > 0 { total_profit / r.quantity_sold } else { 0 };
+        let high_profit = (item_profit as f64) >= avg_unit_profit;
+        let class = match (high_pop, high_profit) {
+            (true, true)   => "star",
+            (true, false)  => "workhorse",
+            (false, true)  => "challenge",
+            (false, false) => "dog",
+        }
+        .to_string();
+        let profit_category = if high_profit { "high" } else { "low" }.to_string();
+        total_sales += r.sales;
+        total_cost += cost;
 
         out_rows.push(MenuEngineeringRow {
             menu_item_id: r.menu_item_id,
@@ -1235,7 +1340,7 @@ pub async fn branch_menu_engineering(
             category_name: r.category_name,
             quantity_sold: r.quantity_sold,
             sales: r.sales,
-            total_cost: r.total_cost,
+            total_cost: cost,
             item_profit,
             total_profit,
             popularity_pct,
@@ -1250,10 +1355,12 @@ pub async fn branch_menu_engineering(
         branch_id: *branch_id,
         from: query.from,
         to: query.to,
+        cost_basis: basis.as_str().to_string(),
         total_profit: total_sales - total_cost,
         total_sales,
         total_cost,
         rows: out_rows,
         rows_cost_missing,
+        excluded_sales,
     }))
 }

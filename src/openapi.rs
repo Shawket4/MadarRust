@@ -55,10 +55,13 @@ use utoipa::{
 paths(
         // ── costing ─────────────────────────────────────────────────
         crate::costing::handlers::list_sku_costs,
+        crate::orgs::onboarding::get_onboarding,
+        crate::orgs::onboarding::complete_onboarding,
         crate::costing::handlers::list_addon_costs,
         crate::reports::handlers::branch_menu_engineering,
         // ── auth ────────────────────────────────────────────────────
         crate::auth::handlers::login,
+        crate::auth::handlers::resolve_branch,
         crate::auth::handlers::me,
         crate::auth::handlers::permissions,
         // ── branches ────────────────────────────────────────────────
@@ -194,12 +197,33 @@ paths(
         crate::payment_methods::handlers::update_payment_method,
         crate::payment_methods::handlers::activate_payment_method,
         crate::payment_methods::handlers::deactivate_payment_method,
+        // ── menu_advisor ──────────────────────────────────────────────
+        crate::menu_advisor::handlers::create_run_handler,
+        crate::menu_advisor::handlers::list_runs_handler,
+        crate::menu_advisor::handlers::get_latest_run_handler,
+        crate::menu_advisor::handlers::get_active_run_handler,
+        crate::menu_advisor::handlers::get_run_handler,
+        crate::menu_advisor::handlers::list_price_suggestions_handler,
+        crate::menu_advisor::handlers::list_bundle_suggestions_handler,
+        crate::menu_advisor::handlers::list_removal_scenarios_handler,
+        crate::menu_advisor::handlers::get_price_suggestion_handler,
+        crate::menu_advisor::handlers::get_bundle_suggestion_handler,
+        crate::menu_advisor::handlers::get_removal_scenario_handler,
+        crate::menu_advisor::handlers::record_decision_handler,
+        crate::menu_advisor::handlers::list_decisions_handler,
+        crate::menu_advisor::handlers::get_calibration_handler,
+        crate::menu_advisor::handlers::set_bundle_promoted_handler,
+        crate::menu_advisor::handlers::get_latest_item_kpi_handler,
     ),
     components(schemas(
         // Most schemas are pulled in transitively via path responses, but
         // listing the shared error body explicitly makes it discoverable.
-        
         crate::errors::ErrorBody,
+        crate::auth::handlers::ResolveBranchRequest,
+        crate::auth::handlers::ResolveBranchResponse,
+        // GET /orders?include_items=true response shape (the annotation's
+        // `body` documents the default PaginatedOrders variant).
+        crate::orders::handlers::PaginatedOrdersFull,
     ))
 )]
 pub struct ApiDoc;

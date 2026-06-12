@@ -64,10 +64,12 @@ async fn main() -> std::io::Result<()> {
     tracing::info!("Starting sufrix-rust");
     tracing::info!("Uploads directory: {}", uploads_dir);
     if enable_swagger_ui {
-        tracing::info!("Swagger UI enabled at /api-docs/swagger-ui/");
-        tracing::info!("OpenAPI JSON at /api-docs/openapi.json");
+        tracing::warn!("⚠️  Swagger UI ENABLED — exposes full API surface unauthenticated.");
+        tracing::warn!("    Do NOT run with SUFRIX_ENABLE_SWAGGER_UI=true in production");
+        tracing::warn!("    without nginx basic-auth in front of /api-docs/.");
+        tracing::info!("Swagger UI at /api-docs/swagger-ui/  |  OpenAPI JSON at /api-docs/openapi.json");
     } else {
-        tracing::info!("Swagger UI disabled (set SUFRIX_ENABLE_SWAGGER_UI=true to enable)");
+        tracing::info!("Swagger UI disabled (set SUFRIX_ENABLE_SWAGGER_UI=true to enable in dev)");
     }
 
     let server = HttpServer::new(move || {
@@ -131,12 +133,12 @@ fn build_tls_config() -> Option<rustls::ServerConfig> {
     let key_file  = env::var("SSL_KEY_FILE").ok()?;
     if cert_file.is_empty() || key_file.is_empty() { return None; }
 
-    let cert_pem = fs::read(&cert_file).ok().or_else(|| {
-        tracing::warn!("SSL_CERT_FILE not found: {}", cert_file); None
-    })?;
-    let key_pem = fs::read(&key_file).ok().or_else(|| {
-        tracing::warn!("SSL_KEY_FILE not found: {}", key_file); None
-    })?;
+    // Once env vars are set, failure to load them is a hard error — do not
+    // silently fall back to HTTP, which would expose production traffic unencrypted.
+    let cert_pem = fs::read(&cert_file)
+        .unwrap_or_else(|e| panic!("SSL_CERT_FILE set but unreadable ({}): {}", cert_file, e));
+    let key_pem = fs::read(&key_file)
+        .unwrap_or_else(|e| panic!("SSL_KEY_FILE set but unreadable ({}): {}", key_file, e));
 
     let certs: Vec<rustls::pki_types::CertificateDer> =
         rustls_pemfile::certs(&mut cert_pem.as_slice())
@@ -154,13 +156,13 @@ fn build_tls_config() -> Option<rustls::ServerConfig> {
     }
 
     if certs.is_empty() || keys.is_empty() {
-        tracing::warn!("Could not parse TLS certs/keys — falling back to HTTP");
-        return None;
+        panic!("SSL_CERT_FILE/SSL_KEY_FILE are set but contain no parseable certs/keys — refusing to start without TLS");
     }
 
-    rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, keys.remove(0))
-        .map_err(|e| { tracing::warn!("TLS config error: {}", e); e })
-        .ok()
+    Some(
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, keys.remove(0))
+            .unwrap_or_else(|e| panic!("TLS configuration error: {}", e))
+    )
 }

@@ -1,6 +1,7 @@
 use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::collections::HashMap;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -147,28 +148,26 @@ pub async fn get_permission_matrix(
     .fetch_all(pool.get_ref())
     .await?;
 
-    let resources = [
-        "orgs", "branches", "users", "categories",
-        "menu_items", "addon_groups", "shifts",
-        "orders", "order_items", "payments", "permissions",
-        "addon_items", "inventory", "inventory_adjustments", "inventory_transfers",
-        "recipes", "soft_serve_batches", "shift_counts",
-    ];
-    let actions = ["create", "read", "update", "delete"];
+    let resources = crate::permissions::RESOURCES;
+    let actions   = crate::permissions::ACTIONS;
 
-    let mut matrix: Vec<PermissionMatrix> = Vec::new();
+    // Build O(1) lookup maps so the nested loop is O(n) not O(n²)
+    let role_map: HashMap<(&str, &str), bool> = role_defaults
+        .iter()
+        .map(|r| ((r.resource.as_str(), r.action.as_str()), r.granted))
+        .collect();
+    let override_map: HashMap<(&str, &str), bool> = user_overrides
+        .iter()
+        .map(|p| ((p.resource.as_str(), p.action.as_str()), p.granted))
+        .collect();
+
+    let mut matrix: Vec<PermissionMatrix> = Vec::with_capacity(resources.len() * actions.len());
 
     for resource in resources {
         for action in actions {
-            let role_default = role_defaults.iter()
-                .find(|r| r.resource == resource && r.action == action)
-                .map(|r| r.granted);
-
-            let user_override = user_overrides.iter()
-                .find(|p| p.resource == resource && p.action == action)
-                .map(|p| p.granted);
-
-            let effective = user_override.or(role_default).unwrap_or(false);
+            let role_default  = role_map.get(&(resource, action)).copied();
+            let user_override = override_map.get(&(resource, action)).copied();
+            let effective     = user_override.or(role_default).unwrap_or(false);
 
             matrix.push(PermissionMatrix {
                 resource: resource.to_string(),

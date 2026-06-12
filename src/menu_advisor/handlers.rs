@@ -1,40 +1,165 @@
+//! HTTP handlers for the Menu Advisor.
+//!
+//! Every handler enforces, in order: claims extraction → `menu_items`
+//! permission → org/branch OWNERSHIP. Run- and suggestion-scoped routes
+//! resolve the record's branch first and gate on it — a UUID alone never
+//! grants access (the pre-rebuild handlers skipped this, allowing any
+//! authenticated user to read any org's advisor data).
+
 use std::collections::HashMap;
 
 use actix_web::{web, HttpRequest, HttpResponse};
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    auth::guards::require_same_org,
-    errors::AppError,
+    auth::jwt::Claims,
+    errors::{AppError, AppErrorResponse},
+    models::UserRole,
     permissions::checker::check_permission,
 };
 
 use super::{
     adapter,
-    engine::{AnalysisConfig, run_advisor},
-    persistence::{self, *},
+    dto::{
+        AnalysisConfig, BundleSuggestionFilter, BundleSuggestionRecord, CalibrationSummary,
+        CreateRunBody, CreateRunResponse, Decision, DecisionRecord, ItemKey, ItemKpiPath,
+        LatestRunQuery, ListDecisionsQuery, ListRunsQuery, PersistedRun, PriceSuggestionFilter,
+        PriceSuggestionRecord, PromoteBundleBody, RecordDecisionBody, RemovalScenarioFilter,
+        RemovalScenarioRecord,
+    },
+    engine,
+    persistence,
 };
 
-fn extract_claims(req: &HttpRequest) -> Result<crate::auth::jwt::Claims, AppError> {
+/// Runs in_progress longer than this are presumed dead (panicked task or
+/// process restart) and get taken over by the next POST.
+const STALE_RUN_TAKEOVER_MINUTES: i64 = 15;
+
+// ═══════════════════════════════════════════════════════════════════
+// Access-control helpers
+// ═══════════════════════════════════════════════════════════════════
+
+fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
     use actix_web::HttpMessage;
     req.extensions()
-        .get::<crate::auth::jwt::Claims>()
+        .get::<Claims>()
         .cloned()
         .ok_or_else(|| AppError::Unauthorized("Missing claims".into()))
+}
+
+/// Standard branch ownership gate (same semantics as the reports module):
+/// branch must exist (404) and belong to the caller's org (403); org admins
+/// pass, everyone else needs a `user_branch_assignments` row. Returns the
+/// branch's org id.
+async fn require_branch_access(
+    pool: &PgPool,
+    claims: &Claims,
+    branch_id: Uuid,
+) -> Result<Uuid, AppError> {
+    let branch_org: Option<Uuid> = sqlx::query_scalar(
+        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(branch_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+
+    let branch_org =
+        branch_org.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+
+    if claims.role == UserRole::SuperAdmin {
+        return Ok(branch_org);
+    }
+    if claims.org_id() != Some(branch_org) {
+        return Err(AppError::Forbidden("Branch belongs to a different org".into()));
+    }
+    if claims.role == UserRole::OrgAdmin {
+        return Ok(branch_org);
+    }
+
+    let assigned: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM user_branch_assignments \
+         WHERE user_id = $1 AND branch_id = $2)",
+    )
+    .bind(claims.user_id())
+    .bind(branch_id)
+    .fetch_one(pool)
+    .await?;
+
+    if !assigned {
+        return Err(AppError::Forbidden("Not assigned to this branch".into()));
+    }
+    Ok(branch_org)
+}
+
+async fn get_run_checked(
+    pool: &PgPool,
+    claims: &Claims,
+    run_id: Uuid,
+) -> Result<PersistedRun, AppError> {
+    let run = persistence::get_run(pool, run_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Run not found".into()))?;
+    require_branch_access(pool, claims, run.branch_id).await?;
+    Ok(run)
+}
+
+async fn get_price_suggestion_checked(
+    pool: &PgPool,
+    claims: &Claims,
+    id: Uuid,
+) -> Result<PriceSuggestionRecord, AppError> {
+    let record = persistence::get_price_suggestion(pool, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Price suggestion not found".into()))?;
+    require_branch_access(pool, claims, record.branch_id).await?;
+    Ok(record)
+}
+
+/// Returns the record plus its branch's org id (the promote flow compares
+/// it against the target bundle's org).
+async fn get_bundle_suggestion_checked(
+    pool: &PgPool,
+    claims: &Claims,
+    id: Uuid,
+) -> Result<(BundleSuggestionRecord, Uuid), AppError> {
+    let record = persistence::get_bundle_suggestion(pool, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Bundle suggestion not found".into()))?;
+    let org = require_branch_access(pool, claims, record.branch_id).await?;
+    Ok((record, org))
+}
+
+async fn get_removal_scenario_checked(
+    pool: &PgPool,
+    claims: &Claims,
+    id: Uuid,
+) -> Result<RemovalScenarioRecord, AppError> {
+    let record = persistence::get_removal_scenario(pool, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Removal scenario not found".into()))?;
+    require_branch_access(pool, claims, record.branch_id).await?;
+    Ok(record)
 }
 
 // ═══════════════════════════════════════════════════════════════════
 // Runs
 // ═══════════════════════════════════════════════════════════════════
 
-#[derive(Serialize, Deserialize)]
-pub struct CreateRunBody {
-    pub config: Option<AnalysisConfig>,
-}
-
+#[utoipa::path(
+    post,
+    path = "/menu-advisor/branches/{branch_id}/runs",
+    tag = "menu_advisor",
+    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    request_body = CreateRunBody,
+    responses(
+        (status = 202, description = "Analysis run started", body = CreateRunResponse),
+        AppErrorResponse
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn create_run_handler(
     req: HttpRequest,
     pool: web::Data<PgPool>,
@@ -44,23 +169,13 @@ pub async fn create_run_handler(
     let branch_id = path.into_inner();
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
-    
-    // We assume there's a way to get org_id from branch_id, but here we can just query it.
-    // However, it's safer to just lookup the branch org_id.
-    let branch_org_id = sqlx::query_scalar::<_, Uuid>("SELECT org_id FROM branches WHERE id = $1")
-        .bind(branch_id)
-        .fetch_one(pool.get_ref())
-        .await?;
-    
-    require_same_org(&claims, Some(branch_org_id))?;
+    let org_id = require_branch_access(pool.get_ref(), &claims, branch_id).await?;
 
     let config = body.into_inner().config.unwrap_or_default();
 
-    // Check if there's already an active run. Runs older than the takeover
-    // threshold are presumed dead (panicked task / process restart) — mark
-    // them failed and proceed, otherwise a single crash blocks the branch
-    // forever.
-    const STALE_RUN_TAKEOVER_MINUTES: i64 = 15;
+    // A fresh active run blocks; a stale one (panicked task / process
+    // restart) is taken over so a single crash can't block the branch
+    // forever. The DB's partial unique index closes the remaining race.
     if let Some(active) = persistence::get_in_progress_run(pool.get_ref(), branch_id).await? {
         let age = Utc::now() - active.started_at;
         if age < chrono::Duration::minutes(STALE_RUN_TAKEOVER_MINUTES) {
@@ -78,27 +193,22 @@ pub async fn create_run_handler(
             pool.get_ref(),
             active.id,
             &format!(
-                "Run abandoned: still in_progress after {} minutes (process restart or panic). \
-                 Superseded by a new run.",
+                "Run abandoned: still in_progress after {} minutes (process restart or \
+                 panic). Superseded by a new run.",
                 age.num_minutes()
             ),
         )
         .await?;
     }
 
-    let run_id = persistence::create_run(pool.get_ref(), branch_org_id, branch_id, &config).await?;
+    let run_id = persistence::create_run(pool.get_ref(), org_id, branch_id, &config).await?;
 
     let pool_clone = pool.get_ref().clone();
     tokio::spawn(async move {
-        run_advisor_task(pool_clone, run_id, branch_org_id, branch_id, config).await;
+        run_advisor_task(pool_clone, run_id, org_id, branch_id, config).await;
     });
 
-    #[derive(Serialize)]
-    struct CreateRunRes {
-        run_id: Uuid,
-    }
-
-    Ok(HttpResponse::Accepted().json(CreateRunRes { run_id }))
+    Ok(HttpResponse::Accepted().json(CreateRunResponse { run_id }))
 }
 
 async fn run_advisor_task(
@@ -112,7 +222,9 @@ async fn run_advisor_task(
 
     async fn fail(pool: &PgPool, run_id: Uuid, stage: &str, msg: String) {
         tracing::error!(run_id = %run_id, stage = %stage, error = %msg, "Menu advisor run failed");
-        if let Err(e) = persistence::mark_run_failed(pool, run_id, &format!("[{stage}] {msg}")).await {
+        if let Err(e) =
+            persistence::mark_run_failed(pool, run_id, &format!("[{stage}] {msg}")).await
+        {
             tracing::error!(run_id = %run_id, error = %e, "Could not mark advisor run failed");
         }
     }
@@ -121,29 +233,35 @@ async fn run_advisor_task(
         Ok(i) => i,
         Err(e) => return fail(&pool, run_id, "adapter", e.to_string()).await,
     };
+    let previous = match persistence::load_latest_classifications(&pool, branch_id).await {
+        Ok(p) => p,
+        Err(e) => return fail(&pool, run_id, "adapter", e.to_string()).await,
+    };
     tracing::info!(
         run_id = %run_id,
         snapshots = inputs.snapshots.len(),
         sales = inputs.sales.len(),
         baskets = inputs.baskets.len(),
+        has_previous = previous.is_some(),
         "Menu advisor inputs loaded"
     );
 
-    let mut snaps_by_key = HashMap::new();
-    for s in &inputs.snapshots {
-        snaps_by_key.insert(s.key.clone(), (s.category_id, s.name.clone()));
-    }
+    let category_by_key: HashMap<ItemKey, Option<Uuid>> = inputs
+        .snapshots
+        .iter()
+        .map(|s| (s.key.clone(), s.category_id))
+        .collect();
 
-    // The engine is pure CPU — catch panics so a math edge case can never
-    // strand the run in `in_progress` (the old failure mode: silent forever).
+    // The engine is panic-free by construction; catch_unwind stays as a
+    // backstop so no failure mode can strand the run in `in_progress`.
     let engine_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_advisor(
+        engine::run_advisor(
             &inputs.snapshots,
             &inputs.sales,
             &inputs.baskets,
             now,
             &config,
-            None, // previous quadrants: not loaded yet (hysteresis input)
+            previous.as_ref(),
             &inputs.price_changed_keys,
         )
     }));
@@ -162,7 +280,8 @@ async fn run_advisor_task(
     };
 
     if let Err(e) =
-        persistence::save_completed_report(&pool, run_id, branch_id, &snaps_by_key, &report).await
+        persistence::save_completed_report(&pool, run_id, branch_id, &category_by_key, &report)
+            .await
     {
         return fail(&pool, run_id, "persistence", e.to_string()).await;
     }
@@ -175,12 +294,17 @@ async fn run_advisor_task(
     );
 }
 
-#[derive(Deserialize)]
-pub struct ListRunsQuery {
-    pub limit: Option<i64>,
-    pub before: Option<chrono::DateTime<Utc>>,
-}
-
+#[utoipa::path(
+    get,
+    path = "/menu-advisor/branches/{branch_id}/runs",
+    tag = "menu_advisor",
+    params(("branch_id" = Uuid, Path, description = "Branch ID"), ListRunsQuery),
+    responses(
+        (status = 200, description = "Runs, newest first", body = Vec<PersistedRun>),
+        AppErrorResponse
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_runs_handler(
     req: HttpRequest,
     pool: web::Data<PgPool>,
@@ -190,20 +314,24 @@ pub async fn list_runs_handler(
     let branch_id = path.into_inner();
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
+    require_branch_access(pool.get_ref(), &claims, branch_id).await?;
+
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
-    
     let runs = persistence::list_runs(pool.get_ref(), branch_id, limit, query.before).await?;
     Ok(HttpResponse::Ok().json(runs))
 }
 
-#[derive(Deserialize)]
-pub struct LatestRunQuery {
-    /// When true, return the latest run regardless of status so the client
-    /// can show failed runs (error_message) instead of an empty state.
-    #[serde(default)]
-    pub any_status: bool,
-}
-
+#[utoipa::path(
+    get,
+    path = "/menu-advisor/branches/{branch_id}/runs/latest",
+    tag = "menu_advisor",
+    params(("branch_id" = Uuid, Path, description = "Branch ID"), LatestRunQuery),
+    responses(
+        (status = 200, description = "Latest run (completed unless any_status), or JSON null when none", body = PersistedRun),
+        AppErrorResponse
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn get_latest_run_handler(
     req: HttpRequest,
     pool: web::Data<PgPool>,
@@ -213,15 +341,23 @@ pub async fn get_latest_run_handler(
     let branch_id = path.into_inner();
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
+    require_branch_access(pool.get_ref(), &claims, branch_id).await?;
 
-    let run = if query.any_status {
-        persistence::get_latest_run_any(pool.get_ref(), branch_id).await?
-    } else {
-        persistence::get_latest_completed_run(pool.get_ref(), branch_id).await?
-    };
+    let run = persistence::get_latest_run(pool.get_ref(), branch_id, query.any_status).await?;
     Ok(HttpResponse::Ok().json(run))
 }
 
+#[utoipa::path(
+    get,
+    path = "/menu-advisor/branches/{branch_id}/runs/active",
+    tag = "menu_advisor",
+    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    responses(
+        (status = 200, description = "In-progress run, or JSON null when none", body = PersistedRun),
+        AppErrorResponse
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn get_active_run_handler(
     req: HttpRequest,
     pool: web::Data<PgPool>,
@@ -230,11 +366,23 @@ pub async fn get_active_run_handler(
     let branch_id = path.into_inner();
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
-    
+    require_branch_access(pool.get_ref(), &claims, branch_id).await?;
+
     let run = persistence::get_in_progress_run(pool.get_ref(), branch_id).await?;
     Ok(HttpResponse::Ok().json(run))
 }
 
+#[utoipa::path(
+    get,
+    path = "/menu-advisor/runs/{id}",
+    tag = "menu_advisor",
+    params(("id" = Uuid, Path, description = "Run ID")),
+    responses(
+        (status = 200, description = "Run", body = PersistedRun),
+        AppErrorResponse
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn get_run_handler(
     req: HttpRequest,
     pool: web::Data<PgPool>,
@@ -243,15 +391,26 @@ pub async fn get_run_handler(
     let run_id = path.into_inner();
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
-    
-    let run = persistence::get_run(pool.get_ref(), run_id).await?;
+
+    let run = get_run_checked(pool.get_ref(), &claims, run_id).await?;
     Ok(HttpResponse::Ok().json(run))
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Suggestions (Read)
+// Suggestions (read)
 // ═══════════════════════════════════════════════════════════════════
 
+#[utoipa::path(
+    get,
+    path = "/menu-advisor/runs/{id}/price-suggestions",
+    tag = "menu_advisor",
+    params(("id" = Uuid, Path, description = "Run ID"), PriceSuggestionFilter),
+    responses(
+        (status = 200, description = "Price suggestions with latest decision joined", body = Vec<PriceSuggestionRecord>),
+        AppErrorResponse
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_price_suggestions_handler(
     req: HttpRequest,
     pool: web::Data<PgPool>,
@@ -261,12 +420,24 @@ pub async fn list_price_suggestions_handler(
     let run_id = path.into_inner();
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
-    
-    let filter = query.into_inner();
-    let suggestions = persistence::list_price_suggestions(pool.get_ref(), run_id, &filter).await?;
+    get_run_checked(pool.get_ref(), &claims, run_id).await?;
+
+    let suggestions =
+        persistence::list_price_suggestions(pool.get_ref(), run_id, &query.into_inner()).await?;
     Ok(HttpResponse::Ok().json(suggestions))
 }
 
+#[utoipa::path(
+    get,
+    path = "/menu-advisor/runs/{id}/bundle-suggestions",
+    tag = "menu_advisor",
+    params(("id" = Uuid, Path, description = "Run ID"), BundleSuggestionFilter),
+    responses(
+        (status = 200, description = "Bundle suggestions with latest decision joined", body = Vec<BundleSuggestionRecord>),
+        AppErrorResponse
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_bundle_suggestions_handler(
     req: HttpRequest,
     pool: web::Data<PgPool>,
@@ -276,12 +447,24 @@ pub async fn list_bundle_suggestions_handler(
     let run_id = path.into_inner();
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
-    
-    let filter = query.into_inner();
-    let suggestions = persistence::list_bundle_suggestions(pool.get_ref(), run_id, &filter).await?;
+    get_run_checked(pool.get_ref(), &claims, run_id).await?;
+
+    let suggestions =
+        persistence::list_bundle_suggestions(pool.get_ref(), run_id, &query.into_inner()).await?;
     Ok(HttpResponse::Ok().json(suggestions))
 }
 
+#[utoipa::path(
+    get,
+    path = "/menu-advisor/runs/{id}/removal-scenarios",
+    tag = "menu_advisor",
+    params(("id" = Uuid, Path, description = "Run ID"), RemovalScenarioFilter),
+    responses(
+        (status = 200, description = "Removal scenarios with latest decision joined", body = Vec<RemovalScenarioRecord>),
+        AppErrorResponse
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_removal_scenarios_handler(
     req: HttpRequest,
     pool: web::Data<PgPool>,
@@ -291,64 +474,100 @@ pub async fn list_removal_scenarios_handler(
     let run_id = path.into_inner();
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
-    
-    let filter = query.into_inner();
-    let scenarios = persistence::list_removal_scenarios(pool.get_ref(), run_id, &filter).await?;
+    get_run_checked(pool.get_ref(), &claims, run_id).await?;
+
+    let scenarios =
+        persistence::list_removal_scenarios(pool.get_ref(), run_id, &query.into_inner()).await?;
     Ok(HttpResponse::Ok().json(scenarios))
 }
 
+#[utoipa::path(
+    get,
+    path = "/menu-advisor/price-suggestions/{id}",
+    tag = "menu_advisor",
+    params(("id" = Uuid, Path, description = "Price suggestion ID")),
+    responses(
+        (status = 200, description = "Price suggestion", body = PriceSuggestionRecord),
+        AppErrorResponse
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn get_price_suggestion_handler(
     req: HttpRequest,
     pool: web::Data<PgPool>,
-    path: web::Path<Uuid>, // id
+    path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let id = path.into_inner();
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
-    
-    let suggestion = persistence::get_price_suggestion(pool.get_ref(), id).await?;
+
+    let suggestion = get_price_suggestion_checked(pool.get_ref(), &claims, id).await?;
     Ok(HttpResponse::Ok().json(suggestion))
 }
 
+#[utoipa::path(
+    get,
+    path = "/menu-advisor/bundle-suggestions/{id}",
+    tag = "menu_advisor",
+    params(("id" = Uuid, Path, description = "Bundle suggestion ID")),
+    responses(
+        (status = 200, description = "Bundle suggestion", body = BundleSuggestionRecord),
+        AppErrorResponse
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn get_bundle_suggestion_handler(
     req: HttpRequest,
     pool: web::Data<PgPool>,
-    path: web::Path<Uuid>, // id
+    path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let id = path.into_inner();
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
-    
-    let suggestion = persistence::get_bundle_suggestion(pool.get_ref(), id).await?;
+
+    let (suggestion, _) = get_bundle_suggestion_checked(pool.get_ref(), &claims, id).await?;
     Ok(HttpResponse::Ok().json(suggestion))
 }
 
+#[utoipa::path(
+    get,
+    path = "/menu-advisor/removal-scenarios/{id}",
+    tag = "menu_advisor",
+    params(("id" = Uuid, Path, description = "Removal scenario ID")),
+    responses(
+        (status = 200, description = "Removal scenario", body = RemovalScenarioRecord),
+        AppErrorResponse
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn get_removal_scenario_handler(
     req: HttpRequest,
     pool: web::Data<PgPool>,
-    path: web::Path<Uuid>, // id
+    path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let id = path.into_inner();
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
-    
-    let scenario = persistence::get_removal_scenario(pool.get_ref(), id).await?;
+
+    let scenario = get_removal_scenario_checked(pool.get_ref(), &claims, id).await?;
     Ok(HttpResponse::Ok().json(scenario))
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Decisions & Calibration
+// Decisions & calibration
 // ═══════════════════════════════════════════════════════════════════
 
-#[derive(Serialize, Deserialize)]
-pub struct RecordDecisionBody {
-    pub suggestion_id: Uuid,
-    pub suggestion_kind: SuggestionKind,
-    pub branch_id: Uuid,
-    pub decision: String,
-    pub notes: Option<String>,
-}
-
+#[utoipa::path(
+    post,
+    path = "/menu-advisor/decisions",
+    tag = "menu_advisor",
+    request_body = RecordDecisionBody,
+    responses(
+        (status = 200, description = "Decision recorded", body = DecisionRecord),
+        AppErrorResponse
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn record_decision_handler(
     req: HttpRequest,
     pool: web::Data<PgPool>,
@@ -356,31 +575,52 @@ pub async fn record_decision_handler(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
-    
+
     let decision = Decision::parse(&body.decision)
         .ok_or_else(|| AppError::BadRequest("Invalid decision".into()))?;
 
-    let decided_by = Uuid::parse_str(&claims.sub)
-        .map_err(|_| AppError::Unauthorized("Invalid user UUID".into()))?;
+    // The suggestion is the source of truth for the branch — the body's
+    // branch_id is validated against it, never trusted.
+    let branch_id = persistence::get_suggestion_branch(
+        pool.get_ref(),
+        body.suggestion_kind,
+        body.suggestion_id,
+    )
+    .await?
+    .ok_or_else(|| AppError::NotFound("Suggestion not found".into()))?;
+    if body.branch_id != branch_id {
+        return Err(AppError::BadRequest(
+            "branch_id does not match the suggestion".into(),
+        ));
+    }
+    require_branch_access(pool.get_ref(), &claims, branch_id).await?;
 
+    let decided_by = claims.user_id_safe()?;
     let record = persistence::record_decision(
         pool.get_ref(),
         body.suggestion_id,
         body.suggestion_kind,
-        body.branch_id,
+        branch_id,
         decision,
         body.notes.clone(),
         decided_by,
-    ).await?;
-    
+    )
+    .await?;
+
     Ok(HttpResponse::Ok().json(record))
 }
 
-#[derive(Deserialize)]
-pub struct ListDecisionsQuery {
-    pub since: Option<chrono::DateTime<Utc>>,
-}
-
+#[utoipa::path(
+    get,
+    path = "/menu-advisor/branches/{branch_id}/decisions",
+    tag = "menu_advisor",
+    params(("branch_id" = Uuid, Path, description = "Branch ID"), ListDecisionsQuery),
+    responses(
+        (status = 200, description = "Decisions, newest first", body = Vec<DecisionRecord>),
+        AppErrorResponse
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn list_decisions_handler(
     req: HttpRequest,
     pool: web::Data<PgPool>,
@@ -390,16 +630,24 @@ pub async fn list_decisions_handler(
     let branch_id = path.into_inner();
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
-    
+    require_branch_access(pool.get_ref(), &claims, branch_id).await?;
+
     let decisions = persistence::list_decisions(pool.get_ref(), branch_id, query.since).await?;
     Ok(HttpResponse::Ok().json(decisions))
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct PromoteBundleBody {
-    pub bundle_id: Uuid,
-}
-
+#[utoipa::path(
+    post,
+    path = "/menu-advisor/bundle-suggestions/{id}/promote",
+    tag = "menu_advisor",
+    params(("id" = Uuid, Path, description = "Bundle suggestion ID")),
+    request_body = PromoteBundleBody,
+    responses(
+        (status = 200, description = "Suggestion linked to the created bundle"),
+        AppErrorResponse
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn set_bundle_promoted_handler(
     req: HttpRequest,
     pool: web::Data<PgPool>,
@@ -409,36 +657,70 @@ pub async fn set_bundle_promoted_handler(
     let suggestion_id = path.into_inner();
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
-    
+
+    let (_, suggestion_org) =
+        get_bundle_suggestion_checked(pool.get_ref(), &claims, suggestion_id).await?;
+
+    // The linked bundle must exist in the same org as the suggestion.
+    let bundle_org: Option<Uuid> =
+        sqlx::query_scalar("SELECT org_id FROM bundles WHERE id = $1")
+            .bind(body.bundle_id)
+            .fetch_optional(pool.get_ref())
+            .await?;
+    let bundle_org = bundle_org.ok_or_else(|| AppError::NotFound("Bundle not found".into()))?;
+    if bundle_org != suggestion_org {
+        return Err(AppError::Forbidden("Bundle belongs to a different org".into()));
+    }
+
     persistence::set_bundle_promoted(pool.get_ref(), suggestion_id, body.bundle_id).await?;
     Ok(HttpResponse::Ok().finish())
 }
 
+#[utoipa::path(
+    get,
+    path = "/menu-advisor/branches/{branch_id}/calibration",
+    tag = "menu_advisor",
+    params(("branch_id" = Uuid, Path, description = "Branch ID"), ListDecisionsQuery),
+    responses(
+        (status = 200, description = "Predicted vs realized price-move calibration", body = CalibrationSummary),
+        AppErrorResponse
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn get_calibration_handler(
     req: HttpRequest,
     pool: web::Data<PgPool>,
     path: web::Path<Uuid>, // branch_id
-    query: web::Query<ListDecisionsQuery>, // Reuse query for `since`
+    query: web::Query<ListDecisionsQuery>,
 ) -> Result<HttpResponse, AppError> {
     let branch_id = path.into_inner();
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
-    
+    require_branch_access(pool.get_ref(), &claims, branch_id).await?;
+
     let calib = persistence::get_calibration(pool.get_ref(), branch_id, query.since).await?;
     Ok(HttpResponse::Ok().json(calib))
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Item Level Integration
+// Item-level integration
 // ═══════════════════════════════════════════════════════════════════
 
-#[derive(Deserialize)]
-pub struct ItemKpiPath {
-    pub branch_id: Uuid,
-    pub menu_item_id: Uuid,
-    pub size_label: String,
-}
-
+#[utoipa::path(
+    get,
+    path = "/menu-advisor/branches/{branch_id}/items/{menu_item_id}/sizes/{size_label}/latest-kpi",
+    tag = "menu_advisor",
+    params(
+        ("branch_id" = Uuid, Path, description = "Branch ID"),
+        ("menu_item_id" = Uuid, Path, description = "Menu item ID"),
+        ("size_label" = String, Path, description = "Size label, e.g. one_size")
+    ),
+    responses(
+        (status = 200, description = "Latest completed-run price suggestion for the SKU, or JSON null", body = PriceSuggestionRecord),
+        AppErrorResponse
+    ),
+    security(("bearer_jwt" = []))
+)]
 pub async fn get_latest_item_kpi_handler(
     req: HttpRequest,
     pool: web::Data<PgPool>,
@@ -447,13 +729,14 @@ pub async fn get_latest_item_kpi_handler(
     let path = path.into_inner();
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
-    
+    require_branch_access(pool.get_ref(), &claims, path.branch_id).await?;
+
     let kpi = persistence::get_latest_item_kpi(
-        pool.get_ref(), 
-        path.branch_id, 
-        path.menu_item_id, 
-        &path.size_label
-    ).await?;
-    
+        pool.get_ref(),
+        path.branch_id,
+        path.menu_item_id,
+        &path.size_label,
+    )
+    .await?;
     Ok(HttpResponse::Ok().json(kpi))
 }

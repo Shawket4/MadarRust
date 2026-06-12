@@ -516,7 +516,7 @@ pub async fn delete_org(
 
 // ── Helpers ───────────────────────────────────────────────────
 
-fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
+pub(crate) fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
     req.extensions()
         .get::<Claims>()
         .cloned()
