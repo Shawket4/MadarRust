@@ -1,7 +1,19 @@
+use actix_governor::{Governor, GovernorConfigBuilder};
 use actix_web::web;
 use crate::{auth::middleware::JwtMiddleware, menu::handlers::*};
+use crate::rate_limit::PeerIpOrLocalhost;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
+    // Public (unauthenticated) menu endpoint: limit per IP to deter scraping
+    // and enumeration. ~60 req/min sustained with a burst of 30 — generous for
+    // real customers refreshing a QR menu, tight enough to blunt abuse.
+    let public_menu_gov = GovernorConfigBuilder::default()
+        .key_extractor(PeerIpOrLocalhost)
+        .seconds_per_request(1)
+        .burst_size(30)
+        .finish()
+        .expect("Invalid public menu rate limiter configuration");
+
     cfg
         // ── Categories ────────────────────────────────────────────────────────
         .service(
@@ -45,10 +57,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/{id}/overrides/{override_id}",  web::delete().to(delete_addon_override)),
         )
 
-        // ── Public Menu ───────────────────────────────────────────────────────
+        // ── Public Menu (unauthenticated, rate-limited) ───────────────────────
         .service(
-            web::scope("/menu/public")
-                .route("/{org_id}", web::get().to(get_public_menu))
+            web::resource("/menu/public/{org_id}")
+                .wrap(Governor::new(&public_menu_gov))
+                .route(web::get().to(get_public_menu)),
         )
 
         // ── Addon items ───────────────────────────────────────────────────────

@@ -1,25 +1,8 @@
-use actix_governor::{Governor, GovernorConfigBuilder, KeyExtractor, SimpleKeyExtractionError};
-use actix_web::{dev::ServiceRequest, web};
-use std::net::{IpAddr, Ipv4Addr};
+use actix_governor::{Governor, GovernorConfigBuilder};
+use actix_web::web;
 
 use crate::auth::{handlers, middleware::JwtMiddleware};
-
-/// Rate-limit by peer IP, falling back to 127.0.0.1 when no socket
-/// address is available (actix test utils don't supply a real peer addr).
-#[derive(Clone)]
-struct PeerIpOrLocalhost;
-
-impl KeyExtractor for PeerIpOrLocalhost {
-    type Key = IpAddr;
-    type KeyExtractionError = SimpleKeyExtractionError<&'static str>;
-
-    fn extract(&self, req: &ServiceRequest) -> Result<Self::Key, Self::KeyExtractionError> {
-        Ok(req
-            .peer_addr()
-            .map(|s| s.ip())
-            .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)))
-    }
-}
+use crate::rate_limit::PeerIpOrLocalhost;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     // 10 req/min per IP, burst of 10.

@@ -762,3 +762,134 @@ async fn test_public_menu_success(pool: PgPool) {
     assert_eq!(cats[0].items.len(), 1);
     assert_eq!(cats[0].items[0].name, "Coffee");
 }
+
+#[sqlx::test]
+async fn test_public_menu_sets_etag_and_cache_headers(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    ).await;
+
+    let org_id = seed_org(&pool).await;
+    let cat_id = seed_category(&pool, org_id, "Mains").await;
+    seed_menu_item(&pool, org_id, cat_id, "Coffee", 500).await;
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/menu/public/{}", org_id))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+
+    assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+    assert!(
+        resp.headers().get(actix_web::http::header::ETAG).is_some(),
+        "response should carry an ETag",
+    );
+    let cache_control = resp
+        .headers()
+        .get(actix_web::http::header::CACHE_CONTROL)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        cache_control.contains("max-age"),
+        "Cache-Control should set max-age, got {cache_control:?}",
+    );
+}
+
+#[sqlx::test]
+async fn test_public_menu_returns_304_for_matching_etag(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    ).await;
+
+    let org_id = seed_org(&pool).await;
+    let cat_id = seed_category(&pool, org_id, "Mains").await;
+    seed_menu_item(&pool, org_id, cat_id, "Coffee", 500).await;
+
+    // First request captures the ETag.
+    let resp1 = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/menu/public/{}", org_id))
+            .to_request(),
+    ).await;
+    let etag = resp1
+        .headers()
+        .get(actix_web::http::header::ETAG)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    // Second request with If-None-Match should be 304 with no body.
+    let resp2 = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/menu/public/{}", org_id))
+            .insert_header((actix_web::http::header::IF_NONE_MATCH, etag))
+            .to_request(),
+    ).await;
+    assert_eq!(resp2.status(), actix_web::http::StatusCode::NOT_MODIFIED);
+
+    let body = test::read_body(resp2).await;
+    assert!(body.is_empty(), "304 response body should be empty, got {body:?}");
+}
+
+#[sqlx::test]
+async fn test_public_menu_inactive_org_returns_404(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    ).await;
+
+    let org_id = seed_org(&pool).await;
+    let cat_id = seed_category(&pool, org_id, "Mains").await;
+    seed_menu_item(&pool, org_id, cat_id, "Coffee", 500).await;
+    sqlx::query("UPDATE organizations SET is_active = false WHERE id = $1")
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/menu/public/{}", org_id))
+            .to_request(),
+    ).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
+}
+
+#[sqlx::test]
+async fn test_public_menu_is_rate_limited(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    ).await;
+
+    // The limiter runs before the handler, so a non-existent org still counts;
+    // no seeding required. Burst is 30 — exceed it and expect a 429.
+    let org_id = Uuid::new_v4();
+    let mut got_429 = false;
+    for _ in 0..40 {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!("/menu/public/{}", org_id))
+                .to_request(),
+        ).await;
+        if resp.status() == actix_web::http::StatusCode::TOO_MANY_REQUESTS {
+            got_429 = true;
+            break;
+        }
+    }
+    assert!(got_429, "expected a 429 once the burst was exceeded");
+}

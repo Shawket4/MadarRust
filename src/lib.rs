@@ -22,6 +22,7 @@ pub mod orders;
 pub mod orgs;
 pub mod payment_methods;
 pub mod permissions;
+pub mod rate_limit;
 pub mod recipes;
 pub mod reports;
 pub mod shifts;

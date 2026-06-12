@@ -1937,19 +1937,26 @@ pub async fn delete_optional_field(
 pub async fn get_public_menu(
     pool:   web::Data<PgPool>,
     org_id: web::Path<Uuid>,
+    req:    HttpRequest,
 ) -> Result<HttpResponse, AppError> {
     let org_id = org_id.into_inner();
 
     // 1. Fetch Org Info
     let org_info = sqlx::query_as::<_, crate::orgs::handlers::Org>(
-        "SELECT id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, is_active 
-         FROM organizations 
+        "SELECT id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, is_active
+         FROM organizations
          WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(org_id)
     .fetch_optional(pool.get_ref())
     .await?
     .ok_or_else(|| AppError::NotFound("Organization not found".into()))?;
+
+    // A disabled org must not expose a public menu (indistinguishable from
+    // "not found" so existence can't be probed via this endpoint).
+    if !org_info.is_active {
+        return Err(AppError::NotFound("Organization not found".into()));
+    }
 
     // 2. Fetch Categories
     let categories = sqlx::query_as::<_, Category>(
@@ -2118,12 +2125,41 @@ pub async fn get_public_menu(
         });
     }
 
-    Ok(HttpResponse::Ok().json(PublicMenuResponse {
+    let response = PublicMenuResponse {
         org_id,
         org_name: org_info.name,
         logo_url: org_info.logo_url,
         categories: public_categories,
-    }))
+    };
+
+    // Serialize once; derive a strong ETag from the body so unchanged menus
+    // revalidate cheaply (304) and browsers/CDNs can cache for a short window.
+    let body = serde_json::to_vec(&response).map_err(|_| AppError::Internal)?;
+    let etag = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        body.hash(&mut hasher);
+        format!("\"{:016x}\"", hasher.finish())
+    };
+    const CACHE_CONTROL: &str = "public, max-age=60, stale-while-revalidate=300";
+
+    // Conditional GET — return 304 when the client already holds this version.
+    let if_none_match = req
+        .headers()
+        .get(actix_web::http::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok());
+    if matches!(if_none_match, Some(inm) if inm == etag || inm == "*") {
+        return Ok(HttpResponse::NotModified()
+            .insert_header((actix_web::http::header::ETAG, etag))
+            .insert_header((actix_web::http::header::CACHE_CONTROL, CACHE_CONTROL))
+            .finish());
+    }
+
+    Ok(HttpResponse::Ok()
+        .insert_header((actix_web::http::header::ETAG, etag))
+        .insert_header((actix_web::http::header::CACHE_CONTROL, CACHE_CONTROL))
+        .content_type("application/json")
+        .body(body))
 }
 
 // ── Helpers ───────────────────────────────────────────────────
