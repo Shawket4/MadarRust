@@ -639,6 +639,29 @@ pub async fn close_shift(
         return Ok(HttpResponse::Ok().json(CloseShiftResponse { shift }));
     }
 
+    let closed_at = body.closed_at.unwrap_or_else(chrono::Utc::now);
+    let mut tx = pool.get_ref().begin().await?;
+
+    // Serialize against concurrent order inserts on this shift: create_order
+    // takes the SAME per-shift advisory lock while inserting, so snapshotting
+    // cash under this lock counts every committed order (no cash lost to a
+    // close/insert race). Re-check open here too (idempotent double-close).
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text))")
+        .bind(shift_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    let still_open: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND status = 'open')"
+    )
+    .bind(*shift_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !still_open {
+        tx.rollback().await?;
+        let current = fetch_shift_or_404(pool.get_ref(), *shift_id).await?;
+        return Ok(HttpResponse::Ok().json(CloseShiftResponse { shift: current }));
+    }
+
     let cash_from_orders: i32 = sqlx::query_scalar(
         r#"
         SELECT COALESCE(
@@ -664,20 +687,17 @@ pub async fn close_shift(
     )
     .bind(*shift_id)
     .bind(shift.branch_id)
-    .fetch_one(pool.get_ref())
+    .fetch_one(&mut *tx)
     .await?;
 
     let cash_movements_total: i32 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(amount), 0)::int FROM shift_cash_movements WHERE shift_id = $1"
     )
     .bind(*shift_id)
-    .fetch_one(pool.get_ref())
+    .fetch_one(&mut *tx)
     .await?;
 
     let closing_cash_system = shift.opening_cash + cash_from_orders + cash_movements_total;
-    let closed_at = body.closed_at.unwrap_or_else(chrono::Utc::now);
-
-    let mut tx = pool.get_ref().begin().await?;
 
     let closed_shift = sqlx::query_as::<_, Shift>(
         r#"

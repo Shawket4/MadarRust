@@ -468,9 +468,10 @@ pub async fn create_order(
     let (resolved_discount_type, resolved_discount_value) =
         if let Some(disc_id) = body.discount_id {
             let row: Option<(String, i32)> = sqlx::query_as(
-                "SELECT type::text, value FROM discounts WHERE id = $1 AND is_active = true"
+                "SELECT type::text, value FROM discounts WHERE id = $1 AND org_id = $2 AND is_active = true"
             )
             .bind(disc_id)
+            .bind(org_id)
             .fetch_optional(pool.get_ref())
             .await?;
             match row {
@@ -1078,6 +1079,9 @@ pub async fn create_order(
         Some("fixed")      => resolved_discount_value.min(subtotal),
         _                  => 0,
     };
+    // A malformed discount (percentage > 100, or a negative value) must never
+    // drive the order to a negative or inflated total: clamp to [0, subtotal].
+    let discount_amount = discount_amount.clamp(0, subtotal);
     let taxable      = subtotal - discount_amount;
     let tax_rate_f64: f64 = tax_rate.to_string().parse().unwrap_or(0.14);
     let tax_amount   = (taxable as f64 * tax_rate_f64) as i32;
@@ -1119,6 +1123,22 @@ pub async fn create_order(
         .execute(&mut *tx)
         .await?;
 
+    // Re-verify the shift is still OPEN now that we hold the per-shift lock.
+    // close_shift takes the SAME advisory lock while it snapshots cash, so this
+    // closes the TOCTOU window where an order's cash could land on a shift that
+    // was just closed (money missing from closing_cash_system).
+    let shift_still_open: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND status = 'open')"
+    )
+    .bind(body.shift_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !shift_still_open {
+        return Err(AppError::Conflict(
+            "Shift was closed before the order could be recorded".into(),
+        ));
+    }
+
     let order_number: i32 = sqlx::query_scalar(
         "SELECT COALESCE(MAX(order_number), 0) + 1 FROM orders WHERE shift_id = $1"
     )
@@ -1126,7 +1146,7 @@ pub async fn create_order(
     .fetch_one(&mut *tx)
     .await?;
 
-    let order = sqlx::query_as::<_, Order>(
+    let order = match sqlx::query_as::<_, Order>(
         r#"
         INSERT INTO orders
             (branch_id, shift_id, teller_id, order_number,
@@ -1168,11 +1188,35 @@ pub async fn create_order(
     .bind(idempotency_key)
     .bind(created_at)
     .fetch_one(&mut *tx)
-    .await?;
+    .await
+    {
+        Ok(o) => o,
+        // Idempotency-key race: a concurrent request with the same key already
+        // committed this order. Replay the existing order instead of returning a
+        // raw 500 from the unique-violation.
+        Err(sqlx::Error::Database(db))
+            if db.code().as_deref() == Some("23505")
+                && db.constraint().is_some_and(|c| c.contains("idempotency")) =>
+        {
+            drop(tx);
+            if let Some(key) = idempotency_key
+                && let Some(existing) = fetch_order_by_idempotency_key(pool.get_ref(), key).await? {
+                    let items = fetch_order_items_full(pool.get_ref(), existing.id).await?;
+                    return Ok(HttpResponse::Ok().json(OrderFull { order: existing, items, warnings: Vec::new() }));
+                }
+            return Err(AppError::Conflict("Duplicate order".into()));
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     // Payment splits
     if let Some(splits) = &body.payment_splits {
         for split in splits {
+            if split.amount <= 0 {
+                return Err(AppError::BadRequest(
+                    "Split payment amounts must be greater than 0".into(),
+                ));
+            }
             validate_payment_method(pool.get_ref(), org_id, &split.method).await?;
             sqlx::query(
                 "INSERT INTO order_payments (order_id, method, amount, reference) \
@@ -1614,8 +1658,8 @@ pub async fn list_orders(
             COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN o.total_amount ELSE 0 END), 0),
             COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN 1              ELSE 0 END), 0),
             COALESCE(SUM(CASE WHEN o.status::text = 'voided'    THEN 1              ELSE 0 END), 0),
-            COALESCE(SUM(o.discount_amount), 0),
-            COALESCE(SUM(COALESCE(o.tip_amount, 0)), 0)
+            COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN o.discount_amount        ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN COALESCE(o.tip_amount, 0) ELSE 0 END), 0)
          FROM orders o JOIN users u ON u.id = o.teller_id
          WHERE {} {}",
         scope_condition, count_filter
@@ -1724,7 +1768,7 @@ pub async fn void_order(
                void_reason = $2::void_reason,
                voided_by   = $4,
                void_note   = $5
-           WHERE id = $1
+           WHERE id = $1 AND status <> 'voided'
            RETURNING
                id, branch_id, shift_id, teller_id,
                (SELECT name FROM users WHERE id = teller_id) AS teller_name,
@@ -1740,8 +1784,17 @@ pub async fn void_order(
     .bind(voided_at)
     .bind(claims.user_id())
     .bind(void_note)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
+
+    // A concurrent/retried void already won the race (UPDATE matched 0 rows
+    // because status was already 'voided'): do NOT restock a second time —
+    // return the already-voided order idempotently.
+    let Some(updated) = updated else {
+        tx.rollback().await?;
+        let current = fetch_order_or_404(pool.get_ref(), *order_id).await?;
+        return Ok(HttpResponse::Ok().json(current));
+    };
 
     if let Some(items) = items_to_restore {
         for item in items {
@@ -2468,8 +2521,8 @@ pub async fn export_orders(
             COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN o.total_amount ELSE 0 END), 0), \
             COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN 1              ELSE 0 END), 0), \
             COALESCE(SUM(CASE WHEN o.status::text = 'voided'    THEN 1              ELSE 0 END), 0), \
-            COALESCE(SUM(o.discount_amount), 0), \
-            COALESCE(SUM(COALESCE(o.tip_amount, 0)), 0) \
+            COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN o.discount_amount        ELSE 0 END), 0), \
+            COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN COALESCE(o.tip_amount, 0) ELSE 0 END), 0) \
          FROM orders o JOIN users u ON u.id = o.teller_id \
          WHERE {} {}",
         scope_condition, filter
