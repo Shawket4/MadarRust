@@ -1121,3 +1121,128 @@ async fn test_inventory_reports_require_inventory_read(pool: PgPool) {
     let resp = test::call_service(&app, test::TestRequest::get().uri(&url).insert_header(auth.clone()).to_request()).await;
     assert_eq!(resp.status(), 200);
 }
+
+// ── Audit regression tests ───────────────────────────────────────────────
+
+/// V17: an order paid by a split (multiple `order_payments` rows) must NOT
+/// multiply order-level aggregates. Before the fix a fan-out `LEFT JOIN
+/// order_payments` doubled total_orders / total_revenue / total_tax for a
+/// 2-way split.
+#[sqlx::test]
+async fn test_shift_summary_split_payment_not_double_counted(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "shifts", "read").await;
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let token = generate_org_admin_token(user_id, org_id);
+
+    // One order, total 570, paid by cash 300 + card 270 → TWO order_payments rows.
+    let order_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, discount_amount, tax_amount, total_amount, status, order_number, payment_method)
+         VALUES ($1,$2,$3,$4, gen_random_uuid(), 500, 0, 70, 570, 'completed', 1, 'cash')"
+    ).bind(order_id).bind(branch_id).bind(user_id).bind(shift_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO order_payments (order_id, method, amount) VALUES ($1,'cash',300),($1,'card',270)")
+        .bind(order_id).execute(&pool).await.unwrap();
+
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/reports/shifts/{}/summary", shift_id))
+        .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
+    assert_eq!(resp.status(), 200);
+    let s: ShiftSummary = test::read_body_json(resp).await;
+    assert_eq!(s.total_orders, 1, "split payment must not inflate order count");
+    assert_eq!(s.total_revenue, 570, "split payment must not double revenue");
+    assert_eq!(s.total_tax, 70, "split payment must not double tax");
+    assert_eq!(s.revenue_by_method["cash"], json!(300));
+    assert_eq!(s.revenue_by_method["card"], json!(270));
+}
+
+/// V17 (org branch comparison): same fan-out, `total_revenue` was inflated even
+/// though `COUNT(DISTINCT)` protected the counts.
+#[sqlx::test]
+async fn test_org_branch_comparison_split_payment_revenue(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let token = generate_org_admin_token(user_id, org_id);
+
+    let order_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, discount_amount, tax_amount, total_amount, status, order_number, payment_method)
+         VALUES ($1,$2,$3,$4, gen_random_uuid(), 500, 0, 70, 570, 'completed', 1, 'cash')"
+    ).bind(order_id).bind(branch_id).bind(user_id).bind(shift_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO order_payments (order_id, method, amount) VALUES ($1,'cash',300),($1,'card',270)")
+        .bind(order_id).execute(&pool).await.unwrap();
+
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/reports/orgs/{}/comparison", org_id))
+        .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
+    assert_eq!(resp.status(), 200);
+    let report: OrgComparisonReport = test::read_body_json(resp).await;
+    let b = report.branches.iter().find(|b| b.branch_id == branch_id).unwrap();
+    assert_eq!(b.total_orders, 1);
+    assert_eq!(b.total_revenue, 570, "split payment must not double branch revenue");
+}
+
+/// V18: a voided-and-restocked sale must net to zero consumption (the
+/// `void_restock` movement cancels the `sale` movement).
+#[sqlx::test]
+async fn test_consumption_nets_voided_restock(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "inventory", "read").await;
+    let ing = seed_ingredient(&pool, org_id, "Beans", "g").await;
+    // Sale of 10 then a void_restock of the same 10 → net zero consumed.
+    ins_movement(&pool, branch_id, ing, "sale", -10.0, Some(100), None).await;
+    ins_movement(&pool, branch_id, ing, "void_restock", 10.0, Some(100), None).await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    for url in [format!("/reports/branches/{branch_id}/consumption"),
+                format!("/reports/orgs/{org_id}/consumption")] {
+        let resp = test::call_service(&app, test::TestRequest::get().uri(&url).insert_header(auth.clone()).to_request()).await;
+        assert_eq!(resp.status(), 200);
+        let rows: Vec<ConsumptionRow> = test::read_body_json(resp).await;
+        let consumed = rows.iter().find(|r| r.org_ingredient_id == ing).map(|r| r.consumed_qty).unwrap_or(0.0);
+        assert_eq!(consumed, 0.0, "voided+restocked sale must net to zero consumption ({url})");
+    }
+}
+
+/// V1: the timeseries timezone is now a bound parameter, not interpolated.
+/// A valid non-default IANA tz must still be honored; an injection payload must
+/// be rejected as an invalid timezone, never executed.
+#[sqlx::test]
+async fn test_timeseries_timezone_is_bound(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    seed_order(&pool, branch_id, user_id, shift_id).await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let url = format!("/reports/branches/{}/sales/timeseries?granularity=daily", branch_id);
+
+    // A valid non-default IANA timezone is honored (proves the value flows as data).
+    sqlx::query("UPDATE branches SET timezone='America/New_York' WHERE id=$1").bind(branch_id).execute(&pool).await.unwrap();
+    let resp = test::call_service(&app, test::TestRequest::get().uri(&url)
+        .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
+    assert_eq!(resp.status(), 200, "valid timezone must still work after parameterization");
+
+    // An injection payload must NOT yield a 2xx response with attacker SQL.
+    sqlx::query("UPDATE branches SET timezone=$2 WHERE id=$1")
+        .bind(branch_id)
+        .bind("Africa/Cairo' UNION SELECT version() --")
+        .execute(&pool).await.unwrap();
+    let resp = test::call_service(&app, test::TestRequest::get().uri(&url)
+        .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
+    assert!(!resp.status().is_success(), "injection-payload timezone must be rejected, never executed");
+}

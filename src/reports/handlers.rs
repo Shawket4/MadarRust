@@ -234,7 +234,6 @@ pub async fn shift_summary(
         JOIN branches b ON b.id = s.branch_id
         JOIN users    u ON u.id = s.teller_id
         LEFT JOIN orders o          ON o.shift_id  = s.id
-        LEFT JOIN order_payments op ON op.order_id = o.id
         WHERE s.id = $1
         GROUP BY s.id, b.name, u.name
         "#,
@@ -535,14 +534,17 @@ pub async fn branch_sales_timeseries(
         _         => "day",
     };
 
-    // trunc and tz are server-controlled (enum whitelist + DB value) — safe to interpolate
+    // `trunc` is an enum whitelist (closed match above) so it is safe to
+    // interpolate. `tz` is a DB value but originates as unvalidated free text
+    // on the branch, so it MUST be bound ($4), never interpolated — otherwise a
+    // crafted branch timezone is a stored SQL injection.
     let sql = format!(
         r#"
         WITH periods AS (
             SELECT
-                date_trunc('{trunc}', o.created_at AT TIME ZONE '{tz}') AS period_val,
+                date_trunc('{trunc}', o.created_at AT TIME ZONE $4) AS period_val,
                 to_char(
-                    date_trunc('{trunc}', o.created_at AT TIME ZONE '{tz}'),
+                    date_trunc('{trunc}', o.created_at AT TIME ZONE $4),
                     'YYYY-MM-DD"T"HH24:MI:SS'
                 ) AS period_str,
                 COUNT(o.id)   FILTER (WHERE o.status != 'voided')::bigint  AS orders,
@@ -554,7 +556,7 @@ pub async fn branch_sales_timeseries(
             WHERE o.branch_id = $1
               AND ($2::timestamptz IS NULL OR o.created_at >= $2)
               AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-            GROUP BY date_trunc('{trunc}', o.created_at AT TIME ZONE '{tz}')
+            GROUP BY date_trunc('{trunc}', o.created_at AT TIME ZONE $4)
         )
         SELECT
             p.period_str AS period,
@@ -569,7 +571,7 @@ pub async fn branch_sales_timeseries(
                 FROM order_payments op2
                 JOIN orders o2 ON o2.id = op2.order_id
                 WHERE o2.branch_id = $1 AND o2.status != 'voided'
-                  AND date_trunc('{trunc}', o2.created_at AT TIME ZONE '{tz}') = p.period_val
+                  AND date_trunc('{trunc}', o2.created_at AT TIME ZONE $4) = p.period_val
                 GROUP BY op2.method
               ) sub
             ), '{{}}'::json) AS revenue_by_method
@@ -577,13 +579,13 @@ pub async fn branch_sales_timeseries(
         ORDER BY p.period_val ASC
         "#,
         trunc = trunc,
-        tz    = tz,
     );
 
     let rows = sqlx::query_as::<_, TimeseriesPoint>(&sql)
         .bind(*branch_id)
         .bind(query.from)
         .bind(query.to)
+        .bind(&tz)
         .fetch_all(pool.get_ref())
         .await?;
 
@@ -754,7 +756,6 @@ pub async fn org_branch_comparison(
         LEFT JOIN orders o          ON o.branch_id = b.id
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        LEFT JOIN order_payments op ON op.order_id  = o.id
         WHERE b.org_id = $1 AND b.deleted_at IS NULL
         GROUP BY b.id, b.name
         ORDER BY total_revenue DESC
@@ -995,7 +996,9 @@ pub async fn branch_consumption(
         FROM inventory_movements m
         JOIN org_ingredients oi ON oi.id = m.org_ingredient_id
         WHERE m.branch_id = $1
-          AND m.type IN ('sale','waste')
+          -- void_restock (positive qty) nets out a voided-and-restocked sale's
+          -- negative 'sale' movement so consumption reflects real usage.
+          AND m.type IN ('sale','waste','void_restock')
           AND ($2::timestamptz IS NULL OR m.created_at >= $2)
           AND ($3::timestamptz IS NULL OR m.created_at <= $3)
         GROUP BY m.org_ingredient_id, oi.name, oi.unit
@@ -1086,7 +1089,8 @@ pub async fn org_consumption(
         FROM inventory_movements m
         JOIN org_ingredients oi ON oi.id = m.org_ingredient_id
         JOIN branches b ON b.id = m.branch_id AND b.org_id = $1 AND b.deleted_at IS NULL
-        WHERE m.type IN ('sale','waste')
+        -- void_restock nets out voided-and-restocked sales (see branch_consumption).
+        WHERE m.type IN ('sale','waste','void_restock')
           AND ($2::timestamptz IS NULL OR m.created_at >= $2)
           AND ($3::timestamptz IS NULL OR m.created_at <= $3)
         GROUP BY m.org_ingredient_id, oi.name, oi.unit
