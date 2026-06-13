@@ -179,7 +179,14 @@ pub async fn create_stocktake(
     .bind(&body.note)
     .bind(claims.user_id())
     .fetch_one(&mut *tx)
-    .await?;
+    .await
+    .map_err(|e| match &e {
+        // A concurrent open won the race; the partial unique index rejected us (V12).
+        sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => AppError::Conflict(
+            "An open stocktake already exists for this branch. Finalize or cancel it first.".into(),
+        ),
+        _ => AppError::Db(e),
+    })?;
 
     // Snapshot current branch stock as the expected counts.
     sqlx::query(
@@ -381,6 +388,19 @@ pub async fn finalize_stocktake(
     }
 
     let mut tx = pool.get_ref().begin().await?;
+
+    // Lock the stocktake row and re-check it is still open INSIDE the tx, so a
+    // concurrent/retried finalize can't both pass the status gate above and
+    // double-post stock_count movements (doubling shrinkage reports) (V11).
+    let locked_status: String = sqlx::query_scalar(
+        "SELECT status::text FROM stocktakes WHERE id = $1 FOR UPDATE"
+    )
+    .bind(*id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if locked_status != "in_progress" && locked_status != "draft" {
+        return Err(AppError::Conflict("Stocktake is not open".into()));
+    }
 
     for (ing_id, bi_id_opt, _name, expected, counted_qty, unit_cost, variance_reason) in counted {
         let Some(bi_id) = bi_id_opt else { continue }; // tracking row removed since snapshot
