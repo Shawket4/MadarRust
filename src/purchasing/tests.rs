@@ -513,3 +513,60 @@ async fn test_po_permission_denied(pool: PgPool) {
         .insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;
     assert_eq!(resp.status(), 403);
 }
+
+// ── Audit regression tests ───────────────────────────────────────────────
+
+/// V10: a cheap-per-base-unit purchase must NOT round the catalog cost to 0
+/// ("free"). 400 piastres/kg = 0.40 piastres/g must persist as 0.40 in the
+/// numeric(15,2) cost_per_unit, not be truncated to integer piastres.
+#[sqlx::test]
+async fn test_receive_cheap_cost_not_rounded_to_zero(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id).await;
+    for a in ["create","read","update"] { grant(&pool, "purchase_orders", a).await; }
+    // Ingredient stocked in grams, cost UNKNOWN.
+    let ing = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, category, cost_per_unit) VALUES ($1,$2,'Salt','g'::inventory_unit,'dry',NULL)")
+        .bind(ing).bind(org_id).execute(&pool).await.unwrap();
+    let token = org_admin_token(user_id, org_id);
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    // Buy 1 kg at 400 piastres/kg = 0.40 piastres/g.
+    let po: PurchaseOrderFull = test::read_body_json(test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/purchasing/branches/{branch_id}/orders")).insert_header(auth.clone())
+        .set_json(serde_json::json!({"lines":[{"org_ingredient_id":ing,"purchase_unit":"kg","quantity_ordered":1.0,"unit_cost":400}]}))
+        .to_request()).await).await;
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/purchasing/orders/{}/receive", po.order.id)).insert_header(auth.clone())
+        .set_json(serde_json::json!({"lines":[{"line_id":po.lines[0].id,"quantity_received":1.0}]})).to_request()).await;
+    assert!(resp.status().is_success());
+
+    let cost: f64 = sqlx::query_scalar("SELECT cost_per_unit::float8 FROM org_ingredients WHERE id=$1").bind(ing).fetch_one(&pool).await.unwrap();
+    assert!((cost - 0.40).abs() < 1e-9, "cheap-per-gram cost must persist as 0.40, got {cost}");
+}
+
+/// V8: a receive request with the same line_id twice is rejected (would
+/// otherwise double-apply stock and cost).
+#[sqlx::test]
+async fn test_receive_rejects_duplicate_line_id(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id).await;
+    for a in ["create","read","update"] { grant(&pool, "purchase_orders", a).await; }
+    let ing = seed_ingredient_g(&pool, org_id).await;
+    let token = org_admin_token(user_id, org_id);
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    let po: PurchaseOrderFull = test::read_body_json(test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/purchasing/branches/{branch_id}/orders")).insert_header(auth.clone())
+        .set_json(serde_json::json!({"lines":[{"org_ingredient_id":ing,"purchase_unit":"g","quantity_ordered":10.0,"unit_cost":5}]}))
+        .to_request()).await).await;
+    let lid = po.lines[0].id;
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/purchasing/orders/{}/receive", po.order.id)).insert_header(auth.clone())
+        .set_json(serde_json::json!({"lines":[{"line_id":lid,"quantity_received":5.0},{"line_id":lid,"quantity_received":5.0}]})).to_request()).await;
+    assert_eq!(resp.status(), 400, "duplicate line_id in one receive must be rejected");
+}

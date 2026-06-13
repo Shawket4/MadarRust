@@ -38,14 +38,14 @@ pub fn round_piastres(piastres: Decimal) -> i64 {
 pub async fn apply_weighted_average_cost(
     conn:               &mut sqlx::PgConnection,
     org_ingredient_id:  Uuid,
-    received_qty:       f64,
-    received_unit_cost: i64,
+    received_qty:       Decimal,
+    received_unit_cost: Decimal,
     changed_by:         Uuid,
-) -> Result<i64, AppError> {
-    let (cur_cost, prior_on_hand): (Option<f64>, f64) = sqlx::query_as(
-        "SELECT oi.cost_per_unit::float8, \
+) -> Result<Decimal, AppError> {
+    let (cur_cost, prior_on_hand): (Option<Decimal>, Decimal) = sqlx::query_as(
+        "SELECT oi.cost_per_unit, \
                 COALESCE((SELECT SUM(current_stock) FROM branch_inventory \
-                          WHERE org_ingredient_id = $1), 0)::float8 \
+                          WHERE org_ingredient_id = $1), 0) \
          FROM org_ingredients oi WHERE oi.id = $1 AND oi.deleted_at IS NULL"
     )
     .bind(org_ingredient_id)
@@ -53,21 +53,24 @@ pub async fn apply_weighted_average_cost(
     .await?
     .ok_or_else(|| AppError::NotFound("Ingredient not found".into()))?;
 
-    if received_qty <= 0.0 {
-        return Ok(cur_cost.map(|c| c.round() as i64).unwrap_or(received_unit_cost));
+    if received_qty <= Decimal::ZERO {
+        return Ok(cur_cost.unwrap_or(received_unit_cost));
     }
 
-    let received = received_unit_cost as f64;
-    let new_cost_f = match cur_cost {
-        Some(cur) if prior_on_hand > 0.0 =>
-            (prior_on_hand * cur + received_qty * received) / (prior_on_hand + received_qty),
-        _ => received,
-    };
-    let new_cost = new_cost_f.round();
-    let new_cost_i = new_cost as i64;
+    // Blend and keep 2 dp. org_ingredients.cost_per_unit is numeric(15,2)
+    // PIASTRES and deliberately holds sub-piastre cost, so we must NOT round to
+    // whole piastres — doing so silently drove cheap-per-base-unit ingredients
+    // (e.g. 0.40 piastres/g) to 0 ("free") and lost precision on every blend.
+    let new_cost = match cur_cost {
+        Some(cur) if prior_on_hand > Decimal::ZERO =>
+            (prior_on_hand * cur + received_qty * received_unit_cost)
+                / (prior_on_hand + received_qty),
+        _ => received_unit_cost,
+    }
+    .round_dp(2);
 
     // Only roll a new epoch when the per-unit cost actually moved.
-    if cur_cost.map(|c| c.round() as i64) != Some(new_cost_i) {
+    if cur_cost.map(|c| c.round_dp(2)) != Some(new_cost) {
         sqlx::query("UPDATE org_ingredients SET cost_per_unit = $2 WHERE id = $1")
             .bind(org_ingredient_id).bind(new_cost).execute(&mut *conn).await?;
         sqlx::query(
@@ -83,7 +86,7 @@ pub async fn apply_weighted_average_cost(
         .bind(org_ingredient_id).bind(new_cost).bind(changed_by).execute(&mut *conn).await?;
     }
 
-    Ok(new_cost_i)
+    Ok(new_cost)
 }
 
 /// Resolve point-in-time PIASTRE cost per unit for a set of ingredients at `at`.

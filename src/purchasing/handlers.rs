@@ -1,11 +1,12 @@
 use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
     auth::jwt::Claims,
-    costing::service::apply_weighted_average_cost,
+    costing::service::{apply_weighted_average_cost, round_piastres},
     errors::{AppError, AppErrorResponse},
     inventory::movements::{record_movement, MovementParams},
     models::UserRole,
@@ -541,7 +542,34 @@ pub async fn receive_order(
         return Err(AppError::BadRequest("no lines to receive".into()));
     }
 
+    // Reject duplicate line_ids in one request — they would double-apply
+    // stock/cost for the same line (V8).
+    {
+        let mut seen = std::collections::HashSet::new();
+        for recv in &body.lines {
+            if !seen.insert(recv.line_id) {
+                return Err(AppError::BadRequest(
+                    "Duplicate line_id in receive request".into(),
+                ));
+            }
+        }
+    }
+
     let mut tx = pool.get_ref().begin().await?;
+
+    // Lock the PO row and re-check status INSIDE the tx: two concurrent receives
+    // must not both pass the status gate and double-apply stock/WAC (V7).
+    let locked_status: String = sqlx::query_scalar(
+        "SELECT status::text FROM purchase_orders WHERE id = $1 FOR UPDATE"
+    )
+    .bind(*id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if locked_status == "received" || locked_status == "cancelled" {
+        return Err(AppError::Conflict(
+            "Purchase order is already received or cancelled".into(),
+        ));
+    }
 
     for recv in &body.lines {
         if recv.quantity_received <= 0.0 {
@@ -561,15 +589,23 @@ pub async fn receive_order(
             .ok_or_else(|| AppError::BadRequest("Line does not belong to this purchase order".into()))?;
 
         let stock_qty = recv.quantity_received * factor;
-        // Piastres per base stock unit.
-        let cost_per_stock_unit = if factor > 0.0 {
-            (unit_cost as f64 / factor).round() as i64
+        // Piastres per base stock unit — kept at 2 dp so a cheap-per-base-unit
+        // ingredient (e.g. 400 piastres/kg = 0.40/g) is NOT rounded down to 0
+        // ("free") before it reaches the numeric(15,2) cost_per_unit (V10).
+        let cost_per_stock_unit_dec: Decimal = if factor > 0.0 {
+            (Decimal::from(unit_cost) / Decimal::from_f64_retain(factor).unwrap_or(Decimal::ONE))
+                .round_dp(2)
         } else {
-            unit_cost
+            Decimal::from(unit_cost)
         };
+        let stock_qty_dec = Decimal::from_f64_retain(stock_qty)
+            .unwrap_or(Decimal::ZERO)
+            .round_dp(3);
+        // The movement ledger unit_cost is a bigint column → whole-piastre snapshot.
+        let cost_per_stock_unit = round_piastres(cost_per_stock_unit_dec);
 
         // Weighted-average cost must read PRIOR on-hand → before adding stock.
-        apply_weighted_average_cost(&mut *tx, ing_id, stock_qty, cost_per_stock_unit, claims.user_id()).await?;
+        apply_weighted_average_cost(&mut *tx, ing_id, stock_qty_dec, cost_per_stock_unit_dec, claims.user_id()).await?;
 
         // Upsert branch stock (+received).
         let (bi_id, balance): (Uuid, f64) = sqlx::query_as(
