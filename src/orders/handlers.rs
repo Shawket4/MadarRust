@@ -26,7 +26,7 @@ const ORDER_SELECT: &str =
      o.subtotal, o.discount_type::text, o.discount_value,
      o.discount_amount, o.tax_amount, o.total_amount,
      o.amount_tendered, o.change_given, o.tip_amount, o.tip_payment_method, o.discount_id,
-     o.customer_name, o.notes, o.voided_at, o.void_reason::text, o.voided_by, o.created_at
+     o.customer_name, o.notes, o.voided_at, o.void_reason::text, o.void_note, o.voided_by, o.created_at
      FROM orders o JOIN users u ON u.id = o.teller_id ";
 
 // ── Models ────────────────────────────────────────────────────
@@ -56,6 +56,7 @@ pub struct Order {
     pub notes:              Option<String>,
     pub voided_at:          Option<chrono::DateTime<chrono::Utc>>,
     pub void_reason:        Option<String>,
+    pub void_note:          Option<String>,
     pub voided_by:          Option<Uuid>,
     pub created_at:         chrono::DateTime<chrono::Utc>,
 }
@@ -123,6 +124,11 @@ pub struct OrderFull {
     #[serde(flatten)]
     pub order: Order,
     pub items: Vec<OrderItemFull>,
+    /// Non-fatal warnings raised while placing the order — currently used to
+    /// flag ingredients that were oversold (stock driven below zero). Empty
+    /// for reads/refunds.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -213,6 +219,8 @@ pub struct CreateOrderRequest {
 #[derive(Deserialize, Serialize, ToSchema)]
 pub struct VoidOrderRequest {
     pub reason:            String,
+    /// Free-text explanation. Required when `reason` is "other".
+    pub note:              Option<String>,
     pub voided_at:         Option<chrono::DateTime<chrono::Utc>>,
     pub restore_inventory: Option<bool>,
 }
@@ -417,24 +425,36 @@ pub async fn create_order(
     if let Some(key) = idempotency_key
         && let Some(existing) = fetch_order_by_idempotency_key(pool.get_ref(), key).await? {
             let items = fetch_order_items_full(pool.get_ref(), existing.id).await?;
-            return Ok(HttpResponse::Ok().json(OrderFull { order: existing, items }));
+            return Ok(HttpResponse::Ok().json(OrderFull { order: existing, items, warnings: Vec::new() }));
         }
 
     if body.items.is_empty() {
         return Err(AppError::BadRequest("Order must have at least one item".into()));
     }
 
-    let shift_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND branch_id = $2)"
+    // The order must attach to an OPEN shift at this branch — and, for tellers,
+    // one that belongs to them. This stops orders posting to a closed shift
+    // (cash already settled → money goes missing) or to another teller's / a
+    // different branch's shift.
+    let teller_match = if claims.role == UserRole::Teller {
+        Some(claims.user_id())
+    } else {
+        None
+    };
+    let shift_ok: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM shifts \
+         WHERE id = $1 AND branch_id = $2 AND status = 'open' \
+           AND ($3::uuid IS NULL OR teller_id = $3))"
     )
     .bind(body.shift_id)
     .bind(body.branch_id)
+    .bind(teller_match)
     .fetch_one(pool.get_ref())
     .await?;
 
-    if !shift_exists {
+    if !shift_ok {
         return Err(AppError::BadRequest(
-            "Shift not found or does not belong to this branch".into(),
+            "Shift is not open, does not belong to this branch, or is not yours.".into(),
         ));
     }
 
@@ -898,10 +918,25 @@ pub async fn create_order(
                             last.is_swap = true;
                         }
 
-                        // Replace base ingredient
+                        // Replace base ingredient. Keep the SAME physical amount the
+                        // recipe called for, but expressed in the replacement
+                        // ingredient's base unit — e.g. 250 g milk → 0.25 kg almond
+                        // milk. Without this conversion a g↔kg / ml↔l base-unit
+                        // mismatch between the two ingredients would deduct the wrong
+                        // amount by 1000×.
                         let mut swapped = false;
                         for ded in deductions.iter_mut() {
                             if ded.source == "drink_recipe" && ded.category == cat {
+                                match crate::units::convert(ded.quantity, &ded.unit, repl_unit) {
+                                    Ok(q) => ded.quantity = q,
+                                    // Different measure families (e.g. ml vs g) have no
+                                    // defined conversion — a setup error for a swap. Leave
+                                    // the amount as-is and flag it rather than blocking the sale.
+                                    Err(_) => tracing::warn!(
+                                        from_unit = %ded.unit, to_unit = %repl_unit, addon = %addon_name,
+                                        "addon swap across incompatible unit families; deducting unconverted quantity"
+                                    ),
+                                }
                                 ded.org_ingredient_id = *repl_id;
                                 ded.ingredient_name = repl_name.clone();
                                 ded.unit = repl_unit.clone();
@@ -1109,7 +1144,7 @@ pub async fn create_order(
             subtotal, discount_type::text, discount_value,
             discount_amount, tax_amount, total_amount,
             amount_tendered, change_given, tip_amount, tip_payment_method, discount_id,
-            customer_name, notes, voided_at, void_reason::text, voided_by, created_at
+            customer_name, notes, voided_at, void_reason::text, void_note, voided_by, created_at
         "#,
     )
     .bind(body.branch_id)
@@ -1163,6 +1198,7 @@ pub async fn create_order(
     }
 
     let mut order_items_full: Vec<OrderItemFull> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
 
     for resolved in resolved_items {
         let line_total = resolved.unit_price * resolved.quantity
@@ -1375,7 +1411,9 @@ pub async fn create_order(
             optional_rows.push(row);
         }
 
-        // Apply inventory deductions (soft-fail — warn if not tracked)
+        // Apply inventory deductions (soft-fail — warn if not tracked).
+        // Negative stock is ALLOWED but FLAGGED: the movement records
+        // below_zero and the sale surfaces a warning (Foodics default).
         for deduction in &resolved.deductions {
             let Some(ing_id) = deduction.org_ingredient_id else {
                 tracing::warn!(
@@ -1386,26 +1424,55 @@ pub async fn create_order(
                 continue;
             };
 
-            let rows_affected = sqlx::query(
+            let updated: Option<(Uuid, f64)> = sqlx::query_as(
                 "UPDATE branch_inventory \
                  SET current_stock = current_stock - $1 \
-                 WHERE branch_id = $2 AND org_ingredient_id = $3"
+                 WHERE branch_id = $2 AND org_ingredient_id = $3 \
+                 RETURNING id, current_stock::float8"
             )
             .bind(deduction.quantity)
             .bind(body.branch_id)
             .bind(ing_id)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
+            .fetch_optional(&mut *tx)
+            .await?;
 
-            if rows_affected == 0 {
+            let Some((bi_id, balance)) = updated else {
                 tracing::warn!(
                     branch_id         = %body.branch_id,
                     org_ingredient_id = %ing_id,
                     source            = %deduction.source,
                     "Ingredient not tracked in branch inventory — skipping"
                 );
+                continue;
+            };
+
+            let below_zero = balance < 0.0;
+            if below_zero {
+                warnings.push(format!(
+                    "{} is oversold — stock is now {:.3} {}",
+                    deduction.ingredient_name, balance, deduction.unit
+                ));
             }
+
+            crate::inventory::movements::record_movement(
+                &mut *tx,
+                crate::inventory::movements::MovementParams {
+                    branch_id:           body.branch_id,
+                    org_ingredient_id:   ing_id,
+                    branch_inventory_id: Some(bi_id),
+                    movement_type:       "sale",
+                    quantity:            -deduction.quantity,
+                    balance_after:       Some(balance),
+                    unit_cost:           deduction.cost_per_unit.map(|c| c.round() as i64),
+                    reason:              None,
+                    below_zero,
+                    source_type:         Some("order"),
+                    source_id:           Some(order.id),
+                    note:                None,
+                    created_by:          Some(claims.user_id()),
+                },
+            )
+            .await?;
         }
 
         order_items_full.push(OrderItemFull {
@@ -1417,7 +1484,7 @@ pub async fn create_order(
     }
 
     tx.commit().await?;
-    Ok(HttpResponse::Created().json(OrderFull { order, items: order_items_full }))
+    Ok(HttpResponse::Created().json(OrderFull { order, items: order_items_full, warnings }))
 }
 
 // ── GET /orders ───────────────────────────────────────────────
@@ -1579,7 +1646,7 @@ pub async fn list_orders(
             .into_iter()
             .map(|order| {
                 let items = items_map.remove(&order.id).unwrap_or_default();
-                OrderFull { order, items }
+                OrderFull { order, items, warnings: Vec::new() }
             })
             .collect();
         return Ok(HttpResponse::Ok().json(PaginatedOrdersFull {
@@ -1610,7 +1677,7 @@ pub async fn get_order(
     let order = fetch_order_or_404(pool.get_ref(), *order_id).await?;
     require_branch_access(pool.get_ref(), &claims, order.branch_id).await?;
     let items = fetch_order_items_full(pool.get_ref(), order.id).await?;
-    Ok(HttpResponse::Ok().json(OrderFull { order, items }))
+    Ok(HttpResponse::Ok().json(OrderFull { order, items, warnings: Vec::new() }))
 }
 
 // ── POST /orders/:id/void ─────────────────────────────────────
@@ -1636,6 +1703,10 @@ pub async fn void_order(
     require_branch_access(pool.get_ref(), &claims, order.branch_id).await?;
     if order.status == "voided" { return Ok(HttpResponse::Ok().json(order)); }
     validate_void_reason(&body.reason)?;
+    let void_note = body.note.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    if body.reason == "other" && void_note.is_none() {
+        return Err(AppError::BadRequest("A note is required when void reason is 'other'".into()));
+    }
     let voided_at = body.voided_at.unwrap_or_else(chrono::Utc::now);
 
     let items_to_restore = if body.restore_inventory.unwrap_or(false) {
@@ -1651,7 +1722,8 @@ pub async fn void_order(
            SET status      = 'voided',
                voided_at   = $3,
                void_reason = $2::void_reason,
-               voided_by   = $4
+               voided_by   = $4,
+               void_note   = $5
            WHERE id = $1
            RETURNING
                id, branch_id, shift_id, teller_id,
@@ -1661,12 +1733,13 @@ pub async fn void_order(
                discount_amount, tax_amount, total_amount,
                amount_tendered, change_given, tip_amount, tip_payment_method,
                discount_id, customer_name, notes,
-               voided_at, void_reason::text, voided_by, created_at"#,
+               voided_at, void_reason::text, void_note, voided_by, created_at"#,
     )
     .bind(*order_id)
     .bind(&body.reason)
     .bind(voided_at)
     .bind(claims.user_id())
+    .bind(void_note)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -1679,16 +1752,41 @@ pub async fn void_order(
                         d.get("org_ingredient_id").and_then(|v| v.as_str()),
                     )
                         && let Ok(ing_id) = Uuid::parse_str(ing_id_str) {
-                            sqlx::query(
+                            let restored: Option<(Uuid, f64)> = sqlx::query_as(
                                 "UPDATE branch_inventory \
                                  SET current_stock = current_stock + $1 \
-                                 WHERE branch_id = $2 AND org_ingredient_id = $3"
+                                 WHERE branch_id = $2 AND org_ingredient_id = $3 \
+                                 RETURNING id, current_stock::float8"
                             )
                             .bind(qty)
                             .bind(order.branch_id)
                             .bind(ing_id)
-                            .execute(&mut *tx)
+                            .fetch_optional(&mut *tx)
                             .await?;
+
+                            if let Some((bi_id, balance)) = restored {
+                                crate::inventory::movements::record_movement(
+                                    &mut *tx,
+                                    crate::inventory::movements::MovementParams {
+                                        branch_id:           order.branch_id,
+                                        org_ingredient_id:   ing_id,
+                                        branch_inventory_id: Some(bi_id),
+                                        movement_type:       "void_restock",
+                                        quantity:            qty,
+                                        balance_after:       Some(balance),
+                                        unit_cost:           d.get("cost_per_unit")
+                                            .and_then(|v| v.as_f64())
+                                            .map(|c| c.round() as i64),
+                                        reason:              None,
+                                        below_zero:          false,
+                                        source_type:         Some("order"),
+                                        source_id:           Some(order.id),
+                                        note:                Some("Void restock"),
+                                        created_by:          Some(claims.user_id()),
+                                    },
+                                )
+                                .await?;
+                            }
                         }
                 }
             }
@@ -2190,6 +2288,20 @@ async fn require_branch_access(
     if !assigned {
         return Err(AppError::Forbidden("Not assigned to this branch".into()));
     }
+
+    // A teller is bound to the branch they authenticated for: a token minted
+    // for one branch cannot ring up / read another, even when the teller is
+    // assigned to both. This stops revenue + inventory being attributed to the
+    // wrong branch. (Tokens always carry a branch for tellers; the `None` guard
+    // keeps legacy/unit-test tokens working.)
+    if claims.role == UserRole::Teller
+        && let Some(token_branch) = claims.branch_id()
+        && token_branch != branch_id {
+        return Err(AppError::Forbidden(
+            "This device is signed in to a different branch.".into(),
+        ));
+    }
+
     Ok(())
 }
 

@@ -296,7 +296,7 @@ async fn test_normal_close_and_report(pool: PgPool) {
     let req_close = test::TestRequest::post()
         .uri(&format!("/shifts/{}/close", shift_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&CloseShiftRequest { closing_cash_declared: 1000, cash_note: None, inventory_counts: vec![], closed_at: None })
+        .set_json(&CloseShiftRequest { closing_cash_declared: 1000, cash_note: None, closed_at: None })
         .to_request();
     let resp_close = test::call_service(&app, req_close).await;
     assert!(resp_close.status().is_success());
@@ -360,4 +360,70 @@ async fn test_delete_shift_forbidden(pool: PgPool) {
         .to_request();
     let resp_del2 = test::call_service(&app, req_del2).await;
     assert!(resp_del2.status().is_success());
+}
+
+#[sqlx::test]
+async fn test_teller_cannot_open_shift_at_two_branches(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    ).await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_a = seed_branch(&pool, org_id).await;
+    let branch_b = seed_branch(&pool, org_id).await;
+    let teller = seed_user(&pool, org_id, "teller").await;
+    assign_user_to_branch(&pool, teller, branch_a).await;
+    assign_user_to_branch(&pool, teller, branch_b).await;
+    for a in ["create", "read", "update"] { grant_permission(&pool, "teller", "shifts", a).await; }
+    let token = generate_teller_token(teller, org_id);
+
+    let open = |branch: Uuid| test::TestRequest::post()
+        .uri(&format!("/shifts/branches/{branch}/open"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({"opening_cash": 0}))
+        .to_request();
+
+    // Opens at branch A.
+    assert_eq!(test::call_service(&app, open(branch_a)).await.status(), 201);
+    // The same teller may NOT open a second shift at another branch.
+    let resp = test::call_service(&app, open(branch_b)).await;
+    assert_eq!(resp.status(), 409);
+    // DB enforces it too: exactly one open shift for this teller.
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM shifts WHERE teller_id=$1 AND status='open'").bind(teller).fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 1);
+}
+
+#[sqlx::test]
+async fn test_teller_token_is_bound_to_login_branch(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    ).await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_a = seed_branch(&pool, org_id).await;
+    let branch_b = seed_branch(&pool, org_id).await;
+    let teller = seed_user(&pool, org_id, "teller").await;
+    assign_user_to_branch(&pool, teller, branch_a).await;
+    assign_user_to_branch(&pool, teller, branch_b).await;
+    grant_permission(&pool, "teller", "shifts", "read").await;
+    // Token minted for branch A (as login does for this device).
+    let token = crate::auth::jwt::create_token(&get_secret(), teller, Some(org_id), UserRole::Teller, Some(branch_a), 24).unwrap();
+
+    // Bound to A → cannot read branch B, even though assigned to both.
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/shifts/branches/{branch_b}/current"))
+        .insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;
+    assert_eq!(resp.status(), 403);
+
+    // Its own branch works.
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/shifts/branches/{branch_a}/current"))
+        .insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;
+    assert_eq!(resp.status(), 200);
 }

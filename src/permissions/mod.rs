@@ -8,7 +8,9 @@ mod tests;
 
 /// Single source of truth for every permission resource the system knows about.
 /// Keep this in sync with the `permission_resource` DB enum
-/// (migrations/20260611010000_permissions_discounts.sql).
+/// (latest: migrations/20260613001000_inventory_permissions.sql).
+/// Note: 'shift_counts' remains a DB enum label but is retired (shift-close
+/// counting was removed), so it is intentionally omitted from the matrix.
 pub const RESOURCES: &[&str] = &[
     "orgs",
     "branches",
@@ -21,12 +23,15 @@ pub const RESOURCES: &[&str] = &[
     "inventory",
     "inventory_adjustments",
     "inventory_transfers",
+    "stocktakes",
+    "inventory_waste",
+    "suppliers",
+    "purchase_orders",
     "orders",
     "order_items",
     "payments",
     "payment_methods",
     "shifts",
-    "shift_counts",
     "soft_serve_batches",
     "discounts",
     "reports",

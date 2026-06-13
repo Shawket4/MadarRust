@@ -53,6 +53,10 @@ path = "src/bin/export_openapi.rs"
 name = "backfill-cost-snapshots"
 path = "src/bin/backfill_cost_snapshots.rs"
 
+[[bin]]
+name = "backfill-recipe-units"
+path = "src/bin/backfill_recipe_units.rs"
+
 [lib]
 name = "sufrix_rust"
 path = "src/lib.rs"

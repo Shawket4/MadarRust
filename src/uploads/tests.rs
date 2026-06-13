@@ -63,7 +63,7 @@ async fn grant_permission(pool: &PgPool, role: &str, resource: &str, action: &st
 
 async fn seed_category(pool: &PgPool, org_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO categories (id, org_id, name, display_order) VALUES ($1, $2, 'Cat', 0)")
+    sqlx::query("INSERT INTO categories (id, org_id, name) VALUES ($1, $2, 'Cat')")
         .bind(id)
         .bind(org_id)
         .execute(pool)

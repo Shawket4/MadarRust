@@ -723,3 +723,46 @@ async fn test_resolve_branch_wrong_org_returns_404(pool: PgPool) {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 404);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn test_pin_login_blocked_while_any_open_shift(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    // Teller assigned to two branches, with an OPEN shift at branch A.
+    let org_id = seed_org(&pool).await;
+    let branch_a = seed_branch(&pool, org_id).await;
+    let branch_b = seed_branch(&pool, org_id).await;
+    let user_id = Uuid::new_v4();
+    let hash = bcrypt::hash("1234", bcrypt::DEFAULT_COST).unwrap();
+    sqlx::query("INSERT INTO users (id, org_id, name, role, pin_hash) VALUES ($1,$2,'Teller One','teller'::user_role,$3)")
+        .bind(user_id).bind(org_id).bind(&hash).execute(&pool).await.unwrap();
+    assign_teller_to_branch(&pool, user_id, branch_a).await;
+    assign_teller_to_branch(&pool, user_id, branch_b).await;
+    let shift_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO shifts (id, branch_id, teller_id, opening_cash) VALUES ($1,$2,$3,0)")
+        .bind(shift_id).bind(branch_a).bind(user_id).execute(&pool).await.unwrap();
+
+    let login = |branch: Uuid| test::TestRequest::post()
+        .uri("/auth/login")
+        .set_json(&json!({"name":"Teller One","pin":"1234","branch_id": branch}))
+        .to_request();
+
+    // Signing in for the OTHER branch is blocked (409).
+    assert_eq!(test::call_service(&app, login(branch_b)).await.status(), 409,
+        "login at a different branch while a shift is open must be blocked");
+    // Signing in again for the SAME branch is ALSO blocked — no second session.
+    assert_eq!(test::call_service(&app, login(branch_a)).await.status(), 409,
+        "any login while a shift is open must be blocked");
+
+    // Once the shift is closed, login works again.
+    sqlx::query("UPDATE shifts SET status='closed', closed_at=now() WHERE id=$1")
+        .bind(shift_id).execute(&pool).await.unwrap();
+    assert_eq!(test::call_service(&app, login(branch_a)).await.status(), 200,
+        "login must succeed once the open shift is closed");
+}

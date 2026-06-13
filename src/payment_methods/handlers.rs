@@ -24,7 +24,6 @@ pub struct OrgPaymentMethod {
     pub icon: String,
     pub is_cash: bool,
     pub is_active: bool,
-    pub display_order: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -37,7 +36,6 @@ pub struct CreatePaymentMethodRequest {
     pub icon: String,
     pub is_cash: bool,
     pub is_active: Option<bool>,
-    pub display_order: Option<i32>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -48,7 +46,6 @@ pub struct UpdatePaymentMethodRequest {
     pub icon: Option<String>,
     pub is_cash: Option<bool>,
     pub is_active: Option<bool>,
-    pub display_order: Option<i32>,
 }
 
 // ── GET /payment-methods ──────────────────────────────────────────
@@ -70,10 +67,10 @@ pub async fn list_payment_methods(
     let org_id = claims.org_id().ok_or_else(|| AppError::Forbidden("No org id".into()))?;
 
     let rows = sqlx::query_as::<_, OrgPaymentMethod>(
-        "SELECT id, org_id, name, label_translations, color, icon, is_cash, is_active, display_order, created_at, updated_at 
-         FROM org_payment_methods 
-         WHERE org_id = $1 
-         ORDER BY display_order ASC, created_at ASC"
+        "SELECT id, org_id, name, label_translations, color, icon, is_cash, is_active, created_at, updated_at
+         FROM org_payment_methods
+         WHERE org_id = $1
+         ORDER BY created_at ASC"
     )
     .bind(org_id)
     .fetch_all(pool.get_ref())
@@ -110,10 +107,10 @@ pub async fn create_payment_method(
 
     let method = sqlx::query_as::<_, OrgPaymentMethod>(
         r#"
-        INSERT INTO org_payment_methods 
-        (org_id, name, label_translations, color, icon, is_cash, is_active, display_order)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        RETURNING id, org_id, name, label_translations, color, icon, is_cash, is_active, display_order, created_at, updated_at
+        INSERT INTO org_payment_methods
+        (org_id, name, label_translations, color, icon, is_cash, is_active)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING id, org_id, name, label_translations, color, icon, is_cash, is_active, created_at, updated_at
         "#
     )
     .bind(org_id)
@@ -123,7 +120,6 @@ pub async fn create_payment_method(
     .bind(&body.icon)
     .bind(body.is_cash)
     .bind(body.is_active.unwrap_or(true))
-    .bind(body.display_order.unwrap_or(0))
     .fetch_one(pool.get_ref())
     .await
     .map_err(|e| {
@@ -188,10 +184,9 @@ pub async fn update_payment_method(
             color = COALESCE($3, color),
             icon = COALESCE($4, icon),
             is_cash = COALESCE($5, is_cash),
-            is_active = COALESCE($6, is_active),
-            display_order = COALESCE($7, display_order)
-        WHERE id = $8 AND org_id = $9
-        RETURNING id, org_id, name, label_translations, color, icon, is_cash, is_active, display_order, created_at, updated_at
+            is_active = COALESCE($6, is_active)
+        WHERE id = $7 AND org_id = $8
+        RETURNING id, org_id, name, label_translations, color, icon, is_cash, is_active, created_at, updated_at
         "#
     )
     .bind(&body.name)
@@ -200,7 +195,6 @@ pub async fn update_payment_method(
     .bind(&body.icon)
     .bind(body.is_cash)
     .bind(body.is_active)
-    .bind(body.display_order)
     .bind(*id)
     .bind(org_id)
     .fetch_one(pool.get_ref())

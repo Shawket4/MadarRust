@@ -61,7 +61,7 @@ async fn grant_permission(pool: &PgPool, role: &str, resource: &str, action: &st
 
 async fn seed_category(pool: &PgPool, org_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO categories (id, org_id, name, display_order) VALUES ($1, $2, 'Test Cat', 0)")
+    sqlx::query("INSERT INTO categories (id, org_id, name) VALUES ($1, $2, 'Test Cat')")
         .bind(id)
         .bind(org_id)
         .execute(pool)
@@ -135,7 +135,6 @@ async fn test_bundles_crud(pool: PgPool) {
         description_translations: None,
         price: 900,
         image_url: None,
-        display_order: Some(1),
         available_from_time: None,
         available_until_time: None,
         available_from_date: None,
@@ -181,7 +180,6 @@ async fn test_bundles_crud(pool: PgPool) {
             description_translations: None,
             price: Some(1000),
             image_url: None,
-            display_order: None,
             available_from_time: None,
             available_until_time: None,
             available_from_date: None,
@@ -243,7 +241,6 @@ async fn test_bundle_activation_and_rules(pool: PgPool) {
             description_translations: None,
             price: 800, // Valid (240 <= 800 <= 970)
             image_url: None,
-            display_order: None,
             available_from_time: None,
             available_until_time: None,
             available_from_date: None,
@@ -276,7 +273,6 @@ async fn test_bundle_activation_and_rules(pool: PgPool) {
             description_translations: None,
             price: 200, // Invalid (200 < 240)
             image_url: None,
-            display_order: None,
             available_from_time: None,
             available_until_time: None,
             available_from_date: None,
@@ -306,7 +302,6 @@ async fn test_bundle_activation_and_rules(pool: PgPool) {
             description_translations: None,
             price: 980, // Invalid (980 > 970)
             image_url: None,
-            display_order: None,
             available_from_time: None,
             available_until_time: None,
             available_from_date: None,

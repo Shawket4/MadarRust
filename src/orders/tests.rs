@@ -41,9 +41,9 @@ async fn seed_org(pool: &PgPool) -> Uuid {
         .unwrap();
 
     sqlx::query(
-        "INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash, is_active, display_order) VALUES 
-        ($1, 'cash', '{}', 'emerald', 'payments_outlined', true, true, 1),
-        ($1, 'card', '{}', 'blue', 'credit_card_rounded', false, true, 2)"
+        "INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash, is_active) VALUES
+        ($1, 'cash', '{}', 'emerald', 'payments_outlined', true, true),
+        ($1, 'card', '{}', 'blue', 'credit_card_rounded', false, true)"
     )
     .bind(org_id)
     .execute(pool)
@@ -114,7 +114,7 @@ async fn assign_user_to_branch(pool: &PgPool, user_id: Uuid, branch_id: Uuid) {
 
 async fn seed_category(pool: &PgPool, org_id: Uuid) -> Uuid {
     let cat_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO categories (id, org_id, name, display_order) VALUES ($1, $2, 'Cat', 0)")
+    sqlx::query("INSERT INTO categories (id, org_id, name) VALUES ($1, $2, 'Cat')")
         .bind(cat_id)
         .bind(org_id)
         .execute(pool)
@@ -347,6 +347,76 @@ async fn test_create_order_with_addons_and_discount(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn test_milk_swap_converts_units_across_base_units(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    // Milk is stocked in GRAMS, almond milk in KILOGRAMS — both category 'milk'.
+    let milk = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,'Milk','g'::inventory_unit,5,'milk')")
+        .bind(milk).bind(org_id).execute(&pool).await.unwrap();
+    let almond = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,'Almond Milk','kg'::inventory_unit,8000,'milk')")
+        .bind(almond).bind(org_id).execute(&pool).await.unwrap();
+    seed_branch_inventory(&pool, branch_id, milk, 5000.0).await;  // 5000 g
+    seed_branch_inventory(&pool, branch_id, almond, 10.0).await;  // 10 kg
+
+    // Recipe uses 250 g of milk (stored in milk's base unit).
+    add_menu_item_recipe(&pool, menu_item_id, milk, 250.0).await; // ingredient_unit 'g'
+
+    // A milk_type addon that swaps in almond milk (its ingredient is in kg).
+    let almond_addon = seed_addon_item(&pool, org_id, "Almond Milk", "milk_type", 0).await;
+    sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1,$2,1,'Almond Milk','kg')")
+        .bind(almond_addon).bind(almond).execute(&pool).await.unwrap();
+
+    let req_body = CreateOrderRequest {
+        branch_id,
+        shift_id,
+        payment_method: "cash".to_string(),
+        customer_name: None, notes: None,
+        discount_type: None, discount_value: None, discount_id: None,
+        amount_tendered: None, tip_amount: None, tip_payment_method: None, payment_splits: None,
+        items: vec![OrderItemInput {
+            menu_item_id: Some(menu_item_id),
+            bundle_id: None,
+            size_label: None,
+            quantity: 1,
+            addons: vec![crate::orders::component_resolve::AddonInput { addon_item_id: almond_addon, quantity: 1 }],
+            optional_field_ids: vec![],
+            bundle_components: vec![],
+            notes: None,
+        }],
+        created_at: None,
+    };
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri("/orders").insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(&req_body).to_request()).await;
+    assert_eq!(resp.status(), 201);
+
+    // The 250 g the recipe called for is converted to the almond-milk base unit:
+    // 0.25 kg deducted — NOT 250 (which would be a 1000× over-deduction).
+    let almond_stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE org_ingredient_id=$1").bind(almond).fetch_one(&pool).await.unwrap();
+    assert_eq!(almond_stock, 9.75);
+    // Milk was swapped out → its stock is untouched.
+    let milk_stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE org_ingredient_id=$1").bind(milk).fetch_one(&pool).await.unwrap();
+    assert_eq!(milk_stock, 5000.0);
+}
+
+#[sqlx::test]
 async fn test_list_orders(pool: PgPool) {
     let app = test::init_service(
         App::new()
@@ -485,6 +555,7 @@ async fn test_void_order(pool: PgPool) {
     // Void the order
     let void_req = VoidOrderRequest {
         reason: "customer_request".to_string(),
+        note: None,
         voided_at: None,
         restore_inventory: Some(true),
     };

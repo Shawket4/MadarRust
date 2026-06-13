@@ -24,6 +24,68 @@ pub fn round_piastres(piastres: Decimal) -> i64 {
         .unwrap_or(0)
 }
 
+/// Apply weighted moving-average costing after receiving `received_qty` units
+/// (in the ingredient's base stock unit) at `received_unit_cost` piastres/unit.
+///
+/// MUST be called BEFORE the received stock is added to `branch_inventory` — it
+/// reads the PRIOR org-wide on-hand to weight the average:
+///   new = (prior_on_hand × current_cost + received_qty × received_cost)
+///         / (prior_on_hand + received_qty)
+/// When the current cost is unknown (NULL) or there is no prior stock, the
+/// received cost becomes the new cost. Updates `org_ingredients.cost_per_unit`
+/// and rolls a new `ingredient_cost_history` epoch (same mechanism as the
+/// catalog cost edit). Returns the new per-unit cost in piastres.
+pub async fn apply_weighted_average_cost(
+    conn:               &mut sqlx::PgConnection,
+    org_ingredient_id:  Uuid,
+    received_qty:       f64,
+    received_unit_cost: i64,
+    changed_by:         Uuid,
+) -> Result<i64, AppError> {
+    let (cur_cost, prior_on_hand): (Option<f64>, f64) = sqlx::query_as(
+        "SELECT oi.cost_per_unit::float8, \
+                COALESCE((SELECT SUM(current_stock) FROM branch_inventory \
+                          WHERE org_ingredient_id = $1), 0)::float8 \
+         FROM org_ingredients oi WHERE oi.id = $1 AND oi.deleted_at IS NULL"
+    )
+    .bind(org_ingredient_id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Ingredient not found".into()))?;
+
+    if received_qty <= 0.0 {
+        return Ok(cur_cost.map(|c| c.round() as i64).unwrap_or(received_unit_cost));
+    }
+
+    let received = received_unit_cost as f64;
+    let new_cost_f = match cur_cost {
+        Some(cur) if prior_on_hand > 0.0 =>
+            (prior_on_hand * cur + received_qty * received) / (prior_on_hand + received_qty),
+        _ => received,
+    };
+    let new_cost = new_cost_f.round();
+    let new_cost_i = new_cost as i64;
+
+    // Only roll a new epoch when the per-unit cost actually moved.
+    if cur_cost.map(|c| c.round() as i64) != Some(new_cost_i) {
+        sqlx::query("UPDATE org_ingredients SET cost_per_unit = $2 WHERE id = $1")
+            .bind(org_ingredient_id).bind(new_cost).execute(&mut *conn).await?;
+        sqlx::query(
+            "UPDATE ingredient_cost_history SET effective_until = now() \
+             WHERE org_ingredient_id = $1 AND effective_until IS NULL"
+        )
+        .bind(org_ingredient_id).execute(&mut *conn).await?;
+        sqlx::query(
+            "INSERT INTO ingredient_cost_history \
+                 (org_ingredient_id, cost_per_unit, effective_from, changed_by, note) \
+             VALUES ($1, $2, now(), $3, 'Weighted average from purchase')"
+        )
+        .bind(org_ingredient_id).bind(new_cost).bind(changed_by).execute(&mut *conn).await?;
+    }
+
+    Ok(new_cost_i)
+}
+
 /// Resolve point-in-time PIASTRE cost per unit for a set of ingredients at `at`.
 ///
 /// Resolution order per ingredient:
@@ -96,6 +158,28 @@ pub struct SkuCost {
 /// The rollup is NULL-propagating: any unlinked ingredient or missing cost
 /// makes the whole SKU cost unknown — `COALESCE(..., 0)` is never used.
 pub async fn org_sku_costs(pool: &PgPool, org_id: Uuid) -> Result<Vec<SkuCost>, AppError> {
+    sku_costs_impl(pool, org_id, None).await
+}
+
+/// Same recipe-cost rollup as [`org_sku_costs`] but scoped to a specific set of
+/// menu items, so list endpoints can embed per-page costs without a second
+/// org-wide round trip. Empty `item_ids` ⇒ no rows (no query issued).
+pub async fn sku_costs_for_items(
+    pool: &PgPool,
+    org_id: Uuid,
+    item_ids: &[Uuid],
+) -> Result<Vec<SkuCost>, AppError> {
+    if item_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    sku_costs_impl(pool, org_id, Some(item_ids)).await
+}
+
+async fn sku_costs_impl(
+    pool: &PgPool,
+    org_id: Uuid,
+    item_ids: Option<&[Uuid]>,
+) -> Result<Vec<SkuCost>, AppError> {
     #[derive(sqlx::FromRow)]
     struct Row {
         menu_item_id: Uuid,
@@ -122,6 +206,7 @@ pub async fn org_sku_costs(pool: &PgPool, org_id: Uuid) -> Result<Vec<SkuCost>, 
             WHERE mi.org_id = $1
               AND mi.deleted_at IS NULL
               AND mi.is_active = TRUE
+              AND ($2::uuid[] IS NULL OR mi.id = ANY($2))
         )
         SELECT
             e.menu_item_id,
@@ -154,6 +239,7 @@ pub async fn org_sku_costs(pool: &PgPool, org_id: Uuid) -> Result<Vec<SkuCost>, 
         "#,
     )
     .bind(org_id)
+    .bind(item_ids)
     .fetch_all(pool)
     .await?;
 

@@ -103,17 +103,9 @@ pub struct CashMovementRequest {
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
-pub struct InventoryCountInput {
-    pub branch_inventory_id: Uuid,
-    pub actual_stock:        f64,
-    pub note:                Option<String>,
-}
-
-#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CloseShiftRequest {
     pub closing_cash_declared: i32,
     pub cash_note:             Option<String>,
-    pub inventory_counts:      Vec<InventoryCountInput>,
     pub closed_at:             Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -218,6 +210,7 @@ pub async fn open_shift(
 
     let shift_id = body.id.unwrap_or_else(Uuid::new_v4);
 
+    // Idempotent replay: the same shift id was already persisted → return it.
     if let Some(existing) = sqlx::query_as::<_, Shift>(
         r#"
         SELECT
@@ -243,19 +236,6 @@ pub async fn open_shift(
         return Ok(HttpResponse::Ok().json(existing));
     }
 
-    let already_open: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM shifts WHERE branch_id = $1 AND status = 'open')"
-    )
-    .bind(*branch_id)
-    .fetch_one(pool.get_ref())
-    .await?;
-
-    if already_open {
-        return Err(AppError::Conflict(
-            "A shift is already open for this branch".into(),
-        ));
-    }
-
     let was_edited = body.opening_cash_edited.unwrap_or(false);
     if was_edited && body.edit_reason.as_deref().unwrap_or("").trim().is_empty() {
         return Err(AppError::BadRequest(
@@ -265,7 +245,38 @@ pub async fn open_shift(
 
     let opened_at = body.opened_at.unwrap_or_else(chrono::Utc::now);
 
+    // Guards + insert run in one transaction; the unique partial indexes
+    // (one open shift per branch AND per teller) are the race-proof backstop —
+    // the pre-checks below only exist to return a friendly message.
     let mut tx = pool.get_ref().begin().await?;
+
+    // This teller must not already hold an open shift (here or anywhere).
+    let other_open_branch: Option<Uuid> = sqlx::query_scalar(
+        "SELECT branch_id FROM shifts WHERE teller_id = $1 AND status = 'open'"
+    )
+    .bind(claims.user_id())
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(open_branch) = other_open_branch {
+        return Err(AppError::Conflict(if open_branch == *branch_id {
+            "A shift is already open for this branch".into()
+        } else {
+            "You already have an open shift at another branch. Close it before opening a new one.".into()
+        }));
+    }
+
+    // And no one else may already have this branch open.
+    let already_open: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM shifts WHERE branch_id = $1 AND status = 'open')"
+    )
+    .bind(*branch_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if already_open {
+        return Err(AppError::Conflict(
+            "A shift is already open for this branch".into(),
+        ));
+    }
 
     let shift = sqlx::query_as::<_, Shift>(
         r#"
@@ -294,7 +305,20 @@ pub async fn open_shift(
     .bind(&body.edit_reason)
     .bind(opened_at)
     .fetch_one(&mut *tx)
-    .await?;
+    .await
+    .map_err(|e| match &e {
+        // A concurrent open won the race; the partial unique index rejected us.
+        sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
+            if db.constraint().is_some_and(|c| c.contains("teller")) {
+                AppError::Conflict(
+                    "You already have an open shift. Close it before opening a new one.".into(),
+                )
+            } else {
+                AppError::Conflict("A shift is already open for this branch".into())
+            }
+        }
+        _ => AppError::Db(e),
+    })?;
 
     tx.commit().await?;
 
@@ -583,25 +607,9 @@ pub async fn list_cash_movements(
 
 // ── POST /shifts/:shift_id/close ──────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
-pub struct InventoryCountRow {
-    pub branch_inventory_id: Uuid,
-    pub ingredient_name:     String,
-    pub unit:                String,
-    #[schema(value_type = f64)]
-    pub expected_stock:      sqlx::types::BigDecimal,
-    #[schema(value_type = f64)]
-    pub actual_stock:        sqlx::types::BigDecimal,
-    #[schema(value_type = f64)]
-    pub discrepancy:         sqlx::types::BigDecimal,
-    pub is_suspicious:       bool,
-    pub note:                Option<String>,
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct CloseShiftResponse {
-    pub shift:            Shift,
-    pub inventory_counts: Vec<InventoryCountRow>,
+    pub shift: Shift,
 }
 
 #[utoipa::path(
@@ -625,32 +633,10 @@ pub async fn close_shift(
     let shift = fetch_shift_or_404(pool.get_ref(), *shift_id).await?;
     require_branch_access(pool.get_ref(), &claims, shift.branch_id).await?;
 
+    // Idempotent: closing an already-closed shift just returns it.
+    // (Inventory counting now lives in the standalone stocktake module.)
     if shift.status != "open" {
-        let existing_counts = sqlx::query_as::<_, InventoryCountRow>(
-            r#"
-            SELECT
-                sic.branch_inventory_id,
-                oi.name  AS ingredient_name,
-                oi.unit::text AS unit,
-                sic.expected_stock,
-                sic.actual_stock,
-                sic.discrepancy,
-                sic.is_suspicious,
-                sic.note
-            FROM shift_inventory_counts sic
-            JOIN branch_inventory bi ON bi.id = sic.branch_inventory_id
-            JOIN org_ingredients oi  ON oi.id = bi.org_ingredient_id
-            WHERE sic.shift_id = $1
-            "#,
-        )
-        .bind(*shift_id)
-        .fetch_all(pool.get_ref())
-        .await?;
-
-        return Ok(HttpResponse::Ok().json(CloseShiftResponse {
-            shift,
-            inventory_counts: existing_counts,
-        }));
+        return Ok(HttpResponse::Ok().json(CloseShiftResponse { shift }));
     }
 
     let cash_from_orders: i32 = sqlx::query_scalar(
@@ -692,57 +678,6 @@ pub async fn close_shift(
     let closed_at = body.closed_at.unwrap_or_else(chrono::Utc::now);
 
     let mut tx = pool.get_ref().begin().await?;
-    let mut inventory_counts: Vec<InventoryCountRow> = Vec::new();
-
-    for count in &body.inventory_counts {
-        // Verify branch_inventory belongs to this shift's branch and get current stock as expected
-        let current_stock: Option<sqlx::types::BigDecimal> = sqlx::query_scalar(
-            "SELECT current_stock FROM branch_inventory WHERE id = $1 AND branch_id = $2"
-        )
-        .bind(count.branch_inventory_id)
-        .bind(shift.branch_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .flatten();
-
-        let expected = match current_stock {
-            Some(s) => s,
-            None    => continue, // Not tracked on this branch — skip
-        };
-
-        let actual = sqlx::types::BigDecimal::try_from(count.actual_stock)
-            .map_err(|_| AppError::BadRequest("Invalid actual_stock value".into()))?;
-        let is_suspicious = actual > expected;
-
-        let row = sqlx::query_as::<_, InventoryCountRow>(
-            r#"
-            INSERT INTO shift_inventory_counts
-                (shift_id, branch_inventory_id, expected_stock, actual_stock, is_suspicious, note, counted_by)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT (shift_id, branch_inventory_id)
-            DO UPDATE SET
-                actual_stock  = EXCLUDED.actual_stock,
-                is_suspicious = EXCLUDED.is_suspicious,
-                note          = EXCLUDED.note
-            RETURNING
-                branch_inventory_id,
-                (SELECT oi.name FROM branch_inventory bi JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id WHERE bi.id = $2) AS ingredient_name,
-                (SELECT oi.unit::text FROM branch_inventory bi JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id WHERE bi.id = $2) AS unit,
-                expected_stock, actual_stock, discrepancy, is_suspicious, note
-            "#,
-        )
-        .bind(*shift_id)
-        .bind(count.branch_inventory_id)
-        .bind(&expected)
-        .bind(&actual)
-        .bind(is_suspicious)
-        .bind(&count.note)
-        .bind(claims.user_id())
-        .fetch_one(&mut *tx)
-        .await?;
-
-        inventory_counts.push(row);
-    }
 
     let closed_shift = sqlx::query_as::<_, Shift>(
         r#"
@@ -777,10 +712,7 @@ pub async fn close_shift(
 
     tx.commit().await?;
 
-    Ok(HttpResponse::Ok().json(CloseShiftResponse {
-        shift:            closed_shift,
-        inventory_counts,
-    }))
+    Ok(HttpResponse::Ok().json(CloseShiftResponse { shift: closed_shift }))
 }
 
 // ── POST /shifts/:shift_id/force-close ────────────────────────
@@ -960,6 +892,20 @@ async fn require_branch_access(
 
     if !assigned {
         return Err(AppError::Forbidden("Not assigned to this branch".into()));
+    }
+
+    // A teller is bound to the branch they authenticated for. A token minted
+    // for one branch must not drive another, even when the teller is assigned
+    // to both — this is what stops a device picking up a different branch's
+    // shift. (Tokens always carry a branch for tellers; the `None` guard keeps
+    // legacy/unit-test tokens from being rejected outright.)
+    if claims.role == UserRole::Teller {
+        if let Some(token_branch) = claims.branch_id()
+            && token_branch != branch_id {
+            return Err(AppError::Forbidden(
+                "This device is signed in to a different branch. Sign in to this branch to continue.".into(),
+            ));
+        }
     }
 
     Ok(())

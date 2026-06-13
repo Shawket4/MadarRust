@@ -14,7 +14,8 @@ use tracing_subscriber::EnvFilter;
 use sufrix_rust::openapi::ApiDoc;
 use sufrix_rust::{
     auth, branches, bundles, costing, discounts, inventory, menu, menu_advisor,
-    orders, orgs, payment_methods, permissions, recipes, reports, shifts, uploads, users,
+    orders, orgs, payment_methods, permissions, purchasing, recipes, reports, shifts, stocktakes,
+    uploads, users,
 };
 
 use utoipa::OpenApi;
@@ -96,6 +97,8 @@ async fn main() -> std::io::Result<()> {
             .configure(inventory::routes::configure)
             .configure(recipes::routes::configure)
             .configure(shifts::routes::configure)
+            .configure(stocktakes::routes::configure)
+            .configure(purchasing::routes::configure)
             .configure(orders::routes::configure)
             .configure(discounts::routes::configure)
             .configure(reports::routes::configure)

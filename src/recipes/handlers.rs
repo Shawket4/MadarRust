@@ -125,6 +125,10 @@ pub async fn upsert_drink_recipe(
         return Err(AppError::BadRequest("quantity_used must be greater than 0".into()));
     }
 
+    let (ingredient_unit, quantity_used) = normalize_recipe_unit(
+        pool.get_ref(), body.org_ingredient_id, &body.ingredient_unit, body.quantity_used,
+    ).await?;
+
     let row = sqlx::query_as::<_, DrinkRecipe>(
         r#"
         INSERT INTO menu_item_recipes
@@ -146,8 +150,8 @@ pub async fn upsert_drink_recipe(
     .bind(&body.size_label)
     .bind(body.org_ingredient_id)
     .bind(&body.ingredient_name)
-    .bind(&body.ingredient_unit)
-    .bind(body.quantity_used)
+    .bind(&ingredient_unit)
+    .bind(quantity_used)
     .fetch_one(pool.get_ref())
     .await?;
 
@@ -260,6 +264,10 @@ pub async fn upsert_addon_ingredient(
         return Err(AppError::BadRequest("quantity_used must be greater than 0".into()));
     }
 
+    let (ingredient_unit, quantity_used) = normalize_recipe_unit(
+        pool.get_ref(), body.org_ingredient_id, &body.ingredient_unit, body.quantity_used,
+    ).await?;
+
     let row = sqlx::query_as::<_, AddonIngredient>(
         r#"
         INSERT INTO addon_item_ingredients
@@ -280,8 +288,8 @@ pub async fn upsert_addon_ingredient(
     .bind(*addon_item_id)
     .bind(body.org_ingredient_id)
     .bind(&body.ingredient_name)
-    .bind(&body.ingredient_unit)
-    .bind(body.quantity_used)
+    .bind(&ingredient_unit)
+    .bind(quantity_used)
     .fetch_one(pool.get_ref())
     .await?;
 
@@ -329,6 +337,31 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
         .get::<Claims>()
         .cloned()
         .ok_or_else(|| AppError::Unauthorized("Missing claims".into()))
+}
+
+/// When a recipe line links a catalog ingredient, normalize the submitted
+/// quantity to that ingredient's base stock unit (so every stored quantity is
+/// in base units — the invariant the deduction + cost rollups rely on). For
+/// unlinked (name-only) lines we keep the free-text unit as-is.
+pub async fn normalize_recipe_unit(
+    pool:              &PgPool,
+    org_ingredient_id: Option<Uuid>,
+    recipe_unit:       &str,
+    qty:               f64,
+) -> Result<(String, f64), AppError> {
+    match org_ingredient_id {
+        Some(id) => {
+            let base_unit: String = sqlx::query_scalar(
+                "SELECT unit::text FROM org_ingredients WHERE id = $1 AND deleted_at IS NULL"
+            )
+            .bind(id)
+            .fetch_optional(pool)
+            .await?
+            .ok_or_else(|| AppError::BadRequest("Linked ingredient not found in catalog".into()))?;
+            crate::units::normalize_to_base(qty, recipe_unit, &base_unit)
+        }
+        None => Ok((recipe_unit.to_string(), qty)),
+    }
 }
 
 async fn require_menu_item_org(

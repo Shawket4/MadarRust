@@ -80,7 +80,7 @@ async fn grant_permission(pool: &PgPool, role: &str, resource: &str, action: &st
 
 async fn seed_category(pool: &PgPool, org_id: Uuid, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO categories (id, org_id, name, display_order) VALUES ($1, $2, $3, 0)")
+    sqlx::query("INSERT INTO categories (id, org_id, name) VALUES ($1, $2, $3)")
         .bind(id)
         .bind(org_id)
         .bind(name)
@@ -92,7 +92,7 @@ async fn seed_category(pool: &PgPool, org_id: Uuid, name: &str) -> Uuid {
 
 async fn seed_menu_item(pool: &PgPool, org_id: Uuid, category_id: Uuid, name: &str, price: i32) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price, display_order) VALUES ($1, $2, $3, $4, $5, 0)")
+    sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price) VALUES ($1, $2, $3, $4, $5)")
         .bind(id)
         .bind(org_id)
         .bind(category_id)
@@ -106,7 +106,7 @@ async fn seed_menu_item(pool: &PgPool, org_id: Uuid, category_id: Uuid, name: &s
 
 async fn seed_addon_item(pool: &PgPool, org_id: Uuid, name: &str, addon_type: &str, price: i32) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price, display_order) VALUES ($1, $2, $3, $4, $5, 0)")
+    sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price) VALUES ($1, $2, $3, $4, $5)")
         .bind(id)
         .bind(org_id)
         .bind(name)
@@ -185,7 +185,6 @@ async fn test_create_category_success(pool: PgPool) {
         name_translations: None,
         name: "New Category".to_string(),
         image_url: None,
-        display_order: Some(1),
     };
 
     let token = generate_org_admin_token(user_id, org_id);
@@ -200,7 +199,6 @@ async fn test_create_category_success(pool: PgPool) {
 
     let category: Category = test::read_body_json(resp).await;
     assert_eq!(category.name, "New Category");
-    assert_eq!(category.display_order, 1);
 }
 
 #[sqlx::test]
@@ -222,7 +220,6 @@ async fn test_update_category_success(pool: PgPool) {
         name_translations: None,
         name: Some("Updated Name".to_string()),
         image_url: None,
-        display_order: Some(2),
         is_active: None,
     };
 
@@ -238,7 +235,6 @@ async fn test_update_category_success(pool: PgPool) {
 
     let category: Category = test::read_body_json(resp).await;
     assert_eq!(category.name, "Updated Name");
-    assert_eq!(category.display_order, 2);
 }
 
 #[sqlx::test]
@@ -296,8 +292,44 @@ async fn test_list_menu_items_success(pool: PgPool) {
     let resp = test::call_service(&app, req).await;
     assert!(resp.status().is_success());
 
+    // /menu-items is a plain array (the POS contract) — not paginated.
     let items: Vec<MenuItem> = test::read_body_json(resp).await;
     assert_eq!(items.len(), 2);
+}
+
+#[sqlx::test]
+async fn test_menu_catalog_paginated_with_costs(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+            .configure(crate::costing::routes::configure)
+    ).await;
+
+    let org_id = seed_org(&pool).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "menu_items", "read").await;
+
+    let cat_id = seed_category(&pool, org_id, "Mains").await;
+    seed_menu_item(&pool, org_id, cat_id, "Burger", 1000).await;
+    seed_menu_item(&pool, org_id, cat_id, "Pizza", 1500).await;
+
+    let token = generate_org_admin_token(user_id, org_id);
+    let req = test::TestRequest::get()
+        .uri(&format!("/costing/catalog?org_id={}&per_page=1&page=1", org_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+
+    // Deserializing into PaginatedMenuItems proves each row carries the
+    // embedded `sku_costs` field (it has no serde default).
+    let page: PaginatedMenuItems = test::read_body_json(resp).await;
+    assert_eq!(page.total, 2);
+    assert_eq!(page.total_pages, 2);
+    assert_eq!(page.data.len(), 1); // per_page = 1
 }
 
 #[sqlx::test]
@@ -324,7 +356,6 @@ async fn test_create_menu_item_success(pool: PgPool) {
         description: Some("Tasty".to_string()),
         base_price: 1200,
         image_url: None,
-        display_order: Some(1),
     };
 
     let token = generate_org_admin_token(user_id, org_id);
@@ -377,7 +408,6 @@ async fn test_update_menu_item_success(pool: PgPool) {
         description: None,
         base_price: Some(1500),
         image_url: None,
-        display_order: None,
         is_active: None,
     };
 
@@ -453,7 +483,6 @@ async fn test_upsert_size_success(pool: PgPool) {
     let req_body = UpsertSizeRequest {
         label: "large".to_string(),
         price_override: 700,
-        display_order: Some(1),
     };
 
     let token = generate_org_admin_token(user_id, org_id);
@@ -502,7 +531,6 @@ async fn test_delete_size_success(pool: PgPool) {
     let req_body = UpsertSizeRequest {
         label: "large".to_string(),
         price_override: 700,
-        display_order: Some(1),
     };
 
     let token = generate_org_admin_token(user_id, org_id);
@@ -550,7 +578,6 @@ async fn test_addon_slots_success(pool: PgPool) {
         label_translations: None,
         max_selections: Some(1),
         min_selections: Some(0),
-        display_order: Some(1),
         label: None,
         is_required: None,
     };
@@ -608,7 +635,6 @@ async fn test_addon_items_crud(pool: PgPool) {
         name: "Extra Cheese".to_string(),
         addon_type: "Topping".to_string(),
         default_price: 200,
-        display_order: Some(1),
     };
 
     let token = generate_org_admin_token(user_id, org_id);
@@ -643,7 +669,6 @@ async fn test_addon_items_crud(pool: PgPool) {
         name: Some("Super Cheese".to_string()),
         addon_type: None,
         default_price: None,
-        display_order: None,
         is_active: None,
     };
     let req_u = test::TestRequest::patch()
@@ -696,7 +721,6 @@ async fn test_optional_fields_crud(pool: PgPool) {
         ingredient_unit: None,
         quantity_used: None,
         size_label: None,
-        display_order: Some(1),
     };
 
     let token = generate_org_admin_token(user_id, org_id);

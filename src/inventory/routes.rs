@@ -12,6 +12,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/orgs/{org_id}/catalog/{id}", web::patch().to(handlers::update_catalog_item))
             .route("/orgs/{org_id}/catalog/{id}", web::delete().to(handlers::delete_catalog_item))
 
+            // ── Org-level inventory settings ──────────────────────────
+            .route("/orgs/{org_id}/settings",    web::get().to(handlers::get_inventory_settings))
+            .route("/orgs/{org_id}/settings",    web::put().to(handlers::update_inventory_settings))
+
             // ── Branch-level stock ────────────────────────────────────
             .route("/branches/{branch_id}/stock",     web::get().to(handlers::list_branch_stock))
             .route("/branches/{branch_id}/stock",     web::post().to(handlers::add_to_branch_stock))
@@ -21,6 +25,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             // ── Adjustments ───────────────────────────────────────────
             .route("/branches/{branch_id}/adjustments", web::post().to(handlers::create_adjustment))
             .route("/branches/{branch_id}/adjustments", web::get().to(handlers::list_adjustments))
+
+            // ── Movement ledger ───────────────────────────────────────
+            .route("/branches/{branch_id}/movements", web::get().to(handlers::list_movements))
+
+            // ── Waste ─────────────────────────────────────────────────
+            .route("/branches/{branch_id}/waste", web::post().to(handlers::create_waste))
+            .route("/branches/{branch_id}/waste", web::get().to(handlers::list_waste))
 
             // ── Transfers (always auto-applied) ───────────────────────
             .route("/transfers",                         web::post().to(handlers::create_transfer))

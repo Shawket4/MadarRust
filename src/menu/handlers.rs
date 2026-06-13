@@ -24,7 +24,6 @@ pub struct Category {
     pub name_translations: serde_json::Value,
     #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
     pub image_url:     Option<String>,
-    pub display_order: i32,
     pub is_active:     bool,
     pub created_at:    DateTime<Utc>,
     pub updated_at:    DateTime<Utc>,
@@ -46,7 +45,6 @@ pub struct MenuItem {
     pub image_url:     Option<String>,
     pub base_price:    i32,
     pub is_active:     bool,
-    pub display_order: i32,
     pub created_at:    DateTime<Utc>,
     pub updated_at:    DateTime<Utc>,
     pub deleted_at:    Option<DateTime<Utc>>,
@@ -59,7 +57,6 @@ pub struct ItemSize {
     pub menu_item_id:   Uuid,
     pub label:          String,
     pub price_override: i32,
-    pub display_order:  i32,
     pub is_active:      bool,
 }
 
@@ -73,7 +70,6 @@ pub struct AddonItem {
     pub addon_type:    String,
     pub default_price: i32,
     pub is_active:     bool,
-    pub display_order: i32,
     pub created_at:    DateTime<Utc>,
     pub updated_at:    DateTime<Utc>,
     pub primary_ingredient_id: Option<Uuid>,
@@ -95,7 +91,6 @@ pub struct AddonSlot {
     pub is_required:    bool,
     pub min_selections: i32,
     pub max_selections: Option<i32>,
-    pub display_order:  i32,
     pub created_at:     DateTime<Utc>,
 }
 
@@ -172,7 +167,6 @@ pub struct PublicCategory {
     pub name_translations: serde_json::Value,
     #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
     pub image_url:     Option<String>,
-    pub display_order: i32,
     pub items:         Vec<PublicMenuItem>,
 }
 
@@ -188,7 +182,6 @@ pub struct PublicMenuItem {
     #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
     pub image_url:     Option<String>,
     pub base_price:    i32,
-    pub display_order: i32,
     pub sizes:         Vec<PublicItemSize>,
     pub addon_slots:   Vec<PublicAddonSlot>,
 }
@@ -235,7 +228,46 @@ pub struct OrgQuery {
 pub struct MenuItemQuery {
     pub org_id:      Uuid,
     pub category_id: Option<Uuid>,
+    /// When true, embed sizes + addon slots + optionals + recipes per item
+    /// (the shape the POS/teller consumes). Always returns a plain, unpaginated
+    /// array — the POS depends on this contract.
     pub full:        Option<bool>,
+}
+
+/// Query for the dashboard catalog endpoint: paginated menu items with embedded
+/// per-SKU costs. Kept separate from [`MenuItemQuery`] so the plain `/menu-items`
+/// list the POS relies on stays an unpaginated array.
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct MenuCatalogQuery {
+    pub org_id:      Uuid,
+    pub category_id: Option<Uuid>,
+    /// Case-insensitive filter on the item name.
+    pub search:      Option<String>,
+    /// 1-based page number (default 1).
+    pub page:        Option<i64>,
+    /// Page size (default 50, max 500).
+    pub per_page:    Option<i64>,
+}
+
+/// A menu item with its per-SKU recipe-cost rollup embedded, so the catalog
+/// list needs no separate `/costing/menu-items` round trip. `sku_costs` is one
+/// row per sellable size (or a single `one_size` row); empty when the item is
+/// inactive or has no recipe.
+#[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
+pub struct MenuItemWithCosts {
+    #[serde(flatten)]
+    pub item: MenuItem,
+    pub sku_costs: Vec<crate::costing::SkuCost>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
+pub struct PaginatedMenuItems {
+    pub data: Vec<MenuItemWithCosts>,
+    pub total: i64,
+    pub page: i64,
+    pub per_page: i64,
+    pub total_pages: i64,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -252,7 +284,6 @@ pub struct CreateCategoryRequest {
     #[schema(value_type = Option<Object>)]
     pub name_translations: Option<serde_json::Value>,
     pub image_url:     Option<String>,
-    pub display_order: Option<i32>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -262,7 +293,6 @@ pub struct UpdateCategoryRequest {
     pub name_translations: Option<serde_json::Value>,
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub image_url:     Option<Option<String>>,
-    pub display_order: Option<i32>,
     pub is_active:     Option<bool>,
 }
 
@@ -278,7 +308,6 @@ pub struct CreateMenuItemRequest {
     pub description_translations: Option<serde_json::Value>,
     pub image_url:     Option<String>,
     pub base_price:    i32,
-    pub display_order: Option<i32>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -293,7 +322,6 @@ pub struct UpdateMenuItemRequest {
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub image_url:     Option<Option<String>>,
     pub base_price:    Option<i32>,
-    pub display_order: Option<i32>,
     pub is_active:     Option<bool>,
 }
 
@@ -305,7 +333,6 @@ pub struct CreateAddonItemRequest {
     pub name_translations: Option<serde_json::Value>,
     pub addon_type:    String,
     pub default_price: i32,
-    pub display_order: Option<i32>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -315,7 +342,6 @@ pub struct UpdateAddonItemRequest {
     pub name_translations: Option<serde_json::Value>,
     pub addon_type:    Option<String>,
     pub default_price: Option<i32>,
-    pub display_order: Option<i32>,
     pub is_active:     Option<bool>,
 }
 
@@ -323,7 +349,6 @@ pub struct UpdateAddonItemRequest {
 pub struct UpsertSizeRequest {
     pub label:          String,
     pub price_override: i32,
-    pub display_order:  Option<i32>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -335,7 +360,6 @@ pub struct CreateAddonSlotRequest {
     pub is_required:    Option<bool>,
     pub min_selections: Option<i32>,
     pub max_selections: Option<i32>,
-    pub display_order:  Option<i32>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -346,7 +370,6 @@ pub struct UpdateAddonSlotRequest {
     pub is_required:    Option<bool>,
     pub min_selections: Option<i32>,
     pub max_selections: Option<i32>,
-    pub display_order:  Option<i32>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -381,11 +404,11 @@ pub async fn list_categories(
     require_same_org(&claims, Some(query.org_id))?;
 
     let rows = sqlx::query_as::<_, Category>(
-        "SELECT id, org_id, name, name_translations, image_url, display_order, is_active,
+        "SELECT id, org_id, name, name_translations, image_url, is_active,
                 created_at, updated_at, deleted_at
          FROM categories
          WHERE org_id = $1 AND deleted_at IS NULL
-         ORDER BY display_order ASC, name ASC",
+         ORDER BY name ASC",
     )
     .bind(query.org_id)
     .fetch_all(pool.get_ref())
@@ -418,16 +441,15 @@ pub async fn create_category(
         .map_err(|_| AppError::Internal)?;
 
     let row = sqlx::query_as::<_, Category>(
-        "INSERT INTO categories (org_id, name, name_translations, image_url, display_order)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING id, org_id, name, name_translations, image_url, display_order, is_active,
+        "INSERT INTO categories (org_id, name, name_translations, image_url)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id, org_id, name, name_translations, image_url, is_active,
                    created_at, updated_at, deleted_at",
     )
     .bind(mut_body.org_id)
     .bind(&mut_body.name)
     .bind(name_translations)
     .bind(&mut_body.image_url)
-    .bind(mut_body.display_order.unwrap_or(0))
     .fetch_one(pool.get_ref())
     .await?;
 
@@ -475,18 +497,16 @@ pub async fn update_category(
         "UPDATE categories SET
              name              = COALESCE($2, name),
              name_translations = $3,
-             image_url         = CASE WHEN $7 THEN $4 ELSE image_url END,
-             display_order     = COALESCE($5, display_order),
-             is_active         = COALESCE($6, is_active)
+             image_url         = CASE WHEN $6 THEN $4 ELSE image_url END,
+             is_active         = COALESCE($5, is_active)
          WHERE id = $1 AND deleted_at IS NULL
-         RETURNING id, org_id, name, name_translations, image_url, display_order, is_active,
+         RETURNING id, org_id, name, name_translations, image_url, is_active,
                    created_at, updated_at, deleted_at",
     )
     .bind(*id)
     .bind(&mut_body.name)
     .bind(name_translations)
     .bind(image_url_val)
-    .bind(mut_body.display_order)
     .bind(mut_body.is_active)
     .bind(image_url_is_present)
     .fetch_optional(pool.get_ref())
@@ -539,8 +559,9 @@ pub async fn delete_category(
     get,
     path = "/menu-items",
     tag = "menu",
+    operation_id = "list_menu_items",
     params(MenuItemQuery),
-    responses((status = 200, description = "List menu items", body = Vec<MenuItemFull>), AppErrorResponse),
+    responses((status = 200, description = "List menu items as a plain array; ?full=true embeds sizes/addons/optionals/recipes (POS contract)", body = Vec<MenuItem>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn list_menu_items(
@@ -552,52 +573,30 @@ pub async fn list_menu_items(
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
     require_same_org(&claims, Some(query.org_id))?;
 
-    let items = match query.category_id {
-        Some(cat_id) => sqlx::query_as::<_, MenuItem>(
-            "SELECT id, org_id, category_id, name, name_translations, description, description_translations, image_url,
-                    base_price, is_active, display_order,
-                    created_at, updated_at, deleted_at,
-                    (
-                        SELECT a.id::text
-                        FROM menu_item_recipes r
-                        JOIN addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
-                        JOIN addon_items a ON a.id = ai.addon_item_id
-                        WHERE r.menu_item_id = menu_items.id
-                          AND a.type = 'milk_type'
-                        LIMIT 1
-                    ) AS default_milk_addon_id
-             FROM menu_items
-             WHERE org_id = $1 AND deleted_at IS NULL AND category_id = $2
-             ORDER BY display_order ASC, name ASC",
-        )
-        .bind(query.org_id)
-        .bind(cat_id)
-        .fetch_all(pool.get_ref())
-        .await?,
+    let items = sqlx::query_as::<_, MenuItem>(
+        "SELECT id, org_id, category_id, name, name_translations, description, description_translations, image_url,
+                base_price, is_active,
+                created_at, updated_at, deleted_at,
+                (
+                    SELECT a.id::text
+                    FROM menu_item_recipes r
+                    JOIN addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
+                    JOIN addon_items a ON a.id = ai.addon_item_id
+                    WHERE r.menu_item_id = menu_items.id
+                      AND a.type = 'milk_type'
+                    LIMIT 1
+                ) AS default_milk_addon_id
+         FROM menu_items
+         WHERE org_id = $1 AND deleted_at IS NULL
+           AND ($2::uuid IS NULL OR category_id = $2)
+         ORDER BY name ASC",
+    )
+    .bind(query.org_id)
+    .bind(query.category_id)
+    .fetch_all(pool.get_ref())
+    .await?;
 
-        None => sqlx::query_as::<_, MenuItem>(
-            "SELECT id, org_id, category_id, name, name_translations, description, description_translations, image_url,
-                    base_price, is_active, display_order,
-                    created_at, updated_at, deleted_at,
-                    (
-                        SELECT a.id::text
-                        FROM menu_item_recipes r
-                        JOIN addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
-                        JOIN addon_items a ON a.id = ai.addon_item_id
-                        WHERE r.menu_item_id = menu_items.id
-                          AND a.type = 'milk_type'
-                        LIMIT 1
-                    ) AS default_milk_addon_id
-             FROM menu_items
-             WHERE org_id = $1 AND deleted_at IS NULL
-             ORDER BY display_order ASC, name ASC",
-        )
-        .bind(query.org_id)
-        .fetch_all(pool.get_ref())
-        .await?,
-    };
-
-    // ?full=true embeds sizes + addon_slots for each item
+    // ?full=true embeds sizes + addon_slots + optionals + recipes per item.
     if query.full.unwrap_or(false) {
         let mut result: Vec<MenuItemFull> = vec![];
         for item in items {
@@ -611,6 +610,101 @@ pub async fn list_menu_items(
     }
 
     Ok(HttpResponse::Ok().json(items))
+}
+
+#[utoipa::path(
+    get,
+    path = "/costing/catalog",
+    tag = "menu",
+    operation_id = "list_menu_catalog",
+    params(MenuCatalogQuery),
+    responses((status = 200, description = "Dashboard catalog: paginated menu items with embedded per-SKU costs", body = PaginatedMenuItems), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn list_menu_catalog(
+    req:   HttpRequest,
+    pool:  web::Data<PgPool>,
+    query: web::Query<MenuCatalogQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
+    require_same_org(&claims, Some(query.org_id))?;
+
+    let page = query.page.unwrap_or(1).max(1);
+    let per_page = query.per_page.unwrap_or(50).clamp(1, 500);
+    let offset = (page - 1) * per_page;
+    let search = query
+        .search
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM menu_items
+         WHERE org_id = $1 AND deleted_at IS NULL
+           AND ($2::uuid IS NULL OR category_id = $2)
+           AND ($3::text IS NULL OR name ILIKE '%' || $3 || '%')",
+    )
+    .bind(query.org_id)
+    .bind(query.category_id)
+    .bind(search.as_deref())
+    .fetch_one(pool.get_ref())
+    .await?;
+
+    let rows = sqlx::query_as::<_, MenuItem>(
+        "SELECT id, org_id, category_id, name, name_translations, description, description_translations, image_url,
+                base_price, is_active,
+                created_at, updated_at, deleted_at,
+                (
+                    SELECT a.id::text
+                    FROM menu_item_recipes r
+                    JOIN addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
+                    JOIN addon_items a ON a.id = ai.addon_item_id
+                    WHERE r.menu_item_id = menu_items.id
+                      AND a.type = 'milk_type'
+                    LIMIT 1
+                ) AS default_milk_addon_id
+         FROM menu_items
+         WHERE org_id = $1 AND deleted_at IS NULL
+           AND ($2::uuid IS NULL OR category_id = $2)
+           AND ($3::text IS NULL OR name ILIKE '%' || $3 || '%')
+         ORDER BY name ASC
+         LIMIT $4 OFFSET $5",
+    )
+    .bind(query.org_id)
+    .bind(query.category_id)
+    .bind(search.as_deref())
+    .bind(per_page)
+    .bind(offset)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    let total_pages = if total == 0 { 0 } else { ((total as f64) / (per_page as f64)).ceil() as i64 };
+
+    // Embed per-SKU costs for just this page so the dashboard catalog renders
+    // food-cost chips in the same round trip.
+    let ids: Vec<Uuid> = rows.iter().map(|m| m.id).collect();
+    let costs = crate::costing::sku_costs_for_items(pool.get_ref(), query.org_id, &ids).await?;
+    let mut by_item: std::collections::HashMap<Uuid, Vec<crate::costing::SkuCost>> =
+        std::collections::HashMap::new();
+    for c in costs {
+        by_item.entry(c.menu_item_id).or_default().push(c);
+    }
+    let data: Vec<MenuItemWithCosts> = rows
+        .into_iter()
+        .map(|item| {
+            let sku_costs = by_item.remove(&item.id).unwrap_or_default();
+            MenuItemWithCosts { item, sku_costs }
+        })
+        .collect();
+
+    Ok(HttpResponse::Ok().json(PaginatedMenuItems {
+        data,
+        total,
+        page,
+        per_page,
+        total_pages,
+    }))
 }
 
 #[utoipa::path(
@@ -674,10 +768,10 @@ pub async fn create_menu_item(
 
     let item = sqlx::query_as::<_, MenuItem>(
         "INSERT INTO menu_items
-             (org_id, category_id, name, name_translations, description, description_translations, image_url, base_price, display_order)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             (org_id, category_id, name, name_translations, description, description_translations, image_url, base_price)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          RETURNING id, org_id, category_id, name, name_translations, description, description_translations, image_url,
-                   base_price, is_active, display_order,
+                   base_price, is_active,
                    created_at, updated_at, deleted_at,
                    NULL::text AS default_milk_addon_id",
     )
@@ -689,7 +783,6 @@ pub async fn create_menu_item(
     .bind(description_translations)
     .bind(&mut_body.image_url)
     .bind(mut_body.base_price)
-    .bind(mut_body.display_order.unwrap_or(0))
     .fetch_one(&mut *tx)
     .await?;
 
@@ -776,13 +869,12 @@ pub async fn update_menu_item(
              name_translations        = $4,
              description              = COALESCE($5, description),
              description_translations = $6,
-             image_url                = CASE WHEN $11 THEN $7 ELSE image_url END,
+             image_url                = CASE WHEN $10 THEN $7 ELSE image_url END,
              base_price               = COALESCE($8, base_price),
-             display_order            = COALESCE($9, display_order),
-             is_active                = COALESCE($10, is_active)
+             is_active                = COALESCE($9, is_active)
          WHERE id = $1 AND deleted_at IS NULL
          RETURNING id, org_id, category_id, name, name_translations, description, description_translations, image_url,
-                   base_price, is_active, display_order,
+                   base_price, is_active,
                    created_at, updated_at, deleted_at,
                    (
                        SELECT a.id::text
@@ -802,7 +894,6 @@ pub async fn update_menu_item(
     .bind(description_translations)
     .bind(image_url_val)
     .bind(mut_body.base_price)
-    .bind(mut_body.display_order)
     .bind(mut_body.is_active)
     .bind(image_url_is_present)
     .fetch_optional(&mut *tx)
@@ -920,18 +1011,16 @@ pub async fn upsert_size(
     let mut tx = pool.get_ref().begin().await?;
 
     let row = sqlx::query_as::<_, ItemSize>(
-        "INSERT INTO item_sizes (menu_item_id, label, price_override, display_order)
-         VALUES ($1, $2::item_size, $3, $4)
+        "INSERT INTO item_sizes (menu_item_id, label, price_override)
+         VALUES ($1, $2::item_size, $3)
          ON CONFLICT (menu_item_id, label) DO UPDATE SET
              price_override = EXCLUDED.price_override,
-             display_order  = EXCLUDED.display_order,
              is_active      = TRUE
-         RETURNING id, menu_item_id, label::text, price_override, display_order, is_active",
+         RETURNING id, menu_item_id, label::text, price_override, is_active",
     )
     .bind(*id)
     .bind(&body.label)
     .bind(body.price_override)
-    .bind(body.display_order.unwrap_or(0))
     .fetch_one(&mut *tx)
     .await?;
 
@@ -1046,11 +1135,11 @@ pub async fn list_addon_items(
     let mut rows = match &query.addon_type {
         Some(t) => sqlx::query_as::<_, AddonItem>(
             "SELECT a.id, a.org_id, a.name, a.name_translations, a.type as addon_type, a.default_price,
-                    a.is_active, a.display_order, a.created_at, a.updated_at,
+                    a.is_active, a.created_at, a.updated_at,
                     (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id LIMIT 1) as primary_ingredient_id
              FROM addon_items a
              WHERE a.org_id = $1 AND a.type = $2
-             ORDER BY a.type ASC, a.display_order ASC",
+             ORDER BY a.type ASC, a.created_at ASC",
         )
         .bind(query.org_id)
         .bind(t)
@@ -1059,11 +1148,11 @@ pub async fn list_addon_items(
 
         None => sqlx::query_as::<_, AddonItem>(
             "SELECT a.id, a.org_id, a.name, a.name_translations, a.type as addon_type, a.default_price,
-                    a.is_active, a.display_order, a.created_at, a.updated_at,
+                    a.is_active, a.created_at, a.updated_at,
                     (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id LIMIT 1) as primary_ingredient_id
              FROM addon_items a
              WHERE a.org_id = $1
-             ORDER BY a.type ASC, a.display_order ASC",
+             ORDER BY a.type ASC, a.created_at ASC",
         )
         .bind(query.org_id)
         .fetch_all(pool.get_ref())
@@ -1101,10 +1190,10 @@ pub async fn create_addon_item(
         .map_err(|_| AppError::Internal)?;
 
     let mut row = sqlx::query_as::<_, AddonItem>(
-        "INSERT INTO addon_items (org_id, name, name_translations, type, default_price, display_order)
-         VALUES ($1, $2, $3, $4, $5, $6)
+        "INSERT INTO addon_items (org_id, name, name_translations, type, default_price)
+         VALUES ($1, $2, $3, $4, $5)
          RETURNING id, org_id, name, name_translations, type as addon_type, default_price,
-                   is_active, display_order, created_at, updated_at,
+                   is_active, created_at, updated_at,
                    NULL::uuid as primary_ingredient_id",
     )
     .bind(mut_body.org_id)
@@ -1112,7 +1201,6 @@ pub async fn create_addon_item(
     .bind(name_translations)
     .bind(&mut_body.addon_type)
     .bind(mut_body.default_price)
-    .bind(mut_body.display_order.unwrap_or(0))
     .fetch_one(pool.get_ref())
     .await?;
 
@@ -1162,11 +1250,10 @@ pub async fn update_addon_item(
              name_translations = $3,
              type              = COALESCE($4, type),
              default_price     = COALESCE($5, default_price),
-             display_order     = COALESCE($6, display_order),
-             is_active         = COALESCE($7, is_active)
+             is_active         = COALESCE($6, is_active)
          WHERE id = $1
          RETURNING id, org_id, name, name_translations, type as addon_type, default_price,
-                   is_active, display_order, created_at, updated_at,
+                   is_active, created_at, updated_at,
                    (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = addon_items.id LIMIT 1) as primary_ingredient_id",
     )
     .bind(*id)
@@ -1174,7 +1261,6 @@ pub async fn update_addon_item(
     .bind(name_translations)
     .bind(&mut_body.addon_type)
     .bind(mut_body.default_price)
-    .bind(mut_body.display_order)
     .bind(mut_body.is_active)
     .fetch_optional(pool.get_ref())
     .await?
@@ -1269,17 +1355,16 @@ pub async fn create_addon_slot(
     let row = sqlx::query_as::<_, AddonSlot>(
         "INSERT INTO menu_item_addon_slots
              (menu_item_id, addon_type, label, label_translations, is_required,
-              min_selections, max_selections, display_order)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+              min_selections, max_selections)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (menu_item_id, addon_type) DO UPDATE SET
              label              = COALESCE(EXCLUDED.label, menu_item_addon_slots.label),
              label_translations = EXCLUDED.label_translations,
              is_required        = EXCLUDED.is_required,
              min_selections     = EXCLUDED.min_selections,
-             max_selections     = EXCLUDED.max_selections,
-             display_order      = EXCLUDED.display_order
+             max_selections     = EXCLUDED.max_selections
          RETURNING id, menu_item_id, addon_type, label, label_translations, is_required,
-                   min_selections, max_selections, display_order, created_at",
+                   min_selections, max_selections, created_at",
     )
     .bind(*id)
     .bind(&mut_body.addon_type)
@@ -1288,7 +1373,6 @@ pub async fn create_addon_slot(
     .bind(mut_body.is_required.unwrap_or(false))
     .bind(mut_body.min_selections.unwrap_or(0))
     .bind(mut_body.max_selections)
-    .bind(mut_body.display_order.unwrap_or(0))
     .fetch_one(pool.get_ref())
     .await?;
 
@@ -1321,7 +1405,7 @@ pub async fn update_addon_slot(
     require_same_org(&claims, Some(item.org_id))?;
 
     let existing: AddonSlot = sqlx::query_as(
-        "SELECT id, menu_item_id, addon_type, label, label_translations, is_required, min_selections, max_selections, display_order, created_at FROM menu_item_addon_slots WHERE id = $1 AND menu_item_id = $2"
+        "SELECT id, menu_item_id, addon_type, label, label_translations, is_required, min_selections, max_selections, created_at FROM menu_item_addon_slots WHERE id = $1 AND menu_item_id = $2"
     )
     .bind(slot_id)
     .bind(item_id)
@@ -1350,11 +1434,10 @@ pub async fn update_addon_slot(
              label_translations = $4,
              is_required        = COALESCE($5, is_required),
              min_selections     = COALESCE($6, min_selections),
-             max_selections     = COALESCE($7, max_selections),
-             display_order      = COALESCE($8, display_order)
+             max_selections     = COALESCE($7, max_selections)
          WHERE id = $1 AND menu_item_id = $2
          RETURNING id, menu_item_id, addon_type, label, label_translations, is_required,
-                   min_selections, max_selections, display_order, created_at",
+                   min_selections, max_selections, created_at",
     )
     .bind(slot_id)
     .bind(item_id)
@@ -1363,7 +1446,6 @@ pub async fn update_addon_slot(
     .bind(mut_body.is_required)
     .bind(mut_body.min_selections)
     .bind(mut_body.max_selections)
-    .bind(mut_body.display_order)
     .fetch_one(pool.get_ref())
     .await?;
 
@@ -1484,6 +1566,14 @@ pub async fn upsert_addon_override(
     let addon = fetch_addon_item(pool.get_ref(), body.addon_item_id).await?;
     require_same_org(&claims, Some(addon.org_id))?;
 
+    if body.quantity_used <= 0.0 {
+        return Err(AppError::BadRequest("quantity_used must be greater than 0".into()));
+    }
+    // Normalize the deduction to the replacement ingredient's base unit.
+    let (norm_unit, norm_qty) = crate::recipes::handlers::normalize_recipe_unit(
+        pool.get_ref(), body.org_ingredient_id, &body.ingredient_unit, body.quantity_used,
+    ).await?;
+
     // Upsert using the appropriate partial unique index path.
     // Because size_label and combo_addon_item_id are nullable we can't use
     // a single ON CONFLICT clause — instead we do a manual upsert:
@@ -1560,8 +1650,8 @@ pub async fn upsert_addon_override(
         )
         .bind(eid)
         .bind(body.org_ingredient_id)
-        .bind(&body.ingredient_unit)
-        .bind(body.quantity_used)
+        .bind(&norm_unit)
+        .bind(norm_qty)
         .bind(body.replaces_org_ingredient_id)
         .fetch_one(pool.get_ref())
         .await?
@@ -1592,8 +1682,8 @@ pub async fn upsert_addon_override(
         .bind(&body.size_label)
         .bind(&body.ingredient_name)
         .bind(body.org_ingredient_id)
-        .bind(&body.ingredient_unit)
-        .bind(body.quantity_used)
+        .bind(&norm_unit)
+        .bind(norm_qty)
         .bind(body.replaces_org_ingredient_id)
         .bind(body.combo_addon_item_id)
         .fetch_one(pool.get_ref())
@@ -1655,7 +1745,6 @@ pub struct OptionalField {
     #[schema(value_type = Option<f64>)]
     pub quantity_used:     Option<sqlx::types::BigDecimal>,
     pub size_label:        Option<String>,
-    pub display_order:     i32,
     pub is_active:         bool,
     pub created_at:        DateTime<Utc>,
     pub updated_at:        DateTime<Utc>,
@@ -1672,7 +1761,6 @@ pub struct CreateOptionalFieldRequest {
     pub ingredient_unit:   Option<String>,
     pub quantity_used:     Option<f64>,
     pub size_label:        Option<String>,
-    pub display_order:     Option<i32>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -1686,7 +1774,6 @@ pub struct UpdateOptionalFieldRequest {
     pub ingredient_unit:   Option<String>,
     pub quantity_used:     Option<f64>,
     pub size_label:        Option<String>,
-    pub display_order:     Option<i32>,
     pub is_active:         Option<bool>,
 }
 
@@ -1713,10 +1800,10 @@ pub async fn list_optional_fields(
         SELECT id, menu_item_id, name, name_translations, price,
                org_ingredient_id, ingredient_name, ingredient_unit,
                quantity_used, size_label::text,
-               display_order, is_active, created_at, updated_at
+               is_active, created_at, updated_at
         FROM menu_item_optional_fields
         WHERE menu_item_id = $1
-        ORDER BY display_order ASC, name ASC
+        ORDER BY name ASC
         "#,
     )
     .bind(*id)
@@ -1763,12 +1850,22 @@ pub async fn create_optional_field(
             ));
         }
         if let Some(qty) = body.quantity_used
-            && qty < 0.0 {
-                return Err(AppError::BadRequest("quantity_used cannot be negative".into()));
+            && qty <= 0.0 {
+                return Err(AppError::BadRequest("quantity_used must be greater than 0".into()));
             }
     }
 
-    let mut_body = body.into_inner();
+    let mut mut_body = body.into_inner();
+    // Normalize the deduction quantity to the linked ingredient's base unit.
+    if has_ingredient {
+        let unit = mut_body.ingredient_unit.clone().unwrap_or_default();
+        let qty  = mut_body.quantity_used.unwrap_or(0.0);
+        let (nu, nq) = crate::recipes::handlers::normalize_recipe_unit(
+            pool.get_ref(), mut_body.org_ingredient_id, &unit, qty,
+        ).await?;
+        mut_body.ingredient_unit = Some(nu);
+        mut_body.quantity_used   = Some(nq);
+    }
     let trimmed_name = mut_body.name.trim().to_string();
     let mut name_translations = mut_body.name_translations.unwrap_or_else(|| serde_json::json!({}));
     crate::translation::ensure_translations_json(&mut name_translations, Some(&trimmed_name))
@@ -1779,12 +1876,12 @@ pub async fn create_optional_field(
         r#"
         INSERT INTO menu_item_optional_fields
             (menu_item_id, name, name_translations, price, org_ingredient_id, ingredient_name,
-             ingredient_unit, quantity_used, size_label, display_order)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::item_size, $10)
+             ingredient_unit, quantity_used, size_label)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::item_size)
         RETURNING id, menu_item_id, name, name_translations, price,
                   org_ingredient_id, ingredient_name, ingredient_unit,
                   quantity_used, size_label::text,
-                  display_order, is_active, created_at, updated_at
+                  is_active, created_at, updated_at
         "#,
     )
     .bind(*id)
@@ -1796,7 +1893,6 @@ pub async fn create_optional_field(
     .bind(&mut_body.ingredient_unit)
     .bind(mut_body.quantity_used)
     .bind(&mut_body.size_label)
-    .bind(mut_body.display_order.unwrap_or(0))
     .fetch_one(pool.get_ref())
     .await?;
 
@@ -1828,12 +1924,18 @@ pub async fn update_optional_field(
     require_same_org(&claims, Some(item.org_id))?;
 
     if let Some(qty) = body.quantity_used
-        && qty < 0.0 {
-            return Err(AppError::BadRequest("quantity_used cannot be negative".into()));
+        && qty <= 0.0 {
+            return Err(AppError::BadRequest("quantity_used must be greater than 0".into()));
         }
+    // Changing the unit alone would reinterpret the stored (base-unit) quantity.
+    if body.ingredient_unit.is_some() && body.quantity_used.is_none() {
+        return Err(AppError::BadRequest(
+            "provide quantity_used when changing ingredient_unit".into(),
+        ));
+    }
 
     let existing: OptionalField = sqlx::query_as(
-        r#"SELECT id, menu_item_id, name, name_translations, price, org_ingredient_id, ingredient_name, ingredient_unit, quantity_used, size_label::text, display_order, is_active, created_at, updated_at FROM menu_item_optional_fields WHERE id = $1 AND menu_item_id = $2"#
+        r#"SELECT id, menu_item_id, name, name_translations, price, org_ingredient_id, ingredient_name, ingredient_unit, quantity_used, size_label::text, is_active, created_at, updated_at FROM menu_item_optional_fields WHERE id = $1 AND menu_item_id = $2"#
     )
     .bind(field_id)
     .bind(item_id)
@@ -1841,7 +1943,19 @@ pub async fn update_optional_field(
     .await?
     .ok_or_else(|| AppError::NotFound("Optional field not found".into()))?;
 
-    let mut_body = body.into_inner();
+    let mut mut_body = body.into_inner();
+    // Normalize a newly-supplied quantity to the linked ingredient's base unit.
+    if let Some(qty) = mut_body.quantity_used {
+        let effective_id = mut_body.org_ingredient_id.or(existing.org_ingredient_id);
+        let unit = mut_body.ingredient_unit.clone()
+            .or_else(|| existing.ingredient_unit.clone())
+            .unwrap_or_default();
+        let (nu, nq) = crate::recipes::handlers::normalize_recipe_unit(
+            pool.get_ref(), effective_id, &unit, qty,
+        ).await?;
+        mut_body.ingredient_unit = Some(nu);
+        mut_body.quantity_used   = Some(nq);
+    }
     let mut name_translations = existing.name_translations;
     if let Some(new_name) = &mut_body.name {
         crate::translation::ensure_translations_json(&mut name_translations, Some(new_name))
@@ -1865,13 +1979,12 @@ pub async fn update_optional_field(
             ingredient_unit   = COALESCE($8, ingredient_unit),
             quantity_used     = COALESCE($9, quantity_used),
             size_label        = COALESCE($10::item_size, size_label),
-            display_order     = COALESCE($11, display_order),
-            is_active         = COALESCE($12, is_active)
+            is_active         = COALESCE($11, is_active)
         WHERE id = $1 AND menu_item_id = $2
         RETURNING id, menu_item_id, name, name_translations, price,
                   org_ingredient_id, ingredient_name, ingredient_unit,
                   quantity_used, size_label::text,
-                  display_order, is_active, created_at, updated_at
+                  is_active, created_at, updated_at
         "#,
     )
     .bind(field_id)
@@ -1884,7 +1997,6 @@ pub async fn update_optional_field(
     .bind(&mut_body.ingredient_unit)
     .bind(mut_body.quantity_used)
     .bind(&mut_body.size_label)
-    .bind(mut_body.display_order)
     .bind(mut_body.is_active)
     .fetch_one(pool.get_ref())
     .await?;
@@ -1960,10 +2072,10 @@ pub async fn get_public_menu(
 
     // 2. Fetch Categories
     let categories = sqlx::query_as::<_, Category>(
-        "SELECT id, org_id, name, name_translations, image_url, display_order, is_active, created_at, updated_at, deleted_at 
-         FROM categories 
-         WHERE org_id = $1 AND deleted_at IS NULL AND is_active = true 
-         ORDER BY display_order ASC",
+        "SELECT id, org_id, name, name_translations, image_url, is_active, created_at, updated_at, deleted_at
+         FROM categories
+         WHERE org_id = $1 AND deleted_at IS NULL AND is_active = true
+         ORDER BY name ASC",
     )
     .bind(org_id)
     .fetch_all(pool.get_ref())
@@ -1971,12 +2083,12 @@ pub async fn get_public_menu(
 
     // 3. Fetch Items
     let items = sqlx::query_as::<_, MenuItem>(
-        "SELECT id, org_id, category_id, name, name_translations, description, description_translations, image_url, base_price, is_active, display_order, 
-                created_at, updated_at, deleted_at, 
+        "SELECT id, org_id, category_id, name, name_translations, description, description_translations, image_url, base_price, is_active,
+                created_at, updated_at, deleted_at,
                 NULL::text as default_milk_addon_id
-         FROM menu_items 
-         WHERE org_id = $1 AND deleted_at IS NULL AND is_active = true 
-         ORDER BY display_order ASC",
+         FROM menu_items
+         WHERE org_id = $1 AND deleted_at IS NULL AND is_active = true
+         ORDER BY name ASC",
     )
     .bind(org_id)
     .fetch_all(pool.get_ref())
@@ -1984,8 +2096,8 @@ pub async fn get_public_menu(
 
     // 4. Fetch Sizes
     let sizes = sqlx::query_as::<_, ItemSize>(
-        "SELECT s.id, s.menu_item_id, s.label::text, s.price_override, s.display_order, s.is_active 
-         FROM item_sizes s 
+        "SELECT s.id, s.menu_item_id, s.label::text, s.price_override, s.is_active
+         FROM item_sizes s
          JOIN menu_items i ON s.menu_item_id = i.id 
          WHERE i.org_id = $1 AND s.is_active = true",
     )
@@ -1995,8 +2107,8 @@ pub async fn get_public_menu(
 
     // 5. Fetch Addon Slots
     let slots = sqlx::query_as::<_, AddonSlot>(
-        "SELECT s.id, s.menu_item_id, s.addon_type, s.label, s.label_translations, s.is_required, s.min_selections, s.max_selections, s.display_order, s.created_at 
-         FROM menu_item_addon_slots s 
+        "SELECT s.id, s.menu_item_id, s.addon_type, s.label, s.label_translations, s.is_required, s.min_selections, s.max_selections, s.created_at
+         FROM menu_item_addon_slots s
          JOIN menu_items i ON s.menu_item_id = i.id 
          WHERE i.org_id = $1",
     )
@@ -2006,8 +2118,8 @@ pub async fn get_public_menu(
 
     // 6. Fetch Addon Items
     let addon_items_all = sqlx::query_as::<_, AddonItem>(
-        "SELECT id, org_id, name, name_translations, type as addon_type, default_price, is_active, display_order, created_at, updated_at, 
-                NULL::uuid as primary_ingredient_id 
+        "SELECT id, org_id, name, name_translations, type as addon_type, default_price, is_active, created_at, updated_at,
+                NULL::uuid as primary_ingredient_id
          FROM addon_items 
          WHERE org_id = $1 AND is_active = true",
     )
@@ -2109,7 +2221,6 @@ pub async fn get_public_menu(
                 description_translations: item.description_translations.clone(),
                 image_url: item.image_url.clone(),
                 base_price: item.base_price,
-                display_order: item.display_order,
                 sizes: item_sizes,
                 addon_slots: item_slots,
             });
@@ -2120,7 +2231,6 @@ pub async fn get_public_menu(
             name: cat.name.clone(),
             name_translations: cat.name_translations.clone(),
             image_url: cat.image_url,
-            display_order: cat.display_order,
             items: public_items,
         });
     }
@@ -2173,7 +2283,7 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 
 async fn fetch_category(pool: &PgPool, id: Uuid) -> Result<Category, AppError> {
     sqlx::query_as::<_, Category>(
-        "SELECT id, org_id, name, name_translations, image_url, display_order, is_active,
+        "SELECT id, org_id, name, name_translations, image_url, is_active,
                 created_at, updated_at, deleted_at
          FROM categories
          WHERE id = $1 AND deleted_at IS NULL",
@@ -2187,7 +2297,7 @@ async fn fetch_category(pool: &PgPool, id: Uuid) -> Result<Category, AppError> {
 async fn fetch_menu_item(pool: &PgPool, id: Uuid) -> Result<MenuItem, AppError> {
     sqlx::query_as::<_, MenuItem>(
         "SELECT id, org_id, category_id, name, name_translations, description, description_translations, image_url,
-                base_price, is_active, display_order,
+                base_price, is_active,
                 created_at, updated_at, deleted_at,
                 (
                     SELECT a.id::text
@@ -2210,7 +2320,7 @@ async fn fetch_menu_item(pool: &PgPool, id: Uuid) -> Result<MenuItem, AppError> 
 async fn fetch_addon_item(pool: &PgPool, id: Uuid) -> Result<AddonItem, AppError> {
     sqlx::query_as::<_, AddonItem>(
         "SELECT id, org_id, name, name_translations, type as addon_type, default_price,
-                is_active, display_order, created_at, updated_at,
+                is_active, created_at, updated_at,
                 (SELECT org_ingredient_id
                    FROM addon_item_ingredients
                   WHERE addon_item_id = addon_items.id
@@ -2226,10 +2336,10 @@ async fn fetch_addon_item(pool: &PgPool, id: Uuid) -> Result<AddonItem, AppError
 
 async fn fetch_sizes(pool: &PgPool, item_id: Uuid) -> Result<Vec<ItemSize>, AppError> {
     Ok(sqlx::query_as::<_, ItemSize>(
-        "SELECT id, menu_item_id, label::text, price_override, display_order, is_active
+        "SELECT id, menu_item_id, label::text, price_override, is_active
          FROM item_sizes
          WHERE menu_item_id = $1
-         ORDER BY display_order ASC",
+         ORDER BY label ASC",
     )
     .bind(item_id)
     .fetch_all(pool)
@@ -2242,10 +2352,10 @@ async fn fetch_addon_slots(
 ) -> Result<Vec<AddonSlot>, AppError> {
     Ok(sqlx::query_as::<_, AddonSlot>(
         "SELECT id, menu_item_id, addon_type, label, label_translations, is_required,
-                min_selections, max_selections, display_order, created_at
+                min_selections, max_selections, created_at
          FROM menu_item_addon_slots
          WHERE menu_item_id = $1
-         ORDER BY display_order ASC",
+         ORDER BY created_at ASC",
     )
     .bind(item_id)
     .fetch_all(pool)
@@ -2260,10 +2370,10 @@ async fn fetch_optional_fields(
         "SELECT id, menu_item_id, name, name_translations, price,
                 org_ingredient_id, ingredient_name, ingredient_unit,
                 quantity_used, size_label::text,
-                display_order, is_active, created_at, updated_at
+                is_active, created_at, updated_at
          FROM menu_item_optional_fields
          WHERE menu_item_id = $1 AND is_active = true
-         ORDER BY display_order ASC, name ASC",
+         ORDER BY name ASC",
     )
     .bind(item_id)
     .fetch_all(pool)

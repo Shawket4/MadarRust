@@ -199,6 +199,31 @@ pub async fn login(
         return Err(AppError::Unauthorized("Account is disabled".into()));
     }
 
+    // A user with an OPEN shift may NOT start a new login session — anywhere.
+    // The open shift must be closed first. This stops a teller (assigned to
+    // several branches) being live at two places at once, and blocks any
+    // duplicate session. The device that opened the shift keeps working on its
+    // persisted token (no re-login needed mid-shift). Surfaced as an error state.
+    let open_shift_branch: Option<Uuid> = sqlx::query_scalar(
+        "SELECT branch_id FROM shifts WHERE teller_id = $1 AND status = 'open'"
+    )
+    .bind(user.id)
+    .fetch_optional(pool.get_ref())
+    .await?;
+    if let Some(open_branch) = open_shift_branch {
+        tracing::warn!(
+            target: "auth.login.blocked_open_shift",
+            user_id = %user.id,
+            role = ?user.role,
+            open_shift_branch = %open_branch,
+            attempted_branch = ?body.branch_id,
+            "login blocked: user already has an open shift"
+        );
+        return Err(AppError::Conflict(
+            "You already have an open shift. It must be closed before signing in again.".into(),
+        ));
+    }
+
     let token_branch_id = if user.role == UserRole::Teller {
         body.branch_id
     } else {

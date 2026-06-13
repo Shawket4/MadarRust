@@ -56,17 +56,6 @@ pub struct ShiftSummary {
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
-pub struct InventoryDiscrepancy {
-    pub branch_inventory_id: Uuid,
-    pub ingredient_name:     String,
-    pub unit:                String,
-    pub expected_stock:      f64,
-    pub actual_count:        Option<f64>,
-    pub discrepancy:         Option<f64>,
-    pub note:                Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct DeductionLogRow {
     pub id:                Uuid,
     pub order_id:          Option<Uuid>,
@@ -256,49 +245,6 @@ pub async fn shift_summary(
     .ok_or_else(|| AppError::NotFound("Shift not found".into()))?;
 
     Ok(HttpResponse::Ok().json(summary))
-}
-
-// ── GET /reports/shifts/:id/inventory ────────────────────────
-
-#[utoipa::path(
-    get,
-    path = "/reports/shifts/{shift_id}/inventory",
-    tag = "reports",
-    params(("shift_id" = Uuid, Path, description = "Shift ID")),
-    responses((status = 200, description = "Shift inventory discrepancies", body = Vec<InventoryDiscrepancy>), AppErrorResponse),
-    security(("bearer_jwt" = []))
-)]
-pub async fn shift_inventory_discrepancies(
-    req:      HttpRequest,
-    pool:     web::Data<PgPool>,
-    shift_id: web::Path<Uuid>,
-) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "shift_counts", "read").await?;
-    require_shift_branch_access(pool.get_ref(), &claims, *shift_id).await?;
-
-    let rows = sqlx::query_as::<_, InventoryDiscrepancy>(
-        r#"
-        SELECT
-            sic.branch_inventory_id,
-            oi.name         AS ingredient_name,
-            oi.unit::text   AS unit,
-            sic.expected_stock::float8,
-            sic.actual_stock::float8 AS actual_count,
-            sic.discrepancy::float8,
-            sic.note
-        FROM shift_inventory_counts sic
-        JOIN branch_inventory bi ON bi.id = sic.branch_inventory_id
-        JOIN org_ingredients oi  ON oi.id = bi.org_ingredient_id
-        WHERE sic.shift_id = $1
-        ORDER BY oi.name ASC
-        "#,
-    )
-    .bind(*shift_id)
-    .fetch_all(pool.get_ref())
-    .await?;
-
-    Ok(HttpResponse::Ok().json(rows))
 }
 
 // ── GET /reports/shifts/:id/deductions ───────────────────────
@@ -535,11 +481,11 @@ pub async fn branch_stock(
             bi.current_stock::float8,
             bi.reorder_threshold::float8,
             oi.cost_per_unit,
-            (bi.current_stock <= bi.reorder_threshold) AS below_reorder
+            (bi.reorder_threshold > 0 AND bi.current_stock <= bi.reorder_threshold) AS below_reorder
         FROM branch_inventory bi
         JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id
         WHERE bi.branch_id = $1
-        ORDER BY (bi.current_stock <= bi.reorder_threshold) DESC, oi.name ASC
+        ORDER BY (bi.reorder_threshold > 0 AND bi.current_stock <= bi.reorder_threshold) DESC, oi.name ASC
         "#,
     )
     .bind(*branch_id)
@@ -841,6 +787,488 @@ pub async fn org_branch_comparison(
         to:       query.to,
         branches,
     }))
+}
+
+// ── Inventory valuation / low-stock / consumption / waste ─────
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct ValuationRow {
+    pub org_ingredient_id: Uuid,
+    pub ingredient_name:   String,
+    pub unit:              String,
+    pub current_stock:     f64,
+    /// Piastres per unit; `null` ⟺ unknown.
+    pub cost_per_unit:     Option<i64>,
+    /// current_stock × cost_per_unit in piastres; `null` when cost unknown.
+    pub value:             Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct InventoryValuationReport {
+    pub total_value:        i64,
+    pub unknown_cost_count: i64,
+    pub items:              Vec<ValuationRow>,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct LowStockRow {
+    pub branch_id:         Uuid,
+    pub branch_name:       String,
+    pub org_ingredient_id: Uuid,
+    pub ingredient_name:   String,
+    pub unit:              String,
+    pub current_stock:     f64,
+    pub reorder_threshold: f64,
+    /// reorder_threshold − current_stock: how much to order to reach par.
+    pub deficit:           f64,
+    /// Default supplier for this ingredient (for one-click "create PO"); may be null.
+    pub supplier_id:       Option<Uuid>,
+    pub supplier_name:     Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct ConsumptionRow {
+    pub org_ingredient_id: Uuid,
+    pub ingredient_name:   String,
+    pub unit:              String,
+    pub consumed_qty:      f64,
+    /// Consumption valued in piastres; `null` if any contributing cost unknown.
+    pub consumed_value:    Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct WasteReportRow {
+    pub reason:            String,
+    pub org_ingredient_id: Uuid,
+    pub ingredient_name:   String,
+    pub unit:              String,
+    pub waste_qty:         f64,
+    pub waste_value:       Option<i64>,
+}
+
+// ── GET /reports/branches/:id/inventory-valuation ────────────
+
+#[utoipa::path(
+    get,
+    path = "/reports/branches/{branch_id}/inventory-valuation",
+    tag = "reports",
+    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    responses((status = 200, description = "Branch inventory valuation", body = InventoryValuationReport), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn branch_inventory_valuation(
+    req:       HttpRequest,
+    pool:      web::Data<PgPool>,
+    branch_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
+    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+
+    let items = sqlx::query_as::<_, ValuationRow>(
+        r#"
+        SELECT bi.org_ingredient_id, oi.name AS ingredient_name, oi.unit::text AS unit,
+               bi.current_stock::float8,
+               round(oi.cost_per_unit)::bigint AS cost_per_unit,
+               CASE WHEN oi.cost_per_unit IS NULL THEN NULL
+                    ELSE round(bi.current_stock * oi.cost_per_unit)::bigint END AS value
+        FROM branch_inventory bi
+        JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id
+        WHERE bi.branch_id = $1
+        ORDER BY oi.name ASC
+        "#,
+    )
+    .bind(*branch_id)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(summarize_valuation(items)))
+}
+
+// ── GET /reports/orgs/:id/inventory-valuation ────────────────
+
+#[utoipa::path(
+    get,
+    path = "/reports/orgs/{org_id}/inventory-valuation",
+    tag = "reports",
+    params(("org_id" = Uuid, Path, description = "Organization ID")),
+    responses((status = 200, description = "Org inventory valuation (all branches)", body = InventoryValuationReport), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn org_inventory_valuation(
+    req:    HttpRequest,
+    pool:   web::Data<PgPool>,
+    org_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
+    require_org(&claims, *org_id)?;
+
+    let items = sqlx::query_as::<_, ValuationRow>(
+        r#"
+        SELECT oi.id AS org_ingredient_id, oi.name AS ingredient_name, oi.unit::text AS unit,
+               SUM(bi.current_stock)::float8 AS current_stock,
+               round(oi.cost_per_unit)::bigint AS cost_per_unit,
+               CASE WHEN oi.cost_per_unit IS NULL THEN NULL
+                    ELSE round(SUM(bi.current_stock) * oi.cost_per_unit)::bigint END AS value
+        FROM branch_inventory bi
+        JOIN branches b        ON b.id = bi.branch_id AND b.org_id = $1 AND b.deleted_at IS NULL
+        JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id
+        GROUP BY oi.id, oi.name, oi.unit, oi.cost_per_unit
+        ORDER BY oi.name ASC
+        "#,
+    )
+    .bind(*org_id)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(summarize_valuation(items)))
+}
+
+// ── GET /reports/orgs/:id/low-stock ──────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/reports/orgs/{org_id}/low-stock",
+    tag = "reports",
+    params(("org_id" = Uuid, Path, description = "Organization ID")),
+    responses((status = 200, description = "Below-reorder items across branches", body = Vec<LowStockRow>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn org_low_stock(
+    req:    HttpRequest,
+    pool:   web::Data<PgPool>,
+    org_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
+    require_org(&claims, *org_id)?;
+
+    let rows = sqlx::query_as::<_, LowStockRow>(
+        r#"
+        SELECT bi.branch_id, b.name AS branch_name, bi.org_ingredient_id,
+               oi.name AS ingredient_name, oi.unit::text AS unit,
+               bi.current_stock::float8, bi.reorder_threshold::float8,
+               (bi.reorder_threshold - bi.current_stock)::float8 AS deficit,
+               oi.supplier_id,
+               (SELECT name FROM suppliers WHERE id = oi.supplier_id) AS supplier_name
+        FROM branch_inventory bi
+        JOIN branches b        ON b.id = bi.branch_id AND b.org_id = $1 AND b.deleted_at IS NULL
+        JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id
+        WHERE bi.reorder_threshold > 0 AND bi.current_stock <= bi.reorder_threshold
+        ORDER BY b.name ASC, oi.name ASC
+        "#,
+    )
+    .bind(*org_id)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+// ── GET /reports/branches/:id/consumption ────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/reports/branches/{branch_id}/consumption",
+    tag = "reports",
+    params(("branch_id" = Uuid, Path, description = "Branch ID"), DateRangeQuery),
+    responses((status = 200, description = "Ingredient consumption over a date range", body = Vec<ConsumptionRow>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn branch_consumption(
+    req:       HttpRequest,
+    pool:      web::Data<PgPool>,
+    branch_id: web::Path<Uuid>,
+    query:     web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
+    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+
+    let rows = sqlx::query_as::<_, ConsumptionRow>(
+        r#"
+        SELECT m.org_ingredient_id, oi.name AS ingredient_name, oi.unit::text AS unit,
+               (-SUM(m.quantity))::float8 AS consumed_qty,
+               CASE WHEN bool_or(m.unit_cost IS NULL) THEN NULL
+                    ELSE round(SUM(-m.quantity * m.unit_cost))::bigint END AS consumed_value
+        FROM inventory_movements m
+        JOIN org_ingredients oi ON oi.id = m.org_ingredient_id
+        WHERE m.branch_id = $1
+          AND m.type IN ('sale','waste')
+          AND ($2::timestamptz IS NULL OR m.created_at >= $2)
+          AND ($3::timestamptz IS NULL OR m.created_at <= $3)
+        GROUP BY m.org_ingredient_id, oi.name, oi.unit
+        ORDER BY consumed_qty DESC
+        "#,
+    )
+    .bind(*branch_id)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+// ── GET /reports/branches/:id/waste-report ───────────────────
+
+#[utoipa::path(
+    get,
+    path = "/reports/branches/{branch_id}/waste-report",
+    tag = "reports",
+    params(("branch_id" = Uuid, Path, description = "Branch ID"), DateRangeQuery),
+    responses((status = 200, description = "Waste by reason and ingredient", body = Vec<WasteReportRow>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn branch_waste_report(
+    req:       HttpRequest,
+    pool:      web::Data<PgPool>,
+    branch_id: web::Path<Uuid>,
+    query:     web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
+    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+
+    let rows = sqlx::query_as::<_, WasteReportRow>(
+        r#"
+        SELECT COALESCE(m.reason, 'other') AS reason,
+               m.org_ingredient_id, oi.name AS ingredient_name, oi.unit::text AS unit,
+               (-SUM(m.quantity))::float8 AS waste_qty,
+               CASE WHEN bool_or(m.unit_cost IS NULL) THEN NULL
+                    ELSE round(SUM(-m.quantity * m.unit_cost))::bigint END AS waste_value
+        FROM inventory_movements m
+        JOIN org_ingredients oi ON oi.id = m.org_ingredient_id
+        WHERE m.branch_id = $1
+          AND m.type = 'waste'
+          AND ($2::timestamptz IS NULL OR m.created_at >= $2)
+          AND ($3::timestamptz IS NULL OR m.created_at <= $3)
+        GROUP BY m.reason, m.org_ingredient_id, oi.name, oi.unit
+        ORDER BY waste_qty DESC
+        "#,
+    )
+    .bind(*branch_id)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+// ── GET /reports/orgs/:id/consumption ────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/reports/orgs/{org_id}/consumption",
+    tag = "reports",
+    params(("org_id" = Uuid, Path, description = "Organization ID"), DateRangeQuery),
+    responses((status = 200, description = "Ingredient consumption across the org", body = Vec<ConsumptionRow>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn org_consumption(
+    req:    HttpRequest,
+    pool:   web::Data<PgPool>,
+    org_id: web::Path<Uuid>,
+    query:  web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
+    require_org(&claims, *org_id)?;
+
+    let rows = sqlx::query_as::<_, ConsumptionRow>(
+        r#"
+        SELECT m.org_ingredient_id, oi.name AS ingredient_name, oi.unit::text AS unit,
+               (-SUM(m.quantity))::float8 AS consumed_qty,
+               CASE WHEN bool_or(m.unit_cost IS NULL) THEN NULL
+                    ELSE round(SUM(-m.quantity * m.unit_cost))::bigint END AS consumed_value
+        FROM inventory_movements m
+        JOIN org_ingredients oi ON oi.id = m.org_ingredient_id
+        JOIN branches b ON b.id = m.branch_id AND b.org_id = $1 AND b.deleted_at IS NULL
+        WHERE m.type IN ('sale','waste')
+          AND ($2::timestamptz IS NULL OR m.created_at >= $2)
+          AND ($3::timestamptz IS NULL OR m.created_at <= $3)
+        GROUP BY m.org_ingredient_id, oi.name, oi.unit
+        ORDER BY consumed_qty DESC
+        "#,
+    )
+    .bind(*org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+// ── GET /reports/orgs/:id/waste-report ───────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/reports/orgs/{org_id}/waste-report",
+    tag = "reports",
+    params(("org_id" = Uuid, Path, description = "Organization ID"), DateRangeQuery),
+    responses((status = 200, description = "Waste by reason and ingredient across the org", body = Vec<WasteReportRow>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn org_waste_report(
+    req:    HttpRequest,
+    pool:   web::Data<PgPool>,
+    org_id: web::Path<Uuid>,
+    query:  web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
+    require_org(&claims, *org_id)?;
+
+    let rows = sqlx::query_as::<_, WasteReportRow>(
+        r#"
+        SELECT COALESCE(m.reason, 'other') AS reason,
+               m.org_ingredient_id, oi.name AS ingredient_name, oi.unit::text AS unit,
+               (-SUM(m.quantity))::float8 AS waste_qty,
+               CASE WHEN bool_or(m.unit_cost IS NULL) THEN NULL
+                    ELSE round(SUM(-m.quantity * m.unit_cost))::bigint END AS waste_value
+        FROM inventory_movements m
+        JOIN org_ingredients oi ON oi.id = m.org_ingredient_id
+        JOIN branches b ON b.id = m.branch_id AND b.org_id = $1 AND b.deleted_at IS NULL
+        WHERE m.type = 'waste'
+          AND ($2::timestamptz IS NULL OR m.created_at >= $2)
+          AND ($3::timestamptz IS NULL OR m.created_at <= $3)
+        GROUP BY m.reason, m.org_ingredient_id, oi.name, oi.unit
+        ORDER BY waste_qty DESC
+        "#,
+    )
+    .bind(*org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct ShrinkageRow {
+    /// The variance reason captured at finalize, or `unexplained` when none.
+    pub reason:            String,
+    pub org_ingredient_id: Uuid,
+    pub ingredient_name:   String,
+    pub unit:              String,
+    /// Quantity lost (positive number) from negative stock-count differences.
+    pub shrinkage_qty:     f64,
+    /// Valued shrinkage in piastres; `null` when any contributing cost unknown.
+    pub shrinkage_value:   Option<i64>,
+}
+
+// ── GET /reports/branches/:id/shrinkage ──────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/reports/branches/{branch_id}/shrinkage",
+    tag = "reports",
+    params(("branch_id" = Uuid, Path, description = "Branch ID"), DateRangeQuery),
+    responses((status = 200, description = "Stock-count shrinkage by reason", body = Vec<ShrinkageRow>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn branch_shrinkage(
+    req:       HttpRequest,
+    pool:      web::Data<PgPool>,
+    branch_id: web::Path<Uuid>,
+    query:     web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
+    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+
+    let rows = sqlx::query_as::<_, ShrinkageRow>(
+        r#"
+        SELECT COALESCE(m.reason, 'unexplained') AS reason,
+               m.org_ingredient_id, oi.name AS ingredient_name, oi.unit::text AS unit,
+               (-SUM(m.quantity))::float8 AS shrinkage_qty,
+               CASE WHEN bool_or(m.unit_cost IS NULL) THEN NULL
+                    ELSE round(SUM(-m.quantity * m.unit_cost))::bigint END AS shrinkage_value
+        FROM inventory_movements m
+        JOIN org_ingredients oi ON oi.id = m.org_ingredient_id
+        WHERE m.branch_id = $1 AND m.type = 'stock_count' AND m.quantity < 0
+          AND ($2::timestamptz IS NULL OR m.created_at >= $2)
+          AND ($3::timestamptz IS NULL OR m.created_at <= $3)
+        GROUP BY COALESCE(m.reason, 'unexplained'), m.org_ingredient_id, oi.name, oi.unit
+        ORDER BY shrinkage_qty DESC
+        "#,
+    )
+    .bind(*branch_id)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+// ── GET /reports/orgs/:id/shrinkage ──────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/reports/orgs/{org_id}/shrinkage",
+    tag = "reports",
+    params(("org_id" = Uuid, Path, description = "Organization ID"), DateRangeQuery),
+    responses((status = 200, description = "Stock-count shrinkage by reason across the org", body = Vec<ShrinkageRow>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn org_shrinkage(
+    req:    HttpRequest,
+    pool:   web::Data<PgPool>,
+    org_id: web::Path<Uuid>,
+    query:  web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
+    require_org(&claims, *org_id)?;
+
+    let rows = sqlx::query_as::<_, ShrinkageRow>(
+        r#"
+        SELECT COALESCE(m.reason, 'unexplained') AS reason,
+               m.org_ingredient_id, oi.name AS ingredient_name, oi.unit::text AS unit,
+               (-SUM(m.quantity))::float8 AS shrinkage_qty,
+               CASE WHEN bool_or(m.unit_cost IS NULL) THEN NULL
+                    ELSE round(SUM(-m.quantity * m.unit_cost))::bigint END AS shrinkage_value
+        FROM inventory_movements m
+        JOIN org_ingredients oi ON oi.id = m.org_ingredient_id
+        JOIN branches b ON b.id = m.branch_id AND b.org_id = $1 AND b.deleted_at IS NULL
+        WHERE m.type = 'stock_count' AND m.quantity < 0
+          AND ($2::timestamptz IS NULL OR m.created_at >= $2)
+          AND ($3::timestamptz IS NULL OR m.created_at <= $3)
+        GROUP BY COALESCE(m.reason, 'unexplained'), m.org_ingredient_id, oi.name, oi.unit
+        ORDER BY shrinkage_qty DESC
+        "#,
+    )
+    .bind(*org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+fn summarize_valuation(items: Vec<ValuationRow>) -> InventoryValuationReport {
+    let mut total_value = 0i64;
+    let mut unknown_cost_count = 0i64;
+    for it in &items {
+        match it.value {
+            Some(v) => total_value += v,
+            None    => unknown_cost_count += 1,
+        }
+    }
+    InventoryValuationReport { total_value, unknown_cost_count, items }
+}
+
+fn require_org(claims: &Claims, org_id: Uuid) -> Result<(), AppError> {
+    if claims.role != UserRole::SuperAdmin && claims.org_id() != Some(org_id) {
+        return Err(AppError::Forbidden("Not your org".into()));
+    }
+    Ok(())
 }
 
 // ── Helpers ───────────────────────────────────────────────────

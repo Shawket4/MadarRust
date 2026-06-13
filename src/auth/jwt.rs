@@ -28,6 +28,11 @@ impl Claims {
     pub fn org_id(&self) -> Option<Uuid> {
         self.org_id.as_deref().and_then(|s| Uuid::parse_str(s).ok())
     }
+    /// The branch this token was issued for. Tellers always carry one (the
+    /// branch they signed into); other roles are not branch-bound (`None`).
+    pub fn branch_id(&self) -> Option<Uuid> {
+        self.branch_id.as_deref().and_then(|s| Uuid::parse_str(s).ok())
+    }
 }
 
 pub fn create_token(

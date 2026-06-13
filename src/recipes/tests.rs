@@ -60,7 +60,7 @@ async fn grant_permission(pool: &PgPool, role: &str, resource: &str, action: &st
 
 async fn seed_category(pool: &PgPool, org_id: Uuid, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO categories (id, org_id, name, display_order) VALUES ($1, $2, $3, 0)")
+    sqlx::query("INSERT INTO categories (id, org_id, name) VALUES ($1, $2, $3)")
         .bind(id)
         .bind(org_id)
         .bind(name)
@@ -72,7 +72,7 @@ async fn seed_category(pool: &PgPool, org_id: Uuid, name: &str) -> Uuid {
 
 async fn seed_menu_item(pool: &PgPool, org_id: Uuid, category_id: Uuid, name: &str, price: i32) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price, display_order) VALUES ($1, $2, $3, $4, $5, 0)")
+    sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price) VALUES ($1, $2, $3, $4, $5)")
         .bind(id)
         .bind(org_id)
         .bind(category_id)
@@ -86,7 +86,7 @@ async fn seed_menu_item(pool: &PgPool, org_id: Uuid, category_id: Uuid, name: &s
 
 async fn seed_addon_item(pool: &PgPool, org_id: Uuid, name: &str, addon_type: &str, price: i32) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price, display_order) VALUES ($1, $2, $3, $4, $5, 0)")
+    sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price) VALUES ($1, $2, $3, $4, $5)")
         .bind(id)
         .bind(org_id)
         .bind(name)

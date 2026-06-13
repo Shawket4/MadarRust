@@ -36,7 +36,6 @@ pub struct Bundle {
     pub price: i32,
     pub status: BundleStatus,
     pub image_url: Option<String>,
-    pub display_order: i32,
     pub available_from_time: Option<NaiveTime>,
     pub available_until_time: Option<NaiveTime>,
     pub available_from_date: Option<NaiveDate>,
@@ -122,7 +121,6 @@ pub struct CreateBundleRequest {
     pub description_translations: Option<serde_json::Value>,
     pub price: i32,
     pub image_url: Option<String>,
-    pub display_order: Option<i32>,
     pub available_from_time: Option<NaiveTime>,
     pub available_until_time: Option<NaiveTime>,
     pub available_from_date: Option<NaiveDate>,
@@ -139,7 +137,6 @@ pub struct UpdateBundleRequest {
     pub description_translations: Option<serde_json::Value>,
     pub price: Option<i32>,
     pub image_url: Option<String>,
-    pub display_order: Option<i32>,
     /// `null`  → clear the field (no start time restriction)
     /// omitted → keep the existing value
     /// a value → set to that time
@@ -242,7 +239,7 @@ pub async fn compute_item_cost(pool: &PgPool, item_id: Uuid) -> Result<i32, sqlx
 pub async fn fetch_bundle_full(pool: &PgPool, id: Uuid) -> Result<Option<BundleWithComponents>, AppError> {
     let bundle = sqlx::query_as::<_, Bundle>(
         "SELECT id, org_id, name, name_translations, description, description_translations, \
-                price, status, image_url, display_order, available_from_time, available_until_time, \
+                price, status, image_url, available_from_time, available_until_time, \
                 available_from_date, available_until_date, created_at, updated_at, created_by \
          FROM bundles WHERE id = $1"
     )
@@ -434,7 +431,7 @@ pub async fn list_bundles(
               NOT EXISTS (SELECT 1 FROM bundle_branch_availability WHERE bundle_id = b.id) OR
               EXISTS (SELECT 1 FROM bundle_branch_availability WHERE bundle_id = b.id AND branch_id = $4)
           ))
-        ORDER BY b.display_order ASC, b.created_at DESC
+        ORDER BY b.created_at DESC
         LIMIT $5 OFFSET $6
         "#
     )
@@ -506,10 +503,10 @@ pub async fn create_bundle(
         r#"
         INSERT INTO bundles (
             org_id, name, name_translations, description, description_translations,
-            price, status, image_url, display_order, available_from_time,
+            price, status, image_url, available_from_time,
             available_until_time, available_from_date, available_until_date, created_by
         )
-        VALUES ($1, $2, $3, $4, $5, $6, 'draft'::public.bundle_status, $7, $8, $9, $10, $11, $12, $13)
+        VALUES ($1, $2, $3, $4, $5, $6, 'draft'::public.bundle_status, $7, $8, $9, $10, $11, $12)
         RETURNING *
         "#
     )
@@ -520,7 +517,6 @@ pub async fn create_bundle(
     .bind(description_translations)
     .bind(mut_body.price)
     .bind(&mut_body.image_url)
-    .bind(mut_body.display_order.unwrap_or(0))
     .bind(mut_body.available_from_time)
     .bind(mut_body.available_until_time)
     .bind(mut_body.available_from_date)
@@ -668,7 +664,6 @@ pub async fn update_bundle(
     let description = mut_body.description.as_ref().or(original.bundle.description.as_ref());
     let price = mut_body.price.unwrap_or(original.bundle.price);
     let image_url = mut_body.image_url.as_ref().or(original.bundle.image_url.as_ref());
-    let display_order = mut_body.display_order.unwrap_or(original.bundle.display_order);
     // Option<Option<T>> semantics:
     //   None        → field was absent from the request → keep existing value
     //   Some(None)  → field was explicitly `null`       → clear (no restriction)
@@ -763,10 +758,10 @@ pub async fn update_bundle(
         r#"
         UPDATE bundles
         SET name = $1, name_translations = $2, description = $3, description_translations = $4,
-            price = $5, image_url = $6, display_order = $7, available_from_time = $8,
-            available_until_time = $9, available_from_date = $10, available_until_date = $11,
+            price = $5, image_url = $6, available_from_time = $7,
+            available_until_time = $8, available_from_date = $9, available_until_date = $10,
             updated_at = NOW()
-        WHERE id = $12
+        WHERE id = $11
         "#
     )
     .bind(name)
@@ -775,7 +770,6 @@ pub async fn update_bundle(
     .bind(&description_translations)
     .bind(price)
     .bind(image_url)
-    .bind(display_order)
     .bind(available_from_time)
     .bind(available_until_time)
     .bind(available_from_date)
@@ -1041,7 +1035,7 @@ pub async fn available_bundles(
               b.available_until_time IS NULL OR
               ($3::timestamptz AT TIME ZONE $4)::time <= b.available_until_time
           )
-        ORDER BY b.display_order ASC, b.created_at DESC
+        ORDER BY b.created_at DESC
         "#
     )
     .bind(branch.0)

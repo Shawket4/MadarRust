@@ -2676,6 +2676,140 @@
         ]
       }
     },
+    "/costing/catalog": {
+      "get": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "list_menu_catalog",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "category_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Case-insensitive filter on the item name.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "1-based page number (default 1).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "description": "Page size (default 50, max 500).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Dashboard catalog: paginated menu items with embedded per-SKU costs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedMenuItems"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/costing/menu-items": {
       "get": {
         "tags": [
@@ -3367,6 +3501,159 @@
         ]
       }
     },
+    "/inventory/branches/{branch_id}/movements": {
+      "get": {
+        "tags": [
+          "inventory"
+        ],
+        "operationId": "list_movements",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "org_ingredient_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List stock movements",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BranchInventoryMovement"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/inventory/branches/{branch_id}/stock": {
       "get": {
         "tags": [
@@ -3894,6 +4181,211 @@
         ]
       }
     },
+    "/inventory/branches/{branch_id}/waste": {
+      "get": {
+        "tags": [
+          "inventory"
+        ],
+        "operationId": "list_waste",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List waste movements",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BranchInventoryMovement"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "inventory"
+        ],
+        "operationId": "create_waste",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateWasteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Waste recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BranchInventoryMovement"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/inventory/orgs/{org_id}/catalog": {
       "get": {
         "tags": [
@@ -4242,6 +4734,208 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/OrgIngredient"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/inventory/orgs/{org_id}/settings": {
+      "get": {
+        "tags": [
+          "inventory"
+        ],
+        "operationId": "get_inventory_settings",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Org inventory settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgInventorySettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "inventory"
+        ],
+        "operationId": "update_inventory_settings",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateInventorySettingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Org inventory settings updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgInventorySettings"
                 }
               }
             }
@@ -6392,6 +7086,7 @@
           {
             "name": "full",
             "in": "query",
+            "description": "When true, embed sizes + addon slots + optionals + recipes per item\n(the shape the POS/teller consumes). Always returns a plain, unpaginated\narray — the POS depends on this contract.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -6400,13 +7095,13 @@
         ],
         "responses": {
           "200": {
-            "description": "List menu items",
+            "description": "List menu items as a plain array; ?full=true embeds sizes/addons/optionals/recipes (POS contract)",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/MenuItemFull"
+                    "$ref": "#/components/schemas/MenuItem"
                   }
                 }
               }
@@ -10967,6 +11662,1050 @@
         }
       }
     },
+    "/purchasing/branches/{branch_id}/orders": {
+      "get": {
+        "tags": [
+          "purchasing"
+        ],
+        "operationId": "list_purchase_orders",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Filter by status: draft | ordered | partially_received | received | cancelled.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "expected_before",
+            "in": "query",
+            "description": "Only orders expected on or before this instant (for \"arriving by\" views).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List purchase orders",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PurchaseOrder"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "purchasing"
+        ],
+        "operationId": "create_purchase_order",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePurchaseOrderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Purchase order created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PurchaseOrderFull"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/purchasing/orders/{id}": {
+      "get": {
+        "tags": [
+          "purchasing"
+        ],
+        "operationId": "get_purchase_order",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Purchase order ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Purchase order detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PurchaseOrderFull"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/purchasing/orders/{id}/cancel": {
+      "post": {
+        "tags": [
+          "purchasing"
+        ],
+        "operationId": "cancel_purchase_order",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Purchase order ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Purchase order cancelled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PurchaseOrder"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/purchasing/orders/{id}/receive": {
+      "post": {
+        "tags": [
+          "purchasing"
+        ],
+        "operationId": "receive_purchase_order",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Purchase order ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReceivePurchaseOrderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Order received: stock + cost updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PurchaseOrderFull"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/purchasing/orgs/{org_id}/orders": {
+      "get": {
+        "tags": [
+          "purchasing"
+        ],
+        "operationId": "list_org_purchase_orders",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Filter by status: draft | ordered | partially_received | received | cancelled.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "expected_before",
+            "in": "query",
+            "description": "Only orders expected on or before this instant (for \"arriving by\" views).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List purchase orders across the org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PurchaseOrder"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/purchasing/orgs/{org_id}/suppliers": {
+      "get": {
+        "tags": [
+          "purchasing"
+        ],
+        "operationId": "list_suppliers",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List suppliers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Supplier"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "purchasing"
+        ],
+        "operationId": "create_supplier",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSupplierRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Supplier created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Supplier"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/purchasing/suppliers/{id}": {
+      "delete": {
+        "tags": [
+          "purchasing"
+        ],
+        "operationId": "delete_supplier",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Supplier ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Supplier deleted"
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "purchasing"
+        ],
+        "operationId": "update_supplier",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Supplier ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSupplierRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Supplier updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Supplier"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/recipes/addons/{addon_item_id}": {
       "get": {
         "tags": [
@@ -11829,6 +13568,230 @@
         ]
       }
     },
+    "/reports/branches/{branch_id}/consumption": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "operationId": "branch_consumption",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ingredient consumption over a date range",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ConsumptionRow"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/reports/branches/{branch_id}/inventory-valuation": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "operationId": "branch_inventory_valuation",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Branch inventory valuation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InventoryValuationReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/reports/branches/{branch_id}/items-combined": {
       "get": {
         "tags": [
@@ -12335,6 +14298,133 @@
         ]
       }
     },
+    "/reports/branches/{branch_id}/shrinkage": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "operationId": "branch_shrinkage",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stock-count shrinkage by reason",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ShrinkageRow"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/reports/branches/{branch_id}/stock": {
       "get": {
         "tags": [
@@ -12558,6 +14648,133 @@
         ]
       }
     },
+    "/reports/branches/{branch_id}/waste-report": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "operationId": "branch_waste_report",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Waste by reason and ingredient",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/WasteReportRow"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/reports/orgs/{org_id}/comparison": {
       "get": {
         "tags": [
@@ -12681,33 +14898,60 @@
         ]
       }
     },
-    "/reports/shifts/{shift_id}/deductions": {
+    "/reports/orgs/{org_id}/consumption": {
       "get": {
         "tags": [
           "reports"
         ],
-        "operationId": "shift_deductions",
+        "operationId": "org_consumption",
         "parameters": [
           {
-            "name": "shift_id",
+            "name": "org_id",
             "in": "path",
-            "description": "Shift ID",
+            "description": "Organization ID",
             "required": true,
             "schema": {
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "Shift deductions",
+            "description": "Ingredient consumption across the org",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/DeductionLogRow"
+                    "$ref": "#/components/schemas/ConsumptionRow"
                   }
                 }
               }
@@ -12781,12 +15025,463 @@
         ]
       }
     },
-    "/reports/shifts/{shift_id}/inventory": {
+    "/reports/orgs/{org_id}/inventory-valuation": {
       "get": {
         "tags": [
           "reports"
         ],
-        "operationId": "shift_inventory_discrepancies",
+        "operationId": "org_inventory_valuation",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Org inventory valuation (all branches)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InventoryValuationReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/reports/orgs/{org_id}/low-stock": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "operationId": "org_low_stock",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Below-reorder items across branches",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LowStockRow"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/reports/orgs/{org_id}/shrinkage": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "operationId": "org_shrinkage",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stock-count shrinkage by reason across the org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ShrinkageRow"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/reports/orgs/{org_id}/waste-report": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "operationId": "org_waste_report",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Waste by reason and ingredient across the org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/WasteReportRow"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/reports/shifts/{shift_id}/deductions": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "operationId": "shift_deductions",
         "parameters": [
           {
             "name": "shift_id",
@@ -12801,13 +15496,13 @@
         ],
         "responses": {
           "200": {
-            "description": "Shift inventory discrepancies",
+            "description": "Shift deductions",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/InventoryDiscrepancy"
+                    "$ref": "#/components/schemas/DeductionLogRow"
                   }
                 }
               }
@@ -13983,6 +16678,706 @@
         ]
       }
     },
+    "/stocktakes/branches/{branch_id}": {
+      "get": {
+        "tags": [
+          "stocktakes"
+        ],
+        "operationId": "list_stocktakes",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List stocktakes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Stocktake"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "stocktakes"
+        ],
+        "operationId": "create_stocktake",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateStocktakeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Stocktake started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StocktakeFull"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/stocktakes/{id}": {
+      "get": {
+        "tags": [
+          "stocktakes"
+        ],
+        "operationId": "get_stocktake",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Stocktake ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stocktake detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StocktakeFull"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/stocktakes/{id}/cancel": {
+      "post": {
+        "tags": [
+          "stocktakes"
+        ],
+        "operationId": "cancel_stocktake",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Stocktake ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stocktake cancelled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Stocktake"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/stocktakes/{id}/finalize": {
+      "post": {
+        "tags": [
+          "stocktakes"
+        ],
+        "operationId": "finalize_stocktake",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Stocktake ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stocktake finalized + stock reconciled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StocktakeFull"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/stocktakes/{id}/items": {
+      "put": {
+        "tags": [
+          "stocktakes"
+        ],
+        "operationId": "upsert_items",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Stocktake ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpsertItemsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Counts saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StocktakeFull"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/stocktakes/{id}/variance-report": {
+      "get": {
+        "tags": [
+          "stocktakes"
+        ],
+        "operationId": "variance_report",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Stocktake ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Variance report (valued)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VarianceReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/uploads/menu-items/{menu_item_id}": {
       "post": {
         "tags": [
@@ -15043,7 +18438,6 @@
           "addon_type",
           "default_price",
           "is_active",
-          "display_order",
           "created_at",
           "updated_at"
         ],
@@ -15056,10 +18450,6 @@
             "format": "date-time"
           },
           "default_price": {
-            "type": "integer",
-            "format": "int32"
-          },
-          "display_order": {
             "type": "integer",
             "format": "int32"
           },
@@ -15257,7 +18647,6 @@
           "label_translations",
           "is_required",
           "min_selections",
-          "display_order",
           "created_at"
         ],
         "properties": {
@@ -15267,10 +18656,6 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
-          },
-          "display_order": {
-            "type": "integer",
-            "format": "int32"
           },
           "id": {
             "type": "string",
@@ -15704,6 +19089,14 @@
           "ingredient_name": {
             "type": "string"
           },
+          "last_counted_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When this item was last reconciled by a finalized stock count; `null` =\nnever counted. Drives the \"count due\" signal on the inventory home."
+          },
           "org_ingredient_id": {
             "type": "string",
             "format": "uuid"
@@ -15718,6 +19111,116 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "BranchInventoryMovement": {
+        "type": "object",
+        "required": [
+          "id",
+          "branch_id",
+          "org_ingredient_id",
+          "ingredient_name",
+          "unit",
+          "movement_type",
+          "quantity",
+          "below_zero",
+          "created_at"
+        ],
+        "properties": {
+          "balance_after": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "below_zero": {
+            "type": "boolean"
+          },
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "branch_inventory_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "created_by_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ingredient_name": {
+            "type": "string"
+          },
+          "movement_type": {
+            "type": "string",
+            "description": "inventory_movement_type: sale | void_restock | adjustment_add |\nadjustment_remove | waste | transfer_out | transfer_in | purchase_in | stock_count"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "quantity": {
+            "type": "number",
+            "format": "double",
+            "description": "Signed delta applied to stock (consumption negative, replenishment positive)."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "source_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unit": {
+            "type": "string"
+          },
+          "unit_cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Piastres per unit at movement time; `null` ⟺ unknown."
           }
         }
       },
@@ -15903,7 +19406,6 @@
           "description_translations",
           "price",
           "status",
-          "display_order",
           "created_at",
           "updated_at"
         ],
@@ -15952,10 +19454,6 @@
             ]
           },
           "description_translations": {},
-          "display_order": {
-            "type": "integer",
-            "format": "int32"
-          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -16586,7 +20084,6 @@
           "org_id",
           "name",
           "name_translations",
-          "display_order",
           "is_active",
           "created_at",
           "updated_at"
@@ -16602,10 +20099,6 @@
               "null"
             ],
             "format": "date-time"
-          },
-          "display_order": {
-            "type": "integer",
-            "format": "int32"
           },
           "id": {
             "type": "string",
@@ -16740,8 +20233,7 @@
       "CloseShiftRequest": {
         "type": "object",
         "required": [
-          "closing_cash_declared",
-          "inventory_counts"
+          "closing_cash_declared"
         ],
         "properties": {
           "cash_note": {
@@ -16760,28 +20252,15 @@
           "closing_cash_declared": {
             "type": "integer",
             "format": "int32"
-          },
-          "inventory_counts": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/InventoryCountInput"
-            }
           }
         }
       },
       "CloseShiftResponse": {
         "type": "object",
         "required": [
-          "shift",
-          "inventory_counts"
+          "shift"
         ],
         "properties": {
-          "inventory_counts": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/InventoryCountRow"
-            }
-          },
           "shift": {
             "$ref": "#/components/schemas/Shift"
           }
@@ -16883,6 +20362,39 @@
           "high"
         ]
       },
+      "ConsumptionRow": {
+        "type": "object",
+        "required": [
+          "org_ingredient_id",
+          "ingredient_name",
+          "unit",
+          "consumed_qty"
+        ],
+        "properties": {
+          "consumed_qty": {
+            "type": "number",
+            "format": "double"
+          },
+          "consumed_value": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Consumption valued in piastres; `null` if any contributing cost unknown."
+          },
+          "ingredient_name": {
+            "type": "string"
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "unit": {
+            "type": "string"
+          }
+        }
+      },
       "CreateAddonItemRequest": {
         "type": "object",
         "required": [
@@ -16897,13 +20409,6 @@
           },
           "default_price": {
             "type": "integer",
-            "format": "int32"
-          },
-          "display_order": {
-            "type": [
-              "integer",
-              "null"
-            ],
             "format": "int32"
           },
           "name": {
@@ -16929,13 +20434,6 @@
               "string",
               "null"
             ]
-          },
-          "display_order": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32"
           },
           "is_required": {
             "type": [
@@ -17162,13 +20660,6 @@
             ]
           },
           "description_translations": {},
-          "display_order": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32"
-          },
           "image_url": {
             "type": [
               "string",
@@ -17216,6 +20707,14 @@
           "name": {
             "type": "string"
           },
+          "supplier_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Optional default supplier for reordering."
+          },
           "unit": {
             "type": "string"
           }
@@ -17228,13 +20727,6 @@
           "name"
         ],
         "properties": {
-          "display_order": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32"
-          },
           "image_url": {
             "type": [
               "string",
@@ -17322,13 +20814,6 @@
               "null"
             ]
           },
-          "display_order": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32"
-          },
           "image_url": {
             "type": [
               "string",
@@ -17356,13 +20841,6 @@
           "name"
         ],
         "properties": {
-          "display_order": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32"
-          },
           "ingredient_name": {
             "type": [
               "string",
@@ -17569,13 +21047,6 @@
           "color": {
             "type": "string"
           },
-          "display_order": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32"
-          },
           "icon": {
             "type": "string"
           },
@@ -17599,6 +21070,46 @@
           },
           "name": {
             "type": "string"
+          }
+        }
+      },
+      "CreatePurchaseOrderRequest": {
+        "type": "object",
+        "required": [
+          "lines"
+        ],
+        "properties": {
+          "expected_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/POLineInput"
+            }
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reference": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "supplier_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           }
         }
       },
@@ -17626,6 +21137,46 @@
           "run_id": {
             "type": "string",
             "format": "uuid"
+          }
+        }
+      },
+      "CreateStocktakeRequest": {
+        "type": "object",
+        "properties": {
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "CreateSupplierRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "contact_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "phone": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -17736,6 +21287,34 @@
         "properties": {
           "user": {
             "$ref": "#/components/schemas/UserPublic"
+          }
+        }
+      },
+      "CreateWasteRequest": {
+        "type": "object",
+        "required": [
+          "org_ingredient_id",
+          "quantity",
+          "reason"
+        ],
+        "properties": {
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "quantity": {
+            "type": "number",
+            "format": "double"
+          },
+          "reason": {
+            "type": "string",
+            "description": "expired | spoiled | damaged | overproduction | theft | other"
           }
         }
       },
@@ -18008,62 +21587,40 @@
           "cultural_rounding"
         ]
       },
-      "InventoryCountInput": {
+      "InventoryValuationReport": {
         "type": "object",
         "required": [
-          "branch_inventory_id",
-          "actual_stock"
+          "total_value",
+          "unknown_cost_count",
+          "items"
         ],
         "properties": {
-          "actual_stock": {
-            "type": "number",
-            "format": "double"
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ValuationRow"
+            }
           },
-          "branch_inventory_id": {
-            "type": "string",
-            "format": "uuid"
+          "total_value": {
+            "type": "integer",
+            "format": "int64"
           },
-          "note": {
-            "type": [
-              "string",
-              "null"
-            ]
+          "unknown_cost_count": {
+            "type": "integer",
+            "format": "int64"
           }
         }
       },
-      "InventoryCountRow": {
+      "ItemCountInput": {
         "type": "object",
         "required": [
-          "branch_inventory_id",
-          "ingredient_name",
-          "unit",
-          "expected_stock",
-          "actual_stock",
-          "discrepancy",
-          "is_suspicious"
+          "org_ingredient_id",
+          "counted_qty"
         ],
         "properties": {
-          "actual_stock": {
+          "counted_qty": {
             "type": "number",
             "format": "double"
-          },
-          "branch_inventory_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "discrepancy": {
-            "type": "number",
-            "format": "double"
-          },
-          "expected_stock": {
-            "type": "number",
-            "format": "double"
-          },
-          "ingredient_name": {
-            "type": "string"
-          },
-          "is_suspicious": {
-            "type": "boolean"
           },
           "note": {
             "type": [
@@ -18071,53 +21628,16 @@
               "null"
             ]
           },
-          "unit": {
-            "type": "string"
-          }
-        }
-      },
-      "InventoryDiscrepancy": {
-        "type": "object",
-        "required": [
-          "branch_inventory_id",
-          "ingredient_name",
-          "unit",
-          "expected_stock"
-        ],
-        "properties": {
-          "actual_count": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          },
-          "branch_inventory_id": {
+          "org_ingredient_id": {
             "type": "string",
             "format": "uuid"
           },
-          "discrepancy": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          },
-          "expected_stock": {
-            "type": "number",
-            "format": "double"
-          },
-          "ingredient_name": {
-            "type": "string"
-          },
-          "note": {
+          "variance_reason": {
             "type": [
               "string",
               "null"
-            ]
-          },
-          "unit": {
-            "type": "string"
+            ],
+            "description": "Why the count differs from expected. One of: theft | spoilage | breakage |\nmiscount | supplier_short | transfer_error | other. Required at finalize for\nrows whose difference exceeds the org's variance threshold."
           }
         }
       },
@@ -18175,14 +21695,9 @@
           "menu_item_id",
           "label",
           "price_override",
-          "display_order",
           "is_active"
         ],
         "properties": {
-          "display_order": {
-            "type": "integer",
-            "format": "int32"
-          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -18269,6 +21784,65 @@
           },
           "user": {
             "$ref": "#/components/schemas/UserPublic"
+          }
+        }
+      },
+      "LowStockRow": {
+        "type": "object",
+        "required": [
+          "branch_id",
+          "branch_name",
+          "org_ingredient_id",
+          "ingredient_name",
+          "unit",
+          "current_stock",
+          "reorder_threshold",
+          "deficit"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "branch_name": {
+            "type": "string"
+          },
+          "current_stock": {
+            "type": "number",
+            "format": "double"
+          },
+          "deficit": {
+            "type": "number",
+            "format": "double",
+            "description": "reorder_threshold − current_stock: how much to order to reach par."
+          },
+          "ingredient_name": {
+            "type": "string"
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reorder_threshold": {
+            "type": "number",
+            "format": "double"
+          },
+          "supplier_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Default supplier for this ingredient (for one-click \"create PO\"); may be null."
+          },
+          "supplier_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unit": {
+            "type": "string"
           }
         }
       },
@@ -18450,7 +22024,6 @@
           "description_translations",
           "base_price",
           "is_active",
-          "display_order",
           "created_at",
           "updated_at"
         ],
@@ -18491,10 +22064,6 @@
           },
           "description_translations": {
             "type": "object"
-          },
-          "display_order": {
-            "type": "integer",
-            "format": "int32"
           },
           "id": {
             "type": "string",
@@ -18601,6 +22170,28 @@
             "type": "string"
           }
         }
+      },
+      "MenuItemWithCosts": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/MenuItem"
+          },
+          {
+            "type": "object",
+            "required": [
+              "sku_costs"
+            ],
+            "properties": {
+              "sku_costs": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/SkuCost"
+                }
+              }
+            }
+          }
+        ],
+        "description": "A menu item with its per-SKU recipe-cost rollup embedded, so the catalog\nlist needs no separate `/costing/menu-items` round trip. `sku_costs` is one\nrow per sellable size (or a single `one_size` row); empty when the item is\ninactive or has no recipe."
       },
       "ModeSummary": {
         "type": "object",
@@ -18746,7 +22337,6 @@
           "name",
           "name_translations",
           "price",
-          "display_order",
           "is_active",
           "created_at",
           "updated_at"
@@ -18755,10 +22345,6 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
-          },
-          "display_order": {
-            "type": "integer",
-            "format": "int32"
           },
           "id": {
             "type": "string",
@@ -18942,6 +22528,12 @@
           "total_amount": {
             "type": "integer",
             "format": "int32"
+          },
+          "void_note": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "void_reason": {
             "type": [
@@ -19146,6 +22738,13 @@
                 "items": {
                   "$ref": "#/components/schemas/OrderItemFull"
                 }
+              },
+              "warnings": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Non-fatal warnings raised while placing the order — currently used to\nflag ingredients that were oversold (stock driven below zero). Empty\nfor reads/refunds."
               }
             }
           }
@@ -19659,12 +23258,39 @@
             "type": "string",
             "format": "uuid"
           },
+          "supplier_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Default supplier for reordering this ingredient; `null` = none set."
+          },
+          "supplier_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "unit": {
             "type": "string"
           },
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "OrgInventorySettings": {
+        "type": "object",
+        "required": [
+          "stocktake_variance_threshold_pct"
+        ],
+        "properties": {
+          "stocktake_variance_threshold_pct": {
+            "type": "number",
+            "format": "double",
+            "description": "Stock-count variance tolerance (percent). A counted row whose |difference|\nis at least this percent of expected is flagged and needs a reason."
           }
         }
       },
@@ -19679,7 +23305,6 @@
           "icon",
           "is_cash",
           "is_active",
-          "display_order",
           "created_at",
           "updated_at"
         ],
@@ -19690,10 +23315,6 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
-          },
-          "display_order": {
-            "type": "integer",
-            "format": "int32"
           },
           "icon": {
             "type": "string"
@@ -19722,6 +23343,41 @@
           }
         }
       },
+      "POLineInput": {
+        "type": "object",
+        "required": [
+          "org_ingredient_id",
+          "purchase_unit",
+          "quantity_ordered",
+          "unit_cost"
+        ],
+        "properties": {
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "purchase_unit": {
+            "type": "string"
+          },
+          "quantity_ordered": {
+            "type": "number",
+            "format": "double"
+          },
+          "unit_cost": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Piastres per purchase unit."
+          },
+          "units_per_purchase_unit": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Stock units per purchase unit. Ignored when `purchase_unit` is a known\ninventory unit (the factor is derived from the ingredient's base unit)."
+          }
+        }
+      },
       "PaginatedBundles": {
         "type": "object",
         "required": [
@@ -19736,6 +23392,40 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/BundleWithComponents"
+            }
+          },
+          "page": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "per_page": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total_pages": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "PaginatedMenuItems": {
+        "type": "object",
+        "required": [
+          "data",
+          "total",
+          "page",
+          "per_page",
+          "total_pages"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MenuItemWithCosts"
             }
           },
           "page": {
@@ -20435,14 +24125,9 @@
           "id",
           "name",
           "name_translations",
-          "display_order",
           "items"
         ],
         "properties": {
-          "display_order": {
-            "type": "integer",
-            "format": "int32"
-          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -20496,7 +24181,6 @@
           "name_translations",
           "description_translations",
           "base_price",
-          "display_order",
           "sizes",
           "addon_slots"
         ],
@@ -20519,10 +24203,6 @@
           },
           "description_translations": {
             "type": "object"
-          },
-          "display_order": {
-            "type": "integer",
-            "format": "int32"
           },
           "id": {
             "type": "string",
@@ -20613,6 +24293,201 @@
           "name": {
             "type": "string",
             "example": "The Rue"
+          }
+        }
+      },
+      "PurchaseOrder": {
+        "type": "object",
+        "required": [
+          "id",
+          "org_id",
+          "branch_id",
+          "status",
+          "created_by",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expected_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "received_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "received_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "reference": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "supplier_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "supplier_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "PurchaseOrderFull": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/PurchaseOrder"
+          },
+          {
+            "type": "object",
+            "required": [
+              "lines"
+            ],
+            "properties": {
+              "lines": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/PurchaseOrderLine"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "PurchaseOrderLine": {
+        "type": "object",
+        "required": [
+          "id",
+          "purchase_order_id",
+          "org_ingredient_id",
+          "ingredient_name",
+          "unit",
+          "purchase_unit",
+          "units_per_purchase_unit",
+          "quantity_ordered",
+          "quantity_received",
+          "unit_cost"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ingredient_name": {
+            "type": "string"
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "purchase_order_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "purchase_unit": {
+            "type": "string"
+          },
+          "quantity_ordered": {
+            "type": "number",
+            "format": "double"
+          },
+          "quantity_received": {
+            "type": "number",
+            "format": "double"
+          },
+          "unit": {
+            "type": "string",
+            "description": "Ingredient's base stock unit."
+          },
+          "unit_cost": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Piastres per PURCHASE unit."
+          },
+          "units_per_purchase_unit": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "ReceiveLineInput": {
+        "type": "object",
+        "required": [
+          "line_id",
+          "quantity_received"
+        ],
+        "properties": {
+          "line_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "quantity_received": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "ReceivePurchaseOrderRequest": {
+        "type": "object",
+        "required": [
+          "lines"
+        ],
+        "properties": {
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReceiveLineInput"
+            }
           }
         }
       },
@@ -21152,6 +25027,45 @@
           }
         }
       },
+      "ShrinkageRow": {
+        "type": "object",
+        "required": [
+          "reason",
+          "org_ingredient_id",
+          "ingredient_name",
+          "unit",
+          "shrinkage_qty"
+        ],
+        "properties": {
+          "ingredient_name": {
+            "type": "string"
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reason": {
+            "type": "string",
+            "description": "The variance reason captured at finalize, or `unexplained` when none."
+          },
+          "shrinkage_qty": {
+            "type": "number",
+            "format": "double",
+            "description": "Quantity lost (positive number) from negative stock-count differences."
+          },
+          "shrinkage_value": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Valued shrinkage in piastres; `null` when any contributing cost unknown."
+          },
+          "unit": {
+            "type": "string"
+          }
+        }
+      },
       "SkuCost": {
         "type": "object",
         "description": "Computed cost for one sellable SKU (menu item × size).",
@@ -21257,6 +25171,189 @@
           }
         }
       },
+      "Stocktake": {
+        "type": "object",
+        "required": [
+          "id",
+          "org_id",
+          "branch_id",
+          "status",
+          "started_by",
+          "started_at",
+          "created_at"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "finalized_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "finalized_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "started_by": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "started_by_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "StocktakeFull": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Stocktake"
+          },
+          {
+            "type": "object",
+            "required": [
+              "items",
+              "variance_threshold_pct"
+            ],
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/StocktakeItem"
+                }
+              },
+              "variance_threshold_pct": {
+                "type": "number",
+                "format": "double",
+                "description": "Org tolerance: a counted row whose |difference| is >= this percent of the\nexpected quantity (or that appears-from / vanishes-to zero) is flagged and\nrequires a `variance_reason` before the count can be finalized."
+              }
+            }
+          }
+        ]
+      },
+      "StocktakeItem": {
+        "type": "object",
+        "required": [
+          "id",
+          "stocktake_id",
+          "org_ingredient_id",
+          "ingredient_name",
+          "unit",
+          "expected_qty",
+          "created_at"
+        ],
+        "properties": {
+          "branch_inventory_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "counted_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "counted_qty": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expected_qty": {
+            "type": "number",
+            "format": "double"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ingredient_name": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "stocktake_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "unit": {
+            "type": "string"
+          },
+          "unit_cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Piastres per unit snapshot; `null` ⟺ unknown."
+          },
+          "variance": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "variance_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "theft | spoilage | breakage | miscount | supplier_short | transfer_error | other."
+          }
+        }
+      },
       "SuggestionKind": {
         "type": "string",
         "enum": [
@@ -21264,6 +25361,59 @@
           "bundle",
           "removal"
         ]
+      },
+      "Supplier": {
+        "type": "object",
+        "required": [
+          "id",
+          "org_id",
+          "name",
+          "is_active",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "contact_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "is_active": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "phone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
       },
       "TellerStats": {
         "type": "object",
@@ -21382,13 +25532,6 @@
             ],
             "format": "int32"
           },
-          "display_order": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32"
-          },
           "is_active": {
             "type": [
               "boolean",
@@ -21412,13 +25555,6 @@
       "UpdateAddonSlotRequest": {
         "type": "object",
         "properties": {
-          "display_order": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32"
-          },
           "is_required": {
             "type": [
               "boolean",
@@ -21589,13 +25725,6 @@
             ]
           },
           "description_translations": {},
-          "display_order": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32"
-          },
           "image_url": {
             "type": [
               "string",
@@ -21652,6 +25781,14 @@
               "null"
             ]
           },
+          "supplier_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Set/replace the default supplier. (Omitted = unchanged; clearing to\nnone is not supported via this field.)"
+          },
           "unit": {
             "type": [
               "string",
@@ -21663,13 +25800,6 @@
       "UpdateCategoryRequest": {
         "type": "object",
         "properties": {
-          "display_order": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32"
-          },
           "image_url": {
             "type": [
               "string",
@@ -21732,6 +25862,18 @@
           }
         }
       },
+      "UpdateInventorySettingsRequest": {
+        "type": "object",
+        "required": [
+          "stocktake_variance_threshold_pct"
+        ],
+        "properties": {
+          "stocktake_variance_threshold_pct": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
       "UpdateMenuItemRequest": {
         "type": "object",
         "properties": {
@@ -21760,13 +25902,6 @@
               "object",
               "null"
             ]
-          },
-          "display_order": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32"
           },
           "image_url": {
             "type": [
@@ -21797,13 +25932,6 @@
       "UpdateOptionalFieldRequest": {
         "type": "object",
         "properties": {
-          "display_order": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32"
-          },
           "ingredient_name": {
             "type": [
               "string",
@@ -21922,13 +26050,6 @@
               "null"
             ]
           },
-          "display_order": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32"
-          },
           "icon": {
             "type": [
               "string",
@@ -21983,6 +26104,41 @@
               "null"
             ],
             "format": "double"
+          }
+        }
+      },
+      "UpdateSupplierRequest": {
+        "type": "object",
+        "properties": {
+          "contact_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_active": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "phone": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -22203,6 +26359,20 @@
           }
         }
       },
+      "UpsertItemsRequest": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ItemCountInput"
+            }
+          }
+        }
+      },
       "UpsertPermissionRequest": {
         "type": "object",
         "required": [
@@ -22257,13 +26427,6 @@
           "price_override"
         ],
         "properties": {
-          "display_order": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32"
-          },
           "label": {
             "type": "string"
           },
@@ -22377,12 +26540,175 @@
           "teller"
         ]
       },
+      "ValuationRow": {
+        "type": "object",
+        "required": [
+          "org_ingredient_id",
+          "ingredient_name",
+          "unit",
+          "current_stock"
+        ],
+        "properties": {
+          "cost_per_unit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Piastres per unit; `null` ⟺ unknown."
+          },
+          "current_stock": {
+            "type": "number",
+            "format": "double"
+          },
+          "ingredient_name": {
+            "type": "string"
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "unit": {
+            "type": "string"
+          },
+          "value": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "current_stock × cost_per_unit in piastres; `null` when cost unknown."
+          }
+        }
+      },
+      "VarianceReport": {
+        "type": "object",
+        "required": [
+          "stocktake_id",
+          "rows",
+          "total_shrinkage_value",
+          "total_overage_value",
+          "net_variance_value",
+          "unknown_cost_count",
+          "variance_threshold_pct"
+        ],
+        "properties": {
+          "net_variance_value": {
+            "type": "integer",
+            "format": "int64",
+            "description": "overage − shrinkage (net effect on inventory value)."
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VarianceRow"
+            }
+          },
+          "stocktake_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "total_overage_value": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Piastres of overage (positive variances)."
+          },
+          "total_shrinkage_value": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Piastres lost to shrinkage (negative variances), as a positive number."
+          },
+          "unknown_cost_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Count of counted rows whose cost was unknown (excluded from totals)."
+          },
+          "variance_threshold_pct": {
+            "type": "number",
+            "format": "double",
+            "description": "Org tolerance used to compute `is_flagged`."
+          }
+        }
+      },
+      "VarianceRow": {
+        "type": "object",
+        "required": [
+          "org_ingredient_id",
+          "ingredient_name",
+          "unit",
+          "expected_qty",
+          "is_flagged"
+        ],
+        "properties": {
+          "counted_qty": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "expected_qty": {
+            "type": "number",
+            "format": "double"
+          },
+          "ingredient_name": {
+            "type": "string"
+          },
+          "is_flagged": {
+            "type": "boolean",
+            "description": "True when |difference| exceeds the org threshold (or appears/vanishes from zero)."
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "unit": {
+            "type": "string"
+          },
+          "unit_cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "variance": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "variance_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "theft | spoilage | breakage | miscount | supplier_short | transfer_error | other."
+          },
+          "variance_value": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "variance × unit_cost in piastres; `null` when cost unknown."
+          }
+        }
+      },
       "VoidOrderRequest": {
         "type": "object",
         "required": [
           "reason"
         ],
         "properties": {
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Free-text explanation. Required when `reason` is \"other\"."
+          },
           "reason": {
             "type": "string"
           },
@@ -22398,6 +26724,42 @@
               "null"
             ],
             "format": "date-time"
+          }
+        }
+      },
+      "WasteReportRow": {
+        "type": "object",
+        "required": [
+          "reason",
+          "org_ingredient_id",
+          "ingredient_name",
+          "unit",
+          "waste_qty"
+        ],
+        "properties": {
+          "ingredient_name": {
+            "type": "string"
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "unit": {
+            "type": "string"
+          },
+          "waste_qty": {
+            "type": "number",
+            "format": "double"
+          },
+          "waste_value": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
           }
         }
       }
@@ -22451,6 +26813,14 @@
     {
       "name": "shifts",
       "description": "Shift open/close, cash reconciliation, printable reports."
+    },
+    {
+      "name": "stocktakes",
+      "description": "Standalone physical-count sessions that reconcile branch stock and post variance movements."
+    },
+    {
+      "name": "purchasing",
+      "description": "Suppliers, purchase orders, and receiving (weighted-average cost + purchase_in movements)."
     },
     {
       "name": "discounts",

@@ -216,14 +216,14 @@ pub async fn create_org(
 
     sqlx::query(
         r#"
-        INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash, display_order)
-        VALUES 
-            ($1, 'cash', '{"en": "Cash", "ar": "نقدي"}', '#10B981', 'money', true, 1),
-            ($1, 'card', '{"en": "Card", "ar": "بطاقة"}', '#3B82F6', 'credit_card', false, 2),
-            ($1, 'digital_wallet', '{"en": "Digital Wallet", "ar": "محفظة رقمية"}', '#8B5CF6', 'wallet', false, 3),
-            ($1, 'mixed', '{"en": "Mixed", "ar": "مختلط"}', '#F59E0B', 'pie_chart', false, 4),
-            ($1, 'talabat_online', '{"en": "Talabat Online", "ar": "طلبات أونلاين"}', '#EF4444', 'delivery', false, 5),
-            ($1, 'talabat_cash', '{"en": "Talabat Cash", "ar": "طلبات كاش"}', '#F97316', 'delivery', true, 6)
+        INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash)
+        VALUES
+            ($1, 'cash', '{"en": "Cash", "ar": "نقدي"}', '#10B981', 'money', true),
+            ($1, 'card', '{"en": "Card", "ar": "بطاقة"}', '#3B82F6', 'credit_card', false),
+            ($1, 'digital_wallet', '{"en": "Digital Wallet", "ar": "محفظة رقمية"}', '#8B5CF6', 'wallet', false),
+            ($1, 'mixed', '{"en": "Mixed", "ar": "مختلط"}', '#F59E0B', 'pie_chart', false),
+            ($1, 'talabat_online', '{"en": "Talabat Online", "ar": "طلبات أونلاين"}', '#EF4444', 'delivery', false),
+            ($1, 'talabat_cash', '{"en": "Talabat Cash", "ar": "طلبات كاش"}', '#F97316', 'delivery', true)
         "#
     )
     .bind(org.id)

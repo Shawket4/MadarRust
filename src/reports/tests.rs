@@ -10,9 +10,10 @@ use crate::auth::jwt::JwtSecret;
 use crate::models::UserRole;
 use crate::reports::routes;
 use crate::reports::handlers::{
-    ShiftSummary, InventoryDiscrepancy, DeductionLogRow, CategorySales, ItemSales, BranchSalesReport, 
+    ShiftSummary, DeductionLogRow, CategorySales, ItemSales, BranchSalesReport,
     StockRow, BranchStockReport, TimeseriesPoint, TellerStats, AddonSalesRow, BranchComparison, OrgComparisonReport,
-    BundleSalesRow, CombinedItemSalesRow
+    BundleSalesRow, CombinedItemSalesRow,
+    InventoryValuationReport, LowStockRow, ConsumptionRow, WasteReportRow, ShrinkageRow,
 };
 
 fn get_secret() -> JwtSecret {
@@ -42,9 +43,9 @@ async fn seed_org(pool: &PgPool) -> Uuid {
         .unwrap();
 
     sqlx::query(
-        "INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash, is_active, display_order) VALUES 
-        ($1, 'cash', '{}', 'emerald', 'payments_outlined', true, true, 1),
-        ($1, 'card', '{}', 'blue', 'credit_card_rounded', false, true, 2)"
+        "INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash, is_active) VALUES
+        ($1, 'cash', '{}', 'emerald', 'payments_outlined', true, true),
+        ($1, 'card', '{}', 'blue', 'credit_card_rounded', false, true)"
     )
     .bind(org_id)
     .execute(pool)
@@ -115,7 +116,7 @@ async fn assign_user_to_branch(pool: &PgPool, user_id: Uuid, branch_id: Uuid) {
 
 async fn seed_category(pool: &PgPool, org_id: Uuid) -> Uuid {
     let cat_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO categories (id, org_id, name, display_order) VALUES ($1, $2, 'Cat', 0)")
+    sqlx::query("INSERT INTO categories (id, org_id, name) VALUES ($1, $2, 'Cat')")
         .bind(cat_id)
         .bind(org_id)
         .execute(pool)
@@ -289,42 +290,6 @@ async fn test_branch_stock(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn test_shift_inventory_discrepancies(pool: PgPool) {
-    let app = test::init_service(
-        App::new()
-            .app_data(web::Data::new(pool.clone()))
-            .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
-
-    let org_id = seed_org(&pool).await;
-    let branch_id = seed_branch(&pool, org_id).await;
-    let user_id = seed_user(&pool, org_id, "org_admin").await;
-    let token = generate_org_admin_token(user_id, org_id);
-    let shift_id = seed_shift(&pool, branch_id, user_id).await;
-
-    grant_permission(&pool, "org_admin", "shift_counts", "read").await;
-
-    let ing_id = seed_ingredient(&pool, org_id, "Milk", "ml").await;
-    let branch_inv_id = seed_branch_inventory(&pool, branch_id, ing_id, 50.0).await;
-
-    sqlx::query("INSERT INTO shift_inventory_counts (shift_id, branch_inventory_id, expected_stock, actual_stock, counted_by) VALUES ($1, $2, 50.0, 48.0, $3)")
-        .bind(shift_id).bind(branch_inv_id).bind(user_id).execute(&pool).await.unwrap();
-
-    let req = test::TestRequest::get()
-        .uri(&format!("/reports/shifts/{}/inventory", shift_id))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert!(resp.status().is_success());
-
-    let discrepancies: Vec<InventoryDiscrepancy> = test::read_body_json(resp).await;
-    assert_eq!(discrepancies.len(), 1);
-    assert_eq!(discrepancies[0].expected_stock, 50.0);
-    assert_eq!(discrepancies[0].actual_count, Some(48.0));
-}
-
-#[sqlx::test]
 async fn test_branch_sales_timeseries(pool: PgPool) {
     let app = test::init_service(
         App::new()
@@ -467,7 +432,7 @@ async fn test_branch_addon_sales(pool: PgPool) {
     let order_id = seed_order(&pool, branch_id, user_id, shift_id).await;
 
     let addon_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price, display_order) VALUES ($1, $2, 'Extra Cheese', 'ingredient', 50, 0)")
+    sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price) VALUES ($1, $2, 'Extra Cheese', 'ingredient', 50)")
         .bind(addon_id).bind(org_id).execute(&pool).await.unwrap();
 
     let category_id = Uuid::new_v4();
@@ -969,4 +934,190 @@ async fn test_menu_engineering_bases_match_after_backfill(pool: PgPool) {
         .find(|r| r["menu_item_id"] == serde_json::json!(item_a.to_string()))
         .unwrap();
     assert_eq!(a_row["total_cost"], 600); // 200/unit × qty 3
+}
+
+// ──────────────────────────────────────────────────────────────
+// Inventory reports (valuation / low-stock / consumption / waste / shrinkage)
+// ──────────────────────────────────────────────────────────────
+
+macro_rules! init_app {
+    ($pool:expr) => {
+        test::init_service(
+            App::new()
+                .app_data(web::Data::new($pool.clone()))
+                .app_data(web::Data::new(get_secret()))
+                .configure(routes::configure),
+        ).await
+    };
+}
+
+async fn seed_ingredient_nullcost(pool: &PgPool, org_id: Uuid, name: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,$3,'g'::inventory_unit,NULL,'general')")
+        .bind(id).bind(org_id).bind(name).execute(pool).await.unwrap();
+    id
+}
+
+async fn seed_stock_lvl(pool: &PgPool, branch_id: Uuid, ing: Uuid, stock: f64, reorder: f64) {
+    sqlx::query("INSERT INTO branch_inventory (branch_id, org_ingredient_id, current_stock, reorder_threshold) VALUES ($1,$2,$3,$4)")
+        .bind(branch_id).bind(ing).bind(stock).bind(reorder).execute(pool).await.unwrap();
+}
+
+async fn ins_movement(pool: &PgPool, branch_id: Uuid, ing: Uuid, mtype: &str, qty: f64, unit_cost: Option<i64>, reason: Option<&str>) {
+    sqlx::query("INSERT INTO inventory_movements (branch_id, org_ingredient_id, type, quantity, unit_cost, reason) VALUES ($1,$2,$3::inventory_movement_type,$4,$5,$6)")
+        .bind(branch_id).bind(ing).bind(mtype).bind(qty).bind(unit_cost).bind(reason).execute(pool).await.unwrap();
+}
+
+#[sqlx::test]
+async fn test_inventory_valuation_branch_and_org(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "inventory", "read").await;
+    let known = seed_ingredient(&pool, org_id, "Known", "g").await;     // cost 100
+    let unknown = seed_ingredient_nullcost(&pool, org_id, "Unknown").await;
+    seed_branch_inventory(&pool, branch_id, known, 10.0).await;          // 10 × 100 = 1000
+    seed_branch_inventory(&pool, branch_id, unknown, 5.0).await;         // unknown → excluded
+    let token = generate_org_admin_token(user_id, org_id);
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    for url in [format!("/reports/branches/{branch_id}/inventory-valuation"),
+                format!("/reports/orgs/{org_id}/inventory-valuation")] {
+        let resp = test::call_service(&app, test::TestRequest::get().uri(&url).insert_header(auth.clone()).to_request()).await;
+        assert_eq!(resp.status(), 200);
+        let report: InventoryValuationReport = test::read_body_json(resp).await;
+        assert_eq!(report.total_value, 1000);
+        assert_eq!(report.unknown_cost_count, 1);
+        assert_eq!(report.items.len(), 2);
+    }
+}
+
+#[sqlx::test]
+async fn test_org_low_stock_guard_and_supplier(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "inventory", "read").await;
+    // Low item with a supplier.
+    let sup = Uuid::new_v4();
+    sqlx::query("INSERT INTO suppliers (id, org_id, name) VALUES ($1,$2,'Beans Co')").bind(sup).bind(org_id).execute(&pool).await.unwrap();
+    let low = seed_ingredient(&pool, org_id, "Low", "g").await;
+    sqlx::query("UPDATE org_ingredients SET supplier_id=$1 WHERE id=$2").bind(sup).bind(low).execute(&pool).await.unwrap();
+    seed_stock_lvl(&pool, branch_id, low, 5.0, 10.0).await;   // below → flagged
+    // Zero/zero item must be excluded (G3).
+    let zero = seed_ingredient(&pool, org_id, "Zero", "g").await;
+    seed_stock_lvl(&pool, branch_id, zero, 0.0, 0.0).await;
+    let token = generate_org_admin_token(user_id, org_id);
+
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/reports/orgs/{org_id}/low-stock"))
+        .insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;
+    assert_eq!(resp.status(), 200);
+    let rows: Vec<LowStockRow> = test::read_body_json(resp).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].org_ingredient_id, low);
+    assert_eq!(rows[0].deficit, 5.0);
+    assert_eq!(rows[0].supplier_name.as_deref(), Some("Beans Co"));
+}
+
+#[sqlx::test]
+async fn test_consumption_branch_and_org(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "inventory", "read").await;
+    let ing = seed_ingredient(&pool, org_id, "Beans", "g").await;
+    // sale 10 + waste 5 consumed, at 100 piastres/unit.
+    ins_movement(&pool, branch_id, ing, "sale", -10.0, Some(100), None).await;
+    ins_movement(&pool, branch_id, ing, "waste", -5.0, Some(100), Some("spoiled")).await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    for url in [format!("/reports/branches/{branch_id}/consumption"),
+                format!("/reports/orgs/{org_id}/consumption")] {
+        let resp = test::call_service(&app, test::TestRequest::get().uri(&url).insert_header(auth.clone()).to_request()).await;
+        assert_eq!(resp.status(), 200);
+        let rows: Vec<ConsumptionRow> = test::read_body_json(resp).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].consumed_qty, 15.0);
+        assert_eq!(rows[0].consumed_value, Some(1500));
+    }
+}
+
+#[sqlx::test]
+async fn test_waste_report_branch_and_org(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "inventory", "read").await;
+    let ing = seed_ingredient(&pool, org_id, "Cream", "ml").await;
+    ins_movement(&pool, branch_id, ing, "waste", -5.0, Some(100), Some("spoiled")).await;
+    ins_movement(&pool, branch_id, ing, "waste", -3.0, Some(100), Some("expired")).await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    for url in [format!("/reports/branches/{branch_id}/waste-report"),
+                format!("/reports/orgs/{org_id}/waste-report")] {
+        let resp = test::call_service(&app, test::TestRequest::get().uri(&url).insert_header(auth.clone()).to_request()).await;
+        assert_eq!(resp.status(), 200);
+        let rows: Vec<WasteReportRow> = test::read_body_json(resp).await;
+        assert_eq!(rows.len(), 2);
+        let spoiled = rows.iter().find(|r| r.reason == "spoiled").unwrap();
+        assert_eq!(spoiled.waste_qty, 5.0);
+        assert_eq!(spoiled.waste_value, Some(500));
+    }
+}
+
+#[sqlx::test]
+async fn test_shrinkage_branch_and_org(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "inventory", "read").await;
+    let ing = seed_ingredient(&pool, org_id, "Beans", "g").await;
+    // stock_count negatives = shrinkage; a reason + an unexplained; one positive (overage, ignored).
+    ins_movement(&pool, branch_id, ing, "stock_count", -8.0, Some(100), Some("theft")).await;
+    ins_movement(&pool, branch_id, ing, "stock_count", -4.0, Some(100), None).await;
+    ins_movement(&pool, branch_id, ing, "stock_count", 2.0, Some(100), None).await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    for url in [format!("/reports/branches/{branch_id}/shrinkage"),
+                format!("/reports/orgs/{org_id}/shrinkage")] {
+        let resp = test::call_service(&app, test::TestRequest::get().uri(&url).insert_header(auth.clone()).to_request()).await;
+        assert_eq!(resp.status(), 200);
+        let rows: Vec<ShrinkageRow> = test::read_body_json(resp).await;
+        // Two reason buckets: theft (8) + unexplained (4); the +2 overage is excluded.
+        assert_eq!(rows.len(), 2);
+        let theft = rows.iter().find(|r| r.reason == "theft").unwrap();
+        assert_eq!(theft.shrinkage_qty, 8.0);
+        assert_eq!(theft.shrinkage_value, Some(800));
+        assert!(rows.iter().any(|r| r.reason == "unexplained"));
+    }
+}
+
+#[sqlx::test]
+async fn test_inventory_reports_require_inventory_read(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    // Has reports/read but NOT inventory/read.
+    grant_permission(&pool, "org_admin", "reports", "read").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let auth = ("Authorization", format!("Bearer {token}"));
+    let url = format!("/reports/branches/{branch_id}/inventory-valuation");
+
+    let resp = test::call_service(&app, test::TestRequest::get().uri(&url).insert_header(auth.clone()).to_request()).await;
+    assert_eq!(resp.status(), 403, "inventory reports must require inventory/read");
+
+    // Granting inventory/read unlocks it.
+    grant_permission(&pool, "org_admin", "inventory", "read").await;
+    let resp = test::call_service(&app, test::TestRequest::get().uri(&url).insert_header(auth.clone()).to_request()).await;
+    assert_eq!(resp.status(), 200);
 }
