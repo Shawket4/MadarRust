@@ -1033,3 +1033,39 @@ async fn test_summary_excludes_voided_discounts(pool: PgPool) {
     assert_eq!(list.summary.voided, 1);
     assert_eq!(list.summary.discounts, 100, "voided order's discount must be excluded from the summary");
 }
+
+/// V19: the bundle-COMPONENT swap path (resolve_menu_item_configuration) must
+/// convert the recipe quantity into the replacement ingredient's base unit just
+/// like the direct-item path — otherwise a g↔kg component swap mis-deducts 1000×.
+#[sqlx::test]
+async fn test_bundle_component_swap_converts_units(pool: PgPool) {
+    let org_id = seed_org(&pool).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    // Milk in GRAMS, almond milk in KILOGRAMS — both category 'milk'.
+    let milk = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,'Milk','g'::inventory_unit,5,'milk')")
+        .bind(milk).bind(org_id).execute(&pool).await.unwrap();
+    let almond = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,'Almond Milk','kg'::inventory_unit,8000,'milk')")
+        .bind(almond).bind(org_id).execute(&pool).await.unwrap();
+
+    add_menu_item_recipe(&pool, menu_item_id, milk, 250.0).await; // 250 g milk
+    let almond_addon = seed_addon_item(&pool, org_id, "Almond Milk", "milk_type", 0).await;
+    sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1,$2,1,'Almond Milk','kg')")
+        .bind(almond_addon).bind(almond).execute(&pool).await.unwrap();
+
+    let config = crate::orders::component_resolve::resolve_menu_item_configuration(
+        &pool, menu_item_id, None, 1,
+        &[crate::orders::component_resolve::AddonInput { addon_item_id: almond_addon, quantity: 1 }],
+        &[],
+    ).await.unwrap();
+
+    let swap = config.deductions.iter().find(|d| d.org_ingredient_id == Some(almond))
+        .expect("almond swap deduction must be present");
+    assert_eq!(swap.unit, "kg");
+    assert!((swap.quantity - 0.25).abs() < 1e-9, "250 g must convert to 0.25 kg, got {}", swap.quantity);
+    // Milk was swapped out — no milk deduction remains.
+    assert!(config.deductions.iter().all(|d| d.org_ingredient_id != Some(milk)));
+}

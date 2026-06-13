@@ -211,7 +211,23 @@ pub async fn resolve_menu_item_configuration(
                 let mut swapped = false;
                 for ded in deductions.iter_mut() {
                     if ded.source == "drink_recipe" && ded.category == cat {
-                        ded.org_ingredient_id = *repl_id;
+                        // Convert the recipe quantity into the replacement ingredient's
+                        // base unit (g↔kg / ml↔l) BEFORE swapping the unit — otherwise
+                        // the raw quantity is mis-deducted by up to 1000× and COGS is
+                        // inflated. Mirrors the direct-item path in handlers.rs (V19).
+                        match crate::units::convert(ded.quantity, &ded.unit, repl_unit) {
+                            Ok(q) => {
+                                ded.quantity = q;
+                                ded.org_ingredient_id = *repl_id;
+                            }
+                            Err(_) => {
+                                tracing::warn!(
+                                    from_unit = %ded.unit, to_unit = %repl_unit, addon = %addon_name,
+                                    "addon swap across incompatible unit families; inventory not deducted"
+                                );
+                                ded.org_ingredient_id = None;
+                            }
+                        }
                         ded.ingredient_name = repl_name.clone();
                         ded.unit = repl_unit.clone();
                         ded.source = format!("addon_swap:{}", addon_name);

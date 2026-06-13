@@ -358,7 +358,16 @@ pub async fn normalize_recipe_unit(
             .fetch_optional(pool)
             .await?
             .ok_or_else(|| AppError::BadRequest("Linked ingredient not found in catalog".into()))?;
-            crate::units::normalize_to_base(qty, recipe_unit, &base_unit)
+            let (u, q) = crate::units::normalize_to_base(qty, recipe_unit, &base_unit)?;
+            // A positive input that rounds to 0 in the base unit (e.g. 0.4 g into a
+            // kg-base ingredient → 0.000 kg) would silently store a no-op recipe
+            // line: no deduction, no COGS. Reject it instead of losing the quantity (V22).
+            if qty > 0.0 && q <= 0.0 {
+                return Err(AppError::BadRequest(format!(
+                    "quantity {qty} {recipe_unit} is too small for base unit {base_unit} (rounds to 0)"
+                )));
+            }
+            Ok((u, q))
         }
         None => Ok((recipe_unit.to_string(), qty)),
     }

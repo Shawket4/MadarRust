@@ -929,16 +929,23 @@ pub async fn create_order(
                         for ded in deductions.iter_mut() {
                             if ded.source == "drink_recipe" && ded.category == cat {
                                 match crate::units::convert(ded.quantity, &ded.unit, repl_unit) {
-                                    Ok(q) => ded.quantity = q,
-                                    // Different measure families (e.g. ml vs g) have no
-                                    // defined conversion — a setup error for a swap. Leave
-                                    // the amount as-is and flag it rather than blocking the sale.
-                                    Err(_) => tracing::warn!(
-                                        from_unit = %ded.unit, to_unit = %repl_unit, addon = %addon_name,
-                                        "addon swap across incompatible unit families; deducting unconverted quantity"
-                                    ),
+                                    Ok(q) => {
+                                        ded.quantity = q;
+                                        ded.org_ingredient_id = *repl_id;
+                                    }
+                                    // Different measure families (e.g. ml vs g) have no defined
+                                    // conversion — a swap setup error. Deducting the raw number
+                                    // would be a meaningless 1000×-class corruption of stock/COGS,
+                                    // so SKIP the deduction (leave it untracked) and flag it rather
+                                    // than block the sale (V20).
+                                    Err(_) => {
+                                        tracing::warn!(
+                                            from_unit = %ded.unit, to_unit = %repl_unit, addon = %addon_name,
+                                            "addon swap across incompatible unit families; inventory not deducted"
+                                        );
+                                        ded.org_ingredient_id = None;
+                                    }
                                 }
-                                ded.org_ingredient_id = *repl_id;
                                 ded.ingredient_name = repl_name.clone();
                                 ded.unit = repl_unit.clone();
                                 ded.source = format!("addon_swap:{}", addon_name);

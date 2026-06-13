@@ -342,3 +342,45 @@ async fn test_addon_ingredients_wrong_org(pool: PgPool) {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 403);
 }
+
+/// V22: a positive recipe quantity that rounds to 0 in the ingredient's base
+/// unit (0.4 g into a kg-base ingredient → 0.000 kg) must be rejected, not
+/// silently stored as a no-op recipe line (no deduction, no COGS).
+#[sqlx::test]
+async fn test_drink_recipe_subunit_rounding_to_zero_rejected(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    let org_id = seed_org(&pool).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "recipes", "create").await;
+    let cat_id = seed_category(&pool, org_id, "Drinks").await;
+    let item_id = seed_menu_item(&pool, org_id, cat_id, "Latte", 500).await;
+    let token = generate_org_admin_token(user_id, org_id);
+
+    // Ingredient base unit is KILOGRAMS.
+    let ing = seed_ingredient(&pool, org_id, "Almond Milk", "kg").await;
+
+    // 0.4 g = 0.0004 kg → rounds to 0.000 kg in the numeric(12,3) column.
+    let req_body = UpsertDrinkRecipeRequest {
+        size_label: "large".to_string(),
+        org_ingredient_id: Some(ing),
+        ingredient_name: "Almond Milk".to_string(),
+        ingredient_unit: "g".to_string(),
+        quantity_used: 0.4,
+    };
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/recipes/drinks/{}", item_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&req_body).to_request()).await;
+    assert_eq!(resp.status().as_u16(), 400, "sub-unit quantity rounding to 0 must be rejected");
+
+    let stored: Option<sqlx::types::BigDecimal> = sqlx::query_scalar(
+        "SELECT quantity_used FROM menu_item_recipes WHERE org_ingredient_id=$1"
+    ).bind(ing).fetch_optional(&pool).await.unwrap();
+    assert!(stored.is_none(), "no recipe row should be stored for a rounds-to-zero quantity");
+}
