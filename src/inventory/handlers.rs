@@ -379,15 +379,20 @@ pub async fn delete_catalog_item(
     let (org_id, id) = path.into_inner();
     require_org_access(&claims, org_id)?;
 
-    // Check if referenced anywhere
+    // Check if referenced by any active configuration. menu_item_optional_fields
+    // also carries org_ingredient_id and drives sale-time deductions, so it must
+    // be guarded too — otherwise an ingredient can be soft-deleted while an
+    // optional field keeps pointing at it (orphaned deductions, broken costing).
     let referenced: bool = sqlx::query_scalar(
         r#"
         SELECT EXISTS (
-            SELECT 1 FROM menu_item_recipes      WHERE org_ingredient_id = $1
+            SELECT 1 FROM menu_item_recipes        WHERE org_ingredient_id = $1
             UNION ALL
-            SELECT 1 FROM addon_item_ingredients WHERE org_ingredient_id = $1
+            SELECT 1 FROM addon_item_ingredients   WHERE org_ingredient_id = $1
             UNION ALL
-            SELECT 1 FROM branch_inventory       WHERE org_ingredient_id = $1
+            SELECT 1 FROM menu_item_optional_fields WHERE org_ingredient_id = $1
+            UNION ALL
+            SELECT 1 FROM branch_inventory         WHERE org_ingredient_id = $1
         )
         "#,
     )
@@ -397,7 +402,7 @@ pub async fn delete_catalog_item(
 
     if referenced {
         return Err(AppError::Conflict(
-            "Ingredient is referenced by recipes or branch stock. Remove those references first.".into(),
+            "Ingredient is referenced by recipes, optional fields, or branch stock. Remove those references first.".into(),
         ));
     }
 
@@ -658,36 +663,29 @@ pub async fn create_adjustment(
         return Err(AppError::BadRequest("note is required for adjustments".into()));
     }
 
-    // Verify branch_inventory belongs to this branch
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM branch_inventory WHERE id = $1 AND branch_id = $2)"
+    let mut tx = pool.get_ref().begin().await?;
+
+    // Lock the row inside the tx. This both verifies the item belongs to this
+    // branch AND closes a TOCTOU race: without the lock two concurrent
+    // "remove" requests could each read the same stock, both pass the check,
+    // and drive current_stock negative. (Mirrors create_transfer's FOR UPDATE.)
+    let current: sqlx::types::BigDecimal = sqlx::query_scalar(
+        "SELECT current_stock FROM branch_inventory WHERE id = $1 AND branch_id = $2 FOR UPDATE"
     )
     .bind(body.branch_inventory_id)
     .bind(*branch_id)
-    .fetch_one(pool.get_ref())
-    .await?;
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::BadRequest("Inventory item does not belong to this branch".into()))?;
 
-    if !exists {
-        return Err(AppError::BadRequest("Inventory item does not belong to this branch".into()));
-    }
+    let qty = sqlx::types::BigDecimal::try_from(body.quantity)
+        .map_err(|_| AppError::BadRequest("Invalid quantity".into()))?;
 
-    // For remove: check sufficient stock
-    if body.adjustment_type == "remove" {
-        let current: sqlx::types::BigDecimal = sqlx::query_scalar(
-            "SELECT current_stock FROM branch_inventory WHERE id = $1"
-        )
-        .bind(body.branch_inventory_id)
-        .fetch_one(pool.get_ref())
-        .await?;
-
-        let qty = sqlx::types::BigDecimal::try_from(body.quantity)
-            .map_err(|_| AppError::BadRequest("Invalid quantity".into()))?;
-
-        if current < qty {
-            return Err(AppError::BadRequest(format!(
-                "Insufficient stock. Current: {}, Requested: {}", current, qty
-            )));
-        }
+    // For remove: check sufficient stock (under the lock taken above).
+    if body.adjustment_type == "remove" && current < qty {
+        return Err(AppError::BadRequest(format!(
+            "Insufficient stock. Current: {}, Requested: {}", current, qty
+        )));
     }
 
     let delta: f64 = match body.adjustment_type.as_str() {
@@ -695,8 +693,6 @@ pub async fn create_adjustment(
         "remove" => -body.quantity,
         _        => unreachable!(),
     };
-
-    let mut tx = pool.get_ref().begin().await?;
 
     sqlx::query(
         "UPDATE branch_inventory SET current_stock = current_stock + $1 WHERE id = $2"

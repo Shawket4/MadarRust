@@ -2429,7 +2429,7 @@ pub async fn export_orders(
     let ingredient_costs: HashMap<Uuid, i32> = if ingredient_ids.is_empty() {
         HashMap::new()
     } else {
-        let decimal_costs: Vec<(Uuid, Decimal)> = sqlx::query_as::<_, (Uuid, Decimal)>(
+        let decimal_costs: Vec<(Uuid, Option<Decimal>)> = sqlx::query_as::<_, (Uuid, Option<Decimal>)>(
             "SELECT id, cost_per_unit FROM org_ingredients WHERE id = ANY($1)"
         )
         .bind(&ingredient_ids)
@@ -2437,10 +2437,12 @@ pub async fn export_orders(
         .await?;
 
         decimal_costs.into_iter()
-            .map(|(id, cost)| {
+            // NULL cost ⟺ never entered (unknown, NOT free). Omit those rows
+            // so the frontend can distinguish "unknown" from a genuine 0 —
+            // mirrors the catalog's Option<Decimal> contract.
+            .filter_map(|(id, cost)| {
                 // cost_per_unit is stored in piastres; just round to integer.
-                let piastres = cost.round().to_i32().unwrap_or(0);
-                (id, piastres)
+                cost.map(|c| (id, c.round().to_i32().unwrap_or(0)))
             })
             .collect()
     };
