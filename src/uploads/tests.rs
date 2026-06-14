@@ -268,3 +268,50 @@ async fn test_upload_menu_item_image_invalid_image_data(pool: PgPool) {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 400); // Invalid image
 }
+
+/// V5: delete_old_image must not delete a file outside the caller's org subtree,
+/// even when a crafted image_url points at another org's file.
+#[tokio::test]
+async fn test_delete_old_image_blocks_cross_tenant() {
+    use std::fs;
+    let base = env::temp_dir().join(format!("sufrix-del-test-{}", Uuid::new_v4()));
+    let org_a = Uuid::new_v4();
+    let org_b = Uuid::new_v4();
+
+    let victim_dir = base.join(org_b.to_string()).join("menu-items");
+    fs::create_dir_all(&victim_dir).unwrap();
+    let victim = victim_dir.join("v.jpg");
+    fs::write(&victim, b"x").unwrap();
+    fs::create_dir_all(base.join(org_a.to_string()).join("menu-items")).unwrap();
+
+    let url = format!("http://h/uploads/{}/menu-items/v.jpg", org_b);
+    let dir = base.to_str().unwrap();
+
+    // Org A tries to delete org B's file → blocked.
+    crate::uploads::handlers::delete_old_image(&url, "", dir, Some(org_a)).await;
+    assert!(victim.exists(), "cross-tenant delete must be blocked");
+
+    // Org B deleting its own file → removed.
+    crate::uploads::handlers::delete_old_image(&url, "", dir, Some(org_b)).await;
+    assert!(!victim.exists(), "same-org delete must work");
+
+    let _ = fs::remove_dir_all(&base);
+}
+
+/// V5 control: traversal OUT of the uploads dir stays blocked (no regression).
+#[tokio::test]
+async fn test_delete_old_image_blocks_escape() {
+    use std::fs;
+    let base = env::temp_dir().join(format!("sufrix-esc-test-{}", Uuid::new_v4()));
+    fs::create_dir_all(&base).unwrap();
+    let secret = base.join("secret.txt");
+    fs::write(&secret, b"top").unwrap();
+    let uploads = base.join("uploads");
+    fs::create_dir_all(&uploads).unwrap();
+
+    // old_url resolves to ../secret.txt — must be blocked.
+    crate::uploads::handlers::delete_old_image("/uploads/../secret.txt", "", uploads.to_str().unwrap(), None).await;
+    assert!(secret.exists(), "path traversal out of uploads must be blocked");
+
+    let _ = fs::remove_dir_all(&base);
+}

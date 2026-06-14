@@ -136,7 +136,7 @@ pub async fn upload_menu_item_image(
 
     // 3. Delete old image ONLY after successful DB update
     if let Some(old_url) = old_image_url {
-        delete_old_image(&old_url, &base_url, &uploads_dir).await;
+        delete_old_image(&old_url, &base_url, &uploads_dir, Some(org_id)).await;
     }
 
     tracing::info!("Uploaded image for menu_item {} → {} ({} KB)",
@@ -164,7 +164,12 @@ fn compress_to_jpeg(raw: &[u8]) -> Result<Vec<u8>, AppError> {
     Err(AppError::Internal)
 }
 
-pub async fn delete_old_image(old_url: &str, _base_url: &str, uploads_dir: &str) {
+/// Delete a stored image. `org_scope = Some(org)` constrains the deletion to
+/// that org's subtree (`{uploads_root}/{org}/…`) so one tenant can't delete
+/// another's file via a crafted image_url; `None` (org-logos, super-admin only)
+/// keeps the looser uploads-root check. Either way path traversal OUT of the
+/// uploads dir is blocked.
+pub async fn delete_old_image(old_url: &str, _base_url: &str, uploads_dir: &str, org_scope: Option<Uuid>) {
     let rel = extract_relative_path(old_url);
     let uploads_root = match std::fs::canonicalize(uploads_dir) {
         Ok(p) => p,
@@ -176,8 +181,12 @@ pub async fn delete_old_image(old_url: &str, _base_url: &str, uploads_dir: &str)
         Ok(p) => p,
         Err(_) => return,
     };
-    if !canonical.starts_with(&uploads_root) {
-        tracing::warn!("Blocked path traversal attempt: {:?} escapes uploads dir", canonical);
+    let allowed_root = match org_scope {
+        Some(org) => uploads_root.join(org.to_string()),
+        None => uploads_root.clone(),
+    };
+    if !canonical.starts_with(&allowed_root) {
+        tracing::warn!("Blocked out-of-scope image delete: {:?} not under {:?}", canonical, allowed_root);
         return;
     }
     if let Err(e) = tokio::fs::remove_file(&canonical).await {

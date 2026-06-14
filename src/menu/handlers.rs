@@ -518,7 +518,7 @@ pub async fn update_category(
         && let Some(old_url) = existing.image_url {
             let uploads_dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
             let base_url    = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
-            delete_old_image(&old_url, &base_url, &uploads_dir).await;
+            delete_old_image(&old_url, &base_url, &uploads_dir, Some(existing.org_id)).await;
         }
 
     Ok(HttpResponse::Ok().json(row))
@@ -931,7 +931,7 @@ pub async fn update_menu_item(
         && let Some(old_url) = existing.image_url {
             let uploads_dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
             let base_url    = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
-            delete_old_image(&old_url, &base_url, &uploads_dir).await;
+            delete_old_image(&old_url, &base_url, &uploads_dir, Some(existing.org_id)).await;
         }
 
     Ok(HttpResponse::Ok().json(item))
