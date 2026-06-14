@@ -827,5 +827,17 @@ async fn require_branch_access(
         return Err(AppError::Forbidden("Not assigned to this branch".into()));
     }
 
+    // A teller token is bound to the branch it authenticated for: a token minted
+    // for one branch must not act on another, even when the teller is assigned to
+    // both. The None guard keeps legacy/non-teller tokens working (V26).
+    if claims.role == UserRole::Teller {
+        if let Some(token_branch) = claims.branch_id()
+            && token_branch != branch_id {
+            return Err(AppError::Forbidden(
+                "This device is signed in to a different branch.".into(),
+            ));
+        }
+    }
+
     Ok(())
 }

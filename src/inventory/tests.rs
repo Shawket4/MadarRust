@@ -1746,3 +1746,39 @@ async fn test_catalog_unit_change_rebases_all_references(pool: PgPool) {
         .set_json(serde_json::json!({"unit": "g", "cost_per_unit": 5})).to_request()).await;
     assert_eq!(resp.status(), 400);
 }
+
+/// V26: a teller token bound to branch A must not read another branch's
+/// inventory, even when the teller is assigned to both branches.
+#[sqlx::test]
+async fn test_teller_token_branch_binding_on_inventory(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+    let org_id = seed_org(&pool).await;
+    let branch_a = seed_branch(&pool, org_id).await;
+    let branch_b = seed_branch(&pool, org_id).await;
+    grant_permission(&pool, "teller", "inventory", "read").await;
+    let teller = seed_user(&pool, org_id, "teller").await;
+    assign_branch(&pool, teller, branch_a).await;
+    assign_branch(&pool, teller, branch_b).await;
+
+    // Token is bound to branch A only.
+    let token = crate::auth::jwt::create_token(
+        &get_secret(), teller, Some(org_id), UserRole::Teller, Some(branch_a), 24
+    ).unwrap();
+
+    // Branch A → allowed.
+    let resp_a = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/inventory/branches/{}/stock", branch_a))
+        .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
+    assert!(resp_a.status().is_success(), "own branch must work");
+
+    // Branch B → forbidden, because the token is bound to branch A.
+    let resp_b = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/inventory/branches/{}/stock", branch_b))
+        .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
+    assert_eq!(resp_b.status(), 403, "cross-branch teller token must be rejected");
+}

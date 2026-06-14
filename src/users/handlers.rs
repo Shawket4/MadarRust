@@ -432,6 +432,24 @@ pub async fn update_user(
 
     require_same_org(&claims, existing.org_id)?;
 
+    // Vertical-privilege guard (V4): a caller may only reset credentials / toggle
+    // status / change the role of a STRICTLY lower-privileged user. This stops a
+    // branch_manager from taking over an org_admin (even on a shared branch), or
+    // an org_admin from resetting a super_admin's credentials.
+    let rank = |r: &UserRole| match r {
+        UserRole::SuperAdmin => 3u8,
+        UserRole::OrgAdmin => 2,
+        UserRole::BranchManager => 1,
+        UserRole::Teller => 0,
+    };
+    let sensitive = body.password.is_some() || body.pin.is_some()
+        || body.is_active.is_some() || body.role.is_some();
+    if sensitive && *user_id != claims.user_id() && rank(&existing.role) > rank(&claims.role) {
+        return Err(AppError::Forbidden(
+            "You cannot modify a user with higher privileges".into(),
+        ));
+    }
+
     if claims.role == UserRole::BranchManager && claims.user_id() != *user_id {
         let same_branch: bool = sqlx::query_scalar(
             r#"
@@ -591,7 +609,32 @@ pub async fn assign_branch(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "users", "update").await?;
 
+    // Org-scope the assignment (V3): both the target user and the branch must be
+    // in the caller's org. require_same_org early-returns Ok for super_admin.
+    let (target_org, target_role): (Option<Uuid>, UserRole) = sqlx::query_as(
+        "SELECT org_id, role FROM users WHERE id = $1 AND deleted_at IS NULL"
+    )
+    .bind(*user_id)
+    .fetch_optional(pool.get_ref())
+    .await?
+    .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+    require_same_org(&claims, target_org)?;
+
+    let branch_org: Uuid = sqlx::query_scalar(
+        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL"
+    )
+    .bind(body.branch_id)
+    .fetch_optional(pool.get_ref())
+    .await?
+    .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    require_same_org(&claims, Some(branch_org))?;
+
     if claims.role == UserRole::BranchManager {
+        // A branch_manager must not attach an admin to a branch — that step opens
+        // the shared-branch gate that would let them reset the admin's creds (V4).
+        if matches!(target_role, UserRole::OrgAdmin | UserRole::SuperAdmin) {
+            return Err(AppError::Forbidden("You cannot assign an admin user to a branch".into()));
+        }
         let is_assigned: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)"
         )
@@ -645,6 +688,25 @@ pub async fn unassign_branch(
     check_permission(pool.get_ref(), &claims, "users", "update").await?;
 
     let (user_id, branch_id) = path.into_inner();
+
+    // Org-scope (V3): the target user and branch must both be in the caller's org.
+    let target_org: Option<Uuid> = sqlx::query_scalar(
+        "SELECT org_id FROM users WHERE id = $1 AND deleted_at IS NULL"
+    )
+    .bind(user_id)
+    .fetch_optional(pool.get_ref())
+    .await?
+    .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+    require_same_org(&claims, target_org)?;
+
+    let branch_org: Uuid = sqlx::query_scalar(
+        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL"
+    )
+    .bind(branch_id)
+    .fetch_optional(pool.get_ref())
+    .await?
+    .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    require_same_org(&claims, Some(branch_org))?;
 
     if claims.role == UserRole::BranchManager {
         let is_assigned: bool = sqlx::query_scalar(

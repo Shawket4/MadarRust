@@ -322,3 +322,40 @@ async fn test_delete_branch_not_found(pool: PgPool) {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
 }
+
+/// V1 (defense-in-depth): a branch timezone that PostgreSQL does not recognize
+/// must be rejected at write time, so it can never reach the reports query.
+#[sqlx::test]
+async fn test_create_branch_rejects_invalid_timezone(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+    let org_id = seed_org(&pool).await;
+    grant_permission(&pool, "org_admin", "branches", "create").await;
+    let token = generate_org_admin_token(Uuid::new_v4(), org_id);
+
+    // An injection-style / non-IANA timezone is rejected.
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri("/branches")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&serde_json::json!({
+            "org_id": org_id,
+            "name": "Bad TZ Branch",
+            "timezone": "Africa/Cairo' UNION SELECT version() --"
+        })).to_request()).await;
+    assert_eq!(resp.status(), 400, "invalid timezone must be rejected");
+
+    // A valid IANA timezone is accepted.
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri("/branches")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&serde_json::json!({
+            "org_id": org_id,
+            "name": "Good TZ Branch",
+            "timezone": "America/New_York"
+        })).to_request()).await;
+    assert!(resp.status().is_success(), "valid timezone must be accepted: {:?}", resp.status());
+}

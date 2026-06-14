@@ -12,6 +12,23 @@ use crate::{
     permissions::checker::check_permission,
 };
 
+/// Reject a timezone PostgreSQL does not recognize. Stored branch timezones are
+/// later used by the reports timeseries (AT TIME ZONE), so validating at write
+/// time keeps a bad value from 500ing every report and is defense-in-depth for
+/// the now-parameterized reports query (audit V1).
+async fn validate_timezone(pool: &PgPool, tz: &str) -> Result<(), AppError> {
+    let ok: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pg_timezone_names WHERE name = $1)"
+    )
+    .bind(tz)
+    .fetch_one(pool)
+    .await?;
+    if !ok {
+        return Err(AppError::BadRequest(format!("Unknown timezone '{tz}'")));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize, Deserialize, sqlx::Type, Clone, PartialEq, ToSchema)]
 #[sqlx(type_name = "printer_brand", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
@@ -243,6 +260,10 @@ pub async fn create_branch(
     check_permission(pool.get_ref(), &claims, "branches", "create").await?;
     require_same_org(&claims, Some(body.org_id))?;
 
+    if let Some(tz) = body.timezone.as_deref().filter(|s| !s.is_empty()) {
+        validate_timezone(pool.get_ref(), tz).await?;
+    }
+
     let branch = sqlx::query_as::<_, Branch>(
         r#"
         WITH inserted AS (
@@ -304,6 +325,10 @@ pub async fn update_branch(
 
     let existing = fetch_branch(pool.get_ref(), *id).await?;
     require_same_org(&claims, Some(existing.org_id))?;
+
+    if let Some(tz) = body.timezone.as_deref().filter(|s| !s.is_empty()) {
+        validate_timezone(pool.get_ref(), tz).await?;
+    }
 
     // Resolve each nullable field:
     //   Some(Some(v)) → use v
