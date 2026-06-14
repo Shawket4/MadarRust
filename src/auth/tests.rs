@@ -725,7 +725,7 @@ async fn test_resolve_branch_wrong_org_returns_404(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn test_pin_login_blocked_while_any_open_shift(pool: PgPool) {
+async fn test_pin_login_same_branch_allowed_different_branch_blocked(pool: PgPool) {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
@@ -753,18 +753,20 @@ async fn test_pin_login_blocked_while_any_open_shift(pool: PgPool) {
         .set_json(&json!({"name":"Teller One","pin":"1234","branch_id": branch}))
         .to_request();
 
-    // Signing in for the OTHER branch is blocked (409).
+    // Signing in at a DIFFERENT branch while the shift is open elsewhere is blocked.
     assert_eq!(test::call_service(&app, login(branch_b)).await.status(), 409,
         "login at a different branch while a shift is open must be blocked");
-    // Signing in again for the SAME branch is ALSO blocked — no second session.
-    assert_eq!(test::call_service(&app, login(branch_a)).await.status(), 409,
-        "any login while a shift is open must be blocked");
+    // Re-signing in at the SAME branch as the open shift is ALLOWED — the teller
+    // must be able to resume their own shift (e.g. after a token expiry),
+    // otherwise an expired token locks them out of the shift they need to close.
+    assert_eq!(test::call_service(&app, login(branch_a)).await.status(), 200,
+        "login at the same branch as the open shift must be allowed (resume)");
 
-    // Once the shift is closed, login works again.
+    // Once the shift is closed, any branch is available again.
     sqlx::query("UPDATE shifts SET status='closed', closed_at=now() WHERE id=$1")
         .bind(shift_id).execute(&pool).await.unwrap();
-    assert_eq!(test::call_service(&app, login(branch_a)).await.status(), 200,
-        "login must succeed once the open shift is closed");
+    assert_eq!(test::call_service(&app, login(branch_b)).await.status(), 200,
+        "login must succeed at any branch once the open shift is closed");
 }
 
 /// /auth/me exposes the org tax_rate + currency so the POS can compute a
