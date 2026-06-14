@@ -1127,6 +1127,36 @@ async fn test_all_branches_nil_aggregates_consumption(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn test_all_branches_super_admin_uses_org_header(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id   = seed_org(&pool).await;
+    let branch_a = seed_branch(&pool, org_id).await;
+    let ing = seed_ingredient(&pool, org_id, "Beans", "g").await;
+    seed_stock_lvl(&pool, branch_a, ing, 1.0, 10.0).await; // below reorder
+
+    // A super-admin token carries no org — the all-branches scope can't infer one.
+    let token = generate_token(Uuid::new_v4(), None, UserRole::SuperAdmin);
+    let nil = Uuid::nil();
+
+    // Without X-Org-Id there is no org to roll up over → 403.
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/reports/branches/{nil}/low-stock"))
+        .insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;
+    assert_eq!(resp.status(), 403, "super-admin all-branches requires an org header");
+
+    // The dashboard pins the active org via X-Org-Id; a super admin may read any
+    // org, so it is honoured and the roll-up is scoped to that org.
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/reports/branches/{nil}/low-stock"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("X-Org-Id", org_id.to_string())).to_request()).await;
+    assert_eq!(resp.status(), 200);
+    let rows: Vec<LowStockRow> = test::read_body_json(resp).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].org_ingredient_id, ing);
+}
+
+#[sqlx::test]
 async fn test_consumption_branch_and_org(pool: PgPool) {
     let app = init_app!(pool);
     let org_id = seed_org(&pool).await;

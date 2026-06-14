@@ -290,7 +290,7 @@ pub async fn branch_sales(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
     let branch_name = branch_label(pool.get_ref(), *branch_id).await?;
 
     let totals: (i64, i64, i64, i64, i64, i64, serde_json::Value) = sqlx::query_as(
@@ -454,7 +454,7 @@ pub async fn branch_stock(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
     let branch_name = branch_label(pool.get_ref(), *branch_id).await?;
 
     // For a single branch each branch_inventory row is kept (its id drives
@@ -527,7 +527,7 @@ pub async fn branch_sales_timeseries(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     // For "all branches" the per-branch timezone lookup finds nothing and falls
     // back to the org default — periods are bucketed in one consistent zone.
@@ -624,7 +624,7 @@ pub async fn branch_teller_stats(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     let rows = sqlx::query_as::<_, TellerStats>(
         r#"
@@ -679,7 +679,7 @@ pub async fn branch_addon_sales(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     let rows = sqlx::query_as::<_, AddonSalesRow>(
         r#"
@@ -877,7 +877,7 @@ pub async fn branch_inventory_valuation(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     // Summed per ingredient over the selected branch(es): one branch has a
     // single row per ingredient so the SUM is a no-op; "all branches" (nil)
@@ -1001,7 +1001,7 @@ pub async fn branch_low_stock(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     // Each row carries its own branch_id/branch_name, so a single-branch call is
     // genuinely scoped to that branch and an "all branches" (nil) call still
@@ -1047,7 +1047,7 @@ pub async fn branch_consumption(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     let rows = sqlx::query_as::<_, ConsumptionRow>(
         r#"
@@ -1094,7 +1094,7 @@ pub async fn branch_waste_report(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     let rows = sqlx::query_as::<_, WasteReportRow>(
         r#"
@@ -1245,7 +1245,7 @@ pub async fn branch_shrinkage(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     let rows = sqlx::query_as::<_, ShrinkageRow>(
         r#"
@@ -1425,6 +1425,7 @@ async fn require_branch_access(
 async fn resolve_report_branches(
     pool:      &PgPool,
     claims:    &Claims,
+    req:       &HttpRequest,
     branch_id: Uuid,
 ) -> Result<(Vec<Uuid>, Uuid), AppError> {
     if !branch_id.is_nil() {
@@ -1440,9 +1441,8 @@ async fn resolve_report_branches(
         return Ok((vec![branch_id], org));
     }
 
-    let org = claims
-        .org_id()
-        .ok_or_else(|| AppError::Forbidden("No organization in token".into()))?;
+    let org = report_scope_org(claims, req)
+        .ok_or_else(|| AppError::Forbidden("No organization in scope".into()))?;
     let ids: Vec<Uuid> = sqlx::query_scalar(
         "SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL",
     )
@@ -1450,6 +1450,25 @@ async fn resolve_report_branches(
     .fetch_all(pool)
     .await?;
     Ok((ids, org))
+}
+
+/// The org an "all branches" report rolls up over. Org-bound tokens carry it
+/// directly; a super admin's token does not, so the dashboard pins the active
+/// org via the `X-Org-Id` header. Trusting that header is safe here because a
+/// super admin may read any org anyway (see `require_org`); for every other
+/// role the header is ignored and the token's own org is authoritative.
+fn report_scope_org(claims: &Claims, req: &HttpRequest) -> Option<Uuid> {
+    if let Some(org) = claims.org_id() {
+        return Some(org);
+    }
+    if claims.role == UserRole::SuperAdmin {
+        return req
+            .headers()
+            .get("X-Org-Id")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| Uuid::parse_str(s).ok());
+    }
+    None
 }
 
 /// Human label for a report scope: "All branches" for the nil UUID, otherwise
@@ -1505,7 +1524,7 @@ pub async fn branch_bundle_sales(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     let rows = sqlx::query_as::<_, BundleSalesRow>(
         r#"
@@ -1552,7 +1571,7 @@ pub async fn branch_combined_item_sales(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     let rows = sqlx::query_as::<_, CombinedItemSalesRow>(
         r#"
@@ -1748,7 +1767,7 @@ pub async fn branch_menu_engineering(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    let (branch_ids, org_id) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, org_id) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
     let basis = CostBasis::parse(basis_query.cost_basis.as_deref())?;
 
     #[derive(sqlx::FromRow)]
