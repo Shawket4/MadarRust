@@ -19249,6 +19249,13 @@
             ],
             "format": "uuid"
           },
+          "branch_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Branch name; only populated by the all-branches waste roll-up (nil\n{branch_id}). `None` for single-branch queries that do not select it."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -24437,6 +24444,13 @@
             "type": "string",
             "format": "uuid"
           },
+          "branch_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Branch label — populated by the order lists so the \"All branches\" view\ncan show which branch each PO belongs to; other endpoints leave it null."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -25318,6 +25332,13 @@
           "branch_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "branch_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Branch label — only populated by the stocktakes list (so the \"All\nbranches\" view can show which branch each stocktake belongs to). Other\nstocktake endpoints leave it `null`."
           },
           "created_at": {
             "type": "string",
