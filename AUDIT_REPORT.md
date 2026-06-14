@@ -151,16 +151,20 @@ Each entry: root cause → fix (file) → guarding test.
 
 ---
 
-## Frontend findings (deferred — NOT modified this run)
+## Frontend (POS + dashboard) — done in a follow-up pass
 
-The map surfaced real POS/dashboard issues, but they were **not changed** because their test suites (Flutter / Vitest) can't be run+verified in this backend-focused session, and the mandate is to never leave a suite red. They are logged here for a focused frontend pass:
+The frontend was subsequently audited and fixed; full details in each repo's `AUDIT_REPORT.md`. Summary:
 
-- **Dashboard `egpToPiastres` uses `Math.trunc`** (`src/lib/format.ts:23`, also `editable-cards.tsx:64`, `menu-items-page.tsx:453`) → drops 1 piastre on ~5.7% of two-decimal prices. Use `Math.round`.
-- **POS cart total omits tax** (`lib/core/models/cart.dart:383`) and **split-payment / amount_tendered validate against the tax-free total** (`checkout_sheet.dart:389,415`) → can underpay vs the server total (which adds tax).
-- **POS swallows the 403 "different branch" / 409 "shift open" states** during login/resume (`auth_notifier.dart:230`, `shift_notifier.dart:141`) → surfaced as generic/offline errors. The backend now returns these crisply (V26, single-open-shift); the POS should render them.
-- **Dashboard read-query failures render as empty state** (`data-table.tsx:165`) and a **missing Vitest setup file** (`vitest.config.ts:8`) reportedly breaks `npm run test` before it starts — worth confirming first.
+**Dashboard** (`SufrixDashboard/AUDIT_REPORT.md`) — `tsc`/`eslint` clean, Vitest green:
+- **Fixed: `egpToPiastres` used `Math.trunc`** → dropped a piastre on ~5.7% of two-decimal prices (`19.99*100 = 1998.999…` → 1998). Switched to `Math.round` (+ the inline editable-card / bulk-price paths), guarded by a new test.
+- **Fixed: the Vitest harness was broken** (config referenced a missing `src/test/setup.ts`; zero tests) → added the setup file + first test; `npm run test` now runs.
+- Documented (not changed): read-query empty-state error surfacing, 403-on-GET banner, void detail-cache invalidation, super_admin org switcher.
 
-(Note: no localhost frontend-pointing changes were made; the backend `.env`/URLs were not modified.)
+**POS** (`sufrix_pos/AUDIT_REPORT.md`) — `flutter test` **318 pass / 0 fail** (was **13 failing on baseline**), `flutter analyze` clean:
+- **Fixed: 13 stale tests** (test rot, no `lib/` change) from recent refactors — `display_order` removed (now server-order rendering), the open-shift redirect flow (`/open-shift`), and a new `PendingVoidOrder.note`. Each was verified against the shipped models; none masked a code bug.
+- Documented (not changed, with rationale): cart total omits tax + split/tender validate against the tax-free total — **no current impact (every org has `tax_rate = 0`)** and a correct fix is a *feature* (the POS has no tax model); swallowed 403/409 login errors; percentage-discount round-vs-truncate (1 piastre); offline-void-of-offline-order id mismatch.
+
+(No runtime API-base / `.env` changes were made in any repo.)
 
 ---
 
