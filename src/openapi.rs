@@ -220,6 +220,7 @@ paths(
         crate::reports::handlers::branch_inventory_valuation,
         crate::reports::handlers::org_inventory_valuation,
         crate::reports::handlers::org_low_stock,
+        crate::reports::handlers::branch_low_stock,
         crate::reports::handlers::branch_consumption,
         crate::reports::handlers::branch_waste_report,
         crate::reports::handlers::branch_shrinkage,

@@ -290,16 +290,8 @@ pub async fn branch_sales(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
-
-    let branch_name: String = sqlx::query_scalar(
-        "SELECT name FROM branches WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(*branch_id)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .flatten()
-    .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
+    let branch_name = branch_label(pool.get_ref(), *branch_id).await?;
 
     let totals: (i64, i64, i64, i64, i64, i64, serde_json::Value) = sqlx::query_as(
         r#"
@@ -315,19 +307,19 @@ pub async fn branch_sales(
                 SELECT op.method, SUM(op.amount)::bigint AS rev
                 FROM order_payments op
                 JOIN orders o2 ON o2.id = op.order_id
-                WHERE o2.branch_id = $1 AND o2.status != 'voided'
+                WHERE o2.branch_id = ANY($1) AND o2.status != 'voided'
                   AND ($2::timestamptz IS NULL OR o2.created_at >= $2)
                   AND ($3::timestamptz IS NULL OR o2.created_at <= $3)
                 GROUP BY op.method
               ) sub
             ), '{}'::json)
         FROM orders
-        WHERE branch_id = $1
+        WHERE branch_id = ANY($1)
           AND ($2::timestamptz IS NULL OR created_at >= $2)
           AND ($3::timestamptz IS NULL OR created_at <= $3)
         "#,
     )
-    .bind(*branch_id).bind(query.from).bind(query.to)
+    .bind(&branch_ids).bind(query.from).bind(query.to)
     .fetch_one(pool.get_ref()).await?;
 
     let item_limit = query.limit.unwrap_or(20).clamp(1, 100);
@@ -340,7 +332,7 @@ pub async fn branch_sales(
                SUM(oi.line_total)::bigint AS revenue
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
-        WHERE o.branch_id = $1 AND o.status != 'voided'
+        WHERE o.branch_id = ANY($1) AND o.status != 'voided'
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         GROUP BY COALESCE(oi.menu_item_id, oi.bundle_id), oi.item_name
@@ -348,7 +340,7 @@ pub async fn branch_sales(
         LIMIT $4
         "#,
     )
-    .bind(*branch_id).bind(query.from).bind(query.to).bind(item_limit)
+    .bind(&branch_ids).bind(query.from).bind(query.to).bind(item_limit)
     .fetch_all(pool.get_ref()).await?;
 
     #[derive(sqlx::FromRow)]
@@ -381,10 +373,10 @@ pub async fn branch_sales(
         JOIN orders o     ON o.id  = oi.order_id
         LEFT JOIN menu_items m ON m.id  = oi.menu_item_id
         LEFT JOIN categories c ON c.id = m.category_id
-        WHERE o.branch_id = $1 AND o.status != 'voided'
+        WHERE o.branch_id = ANY($1) AND o.status != 'voided'
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        GROUP BY 
+        GROUP BY
             CASE 
                 WHEN oi.bundle_id IS NOT NULL THEN '00000000-0000-0000-0000-000000000000'::uuid
                 ELSE m.category_id
@@ -395,7 +387,7 @@ pub async fn branch_sales(
         ORDER BY category_name NULLS LAST, revenue DESC
         "#,
     )
-    .bind(*branch_id).bind(query.from).bind(query.to)
+    .bind(&branch_ids).bind(query.from).bind(query.to)
     .fetch_all(pool.get_ref()).await?;
 
     let mut by_category: Vec<CategorySales> = Vec::new();
@@ -462,33 +454,52 @@ pub async fn branch_stock(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
-    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
+    let branch_name = branch_label(pool.get_ref(), *branch_id).await?;
 
-    let branch_name: String = sqlx::query_scalar(
-        "SELECT name FROM branches WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(*branch_id)
-    .fetch_optional(pool.get_ref()).await?.flatten()
-    .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
-
-    let items = sqlx::query_as::<_, StockRow>(
-        r#"
-        SELECT
-            bi.id              AS branch_inventory_id,
-            oi.name            AS ingredient_name,
-            oi.unit::text      AS unit,
-            bi.current_stock::float8,
-            bi.reorder_threshold::float8,
-            oi.cost_per_unit,
-            (bi.reorder_threshold > 0 AND bi.current_stock <= bi.reorder_threshold) AS below_reorder
-        FROM branch_inventory bi
-        JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id
-        WHERE bi.branch_id = $1
-        ORDER BY (bi.reorder_threshold > 0 AND bi.current_stock <= bi.reorder_threshold) DESC, oi.name ASC
-        "#,
-    )
-    .bind(*branch_id)
-    .fetch_all(pool.get_ref()).await?;
+    // For a single branch each branch_inventory row is kept (its id drives
+    // stock adjustments). "All branches" (nil) has no single row id, so it
+    // rolls every branch's stock up per ingredient (id = nil placeholder).
+    let items = if branch_id.is_nil() {
+        sqlx::query_as::<_, StockRow>(
+            r#"
+            SELECT
+                '00000000-0000-0000-0000-000000000000'::uuid AS branch_inventory_id,
+                oi.name            AS ingredient_name,
+                oi.unit::text      AS unit,
+                SUM(bi.current_stock)::float8     AS current_stock,
+                SUM(bi.reorder_threshold)::float8 AS reorder_threshold,
+                oi.cost_per_unit,
+                (SUM(bi.reorder_threshold) > 0 AND SUM(bi.current_stock) <= SUM(bi.reorder_threshold)) AS below_reorder
+            FROM branch_inventory bi
+            JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id
+            WHERE bi.branch_id = ANY($1)
+            GROUP BY oi.id, oi.name, oi.unit, oi.cost_per_unit
+            ORDER BY below_reorder DESC, oi.name ASC
+            "#,
+        )
+        .bind(&branch_ids)
+        .fetch_all(pool.get_ref()).await?
+    } else {
+        sqlx::query_as::<_, StockRow>(
+            r#"
+            SELECT
+                bi.id              AS branch_inventory_id,
+                oi.name            AS ingredient_name,
+                oi.unit::text      AS unit,
+                bi.current_stock::float8,
+                bi.reorder_threshold::float8,
+                oi.cost_per_unit,
+                (bi.reorder_threshold > 0 AND bi.current_stock <= bi.reorder_threshold) AS below_reorder
+            FROM branch_inventory bi
+            JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id
+            WHERE bi.branch_id = ANY($1)
+            ORDER BY (bi.reorder_threshold > 0 AND bi.current_stock <= bi.reorder_threshold) DESC, oi.name ASC
+            "#,
+        )
+        .bind(&branch_ids)
+        .fetch_all(pool.get_ref()).await?
+    };
 
     Ok(HttpResponse::Ok().json(BranchStockReport {
         branch_id:   *branch_id,
@@ -516,8 +527,10 @@ pub async fn branch_sales_timeseries(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
 
+    // For "all branches" the per-branch timezone lookup finds nothing and falls
+    // back to the org default — periods are bucketed in one consistent zone.
     let tz: String = sqlx::query_scalar(
         "SELECT timezone FROM branches WHERE id = $1 AND deleted_at IS NULL"
     )
@@ -553,7 +566,7 @@ pub async fn branch_sales_timeseries(
                 COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status != 'voided'), 0)::bigint AS discount,
                 COALESCE(SUM(o.tax_amount)      FILTER (WHERE o.status != 'voided'), 0)::bigint AS tax
             FROM orders o
-            WHERE o.branch_id = $1
+            WHERE o.branch_id = ANY($1)
               AND ($2::timestamptz IS NULL OR o.created_at >= $2)
               AND ($3::timestamptz IS NULL OR o.created_at <= $3)
             GROUP BY date_trunc('{trunc}', o.created_at AT TIME ZONE $4)
@@ -570,7 +583,7 @@ pub async fn branch_sales_timeseries(
                 SELECT op2.method, SUM(op2.amount)::bigint AS rev
                 FROM order_payments op2
                 JOIN orders o2 ON o2.id = op2.order_id
-                WHERE o2.branch_id = $1 AND o2.status != 'voided'
+                WHERE o2.branch_id = ANY($1) AND o2.status != 'voided'
                   AND date_trunc('{trunc}', o2.created_at AT TIME ZONE $4) = p.period_val
                 GROUP BY op2.method
               ) sub
@@ -582,7 +595,7 @@ pub async fn branch_sales_timeseries(
     );
 
     let rows = sqlx::query_as::<_, TimeseriesPoint>(&sql)
-        .bind(*branch_id)
+        .bind(&branch_ids)
         .bind(query.from)
         .bind(query.to)
         .bind(&tz)
@@ -611,7 +624,7 @@ pub async fn branch_teller_stats(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
 
     let rows = sqlx::query_as::<_, TellerStats>(
         r#"
@@ -631,14 +644,14 @@ pub async fn branch_teller_stats(
             COUNT(DISTINCT o.shift_id)::bigint AS shifts
         FROM orders o
         JOIN users u ON u.id = o.teller_id
-        WHERE o.branch_id = $1
+        WHERE o.branch_id = ANY($1)
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         GROUP BY o.teller_id, u.name
         ORDER BY revenue DESC
         "#,
     )
-    .bind(*branch_id)
+    .bind(&branch_ids)
     .bind(query.from)
     .bind(query.to)
     .fetch_all(pool.get_ref())
@@ -666,7 +679,7 @@ pub async fn branch_addon_sales(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
 
     let rows = sqlx::query_as::<_, AddonSalesRow>(
         r#"
@@ -681,7 +694,7 @@ pub async fn branch_addon_sales(
         JOIN order_items oi ON oi.id  = oia.order_item_id
         JOIN orders o       ON o.id   = oi.order_id
         LEFT JOIN addon_items ai ON ai.id = oia.addon_item_id
-        WHERE o.branch_id = $1
+        WHERE o.branch_id = ANY($1)
           AND o.status != 'voided'
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
@@ -689,7 +702,7 @@ pub async fn branch_addon_sales(
         ORDER BY quantity_sold DESC
         "#,
     )
-    .bind(*branch_id)
+    .bind(&branch_ids)
     .bind(query.from)
     .bind(query.to)
     .fetch_all(pool.get_ref())
@@ -864,22 +877,26 @@ pub async fn branch_inventory_valuation(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
-    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
 
+    // Summed per ingredient over the selected branch(es): one branch has a
+    // single row per ingredient so the SUM is a no-op; "all branches" (nil)
+    // rolls every branch's stock together, matching the org valuation report.
     let items = sqlx::query_as::<_, ValuationRow>(
         r#"
-        SELECT bi.org_ingredient_id, oi.name AS ingredient_name, oi.unit::text AS unit,
-               bi.current_stock::float8,
+        SELECT oi.id AS org_ingredient_id, oi.name AS ingredient_name, oi.unit::text AS unit,
+               SUM(bi.current_stock)::float8 AS current_stock,
                round(oi.cost_per_unit)::bigint AS cost_per_unit,
                CASE WHEN oi.cost_per_unit IS NULL THEN NULL
-                    ELSE round(bi.current_stock * oi.cost_per_unit)::bigint END AS value
+                    ELSE round(SUM(bi.current_stock) * oi.cost_per_unit)::bigint END AS value
         FROM branch_inventory bi
         JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id
-        WHERE bi.branch_id = $1
+        WHERE bi.branch_id = ANY($1)
+        GROUP BY oi.id, oi.name, oi.unit, oi.cost_per_unit
         ORDER BY oi.name ASC
         "#,
     )
-    .bind(*branch_id)
+    .bind(&branch_ids)
     .fetch_all(pool.get_ref())
     .await?;
 
@@ -967,6 +984,51 @@ pub async fn org_low_stock(
     Ok(HttpResponse::Ok().json(rows))
 }
 
+// ── GET /reports/branches/:id/low-stock ──────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/reports/branches/{branch_id}/low-stock",
+    tag = "reports",
+    params(("branch_id" = Uuid, Path, description = "Branch ID, or the all-zeros UUID for every branch in the org")),
+    responses((status = 200, description = "Below-reorder items for one branch (or all branches)", body = Vec<LowStockRow>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn branch_low_stock(
+    req:       HttpRequest,
+    pool:      web::Data<PgPool>,
+    branch_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
+
+    // Each row carries its own branch_id/branch_name, so a single-branch call is
+    // genuinely scoped to that branch and an "all branches" (nil) call still
+    // attributes every below-reorder line to the branch it belongs to.
+    let rows = sqlx::query_as::<_, LowStockRow>(
+        r#"
+        SELECT bi.branch_id, b.name AS branch_name, bi.org_ingredient_id,
+               oi.name AS ingredient_name, oi.unit::text AS unit,
+               bi.current_stock::float8, bi.reorder_threshold::float8,
+               (bi.reorder_threshold - bi.current_stock)::float8 AS deficit,
+               oi.supplier_id,
+               (SELECT name FROM suppliers WHERE id = oi.supplier_id) AS supplier_name
+        FROM branch_inventory bi
+        JOIN branches b         ON b.id = bi.branch_id AND b.deleted_at IS NULL
+        JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id
+        WHERE bi.branch_id = ANY($1)
+          AND bi.reorder_threshold > 0 AND bi.current_stock <= bi.reorder_threshold
+        ORDER BY b.name ASC, oi.name ASC
+        "#,
+    )
+    .bind(&branch_ids)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+
 // ── GET /reports/branches/:id/consumption ────────────────────
 
 #[utoipa::path(
@@ -985,7 +1047,7 @@ pub async fn branch_consumption(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
-    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
 
     let rows = sqlx::query_as::<_, ConsumptionRow>(
         r#"
@@ -995,7 +1057,7 @@ pub async fn branch_consumption(
                     ELSE round(SUM(-m.quantity * m.unit_cost))::bigint END AS consumed_value
         FROM inventory_movements m
         JOIN org_ingredients oi ON oi.id = m.org_ingredient_id
-        WHERE m.branch_id = $1
+        WHERE m.branch_id = ANY($1)
           -- void_restock (positive qty) nets out a voided-and-restocked sale's
           -- negative 'sale' movement so consumption reflects real usage.
           AND m.type IN ('sale','waste','void_restock')
@@ -1005,7 +1067,7 @@ pub async fn branch_consumption(
         ORDER BY consumed_qty DESC
         "#,
     )
-    .bind(*branch_id)
+    .bind(&branch_ids)
     .bind(query.from)
     .bind(query.to)
     .fetch_all(pool.get_ref())
@@ -1032,7 +1094,7 @@ pub async fn branch_waste_report(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
-    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
 
     let rows = sqlx::query_as::<_, WasteReportRow>(
         r#"
@@ -1043,7 +1105,7 @@ pub async fn branch_waste_report(
                     ELSE round(SUM(-m.quantity * m.unit_cost))::bigint END AS waste_value
         FROM inventory_movements m
         JOIN org_ingredients oi ON oi.id = m.org_ingredient_id
-        WHERE m.branch_id = $1
+        WHERE m.branch_id = ANY($1)
           AND m.type = 'waste'
           AND ($2::timestamptz IS NULL OR m.created_at >= $2)
           AND ($3::timestamptz IS NULL OR m.created_at <= $3)
@@ -1051,7 +1113,7 @@ pub async fn branch_waste_report(
         ORDER BY waste_qty DESC
         "#,
     )
-    .bind(*branch_id)
+    .bind(&branch_ids)
     .bind(query.from)
     .bind(query.to)
     .fetch_all(pool.get_ref())
@@ -1183,7 +1245,7 @@ pub async fn branch_shrinkage(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
-    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
 
     let rows = sqlx::query_as::<_, ShrinkageRow>(
         r#"
@@ -1194,14 +1256,14 @@ pub async fn branch_shrinkage(
                     ELSE round(SUM(-m.quantity * m.unit_cost))::bigint END AS shrinkage_value
         FROM inventory_movements m
         JOIN org_ingredients oi ON oi.id = m.org_ingredient_id
-        WHERE m.branch_id = $1 AND m.type = 'stock_count' AND m.quantity < 0
+        WHERE m.branch_id = ANY($1) AND m.type = 'stock_count' AND m.quantity < 0
           AND ($2::timestamptz IS NULL OR m.created_at >= $2)
           AND ($3::timestamptz IS NULL OR m.created_at <= $3)
         GROUP BY COALESCE(m.reason, 'unexplained'), m.org_ingredient_id, oi.name, oi.unit
         ORDER BY shrinkage_qty DESC
         "#,
     )
-    .bind(*branch_id)
+    .bind(&branch_ids)
     .bind(query.from)
     .bind(query.to)
     .fetch_all(pool.get_ref())
@@ -1354,6 +1416,56 @@ async fn require_branch_access(
     Ok(())
 }
 
+/// Resolve a report `{branch_id}` path param into the concrete set of branches
+/// to report over, plus the owning org id. The all-zeros (nil) UUID means
+/// "every branch in the caller's org" — the same scope as the `/reports/orgs/*`
+/// endpoints; any other UUID means that one branch, after the usual access
+/// check. The per-resource `check_permission` gate in each handler still
+/// applies, so this does not widen who may read reports — only the scope.
+async fn resolve_report_branches(
+    pool:      &PgPool,
+    claims:    &Claims,
+    branch_id: Uuid,
+) -> Result<(Vec<Uuid>, Uuid), AppError> {
+    if !branch_id.is_nil() {
+        require_branch_access(pool, claims, branch_id).await?;
+        let org: Uuid = sqlx::query_scalar(
+            "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(branch_id)
+        .fetch_optional(pool)
+        .await?
+        .flatten()
+        .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+        return Ok((vec![branch_id], org));
+    }
+
+    let org = claims
+        .org_id()
+        .ok_or_else(|| AppError::Forbidden("No organization in token".into()))?;
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(org)
+    .fetch_all(pool)
+    .await?;
+    Ok((ids, org))
+}
+
+/// Human label for a report scope: "All branches" for the nil UUID, otherwise
+/// the branch's own name (404 if it does not exist).
+async fn branch_label(pool: &PgPool, branch_id: Uuid) -> Result<String, AppError> {
+    if branch_id.is_nil() {
+        return Ok("All branches".to_string());
+    }
+    sqlx::query_scalar("SELECT name FROM branches WHERE id = $1 AND deleted_at IS NULL")
+        .bind(branch_id)
+        .fetch_optional(pool)
+        .await?
+        .flatten()
+        .ok_or_else(|| AppError::NotFound("Branch not found".into()))
+}
+
 // ── Bundles Reporting ────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -1393,7 +1505,7 @@ pub async fn branch_bundle_sales(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
 
     let rows = sqlx::query_as::<_, BundleSalesRow>(
         r#"
@@ -1404,7 +1516,7 @@ pub async fn branch_bundle_sales(
             SUM(oi.line_total)::bigint AS revenue
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
-        WHERE o.branch_id = $1
+        WHERE o.branch_id = ANY($1)
           AND o.status != 'voided'
           AND oi.bundle_id IS NOT NULL
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
@@ -1413,7 +1525,7 @@ pub async fn branch_bundle_sales(
         ORDER BY quantity_sold DESC
         "#,
     )
-    .bind(*branch_id)
+    .bind(&branch_ids)
     .bind(query.from)
     .bind(query.to)
     .fetch_all(pool.get_ref())
@@ -1440,7 +1552,7 @@ pub async fn branch_combined_item_sales(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
 
     let rows = sqlx::query_as::<_, CombinedItemSalesRow>(
         r#"
@@ -1453,7 +1565,7 @@ pub async fn branch_combined_item_sales(
                 SUM(oi.quantity)::bigint AS qty
             FROM order_items oi
             JOIN orders o ON o.id = oi.order_id
-            WHERE o.branch_id = $1
+            WHERE o.branch_id = ANY($1)
               AND o.status != 'voided'
               AND oi.menu_item_id IS NOT NULL
               AND ($2::timestamptz IS NULL OR o.created_at >= $2)
@@ -1471,7 +1583,7 @@ pub async fn branch_combined_item_sales(
             JOIN order_items oi ON oi.id = bc.order_line_id
             JOIN orders o ON o.id = oi.order_id
             JOIN menu_items mi ON mi.id = bc.item_id
-            WHERE o.branch_id = $1
+            WHERE o.branch_id = ANY($1)
               AND o.status != 'voided'
               AND oi.bundle_id IS NOT NULL
               AND ($2::timestamptz IS NULL OR o.created_at >= $2)
@@ -1491,7 +1603,7 @@ pub async fn branch_combined_item_sales(
         ORDER BY total_qty DESC
         "#,
     )
-    .bind(*branch_id)
+    .bind(&branch_ids)
     .bind(query.from)
     .bind(query.to)
     .fetch_all(pool.get_ref())
@@ -1636,7 +1748,7 @@ pub async fn branch_menu_engineering(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+    let (branch_ids, org_id) = resolve_report_branches(pool.get_ref(), &claims, *branch_id).await?;
     let basis = CostBasis::parse(basis_query.cost_basis.as_deref())?;
 
     #[derive(sqlx::FromRow)]
@@ -1671,7 +1783,7 @@ pub async fn branch_menu_engineering(
         JOIN orders o ON o.id = oi.order_id
         JOIN menu_items mi ON mi.id = oi.menu_item_id
         LEFT JOIN categories c ON c.id = mi.category_id
-        WHERE o.branch_id = $1
+        WHERE o.branch_id = ANY($1)
           AND o.status != 'voided'
           AND oi.menu_item_id IS NOT NULL
           AND oi.bundle_id IS NULL
@@ -1682,7 +1794,7 @@ pub async fn branch_menu_engineering(
         ORDER BY sales DESC
         "#,
     )
-    .bind(*branch_id)
+    .bind(&branch_ids)
     .bind(query.from)
     .bind(query.to)
     .fetch_all(pool.get_ref())
@@ -1693,12 +1805,8 @@ pub async fn branch_menu_engineering(
     // (no recipe, missing ingredient cost, item deleted/deactivated since
     // the sale) become unresolvable, exactly like snapshot cost-missing rows.
     if basis == CostBasis::Current {
-        let org_id: Uuid = sqlx::query_scalar(
-            "SELECT org_id FROM branches WHERE id = $1",
-        )
-        .bind(*branch_id)
-        .fetch_one(pool.get_ref())
-        .await?;
+        // org_id resolved with the scope above — for "all branches" there is no
+        // single branch row to derive it from.
         let current_costs: std::collections::HashMap<(Uuid, String), Option<i64>> =
             crate::costing::org_sku_costs(pool.get_ref(), org_id)
                 .await?

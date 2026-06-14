@@ -19,6 +19,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/branches/{branch_id}/consumption",      web::get().to(handlers::branch_consumption))
             .route("/branches/{branch_id}/waste-report",     web::get().to(handlers::branch_waste_report))
             .route("/branches/{branch_id}/shrinkage",        web::get().to(handlers::branch_shrinkage))
+            .route("/branches/{branch_id}/low-stock",        web::get().to(handlers::branch_low_stock))
             .route("/orgs/{org_id}/comparison",              web::get().to(handlers::org_branch_comparison))
             .route("/orgs/{org_id}/inventory-valuation",     web::get().to(handlers::org_inventory_valuation))
             .route("/orgs/{org_id}/low-stock",               web::get().to(handlers::org_low_stock))

@@ -1023,6 +1023,110 @@ async fn test_org_low_stock_guard_and_supplier(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn test_branch_low_stock_scope_and_all_branches(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id   = seed_org(&pool).await;
+    let branch_a = seed_branch(&pool, org_id).await;
+    // Second branch in the SAME org — distinct name (branches are unique per
+    // org name), so seed_branch's fixed name can't be reused here.
+    let branch_b = {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1,$2,'Test Branch 2')")
+            .bind(id).bind(org_id).execute(&pool).await.unwrap();
+        id
+    };
+    let user_id  = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "inventory", "read").await;
+
+    let beans = seed_ingredient(&pool, org_id, "Beans", "g").await;
+    let milk  = seed_ingredient(&pool, org_id, "Milk", "ml").await;
+    seed_stock_lvl(&pool, branch_a, beans, 2.0,  10.0).await; // A: below
+    seed_stock_lvl(&pool, branch_a, milk,  50.0, 10.0).await; // A: ok
+    seed_stock_lvl(&pool, branch_b, milk,  1.0,  5.0).await;  // B: below
+    seed_stock_lvl(&pool, branch_b, beans, 99.0, 10.0).await; // B: ok
+
+    // A second org with its own low item — must never leak into org_id's view.
+    let other_org    = seed_org(&pool).await;
+    let other_branch = seed_branch(&pool, other_org).await;
+    let other_ing    = seed_ingredient(&pool, other_org, "Sugar", "g").await;
+    seed_stock_lvl(&pool, other_branch, other_ing, 0.5, 5.0).await;
+
+    let token = generate_org_admin_token(user_id, org_id);
+    let auth  = ("Authorization", format!("Bearer {token}"));
+
+    // Branch A only: exactly Beans@A.
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/reports/branches/{branch_a}/low-stock"))
+        .insert_header(auth.clone()).to_request()).await;
+    assert_eq!(resp.status(), 200);
+    let rows: Vec<LowStockRow> = test::read_body_json(resp).await;
+    assert_eq!(rows.len(), 1, "branch A has exactly one below-reorder item");
+    assert_eq!(rows[0].branch_id, branch_a);
+    assert_eq!(rows[0].org_ingredient_id, beans);
+
+    // All branches (nil UUID): Beans@A + Milk@B, each attributed to its branch,
+    // and the other org's Sugar excluded.
+    let nil = Uuid::nil();
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/reports/branches/{nil}/low-stock"))
+        .insert_header(auth.clone()).to_request()).await;
+    assert_eq!(resp.status(), 200);
+    let rows: Vec<LowStockRow> = test::read_body_json(resp).await;
+    assert_eq!(rows.len(), 2, "all-branches sees both org branches' low items");
+    assert!(rows.iter().any(|r| r.branch_id == branch_a && r.org_ingredient_id == beans));
+    assert!(rows.iter().any(|r| r.branch_id == branch_b && r.org_ingredient_id == milk));
+    assert!(!rows.iter().any(|r| r.org_ingredient_id == other_ing),
+        "another org's low stock must never appear in all-branches scope");
+}
+
+#[sqlx::test]
+async fn test_all_branches_nil_aggregates_consumption(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id   = seed_org(&pool).await;
+    let branch_a = seed_branch(&pool, org_id).await;
+    // Second branch in the SAME org — distinct name (branches are unique per
+    // org name), so seed_branch's fixed name can't be reused here.
+    let branch_b = {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1,$2,'Test Branch 2')")
+            .bind(id).bind(org_id).execute(&pool).await.unwrap();
+        id
+    };
+    let user_id  = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "inventory", "read").await;
+    let ing = seed_ingredient(&pool, org_id, "Beans", "g").await;
+    ins_movement(&pool, branch_a, ing, "sale", -10.0, Some(100), None).await;
+    ins_movement(&pool, branch_b, ing, "sale", -6.0,  Some(100), None).await;
+
+    // Another org's consumption must not bleed into the all-branches roll-up.
+    let other_org    = seed_org(&pool).await;
+    let other_branch = seed_branch(&pool, other_org).await;
+    let other_ing    = seed_ingredient(&pool, other_org, "Beans", "g").await;
+    ins_movement(&pool, other_branch, other_ing, "sale", -99.0, Some(100), None).await;
+
+    let token = generate_org_admin_token(user_id, org_id);
+    let auth  = ("Authorization", format!("Bearer {token}"));
+
+    // Single branch A: 10 consumed.
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/reports/branches/{branch_a}/consumption"))
+        .insert_header(auth.clone()).to_request()).await;
+    let rows: Vec<ConsumptionRow> = test::read_body_json(resp).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].consumed_qty, 10.0);
+
+    // All branches (nil): one summed row, 16 = A(10) + B(6); org-isolated.
+    let nil = Uuid::nil();
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/reports/branches/{nil}/consumption"))
+        .insert_header(auth.clone()).to_request()).await;
+    let rows: Vec<ConsumptionRow> = test::read_body_json(resp).await;
+    assert_eq!(rows.len(), 1, "consumption rolls up to one ingredient row");
+    assert_eq!(rows[0].consumed_qty, 16.0);
+    assert_eq!(rows[0].consumed_value, Some(1600));
+}
+
+#[sqlx::test]
 async fn test_consumption_branch_and_org(pool: PgPool) {
     let app = init_app!(pool);
     let org_id = seed_org(&pool).await;
