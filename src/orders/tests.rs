@@ -1069,3 +1069,64 @@ async fn test_bundle_component_swap_converts_units(pool: PgPool) {
     // Milk was swapped out — no milk deduction remains.
     assert!(config.deductions.iter().all(|d| d.org_ingredient_id != Some(milk)));
 }
+
+/// V30: order_payments snapshot is_cash at sale time (cash → true, card → false),
+/// so a later method rename / is_cash flip can't rewrite shift cash history.
+#[sqlx::test]
+async fn test_order_payment_snapshots_is_cash(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await; // seeds cash (is_cash true) + card (is_cash false)
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    let mut body = simple_order(branch_id, shift_id, menu_item_id);
+    body.payment_splits = Some(vec![
+        PaymentSplitInput { method: "cash".into(), amount: 300, reference: None },
+        PaymentSplitInput { method: "card".into(), amount: 270, reference: None },
+    ]);
+    let resp = test::call_service(&app, test::TestRequest::post().uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&body).to_request()).await;
+    assert!(resp.status().is_success());
+    let of: OrderFull = test::read_body_json(resp).await;
+
+    let cash_is_cash: bool = sqlx::query_scalar("SELECT is_cash FROM order_payments WHERE order_id=$1 AND method='cash'")
+        .bind(of.order.id).fetch_one(&pool).await.unwrap();
+    let card_is_cash: bool = sqlx::query_scalar("SELECT is_cash FROM order_payments WHERE order_id=$1 AND method='card'")
+        .bind(of.order.id).fetch_one(&pool).await.unwrap();
+    assert!(cash_is_cash, "cash payment must snapshot is_cash=true");
+    assert!(!card_is_cash, "card payment must snapshot is_cash=false");
+}
+
+/// Alignment: a percentage discount is ROUNDED (matching the POS preview), not
+/// truncated — 10% of 2995 = 299.5 must round to 300, not 299.
+#[sqlx::test]
+async fn test_percentage_discount_is_rounded_not_truncated(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item = Uuid::new_v4();
+    sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price, is_active) VALUES ($1,$2,$3,'P',2995,true)")
+        .bind(item).bind(org_id).bind(cat_id).execute(&pool).await.unwrap();
+
+    let mut body = simple_order(branch_id, shift_id, item);
+    body.discount_type = Some("percentage".to_string());
+    body.discount_value = Some(10);
+    let resp = test::call_service(&app, test::TestRequest::post().uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&body).to_request()).await;
+    assert!(resp.status().is_success());
+    let o: OrderFull = test::read_body_json(resp).await;
+    assert_eq!(o.order.subtotal, 2995);
+    assert_eq!(o.order.discount_amount, 300, "10% of 2995 = 299.5 must round to 300");
+}

@@ -527,3 +527,36 @@ async fn test_delete_user_permission_different_org(pool: PgPool) {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), actix_web::http::StatusCode::FORBIDDEN);
 }
+
+/// V28: a user's still-valid token stops working once their account is
+/// deactivated or soft-deleted (no waiting for the JWT to expire).
+#[sqlx::test]
+async fn test_disabled_user_token_is_rejected(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+    let org_id = seed_org(&pool).await;
+    let user_id = seed_user(&pool, org_id, "Admin", UserRole::OrgAdmin, "dis@t.com").await;
+    let token = generate_token(user_id, Some(org_id), UserRole::OrgAdmin);
+
+    // Active → allowed.
+    let req = test::TestRequest::get().uri("/permissions/roles")
+        .insert_header(("Authorization", format!("Bearer {}", token))).to_request();
+    assert!(test::call_service(&app, req).await.status().is_success(), "active account should work");
+
+    // Deactivated → same token rejected.
+    sqlx::query("UPDATE users SET is_active = false WHERE id = $1").bind(user_id).execute(&pool).await.unwrap();
+    let req = test::TestRequest::get().uri("/permissions/roles")
+        .insert_header(("Authorization", format!("Bearer {}", token))).to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 403, "deactivated account token must be rejected");
+
+    // Re-activated but soft-deleted → still rejected.
+    sqlx::query("UPDATE users SET is_active = true, deleted_at = now() WHERE id = $1").bind(user_id).execute(&pool).await.unwrap();
+    let req = test::TestRequest::get().uri("/permissions/roles")
+        .insert_header(("Authorization", format!("Bearer {}", token))).to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 403, "soft-deleted account token must be rejected");
+}

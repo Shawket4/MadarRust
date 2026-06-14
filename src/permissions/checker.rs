@@ -20,6 +20,21 @@ pub async fn check_permission(
 
     let user_id = claims.user_id();
 
+    // 0. Reject a known-disabled / soft-deleted account (V28): a deactivated or
+    // deleted user must not keep acting until their JWT expires. Resolves to
+    // Some(true) = active, Some(false) = disabled, None = no such row. We deny
+    // only Some(false), so a missing row (service/integration tokens with no
+    // corresponding stored user) still passes through.
+    let account_ok: Option<bool> = sqlx::query_scalar(
+        "SELECT (is_active AND deleted_at IS NULL) FROM users WHERE id = $1"
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    if account_ok == Some(false) {
+        return Err(AppError::Forbidden("Account is disabled".into()));
+    }
+
     // 1. Check per-user override
     let user_override: Option<bool> = sqlx::query_scalar(
         r#"

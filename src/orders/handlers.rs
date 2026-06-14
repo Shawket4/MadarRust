@@ -465,6 +465,18 @@ pub async fn create_order(
     if let Some(dt)  = &body.discount_type      { validate_discount_type(dt)?; }
     if let Some(tpm) = &body.tip_payment_method { validate_payment_method(pool.get_ref(), org_id, tpm).await?; }
 
+    // Snapshot is_cash for every method now, so a later method rename / is_cash
+    // flip can't rewrite this order's contribution to shift cash totals (V30).
+    let pm_is_cash: std::collections::HashMap<String, bool> = sqlx::query_as::<_, (String, bool)>(
+        "SELECT name, is_cash FROM org_payment_methods WHERE org_id = $1"
+    )
+    .bind(org_id)
+    .fetch_all(pool.get_ref())
+    .await?
+    .into_iter()
+    .collect();
+    let is_cash_of = |m: &str| pm_is_cash.get(m).copied().unwrap_or(m == "cash");
+
     let (resolved_discount_type, resolved_discount_value) =
         if let Some(disc_id) = body.discount_id {
             let row: Option<(String, i32)> = sqlx::query_as(
@@ -1082,7 +1094,10 @@ pub async fn create_order(
     }
 
     let discount_amount = match resolved_discount_type.as_deref() {
-        Some("percentage") => (subtotal as f64 * resolved_discount_value as f64 / 100.0) as i32,
+        // Round (half away from zero), NOT truncate, so the discount matches the
+        // POS's rounded preview to the piastre (alignment) and is the correct
+        // currency rounding.
+        Some("percentage") => (subtotal as f64 * resolved_discount_value as f64 / 100.0).round() as i32,
         Some("fixed")      => resolved_discount_value.min(subtotal),
         _                  => 0,
     };
@@ -1091,7 +1106,7 @@ pub async fn create_order(
     let discount_amount = discount_amount.clamp(0, subtotal);
     let taxable      = subtotal - discount_amount;
     let tax_rate_f64: f64 = tax_rate.to_string().parse().unwrap_or(0.14);
-    let tax_amount   = (taxable as f64 * tax_rate_f64) as i32;
+    let tax_amount   = (taxable as f64 * tax_rate_f64).round() as i32;
     let total_amount = taxable + tax_amount;
     let change_given = body.amount_tendered.map(|t| (t - total_amount).max(0));
     let created_at   = body.created_at.unwrap_or_else(chrono::Utc::now);
@@ -1153,6 +1168,14 @@ pub async fn create_order(
     .fetch_one(&mut *tx)
     .await?;
 
+    // Snapshot whether the tip was paid in cash (V30) — only meaningful when a
+    // tip exists; resolves the tip method now so a later rename can't change it.
+    let tip_is_cash: Option<bool> = if body.tip_amount.unwrap_or(0) > 0 {
+        Some(is_cash_of(body.tip_payment_method.as_deref().unwrap_or(&body.payment_method)))
+    } else {
+        None
+    };
+
     let order = match sqlx::query_as::<_, Order>(
         r#"
         INSERT INTO orders
@@ -1161,9 +1184,9 @@ pub async fn create_order(
              discount_amount, tax_amount, total_amount,
              amount_tendered, change_given, tip_amount, tip_payment_method,
              discount_id, customer_name, notes, status,
-             idempotency_key, created_at)
+             idempotency_key, created_at, tip_is_cash)
         VALUES ($1, $2, $3, $4, $5, $6, $7::discount_type, $8,
-                $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'completed', $19, $20)
+                $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'completed', $19, $20, $21)
         RETURNING
             id, branch_id, shift_id, teller_id,
             (SELECT name FROM users WHERE id = $3) AS teller_name,
@@ -1194,6 +1217,7 @@ pub async fn create_order(
     .bind(&body.notes)
     .bind(idempotency_key)
     .bind(created_at)
+    .bind(tip_is_cash)
     .fetch_one(&mut *tx)
     .await
     {
@@ -1226,24 +1250,26 @@ pub async fn create_order(
             }
             validate_payment_method(pool.get_ref(), org_id, &split.method).await?;
             sqlx::query(
-                "INSERT INTO order_payments (order_id, method, amount, reference) \
-                 VALUES ($1, $2, $3, $4)",
+                "INSERT INTO order_payments (order_id, method, amount, reference, is_cash) \
+                 VALUES ($1, $2, $3, $4, $5)",
             )
             .bind(order.id)
             .bind(&split.method)
             .bind(split.amount)
             .bind(&split.reference)
+            .bind(is_cash_of(&split.method))
             .execute(&mut *tx)
             .await?;
         }
     } else {
         sqlx::query(
-            "INSERT INTO order_payments (order_id, method, amount) \
-             VALUES ($1, $2, $3)",
+            "INSERT INTO order_payments (order_id, method, amount, is_cash) \
+             VALUES ($1, $2, $3, $4)",
         )
         .bind(order.id)
         .bind(&body.payment_method)
         .bind(total_amount)
+        .bind(is_cash_of(&body.payment_method))
         .execute(&mut *tx)
         .await?;
     }

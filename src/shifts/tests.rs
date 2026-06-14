@@ -427,3 +427,54 @@ async fn test_teller_token_is_bound_to_login_branch(pool: PgPool) {
         .insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;
     assert_eq!(resp.status(), 200);
 }
+
+/// V30: a closed shift's cash uses the SALE-TIME is_cash snapshot, so flipping
+/// is_cash (or renaming) the payment method afterward does NOT change history.
+#[sqlx::test]
+async fn test_close_cash_uses_is_cash_snapshot(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+    let org_id = seed_org(&pool).await;
+    sqlx::query("INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash, is_active) VALUES ($1,'cash','{}','e','i',true,true)")
+        .bind(org_id).execute(&pool).await.unwrap();
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "shifts", "create").await;
+    grant_permission(&pool, "org_admin", "shifts", "update").await;
+    let token = generate_org_admin_token(user_id, org_id);
+
+    // Open a shift with 1000 opening cash.
+    let shift_id = Uuid::new_v4();
+    let open = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/shifts/branches/{}/open", branch_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&OpenShiftRequest { id: Some(shift_id), opening_cash: 1000, opening_cash_edited: None, edit_reason: None, opened_at: None })
+        .to_request()).await;
+    assert!(open.status().is_success());
+
+    // A completed CASH order of 500, with order_payments.is_cash snapshotted true.
+    let order_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method) VALUES ($1,$2,$3,$4, gen_random_uuid(), 500,0,500,'completed',1,'cash')")
+        .bind(order_id).bind(branch_id).bind(user_id).bind(shift_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ($1,'cash',500,true)")
+        .bind(order_id).execute(&pool).await.unwrap();
+
+    // CORRUPTION: the 'cash' method is later flipped to NOT cash.
+    sqlx::query("UPDATE org_payment_methods SET is_cash=false WHERE org_id=$1 AND name='cash'")
+        .bind(org_id).execute(&pool).await.unwrap();
+
+    // Close: system cash must still be opening 1000 + the cash order 500 = 1500,
+    // because is_cash was snapshotted at sale time (not read from current config).
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/shifts/{}/close", shift_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&CloseShiftRequest { closing_cash_declared: 1500, cash_note: None, closed_at: None })
+        .to_request()).await;
+    assert!(resp.status().is_success());
+    let closed: CloseShiftResponse = test::read_body_json(resp).await;
+    assert_eq!(closed.shift.closing_cash_system.unwrap(), 1500, "cash order must still count via the sale-time snapshot");
+}
