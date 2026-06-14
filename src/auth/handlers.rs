@@ -170,7 +170,11 @@ pub async fn login(
             .await?
             .ok_or_else(|| AppError::Unauthorized("Invalid branch".into()))?;
 
-            // Branch-scoped lookup: teller must be assigned to this branch
+            // ORG-scoped lookup: teller names are unique per org, so resolve the
+            // teller from (name, pin) within the branch's org FIRST. Branch
+            // assignment is checked separately below — that lets us distinguish
+            // "wrong name/pin (or wrong org)" → 401 from "valid teller, but no
+            // access to THIS branch" → 403, instead of conflating both.
             let tellers = sqlx::query_as::<_, User>(
                 r#"
                 SELECT u.id, u.org_id, u.name, u.email, u.phone,
@@ -178,29 +182,44 @@ pub async fn login(
                        u.is_active, u.last_login_at,
                        u.created_at, u.updated_at, u.deleted_at
                 FROM users u
-                JOIN user_branch_assignments uba ON uba.user_id = u.id AND uba.branch_id = $1
-                WHERE LOWER(u.name) = LOWER($2)
-                  AND u.org_id      = $3
+                WHERE LOWER(u.name) = LOWER($1)
+                  AND u.org_id      = $2
                   AND u.pin_hash    IS NOT NULL
                   AND u.role        = 'teller'
                   AND u.is_active   = TRUE
                   AND u.deleted_at  IS NULL
                 "#,
             )
-            .bind(branch_id)
             .bind(name)
             .bind(branch_org_id)
             .fetch_all(pool.get_ref())
             .await?;
 
-            tellers
+            let matched = tellers
                 .into_iter()
                 .find(|u| {
                     u.pin_hash
                         .as_deref()
                         .is_some_and(|h| bcrypt::verify(pin, h).unwrap_or(false))
                 })
-                .ok_or_else(|| AppError::Unauthorized("Invalid PIN".into()))?
+                // No teller in this org matches name+PIN (includes a real teller
+                // from a DIFFERENT org) → generic invalid credentials.
+                .ok_or_else(|| AppError::Unauthorized("Invalid credentials".into()))?;
+
+            // Valid teller for this org — but they must be assigned to this branch.
+            let has_branch_access: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)"
+            )
+            .bind(matched.id)
+            .bind(branch_id)
+            .fetch_one(pool.get_ref())
+            .await?;
+            if !has_branch_access {
+                return Err(AppError::Forbidden(
+                    "Your account is not assigned to this branch.".into(),
+                ));
+            }
+            matched
         }
 
         _ => return Err(AppError::BadRequest(

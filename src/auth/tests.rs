@@ -319,7 +319,7 @@ async fn test_login_pin_invalid_branch_returns_401(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn test_login_pin_teller_not_assigned_to_branch_returns_401(pool: PgPool) {
+async fn test_login_pin_teller_not_assigned_to_branch_returns_403(pool: PgPool) {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
@@ -355,7 +355,12 @@ async fn test_login_pin_teller_not_assigned_to_branch_returns_401(pool: PgPool) 
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 401, "Teller not assigned to that branch should return 401");
+    // Valid teller (correct name+PIN in this org) but NOT assigned to this
+    // branch → a distinct 403, NOT the generic "invalid credentials" 401.
+    assert_eq!(resp.status(), 403, "valid teller without branch access should return 403");
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert!(body["error"].as_str().unwrap_or("").to_lowercase().contains("branch"),
+        "403 error should mention branch access, got {body:?}");
 }
 
 #[sqlx::test(migrations = "./migrations")]
