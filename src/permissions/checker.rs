@@ -35,20 +35,25 @@ pub async fn check_permission(
         return Err(AppError::Forbidden("Account is disabled".into()));
     }
 
-    // 1. Check per-user override
-    let user_override: Option<bool> = sqlx::query_scalar(
-        r#"
-        SELECT granted FROM permissions
-        WHERE user_id  = $1
-          AND resource = $2::permission_resource
-          AND action   = $3::permission_action
-        "#,
-    )
-    .bind(user_id)
-    .bind(resource)
-    .bind(action)
-    .fetch_optional(pool)
-    .await?;
+    // 1. Check per-user override (cached; invalidated on `permissions` writes)
+    let user_override: Option<bool> =
+        crate::cache::user_override(user_id, resource, action, || async move {
+            let v: Option<bool> = sqlx::query_scalar(
+                r#"
+                SELECT granted FROM permissions
+                WHERE user_id  = $1
+                  AND resource = $2::permission_resource
+                  AND action   = $3::permission_action
+                "#,
+            )
+            .bind(user_id)
+            .bind(resource)
+            .bind(action)
+            .fetch_optional(pool)
+            .await?;
+            Ok(v)
+        })
+        .await?;
 
     if let Some(granted) = user_override {
         return if granted {
@@ -69,19 +74,24 @@ pub async fn check_permission(
         UserRole::SuperAdmin    => unreachable!(),
     };
 
-    let role_default: Option<bool> = sqlx::query_scalar(
-        r#"
-        SELECT granted FROM role_permissions
-        WHERE role     = $1::user_role
-          AND resource = $2::permission_resource
-          AND action   = $3::permission_action
-        "#,
-    )
-    .bind(role_str)
-    .bind(resource)
-    .bind(action)
-    .fetch_optional(pool)
-    .await?;
+    let role_default: Option<bool> =
+        crate::cache::role_default(role_str, resource, action, || async move {
+            let v: Option<bool> = sqlx::query_scalar(
+                r#"
+                SELECT granted FROM role_permissions
+                WHERE role     = $1::user_role
+                  AND resource = $2::permission_resource
+                  AND action   = $3::permission_action
+                "#,
+            )
+            .bind(role_str)
+            .bind(resource)
+            .bind(action)
+            .fetch_optional(pool)
+            .await?;
+            Ok(v)
+        })
+        .await?;
 
     match role_default {
         Some(true)  => Ok(()),

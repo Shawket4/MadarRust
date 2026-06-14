@@ -9,6 +9,7 @@
 
 pub mod auth;
 pub mod branches;
+pub mod cache;
 pub mod costing;
 pub mod bundles;
 pub mod discounts;

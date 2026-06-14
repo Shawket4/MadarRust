@@ -116,7 +116,10 @@ async fn main() -> std::io::Result<()> {
         }
 
         app.service(Files::new("/uploads", &uploads_clone).use_last_modified(true))
-    });
+    })
+    // Drop slow/stalled clients so a resource-tight box can't be tied up.
+    .client_request_timeout(std::time::Duration::from_secs(30))
+    .client_disconnect_timeout(std::time::Duration::from_secs(5));
 
     if let Some(tls) = tls_config {
         tracing::info!("HTTPS on {} and HTTP on {}", https_addr, bind_addr);

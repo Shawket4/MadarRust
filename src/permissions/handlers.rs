@@ -222,6 +222,8 @@ pub async fn upsert_user_permission(
     .fetch_one(pool.get_ref())
     .await?;
 
+    crate::cache::invalidate_user_override(*user_id, &body.resource, &body.action).await;
+
     Ok(HttpResponse::Ok().json(perm))
 }
 
@@ -262,6 +264,8 @@ pub async fn delete_user_permission(
     .bind(&action)
     .execute(pool.get_ref())
     .await?;
+
+    crate::cache::invalidate_user_override(user_id, &resource, &action).await;
 
     Ok(HttpResponse::NoContent().finish())
 }
@@ -331,6 +335,8 @@ pub async fn upsert_role_permission(
     .bind(body.granted)
     .fetch_one(pool.get_ref())
     .await?;
+
+    crate::cache::invalidate_role_default(&body.role, &body.resource, &body.action).await;
 
     Ok(HttpResponse::Ok().json(perm))
 }
