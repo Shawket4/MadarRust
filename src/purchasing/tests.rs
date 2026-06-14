@@ -108,6 +108,72 @@ async fn test_receive_purchase_updates_stock_cost_and_movement(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn test_list_orders_all_branches(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    ).await;
+
+    let org_id   = seed_org(&pool).await;
+    let branch_a = seed_branch(&pool, org_id).await;
+    let branch_b = {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1,$2,'Branch B')")
+            .bind(id).bind(org_id).execute(&pool).await.unwrap();
+        id
+    };
+    let user_id = seed_user(&pool, org_id).await;
+    for a in ["create", "read"] { grant(&pool, "purchase_orders", a).await; }
+    let ing = seed_ingredient_g(&pool, org_id).await;
+    let token = org_admin_token(user_id, org_id);
+
+    let mk_po = |branch: Uuid| test::TestRequest::post()
+        .uri(&format!("/purchasing/branches/{branch}/orders"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({
+            "lines": [{"org_ingredient_id": ing, "purchase_unit": "kg", "quantity_ordered": 1.0, "unit_cost": 5000}]
+        })).to_request();
+    assert_eq!(test::call_service(&app, mk_po(branch_a)).await.status(), 201);
+    assert_eq!(test::call_service(&app, mk_po(branch_b)).await.status(), 201);
+
+    // A different org's PO must never appear in this org's all-branches view.
+    let other_org    = seed_org(&pool).await;
+    let other_branch = seed_branch(&pool, other_org).await;
+    let other_user   = seed_user(&pool, other_org).await;
+    let other_ing    = seed_ingredient_g(&pool, other_org).await;
+    let other_token  = org_admin_token(other_user, other_org);
+    test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/purchasing/branches/{other_branch}/orders"))
+        .insert_header(("Authorization", format!("Bearer {other_token}")))
+        .set_json(serde_json::json!({
+            "lines": [{"org_ingredient_id": other_ing, "purchase_unit": "kg", "quantity_ordered": 1.0, "unit_cost": 5000}]
+        })).to_request()).await;
+
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    // All branches (nil UUID): both org branches' POs, branch-labelled, org-isolated.
+    let nil = Uuid::nil();
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/purchasing/branches/{nil}/orders")).insert_header(auth.clone()).to_request()).await;
+    assert_eq!(resp.status(), 200);
+    let pos: Vec<PurchaseOrder> = test::read_body_json(resp).await;
+    assert_eq!(pos.len(), 2, "all-branches sees both org branches' purchase orders");
+    assert!(pos.iter().all(|p| p.branch_name.is_some()), "rows carry a branch label");
+    let seen: std::collections::HashSet<_> = pos.iter().map(|p| p.branch_id).collect();
+    assert!(seen.contains(&branch_a) && seen.contains(&branch_b));
+
+    // A specific branch still scopes to that one branch.
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/purchasing/branches/{branch_a}/orders")).insert_header(auth.clone()).to_request()).await;
+    assert_eq!(resp.status(), 200);
+    let just_a: Vec<PurchaseOrder> = test::read_body_json(resp).await;
+    assert_eq!(just_a.len(), 1);
+    assert_eq!(just_a[0].branch_id, branch_a);
+}
+
+#[sqlx::test]
 async fn test_partial_receive_then_complete(pool: PgPool) {
     let app = test::init_service(
         App::new()

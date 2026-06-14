@@ -50,6 +50,11 @@ pub struct PurchaseOrder {
     pub id:            Uuid,
     pub org_id:        Uuid,
     pub branch_id:     Uuid,
+    /// Branch label — populated by the order lists so the "All branches" view
+    /// can show which branch each PO belongs to; other endpoints leave it null.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub branch_name:   Option<String>,
     pub supplier_id:   Option<Uuid>,
     pub supplier_name: Option<String>,
     pub status:        String,
@@ -424,27 +429,43 @@ pub async fn list_orders(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "purchase_orders", "read").await?;
-    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
 
-    let rows = sqlx::query_as::<_, PurchaseOrder>(
+    // nil UUID = every branch in the caller's org ("All branches"); otherwise the
+    // one branch after the usual access check.
+    let (scope_condition, scope_id): (&str, Uuid) = if branch_id.is_nil() {
+        let org = claims
+            .scope_org(crate::auth::middleware::header_org_id(&req))
+            .ok_or_else(|| AppError::Forbidden("No organization in scope".into()))?;
+        (
+            "po.branch_id IN (SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL)",
+            org,
+        )
+    } else {
+        require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+        ("po.branch_id = $1", *branch_id)
+    };
+
+    let sql = format!(
         r#"
-        SELECT po.id, po.org_id, po.branch_id, po.supplier_id,
+        SELECT po.id, po.org_id, po.branch_id, b.name AS branch_name, po.supplier_id,
                s.name AS supplier_name,
                po.status::text, po.reference, po.note, po.expected_at,
                po.received_at, po.received_by, po.created_by, po.created_at, po.updated_at
         FROM purchase_orders po
+        JOIN branches b       ON b.id = po.branch_id
         LEFT JOIN suppliers s ON s.id = po.supplier_id
-        WHERE po.branch_id = $1
+        WHERE {scope_condition}
           AND ($2::text        IS NULL OR po.status::text = $2)
           AND ($3::timestamptz IS NULL OR po.expected_at <= $3)
         ORDER BY po.created_at DESC
-        "#,
-    )
-    .bind(*branch_id)
-    .bind(&query.status)
-    .bind(query.expected_before)
-    .fetch_all(pool.get_ref())
-    .await?;
+        "#
+    );
+    let rows = sqlx::query_as::<_, PurchaseOrder>(&sql)
+        .bind(scope_id)
+        .bind(&query.status)
+        .bind(query.expected_before)
+        .fetch_all(pool.get_ref())
+        .await?;
 
     Ok(HttpResponse::Ok().json(rows))
 }
@@ -470,11 +491,12 @@ pub async fn list_org_orders(
 
     let rows = sqlx::query_as::<_, PurchaseOrder>(
         r#"
-        SELECT po.id, po.org_id, po.branch_id, po.supplier_id,
+        SELECT po.id, po.org_id, po.branch_id, b.name AS branch_name, po.supplier_id,
                s.name AS supplier_name,
                po.status::text, po.reference, po.note, po.expected_at,
                po.received_at, po.received_by, po.created_by, po.created_at, po.updated_at
         FROM purchase_orders po
+        JOIN branches b       ON b.id = po.branch_id
         LEFT JOIN suppliers s ON s.id = po.supplier_id
         WHERE po.org_id = $1
           AND ($2::text        IS NULL OR po.status::text = $2)
