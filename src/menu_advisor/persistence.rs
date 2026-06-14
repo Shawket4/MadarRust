@@ -766,7 +766,7 @@ pub async fn get_calibration(
             SELECT e.price::bigint AS price, e.effective_from
             FROM menu_item_price_epochs e
             WHERE e.menu_item_id = ps.menu_item_id
-              AND (e.size_label IS NULL OR e.size_label::text = ps.size_label)
+              AND COALESCE(e.size_label::text, 'one_size') = ps.size_label
               AND e.effective_from > d.decided_at
             ORDER BY e.effective_from ASC
             LIMIT 1

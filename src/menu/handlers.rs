@@ -1927,12 +1927,6 @@ pub async fn update_optional_field(
         && qty <= 0.0 {
             return Err(AppError::BadRequest("quantity_used must be greater than 0".into()));
         }
-    // Changing the unit alone would reinterpret the stored (base-unit) quantity.
-    if body.ingredient_unit.is_some() && body.quantity_used.is_none() {
-        return Err(AppError::BadRequest(
-            "provide quantity_used when changing ingredient_unit".into(),
-        ));
-    }
 
     let existing: OptionalField = sqlx::query_as(
         r#"SELECT id, menu_item_id, name, name_translations, price, org_ingredient_id, ingredient_name, ingredient_unit, quantity_used, size_label::text, is_active, created_at, updated_at FROM menu_item_optional_fields WHERE id = $1 AND menu_item_id = $2"#
@@ -1942,6 +1936,19 @@ pub async fn update_optional_field(
     .fetch_optional(pool.get_ref())
     .await?
     .ok_or_else(|| AppError::NotFound("Optional field not found".into()))?;
+
+    // Changing the linked ingredient OR its unit reinterprets the stored
+    // (base-unit) quantity, so a fresh quantity_used must accompany either
+    // change — otherwise the old amount is silently re-read in the new unit (V21).
+    if body.quantity_used.is_none()
+        && (body.ingredient_unit.is_some()
+            || (body.org_ingredient_id.is_some()
+                && body.org_ingredient_id != existing.org_ingredient_id))
+    {
+        return Err(AppError::BadRequest(
+            "provide quantity_used when changing the linked ingredient or its unit".into(),
+        ));
+    }
 
     let mut mut_body = body.into_inner();
     // Normalize a newly-supplied quantity to the linked ingredient's base unit.

@@ -195,6 +195,9 @@ pub async fn create_org(
 
     let currency = fields.currency_code.as_deref().unwrap_or("EGP");
     let tax_rate = fields.tax_rate.unwrap_or(0.14);
+    if !(0.0..=1.0).contains(&tax_rate) {
+        return Err(AppError::BadRequest("tax_rate must be between 0 and 1".into()));
+    }
 
     let mut tx = pool.begin().await?;
 
@@ -337,6 +340,12 @@ pub async fn update_org(
 
         if exists {
             return Err(AppError::Conflict(format!("Slug '{}' is already taken", slug)));
+        }
+    }
+
+    if let Some(r) = body.tax_rate {
+        if !(0.0..=1.0).contains(&r) {
+            return Err(AppError::BadRequest("tax_rate must be between 0 and 1".into()));
         }
     }
 

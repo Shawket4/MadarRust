@@ -320,3 +320,57 @@ async fn test_bundle_activation_and_rules(pool: PgPool) {
     let resp6 = test::call_service(&app, req6).await;
     assert_eq!(resp6.status().as_u16(), 400);
 }
+
+/// V24: a bundle whose component has an UNKNOWN ingredient cost (a recipe line
+/// with no linked ingredient) must NOT be activatable — otherwise the
+/// undercounted cost lets an under-priced bundle slip past the margin floor.
+#[sqlx::test]
+async fn test_bundle_activation_blocked_on_unknown_component_cost(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+    let org_id = seed_org(&pool).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "menu_items", "create").await;
+    grant_permission(&pool, "org_admin", "menu_items", "read").await;
+    grant_permission(&pool, "org_admin", "menu_items", "update").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let cat_id = seed_category(&pool, org_id).await;
+    let ing = seed_ingredient(&pool, org_id, Decimal::from(100)).await;
+    let item1 = seed_menu_item(&pool, org_id, cat_id, 500).await;
+    let item2 = seed_menu_item(&pool, org_id, cat_id, 500).await;
+
+    // item1: one linked recipe line + one UNLINKED line → true cost UNKNOWN.
+    link_recipe(&pool, item1, ing, 1.0).await;
+    sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, ingredient_name, ingredient_unit, quantity_used, size_label) VALUES ($1, NULL, 'Spice', 'g', 5.0, 'one_size'::item_size)")
+        .bind(item1).execute(&pool).await.unwrap();
+    // item2: fully linked → cost known.
+    link_recipe(&pool, item2, ing, 1.0).await;
+
+    // Draft creation succeeds (no cost check at create).
+    let resp = test::call_service(&app, test::TestRequest::post().uri("/bundles")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&CreateBundleRequest {
+            org_id, name: "Combo".into(), name_translations: None,
+            description: None, description_translations: None,
+            price: 800, image_url: None,
+            available_from_time: None, available_until_time: None,
+            available_from_date: None, available_until_date: None,
+            branch_ids: None,
+            components: vec![
+                CreateBundleComponentInput { item_id: item1, quantity: 1, position: None },
+                CreateBundleComponentInput { item_id: item2, quantity: 1, position: None },
+            ],
+        }).to_request()).await;
+    assert!(resp.status().is_success(), "draft create should succeed");
+    let bundle: BundleWithComponents = test::read_body_json(resp).await;
+
+    // Activation is BLOCKED because item1's cost is unknown.
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/bundles/{}/activate", bundle.bundle.id))
+        .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
+    assert_eq!(resp.status(), 400, "activation must be blocked on unknown component cost");
+}

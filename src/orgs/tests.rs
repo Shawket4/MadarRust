@@ -446,3 +446,38 @@ async fn test_onboarding_checklist_and_complete(pool: PgPool) {
         assert!(body["completed_at"].is_string());
     }
 }
+
+/// V16: tax_rate outside [0, 1] must be rejected (negative or >100%).
+#[sqlx::test]
+async fn test_update_org_rejects_out_of_range_tax_rate(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+    let org_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO organizations (id, name, slug, tax_rate) VALUES ($1,'O','o-tax-16',0.14)")
+        .bind(org_id).execute(&pool).await.unwrap();
+    let token = generate_super_admin_token();
+
+    for bad in [-0.5_f64, 5.0_f64] {
+        let resp = test::call_service(&app, test::TestRequest::patch()
+            .uri(&format!("/orgs/{}", org_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&serde_json::json!({"tax_rate": bad})).to_request()).await;
+        assert_eq!(resp.status(), 400, "tax_rate {bad} must be rejected");
+    }
+
+    // The persisted value is unchanged by the rejected calls.
+    let tr: sqlx::types::BigDecimal = sqlx::query_scalar("SELECT tax_rate FROM organizations WHERE id=$1")
+        .bind(org_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(tr.to_string().parse::<f64>().unwrap(), 0.14);
+
+    // A valid rate is accepted.
+    let resp = test::call_service(&app, test::TestRequest::patch()
+        .uri(&format!("/orgs/{}", org_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&serde_json::json!({"tax_rate": 0.2})).to_request()).await;
+    assert!(resp.status().is_success());
+}

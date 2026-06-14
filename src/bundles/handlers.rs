@@ -3,8 +3,6 @@ use chrono::{DateTime, Utc, NaiveTime, NaiveDate};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
-use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
 use actix_web::HttpMessage;
 
 use crate::{
@@ -207,20 +205,24 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
         .ok_or_else(|| AppError::Unauthorized("Missing claims".into()))
 }
 
-pub async fn compute_item_cost(pool: &PgPool, item_id: Uuid) -> Result<i32, sqlx::Error> {
-    // cost_per_unit is stored in piastres — no currency conversion. The
-    // rollup NULL-propagates: any ingredient without an entered cost makes
-    // the whole recipe cost unknown (plain SUM would silently skip NULLs
-    // and undercount). Unknown ⟹ 0 here, meaning "no margin floor to
-    // enforce" for bundle activation — never "free".
+/// Roll up a menu item's ingredient cost in piastres. Returns:
+///   * `Some(0)`   — the item has no recipe lines (no tracked ingredient cost),
+///   * `Some(sum)` — every recipe line is linked to a costed ingredient,
+///   * `None`      — UNKNOWN: at least one recipe line is unlinked or uncosted.
+///
+/// A LEFT JOIN keeps unlinked recipe rows visible so they flip the result to
+/// unknown instead of being silently dropped (which undercounted cost and let
+/// an under-priced bundle slip past the activation margin floor).
+pub async fn compute_item_cost(pool: &PgPool, item_id: Uuid) -> Result<Option<i32>, sqlx::Error> {
     let cost: Option<f64> = sqlx::query_scalar(
         r#"
         SELECT CASE
-            WHEN bool_or(i.cost_per_unit IS NULL) THEN NULL
+            WHEN COUNT(*) = 0 THEN 0
+            WHEN bool_or(r.org_ingredient_id IS NULL OR i.cost_per_unit IS NULL) THEN NULL
             ELSE SUM(r.quantity_used::float8 * i.cost_per_unit::float8)
         END
         FROM menu_item_recipes r
-        JOIN org_ingredients i ON i.id = r.org_ingredient_id
+        LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id
         WHERE r.menu_item_id = $1
           AND r.size_label = COALESCE(
               (SELECT size_label FROM menu_item_recipes WHERE menu_item_id = $1 LIMIT 1),
@@ -233,7 +235,7 @@ pub async fn compute_item_cost(pool: &PgPool, item_id: Uuid) -> Result<i32, sqlx
     .await?
     .flatten();
 
-    Ok(cost.unwrap_or(0.0).round() as i32)
+    Ok(cost.map(|c| c.round() as i32))
 }
 
 pub async fn fetch_bundle_full(pool: &PgPool, id: Uuid) -> Result<Option<BundleWithComponents>, AppError> {
@@ -269,7 +271,8 @@ pub async fn fetch_bundle_full(pool: &PgPool, id: Uuid) -> Result<Option<BundleW
     let mut computed_cost = 0;
 
     for row in component_rows {
-        let item_cost = compute_item_cost(pool, row.2).await?;
+        // Display rollup: an unknown component cost shows as 0 here.
+        let item_cost = compute_item_cost(pool, row.2).await?.unwrap_or(0);
         computed_cost += item_cost * row.3;
 
         components.push(BundleComponentHydrated {
@@ -348,7 +351,16 @@ async fn validate_bundle_rules(
 
         sum_list_prices += item_info.2 * c.quantity;
 
-        let item_cost = compute_item_cost(pool, c.item_id).await?;
+        // Block activation when a component's cost is UNKNOWN — otherwise an
+        // undercounted/zeroed cost lets an under-priced bundle pass the margin
+        // floor (V24). Drafts can still be created; link all recipe ingredients
+        // before activating.
+        let Some(item_cost) = compute_item_cost(pool, c.item_id).await? else {
+            return Err(AppError::BadRequest(format!(
+                "Component {} has an unknown ingredient cost — link all recipe ingredients before activating the bundle",
+                item_info.0
+            )));
+        };
         sum_costs += item_cost * c.quantity;
     }
 
@@ -1132,14 +1144,18 @@ pub async fn bundle_performance(
     .fetch_all(pool.get_ref())
     .await?;
 
-    // Net profit (gross revenue - sum of component ingredient costs using historical snapshot)
-    let deductions_rows: Vec<serde_json::Value> = sqlx::query_scalar(
+    // Net profit from the SALE-TIME COGS snapshot (order_items.line_cost), NOT
+    // current ingredient costs, and only over lines whose cost was known at sale
+    // time — lines flagged cost_missing are excluded entirely rather than counted
+    // as zero-cost (which would silently inflate profit) (V25).
+    let net_profit: i64 = sqlx::query_scalar(
         r#"
-        SELECT oi.deductions_snapshot
+        SELECT COALESCE(SUM(oi.line_total - COALESCE(oi.line_cost, 0)), 0)::int8
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
         WHERE oi.bundle_id = $1
           AND o.status != 'voided'
+          AND oi.cost_missing = false
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         "#
@@ -1147,46 +1163,8 @@ pub async fn bundle_performance(
     .bind(id)
     .bind(query.start_date)
     .bind(query.end_date)
-    .fetch_all(pool.get_ref())
+    .fetch_one(pool.get_ref())
     .await?;
-
-    let mut ing_qty_map = std::collections::HashMap::new();
-    for snapshot in deductions_rows {
-        if let Some(arr) = snapshot.as_array() {
-            for d in arr {
-                if let (Some(qty), Some(ing_id_str)) = (
-                    d.get("quantity").and_then(|v| v.as_f64()),
-                    d.get("org_ingredient_id").and_then(|v| v.as_str()),
-                )
-                    && let Ok(ing_id) = Uuid::parse_str(ing_id_str) {
-                        *ing_qty_map.entry(ing_id).or_insert(0.0) += qty;
-                    }
-            }
-        }
-    }
-
-    let mut total_cost = 0;
-    if !ing_qty_map.is_empty() {
-        let ing_ids: Vec<Uuid> = ing_qty_map.keys().cloned().collect();
-        let decimal_costs: Vec<(Uuid, Option<Decimal>)> = sqlx::query_as(
-            "SELECT id, cost_per_unit FROM org_ingredients WHERE id = ANY($1)"
-        )
-        .bind(&ing_ids)
-        .fetch_all(pool.get_ref())
-        .await?;
-
-        for (id, cost) in decimal_costs {
-            // cost_per_unit is piastres; NULL = never entered, contributes
-            // nothing (the figure is a best-effort profit estimate).
-            let Some(cost) = cost else { continue };
-            let piastres = cost.round().to_i32().unwrap_or(0);
-            if let Some(qty) = ing_qty_map.get(&id) {
-                total_cost += (*qty * piastres as f64).round() as i64;
-            }
-        }
-    }
-
-    let net_profit = gross_revenue - total_cost;
 
     Ok(HttpResponse::Ok().json(BundlePerformanceResponse {
         sales_volume,

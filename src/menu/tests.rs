@@ -917,3 +917,51 @@ async fn test_public_menu_is_rate_limited(pool: PgPool) {
     }
     assert!(got_429, "expected a 429 once the burst was exceeded");
 }
+
+/// V21: changing an optional field's linked ingredient without resupplying
+/// quantity_used must be rejected — the stored base-unit quantity would
+/// otherwise be silently reinterpreted in the new ingredient's base unit.
+#[sqlx::test]
+async fn test_update_optional_field_swap_ingredient_requires_quantity(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+    let org_id = seed_org(&pool).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "menu_items", "update").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let cat_id = seed_category(&pool, org_id, "Mains").await;
+    let item_id = seed_menu_item(&pool, org_id, cat_id, "Coffee", 500).await;
+    let flour = seed_ingredient(&pool, org_id, "Flour", "g").await;
+    let sugar = seed_ingredient(&pool, org_id, "Sugar", "kg").await;
+
+    // Optional field linked to flour, 100 g.
+    let create = CreateOptionalFieldRequest {
+        name: "Extra".into(), name_translations: None, price: Some(0),
+        org_ingredient_id: Some(flour), ingredient_name: Some("Flour".into()),
+        ingredient_unit: Some("g".into()), quantity_used: Some(100.0), size_label: None,
+    };
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/menu-items/{}/optionals", item_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&create).to_request()).await;
+    assert!(resp.status().is_success());
+    let field: OptionalField = test::read_body_json(resp).await;
+
+    // Swap the linked ingredient to sugar (kg) WITHOUT a fresh quantity → 400.
+    let resp = test::call_service(&app, test::TestRequest::patch()
+        .uri(&format!("/menu-items/{}/optionals/{}", item_id, field.id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&serde_json::json!({"org_ingredient_id": sugar})).to_request()).await;
+    assert_eq!(resp.status(), 400, "swapping the linked ingredient requires a fresh quantity_used");
+
+    // Supplying a quantity makes the swap succeed.
+    let resp = test::call_service(&app, test::TestRequest::patch()
+        .uri(&format!("/menu-items/{}/optionals/{}", item_id, field.id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&serde_json::json!({"org_ingredient_id": sugar, "ingredient_unit": "g", "quantity_used": 50.0})).to_request()).await;
+    assert!(resp.status().is_success(), "swap with a fresh quantity must succeed");
+}
