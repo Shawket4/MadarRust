@@ -795,3 +795,44 @@ async fn test_me_returns_org_tax_rate(pool: PgPool) {
     assert!((body.tax_rate - 0.14).abs() < 1e-9, "me must expose org tax_rate, got {}", body.tax_rate);
     assert_eq!(body.currency_code, "EGP");
 }
+
+/// Open-shift login rule (different teller, same branch → reject): a teller may
+/// not sign in at a branch that already holds another teller's open shift.
+#[sqlx::test(migrations = "./migrations")]
+async fn test_pin_login_blocked_when_branch_has_other_tellers_open_shift(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org_id).await;
+    let other_branch = seed_branch(&pool, org_id).await;
+
+    // Alice has an OPEN shift at `branch`.
+    let alice = Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, org_id, name, role, pin_hash) VALUES ($1,$2,'Alice','teller'::user_role,$3)")
+        .bind(alice).bind(org_id).bind(bcrypt::hash("1111", bcrypt::DEFAULT_COST).unwrap()).execute(&pool).await.unwrap();
+    assign_teller_to_branch(&pool, alice, branch).await;
+    sqlx::query("INSERT INTO shifts (branch_id, teller_id, opening_cash) VALUES ($1,$2,0)")
+        .bind(branch).bind(alice).execute(&pool).await.unwrap();
+
+    // Bob (no open shift) is assigned to both branches.
+    let bob = Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, org_id, name, role, pin_hash) VALUES ($1,$2,'Bob','teller'::user_role,$3)")
+        .bind(bob).bind(org_id).bind(bcrypt::hash("2222", bcrypt::DEFAULT_COST).unwrap()).execute(&pool).await.unwrap();
+    assign_teller_to_branch(&pool, bob, branch).await;
+    assign_teller_to_branch(&pool, bob, other_branch).await;
+
+    let login = |b: Uuid| test::TestRequest::post().uri("/auth/login")
+        .set_json(&json!({"name":"Bob","pin":"2222","branch_id": b})).to_request();
+
+    // Bob at Alice's open-shift branch → blocked.
+    assert_eq!(test::call_service(&app, login(branch)).await.status(), 409,
+        "a different teller must not sign in at a branch with someone else's open shift");
+    // Bob at a branch with no open shift → allowed.
+    assert_eq!(test::call_service(&app, login(other_branch)).await.status(), 200,
+        "a branch with no open shift accepts a fresh teller login");
+}

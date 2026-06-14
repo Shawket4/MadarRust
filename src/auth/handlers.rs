@@ -212,10 +212,14 @@ pub async fn login(
         return Err(AppError::Unauthorized("Account is disabled".into()));
     }
 
-    // A teller with an OPEN shift may re-login at the SAME branch as that shift
-    // (e.g. to resume after a token expiry — otherwise they'd be locked out of
-    // the very shift they need to close), but NOT at a different branch (which
-    // would make them live in two places at once). Surfaced as an error state.
+    // Open-shift login rules (authoritative — the backend is the source of truth):
+    //   • same teller, SAME branch as their open shift  → allow (resume; e.g.
+    //     after a token expiry — don't lock them out of the shift they must close)
+    //   • same teller, DIFFERENT branch                 → reject (no two live places)
+    //   • DIFFERENT teller, a branch that already has someone else's open shift
+    //                                                    → reject (can't take it over)
+    //
+    // (1) This teller's own open shift must be at the branch they're signing into.
     let open_shift_branch: Option<Uuid> = sqlx::query_scalar(
         "SELECT branch_id FROM shifts WHERE teller_id = $1 AND status = 'open'"
     )
@@ -226,15 +230,36 @@ pub async fn login(
         && body.branch_id != Some(open_branch) {
         tracing::warn!(
             target: "auth.login.blocked_open_shift",
-            user_id = %user.id,
-            role = ?user.role,
-            open_shift_branch = %open_branch,
-            attempted_branch = ?body.branch_id,
+            user_id = %user.id, role = ?user.role,
+            open_shift_branch = %open_branch, attempted_branch = ?body.branch_id,
             "login blocked: user has an open shift at a different branch"
         );
         return Err(AppError::Conflict(
             "You already have an open shift at another branch. Close it before signing in here.".into(),
         ));
+    }
+
+    // (2) The branch being signed into must not already hold a DIFFERENT teller's
+    //     open shift.
+    if let Some(branch) = body.branch_id {
+        let other_teller: Option<String> = sqlx::query_scalar(
+            "SELECT u.name FROM shifts s JOIN users u ON u.id = s.teller_id \
+             WHERE s.branch_id = $1 AND s.status = 'open' AND s.teller_id <> $2"
+        )
+        .bind(branch)
+        .bind(user.id)
+        .fetch_optional(pool.get_ref())
+        .await?;
+        if let Some(name) = other_teller {
+            tracing::warn!(
+                target: "auth.login.blocked_branch_shift",
+                user_id = %user.id, attempted_branch = %branch,
+                "login blocked: branch already has another teller's open shift"
+            );
+            return Err(AppError::Conflict(format!(
+                "This branch has an open shift belonging to {name}. It must be closed before signing in here."
+            )));
+        }
     }
 
     let token_branch_id = if user.role == UserRole::Teller {
