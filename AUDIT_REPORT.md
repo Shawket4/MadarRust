@@ -152,9 +152,13 @@ Each entry: root cause → fix (file) → guarding test.
 **Money-math alignment (frontend ↔ backend):**
 - Percentage discount and tax now **round** (half away from zero) instead of truncating, matching the POS's rounded preview to the piastre (`orders::test_percentage_discount_is_rounded_not_truncated`). The dashboard's `egpToPiastres` was likewise switched to `Math.round`. Verified the generated clients are in sync: regenerating the dashboard Orval client and the POS `sufrix_api` package against the current `openapi.json` produced no contract change.
 
+**Tax made first-class across the stack (feature, on request):**
+- `/auth/login` + `/auth/me` now return the org `tax_rate` + `currency_code` (OpenAPI regenerated; both generated clients regenerate to no-diff → in sync).
+- **POS** computes a tax-inclusive cart total matching the backend exactly (`round((subtotal−discount)×rate)`), validates tender/splits against it, shows a Tax line. Backward-compatible (rate 0 ⇒ unchanged). `flutter test` 325/0.
+- **Dashboard** surfaces tax: order detail (already there), an orders-list Tax column, an analytics "Tax" stat (`total_tax`); menu engineering is noted pre-tax (tax is order-level, not per-item).
+
 **Still genuinely deferred (design, not a defect):**
 - **V29 — cancelling a partially-received PO leaves received stock** — correct by design.
-- **POS tax-inclusive cart total** — the POS computes a tax-free total while the backend adds tax. **No current impact** (every org has `tax_rate = 0`); making the POS tax-aware (fetch `tax_rate`, compute + display tax) is a *feature*, documented in `sufrix_pos/AUDIT_REPORT.md`.
 
 ---
 
