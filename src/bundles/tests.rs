@@ -374,3 +374,47 @@ async fn test_bundle_activation_blocked_on_unknown_component_cost(pool: PgPool) 
         .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
     assert_eq!(resp.status(), 400, "activation must be blocked on unknown component cost");
 }
+
+/// V25: bundle_performance net_profit must use the SALE-TIME COGS snapshot
+/// (order_items.line_cost), not current ingredient costs.
+#[sqlx::test]
+async fn test_bundle_performance_uses_snapshot_cost(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+    let org_id = seed_org(&pool).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "menu_items", "read").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let ing = seed_ingredient(&pool, org_id, Decimal::from(100)).await;
+
+    // A bundle, a branch/shift, and a completed order with one bundle line whose
+    // sale-time COGS snapshot (line_cost) is 100 and revenue (line_total) is 300.
+    let bundle_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO bundles (id, org_id, name, price, status) VALUES ($1,$2,'B',300,'active'::bundle_status)")
+        .bind(bundle_id).bind(org_id).execute(&pool).await.unwrap();
+    let branch_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1,$2,'Br')").bind(branch_id).bind(org_id).execute(&pool).await.unwrap();
+    let shift_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO shifts (id, branch_id, teller_id, status, opening_cash) VALUES ($1,$2,$3,'open',0)")
+        .bind(shift_id).bind(branch_id).bind(user_id).execute(&pool).await.unwrap();
+    let order_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method) VALUES ($1,$2,$3,$4, gen_random_uuid(), 300, 0, 300, 'completed', 1, 'cash')")
+        .bind(order_id).bind(branch_id).bind(user_id).bind(shift_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO order_items (order_id, bundle_id, item_name, unit_price, quantity, line_total, line_cost, cost_missing) VALUES ($1,$2,'B',300,1,300,100,false)")
+        .bind(order_id).bind(bundle_id).execute(&pool).await.unwrap();
+
+    // The ingredient's CURRENT cost changes — the report must IGNORE it.
+    sqlx::query("UPDATE org_ingredients SET cost_per_unit = 500 WHERE id = $1").bind(ing).execute(&pool).await.unwrap();
+
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/bundles/{}/performance", bundle_id))
+        .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
+    assert!(resp.status().is_success());
+    let perf: BundlePerformanceResponse = test::read_body_json(resp).await;
+    assert_eq!(perf.gross_revenue, 300);
+    assert_eq!(perf.net_profit, 200, "net_profit must be 300 - sale-time 100, not affected by current cost");
+}
