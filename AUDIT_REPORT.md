@@ -143,11 +143,18 @@ Each entry: root cause → fix (file) → guarding test.
 - **V23 — `units::convert` negative qty** — unreachable; no caller can pass a negative quantity (recipe/order inputs are validated `> 0`).
 - **V29 — cancelling a partially-received PO leaves received stock** — correct by design (received goods are physically in inventory).
 
-**Confirmed but intentionally deferred (design / risk — documented, not changed):**
-- **V28 — deactivated/soft-deleted user keeps access until JWT expiry.**
-  *Why not fixed:* this is a property of stateless JWT. A per-request `is_active`/`deleted_at` check would add a DB hit to every request **and** break the many tests (and any tooling) that mint tokens for users not present in `users`. *Recommended:* short token TTL (already hours) + an explicit revocation list / token-version column checked in middleware — a deliberate design decision, not a one-line fix.
-- **V30 — renaming a payment method (or flipping `is_cash`) corrupts historical shift cash.**
-  *Why not fixed minimally:* `close_shift` joins `order_payments.method` (a name snapshot) to the **current** `org_payment_methods` by name. A correct fix is a data-model change — snapshot `is_cash` (or store `method_id`) on `order_payments` at sale time — plus a backfill. That exceeds a minimal bug fix. *Recommended:* add `order_payments.is_cash_at_sale boolean` written at insert, and reconcile from it; optionally block renaming/`is_cash`-flip while a method is referenced by open shifts.
+**Initially deferred, then fixed on request:**
+- **V28 — deactivated/soft-deleted user keeps access until JWT expiry → FIXED.**
+  `check_permission` now resolves `is_active AND deleted_at IS NULL` for the token's user and rejects `Some(false)` (a disabled/deleted account) with 403. A **missing** row still passes (so service/integration tokens and tests that mint tokens for non-stored users keep working) — a deactivated *real* user is stopped immediately. Guarded by `permissions::test_disabled_user_token_is_rejected`.
+- **V30 — renaming a payment method / flipping `is_cash` corrupts historical shift cash → FIXED.**
+  Added `order_payments.is_cash` and `orders.tip_is_cash`, snapshotted at sale time (migration `20260614010000`, with best-effort backfill). `close_shift` and the shift report now read those snapshots (with a `method='cash'` fallback for legacy rows) instead of joining `org_payment_methods` by name, so later config changes can't rewrite a closed shift's cash. Guarded by `orders::test_order_payment_snapshots_is_cash` + `shifts::test_close_cash_uses_is_cash_snapshot`.
+
+**Money-math alignment (frontend ↔ backend):**
+- Percentage discount and tax now **round** (half away from zero) instead of truncating, matching the POS's rounded preview to the piastre (`orders::test_percentage_discount_is_rounded_not_truncated`). The dashboard's `egpToPiastres` was likewise switched to `Math.round`. Verified the generated clients are in sync: regenerating the dashboard Orval client and the POS `sufrix_api` package against the current `openapi.json` produced no contract change.
+
+**Still genuinely deferred (design, not a defect):**
+- **V29 — cancelling a partially-received PO leaves received stock** — correct by design.
+- **POS tax-inclusive cart total** — the POS computes a tax-free total while the backend adds tax. **No current impact** (every org has `tax_rate = 0`); making the POS tax-aware (fetch `tax_rate`, compute + display tax) is a *feature*, documented in `sufrix_pos/AUDIT_REPORT.md`.
 
 ---
 
