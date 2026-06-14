@@ -59,6 +59,12 @@ pub struct LoginResponse {
     /// JWT to send as `Authorization: Bearer <token>` on subsequent requests.
     pub token: String,
     pub user:  UserPublic,
+    /// Org tax rate as a decimal (e.g. 0.14 = 14% VAT); 0.0 when no org. Mirrors
+    /// /auth/me so the POS has it immediately after login.
+    #[schema(example = 0.14)]
+    pub tax_rate: f64,
+    #[schema(example = "EGP")]
+    pub currency_code: String,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -268,12 +274,25 @@ pub async fn login(
         .flatten()
     };
 
+    let (tax_rate, currency_code): (f64, String) = match user.org_id {
+        Some(org_id) => sqlx::query_as(
+            "SELECT COALESCE(tax_rate, 0)::float8, currency_code FROM organizations WHERE id = $1"
+        )
+        .bind(org_id)
+        .fetch_optional(pool.get_ref())
+        .await?
+        .unwrap_or((0.0, "EGP".to_string())),
+        None => (0.0, "EGP".to_string()),
+    };
+
     let mut user_public = UserPublic::from(user);
     user_public.branch_id = branch_id_for_response;
 
     Ok(HttpResponse::Ok().json(LoginResponse {
         token,
         user: user_public,
+        tax_rate,
+        currency_code,
     }))
 }
 
