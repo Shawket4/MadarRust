@@ -21849,9 +21849,22 @@
       "MeResponse": {
         "type": "object",
         "required": [
-          "user"
+          "user",
+          "tax_rate",
+          "currency_code"
         ],
         "properties": {
+          "currency_code": {
+            "type": "string",
+            "description": "Org currency code (e.g. \"EGP\").",
+            "example": "EGP"
+          },
+          "tax_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "Org tax rate as a decimal (e.g. 0.14 = 14% VAT); 0.0 when the user has no\norg. Exposed so the POS can compute a tax-inclusive cart total client-side.",
+            "example": 0.14
+          },
           "user": {
             "$ref": "#/components/schemas/UserPublic"
           }

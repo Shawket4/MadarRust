@@ -64,6 +64,13 @@ pub struct LoginResponse {
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct MeResponse {
     pub user: UserPublic,
+    /// Org tax rate as a decimal (e.g. 0.14 = 14% VAT); 0.0 when the user has no
+    /// org. Exposed so the POS can compute a tax-inclusive cart total client-side.
+    #[schema(example = 0.14)]
+    pub tax_rate: f64,
+    /// Org currency code (e.g. "EGP").
+    #[schema(example = "EGP")]
+    pub currency_code: String,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -314,10 +321,22 @@ pub async fn me(
     .fetch_optional(pool.get_ref())
     .await?;
 
+    // Org-level config the POS needs for a tax-inclusive cart total.
+    let (tax_rate, currency_code): (f64, String) = match user.org_id {
+        Some(org_id) => sqlx::query_as(
+            "SELECT COALESCE(tax_rate, 0)::float8, currency_code FROM organizations WHERE id = $1"
+        )
+        .bind(org_id)
+        .fetch_optional(pool.get_ref())
+        .await?
+        .unwrap_or((0.0, "EGP".to_string())),
+        None => (0.0, "EGP".to_string()),
+    };
+
     let mut user_public = UserPublic::from(user);
     user_public.branch_id = branch_id;
 
-    Ok(HttpResponse::Ok().json(MeResponse { user: user_public }))
+    Ok(HttpResponse::Ok().json(MeResponse { user: user_public, tax_rate, currency_code }))
 }
 
 // ── POST /auth/resolve-branch ────────────────────────────────

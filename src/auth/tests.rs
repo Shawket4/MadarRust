@@ -766,3 +766,30 @@ async fn test_pin_login_blocked_while_any_open_shift(pool: PgPool) {
     assert_eq!(test::call_service(&app, login(branch_a)).await.status(), 200,
         "login must succeed once the open shift is closed");
 }
+
+/// /auth/me exposes the org tax_rate + currency so the POS can compute a
+/// tax-inclusive cart total client-side.
+#[sqlx::test(migrations = "./migrations")]
+async fn test_me_returns_org_tax_rate(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    sqlx::query("UPDATE organizations SET tax_rate = 0.14, currency_code = 'EGP' WHERE id = $1")
+        .bind(org_id).execute(&pool).await.unwrap();
+    let user_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, org_id, name, role, email, password_hash) VALUES ($1,$2,'U','org_admin'::user_role,'tx@test.com','h')")
+        .bind(user_id).bind(org_id).execute(&pool).await.unwrap();
+    let token = generate_token(user_id, Some(org_id), UserRole::OrgAdmin);
+
+    let resp = test::call_service(&app, test::TestRequest::get().uri("/auth/me")
+        .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
+    assert_eq!(resp.status(), 200);
+    let body: MeResponse = test::read_body_json(resp).await;
+    assert!((body.tax_rate - 0.14).abs() < 1e-9, "me must expose org tax_rate, got {}", body.tax_rate);
+    assert_eq!(body.currency_code, "EGP");
+}
