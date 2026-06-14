@@ -1297,6 +1297,104 @@ async fn test_list_transfers(pool: PgPool) {
     assert_eq!(transfers_both.len(), 2);
 }
 
+/// nil {branch_id} = "All branches": list_transfers and list_waste both roll up
+/// every branch in the caller's org (and never another org's rows), while a
+/// specific {branch_id} still scopes to that one branch.
+#[sqlx::test]
+async fn test_list_transfers_and_waste_all_branches(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    ).await;
+
+    let org_id   = seed_org(&pool).await;
+    let branch_a = seed_branch(&pool, org_id).await;
+    let branch_b = seed_branch(&pool, org_id).await;
+    let admin    = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "inventory_transfers", "read").await;
+    grant_permission(&pool, "org_admin", "inventory_waste", "read").await;
+    let token = generate_org_admin_token(admin, org_id);
+    let auth  = ("Authorization", format!("Bearer {token}"));
+
+    let ing = seed_ingredient(&pool, org_id, "Tomato", "kg").await;
+
+    // One transfer touching each branch: A→B and B→A.
+    sqlx::query(
+        "INSERT INTO branch_inventory_transfers (org_id, source_branch_id, destination_branch_id, org_ingredient_id, quantity, note, initiated_by) \
+         VALUES ($1, $2, $3, $4, 5.0, 'A to B', $5), \
+                ($1, $3, $2, $4, 3.0, 'B to A', $5)"
+    )
+    .bind(org_id).bind(branch_a).bind(branch_b).bind(ing).bind(admin)
+    .execute(&pool).await.unwrap();
+
+    // One waste movement in each branch.
+    for branch in [branch_a, branch_b] {
+        sqlx::query(
+            "INSERT INTO inventory_movements (id, branch_id, org_ingredient_id, type, quantity, created_by) \
+             VALUES ($1, $2, $3, 'waste', -2.0, $4)"
+        )
+        .bind(Uuid::new_v4()).bind(branch).bind(ing).bind(admin)
+        .execute(&pool).await.unwrap();
+    }
+
+    // A different org's transfer + waste must never appear in this org's roll-up.
+    let other_org    = seed_org(&pool).await;
+    let other_branch = seed_branch(&pool, other_org).await;
+    let other_branch2= seed_branch(&pool, other_org).await;
+    let other_admin  = seed_user(&pool, other_org, "org_admin").await;
+    let other_ing    = seed_ingredient(&pool, other_org, "Onion", "kg").await;
+    sqlx::query(
+        "INSERT INTO branch_inventory_transfers (org_id, source_branch_id, destination_branch_id, org_ingredient_id, quantity, note, initiated_by) \
+         VALUES ($1, $2, $3, $4, 1.0, 'other org', $5)"
+    )
+    .bind(other_org).bind(other_branch).bind(other_branch2).bind(other_ing).bind(other_admin)
+    .execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO inventory_movements (id, branch_id, org_ingredient_id, type, quantity, created_by) \
+         VALUES ($1, $2, $3, 'waste', -1.0, $4)"
+    )
+    .bind(Uuid::new_v4()).bind(other_branch).bind(other_ing).bind(other_admin)
+    .execute(&pool).await.unwrap();
+
+    let nil = Uuid::nil();
+
+    // ── Transfers: all-branches sees both org transfers, org-isolated. ──
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/inventory/branches/{nil}/transfers")).insert_header(auth.clone()).to_request()).await;
+    assert_eq!(resp.status(), 200);
+    let all_transfers: Vec<BranchInventoryTransfer> = test::read_body_json(resp).await;
+    assert_eq!(all_transfers.len(), 2, "all-branches sees both org transfers");
+    assert!(all_transfers.iter().all(|t| t.org_id == org_id), "other org excluded");
+
+    // A specific branch still scopes to transfers touching that one branch.
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/inventory/branches/{branch_a}/transfers?direction=outgoing")).insert_header(auth.clone()).to_request()).await;
+    assert_eq!(resp.status(), 200);
+    let out_a: Vec<BranchInventoryTransfer> = test::read_body_json(resp).await;
+    assert_eq!(out_a.len(), 1);
+    assert_eq!(out_a[0].source_branch_id, branch_a);
+
+    // ── Waste: all-branches rolls up both branches, branch-labelled, isolated. ──
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/inventory/branches/{nil}/waste")).insert_header(auth.clone()).to_request()).await;
+    assert_eq!(resp.status(), 200);
+    let all_waste: Vec<BranchInventoryMovement> = test::read_body_json(resp).await;
+    assert_eq!(all_waste.len(), 2, "all-branches sees both branches' waste");
+    assert!(all_waste.iter().all(|m| m.branch_name.is_some()), "rows carry a branch label");
+    let seen: std::collections::HashSet<_> = all_waste.iter().map(|m| m.branch_id).collect();
+    assert!(seen.contains(&branch_a) && seen.contains(&branch_b));
+
+    // A specific branch still scopes waste to that one branch.
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/inventory/branches/{branch_a}/waste")).insert_header(auth.clone()).to_request()).await;
+    assert_eq!(resp.status(), 200);
+    let waste_a: Vec<BranchInventoryMovement> = test::read_body_json(resp).await;
+    assert_eq!(waste_a.len(), 1);
+    assert_eq!(waste_a[0].branch_id, branch_a);
+}
+
 #[sqlx::test]
 async fn test_update_transfer_note(pool: PgPool) {
     let app = test::init_service(

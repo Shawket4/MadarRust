@@ -27,6 +27,12 @@ pub struct Stocktake {
     pub finalized_by:    Option<Uuid>,
     pub finalized_at:    Option<chrono::DateTime<chrono::Utc>>,
     pub created_at:      chrono::DateTime<chrono::Utc>,
+    /// Branch label — only populated by the stocktakes list (so the "All
+    /// branches" view can show which branch each stocktake belongs to). Other
+    /// stocktake endpoints leave it `null`.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub branch_name:     Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
@@ -228,22 +234,40 @@ pub async fn list_stocktakes(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "stocktakes", "read").await?;
-    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
 
-    let rows = sqlx::query_as::<_, Stocktake>(
+    // nil UUID = every branch in the caller's org ("All branches"); any other
+    // UUID is that one branch after the usual access check. The org for the
+    // roll-up is the token's org (or X-Org-Id for super admins).
+    let (scope_condition, scope_id): (&str, Uuid) = if branch_id.is_nil() {
+        let org = claims
+            .scope_org(crate::auth::middleware::header_org_id(&req))
+            .ok_or_else(|| AppError::Forbidden("No organization in scope".into()))?;
+        (
+            "s.branch_id IN (SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL)",
+            org,
+        )
+    } else {
+        require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+        ("s.branch_id = $1", *branch_id)
+    };
+
+    let sql = format!(
         r#"
         SELECT s.id, s.org_id, s.branch_id, s.status::text, s.note, s.started_by,
                u.name AS started_by_name,
+               b.name AS branch_name,
                s.started_at, s.finalized_by, s.finalized_at, s.created_at
         FROM stocktakes s
-        JOIN users u ON u.id = s.started_by
-        WHERE s.branch_id = $1
+        JOIN users u    ON u.id = s.started_by
+        JOIN branches b ON b.id = s.branch_id
+        WHERE {scope_condition}
         ORDER BY s.started_at DESC
-        "#,
-    )
-    .bind(*branch_id)
-    .fetch_all(pool.get_ref())
-    .await?;
+        "#
+    );
+    let rows = sqlx::query_as::<_, Stocktake>(&sql)
+        .bind(scope_id)
+        .fetch_all(pool.get_ref())
+        .await?;
 
     Ok(HttpResponse::Ok().json(rows))
 }

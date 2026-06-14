@@ -481,3 +481,61 @@ async fn test_threshold_is_configurable(pool: PgPool) {
         .uri(&format!("/stocktakes/{id}/finalize")).insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;
     assert_eq!(resp.status(), 409);
 }
+
+#[sqlx::test]
+async fn test_list_stocktakes_all_branches(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    ).await;
+
+    let org_id = seed_org(&pool).await;
+    // Two branches in the SAME org. seed_branch hardcodes the name 'Branch', which
+    // collides with the (org_id, name) unique key, so insert distinct names here.
+    let branch_a = Uuid::new_v4();
+    let branch_b = Uuid::new_v4();
+    for (id, name) in [(branch_a, "Branch A"), (branch_b, "Branch B")] {
+        sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, $3)")
+            .bind(id).bind(org_id).bind(name).execute(&pool).await.unwrap();
+    }
+    let admin = seed_user(&pool, org_id).await;
+    grant(&pool, "stocktakes", "read").await;
+    let token = org_admin_token(admin, org_id);
+
+    // One finalized stocktake in each branch (finalized → no one-open-per-branch clash).
+    for branch in [branch_a, branch_b] {
+        sqlx::query(
+            "INSERT INTO stocktakes (id, org_id, branch_id, status, started_by, finalized_by, finalized_at)
+             VALUES ($1,$2,$3,'finalized',$4,$4,NOW())")
+            .bind(Uuid::new_v4()).bind(org_id).bind(branch).bind(admin).execute(&pool).await.unwrap();
+    }
+    // A different org's stocktake must never appear in this org's all-branches view.
+    let other_org    = seed_org(&pool).await;
+    let other_branch = seed_branch(&pool, other_org).await;
+    let other_admin  = seed_user(&pool, other_org).await;
+    sqlx::query("INSERT INTO stocktakes (id, org_id, branch_id, status, started_by) VALUES ($1,$2,$3,'in_progress',$4)")
+        .bind(Uuid::new_v4()).bind(other_org).bind(other_branch).bind(other_admin).execute(&pool).await.unwrap();
+
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    // All branches (nil UUID): both org branches' stocktakes, branch-labelled, org-isolated.
+    let nil = Uuid::nil();
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/stocktakes/branches/{nil}")).insert_header(auth.clone()).to_request()).await;
+    assert_eq!(resp.status(), 200);
+    let rows: Vec<Stocktake> = test::read_body_json(resp).await;
+    assert_eq!(rows.len(), 2, "all-branches sees both org branches' stocktakes");
+    assert!(rows.iter().all(|s| s.branch_name.is_some()), "rows carry a branch label");
+    let seen: std::collections::HashSet<_> = rows.iter().map(|s| s.branch_id).collect();
+    assert!(seen.contains(&branch_a) && seen.contains(&branch_b));
+
+    // A specific branch still scopes to that one branch.
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/stocktakes/branches/{branch_a}")).insert_header(auth.clone()).to_request()).await;
+    assert_eq!(resp.status(), 200);
+    let just_a: Vec<Stocktake> = test::read_body_json(resp).await;
+    assert_eq!(just_a.len(), 1);
+    assert_eq!(just_a[0].branch_id, branch_a);
+}

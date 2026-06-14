@@ -100,6 +100,11 @@ pub struct BranchInventoryTransfer {
 pub struct BranchInventoryMovement {
     pub id:                  Uuid,
     pub branch_id:           Uuid,
+    /// Branch name; only populated by the all-branches waste roll-up (nil
+    /// {branch_id}). `None` for single-branch queries that do not select it.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub branch_name:         Option<String>,
     pub org_ingredient_id:   Uuid,
     pub ingredient_name:     String,
     pub unit:                String,
@@ -1188,12 +1193,29 @@ pub async fn list_waste(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory_waste", "read").await?;
-    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
 
-    let rows = sqlx::query_as::<_, BranchInventoryMovement>(
+    // nil UUID = every branch in the caller's org ("All branches"); any other
+    // UUID is that one branch after the usual access check. The org for the
+    // roll-up is the token's org (or X-Org-Id for super admins).
+    let (scope_condition, scope_id): (&str, Uuid) = if branch_id.is_nil() {
+        let org = claims
+            .scope_org(crate::auth::middleware::header_org_id(&req))
+            .ok_or_else(|| AppError::Forbidden("No organization in scope".into()))?;
+        (
+            "m.branch_id IN (SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL)",
+            org,
+        )
+    } else {
+        require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+        ("m.branch_id = $1", *branch_id)
+    };
+
+    let sql = format!(
         r#"
         SELECT
-            m.id, m.branch_id, m.org_ingredient_id,
+            m.id, m.branch_id,
+            b.name AS branch_name,
+            m.org_ingredient_id,
             oi.name AS ingredient_name, oi.unit::text AS unit,
             m.branch_inventory_id, m.type::text AS movement_type,
             m.quantity, m.balance_after, m.unit_cost, m.reason, m.below_zero,
@@ -1201,14 +1223,16 @@ pub async fn list_waste(
             u.name AS created_by_name, m.created_at
         FROM inventory_movements m
         JOIN org_ingredients oi ON oi.id = m.org_ingredient_id
+        JOIN branches b         ON b.id  = m.branch_id
         LEFT JOIN users u       ON u.id  = m.created_by
-        WHERE m.branch_id = $1 AND m.type = 'waste'
+        WHERE {scope_condition} AND m.type = 'waste'
         ORDER BY m.created_at DESC, m.id DESC
-        "#,
-    )
-    .bind(*branch_id)
-    .fetch_all(pool.get_ref())
-    .await?;
+        "#
+    );
+    let rows = sqlx::query_as::<_, BranchInventoryMovement>(&sql)
+        .bind(scope_id)
+        .fetch_all(pool.get_ref())
+        .await?;
 
     Ok(HttpResponse::Ok().json(rows))
 }
@@ -1472,12 +1496,36 @@ pub async fn list_transfers(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory_transfers", "read").await?;
-    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
 
-    let condition = match query.direction.as_deref() {
-        Some("incoming") => "t.destination_branch_id = $1",
-        Some("outgoing") => "t.source_branch_id = $1",
-        _                => "(t.source_branch_id = $1 OR t.destination_branch_id = $1)",
+    // nil UUID = every branch in the caller's org ("All branches"); any other
+    // UUID is that one branch after the usual access check. For all-branches,
+    // $1 is the org and the direction filter scopes to org-member branches; a
+    // transfer row already names its from/to branches, so no extra label.
+    let all_branches = branch_id.is_nil();
+    let scope_id: Uuid = if all_branches {
+        claims
+            .scope_org(crate::auth::middleware::header_org_id(&req))
+            .ok_or_else(|| AppError::Forbidden("No organization in scope".into()))?
+    } else {
+        require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+        *branch_id
+    };
+
+    let condition = if all_branches {
+        let org_branches = "(SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL)";
+        match query.direction.as_deref() {
+            Some("incoming") => format!("t.destination_branch_id IN {org_branches}"),
+            Some("outgoing") => format!("t.source_branch_id IN {org_branches}"),
+            _                => format!(
+                "(t.source_branch_id IN {org_branches} OR t.destination_branch_id IN {org_branches})"
+            ),
+        }
+    } else {
+        match query.direction.as_deref() {
+            Some("incoming") => "t.destination_branch_id = $1".to_string(),
+            Some("outgoing") => "t.source_branch_id = $1".to_string(),
+            _                => "(t.source_branch_id = $1 OR t.destination_branch_id = $1)".to_string(),
+        }
     };
 
     let sql = format!(
@@ -1506,7 +1554,7 @@ pub async fn list_transfers(
     );
 
     let rows = sqlx::query_as::<_, BranchInventoryTransfer>(&sql)
-        .bind(*branch_id)
+        .bind(scope_id)
         .fetch_all(pool.get_ref())
         .await?;
 
