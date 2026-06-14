@@ -34,6 +34,12 @@ pub struct Shift {
     pub force_closed_at:          Option<chrono::DateTime<chrono::Utc>>,
     pub force_close_reason:       Option<String>,
     pub notes:                    Option<String>,
+    /// Branch label — only populated by the shifts list (so the "All branches"
+    /// view can show which branch each shift belongs to). Other shift endpoints
+    /// leave it `null`.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub branch_name:              Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
@@ -342,13 +348,29 @@ pub async fn list_shifts(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "shifts", "read").await?;
-    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
 
-    let shifts = sqlx::query_as::<_, Shift>(
+    // nil UUID = every branch in the caller's org ("All branches"); any other
+    // UUID is that one branch after the usual access check. The org for the
+    // roll-up is the token's org (or X-Org-Id for super admins).
+    let (scope_condition, scope_id): (&str, Uuid) = if branch_id.is_nil() {
+        let org = claims
+            .scope_org(crate::auth::middleware::header_org_id(&req))
+            .ok_or_else(|| AppError::Forbidden("No organization in scope".into()))?;
+        (
+            "s.branch_id IN (SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL)",
+            org,
+        )
+    } else {
+        require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+        ("s.branch_id = $1", *branch_id)
+    };
+
+    let sql = format!(
         r#"
         SELECT
             s.id, s.branch_id, s.teller_id,
             u.name AS teller_name,
+            b.name AS branch_name,
             s.status::text,
             s.opening_cash, s.opening_cash_original,
             s.opening_cash_was_edited, s.opening_cash_edit_reason,
@@ -357,14 +379,16 @@ pub async fn list_shifts(
             s.force_closed_by, s.force_closed_at, s.force_close_reason,
             s.notes
         FROM shifts s
-        JOIN users u ON u.id = s.teller_id
-        WHERE s.branch_id = $1
+        JOIN users u    ON u.id = s.teller_id
+        JOIN branches b ON b.id = s.branch_id
+        WHERE {scope_condition}
         ORDER BY s.opened_at DESC
-        "#,
-    )
-    .bind(*branch_id)
-    .fetch_all(pool.get_ref())
-    .await?;
+        "#
+    );
+    let shifts = sqlx::query_as::<_, Shift>(&sql)
+        .bind(scope_id)
+        .fetch_all(pool.get_ref())
+        .await?;
 
     Ok(HttpResponse::Ok().json(shifts))
 }

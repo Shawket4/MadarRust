@@ -33,6 +33,19 @@ impl Claims {
     pub fn branch_id(&self) -> Option<Uuid> {
         self.branch_id.as_deref().and_then(|s| Uuid::parse_str(s).ok())
     }
+
+    /// The org an "all branches" / org-wide scope rolls up over. Org-bound
+    /// tokens carry it directly; a super admin's token does not, so callers pass
+    /// the org the dashboard pinned via the `X-Org-Id` header — honoured ONLY
+    /// for super admins (who may read any org anyway), ignored for every other
+    /// role so the token's own org always wins.
+    pub fn scope_org(&self, header_org: Option<Uuid>) -> Option<Uuid> {
+        match self.org_id() {
+            Some(org) => Some(org),
+            None if self.role == UserRole::SuperAdmin => header_org,
+            None => None,
+        }
+    }
 }
 
 pub fn create_token(

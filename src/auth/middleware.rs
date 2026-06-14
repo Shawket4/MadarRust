@@ -1,12 +1,24 @@
 use actix_web::{
     body::{BoxBody, EitherBody},
     dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform},
-    web, Error, HttpMessage, ResponseError,
+    web, Error, HttpMessage, HttpRequest, ResponseError,
 };
 use futures::future::{ready, LocalBoxFuture, Ready};
 use std::rc::Rc;
+use uuid::Uuid;
 
 use crate::{auth::jwt::{verify_token, JwtSecret}, errors::AppError};
+
+/// The org the dashboard pinned via the `X-Org-Id` request header, if present
+/// and a valid UUID. Pair with [`crate::auth::jwt::Claims::scope_org`]: the
+/// header is only ever honoured for super admins; every other role's own token
+/// org takes precedence, so reading it here is always safe.
+pub fn header_org_id(req: &HttpRequest) -> Option<Uuid> {
+    req.headers()
+        .get("X-Org-Id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| Uuid::parse_str(s).ok())
+}
 
 // ── JwtMiddleware factory ─────────────────────────────────────
 

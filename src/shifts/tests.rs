@@ -397,6 +397,58 @@ async fn test_teller_cannot_open_shift_at_two_branches(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn test_list_shifts_all_branches(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    ).await;
+
+    let org_id   = seed_org(&pool).await;
+    let branch_a = seed_branch(&pool, org_id).await;
+    let branch_b = seed_branch(&pool, org_id).await;
+    let admin    = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "shifts", "read").await;
+    let token = generate_org_admin_token(admin, org_id);
+
+    // One closed shift in each branch (closed → no one-open-per-teller clash).
+    for branch in [branch_a, branch_b] {
+        sqlx::query(
+            "INSERT INTO shifts (id, branch_id, teller_id, status, opening_cash, closing_cash_declared, closed_at)
+             VALUES ($1,$2,$3,'closed',10000,10000,NOW())")
+            .bind(Uuid::new_v4()).bind(branch).bind(admin).execute(&pool).await.unwrap();
+    }
+    // A different org's shift must never appear in this org's all-branches view.
+    let other_org    = seed_org(&pool).await;
+    let other_branch = seed_branch(&pool, other_org).await;
+    let other_admin  = seed_user(&pool, other_org, "org_admin").await;
+    sqlx::query("INSERT INTO shifts (id, branch_id, teller_id, status, opening_cash) VALUES ($1,$2,$3,'open',5000)")
+        .bind(Uuid::new_v4()).bind(other_branch).bind(other_admin).execute(&pool).await.unwrap();
+
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    // All branches (nil UUID): both org branches' shifts, branch-labelled, org-isolated.
+    let nil = Uuid::nil();
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/shifts/branches/{nil}")).insert_header(auth.clone()).to_request()).await;
+    assert_eq!(resp.status(), 200);
+    let shifts: Vec<Shift> = test::read_body_json(resp).await;
+    assert_eq!(shifts.len(), 2, "all-branches sees both org branches' shifts");
+    assert!(shifts.iter().all(|s| s.branch_name.is_some()), "rows carry a branch label");
+    let seen: std::collections::HashSet<_> = shifts.iter().map(|s| s.branch_id).collect();
+    assert!(seen.contains(&branch_a) && seen.contains(&branch_b));
+
+    // A specific branch still scopes to that one branch.
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/shifts/branches/{branch_a}")).insert_header(auth.clone()).to_request()).await;
+    assert_eq!(resp.status(), 200);
+    let just_a: Vec<Shift> = test::read_body_json(resp).await;
+    assert_eq!(just_a.len(), 1);
+    assert_eq!(just_a[0].branch_id, branch_a);
+}
+
+#[sqlx::test]
 async fn test_teller_token_is_bound_to_login_branch(pool: PgPool) {
     let app = test::init_service(
         App::new()

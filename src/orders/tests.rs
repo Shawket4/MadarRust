@@ -491,6 +491,87 @@ async fn test_list_orders(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn test_list_orders_all_branches(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    let org_id   = seed_org(&pool).await;
+    let branch_a = seed_branch(&pool, org_id).await;
+    // Second branch in the same org (seed_branch hard-codes one name).
+    let branch_b = {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1,$2,'Branch B')")
+            .bind(id).bind(org_id).execute(&pool).await.unwrap();
+        id
+    };
+    let admin = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(admin, org_id);
+
+    // Two OPEN shifts need two different tellers (one open shift per teller).
+    let teller_b = seed_user(&pool, org_id, "teller").await;
+    let shift_a  = seed_shift(&pool, branch_a, admin).await;
+    let shift_b  = seed_shift(&pool, branch_b, teller_b).await;
+
+    let cat  = seed_category(&pool, org_id).await;
+    let item = seed_menu_item(&pool, org_id, cat).await;
+
+    // One order in each branch (org-admin may post to any open shift).
+    for (branch_id, shift_id) in [(branch_a, shift_a), (branch_b, shift_b)] {
+        let body = CreateOrderRequest {
+            branch_id, shift_id,
+            payment_method: "cash".to_string(),
+            customer_name: None, notes: None,
+            discount_type: None, discount_value: None, discount_id: None,
+            amount_tendered: None, tip_amount: None, tip_payment_method: None,
+            payment_splits: None,
+            items: vec![OrderItemInput {
+                menu_item_id: Some(item), bundle_id: None, size_label: None,
+                quantity: 1, addons: vec![], optional_field_ids: vec![],
+                bundle_components: vec![], notes: None,
+            }],
+            created_at: None,
+        };
+        let resp = test::call_service(&app, test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(&body).to_request()).await;
+        assert!(resp.status().is_success(), "create order failed: {:?}", resp.status());
+    }
+
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    // "All branches" via absent branch_id → both branches' orders, summed.
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri("/orders").insert_header(auth.clone()).to_request()).await;
+    assert_eq!(resp.status(), 200);
+    let all: PaginatedOrders = test::read_body_json(resp).await;
+    assert_eq!(all.total, 2, "all-branches (absent branch_id) sees both branches");
+    assert_eq!(all.summary.completed, 2, "summary aggregates across branches");
+
+    // "All branches" via the nil-UUID sentinel → same.
+    let nil = Uuid::nil();
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/orders?branch_id={nil}")).insert_header(auth.clone()).to_request()).await;
+    assert_eq!(resp.status(), 200);
+    let all_nil: PaginatedOrders = test::read_body_json(resp).await;
+    assert_eq!(all_nil.total, 2, "all-branches (nil UUID) sees both branches");
+
+    // A specific branch still scopes to that one branch only.
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/orders?branch_id={branch_a}")).insert_header(auth.clone()).to_request()).await;
+    assert_eq!(resp.status(), 200);
+    let just_a: PaginatedOrders = test::read_body_json(resp).await;
+    assert_eq!(just_a.total, 1, "single branch sees only its own orders");
+    assert_eq!(just_a.data[0].branch_id, branch_a);
+}
+
+#[sqlx::test]
 async fn test_void_order(pool: PgPool) {
     let app = test::init_service(
         App::new()

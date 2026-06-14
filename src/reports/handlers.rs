@@ -1452,23 +1452,10 @@ async fn resolve_report_branches(
     Ok((ids, org))
 }
 
-/// The org an "all branches" report rolls up over. Org-bound tokens carry it
-/// directly; a super admin's token does not, so the dashboard pins the active
-/// org via the `X-Org-Id` header. Trusting that header is safe here because a
-/// super admin may read any org anyway (see `require_org`); for every other
-/// role the header is ignored and the token's own org is authoritative.
+/// The org an "all branches" report rolls up over — the caller's token org, or
+/// the dashboard's `X-Org-Id` header for super admins (see [`Claims::scope_org`]).
 fn report_scope_org(claims: &Claims, req: &HttpRequest) -> Option<Uuid> {
-    if let Some(org) = claims.org_id() {
-        return Some(org);
-    }
-    if claims.role == UserRole::SuperAdmin {
-        return req
-            .headers()
-            .get("X-Org-Id")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| Uuid::parse_str(s).ok());
-    }
-    None
+    claims.scope_org(crate::auth::middleware::header_org_id(req))
 }
 
 /// Human label for a report scope: "All branches" for the nil UUID, otherwise

@@ -24865,6 +24865,13 @@
             "type": "string",
             "format": "uuid"
           },
+          "branch_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Branch label — only populated by the shifts list (so the \"All branches\"\nview can show which branch each shift belongs to). Other shift endpoints\nleave it `null`."
+          },
           "cash_discrepancy": {
             "type": [
               "integer",

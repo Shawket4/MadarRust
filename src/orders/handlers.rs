@@ -1606,25 +1606,34 @@ pub async fn list_orders(
         None => None,
     };
 
-    let branch_id = match (query.shift_id, query.branch_id) {
-        (Some(shift_id), _) => {
-            let bid: Option<Uuid> = sqlx::query_scalar(
-                "SELECT branch_id FROM shifts WHERE id = $1"
-            )
-            .bind(shift_id)
-            .fetch_optional(pool.get_ref())
-            .await?
-            .flatten();
-            bid.ok_or_else(|| AppError::NotFound("Shift not found".into()))?
-        }
-        (None, Some(bid)) => bid,
-        _ => return Err(AppError::BadRequest("Provide either shift_id or branch_id".into())),
+    // Scope: a single shift, a single branch, or — when no shift is given and
+    // branch_id is absent or the all-zeros (nil) UUID — every branch in the
+    // caller's org (the "All branches" view). org_id was validated above, so
+    // the org roll-up stays inside the caller's own org.
+    let all_branches = query.shift_id.is_none()
+        && query.branch_id.map_or(true, |b| b.is_nil());
+
+    let (scope_condition, scope_id): (&str, Uuid) = if let Some(shift_id) = query.shift_id {
+        let bid: Option<Uuid> = sqlx::query_scalar(
+            "SELECT branch_id FROM shifts WHERE id = $1"
+        )
+        .bind(shift_id)
+        .fetch_optional(pool.get_ref())
+        .await?
+        .flatten();
+        let bid = bid.ok_or_else(|| AppError::NotFound("Shift not found".into()))?;
+        require_branch_access(pool.get_ref(), &claims, bid).await?;
+        ("o.shift_id = $1", shift_id)
+    } else if all_branches {
+        (
+            "o.branch_id IN (SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL)",
+            org_id,
+        )
+    } else {
+        let bid = query.branch_id.expect("branch_id present when not all_branches");
+        require_branch_access(pool.get_ref(), &claims, bid).await?;
+        ("o.branch_id = $1", bid)
     };
-
-    require_branch_access(pool.get_ref(), &claims, branch_id).await?;
-
-    let scope_condition = if query.shift_id.is_some() { "o.shift_id = $1" } else { "o.branch_id = $1" };
-    let scope_id = query.shift_id.unwrap_or(branch_id);
 
     let mut data_filter  = String::new();
     let mut count_filter = String::new();
@@ -2464,25 +2473,35 @@ pub async fn export_orders(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
 
-    let branch_id = match (query.shift_id, query.branch_id) {
-        (Some(shift_id), _) => {
-            let bid: Option<Uuid> = sqlx::query_scalar(
-                "SELECT branch_id FROM shifts WHERE id = $1"
-            )
-            .bind(shift_id)
-            .fetch_optional(pool.get_ref())
-            .await?
-            .flatten();
-            bid.ok_or_else(|| AppError::NotFound("Shift not found".into()))?
-        }
-        (None, Some(bid)) => bid,
-        _ => return Err(AppError::BadRequest("Provide either shift_id or branch_id".into())),
-    };
-
-    require_branch_access(pool.get_ref(), &claims, branch_id).await?;
-
     let org_id = claims.org_id()
         .ok_or_else(|| AppError::Forbidden("No org in token".into()))?;
+
+    // Same scope rule as list_orders: shift, single branch, or every branch in
+    // the org when no shift is given and branch_id is absent or the nil UUID.
+    let all_branches = query.shift_id.is_none()
+        && query.branch_id.map_or(true, |b| b.is_nil());
+
+    let (scope_condition, scope_id): (&str, Uuid) = if let Some(shift_id) = query.shift_id {
+        let bid: Option<Uuid> = sqlx::query_scalar(
+            "SELECT branch_id FROM shifts WHERE id = $1"
+        )
+        .bind(shift_id)
+        .fetch_optional(pool.get_ref())
+        .await?
+        .flatten();
+        let bid = bid.ok_or_else(|| AppError::NotFound("Shift not found".into()))?;
+        require_branch_access(pool.get_ref(), &claims, bid).await?;
+        ("o.shift_id = $1", shift_id)
+    } else if all_branches {
+        (
+            "o.branch_id IN (SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL)",
+            org_id,
+        )
+    } else {
+        let bid = query.branch_id.expect("branch_id present when not all_branches");
+        require_branch_access(pool.get_ref(), &claims, bid).await?;
+        ("o.branch_id = $1", bid)
+    };
 
     let parsed_payment_methods = match &query.payment_method {
         Some(pm) => {
@@ -2495,9 +2514,6 @@ pub async fn export_orders(
         }
         None => None,
     };
-
-    let scope_condition = if query.shift_id.is_some() { "o.shift_id = $1" } else { "o.branch_id = $1" };
-    let scope_id = query.shift_id.unwrap_or(branch_id);
 
     let mut filter  = String::new();
     #[allow(unused_assignments)]
