@@ -400,7 +400,23 @@ async fn test_login_pin_cross_org_isolation(pool: PgPool) {
     .unwrap();
     assign_teller_to_branch(&pool, user_id, branch_a).await;
 
-    // Try logging in using org_b's branch — must fail
+    // Org B also has a teller with the SAME name (names are unique only per org)
+    // but a different PIN and not assigned to branch_b — a deliberate collision.
+    let user_b = Uuid::new_v4();
+    let hash_b = bcrypt::hash("9999", bcrypt::DEFAULT_COST).unwrap();
+    sqlx::query!(
+        "INSERT INTO users (id, org_id, name, role, pin_hash)
+         VALUES ($1, $2, 'Teller One', 'teller'::user_role, $3)",
+        user_b, org_b_id, hash_b
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Org A's teller signing in at Org B's branch with Org A's PIN → the org-scoped
+    // lookup only sees Org B's "Teller One" (PIN 9999), which 1234 doesn't match →
+    // 401 invalid credentials. It must NOT be the "not assigned to this branch"
+    // (403) message — that would leak that the credentials are valid somewhere.
     let req = test::TestRequest::post()
         .uri("/auth/login")
         .set_json(&json!({
@@ -411,7 +427,10 @@ async fn test_login_pin_cross_org_isolation(pool: PgPool) {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 401, "Cross-org PIN login must return 401");
+    assert_eq!(resp.status(), 401, "cross-org PIN login must return 401 (invalid credentials)");
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert!(!body["error"].as_str().unwrap_or("").to_lowercase().contains("branch"),
+        "cross-org login must NOT leak the branch-access message, got {body:?}");
 }
 
 // ── GET /auth/me ──────────────────────────────────────────────
