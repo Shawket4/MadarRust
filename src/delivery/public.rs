@@ -582,9 +582,6 @@ pub struct OtpRequestInput {
 #[derive(Serialize, ToSchema)]
 pub struct OtpRequestResponse {
     pub sent: bool,
-    /// Only populated when SUFRIX_OTP_DEBUG=1 (dev/test). Never set in prod.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub debug_code: Option<String>,
 }
 
 const OTP_TTL_SECONDS: i64 = 300;
@@ -634,11 +631,7 @@ pub async fn otp_request(
 
     whatsapp::send_message(phone, whatsapp::build_otp_message(&code));
 
-    let debug_code = std::env::var("SUFRIX_OTP_DEBUG")
-        .ok()
-        .filter(|v| v == "1")
-        .map(|_| code);
-    Ok(HttpResponse::Ok().json(OtpRequestResponse { sent: true, debug_code }))
+    Ok(HttpResponse::Ok().json(OtpRequestResponse { sent: true }))
 }
 
 #[derive(Deserialize, ToSchema)]
