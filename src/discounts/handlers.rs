@@ -260,3 +260,18 @@ fn validate_value(value: i32, dtype: &str) -> Result<(), AppError> {
     }
     Ok(())
 }
+
+/// Discount amount (piastres) for `subtotal` given a discount type
+/// (`"percentage"` | `"fixed"`) and its value. Percentage rounds half-away-from-
+/// zero so it matches the POS preview to the piastre; fixed is capped at the
+/// subtotal. Always clamped to `[0, subtotal]` so a malformed discount can never
+/// drive a total negative or inflated. Single source of truth for both the POS
+/// order path and delivery-order intake/finalize.
+pub fn calc_discount(dtype: Option<&str>, value: i32, subtotal: i32) -> i32 {
+    let d = match dtype {
+        Some("percentage") => (subtotal as f64 * value as f64 / 100.0).round() as i32,
+        Some("fixed") => value.min(subtotal),
+        _ => 0,
+    };
+    d.clamp(0, subtotal)
+}

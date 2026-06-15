@@ -177,6 +177,24 @@ pub struct DeliveryMenu {
     /// Org-wide addon catalog (global, POS model): channel-effective, grouped by
     /// `type`, applicable to every item. Channel-unavailable options are excluded.
     pub addons: Vec<DeliveryAddonOption>,
+    /// The active discount for this channel (customer-facing) or `null`. Applies
+    /// to the item subtotal only — the delivery fee is always charged in full.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discount: Option<DeliveryMenuDiscount>,
+}
+
+/// Customer-facing summary of a channel's active discount, so the public UI can
+/// tell the customer "you've got X off" and show a discounted estimate.
+#[derive(Serialize, ToSchema)]
+pub struct DeliveryMenuDiscount {
+    pub id: Uuid,
+    pub name: String,
+    #[schema(value_type = Object)]
+    pub name_translations: serde_json::Value,
+    /// "percentage" | "fixed".
+    pub dtype: String,
+    /// Percentage points (0-100) for `percentage`; piastres for `fixed`.
+    pub value: i32,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -209,6 +227,25 @@ pub async fn public_menu(
     if !enabled {
         return Err(AppError::NotFound("This branch does not offer this channel".into()));
     }
+
+    // The channel's active discount (customer-facing), if any.
+    let discount_col = if query.channel == "outside" { "outside_discount_id" } else { "in_mall_discount_id" };
+    let discount: Option<DeliveryMenuDiscount> =
+        sqlx::query_as::<_, (Uuid, String, serde_json::Value, String, i32)>(&format!(
+            "SELECT d.id, d.name, d.name_translations, d.type::text, d.value \
+             FROM branch_delivery_settings s JOIN discounts d ON d.id = s.{discount_col} \
+             WHERE s.branch_id = $1 AND d.is_active = true"
+        ))
+        .bind(branch_id)
+        .fetch_optional(pool.get_ref())
+        .await?
+        .map(|(id, name, name_translations, dtype, value)| DeliveryMenuDiscount {
+            id,
+            name,
+            name_translations,
+            dtype,
+            value,
+        });
 
     let categories: Vec<DeliveryMenuCategory> = sqlx::query_as::<_, (Uuid, String, serde_json::Value, Option<String>)>(
         "SELECT id, name, name_translations, image_url FROM categories \
@@ -299,7 +336,7 @@ pub async fn public_menu(
         })
         .collect();
 
-    Ok(HttpResponse::Ok().json(DeliveryMenu { categories, items, addons }))
+    Ok(HttpResponse::Ok().json(DeliveryMenu { categories, items, addons, discount }))
 }
 
 /// Load the org-wide global addon catalog (the POS model: one catalog for every
@@ -813,7 +850,45 @@ pub async fn create_delivery_order(
     };
 
     let subtotal = resolved.subtotal;
-    let total = subtotal + delivery_fee;
+
+    // Resolve + FREEZE the channel's discount onto this order. It applies to the
+    // item subtotal only (the delivery fee is always charged in full). The
+    // discount id is configured per channel on branch_delivery_settings; only an
+    // *active* discount is honored, otherwise it silently drops to none.
+    let discount_col = if is_outside { "outside_discount_id" } else { "in_mall_discount_id" };
+    let configured_discount: Option<Uuid> = sqlx::query_scalar(&format!(
+        "SELECT {discount_col} FROM branch_delivery_settings WHERE branch_id = $1"
+    ))
+    .bind(body.branch_id)
+    .fetch_optional(pool.get_ref())
+    .await?
+    .flatten();
+
+    let (discount_id, discount_type, discount_value, discount_amount): (
+        Option<Uuid>,
+        Option<String>,
+        i32,
+        i32,
+    ) = match configured_discount {
+        Some(did) => {
+            let row: Option<(String, i32)> = sqlx::query_as(
+                "SELECT type::text, value FROM discounts WHERE id = $1 AND is_active = true",
+            )
+            .bind(did)
+            .fetch_optional(pool.get_ref())
+            .await?;
+            match row {
+                Some((dtype, dvalue)) => {
+                    let amt = crate::discounts::handlers::calc_discount(Some(&dtype), dvalue, subtotal);
+                    (Some(did), Some(dtype), dvalue, amt)
+                }
+                None => (None, None, 0, 0),
+            }
+        }
+        None => (None, None, 0, 0),
+    };
+
+    let total = subtotal - discount_amount + delivery_fee;
 
     // Mint the delivery_ref from its own counter (business date in branch tz).
     let mut tx = pool.get_ref().begin().await?;
@@ -844,9 +919,11 @@ pub async fn create_delivery_order(
              place_name, floor, unit_number, landmark, address_line, delivery_notes,
              customer_lat, customer_lng, delivery_zone_id, road_distance_meters,
              subtotal, delivery_fee, total, cart, deductions_snapshot,
-             payment_method_hint, otp_verified, idempotency_key)
+             payment_method_hint, otp_verified, idempotency_key,
+             discount_id, discount_type, discount_value, discount_amount)
            VALUES ($1, $2, $3::delivery_channel, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                   $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, true, $23)
+                   $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, true, $23,
+                   $24, $25::discount_type, $26, $27)
            RETURNING id"#,
     )
     .bind(org_id)
@@ -872,6 +949,10 @@ pub async fn create_delivery_order(
     .bind(deductions_json)
     .bind(&body.payment_method_hint)
     .bind(idem)
+    .bind(discount_id)
+    .bind(&discount_type)
+    .bind(discount_value)
+    .bind(discount_amount)
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;

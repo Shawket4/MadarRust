@@ -1246,17 +1246,13 @@ pub async fn create_order(
     }
 
     let tax_rate_f64: f64 = tax_rate.to_string().parse().unwrap_or(0.14);
+    // Shared with the delivery-order discount path so the two can never drift.
     let calc_discount = |sub: i32| -> i32 {
-        let d = match resolved_discount_type.as_deref() {
-            // Round (half away from zero), NOT truncate, so the discount matches the
-            // POS's rounded preview to the piastre and is the correct currency rounding.
-            Some("percentage") => (sub as f64 * resolved_discount_value as f64 / 100.0).round() as i32,
-            Some("fixed")      => resolved_discount_value.min(sub),
-            _                  => 0,
-        };
-        // A malformed discount (percentage > 100, or negative) must never drive the
-        // order to a negative or inflated total: clamp to [0, sub].
-        d.clamp(0, sub)
+        crate::discounts::handlers::calc_discount(
+            resolved_discount_type.as_deref(),
+            resolved_discount_value,
+            sub,
+        )
     };
 
     // Server EXPECTED breakdown (catalog + branch override) — used only to detect and
@@ -1276,6 +1272,19 @@ pub async fn create_order(
     let total_amount    = body.total_amount.unwrap_or(taxable + tax_amount);
     let change_given    = body.change_given.or_else(|| body.amount_tendered.map(|t| (t - total_amount).max(0)));
 
+    // Split payments must reconcile to the order total. They are the SOLE source
+    // of drawer cash in compute_system_cash, so a mismatch (POS bug / spoof) would
+    // silently leave the teller over or short with no way to trace it. (Per-split
+    // method + positivity are validated again where the rows are inserted.)
+    if let Some(splits) = &body.payment_splits {
+        let split_total: i64 = splits.iter().map(|s| s.amount as i64).sum();
+        if split_total != total_amount as i64 {
+            return Err(AppError::BadRequest(format!(
+                "Split payments ({split_total}) must sum to the order total ({total_amount})."
+            )));
+        }
+    }
+
     // The order is flagged when any line deviated, the charged subtotal differs from the
     // catalog expectation, or the recorded total differs from the expected total.
     let price_flagged = resolved_items.iter().any(|r| r.price_flagged)
@@ -1283,6 +1292,14 @@ pub async fn create_order(
         || total_amount != expected_total;
 
     let created_at   = body.created_at.unwrap_or_else(chrono::Utc::now);
+    // A future-dated order would mint its order_ref in a future business day and
+    // hide the sale from "today" reports. An offline POS legitimately syncs PAST
+    // timestamps, so clamp only the future side (small clock-skew tolerance).
+    if created_at > chrono::Utc::now() + chrono::Duration::minutes(5) {
+        return Err(AppError::BadRequest(
+            "created_at is too far in the future — check the device clock.".into(),
+        ));
+    }
 
     // ── Cost snapshot ─────────────────────────────────────────
     // Resolve point-in-time ingredient costs once for the whole order and
@@ -1318,19 +1335,37 @@ pub async fn create_order(
         .execute(&mut *tx)
         .await?;
 
-    // Re-verify the shift is still OPEN now that we hold the per-shift lock.
-    // close_shift takes the SAME advisory lock while it snapshots cash, so this
-    // closes the TOCTOU window where an order's cash could land on a shift that
-    // was just closed (money missing from closing_cash_system).
-    let shift_still_open: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND status = 'open')"
+    // Re-verify the shift under the per-shift lock and resolve its AUTHORITATIVE
+    // branch + teller. close_shift takes the SAME advisory lock while it snapshots
+    // cash, so this closes the TOCTOU window (an order's cash landing on a shift
+    // that was just closed) AND pins the order to exactly the shift it attaches
+    // to. Defense in depth: even if the one-open-per-branch / per-teller
+    // invariants were somehow violated, the order is filed on the SHIFT'S OWN
+    // branch (not the client-sent branch_id) and, for tellers, only onto their
+    // own shift — so a sale can never be mis-registered onto the wrong shift or
+    // branch.
+    let shift_row: Option<(Uuid, Uuid, String)> = sqlx::query_as(
+        "SELECT branch_id, teller_id, status::text FROM shifts WHERE id = $1"
     )
     .bind(body.shift_id)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
-    if !shift_still_open {
+    let (shift_branch_id, shift_teller_id, shift_status) = shift_row.ok_or_else(|| {
+        AppError::Conflict("Shift was closed before the order could be recorded".into())
+    })?;
+    if shift_status != "open" {
         return Err(AppError::Conflict(
             "Shift was closed before the order could be recorded".into(),
+        ));
+    }
+    if shift_branch_id != body.branch_id {
+        return Err(AppError::BadRequest(
+            "Shift does not belong to the specified branch".into(),
+        ));
+    }
+    if claims.role == UserRole::Teller && shift_teller_id != claims.user_id() {
+        return Err(AppError::Forbidden(
+            "This shift belongs to another teller".into(),
         ));
     }
 
@@ -1404,7 +1439,7 @@ pub async fn create_order(
             voided_at, void_reason::text, void_note, voided_by, created_at
         "#,
     )
-    .bind(body.branch_id)
+    .bind(shift_branch_id) // authoritative: the order's branch IS its shift's branch
     .bind(body.shift_id)
     .bind(claims.user_id())
     .bind(order_number)
@@ -2005,6 +2040,26 @@ pub async fn void_order(
     let order = fetch_order_or_404(pool.get_ref(), *order_id).await?;
     require_branch_access(pool.get_ref(), &claims, order.branch_id).await?;
     if order.status == "voided" { return Ok(HttpResponse::Ok().json(order)); }
+
+    // A teller may not rewrite the history of a SETTLED shift: once a shift is
+    // closed / force-closed its cash is reconciled, so voiding one of its orders
+    // is a correction that belongs to a manager. (The closing snapshot is frozen,
+    // so a manager's void does not silently move a closed shift's recorded drawer
+    // figure.)
+    if claims.role == UserRole::Teller {
+        let shift_open: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND status = 'open')"
+        )
+        .bind(order.shift_id)
+        .fetch_one(pool.get_ref())
+        .await?;
+        if !shift_open {
+            return Err(AppError::Forbidden(
+                "This order's shift is closed — ask a manager to void it.".into(),
+            ));
+        }
+    }
+
     validate_void_reason(&body.reason)?;
     let void_note = body.note.as_deref().map(str::trim).filter(|s| !s.is_empty());
     if body.reason == "other" && void_note.is_none() {

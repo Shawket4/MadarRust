@@ -39,6 +39,10 @@ pub struct BranchDeliverySettings {
     pub in_mall_fee: i32,
     pub prep_time_minutes: i32,
     pub max_road_distance_meters: Option<i32>,
+    /// Optional discount applied to each channel's item subtotal (reuses the
+    /// org `discounts` table). Frozen onto the order at intake. `null` = none.
+    pub in_mall_discount_id: Option<Uuid>,
+    pub outside_discount_id: Option<Uuid>,
 }
 
 impl BranchDeliverySettings {
@@ -56,6 +60,8 @@ impl BranchDeliverySettings {
             in_mall_fee: 0,
             prep_time_minutes: 20,
             max_road_distance_meters: None,
+            in_mall_discount_id: None,
+            outside_discount_id: None,
         }
     }
 }
@@ -63,7 +69,8 @@ impl BranchDeliverySettings {
 const BRANCH_SETTINGS_SELECT: &str = "SELECT branch_id, in_mall_enabled, outside_enabled, \
     in_mall_override, outside_override, in_mall_open_time, in_mall_close_time, \
     outside_open_time, outside_close_time, in_mall_fee, prep_time_minutes, \
-    max_road_distance_meters FROM branch_delivery_settings WHERE branch_id = $1";
+    max_road_distance_meters, in_mall_discount_id, outside_discount_id \
+    FROM branch_delivery_settings WHERE branch_id = $1";
 
 #[derive(Deserialize, IntoParams)]
 pub struct BranchQuery {
@@ -81,7 +88,17 @@ pub async fn get_branch_settings(
     query: web::Query<BranchQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "delivery_settings", "read").await?;
+    // Managers read settings via `delivery_settings`; tellers legitimately need
+    // to see the channel state to flip the POS open/close override, so a teller's
+    // `delivery_orders:read` is accepted as well. A real error (e.g. DB) still
+    // propagates — only a Forbidden falls through to the second check.
+    match check_permission(pool.get_ref(), &claims, "delivery_settings", "read").await {
+        Ok(()) => {}
+        Err(AppError::Forbidden(_)) => {
+            check_permission(pool.get_ref(), &claims, "delivery_orders", "read").await?;
+        }
+        Err(e) => return Err(e),
+    }
     require_branch_access(pool.get_ref(), &claims, query.branch_id).await?;
 
     let row: Option<BranchDeliverySettings> = sqlx::query_as(BRANCH_SETTINGS_SELECT)
@@ -108,6 +125,12 @@ pub struct BranchSettingsInput {
     pub in_mall_fee: i32,
     pub prep_time_minutes: i32,
     pub max_road_distance_meters: Option<i32>,
+    /// Optional per-channel discount ids (must be active discounts in the
+    /// caller's org). `null` clears the channel's discount.
+    #[serde(default)]
+    pub in_mall_discount_id: Option<Uuid>,
+    #[serde(default)]
+    pub outside_discount_id: Option<Uuid>,
 }
 
 #[utoipa::path(
@@ -135,13 +158,33 @@ pub async fn put_branch_settings(
         return Err(AppError::BadRequest("max_road_distance_meters must be > 0".into()));
     }
 
+    // Any channel discount must be an active discount in the caller's org.
+    let org_id = claims
+        .org_id()
+        .ok_or_else(|| AppError::Forbidden("No org in token".into()))?;
+    for did in [body.in_mall_discount_id, body.outside_discount_id]
+        .into_iter()
+        .flatten()
+    {
+        let ok: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM discounts WHERE id = $1 AND org_id = $2 AND is_active = true)",
+        )
+        .bind(did)
+        .bind(org_id)
+        .fetch_one(pool.get_ref())
+        .await?;
+        if !ok {
+            return Err(AppError::BadRequest("Discount not found or inactive".into()));
+        }
+    }
+
     // Upsert config WITHOUT touching the *_override columns (POS-owned).
     sqlx::query(
         "INSERT INTO branch_delivery_settings
             (branch_id, in_mall_enabled, outside_enabled, in_mall_open_time, in_mall_close_time,
              outside_open_time, outside_close_time, in_mall_fee, prep_time_minutes,
-             max_road_distance_meters, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+             max_road_distance_meters, in_mall_discount_id, outside_discount_id, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
          ON CONFLICT (branch_id) DO UPDATE SET
              in_mall_enabled = EXCLUDED.in_mall_enabled,
              outside_enabled = EXCLUDED.outside_enabled,
@@ -152,6 +195,8 @@ pub async fn put_branch_settings(
              in_mall_fee = EXCLUDED.in_mall_fee,
              prep_time_minutes = EXCLUDED.prep_time_minutes,
              max_road_distance_meters = EXCLUDED.max_road_distance_meters,
+             in_mall_discount_id = EXCLUDED.in_mall_discount_id,
+             outside_discount_id = EXCLUDED.outside_discount_id,
              updated_at = now()",
     )
     .bind(body.branch_id)
@@ -164,6 +209,8 @@ pub async fn put_branch_settings(
     .bind(body.in_mall_fee)
     .bind(body.prep_time_minutes)
     .bind(body.max_road_distance_meters)
+    .bind(body.in_mall_discount_id)
+    .bind(body.outside_discount_id)
     .execute(pool.get_ref())
     .await?;
 

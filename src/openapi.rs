@@ -318,6 +318,7 @@ paths(
         crate::delivery::hub::DeliveryEvent,
         crate::delivery::public::PublicBranch,
         crate::delivery::public::DeliveryMenu,
+        crate::delivery::public::DeliveryMenuDiscount,
         crate::delivery::public::DeliveryMenuItem,
         crate::delivery::public::DeliveryMenuSize,
         crate::delivery::public::DeliveryMenuCategory,

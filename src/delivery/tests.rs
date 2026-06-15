@@ -316,6 +316,26 @@ mod it {
         .await
         .unwrap();
     }
+    async fn seed_discount(pool: &PgPool, org: Uuid, dtype: &str, value: i32) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO discounts (id, org_id, name, type, value, is_active) VALUES ($1,$2,'D',$3::discount_type,$4,true)")
+            .bind(id)
+            .bind(org)
+            .bind(dtype)
+            .bind(value)
+            .execute(pool)
+            .await
+            .unwrap();
+        id
+    }
+    async fn set_in_mall_discount(pool: &PgPool, branch: Uuid, discount: Option<Uuid>) {
+        sqlx::query("UPDATE branch_delivery_settings SET in_mall_discount_id = $2 WHERE branch_id = $1")
+            .bind(branch)
+            .bind(discount)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
     async fn seed_item(pool: &PgPool, org: Uuid, price: i32) -> Uuid {
         let cat = Uuid::new_v4();
         sqlx::query("INSERT INTO categories (id, org_id, name) VALUES ($1,$2,$3)")
@@ -728,6 +748,180 @@ mod it {
         assert!(o.get("delivery").map_or(true, |v| v.is_null()), "dine-in must have no delivery block");
     }
 
+    // ── Per-channel discounts ─────────────────────────────────────
+
+    #[sqlx::test]
+    async fn intake_freezes_percentage_discount(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, true, false, 300).await;
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
+        let disc = seed_discount(&pool, org, "percentage", 10).await;
+        set_in_mall_discount(&pool, branch, Some(disc)).await;
+
+        let app = app!(&pool);
+        let body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 2 }]));
+        let (st, b) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        assert_eq!(st, StatusCode::CREATED, "{b}");
+        assert_eq!(b["subtotal"], 1000);
+        assert_eq!(b["discount_amount"], 100); // 10% of 1000
+        assert_eq!(b["discount_type"], "percentage");
+        assert_eq!(b["discount_value"], 10);
+        assert_eq!(b["delivery_fee"], 300); // fee always charged in full
+        assert_eq!(b["total"], 1200); // 1000 - 100 + 300
+        assert_eq!(b["discount_id"].as_str().unwrap(), disc.to_string());
+    }
+
+    #[sqlx::test]
+    async fn intake_fixed_discount_leaves_fee(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, true, false, 300).await;
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
+        let disc = seed_discount(&pool, org, "fixed", 150).await;
+        set_in_mall_discount(&pool, branch, Some(disc)).await;
+
+        let app = app!(&pool);
+        let body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 2 }]));
+        let (st, b) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        assert_eq!(st, StatusCode::CREATED, "{b}");
+        assert_eq!(b["discount_amount"], 150);
+        assert_eq!(b["total"], 1150); // 1000 - 150 + 300
+    }
+
+    #[sqlx::test]
+    async fn inactive_channel_discount_drops_at_intake(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, true, false, 300).await;
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
+        let disc = seed_discount(&pool, org, "percentage", 10).await;
+        set_in_mall_discount(&pool, branch, Some(disc)).await;
+        // Deactivate AFTER configuring — intake must honor only active discounts.
+        sqlx::query("UPDATE discounts SET is_active=false WHERE id=$1").bind(disc).execute(&pool).await.unwrap();
+
+        let app = app!(&pool);
+        let body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 2 }]));
+        let (st, b) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        assert_eq!(st, StatusCode::CREATED, "{b}");
+        assert_eq!(b["discount_amount"], 0);
+        assert_eq!(b["total"], 1300); // no discount: 1000 + 300
+        assert!(b["discount_id"].is_null());
+    }
+
+    #[sqlx::test]
+    async fn finalize_writes_discount_into_order(pool: PgPool) {
+        perms(&pool).await;
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        assign(&pool, teller, branch).await;
+        let shift = seed_shift(&pool, branch, teller).await;
+        seed_settings(&pool, branch, true, false, 300).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
+        let disc = seed_discount(&pool, org, "percentage", 10).await;
+        set_in_mall_discount(&pool, branch, Some(disc)).await;
+
+        let id = place_in_mall_order(&pool, branch, item, 2).await;
+        let token = teller_token(teller, org, branch);
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool.clone()))
+                .app_data(web::Data::new(get_secret()))
+                .app_data(web::Data::new(crate::delivery::hub::DeliveryHub::new()))
+                .configure(crate::delivery::routes::configure)
+                .configure(crate::orders::routes::configure),
+        )
+        .await;
+
+        let (st, b) = send(
+            &app,
+            auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/finalize")), &token)
+                .set_json(json!({ "shift_id": shift, "payment_method": "cash" })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "finalize: {b}");
+        let order_id = b["order_id"].as_str().unwrap().to_string();
+
+        // The real order carries the frozen discount, fee untouched.
+        let (sub, dval, damt, tot, dtype): (i32, i32, i32, i32, Option<String>) = sqlx::query_as(
+            "SELECT subtotal, discount_value, discount_amount, total_amount, discount_type::text FROM orders WHERE id=$1",
+        )
+        .bind(Uuid::parse_str(&order_id).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(sub, 1000);
+        assert_eq!(dval, 10);
+        assert_eq!(damt, 100);
+        assert_eq!(tot, 1200);
+        assert_eq!(dtype.as_deref(), Some("percentage"));
+
+        // The orders API surfaces it too.
+        let (st, o) = send(&app, auth(test::TestRequest::get().uri(&format!("/orders/{order_id}")), &token)).await;
+        assert_eq!(st, StatusCode::OK, "{o}");
+        assert_eq!(o["discount_amount"], 100);
+        assert_eq!(o["total_amount"], 1200);
+        assert_eq!(o["delivery_fee"], 300);
+    }
+
+    #[sqlx::test]
+    async fn settings_rejects_inactive_or_cross_org_discount(pool: PgPool) {
+        perms(&pool).await;
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let admin = seed_user(&pool, org, "org_admin").await;
+        let token = admin_token(admin, org);
+        let app = app!(&pool);
+
+        let inactive = seed_discount(&pool, org, "percentage", 10).await;
+        sqlx::query("UPDATE discounts SET is_active=false WHERE id=$1").bind(inactive).execute(&pool).await.unwrap();
+        let body = json!({
+            "branch_id": branch, "in_mall_enabled": true, "outside_enabled": false,
+            "in_mall_fee": 0, "prep_time_minutes": 20, "in_mall_discount_id": inactive,
+        });
+        let (st, _) = send(&app, auth(test::TestRequest::put().uri("/delivery/settings"), &token).set_json(&body)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "inactive discount must be rejected");
+
+        let org2 = seed_org(&pool).await;
+        let foreign = seed_discount(&pool, org2, "fixed", 50).await;
+        let body2 = json!({
+            "branch_id": branch, "in_mall_enabled": true, "outside_enabled": false,
+            "in_mall_fee": 0, "prep_time_minutes": 20, "in_mall_discount_id": foreign,
+        });
+        let (st2, _) = send(&app, auth(test::TestRequest::put().uri("/delivery/settings"), &token).set_json(&body2)).await;
+        assert_eq!(st2, StatusCode::BAD_REQUEST, "cross-org discount must be rejected");
+    }
+
+    #[sqlx::test]
+    async fn public_menu_surfaces_channel_discount(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, true, false, 0).await;
+        seed_shift(&pool, branch, teller).await;
+        let _item = seed_item(&pool, org, 500).await;
+        let disc = seed_discount(&pool, org, "percentage", 15).await;
+        set_in_mall_discount(&pool, branch, Some(disc)).await;
+
+        let app = app!(&pool);
+        let (st, b) = send(&app, test::TestRequest::get().uri(&format!("/public/branches/{branch}/menu?channel=in_mall"))).await;
+        assert_eq!(st, StatusCode::OK, "{b}");
+        assert_eq!(b["discount"]["dtype"], "percentage");
+        assert_eq!(b["discount"]["value"], 15);
+        assert_eq!(b["discount"]["id"].as_str().unwrap(), disc.to_string());
+    }
+
     #[sqlx::test]
     async fn finalize_replays_frozen_snapshot_not_live_price(pool: PgPool) {
         perms(&pool).await;
@@ -1004,6 +1198,31 @@ mod it {
         assert_eq!(s["outside_enabled"], true);
         assert_eq!(s["in_mall_fee"], 250);
         assert_eq!(s["prep_time_minutes"], 30);
+    }
+
+    /// A teller has `delivery_orders:read` (so they can flip the POS open/close
+    /// override) but NOT `delivery_settings:read`. get_branch_settings must still
+    /// let them read the channel state — otherwise the toggle dead-ends on a 403.
+    #[sqlx::test]
+    async fn teller_can_read_settings_via_delivery_orders_perm(pool: PgPool) {
+        perms(&pool).await; // seeds defaults: teller gets delivery_orders:read, NOT delivery_settings:read
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        assign(&pool, teller, branch).await;
+        seed_settings(&pool, branch, true, false, 250).await;
+        let token = teller_token(teller, org, branch);
+        let app = app!(&pool);
+
+        let (st, s) = send(
+            &app,
+            auth(test::TestRequest::get().uri(&format!("/delivery/settings?branch_id={branch}")), &token),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "teller with delivery_orders:read may read settings: {s}");
+        assert_eq!(s["in_mall_enabled"], true);
+        assert_eq!(s["outside_enabled"], false);
+        assert_eq!(s["in_mall_fee"], 250);
     }
 
     #[sqlx::test]

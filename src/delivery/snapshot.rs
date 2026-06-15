@@ -442,6 +442,12 @@ pub struct FinalizeCtx<'a> {
     pub tax_amount: i32,
     pub delivery_fee: i32,
     pub total_amount: i32,
+    /// Frozen channel discount (item subtotal only). `discount_amount` is 0
+    /// when none; `total_amount == subtotal - discount_amount + delivery_fee`.
+    pub discount_id: Option<Uuid>,
+    pub discount_type: Option<&'a str>,
+    pub discount_value: i32,
+    pub discount_amount: i32,
     pub customer_name: Option<&'a str>,
     pub notes: Option<&'a str>,
     pub delivery_order_id: Uuid,
@@ -488,12 +494,14 @@ pub async fn apply_snapshot(
         r#"
         INSERT INTO orders
             (branch_id, shift_id, teller_id, order_number,
-             payment_method, subtotal, discount_value, discount_amount,
+             payment_method, subtotal,
+             discount_type, discount_value, discount_amount, discount_id,
              tax_amount, total_amount, tip_amount, status,
              customer_name, notes, created_at, order_ref,
              price_flagged, price_expected_total, tip_is_cash,
              order_type, delivery_fee, delivery_order_id)
-        VALUES ($1, $2, $3, $4, $5, $6, 0, 0,
+        VALUES ($1, $2, $3, $4, $5, $6,
+                $15::discount_type, $16, $17, $18,
                 $7, $8, 0, 'completed',
                 $9, $10, $11, $12,
                 false, $8, NULL,
@@ -523,6 +531,10 @@ pub async fn apply_snapshot(
     .bind(&order_ref)
     .bind(ctx.delivery_fee)
     .bind(ctx.delivery_order_id)
+    .bind(ctx.discount_type)   // $15
+    .bind(ctx.discount_value)  // $16
+    .bind(ctx.discount_amount) // $17
+    .bind(ctx.discount_id)     // $18
     .fetch_one(&mut **tx)
     .await?;
 

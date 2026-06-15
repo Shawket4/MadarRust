@@ -22512,6 +22512,14 @@
               "null"
             ]
           },
+          "in_mall_discount_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Optional discount applied to each channel's item subtotal (reuses the\norg `discounts` table). Frozen onto the order at intake. `null` = none."
+          },
           "in_mall_enabled": {
             "type": "boolean"
           },
@@ -22540,6 +22548,13 @@
               "string",
               "null"
             ]
+          },
+          "outside_discount_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           },
           "outside_enabled": {
             "type": "boolean"
@@ -23065,6 +23080,14 @@
               "null"
             ]
           },
+          "in_mall_discount_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Optional per-channel discount ids (must be active discounts in the\ncaller's org). `null` clears the channel's discount."
+          },
           "in_mall_enabled": {
             "type": "boolean"
           },
@@ -23090,6 +23113,13 @@
               "string",
               "null"
             ]
+          },
+          "outside_discount_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           },
           "outside_enabled": {
             "type": "boolean"
@@ -25494,6 +25524,17 @@
               "$ref": "#/components/schemas/DeliveryMenuCategory"
             }
           },
+          "discount": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DeliveryMenuDiscount",
+                "description": "The active discount for this channel (customer-facing) or `null`. Applies\nto the item subtotal only — the delivery fee is always charged in full."
+              }
+            ]
+          },
           "items": {
             "type": "array",
             "items": {
@@ -25525,6 +25566,38 @@
           },
           "name_translations": {
             "type": "object"
+          }
+        }
+      },
+      "DeliveryMenuDiscount": {
+        "type": "object",
+        "description": "Customer-facing summary of a channel's active discount, so the public UI can\ntell the customer \"you've got X off\" and show a discounted estimate.",
+        "required": [
+          "id",
+          "name",
+          "name_translations",
+          "dtype",
+          "value"
+        ],
+        "properties": {
+          "dtype": {
+            "type": "string",
+            "description": "\"percentage\" | \"fixed\"."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
+          },
+          "value": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Percentage points (0-100) for `percentage`; piastres for `fixed`."
           }
         }
       },
@@ -25758,6 +25831,28 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "discount_amount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "discount_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Frozen channel discount on the item subtotal (`total == subtotal -\ndiscount_amount + delivery_fee`). `discount_amount` is 0 when none."
+          },
+          "discount_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "discount_value": {
+            "type": "integer",
+            "format": "int32"
           },
           "extra_prep_minutes": {
             "type": "integer",

@@ -334,6 +334,7 @@ pub async fn open_shift(
     }
 
     let opened_at = body.opened_at.unwrap_or_else(chrono::Utc::now);
+    reject_if_future(opened_at, "opened_at")?;
 
     // Guards + insert run in one transaction; the unique partial indexes
     // (one open shift per branch AND per teller) are the race-proof backstop —
@@ -705,9 +706,11 @@ pub async fn add_cash_movement(
     let shift = fetch_shift_or_404(pool.get_ref(), *shift_id).await?;
     require_branch_access(pool.get_ref(), &claims, shift.branch_id).await?;
 
-    if shift.status != "open" {
-        return Err(AppError::BadRequest(
-            "Cash movements can only be added to an open shift".into(),
+    // A teller may only move cash within their OWN drawer — a movement changes
+    // the expected-cash reconciliation, so it must belong to the right person.
+    if claims.role == UserRole::Teller && shift.teller_id != claims.user_id() {
+        return Err(AppError::Forbidden(
+            "You can only add cash movements to your own shift".into(),
         ));
     }
     if body.amount == 0 {
@@ -716,6 +719,29 @@ pub async fn add_cash_movement(
     if body.note.trim().is_empty() {
         return Err(AppError::BadRequest(
             "Note is required for cash movements".into(),
+        ));
+    }
+
+    // Serialize against a concurrent close exactly like create_order does:
+    // close_shift snapshots `closing_cash_system` under this same per-shift
+    // advisory lock, so taking it here (and re-checking `open` inside the lock)
+    // guarantees a movement either lands before the snapshot — and is counted —
+    // or is rejected, never silently excluded from a just-closed shift.
+    let mut tx = pool.get_ref().begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text))")
+        .bind(shift_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+
+    let still_open: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND status = 'open')"
+    )
+    .bind(*shift_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !still_open {
+        return Err(AppError::BadRequest(
+            "Cash movements can only be added to an open shift".into(),
         ));
     }
 
@@ -733,8 +759,10 @@ pub async fn add_cash_movement(
     .bind(body.amount)
     .bind(&body.note)
     .bind(claims.user_id())
-    .fetch_one(pool.get_ref())
+    .fetch_one(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(HttpResponse::Created().json(movement))
 }
@@ -807,6 +835,15 @@ pub async fn close_shift(
     let shift = fetch_shift_or_404(pool.get_ref(), *shift_id).await?;
     require_branch_access(pool.get_ref(), &claims, shift.branch_id).await?;
 
+    // A teller may only close their OWN shift — closing settles cash, so it must
+    // be attributed to the right person. Managers/admins can close any shift in
+    // their branch scope (force-close remains the path for an absent teller).
+    if claims.role == UserRole::Teller && shift.teller_id != claims.user_id() {
+        return Err(AppError::Forbidden(
+            "You can only close your own shift".into(),
+        ));
+    }
+
     // Idempotent: closing an already-closed shift just returns it.
     // (Inventory counting now lives in the standalone stocktake module.)
     if shift.status != "open" {
@@ -814,6 +851,12 @@ pub async fn close_shift(
     }
 
     let closed_at = body.closed_at.unwrap_or_else(chrono::Utc::now);
+    reject_if_future(closed_at, "closed_at")?;
+    if closed_at < shift.opened_at {
+        return Err(AppError::BadRequest(
+            "closed_at cannot be before the shift was opened".into(),
+        ));
+    }
     let mut tx = pool.get_ref().begin().await?;
 
     // Serialize against concurrent order inserts on this shift: create_order
@@ -839,7 +882,7 @@ pub async fn close_shift(
     // Snapshot the expected drawer cash under the advisory lock (counts every
     // committed order). Same formula as the live shift report — see
     // [compute_system_cash].
-    let closing_cash_system = compute_system_cash(&mut *tx, *shift_id).await? as i32;
+    let closing_cash_system = cash_to_i32(compute_system_cash(&mut *tx, *shift_id).await?)?;
 
     let closed_shift = sqlx::query_as::<_, Shift>(
         r#"
@@ -910,15 +953,42 @@ pub async fn force_close_shift(
         return Err(AppError::BadRequest("Shift is not open".into()));
     }
 
+    // Snapshot the expected drawer cash under the same per-shift advisory lock
+    // create_order / close_shift use, so a force-close freezes `closing_cash_system`
+    // exactly like a normal close. No declared count is collected (the teller is
+    // absent), but the system figure must still be an immutable audit record —
+    // otherwise a force-closed shift's expected cash keeps being re-derived live
+    // and a later void could silently rewrite it.
+    let mut tx = pool.get_ref().begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text))")
+        .bind(shift_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+
+    let still_open: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND status = 'open')"
+    )
+    .bind(*shift_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !still_open {
+        tx.rollback().await?;
+        let current = fetch_shift_or_404(pool.get_ref(), *shift_id).await?;
+        return Ok(HttpResponse::Ok().json(current));
+    }
+
+    let closing_cash_system = cash_to_i32(compute_system_cash(&mut *tx, *shift_id).await?)?;
+
     let closed = sqlx::query_as::<_, Shift>(
         r#"
         UPDATE shifts SET
-            status             = 'force_closed',
-            closed_at          = NOW(),
-            closed_by          = $2,
-            force_closed_by    = $2,
-            force_closed_at    = NOW(),
-            force_close_reason = $3
+            status              = 'force_closed',
+            closing_cash_system = $4,
+            closed_at           = NOW(),
+            closed_by           = $2,
+            force_closed_by     = $2,
+            force_closed_at     = NOW(),
+            force_close_reason  = $3
         WHERE id = $1
         RETURNING
             id, branch_id, teller_id,
@@ -935,8 +1005,11 @@ pub async fn force_close_shift(
     .bind(*shift_id)
     .bind(claims.user_id())
     .bind(&body.reason)
-    .fetch_one(pool.get_ref())
+    .bind(closing_cash_system)
+    .fetch_one(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(HttpResponse::Ok().json(closed))
 }
@@ -968,15 +1041,40 @@ pub async fn delete_shift(
     let shift = fetch_shift_or_404(pool.get_ref(), *shift_id).await?;
     require_branch_access(pool.get_ref(), &claims, shift.branch_id).await?;
 
+    // Delete is a cleanup tool for empty / erroneous shifts only — it must never
+    // be able to wipe live or settled financial history:
+    //   • An OPEN shift may have a teller actively ringing up orders; deleting it
+    //     would destroy in-progress sales and break the one-open-per-branch
+    //     invariant mid-service. Force-close it first (audited), then delete.
+    //   • A shift with non-voided orders holds real revenue that belongs to the
+    //     financial record; those sales must not vanish silently.
+    if shift.status == "open" {
+        return Err(AppError::Conflict(
+            "Cannot delete an open shift — force-close it first.".into(),
+        ));
+    }
+    let has_real_orders: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM orders WHERE shift_id = $1 AND status <> 'voided')"
+    )
+    .bind(*shift_id)
+    .fetch_one(pool.get_ref())
+    .await?;
+    if has_real_orders {
+        return Err(AppError::Conflict(
+            "Cannot delete a shift that has recorded (non-voided) orders — its \
+             sales are part of the financial record.".into(),
+        ));
+    }
+
     let mut tx = pool.get_ref().begin().await?;
 
-    // 1. Delete orders belonging to the shift (cascades to order items, payments, etc.)
+    // Only voided orders (no financial value) remain — remove them so the shift's
+    // FK references clear, then delete the shift (cascades to cash movements).
     sqlx::query("DELETE FROM orders WHERE shift_id = $1")
         .bind(*shift_id)
         .execute(&mut *tx)
         .await?;
 
-    // 2. Delete the shift itself (cascades to cash movements and inventory counts)
     sqlx::query("DELETE FROM shifts WHERE id = $1")
         .bind(*shift_id)
         .execute(&mut *tx)
@@ -994,6 +1092,33 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
         .get::<Claims>()
         .cloned()
         .ok_or_else(|| AppError::Unauthorized("Missing claims".into()))
+}
+
+/// Rejects a client-supplied timestamp that sits too far in the FUTURE. POS
+/// devices can be offline for a while, so a PAST timestamp is legitimate (an
+/// action that happened earlier and is only now syncing) and is accepted as-is.
+/// A future timestamp, though, means a skewed device clock or a spoof — left
+/// unchecked it would file the shift into a future business day or reorder the
+/// cash-continuity carryover (which keys on `closed_at`). We clamp only the
+/// future side, with a few minutes of skew tolerance.
+fn reject_if_future(
+    ts: chrono::DateTime<chrono::Utc>,
+    label: &str,
+) -> Result<(), AppError> {
+    if ts > chrono::Utc::now() + chrono::Duration::minutes(5) {
+        return Err(AppError::BadRequest(format!(
+            "{label} is too far in the future — check the device clock."
+        )));
+    }
+    Ok(())
+}
+
+/// Narrows the i64 system-cash total to the i32 the cash columns store, turning
+/// what was a silent wrap-around (`as i32`) into a clear error. The columns hold
+/// piastres, so i32 caps a single shift at ~21.4M EGP; exceeding that is a data
+/// anomaly we surface rather than corrupt the closing snapshot.
+fn cash_to_i32(v: i64) -> Result<i32, AppError> {
+    i32::try_from(v).map_err(|_| AppError::Internal)
 }
 
 async fn fetch_shift_or_404(pool: &PgPool, shift_id: Uuid) -> Result<Shift, AppError> {

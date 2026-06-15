@@ -44,6 +44,14 @@ pub struct DeliveryOrder {
     pub subtotal: i32,
     pub delivery_fee: i32,
     pub total: i32,
+    /// Frozen channel discount on the item subtotal (`total == subtotal -
+    /// discount_amount + delivery_fee`). `discount_amount` is 0 when none.
+    pub discount_id: Option<Uuid>,
+    pub discount_type: Option<String>,
+    #[serde(default)]
+    pub discount_value: i32,
+    #[serde(default)]
+    pub discount_amount: i32,
     /// Extra prep minutes the teller added on top of the branch base (multiples of 5).
     pub extra_prep_minutes: i32,
     /// The frozen priced line snapshot the POS renders before finalize.
@@ -69,7 +77,8 @@ pub struct DeliveryOrder {
 const DO_SELECT: &str = "SELECT id, org_id, branch_id, channel::text, status::text, delivery_ref, \
     customer_name, customer_phone, place_name, floor, unit_number, landmark, address_line, \
     delivery_notes, customer_lat, customer_lng, delivery_zone_id, road_distance_meters, \
-    subtotal, delivery_fee, total, extra_prep_minutes, cart, payment_method_hint, otp_verified, order_id, \
+    subtotal, delivery_fee, total, discount_id, discount_type::text, discount_value, discount_amount, \
+    extra_prep_minutes, cart, payment_method_hint, otp_verified, order_id, \
     receipt_printed_at, confirmed_at, preparing_at, ready_at, out_for_delivery_at, delivered_at, \
     cancelled_at, rejected_at, cancel_reason, cancel_restocked, created_at, updated_at \
     FROM delivery_orders";
@@ -506,6 +515,10 @@ pub async fn finalize_delivery_order(
         tax_amount: 0,
         delivery_fee: order.delivery_fee,
         total_amount: order.total,
+        discount_id: order.discount_id,
+        discount_type: order.discount_type.as_deref(),
+        discount_value: order.discount_value,
+        discount_amount: order.discount_amount,
         customer_name: Some(order.customer_name.as_str()),
         notes: order.delivery_notes.as_deref(),
         delivery_order_id: id,

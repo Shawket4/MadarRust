@@ -428,6 +428,7 @@ async fn test_delete_shift_forbidden(pool: PgPool) {
     let user_admin = seed_user(&pool, org_id, "org_admin").await;
     
     grant_permission(&pool, "org_admin", "shifts", "create").await;
+    grant_permission(&pool, "org_admin", "shifts", "update").await;
 
     let admin_token = generate_org_admin_token(user_admin, org_id);
     let teller_token = generate_teller_token(user_teller, org_id);
@@ -441,14 +442,30 @@ async fn test_delete_shift_forbidden(pool: PgPool) {
         .to_request();
     test::call_service(&app, req_open).await;
 
-    // Delete by teller -> Forbidden
+    // Delete by teller -> Forbidden (role check)
     let req_del = test::TestRequest::delete()
         .uri(&format!("/shifts/{}", shift_id))
         .insert_header(("Authorization", format!("Bearer {}", teller_token)))
         .to_request();
     let resp_del = test::call_service(&app, req_del).await;
     assert_eq!(resp_del.status().as_u16(), 403);
-    
+
+    // Even an admin may NOT delete an OPEN shift — it must be force-closed first
+    // so live orders are never silently destroyed.
+    let req_del_open = test::TestRequest::delete()
+        .uri(&format!("/shifts/{}", shift_id))
+        .insert_header(("Authorization", format!("Bearer {}", admin_token)))
+        .to_request();
+    assert_eq!(test::call_service(&app, req_del_open).await.status().as_u16(), 409);
+
+    // Force-close it (admin), then the empty shift can be deleted.
+    let req_fc = test::TestRequest::post()
+        .uri(&format!("/shifts/{}/force-close", shift_id))
+        .insert_header(("Authorization", format!("Bearer {}", admin_token)))
+        .set_json(&ForceCloseRequest { reason: Some("cleanup".into()) })
+        .to_request();
+    assert!(test::call_service(&app, req_fc).await.status().is_success());
+
     // Delete by admin -> Success
     let req_del2 = test::TestRequest::delete()
         .uri(&format!("/shifts/{}", shift_id))
@@ -640,4 +657,158 @@ async fn test_close_cash_uses_is_cash_snapshot(pool: PgPool) {
     assert!(resp.status().is_success());
     let closed: CloseShiftResponse = test::read_body_json(resp).await;
     assert_eq!(closed.shift.closing_cash_system.unwrap(), 1500, "cash order must still count via the sale-time snapshot");
+}
+
+/// A teller may close ONLY their own shift — closing settles cash, so it must be
+/// attributed to the right person. A second teller (same branch) is rejected.
+#[sqlx::test]
+async fn test_teller_cannot_close_another_tellers_shift(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+    let org_id   = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    // Two tellers in the same org need distinct names (unique teller name/org).
+    let teller_a = Uuid::new_v4();
+    let teller_b = Uuid::new_v4();
+    for (id, nm) in [(teller_a, "Teller A"), (teller_b, "Teller B")] {
+        sqlx::query("INSERT INTO users (id, org_id, name, email, password_hash, role) VALUES ($1,$2,$3,$4,'hash','teller'::user_role)")
+            .bind(id).bind(org_id).bind(nm).bind(format!("{}@test.com", id))
+            .execute(&pool).await.unwrap();
+    }
+    assign_user_to_branch(&pool, teller_a, branch_id).await;
+    assign_user_to_branch(&pool, teller_b, branch_id).await;
+    for a in ["create", "read", "update"] { grant_permission(&pool, "teller", "shifts", a).await; }
+    let token_a = generate_teller_token(teller_a, org_id);
+    let token_b = generate_teller_token(teller_b, org_id);
+
+    // Teller A opens the (only) shift for the branch.
+    let shift_id = Uuid::new_v4();
+    let open = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/shifts/branches/{}/open", branch_id))
+        .insert_header(("Authorization", format!("Bearer {}", token_a)))
+        .set_json(&OpenShiftRequest { id: Some(shift_id), opening_cash: 0, opening_cash_edited: None, edit_reason: None, opened_at: None })
+        .to_request()).await;
+    assert!(open.status().is_success());
+
+    // Teller B (same branch) cannot close A's shift.
+    let resp_b = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/shifts/{}/close", shift_id))
+        .insert_header(("Authorization", format!("Bearer {}", token_b)))
+        .set_json(&CloseShiftRequest { closing_cash_declared: 0, cash_note: None, closed_at: None })
+        .to_request()).await;
+    assert_eq!(resp_b.status().as_u16(), 403, "a teller cannot close another teller's shift");
+
+    // The shift is still open afterwards.
+    let still_open: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM shifts WHERE id=$1 AND status='open')")
+        .bind(shift_id).fetch_one(&pool).await.unwrap();
+    assert!(still_open);
+
+    // Its owner CAN close it.
+    let resp_a = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/shifts/{}/close", shift_id))
+        .insert_header(("Authorization", format!("Bearer {}", token_a)))
+        .set_json(&CloseShiftRequest { closing_cash_declared: 0, cash_note: None, closed_at: None })
+        .to_request()).await;
+    assert!(resp_a.status().is_success());
+}
+
+/// delete_shift must never destroy recorded sales: a shift that still has a
+/// non-voided order cannot be deleted even by an admin, even after close.
+#[sqlx::test]
+async fn test_delete_shift_with_orders_blocked(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+    let org_id    = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let admin     = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "shifts", "create").await;
+    grant_permission(&pool, "org_admin", "shifts", "update").await;
+    let token = generate_org_admin_token(admin, org_id);
+
+    let shift_id = Uuid::new_v4();
+    let open = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/shifts/branches/{}/open", branch_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&OpenShiftRequest { id: Some(shift_id), opening_cash: 0, opening_cash_edited: None, edit_reason: None, opened_at: None })
+        .to_request()).await;
+    assert!(open.status().is_success());
+
+    // A recorded (non-voided) order on the shift.
+    sqlx::query("INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref) VALUES (gen_random_uuid(),$1,$2,$3, gen_random_uuid(), 500,0,500,'completed',1,'cash', gen_random_uuid()::text)")
+        .bind(branch_id).bind(admin).bind(shift_id).execute(&pool).await.unwrap();
+
+    // Force-close so the only barrier left is the recorded-order guard.
+    let fc = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/shifts/{}/force-close", shift_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&ForceCloseRequest { reason: Some("x".into()) })
+        .to_request()).await;
+    assert!(fc.status().is_success());
+
+    // Delete is refused — the sale is part of the financial record.
+    let del = test::call_service(&app, test::TestRequest::delete()
+        .uri(&format!("/shifts/{}", shift_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request()).await;
+    assert_eq!(del.status().as_u16(), 409, "cannot delete a shift with recorded orders");
+
+    // The shift and its order are still there.
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM shifts WHERE id=$1").bind(shift_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 1);
+}
+
+/// A force-close FREEZES `closing_cash_system` (same formula as a normal close),
+/// so a force-closed shift has an immutable expected-cash audit figure.
+#[sqlx::test]
+async fn test_force_close_snapshots_system_cash(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+    let org_id = seed_org(&pool).await;
+    sqlx::query("INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash, is_active) VALUES ($1,'cash','{}','e','i',true,true)")
+        .bind(org_id).execute(&pool).await.unwrap();
+    let branch_id = seed_branch(&pool, org_id).await;
+    let admin = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "shifts", "create").await;
+    grant_permission(&pool, "org_admin", "shifts", "update").await;
+    let token = generate_org_admin_token(admin, org_id);
+
+    // Open with 1000 float.
+    let shift_id = Uuid::new_v4();
+    let open = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/shifts/branches/{}/open", branch_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&OpenShiftRequest { id: Some(shift_id), opening_cash: 1000, opening_cash_edited: None, edit_reason: None, opened_at: None })
+        .to_request()).await;
+    assert!(open.status().is_success());
+
+    // A 500 cash sale lands in the drawer.
+    let order_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref) VALUES ($1,$2,$3,$4, gen_random_uuid(), 500,0,500,'completed',1,'cash', gen_random_uuid()::text)")
+        .bind(order_id).bind(branch_id).bind(admin).bind(shift_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ($1,'cash',500,true)")
+        .bind(order_id).execute(&pool).await.unwrap();
+
+    // Force-close (no declared count collected) still snapshots system cash = 1500.
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/shifts/{}/force-close", shift_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&ForceCloseRequest { reason: Some("absent teller".into()) })
+        .to_request()).await;
+    assert!(resp.status().is_success());
+    let shift: Shift = test::read_body_json(resp).await;
+    assert_eq!(shift.status, "force_closed");
+    assert_eq!(shift.closing_cash_system.unwrap(), 1500, "force-close must freeze expected cash");
+    assert!(shift.closing_cash_declared.is_none(), "no declared count at force-close");
 }

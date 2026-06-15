@@ -377,12 +377,22 @@ pub async fn me(
     .await?
     .ok_or_else(|| AppError::NotFound("User not found".into()))?;
 
-    let branch_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT branch_id FROM user_branch_assignments WHERE user_id = $1 LIMIT 1"
-    )
-    .bind(user.id)
-    .fetch_optional(pool.get_ref())
-    .await?;
+    // Prefer the branch this token is actually bound to (tellers always carry
+    // one). An arbitrary LIMIT-1 assignment would, for a teller assigned to more
+    // than one branch, report a DIFFERENT branch than the token — the POS adopts
+    // that branch as `user.branchId` and then calls branch-scoped endpoints with
+    // it, tripping require_branch_access's teller token-branch binding (403),
+    // while /auth/me itself still returns 200. Non-branch-bound roles (admins)
+    // have no token branch, so they fall back to an assignment lookup.
+    let branch_id: Option<Uuid> = match claims.branch_id() {
+        Some(b) => Some(b),
+        None => sqlx::query_scalar(
+            "SELECT branch_id FROM user_branch_assignments WHERE user_id = $1 LIMIT 1"
+        )
+        .bind(user.id)
+        .fetch_optional(pool.get_ref())
+        .await?,
+    };
 
     // Org-level config the POS needs for a tax-inclusive cart total.
     let (tax_rate, currency_code): (f64, String) = match user.org_id {

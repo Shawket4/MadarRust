@@ -470,6 +470,56 @@ async fn test_me_success(pool: PgPool) {
     assert_eq!(body.user.name, "Me User");
 }
 
+/// A teller assigned to MULTIPLE branches must have /auth/me report the branch
+/// their TOKEN is bound to — not an arbitrary `LIMIT 1` assignment. Otherwise the
+/// POS adopts the wrong branch as `user.branchId` and every branch-scoped call
+/// 403s on the token-branch binding check while /auth/me itself returns 200.
+#[sqlx::test(migrations = "./migrations")]
+async fn test_me_returns_token_branch_for_multi_branch_teller(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_a = seed_branch(&pool, org_id).await;
+    let branch_b = seed_branch(&pool, org_id).await;
+    let teller = Uuid::new_v4();
+    sqlx::query!(
+        "INSERT INTO users (id, org_id, name, role, email, password_hash)
+         VALUES ($1, $2, 'Multi Teller', 'teller'::user_role, 'mt@test.com', 'h')",
+        teller, org_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Assigned to BOTH branches; branch_a is inserted first, so a naive LIMIT-1
+    // would tend to pick it — but the token is bound to branch_b.
+    assign_teller_to_branch(&pool, teller, branch_a).await;
+    assign_teller_to_branch(&pool, teller, branch_b).await;
+
+    let token = crate::auth::jwt::create_token(
+        &get_secret(), teller, Some(org_id), UserRole::Teller, Some(branch_b), 24,
+    )
+    .unwrap();
+
+    let req = test::TestRequest::get()
+        .uri("/auth/me")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let body: MeResponse = test::read_body_json(resp).await;
+    assert_eq!(
+        body.user.branch_id,
+        Some(branch_b),
+        "/auth/me must report the token's branch, not an arbitrary assignment"
+    );
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn test_me_no_token_returns_401(pool: PgPool) {
     let app = test::init_service(

@@ -1099,6 +1099,43 @@ async fn test_split_payment_rejects_nonpositive_amount(pool: PgPool) {
     assert_eq!(resp.status(), 400, "negative split amount must be rejected");
 }
 
+/// V33: split-payment amounts must SUM to the order total. They are the sole
+/// source of drawer cash in compute_system_cash, so a mismatch would silently
+/// leave the teller over/short. (Seeded menu item is priced 570.)
+#[sqlx::test]
+async fn test_split_payment_must_sum_to_total(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await; // seeds cash + card
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    // 300 + 200 = 500 ≠ 570 → rejected.
+    let mut req_body = simple_order(branch_id, shift_id, menu_item_id);
+    req_body.payment_splits = Some(vec![
+        PaymentSplitInput { method: "cash".to_string(), amount: 300, reference: None },
+        PaymentSplitInput { method: "card".to_string(), amount: 200, reference: None },
+    ]);
+    let resp = test::call_service(&app, test::TestRequest::post().uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&req_body).to_request()).await;
+    assert_eq!(resp.status(), 400, "splits not summing to the total must be rejected");
+
+    // 300 + 270 = 570 → accepted.
+    req_body.payment_splits = Some(vec![
+        PaymentSplitInput { method: "cash".to_string(), amount: 300, reference: None },
+        PaymentSplitInput { method: "card".to_string(), amount: 270, reference: None },
+    ]);
+    let resp_ok = test::call_service(&app, test::TestRequest::post().uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&req_body).to_request()).await;
+    assert!(resp_ok.status().is_success(), "splits summing to the total are accepted");
+}
+
 /// V6: voiding is idempotent — a second void does not double-restock inventory.
 #[sqlx::test]
 async fn test_void_is_idempotent_no_double_restock(pool: PgPool) {
@@ -1669,4 +1706,231 @@ async fn test_create_order_branch_addon_override_applied(pool: PgPool) {
     assert_eq!(of.items[0].addons[0].unit_price, 150, "branch addon override feeds the addon price");
     assert_eq!(of.order.subtotal, 650, "500 item + 150 branch addon");
     assert!(!order_flagged(&pool, of.order.id).await, "charged == branch-effective expected → not flagged");
+}
+
+// ── Order ↔ shift/branch binding (defense in depth) ───────────────────────────
+//
+// The guarantee under test: an order is ALWAYS filed onto exactly the shift it
+// names, on that shift's OWN branch (resolved server-side under the per-shift
+// advisory lock), and a teller can only attach to their own shift. A wrong /
+// stale / cross-branch / cross-teller / cross-org shift_id is rejected and
+// NOTHING is filed — even if the one-open-per-branch / per-teller invariants
+// were somehow bypassed.
+
+async fn total_orders(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM orders").fetch_one(pool).await.unwrap()
+}
+/// A second branch in the same org — `seed_branch` hardcodes the name and would
+/// collide on the unique (org_id, name) constraint.
+async fn seed_branch2(pool: &PgPool, org_id: Uuid) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, $3)")
+        .bind(id).bind(org_id).bind(format!("Branch {id}")).execute(pool).await.unwrap();
+    id
+}
+async fn orders_on_shift(pool: &PgPool, shift_id: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE shift_id=$1").bind(shift_id).fetch_one(pool).await.unwrap()
+}
+
+/// The recorded branch is the SHIFT's branch (resolved server-side), not merely
+/// echoed from the request — confirmed against the persisted row.
+#[sqlx::test]
+async fn test_order_records_shift_branch_authoritatively(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item = seed_menu_item(&pool, org_id, cat_id).await;
+
+    let of = create_order_ok!(app, token, simple_order(branch_id, shift_id, item));
+    assert_eq!(of.order.shift_id, shift_id);
+    assert_eq!(of.order.branch_id, branch_id);
+
+    let (db_branch, db_shift): (Uuid, Uuid) =
+        sqlx::query_as("SELECT branch_id, shift_id FROM orders WHERE id=$1")
+            .bind(of.order.id).fetch_one(&pool).await.unwrap();
+    assert_eq!(db_shift, shift_id, "order is filed under the shift it named");
+    assert_eq!(db_branch, branch_id, "order's branch IS the shift's branch");
+}
+
+/// A request whose branch_id disagrees with the target shift's branch is
+/// rejected — never silently filed under either branch.
+#[sqlx::test]
+async fn test_order_rejected_when_body_branch_mismatches_shift(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_1 = seed_branch(&pool, org_id).await;
+    let branch_2 = seed_branch2(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_1 = seed_shift(&pool, branch_1, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item = seed_menu_item(&pool, org_id, cat_id).await;
+
+    // shift_1 lives at branch_1, but the request claims branch_2.
+    let mut body = simple_order(branch_1, shift_1, item);
+    body.branch_id = branch_2;
+
+    let resp = test::call_service(&app, test::TestRequest::post().uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&body).to_request()).await;
+    assert!(!resp.status().is_success(), "branch/shift disagreement must be rejected");
+    assert_eq!(total_orders(&pool).await, 0, "nothing filed when branch and shift disagree");
+}
+
+/// A request naming a shift that does not exist is rejected; nothing is filed.
+#[sqlx::test]
+async fn test_order_rejected_for_unknown_shift(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let cat_id = seed_category(&pool, org_id).await;
+    let item = seed_menu_item(&pool, org_id, cat_id).await;
+
+    let body = simple_order(branch_id, Uuid::new_v4(), item); // shift that was never created
+    let resp = test::call_service(&app, test::TestRequest::post().uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&body).to_request()).await;
+    assert!(!resp.status().is_success(), "unknown shift must be rejected");
+    assert_eq!(total_orders(&pool).await, 0);
+}
+
+/// A stale shift_id pointing at a CLOSED shift is rejected and nothing is filed
+/// (cash on that shift is already settled).
+#[sqlx::test]
+async fn test_order_on_closed_shift_files_nothing(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item = seed_menu_item(&pool, org_id, cat_id).await;
+
+    sqlx::query("UPDATE shifts SET status='closed', closed_at=now() WHERE id=$1")
+        .bind(shift_id).execute(&pool).await.unwrap();
+
+    let resp = test::call_service(&app, test::TestRequest::post().uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&simple_order(branch_id, shift_id, item)).to_request()).await;
+    assert!(!resp.status().is_success(), "order on a closed shift must be rejected");
+    assert_eq!(orders_on_shift(&pool, shift_id).await, 0, "nothing filed onto the closed shift");
+}
+
+/// THE key invariant: with TWO shifts open at once, each order lands on exactly
+/// the shift + branch it names — no cross-contamination — and a mismatched
+/// (branch_1, shift_2) pairing is rejected.
+#[sqlx::test]
+async fn test_two_open_shifts_route_orders_correctly(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_1 = seed_branch(&pool, org_id).await;
+    let branch_2 = seed_branch2(&pool, org_id).await;
+    let caller = seed_user(&pool, org_id, "org_admin").await;
+    // Distinct shift owners — the per-teller unique index forbids one user
+    // holding two open shifts, so two coexisting open shifts need two owners.
+    let owner_1 = seed_user(&pool, org_id, "org_admin").await;
+    let owner_2 = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(caller, org_id);
+    let shift_1 = seed_shift(&pool, branch_1, owner_1).await;
+    let shift_2 = seed_shift(&pool, branch_2, owner_2).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item = seed_menu_item(&pool, org_id, cat_id).await;
+
+    let a = create_order_ok!(app, token, simple_order(branch_1, shift_1, item));
+    let b = create_order_ok!(app, token, simple_order(branch_2, shift_2, item));
+
+    assert_eq!((a.order.shift_id, a.order.branch_id), (shift_1, branch_1));
+    assert_eq!((b.order.shift_id, b.order.branch_id), (shift_2, branch_2));
+
+    let in_1: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM orders WHERE shift_id=$1")
+        .bind(shift_1).fetch_all(&pool).await.unwrap();
+    let in_2: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM orders WHERE shift_id=$1")
+        .bind(shift_2).fetch_all(&pool).await.unwrap();
+    assert_eq!(in_1, vec![a.order.id], "shift_1 holds only its own order");
+    assert_eq!(in_2, vec![b.order.id], "shift_2 holds only its own order");
+
+    // A crossed pairing (branch_1 + shift_2) is rejected; counts stay 1 each.
+    let resp = test::call_service(&app, test::TestRequest::post().uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&simple_order(branch_1, shift_2, item)).to_request()).await;
+    assert!(!resp.status().is_success(), "branch_1 + shift_2 must be rejected");
+    assert_eq!(orders_on_shift(&pool, shift_1).await, 1);
+    assert_eq!(orders_on_shift(&pool, shift_2).await, 1);
+}
+
+/// Defense in depth: even if a SECOND teller somehow holds a valid token bound
+/// to a branch where ANOTHER teller's shift is open (login normally blocks
+/// this), create_order refuses to attach their order to a shift that is not
+/// theirs — nothing is filed — while the shift's owner can still post.
+#[sqlx::test]
+async fn test_teller_cannot_post_order_to_another_tellers_shift(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    // Two tellers need distinct names (unique teller name per org).
+    let teller_1 = Uuid::new_v4();
+    let teller_2 = Uuid::new_v4();
+    for (id, nm) in [(teller_1, "Teller One"), (teller_2, "Teller Two")] {
+        sqlx::query("INSERT INTO users (id, org_id, name, email, password_hash, role) VALUES ($1,$2,$3,$4,'hash','teller'::user_role)")
+            .bind(id).bind(org_id).bind(nm).bind(format!("{}@t.com", id))
+            .execute(&pool).await.unwrap();
+    }
+    assign_user_to_branch(&pool, teller_1, branch_id).await;
+    assign_user_to_branch(&pool, teller_2, branch_id).await;
+    grant_permission(&pool, "teller", "orders", "create").await;
+
+    let shift_1 = seed_shift(&pool, branch_id, teller_1).await; // teller_1's open shift
+    let cat_id = seed_category(&pool, org_id).await;
+    let item = seed_menu_item(&pool, org_id, cat_id).await;
+
+    // teller_2's token is bound to the SAME branch — the "somehow it happened" case.
+    let token_2 = generate_teller_token(teller_2, org_id, branch_id);
+    let resp = test::call_service(&app, test::TestRequest::post().uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {}", token_2)))
+        .set_json(&simple_order(branch_id, shift_1, item)).to_request()).await;
+    assert!(!resp.status().is_success(), "a teller cannot post onto another teller's shift");
+    assert_eq!(orders_on_shift(&pool, shift_1).await, 0, "nothing filed onto the other teller's shift");
+
+    // The shift's own teller CAN post, and it is attributed to them.
+    let token_1 = generate_teller_token(teller_1, org_id, branch_id);
+    let of = create_order_ok!(app, token_1, simple_order(branch_id, shift_1, item));
+    assert_eq!(of.order.shift_id, shift_1);
+    assert_eq!(of.order.teller_id, teller_1, "order attributed to the posting teller");
+    assert_eq!(orders_on_shift(&pool, shift_1).await, 1);
+}
+
+/// An order cannot target a shift in ANOTHER org — branch access is denied and
+/// nothing is filed.
+#[sqlx::test]
+async fn test_order_cannot_target_shift_in_another_org(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_a = seed_org(&pool).await;
+    let org_b = seed_org(&pool).await;
+    let branch_b = seed_branch(&pool, org_b).await;
+    let admin_a = seed_user(&pool, org_a, "org_admin").await;
+    let owner_b = seed_user(&pool, org_b, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token_a = generate_org_admin_token(admin_a, org_a);
+    let shift_b = seed_shift(&pool, branch_b, owner_b).await;
+    let cat_a = seed_category(&pool, org_a).await;
+    let item_a = seed_menu_item(&pool, org_a, cat_a).await;
+
+    // org-A admin tries to file an order onto org-B's branch + shift.
+    let resp = test::call_service(&app, test::TestRequest::post().uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {}", token_a)))
+        .set_json(&simple_order(branch_b, shift_b, item_a)).to_request()).await;
+    assert!(!resp.status().is_success(), "cross-org order must be rejected");
+    assert_eq!(orders_on_shift(&pool, shift_b).await, 0);
 }
