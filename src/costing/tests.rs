@@ -180,8 +180,8 @@ mod backfill_tests {
         .unwrap();
         let order: Uuid = sqlx::query_scalar(
             "INSERT INTO orders (branch_id, shift_id, teller_id, order_number, status, \
-                                 payment_method, subtotal, total_amount) \
-             VALUES ($1, $2, $3, 1, 'completed', 'cash', 1000, 1000) RETURNING id",
+                                 payment_method, subtotal, total_amount, order_ref) \
+             VALUES ($1, $2, $3, 1, 'completed', 'cash', 1000, 1000, gen_random_uuid()::text) RETURNING id",
         )
         .bind(branch)
         .bind(shift)

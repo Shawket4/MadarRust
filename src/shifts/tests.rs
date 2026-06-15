@@ -89,6 +89,100 @@ async fn grant_permission(pool: &PgPool, role: &str, resource: &str, action: &st
 
 
 
+/// V32 — cash continuity: a new shift must open with the previous shift's
+/// DECLARED closing cash; a deviation needs a reason and is recorded as an edit
+/// (server-derived, not the client flag).
+#[sqlx::test]
+async fn test_open_shift_cash_continuity(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "shifts", "read").await;
+    grant_permission(&pool, "org_admin", "shifts", "create").await;
+    grant_permission(&pool, "org_admin", "shifts", "update").await;
+    let token = generate_org_admin_token(user_id, org_id);
+
+    let open = |opening: i32, reason: Option<String>| {
+        let app = &app;
+        let token = token.clone();
+        async move {
+            let req = test::TestRequest::post()
+                .uri(&format!("/shifts/branches/{}/open", branch_id))
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .set_json(&OpenShiftRequest {
+                    id: None,
+                    opening_cash: opening,
+                    opening_cash_edited: None,
+                    edit_reason: reason,
+                    opened_at: None,
+                })
+                .to_request();
+            test::call_service(app, req).await
+        }
+    };
+    let close = |shift_id: Uuid, declared: i32| {
+        let app = &app;
+        let token = token.clone();
+        async move {
+            let req = test::TestRequest::post()
+                .uri(&format!("/shifts/{}/close", shift_id))
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .set_json(&CloseShiftRequest {
+                    closing_cash_declared: declared,
+                    cash_note: None,
+                    closed_at: None,
+                })
+                .to_request();
+            test::call_service(app, req).await
+        }
+    };
+
+    // 1. First shift — no predecessor, so any opening is the starting float,
+    //    not an edit, and there is no carryover baseline.
+    let r = open(1000, None).await;
+    assert_eq!(r.status(), 201, "first shift opens without a carryover");
+    let s1: Shift = test::read_body_json(r).await;
+    assert_eq!(s1.opening_cash, 1000);
+    assert!(!s1.opening_cash_was_edited);
+    assert_eq!(s1.opening_cash_original, None);
+    assert_eq!(close(s1.id, 1500).await.status(), 200);
+
+    // 2. Next shift opens with the carryover (1500) — clean, no reason needed.
+    let r = open(1500, None).await;
+    assert_eq!(r.status(), 201, "matching the carryover opens cleanly");
+    let s2: Shift = test::read_body_json(r).await;
+    assert!(!s2.opening_cash_was_edited);
+    assert_eq!(s2.opening_cash_original, Some(1500));
+    assert_eq!(close(s2.id, 2000).await.status(), 200);
+
+    // 3. Deviating from the carryover (2000) WITHOUT a reason → rejected.
+    assert_eq!(
+        open(1800, None).await.status(),
+        400,
+        "silent deviation from the declared carryover must be rejected"
+    );
+
+    // 4. Same deviation WITH a reason → allowed and recorded as an edit, with
+    //    the expected carryover preserved in opening_cash_original.
+    let r = open(1800, Some("Owner pulled 200 float".into())).await;
+    assert_eq!(r.status(), 201);
+    let s3: Shift = test::read_body_json(r).await;
+    assert_eq!(s3.opening_cash, 1800);
+    assert!(s3.opening_cash_was_edited);
+    assert_eq!(s3.opening_cash_original, Some(2000));
+    assert_eq!(
+        s3.opening_cash_edit_reason.as_deref(),
+        Some("Owner pulled 200 float")
+    );
+}
+
 #[sqlx::test]
 async fn test_open_shift_and_get_current(pool: PgPool) {
     let app = test::init_service(
@@ -315,6 +409,8 @@ async fn test_normal_close_and_report(pool: PgPool) {
     let rep: ShiftReportResponse = test::read_body_json(resp_rep).await;
     assert_eq!(rep.shift.id, shift_id);
     assert_eq!(rep.total_payments, 0);
+    // Closed shift → expected_cash is the snapshot taken at close.
+    assert_eq!(rep.expected_cash, 1000);
 }
 
 #[sqlx::test]
@@ -429,23 +525,38 @@ async fn test_list_shifts_all_branches(pool: PgPool) {
     let auth = ("Authorization", format!("Bearer {token}"));
 
     // All branches (nil UUID): both org branches' shifts, branch-labelled, org-isolated.
+    // No pagination params → one page holding everything (dashboard-compatible).
     let nil = Uuid::nil();
     let resp = test::call_service(&app, test::TestRequest::get()
         .uri(&format!("/shifts/branches/{nil}")).insert_header(auth.clone()).to_request()).await;
     assert_eq!(resp.status(), 200);
-    let shifts: Vec<Shift> = test::read_body_json(resp).await;
-    assert_eq!(shifts.len(), 2, "all-branches sees both org branches' shifts");
+    let page: PaginatedShifts = test::read_body_json(resp).await;
+    assert_eq!(page.total, 2, "all-branches sees both org branches' shifts");
+    assert_eq!(page.total_pages, 1, "no pagination params → single page");
+    let shifts = page.data;
+    assert_eq!(shifts.len(), 2);
     assert!(shifts.iter().all(|s| s.branch_name.is_some()), "rows carry a branch label");
     let seen: std::collections::HashSet<_> = shifts.iter().map(|s| s.branch_id).collect();
     assert!(seen.contains(&branch_a) && seen.contains(&branch_b));
+
+    // Opt-in pagination: per_page=1 slices the result while reporting the full total.
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/shifts/branches/{nil}?page=1&per_page=1")).insert_header(auth.clone()).to_request()).await;
+    assert_eq!(resp.status(), 200);
+    let paged: PaginatedShifts = test::read_body_json(resp).await;
+    assert_eq!(paged.total, 2);
+    assert_eq!(paged.per_page, 1);
+    assert_eq!(paged.total_pages, 2);
+    assert_eq!(paged.data.len(), 1, "one row per page");
 
     // A specific branch still scopes to that one branch.
     let resp = test::call_service(&app, test::TestRequest::get()
         .uri(&format!("/shifts/branches/{branch_a}")).insert_header(auth.clone()).to_request()).await;
     assert_eq!(resp.status(), 200);
-    let just_a: Vec<Shift> = test::read_body_json(resp).await;
-    assert_eq!(just_a.len(), 1);
-    assert_eq!(just_a[0].branch_id, branch_a);
+    let just_a: PaginatedShifts = test::read_body_json(resp).await;
+    assert_eq!(just_a.total, 1);
+    assert_eq!(just_a.data.len(), 1);
+    assert_eq!(just_a.data[0].branch_id, branch_a);
 }
 
 #[sqlx::test]
@@ -510,7 +621,7 @@ async fn test_close_cash_uses_is_cash_snapshot(pool: PgPool) {
 
     // A completed CASH order of 500, with order_payments.is_cash snapshotted true.
     let order_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method) VALUES ($1,$2,$3,$4, gen_random_uuid(), 500,0,500,'completed',1,'cash')")
+    sqlx::query("INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref) VALUES ($1,$2,$3,$4, gen_random_uuid(), 500,0,500,'completed',1,'cash', gen_random_uuid()::text)")
         .bind(order_id).bind(branch_id).bind(user_id).bind(shift_id).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ($1,'cash',500,true)")
         .bind(order_id).execute(&pool).await.unwrap();

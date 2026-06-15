@@ -9,7 +9,12 @@ use crate::{
     models::UserRole,
     permissions::checker::check_permission,
 };
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
+
+/// Default page size when the shifts list is requested *with* pagination params.
+const DEFAULT_SHIFTS_PER_PAGE: i64 = 20;
+/// Upper bound on a single shifts page, to keep responses bounded.
+const MAX_SHIFTS_PER_PAGE: i64 = 200;
 
 // ── Models ────────────────────────────────────────────────────
 
@@ -88,7 +93,33 @@ pub struct ShiftReportResponse {
     pub cash_movements_out:  i64,
     /// Net of all cash movements (in - out) as a signed integer
     pub cash_movements_net:  i64,
+    /// Authoritative system (expected) cash in the drawer. For a closed shift
+    /// this is the snapshot taken at close (`closing_cash_system`); for an open
+    /// shift it is computed live via the same formula. Clients should display
+    /// this directly instead of re-deriving it from the payment breakdown.
+    pub expected_cash:       i64,
     pub printed_at:          chrono::DateTime<chrono::Utc>,
+}
+
+/// Paginated envelope for the shifts list. When the request omits `page`/`per_page`,
+/// `data` holds every matching shift in one page (back-compat for the dashboard);
+/// when they are present, `data` is one bounded page ordered newest-first.
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
+pub struct PaginatedShifts {
+    pub data:        Vec<Shift>,
+    pub total:       i64,
+    pub page:        i64,
+    pub per_page:    i64,
+    pub total_pages: i64,
+}
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ListShiftsQuery {
+    /// 1-based page number. Omit (along with `per_page`) to fetch every shift.
+    pub page:     Option<i64>,
+    /// Page size (clamped to [1, 200]). Omit to fetch every shift in one page.
+    pub per_page: Option<i64>,
 }
 
 // ── Request types ─────────────────────────────────────────────
@@ -97,6 +128,8 @@ pub struct ShiftReportResponse {
 pub struct OpenShiftRequest {
     pub id:                  Option<Uuid>,
     pub opening_cash:        i32,
+    /// Ignored by the server — the carryover edit is DERIVED from the previous
+    /// shift's declared closing. Kept only for API/back-compat with clients.
     pub opening_cash_edited: Option<bool>,
     pub edit_reason:         Option<String>,
     pub opened_at:           Option<chrono::DateTime<chrono::Utc>>,
@@ -118,6 +151,78 @@ pub struct CloseShiftRequest {
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct ForceCloseRequest {
     pub reason: Option<String>,
+}
+
+/// The cash a new shift should open with: the most recent CLOSED/force-closed
+/// shift's declared closing for this branch (the drawer carryover), or `None`
+/// when there is no such predecessor. Single source of truth for both the
+/// `suggested_opening_cash` hint and the `open_shift` continuity enforcement —
+/// they must never drift apart.
+async fn previous_declared_closing<'e, E>(
+    executor: E,
+    branch_id: Uuid,
+) -> Result<Option<i32>, sqlx::Error>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    sqlx::query_scalar::<_, Option<i32>>(
+        r#"
+        SELECT closing_cash_declared
+        FROM shifts
+        WHERE branch_id = $1
+          AND status IN ('closed', 'force_closed')
+          AND closing_cash_declared IS NOT NULL
+        ORDER BY closed_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(branch_id)
+    .fetch_optional(executor)
+    .await
+    .map(Option::flatten)
+}
+
+/// The **system (expected) cash** in a shift's drawer:
+///   opening float
+/// + cash taken in via orders (cash payments + cash tips, excluding voided/refunded)
+/// + net manual cash movements (cash in − cash out).
+///
+/// Single source of truth shared by `close_shift` (snapshotted into
+/// `closing_cash_system`) and the live shift report's `expected_cash`, so the
+/// teller's pre-close preview can never drift from the value recorded at close.
+/// Reads `opening_cash` from the row, so the caller does not pass it in.
+async fn compute_system_cash<'e, E>(executor: E, shift_id: Uuid) -> Result<i64, sqlx::Error>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT (
+            (SELECT opening_cash FROM shifts WHERE id = $1)
+          + COALESCE((
+                SELECT SUM(op.amount)
+                FROM order_payments op
+                JOIN orders o ON o.id = op.order_id
+                WHERE o.shift_id = $1
+                  AND COALESCE(op.is_cash, op.method = 'cash') = true
+                  AND o.status NOT IN ('voided', 'refunded')
+            ), 0)
+          + COALESCE((
+                SELECT SUM(o.tip_amount)
+                FROM orders o
+                WHERE o.shift_id = $1
+                  AND COALESCE(o.tip_is_cash, COALESCE(o.tip_payment_method, o.payment_method) = 'cash') = true
+                  AND o.status NOT IN ('voided', 'refunded')
+            ), 0)
+          + COALESCE((
+                SELECT SUM(amount) FROM shift_cash_movements WHERE shift_id = $1
+            ), 0)
+        )::bigint
+        "#,
+    )
+    .bind(shift_id)
+    .fetch_one(executor)
+    .await
 }
 
 
@@ -170,21 +275,7 @@ pub async fn get_current_shift(
         }));
     }
 
-    let suggested: Option<i32> = sqlx::query_scalar(
-        r#"
-        SELECT closing_cash_declared
-        FROM shifts
-        WHERE branch_id = $1
-          AND status IN ('closed', 'force_closed')
-          AND closing_cash_declared IS NOT NULL
-        ORDER BY closed_at DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(*branch_id)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .flatten();
+    let suggested = previous_declared_closing(pool.get_ref(), *branch_id).await?;
 
     Ok(HttpResponse::Ok().json(ShiftPreFill {
         has_open_shift:         false,
@@ -242,13 +333,6 @@ pub async fn open_shift(
         return Ok(HttpResponse::Ok().json(existing));
     }
 
-    let was_edited = body.opening_cash_edited.unwrap_or(false);
-    if was_edited && body.edit_reason.as_deref().unwrap_or("").trim().is_empty() {
-        return Err(AppError::BadRequest(
-            "edit_reason is required when opening cash is edited".into(),
-        ));
-    }
-
     let opened_at = body.opened_at.unwrap_or_else(chrono::Utc::now);
 
     // Guards + insert run in one transaction; the unique partial indexes
@@ -284,6 +368,27 @@ pub async fn open_shift(
         ));
     }
 
+    // ── Cash continuity (V32) ────────────────────────────────────
+    // The drawer carries over between shifts: the opening cash must equal the
+    // previous shift's DECLARED closing cash. We compute that expected carryover
+    // server-side and DERIVE `was_edited` from it (the client's
+    // `opening_cash_edited` flag is not trusted). A legitimate float change is
+    // allowed but must carry a reason and is recorded as an edit. With no prior
+    // declared closing (first shift, or a force-closed predecessor that never
+    // declared) there is nothing to continue from, so any amount is accepted as
+    // the starting float. Read inside the tx for a consistent snapshot.
+    let expected_opening = previous_declared_closing(&mut *tx, *branch_id).await?;
+
+    let was_edited = expected_opening.is_some_and(|exp| exp != body.opening_cash);
+    if was_edited && body.edit_reason.as_deref().unwrap_or("").trim().is_empty() {
+        return Err(AppError::BadRequest(
+            "Opening cash differs from the previous shift's declared closing cash; \
+             edit_reason is required to override the carryover.".into(),
+        ));
+    }
+    // Only persist a reason when it actually overrides the carryover.
+    let edit_reason = if was_edited { body.edit_reason.as_deref() } else { None };
+
     let shift = sqlx::query_as::<_, Shift>(
         r#"
         INSERT INTO shifts
@@ -306,9 +411,9 @@ pub async fn open_shift(
     .bind(*branch_id)
     .bind(claims.user_id())
     .bind(body.opening_cash)
-    .bind(body.opening_cash)
+    .bind(expected_opening)
     .bind(was_edited)
-    .bind(&body.edit_reason)
+    .bind(edit_reason)
     .bind(opened_at)
     .fetch_one(&mut *tx)
     .await
@@ -337,14 +442,18 @@ pub async fn open_shift(
     get,
     path = "/shifts/branches/{branch_id}",
     tag = "shifts",
-    params(("branch_id" = Uuid, Path, description = "Branch ID")),
-    responses((status = 200, description = "List shifts", body = Vec<Shift>), AppErrorResponse),
+    params(
+        ("branch_id" = Uuid, Path, description = "Branch ID (nil UUID = all branches in org)"),
+        ListShiftsQuery,
+    ),
+    responses((status = 200, description = "List shifts (newest first)", body = PaginatedShifts), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn list_shifts(
     req:       HttpRequest,
     pool:      web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
+    query:     web::Query<ListShiftsQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "shifts", "read").await?;
@@ -365,6 +474,31 @@ pub async fn list_shifts(
         ("s.branch_id = $1", *branch_id)
     };
 
+    // Pagination is opt-in: a request with neither `page` nor `per_page` returns
+    // every matching shift in one page (the dashboard relies on this for export).
+    // Supplying either one switches on bounded, newest-first paging.
+    let paginate = query.page.is_some() || query.per_page.is_some();
+
+    let total: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM shifts s WHERE {scope_condition}"
+    ))
+    .bind(scope_id)
+    .fetch_one(pool.get_ref())
+    .await?;
+
+    let (page, per_page) = if paginate {
+        let per_page = query
+            .per_page
+            .unwrap_or(DEFAULT_SHIFTS_PER_PAGE)
+            .clamp(1, MAX_SHIFTS_PER_PAGE);
+        (query.page.unwrap_or(1).max(1), per_page)
+    } else {
+        // One page holding everything; per_page mirrors the row count (>=1).
+        (1, total.max(1))
+    };
+    let total_pages = if per_page > 0 { (total + per_page - 1) / per_page } else { 0 };
+    let offset = (page - 1) * per_page;
+
     let sql = format!(
         r#"
         SELECT
@@ -383,14 +517,23 @@ pub async fn list_shifts(
         JOIN branches b ON b.id = s.branch_id
         WHERE {scope_condition}
         ORDER BY s.opened_at DESC
+        LIMIT $2 OFFSET $3
         "#
     );
-    let shifts = sqlx::query_as::<_, Shift>(&sql)
+    let data = sqlx::query_as::<_, Shift>(&sql)
         .bind(scope_id)
+        .bind(per_page)
+        .bind(offset)
         .fetch_all(pool.get_ref())
         .await?;
 
-    Ok(HttpResponse::Ok().json(shifts))
+    Ok(HttpResponse::Ok().json(PaginatedShifts {
+        data,
+        total,
+        page,
+        per_page,
+        total_pages,
+    }))
 }
 
 // ── GET /shifts/:shift_id ─────────────────────────────────────
@@ -515,6 +658,15 @@ pub async fn get_shift_report(
     let net_payments = total_payments;
 
     let cash_movements_net_signed: i64 = cash_movements_in as i64 - cash_movements_out as i64;
+
+    // Authoritative expected cash: a closed shift uses its snapshot; an open
+    // shift is computed live with the SAME formula close_shift will use, so the
+    // teller's preview matches what gets recorded at close.
+    let expected_cash: i64 = match shift.closing_cash_system {
+        Some(v) => v as i64,
+        None => compute_system_cash(pool.get_ref(), *shift_id).await?,
+    };
+
     Ok(HttpResponse::Ok().json(ShiftReportResponse {
         shift,
         payment_summary,
@@ -525,6 +677,7 @@ pub async fn get_shift_report(
         cash_movements_in,
         cash_movements_out,
         cash_movements_net: cash_movements_net_signed,
+        expected_cash,
         printed_at: chrono::Utc::now(),
     }))
 }
@@ -683,37 +836,10 @@ pub async fn close_shift(
         return Ok(HttpResponse::Ok().json(CloseShiftResponse { shift: current }));
     }
 
-    let cash_from_orders: i32 = sqlx::query_scalar(
-        r#"
-        SELECT COALESCE(
-            (
-                SELECT COALESCE(SUM(op.amount), 0)::int
-                FROM order_payments op
-                JOIN orders o ON o.id = op.order_id
-                WHERE o.shift_id = $1
-                  AND COALESCE(op.is_cash, op.method = 'cash') = true
-                  AND o.status NOT IN ('voided', 'refunded')
-            ) + (
-                SELECT COALESCE(SUM(o.tip_amount), 0)::int
-                FROM orders o
-                WHERE o.shift_id = $1
-                  AND COALESCE(o.tip_is_cash, COALESCE(o.tip_payment_method, o.payment_method) = 'cash') = true
-                  AND o.status NOT IN ('voided', 'refunded')
-            ), 0)
-        "#,
-    )
-    .bind(*shift_id)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    let cash_movements_total: i32 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(amount), 0)::int FROM shift_cash_movements WHERE shift_id = $1"
-    )
-    .bind(*shift_id)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    let closing_cash_system = shift.opening_cash + cash_from_orders + cash_movements_total;
+    // Snapshot the expected drawer cash under the advisory lock (counts every
+    // committed order). Same formula as the live shift report — see
+    // [compute_system_cash].
+    let closing_cash_system = compute_system_cash(&mut *tx, *shift_id).await? as i32;
 
     let closed_shift = sqlx::query_as::<_, Shift>(
         r#"

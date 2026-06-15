@@ -52,7 +52,9 @@ use utoipa::{
         (name = "menu_advisor", description = "Read-only pricing, bundle, and removal suggestions. Never edits menus — the differentiator vs. generic POS."),
         (name = "uploads",      description = "Logo and image uploads."),
         (name = "payment_methods", description = "Dynamic payment methods configuration."),
-        (name = "costing",      description = "Canonical recipe/addon cost rollups in piastres. NULL cost = unknown, never zero.")
+        (name = "costing",      description = "Canonical recipe/addon cost rollups in piastres. NULL cost = unknown, never zero."),
+        (name = "delivery",     description = "Delivery config (settings, zones, org defaults), the staff queue, status transitions, finalize, and cancel/waste."),
+        (name = "delivery-public", description = "Unauthenticated, rate-limited customer endpoints: branch selector, channel menu, OSRM quote, WhatsApp OTP, order intake.")
     ),
 paths(
         // ── costing ─────────────────────────────────────────────────
@@ -110,6 +112,7 @@ paths(
         crate::menu::handlers::upsert_size,
         crate::menu::handlers::delete_size,
         crate::menu::handlers::list_addon_items,
+        crate::menu::handlers::list_addon_catalog,
         crate::menu::handlers::create_addon_item,
         crate::menu::handlers::update_addon_item,
         crate::menu::handlers::delete_addon_item,
@@ -124,7 +127,12 @@ paths(
         crate::menu::handlers::create_optional_field,
         crate::menu::handlers::update_optional_field,
         crate::menu::handlers::delete_optional_field,
-        crate::menu::handlers::get_public_menu,
+        crate::menu::handlers::list_branch_menu_overrides,
+        crate::menu::handlers::upsert_branch_menu_override,
+        crate::menu::handlers::delete_branch_menu_override,
+        crate::menu::handlers::list_branch_addon_overrides,
+        crate::menu::handlers::upsert_branch_addon_override,
+        crate::menu::handlers::delete_branch_addon_override,
         // ── uploads ───────────────────────────────────────────────────
         crate::uploads::handlers::upload_menu_item_image,
         // ── inventory ─────────────────────────────────────────────────
@@ -250,6 +258,34 @@ paths(
         crate::menu_advisor::handlers::get_calibration_handler,
         crate::menu_advisor::handlers::set_bundle_promoted_handler,
         crate::menu_advisor::handlers::get_latest_item_kpi_handler,
+        // ── delivery (admin + staff) ──────────────────────────────────
+        crate::delivery::settings::get_branch_settings,
+        crate::delivery::settings::put_branch_settings,
+        crate::delivery::settings::set_accepting,
+        crate::delivery::settings::list_zones,
+        crate::delivery::settings::create_zone,
+        crate::delivery::settings::update_zone,
+        crate::delivery::settings::delete_zone,
+        crate::delivery::settings::list_channel_overrides,
+        crate::delivery::settings::upsert_channel_override,
+        crate::delivery::settings::delete_channel_override,
+        crate::delivery::settings::list_channel_addon_overrides,
+        crate::delivery::settings::upsert_channel_addon_override,
+        crate::delivery::settings::delete_channel_addon_override,
+        crate::delivery::staff::list_delivery_orders,
+        crate::delivery::staff::get_delivery_order,
+        crate::delivery::staff::stream_delivery_orders,
+        crate::delivery::staff::set_status,
+        crate::delivery::staff::set_prep_time,
+        crate::delivery::staff::cancel_delivery_order,
+        crate::delivery::staff::finalize_delivery_order,
+        // ── delivery (public) ─────────────────────────────────────────
+        crate::delivery::public::public_branches,
+        crate::delivery::public::public_menu,
+        crate::delivery::public::delivery_quote,
+        crate::delivery::public::otp_request,
+        crate::delivery::public::otp_verify,
+        crate::delivery::public::create_delivery_order,
     ),
     components(schemas(
         // Most schemas are pulled in transitively via path responses, but
@@ -260,8 +296,35 @@ paths(
         // GET /orders?include_items=true response shape (the annotation's
         // `body` documents the default PaginatedOrders variant).
         crate::orders::handlers::PaginatedOrdersFull,
+        crate::shifts::handlers::PaginatedShifts,
         crate::menu::handlers::PaginatedMenuItems,
         crate::menu::handlers::MenuItemWithCosts,
+        crate::menu::handlers::PaginatedAddonItems,
+        crate::menu::handlers::BranchMenuOverride,
+        crate::menu::handlers::BranchMenuOverrideInput,
+        crate::menu::handlers::BranchSizeOverride,
+        crate::menu::handlers::BranchSizeOverrideInput,
+        crate::menu::handlers::BranchAddonOverride,
+        crate::menu::handlers::BranchAddonOverrideInput,
+        // ── delivery ──────────────────────────────────────────────────
+        crate::delivery::settings::BranchDeliverySettings,
+        crate::delivery::settings::DeliveryZone,
+        crate::delivery::settings::ChannelMenuOverride,
+        crate::delivery::settings::ChannelAddonOverride,
+        crate::delivery::staff::DeliveryOrder,
+        crate::delivery::staff::FinalizeResponse,
+        crate::delivery::hub::DeliveryEvent,
+        crate::delivery::public::PublicBranch,
+        crate::delivery::public::DeliveryMenu,
+        crate::delivery::public::DeliveryMenuItem,
+        crate::delivery::public::DeliveryMenuSize,
+        crate::delivery::public::DeliveryMenuCategory,
+        crate::delivery::public::DeliveryAddonOption,
+        crate::delivery::public::DeliveryOptionalField,
+        crate::delivery::public::QuoteResponse,
+        crate::delivery::public::OtpRequestResponse,
+        crate::delivery::public::OtpVerifyResponse,
+        crate::delivery::snapshot::CartLineInput,
     ))
 )]
 pub struct ApiDoc;

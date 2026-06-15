@@ -148,73 +148,6 @@ pub struct MenuItemFull {
     pub recipes:         Vec<MenuItemRecipe>,
 }
 
-// ── Public Menu Models ────────────────────────────────────────
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
-pub struct PublicMenuResponse {
-    pub org_id:     Uuid,
-    pub org_name:   String,
-    #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
-    pub logo_url:   Option<String>,
-    pub categories: Vec<PublicCategory>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
-pub struct PublicCategory {
-    pub id:            Uuid,
-    pub name:          String,
-    #[schema(value_type = Object)]
-    pub name_translations: serde_json::Value,
-    #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
-    pub image_url:     Option<String>,
-    pub items:         Vec<PublicMenuItem>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
-pub struct PublicMenuItem {
-    pub id:            Uuid,
-    pub name:          String,
-    #[schema(value_type = Object)]
-    pub name_translations: serde_json::Value,
-    pub description:   Option<String>,
-    #[schema(value_type = Object)]
-    pub description_translations: serde_json::Value,
-    #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
-    pub image_url:     Option<String>,
-    pub base_price:    i32,
-    pub sizes:         Vec<PublicItemSize>,
-    pub addon_slots:   Vec<PublicAddonSlot>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
-pub struct PublicItemSize {
-    pub id:             Uuid,
-    pub label:          String,
-    pub price_override: i32,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
-pub struct PublicAddonSlot {
-    pub id:             Uuid,
-    pub addon_type:     String,
-    pub label:          Option<String>,
-    #[schema(value_type = Object)]
-    pub label_translations: serde_json::Value,
-    pub is_required:    bool,
-    pub min_selections: i32,
-    pub max_selections: Option<i32>,
-    pub addon_items:    Vec<PublicAddonItem>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
-pub struct PublicAddonItem {
-    pub id:            Uuid,
-    pub name:          String,
-    #[schema(value_type = Object)]
-    pub name_translations: serde_json::Value,
-    pub default_price: i32,
-}
-
 // ── Request types ─────────────────────────────────────────────
 
 #[derive(Deserialize, IntoParams)]
@@ -232,6 +165,10 @@ pub struct MenuItemQuery {
     /// (the shape the POS/teller consumes). Always returns a plain, unpaginated
     /// array — the POS depends on this contract.
     pub full:        Option<bool>,
+    /// When set, prices are branch-effective (branch override replaces base_price)
+    /// and items disabled at this branch are excluded — the per-branch menu the POS
+    /// consumes. Omitted → the plain org catalog (legacy behaviour).
+    pub branch_id:   Option<Uuid>,
 }
 
 /// Query for the dashboard catalog endpoint: paginated menu items with embedded
@@ -248,6 +185,111 @@ pub struct MenuCatalogQuery {
     pub page:        Option<i64>,
     /// Page size (default 50, max 500).
     pub per_page:    Option<i64>,
+    /// When set, enables the per-branch override filter/sort (LEFT JOINs the
+    /// branch's overrides). Prices in the response stay org-level.
+    pub branch_id:   Option<Uuid>,
+    /// With `branch_id`: true → only items overridden at the branch; false →
+    /// only un-overridden; null → all.
+    pub overridden:  Option<bool>,
+    /// `"overridden"` → overridden items first (needs `branch_id`); otherwise A–Z.
+    pub sort:        Option<String>,
+}
+
+// ── Branch menu overrides (per-branch price + availability layer) ─────────────
+// The branch layer over the org catalog: absence of a row ⟹ inherit base_price and
+// fully available. A row may set a branch price (price_override, piastres — null
+// inherits) and/or disable the item at that branch (is_available=false). Applies to
+// all channels including POS dine-in; a future channel layer (in-mall/outside) sits
+// on top.
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
+pub struct BranchMenuOverride {
+    pub branch_id:      Uuid,
+    pub menu_item_id:   Uuid,
+    /// Branch price in piastres; null inherits the org catalog base_price.
+    pub price_override: Option<i32>,
+    /// False disables the item at this branch (excluded from the branch menu).
+    pub is_available:   bool,
+    pub updated_at:     DateTime<Utc>,
+    /// Per-size branch prices for this item (empty when none). Availability is item-level.
+    #[serde(default)]
+    #[sqlx(skip)]
+    pub sizes:          Vec<BranchSizeOverride>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
+pub struct BranchSizeOverride {
+    pub size_label:     String,
+    /// Branch price for this size in piastres.
+    pub price_override: i32,
+}
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct BranchOverridesQuery {
+    pub branch_id: Uuid,
+}
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct BranchOverrideKeyQuery {
+    pub branch_id:    Uuid,
+    pub menu_item_id: Uuid,
+}
+
+fn override_default_available() -> bool { true }
+
+#[derive(Deserialize, Serialize, Clone, ToSchema)]
+pub struct BranchSizeOverrideInput {
+    pub size_label:     String,
+    pub price_override: i32,
+}
+
+#[derive(Deserialize, Serialize, ToSchema)]
+pub struct BranchMenuOverrideInput {
+    pub branch_id:    Uuid,
+    pub menu_item_id: Uuid,
+    /// Branch price in piastres; null inherits the org catalog base_price.
+    #[serde(default)]
+    pub price_override: Option<i32>,
+    #[serde(default = "override_default_available")]
+    pub is_available:   bool,
+    /// Per-size branch prices. `null`/omitted → leave existing size overrides untouched;
+    /// a list → REPLACE the item's size overrides with exactly that set (empty clears them).
+    #[serde(default)]
+    pub sizes:          Option<Vec<BranchSizeOverrideInput>>,
+}
+
+// ── Branch addon overrides (per-branch addon price + availability) ────────────
+// The addon analogue of BranchMenuOverride. No sizes (addons have none).
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
+pub struct BranchAddonOverride {
+    pub branch_id:      Uuid,
+    pub addon_item_id:  Uuid,
+    /// Branch price in piastres; null inherits the org default_price.
+    pub price_override: Option<i32>,
+    /// False disables the addon at this branch (excluded from the branch addon list).
+    pub is_available:   bool,
+    pub updated_at:     DateTime<Utc>,
+}
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct BranchAddonOverrideKeyQuery {
+    pub branch_id:     Uuid,
+    pub addon_item_id: Uuid,
+}
+
+#[derive(Deserialize, Serialize, ToSchema)]
+pub struct BranchAddonOverrideInput {
+    pub branch_id:     Uuid,
+    pub addon_item_id: Uuid,
+    /// Branch price in piastres; null inherits the org default_price.
+    #[serde(default)]
+    pub price_override: Option<i32>,
+    #[serde(default = "override_default_available")]
+    pub is_available:   bool,
 }
 
 /// A menu item with its per-SKU recipe-cost rollup embedded, so the catalog
@@ -275,6 +317,10 @@ pub struct PaginatedMenuItems {
 pub struct AddonItemQuery {
     pub org_id:     Uuid,
     pub addon_type: Option<String>,
+    /// When set, prices are branch-effective (override replaces default_price) and
+    /// addons disabled at this branch are excluded — the per-branch addon list the
+    /// POS consumes. Omitted → the plain org list (legacy behaviour).
+    pub branch_id:  Option<Uuid>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -573,26 +619,36 @@ pub async fn list_menu_items(
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
     require_same_org(&claims, Some(query.org_id))?;
 
+    // When branch_id is supplied, prices are branch-effective (override replaces
+    // base_price) and branch-disabled items are excluded — the per-branch menu the POS
+    // consumes. When null the LEFT JOIN matches nothing (NULL branch_id) so this is the
+    // plain org catalog, preserving the legacy contract.
     let items = sqlx::query_as::<_, MenuItem>(
-        "SELECT id, org_id, category_id, name, name_translations, description, description_translations, image_url,
-                base_price, is_active,
-                created_at, updated_at, deleted_at,
+        "SELECT mi.id, mi.org_id, mi.category_id, mi.name, mi.name_translations,
+                mi.description, mi.description_translations, mi.image_url,
+                COALESCE(bmo.price_override, mi.base_price) AS base_price,
+                mi.is_active,
+                mi.created_at, mi.updated_at, mi.deleted_at,
                 (
                     SELECT a.id::text
                     FROM menu_item_recipes r
                     JOIN addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
                     JOIN addon_items a ON a.id = ai.addon_item_id
-                    WHERE r.menu_item_id = menu_items.id
+                    WHERE r.menu_item_id = mi.id
                       AND a.type = 'milk_type'
                     LIMIT 1
                 ) AS default_milk_addon_id
-         FROM menu_items
-         WHERE org_id = $1 AND deleted_at IS NULL
-           AND ($2::uuid IS NULL OR category_id = $2)
-         ORDER BY name ASC",
+         FROM menu_items mi
+         LEFT JOIN branch_menu_overrides bmo
+                ON bmo.menu_item_id = mi.id AND bmo.branch_id = $3
+         WHERE mi.org_id = $1 AND mi.deleted_at IS NULL
+           AND ($2::uuid IS NULL OR mi.category_id = $2)
+           AND ($3::uuid IS NULL OR COALESCE(bmo.is_available, true) = true)
+         ORDER BY mi.name ASC",
     )
     .bind(query.org_id)
     .bind(query.category_id)
+    .bind(query.branch_id)
     .fetch_all(pool.get_ref())
     .await?;
 
@@ -600,7 +656,12 @@ pub async fn list_menu_items(
     if query.full.unwrap_or(false) {
         let mut result: Vec<MenuItemFull> = vec![];
         for item in items {
-            let sizes = fetch_sizes(pool.get_ref(), item.id).await?;
+            let mut sizes = fetch_sizes(pool.get_ref(), item.id).await?;
+            // Branch menu (branch_id set): overlay this branch's per-size price overrides
+            // so the POS sees branch-effective size prices, not just the catalog ones.
+            if let Some(branch_id) = query.branch_id {
+                apply_branch_size_overrides(pool.get_ref(), branch_id, item.id, &mut sizes).await?;
+            }
             let addon_slots = fetch_addon_slots(pool.get_ref(), item.id).await?;
             let optional_fields = fetch_optional_fields(pool.get_ref(), item.id).await?;
             let recipes = fetch_item_recipes(pool.get_ref(), item.id).await?;
@@ -639,41 +700,58 @@ pub async fn list_menu_catalog(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
+    // Branch-override filter/sort: LEFT JOIN the branch's overrides ($4); a row's
+    // existence means "overridden at this branch". `overridden` ($5) filters on that;
+    // sort='overridden' brings overridden items first. With no branch_id the join
+    // matches nothing → identical to the plain org catalog.
     let total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM menu_items
-         WHERE org_id = $1 AND deleted_at IS NULL
-           AND ($2::uuid IS NULL OR category_id = $2)
-           AND ($3::text IS NULL OR name ILIKE '%' || $3 || '%')",
+        "SELECT COUNT(*) FROM menu_items mi
+         LEFT JOIN branch_menu_overrides bmo ON bmo.menu_item_id = mi.id AND bmo.branch_id = $4
+         WHERE mi.org_id = $1 AND mi.deleted_at IS NULL
+           AND ($2::uuid IS NULL OR mi.category_id = $2)
+           AND ($3::text IS NULL OR mi.name ILIKE '%' || $3 || '%')
+           AND ($5::bool IS NULL OR (bmo.branch_id IS NOT NULL) = $5)",
     )
     .bind(query.org_id)
     .bind(query.category_id)
     .bind(search.as_deref())
+    .bind(query.branch_id)
+    .bind(query.overridden)
     .fetch_one(pool.get_ref())
     .await?;
 
-    let rows = sqlx::query_as::<_, MenuItem>(
-        "SELECT id, org_id, category_id, name, name_translations, description, description_translations, image_url,
-                base_price, is_active,
-                created_at, updated_at, deleted_at,
+    let order_by = match query.sort.as_deref() {
+        Some("overridden") => "(bmo.branch_id IS NOT NULL) DESC, mi.name ASC",
+        _ => "mi.name ASC",
+    };
+    let rows = sqlx::query_as::<_, MenuItem>(&format!(
+        "SELECT mi.id, mi.org_id, mi.category_id, mi.name, mi.name_translations,
+                mi.description, mi.description_translations, mi.image_url,
+                mi.base_price, mi.is_active,
+                mi.created_at, mi.updated_at, mi.deleted_at,
                 (
                     SELECT a.id::text
                     FROM menu_item_recipes r
                     JOIN addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
                     JOIN addon_items a ON a.id = ai.addon_item_id
-                    WHERE r.menu_item_id = menu_items.id
+                    WHERE r.menu_item_id = mi.id
                       AND a.type = 'milk_type'
                     LIMIT 1
                 ) AS default_milk_addon_id
-         FROM menu_items
-         WHERE org_id = $1 AND deleted_at IS NULL
-           AND ($2::uuid IS NULL OR category_id = $2)
-           AND ($3::text IS NULL OR name ILIKE '%' || $3 || '%')
-         ORDER BY name ASC
-         LIMIT $4 OFFSET $5",
-    )
+         FROM menu_items mi
+         LEFT JOIN branch_menu_overrides bmo ON bmo.menu_item_id = mi.id AND bmo.branch_id = $4
+         WHERE mi.org_id = $1 AND mi.deleted_at IS NULL
+           AND ($2::uuid IS NULL OR mi.category_id = $2)
+           AND ($3::text IS NULL OR mi.name ILIKE '%' || $3 || '%')
+           AND ($5::bool IS NULL OR (bmo.branch_id IS NOT NULL) = $5)
+         ORDER BY {order_by}
+         LIMIT $6 OFFSET $7",
+    ))
     .bind(query.org_id)
     .bind(query.category_id)
     .bind(search.as_deref())
+    .bind(query.branch_id)
+    .bind(query.overridden)
     .bind(per_page)
     .bind(offset)
     .fetch_all(pool.get_ref())
@@ -1132,38 +1210,136 @@ pub async fn list_addon_items(
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
     require_same_org(&claims, Some(query.org_id))?;
 
-    let mut rows = match &query.addon_type {
-        Some(t) => sqlx::query_as::<_, AddonItem>(
-            "SELECT a.id, a.org_id, a.name, a.name_translations, a.type as addon_type, a.default_price,
-                    a.is_active, a.created_at, a.updated_at,
-                    (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id LIMIT 1) as primary_ingredient_id
-             FROM addon_items a
-             WHERE a.org_id = $1 AND a.type = $2
-             ORDER BY a.type ASC, a.created_at ASC",
-        )
-        .bind(query.org_id)
-        .bind(t)
-        .fetch_all(pool.get_ref())
-        .await?,
-
-        None => sqlx::query_as::<_, AddonItem>(
-            "SELECT a.id, a.org_id, a.name, a.name_translations, a.type as addon_type, a.default_price,
-                    a.is_active, a.created_at, a.updated_at,
-                    (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id LIMIT 1) as primary_ingredient_id
-             FROM addon_items a
-             WHERE a.org_id = $1
-             ORDER BY a.type ASC, a.created_at ASC",
-        )
-        .bind(query.org_id)
-        .fetch_all(pool.get_ref())
-        .await?,
-    };
+    // With a branch_id, default_price is branch-effective (override replaces it) and
+    // branch-disabled addons are excluded. Without it ($3 NULL), the LEFT JOIN matches
+    // nothing → the plain org list (legacy contract).
+    let mut rows = sqlx::query_as::<_, AddonItem>(
+        "SELECT a.id, a.org_id, a.name, a.name_translations, a.type as addon_type,
+                COALESCE(bao.price_override, a.default_price) AS default_price,
+                a.is_active, a.created_at, a.updated_at,
+                (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id LIMIT 1) as primary_ingredient_id
+         FROM addon_items a
+         LEFT JOIN branch_addon_overrides bao
+                ON bao.addon_item_id = a.id AND bao.branch_id = $3
+         WHERE a.org_id = $1
+           AND ($2::text IS NULL OR a.type = $2)
+           AND ($3::uuid IS NULL OR COALESCE(bao.is_available, true) = true)
+         ORDER BY a.type ASC, a.created_at ASC",
+    )
+    .bind(query.org_id)
+    .bind(query.addon_type.as_deref())
+    .bind(query.branch_id)
+    .fetch_all(pool.get_ref())
+    .await?;
 
     for addon in &mut rows {
         addon.ingredients = fetch_addon_ingredients(pool.get_ref(), addon.id).await?;
     }
 
     Ok(HttpResponse::Ok().json(rows))
+}
+
+// ── Addon catalog (paginated; powers the Branch Overrides add-on grid) ────────
+// Separate from the plain `/addon-items` array (which the POS + menu rely on):
+// this paginates + searches + filters/sorts by per-branch override status, and
+// returns the ORG default_price so the dashboard can show org vs branch.
+
+#[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
+pub struct PaginatedAddonItems {
+    pub data: Vec<AddonItem>,
+    pub total: i64,
+    pub page: i64,
+    pub per_page: i64,
+    pub total_pages: i64,
+}
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct AddonCatalogQuery {
+    pub org_id:     Uuid,
+    pub addon_type: Option<String>,
+    /// Case-insensitive filter on the addon name.
+    pub search:     Option<String>,
+    pub page:       Option<i64>,
+    pub per_page:   Option<i64>,
+    /// Enables the per-branch override filter/sort (LEFT JOINs the branch's overrides).
+    pub branch_id:  Option<Uuid>,
+    /// With `branch_id`: true → only addons overridden at the branch; false → only
+    /// un-overridden; null → all.
+    pub overridden: Option<bool>,
+    /// `"overridden"` → overridden addons first (needs `branch_id`); otherwise by type/name.
+    pub sort:       Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/addon-items/catalog",
+    tag = "menu",
+    operation_id = "list_addon_catalog",
+    params(AddonCatalogQuery),
+    responses((status = 200, description = "Paginated addon catalog (org prices) with per-branch override filter/sort", body = PaginatedAddonItems), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn list_addon_catalog(
+    req:   HttpRequest,
+    pool:  web::Data<PgPool>,
+    query: web::Query<AddonCatalogQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
+    require_same_org(&claims, Some(query.org_id))?;
+
+    let page = query.page.unwrap_or(1).max(1);
+    let per_page = query.per_page.unwrap_or(50).clamp(1, 500);
+    let offset = (page - 1) * per_page;
+    let search = query.search.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM addon_items a
+         LEFT JOIN branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $4
+         WHERE a.org_id = $1
+           AND ($2::text IS NULL OR a.type = $2)
+           AND ($3::text IS NULL OR a.name ILIKE '%' || $3 || '%')
+           AND ($5::bool IS NULL OR (bao.branch_id IS NOT NULL) = $5)",
+    )
+    .bind(query.org_id)
+    .bind(query.addon_type.as_deref())
+    .bind(search.as_deref())
+    .bind(query.branch_id)
+    .bind(query.overridden)
+    .fetch_one(pool.get_ref())
+    .await?;
+
+    let order_by = match query.sort.as_deref() {
+        Some("overridden") => "(bao.branch_id IS NOT NULL) DESC, a.name ASC",
+        _ => "a.type ASC, a.name ASC",
+    };
+    let data = sqlx::query_as::<_, AddonItem>(&format!(
+        "SELECT a.id, a.org_id, a.name, a.name_translations, a.type as addon_type,
+                a.default_price, a.is_active, a.created_at, a.updated_at,
+                (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id LIMIT 1) as primary_ingredient_id
+         FROM addon_items a
+         LEFT JOIN branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $4
+         WHERE a.org_id = $1
+           AND ($2::text IS NULL OR a.type = $2)
+           AND ($3::text IS NULL OR a.name ILIKE '%' || $3 || '%')
+           AND ($5::bool IS NULL OR (bao.branch_id IS NOT NULL) = $5)
+         ORDER BY {order_by}
+         LIMIT $6 OFFSET $7",
+    ))
+    .bind(query.org_id)
+    .bind(query.addon_type.as_deref())
+    .bind(search.as_deref())
+    .bind(query.branch_id)
+    .bind(query.overridden)
+    .bind(per_page)
+    .bind(offset)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    let total_pages = if total == 0 { 0 } else { ((total as f64) / (per_page as f64)).ceil() as i64 };
+
+    Ok(HttpResponse::Ok().json(PaginatedAddonItems { data, total, page, per_page, total_pages }))
 }
 
 #[utoipa::path(
@@ -2044,239 +2220,356 @@ pub async fn delete_optional_field(
     Ok(HttpResponse::NoContent().finish())
 }
 
-// ── Public Menu ───────────────────────────────────────────────
+// ── Branch menu override handlers ─────────────────────────────
+
+/// Resolve a branch's org and assert the caller is scoped to it. Returns the org_id.
+async fn branch_in_scope(pool: &PgPool, claims: &Claims, branch_id: Uuid) -> Result<Uuid, AppError> {
+    let org_id: Uuid = sqlx::query_scalar(
+        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(branch_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    require_same_org(claims, Some(org_id))?;
+    Ok(org_id)
+}
+
+/// Per-(branch, item) size price overrides, ordered for stable output.
+async fn fetch_branch_size_overrides(
+    pool: &PgPool,
+    branch_id: Uuid,
+    menu_item_id: Uuid,
+) -> Result<Vec<BranchSizeOverride>, AppError> {
+    Ok(sqlx::query_as::<_, BranchSizeOverride>(
+        "SELECT size_label::text AS size_label, price_override
+         FROM branch_menu_size_overrides
+         WHERE branch_id = $1 AND menu_item_id = $2
+         ORDER BY size_label",
+    )
+    .bind(branch_id)
+    .bind(menu_item_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Overlay a branch's size price overrides onto catalog sizes (POS branch menu).
+async fn apply_branch_size_overrides(
+    pool: &PgPool,
+    branch_id: Uuid,
+    menu_item_id: Uuid,
+    sizes: &mut [ItemSize],
+) -> Result<(), AppError> {
+    if sizes.is_empty() {
+        return Ok(());
+    }
+    let overrides = fetch_branch_size_overrides(pool, branch_id, menu_item_id).await?;
+    if overrides.is_empty() {
+        return Ok(());
+    }
+    let map: std::collections::HashMap<String, i32> =
+        overrides.into_iter().map(|o| (o.size_label, o.price_override)).collect();
+    for s in sizes.iter_mut() {
+        if let Some(p) = map.get(&s.label) {
+            s.price_override = *p;
+        }
+    }
+    Ok(())
+}
 
 #[utoipa::path(
     get,
-    path = "/menu/public/{org_id}",
+    path = "/branch-menu-overrides",
     tag = "menu",
-    params(("org_id" = Uuid, Path, description = "Organization ID")),
-    responses((status = 200, description = "Public menu", body = PublicMenuResponse), AppErrorResponse)
+    operation_id = "list_branch_menu_overrides",
+    params(BranchOverridesQuery),
+    responses((status = 200, description = "Per-branch menu item overrides for the branch (each with its size overrides)", body = Vec<BranchMenuOverride>), AppErrorResponse),
+    security(("bearer_jwt" = []))
 )]
-pub async fn get_public_menu(
-    pool:   web::Data<PgPool>,
-    org_id: web::Path<Uuid>,
-    req:    HttpRequest,
+pub async fn list_branch_menu_overrides(
+    req:   HttpRequest,
+    pool:  web::Data<PgPool>,
+    query: web::Query<BranchOverridesQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let org_id = org_id.into_inner();
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
+    branch_in_scope(pool.get_ref(), &claims, query.branch_id).await?;
 
-    // 1. Fetch Org Info
-    let org_info = sqlx::query_as::<_, crate::orgs::handlers::Org>(
-        "SELECT id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, is_active
-         FROM organizations
-         WHERE id = $1 AND deleted_at IS NULL",
+    let mut rows = sqlx::query_as::<_, BranchMenuOverride>(
+        "SELECT branch_id, menu_item_id, price_override, is_available, updated_at
+         FROM branch_menu_overrides WHERE branch_id = $1",
     )
-    .bind(org_id)
+    .bind(query.branch_id)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    // Attach each item's size overrides (single round trip, grouped by item).
+    let size_rows = sqlx::query_as::<_, (Uuid, String, i32)>(
+        "SELECT menu_item_id, size_label::text, price_override
+         FROM branch_menu_size_overrides WHERE branch_id = $1",
+    )
+    .bind(query.branch_id)
+    .fetch_all(pool.get_ref())
+    .await?;
+    let mut by_item: std::collections::HashMap<Uuid, Vec<BranchSizeOverride>> =
+        std::collections::HashMap::new();
+    for (item_id, size_label, price_override) in size_rows {
+        by_item.entry(item_id).or_default().push(BranchSizeOverride { size_label, price_override });
+    }
+    for row in rows.iter_mut() {
+        row.sizes = by_item.remove(&row.menu_item_id).unwrap_or_default();
+    }
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+#[utoipa::path(
+    put,
+    path = "/branch-menu-overrides",
+    tag = "menu",
+    operation_id = "upsert_branch_menu_override",
+    request_body = BranchMenuOverrideInput,
+    responses((status = 200, description = "Override upserted", body = BranchMenuOverride), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn upsert_branch_menu_override(
+    req:  HttpRequest,
+    pool: web::Data<PgPool>,
+    body: web::Json<BranchMenuOverrideInput>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
+    let org_id = branch_in_scope(pool.get_ref(), &claims, body.branch_id).await?;
+
+    // The item must belong to the same org as the branch.
+    let item_org: Option<Uuid> = sqlx::query_scalar(
+        "SELECT org_id FROM menu_items WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(body.menu_item_id)
     .fetch_optional(pool.get_ref())
-    .await?
-    .ok_or_else(|| AppError::NotFound("Organization not found".into()))?;
-
-    // A disabled org must not expose a public menu (indistinguishable from
-    // "not found" so existence can't be probed via this endpoint).
-    if !org_info.is_active {
-        return Err(AppError::NotFound("Organization not found".into()));
+    .await?;
+    if item_org != Some(org_id) {
+        return Err(AppError::NotFound("Menu item not found in this organization".into()));
+    }
+    if let Some(p) = body.price_override
+        && p < 0
+    {
+        return Err(AppError::BadRequest("price_override must be ≥ 0".into()));
     }
 
-    // 2. Fetch Categories
-    let categories = sqlx::query_as::<_, Category>(
-        "SELECT id, org_id, name, name_translations, image_url, is_active, created_at, updated_at, deleted_at
-         FROM categories
-         WHERE org_id = $1 AND deleted_at IS NULL AND is_active = true
-         ORDER BY name ASC",
-    )
-    .bind(org_id)
-    .fetch_all(pool.get_ref())
-    .await?;
-
-    // 3. Fetch Items
-    let items = sqlx::query_as::<_, MenuItem>(
-        "SELECT id, org_id, category_id, name, name_translations, description, description_translations, image_url, base_price, is_active,
-                created_at, updated_at, deleted_at,
-                NULL::text as default_milk_addon_id
-         FROM menu_items
-         WHERE org_id = $1 AND deleted_at IS NULL AND is_active = true
-         ORDER BY name ASC",
-    )
-    .bind(org_id)
-    .fetch_all(pool.get_ref())
-    .await?;
-
-    // 4. Fetch Sizes
-    let sizes = sqlx::query_as::<_, ItemSize>(
-        "SELECT s.id, s.menu_item_id, s.label::text, s.price_override, s.is_active
-         FROM item_sizes s
-         JOIN menu_items i ON s.menu_item_id = i.id 
-         WHERE i.org_id = $1 AND s.is_active = true",
-    )
-    .bind(org_id)
-    .fetch_all(pool.get_ref())
-    .await?;
-
-    // 5. Fetch Addon Slots
-    let slots = sqlx::query_as::<_, AddonSlot>(
-        "SELECT s.id, s.menu_item_id, s.addon_type, s.label, s.label_translations, s.is_required, s.min_selections, s.max_selections, s.created_at
-         FROM menu_item_addon_slots s
-         JOIN menu_items i ON s.menu_item_id = i.id 
-         WHERE i.org_id = $1",
-    )
-    .bind(org_id)
-    .fetch_all(pool.get_ref())
-    .await?;
-
-    // 6. Fetch Addon Items
-    let addon_items_all = sqlx::query_as::<_, AddonItem>(
-        "SELECT id, org_id, name, name_translations, type as addon_type, default_price, is_active, created_at, updated_at,
-                NULL::uuid as primary_ingredient_id
-         FROM addon_items 
-         WHERE org_id = $1 AND is_active = true",
-    )
-    .bind(org_id)
-    .fetch_all(pool.get_ref())
-    .await?;
-
-    // 7. Synthesize "Global" Addon Slots
-    // We group addon items by type and create a slot for each global type (milk_type, coffee_type, extra)
-    let global_types = ["milk_type", "coffee_type", "extra"];
-    let mut global_slots = Vec::new();
-    
-    for g_type in global_types {
-        let items_for_type: Vec<_> = addon_items_all.iter()
-            .filter(|a| a.addon_type == g_type)
-            .map(|a| PublicAddonItem {
-                id: a.id,
-                name: a.name.clone(),
-                name_translations: a.name_translations.clone(),
-                default_price: a.default_price,
-            })
-            .collect();
-
-        if !items_for_type.is_empty() {
-            let (label, is_required, min_selections, max_selections) = match g_type {
-                "milk_type"   => (Some("Milk Type".to_string()),   true,  1, Some(1)),
-                "coffee_type" => (Some("Coffee Beans".to_string()), true,  1, Some(1)),
-                "extra"       => (Some("Add-ons".to_string()),      false, 0, None),
-                _ => (None, false, 0, None),
-            };
-
-            // Use a deterministic UUID for global slots to keep IDs stable
-            let slot_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, g_type.as_bytes());
-
-            global_slots.push(PublicAddonSlot {
-                id: slot_id,
-                addon_type: g_type.to_string(),
-                label,
-                label_translations: serde_json::json!({}),
-                is_required,
-                min_selections,
-                max_selections,
-                addon_items: items_for_type,
-            });
-        }
-    }
-
-    // Organize into response
-    let mut public_categories = Vec::new();
-
-    for cat in categories {
-        let mut public_items = Vec::new();
-        let cat_items: Vec<_> = items.iter().filter(|i| i.category_id == Some(cat.id)).collect();
-
-        for item in cat_items {
-            let item_sizes: Vec<_> = sizes.iter().filter(|s| s.menu_item_id == item.id)
-                .map(|s| PublicItemSize {
-                    id: s.id,
-                    label: s.label.clone(),
-                    price_override: s.price_override,
-                }).collect();
-
-            // Item-specific slots (deprecated but kept for compatibility)
-            let mut item_slots: Vec<PublicAddonSlot> = slots.iter().filter(|s| s.menu_item_id == item.id)
-                .map(|s| {
-                    let relevant_addons: Vec<_> = addon_items_all.iter()
-                        .filter(|a| a.addon_type == s.addon_type)
-                        .map(|a| PublicAddonItem {
-                            id: a.id,
-                            name: a.name.clone(),
-                            name_translations: a.name_translations.clone(),
-                            default_price: a.default_price,
-                        }).collect();
-
-                    PublicAddonSlot {
-                        id: s.id,
-                        addon_type: s.addon_type.clone(),
-                        label: s.label.clone(),
-                        label_translations: s.label_translations.clone(),
-                        is_required: s.is_required,
-                        min_selections: s.min_selections,
-                        max_selections: s.max_selections,
-                        addon_items: relevant_addons,
-                    }
-                }).collect();
-
-            // Add global slots that aren't already explicitly defined for this item
-            for gs in &global_slots {
-                if !item_slots.iter().any(|s| s.addon_type == gs.addon_type) {
-                    item_slots.push(gs.clone());
-                }
+    // Validate any provided size overrides against the item's actual (active) sizes.
+    if let Some(ref sizes) = body.sizes
+        && !sizes.is_empty()
+    {
+        for s in sizes {
+            if s.price_override < 0 {
+                return Err(AppError::BadRequest("size price_override must be ≥ 0".into()));
             }
-
-            public_items.push(PublicMenuItem {
-                id: item.id,
-                name: item.name.clone(),
-                name_translations: item.name_translations.clone(),
-                description: item.description.clone(),
-                description_translations: item.description_translations.clone(),
-                image_url: item.image_url.clone(),
-                base_price: item.base_price,
-                sizes: item_sizes,
-                addon_slots: item_slots,
-            });
         }
-
-        public_categories.push(PublicCategory {
-            id: cat.id,
-            name: cat.name.clone(),
-            name_translations: cat.name_translations.clone(),
-            image_url: cat.image_url,
-            items: public_items,
-        });
+        let valid: Vec<String> = sqlx::query_scalar(
+            "SELECT label::text FROM item_sizes WHERE menu_item_id = $1 AND is_active = true",
+        )
+        .bind(body.menu_item_id)
+        .fetch_all(pool.get_ref())
+        .await?;
+        for s in sizes {
+            if !valid.contains(&s.size_label) {
+                return Err(AppError::BadRequest(format!(
+                    "Size '{}' is not a valid size for this item",
+                    s.size_label
+                )));
+            }
+        }
     }
 
-    let response = PublicMenuResponse {
-        org_id,
-        org_name: org_info.name,
-        logo_url: org_info.logo_url,
-        categories: public_categories,
-    };
+    let mut tx = pool.get_ref().begin().await?;
 
-    // Serialize once; derive a strong ETag from the body so unchanged menus
-    // revalidate cheaply (304) and browsers/CDNs can cache for a short window.
-    let body = serde_json::to_vec(&response).map_err(|_| AppError::Internal)?;
-    let etag = {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        body.hash(&mut hasher);
-        format!("\"{:016x}\"", hasher.finish())
-    };
-    const CACHE_CONTROL: &str = "public, max-age=60, stale-while-revalidate=300";
+    let mut row = sqlx::query_as::<_, BranchMenuOverride>(
+        "INSERT INTO branch_menu_overrides (branch_id, menu_item_id, price_override, is_available, updated_at)
+         VALUES ($1, $2, $3, $4, now())
+         ON CONFLICT (branch_id, menu_item_id)
+         DO UPDATE SET price_override = EXCLUDED.price_override,
+                       is_available   = EXCLUDED.is_available,
+                       updated_at     = now()
+         RETURNING branch_id, menu_item_id, price_override, is_available, updated_at",
+    )
+    .bind(body.branch_id)
+    .bind(body.menu_item_id)
+    .bind(body.price_override)
+    .bind(body.is_available)
+    .fetch_one(&mut *tx)
+    .await?;
 
-    // Conditional GET — return 304 when the client already holds this version.
-    let if_none_match = req
-        .headers()
-        .get(actix_web::http::header::IF_NONE_MATCH)
-        .and_then(|v| v.to_str().ok());
-    if matches!(if_none_match, Some(inm) if inm == etag || inm == "*") {
-        return Ok(HttpResponse::NotModified()
-            .insert_header((actix_web::http::header::ETAG, etag))
-            .insert_header((actix_web::http::header::CACHE_CONTROL, CACHE_CONTROL))
-            .finish());
+    // `sizes` is a full-replacement of this item's size overrides (None leaves them as-is).
+    if let Some(ref sizes) = body.sizes {
+        sqlx::query("DELETE FROM branch_menu_size_overrides WHERE branch_id = $1 AND menu_item_id = $2")
+            .bind(body.branch_id)
+            .bind(body.menu_item_id)
+            .execute(&mut *tx)
+            .await?;
+        for s in sizes {
+            sqlx::query(
+                "INSERT INTO branch_menu_size_overrides (branch_id, menu_item_id, size_label, price_override, updated_at)
+                 VALUES ($1, $2, $3::item_size, $4, now())",
+            )
+            .bind(body.branch_id)
+            .bind(body.menu_item_id)
+            .bind(&s.size_label)
+            .bind(s.price_override)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
 
-    Ok(HttpResponse::Ok()
-        .insert_header((actix_web::http::header::ETAG, etag))
-        .insert_header((actix_web::http::header::CACHE_CONTROL, CACHE_CONTROL))
-        .content_type("application/json")
-        .body(body))
+    tx.commit().await?;
+
+    row.sizes = fetch_branch_size_overrides(pool.get_ref(), body.branch_id, body.menu_item_id).await?;
+    Ok(HttpResponse::Ok().json(row))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/branch-menu-overrides",
+    tag = "menu",
+    operation_id = "delete_branch_menu_override",
+    params(BranchOverrideKeyQuery),
+    responses((status = 204, description = "Override cleared — item (and its size overrides) revert to the org catalog"), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn delete_branch_menu_override(
+    req:   HttpRequest,
+    pool:  web::Data<PgPool>,
+    query: web::Query<BranchOverrideKeyQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
+    branch_in_scope(pool.get_ref(), &claims, query.branch_id).await?;
+
+    let mut tx = pool.get_ref().begin().await?;
+    sqlx::query("DELETE FROM branch_menu_size_overrides WHERE branch_id = $1 AND menu_item_id = $2")
+        .bind(query.branch_id)
+        .bind(query.menu_item_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM branch_menu_overrides WHERE branch_id = $1 AND menu_item_id = $2")
+        .bind(query.branch_id)
+        .bind(query.menu_item_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+
+    Ok(HttpResponse::NoContent().finish())
+}
+
+// ── Branch addon override handlers ────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/branch-addon-overrides",
+    tag = "menu",
+    operation_id = "list_branch_addon_overrides",
+    params(BranchOverridesQuery),
+    responses((status = 200, description = "Per-branch addon overrides for the branch", body = Vec<BranchAddonOverride>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn list_branch_addon_overrides(
+    req:   HttpRequest,
+    pool:  web::Data<PgPool>,
+    query: web::Query<BranchOverridesQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
+    branch_in_scope(pool.get_ref(), &claims, query.branch_id).await?;
+
+    let rows = sqlx::query_as::<_, BranchAddonOverride>(
+        "SELECT branch_id, addon_item_id, price_override, is_available, updated_at
+         FROM branch_addon_overrides WHERE branch_id = $1",
+    )
+    .bind(query.branch_id)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+#[utoipa::path(
+    put,
+    path = "/branch-addon-overrides",
+    tag = "menu",
+    operation_id = "upsert_branch_addon_override",
+    request_body = BranchAddonOverrideInput,
+    responses((status = 200, description = "Addon override upserted", body = BranchAddonOverride), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn upsert_branch_addon_override(
+    req:  HttpRequest,
+    pool: web::Data<PgPool>,
+    body: web::Json<BranchAddonOverrideInput>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
+    let org_id = branch_in_scope(pool.get_ref(), &claims, body.branch_id).await?;
+
+    // The addon must belong to the same org as the branch.
+    let addon_org: Option<Uuid> = sqlx::query_scalar(
+        "SELECT org_id FROM addon_items WHERE id = $1",
+    )
+    .bind(body.addon_item_id)
+    .fetch_optional(pool.get_ref())
+    .await?;
+    if addon_org != Some(org_id) {
+        return Err(AppError::NotFound("Addon not found in this organization".into()));
+    }
+    if let Some(p) = body.price_override
+        && p < 0
+    {
+        return Err(AppError::BadRequest("price_override must be ≥ 0".into()));
+    }
+
+    let row = sqlx::query_as::<_, BranchAddonOverride>(
+        "INSERT INTO branch_addon_overrides (branch_id, addon_item_id, price_override, is_available, updated_at)
+         VALUES ($1, $2, $3, $4, now())
+         ON CONFLICT (branch_id, addon_item_id)
+         DO UPDATE SET price_override = EXCLUDED.price_override,
+                       is_available   = EXCLUDED.is_available,
+                       updated_at     = now()
+         RETURNING branch_id, addon_item_id, price_override, is_available, updated_at",
+    )
+    .bind(body.branch_id)
+    .bind(body.addon_item_id)
+    .bind(body.price_override)
+    .bind(body.is_available)
+    .fetch_one(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(row))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/branch-addon-overrides",
+    tag = "menu",
+    operation_id = "delete_branch_addon_override",
+    params(BranchAddonOverrideKeyQuery),
+    responses((status = 204, description = "Addon override cleared — reverts to the org default"), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn delete_branch_addon_override(
+    req:   HttpRequest,
+    pool:  web::Data<PgPool>,
+    query: web::Query<BranchAddonOverrideKeyQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
+    branch_in_scope(pool.get_ref(), &claims, query.branch_id).await?;
+
+    sqlx::query("DELETE FROM branch_addon_overrides WHERE branch_id = $1 AND addon_item_id = $2")
+        .bind(query.branch_id)
+        .bind(query.addon_item_id)
+        .execute(pool.get_ref())
+        .await?;
+
+    Ok(HttpResponse::NoContent().finish())
 }
 
 // ── Helpers ───────────────────────────────────────────────────

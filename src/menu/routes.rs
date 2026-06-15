@@ -1,19 +1,7 @@
-use actix_governor::{Governor, GovernorConfigBuilder};
 use actix_web::web;
 use crate::{auth::middleware::JwtMiddleware, menu::handlers::*};
-use crate::rate_limit::PeerIpOrLocalhost;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    // Public (unauthenticated) menu endpoint: limit per IP to deter scraping
-    // and enumeration. ~60 req/min sustained with a burst of 30 — generous for
-    // real customers refreshing a QR menu, tight enough to blunt abuse.
-    let public_menu_gov = GovernorConfigBuilder::default()
-        .key_extractor(PeerIpOrLocalhost)
-        .seconds_per_request(1)
-        .burst_size(30)
-        .finish()
-        .expect("Invalid public menu rate limiter configuration");
-
     cfg
         // ── Categories ────────────────────────────────────────────────────────
         .service(
@@ -57,17 +45,29 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/{id}/overrides/{override_id}",  web::delete().to(delete_addon_override)),
         )
 
-        // ── Public Menu (unauthenticated, rate-limited) ───────────────────────
+        // ── Branch menu overrides (per-branch price + availability) ───────────
         .service(
-            web::resource("/menu/public/{org_id}")
-                .wrap(Governor::new(&public_menu_gov))
-                .route(web::get().to(get_public_menu)),
+            web::scope("/branch-menu-overrides")
+                .wrap(JwtMiddleware)
+                .route("", web::get().to(list_branch_menu_overrides))
+                .route("", web::put().to(upsert_branch_menu_override))
+                .route("", web::delete().to(delete_branch_menu_override)),
+        )
+
+        // ── Branch addon overrides (per-branch addon price + availability) ────
+        .service(
+            web::scope("/branch-addon-overrides")
+                .wrap(JwtMiddleware)
+                .route("", web::get().to(list_branch_addon_overrides))
+                .route("", web::put().to(upsert_branch_addon_override))
+                .route("", web::delete().to(delete_branch_addon_override)),
         )
 
         // ── Addon items ───────────────────────────────────────────────────────
         .service(
             web::scope("/addon-items")
                 .wrap(JwtMiddleware)
+                .route("/catalog", web::get().to(list_addon_catalog))
                 .route("",      web::get().to(list_addon_items))
                 .route("",      web::post().to(create_addon_item))
                 .route("/{id}", web::patch().to(update_addon_item))

@@ -402,7 +402,7 @@ async fn test_bundle_performance_uses_snapshot_cost(pool: PgPool) {
     sqlx::query("INSERT INTO shifts (id, branch_id, teller_id, status, opening_cash) VALUES ($1,$2,$3,'open',0)")
         .bind(shift_id).bind(branch_id).bind(user_id).execute(&pool).await.unwrap();
     let order_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method) VALUES ($1,$2,$3,$4, gen_random_uuid(), 300, 0, 300, 'completed', 1, 'cash')")
+    sqlx::query("INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref) VALUES ($1,$2,$3,$4, gen_random_uuid(), 300, 0, 300, 'completed', 1, 'cash', gen_random_uuid()::text)")
         .bind(order_id).bind(branch_id).bind(user_id).bind(shift_id).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO order_items (order_id, bundle_id, item_name, unit_price, quantity, line_total, line_cost, cost_missing) VALUES ($1,$2,'B',300,1,300,100,false)")
         .bind(order_id).bind(bundle_id).execute(&pool).await.unwrap();

@@ -7,11 +7,16 @@ use crate::errors::AppError;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-#[derive(Deserialize, Serialize, Clone, ToSchema)]
+#[derive(Deserialize, Serialize, Clone, Default, ToSchema)]
 pub struct AddonInput {
     pub addon_item_id: Uuid,
     #[serde(default = "default_qty")]
     pub quantity: i32,
+    /// Charged unit price (piastres) the POS applied for this addon. When present
+    /// it is RECORDED as the addon's unit_price; absent → the server's expected
+    /// (catalog) price is used. Bundle-component addons ignore this (server-priced).
+    #[serde(default)]
+    pub unit_price: Option<i32>,
 }
 
 pub fn default_qty() -> i32 { 1 }
@@ -80,6 +85,9 @@ pub async fn resolve_menu_item_configuration(
     line_quantity: i32,
     addons: &[AddonInput],
     optional_field_ids: &[Uuid],
+    // Branch the line is sold at — addon prices are resolved branch-effective so a
+    // bundle's component-addon surcharge matches what the branch POS charged.
+    branch_id: Uuid,
 ) -> Result<MenuItemResolution, AppError> {
     if line_quantity <= 0 {
         return Err(AppError::BadRequest("Quantity must be > 0".into()));
@@ -140,9 +148,16 @@ pub async fn resolve_menu_item_configuration(
         let addon_qty = addon_input.quantity.max(1) as f64;
 
         let (addon_name, name_translations, default_price, addon_type): (String, serde_json::Value, i32, String) = sqlx::query_as(
-            "SELECT name, name_translations, default_price, type FROM addon_items WHERE id = $1",
+            "SELECT a.name, a.name_translations,
+                    COALESCE(bao.price_override, a.default_price) AS default_price,
+                    a.type
+             FROM addon_items a
+             LEFT JOIN branch_addon_overrides bao
+                    ON bao.addon_item_id = a.id AND bao.branch_id = $2
+             WHERE a.id = $1",
         )
         .bind(addon_input.addon_item_id)
+        .bind(branch_id)
         .fetch_optional(pool)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("Addon {} not found", addon_input.addon_item_id)))?;
@@ -188,13 +203,16 @@ pub async fn resolve_menu_item_configuration(
             } else if let Some((repl_id, _, repl_name, repl_unit)) = addon_rows.first() {
                 let base_addon_price: i32 = if let Some(base_id) = base_ing_id {
                     sqlx::query_scalar(
-                        "SELECT COALESCE(MAX(a.default_price), 0)
+                        "SELECT COALESCE(MAX(COALESCE(bao.price_override, a.default_price)), 0)
                          FROM addon_items a
                          JOIN addon_item_ingredients i ON i.addon_item_id = a.id
+                         LEFT JOIN branch_addon_overrides bao
+                                ON bao.addon_item_id = a.id AND bao.branch_id = $3
                          WHERE i.org_ingredient_id = $1 AND a.type = $2",
                     )
                     .bind(base_id)
                     .bind(addon_type.as_str())
+                    .bind(branch_id)
                     .fetch_optional(pool)
                     .await?
                     .flatten()

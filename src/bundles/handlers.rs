@@ -92,6 +92,9 @@ pub struct ListBundlesQuery {
     pub search: Option<String>,
     pub page: Option<i64>,
     pub per_page: Option<i64>,
+    /// Sort: name_asc | name_desc | price_asc | price_desc | created_asc |
+    /// created_desc (default).
+    pub sort: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
@@ -432,7 +435,15 @@ pub async fn list_bundles(
     .await?;
 
     // Page items IDs
-    let ids: Vec<Uuid> = sqlx::query_scalar(
+    let order_by = match query.sort.as_deref() {
+        Some("name_asc")    => "LOWER(b.name) ASC",
+        Some("name_desc")   => "LOWER(b.name) DESC",
+        Some("price_asc")   => "b.price ASC",
+        Some("price_desc")  => "b.price DESC",
+        Some("created_asc") => "b.created_at ASC",
+        _                   => "b.created_at DESC",
+    };
+    let ids: Vec<Uuid> = sqlx::query_scalar(&format!(
         r#"
         SELECT b.id
         FROM bundles b
@@ -443,10 +454,10 @@ pub async fn list_bundles(
               NOT EXISTS (SELECT 1 FROM bundle_branch_availability WHERE bundle_id = b.id) OR
               EXISTS (SELECT 1 FROM bundle_branch_availability WHERE bundle_id = b.id AND branch_id = $4)
           ))
-        ORDER BY b.created_at DESC
+        ORDER BY {order_by}
         LIMIT $5 OFFSET $6
         "#
-    )
+    ))
     .bind(org_id)
     .bind(query.status)
     .bind(&search_pattern)

@@ -18,11 +18,15 @@ use utoipa::{IntoParams, ToSchema};
 const DEFAULT_PER_PAGE_SHIFT: i64 = 1000;
 /// Default page size when listing orders for a whole branch (dashboard).
 const DEFAULT_PER_PAGE_BRANCH: i64 = 100;
+/// Upper bound on a single orders page. High enough that the POS can bulk-fetch
+/// an entire shift's orders in one or two round trips (offline cache), but bounded
+/// so a client can't request a near-unlimited result set in one query.
+const MAX_PER_PAGE: i64 = 1000;
 
 // ── Shared SELECT fragment ────────────────────────────────────
 const ORDER_SELECT: &str =
     "SELECT o.id, o.branch_id, o.shift_id, o.teller_id, u.name AS teller_name,
-     o.order_number, o.status::text, o.payment_method::text,
+     o.order_number, o.order_ref, o.status::text, o.payment_method::text,
      o.subtotal, o.discount_type::text, o.discount_value,
      o.discount_amount, o.tax_amount, o.total_amount,
      o.amount_tendered, o.change_given, o.tip_amount, o.tip_payment_method, o.discount_id,
@@ -39,6 +43,10 @@ pub struct Order {
     pub teller_id:          Uuid,
     pub teller_name:        String,
     pub order_number:       i32,
+    /// Human-readable, org-unique reference (e.g. "DT-260614-0042"). Additive
+    /// alongside the per-shift order_number. Optional only during the rollout
+    /// window before the historical backfill runs; never null afterwards.
+    pub order_ref:          Option<String>,
     pub status:             String,
     pub payment_method:     String,
     pub subtotal:           i32,
@@ -185,7 +193,7 @@ pub struct PaymentSplitInput {
 
 pub use crate::orders::component_resolve::AddonInput;
 
-#[derive(Deserialize, Serialize, ToSchema)]
+#[derive(Deserialize, Serialize, Default, ToSchema)]
 pub struct OrderItemInput {
     pub menu_item_id:      Option<Uuid>,
     pub bundle_id:         Option<Uuid>,
@@ -196,9 +204,16 @@ pub struct OrderItemInput {
     #[serde(default)]
     pub bundle_components: Vec<crate::orders::component_resolve::BundleComponentInput>,
     pub notes:             Option<String>,
+    /// Charged unit price (piastres) the POS applied for this item/bundle line. When
+    /// present it is RECORDED as the line's unit_price; absent → the server's expected
+    /// (catalog + branch override) price is used. Recording what the customer was
+    /// actually charged keeps the DB equal to the printed receipt even when the POS's
+    /// synced menu/override prices are stale or it was offline at sale time.
+    #[serde(default)]
+    pub unit_price:        Option<i32>,
 }
 
-#[derive(Deserialize, Serialize, ToSchema)]
+#[derive(Deserialize, Serialize, Default, ToSchema)]
 pub struct CreateOrderRequest {
     pub branch_id:          Uuid,
     pub shift_id:           Uuid,
@@ -214,6 +229,16 @@ pub struct CreateOrderRequest {
     pub payment_splits:     Option<Vec<PaymentSplitInput>>,
     pub items:              Vec<OrderItemInput>,
     pub created_at:         Option<chrono::DateTime<chrono::Utc>>,
+    // ── Charged money breakdown (POS source of truth) ─────────────────────────
+    // When supplied these are RECORDED VERBATIM as what the customer paid; the
+    // server uses its catalog only to compute an expected total and flag
+    // deviations (never reject). Omitted → the server computes them (legacy /
+    // pre-update POS builds / tests).
+    #[serde(default)] pub subtotal:        Option<i32>,
+    #[serde(default)] pub discount_amount: Option<i32>,
+    #[serde(default)] pub tax_amount:      Option<i32>,
+    #[serde(default)] pub total_amount:    Option<i32>,
+    #[serde(default)] pub change_given:    Option<i32>,
 }
 
 #[derive(Deserialize, Serialize, ToSchema)]
@@ -529,7 +554,10 @@ pub async fn create_order(
         item_name:         String,
         name_translations: serde_json::Value,
         size_label:        Option<String>,
+        /// Charged unit price recorded on the line (client value, else expected).
         unit_price:        i32,
+        /// True when this line's charged price/availability deviated from the catalog.
+        price_flagged:     bool,
         quantity:          i32,
         notes:             Option<String>,
         addons:            Vec<ResolvedAddon>,
@@ -556,7 +584,11 @@ pub async fn create_order(
     }
 
     let mut resolved_items: Vec<ResolvedItem> = Vec::new();
+    // `subtotal` accumulates the CHARGED line totals (what the customer paid);
+    // `expected_subtotal` mirrors it using catalog + branch-override prices so we
+    // can flag deviations without rejecting the order.
     let mut subtotal: i32 = 0;
+    let mut expected_subtotal: i32 = 0;
 
     for item_input in &body.items {
         if item_input.quantity <= 0 {
@@ -569,7 +601,12 @@ pub async fn create_order(
         let mut bundle_components = Vec::new();
 
         let mut component_surcharge: i32 = 0;
-        let (resolved_menu_item_id, item_name, name_translations, unit_price, bundle_id, bundle_unit_price) = if let Some(b_id) = item_input.bundle_id {
+        // Note: `unit_price` returned here is the EXPECTED (catalog + branch override)
+        // price; the client's charged price is overlaid after this block.
+        // `expected_addon_per_unit` is the catalog addon total per single item unit
+        // (0 for bundles, whose surcharge is computed separately); `branch_disabled`
+        // is true when this branch has the item turned off (flagged, not rejected).
+        let (resolved_menu_item_id, item_name, name_translations, unit_price, bundle_id, bundle_unit_price, expected_addon_per_unit, branch_disabled) = if let Some(b_id) = item_input.bundle_id {
             // ── 1. Resolve Bundle ─────────────────────────────
             let bundle: (Uuid, String, i32, String) = sqlx::query_as(
                 "SELECT id, name, price, status::text FROM bundles WHERE id = $1 AND org_id = $2"
@@ -704,6 +741,7 @@ pub async fn create_order(
                     line_qty,
                     &comp_in.addons,
                     &comp_in.optional_field_ids,
+                    body.branch_id,
                 )
                 .await?;
 
@@ -765,31 +803,64 @@ pub async fn create_order(
                 });
             }
 
-            (None, bundle.1, serde_json::json!({}), bundle.2, Some(bundle.0), Some(bundle.2))
+            (None, bundle.1, serde_json::json!({}), bundle.2, Some(bundle.0), Some(bundle.2), 0, false)
         } else if let Some(m_item_id) = item_input.menu_item_id {
             // ── 2. Resolve Menu Item ──────────────────────────
-            let (item_name, name_translations, base_price): (String, serde_json::Value, i32) = sqlx::query_as(
-                "SELECT name, name_translations, base_price FROM menu_items WHERE id = $1 AND deleted_at IS NULL",
+            // Pull the branch override alongside the catalog row: the branch layer can
+            // replace the price (price_override, piastres) and/or disable the item at
+            // this branch. A disabled item is flagged (price_flagged) but NOT rejected
+            // — an offline/stale POS may legitimately still be selling it.
+            let (item_name, name_translations, base_price, branch_price_override, branch_disabled):
+                (String, serde_json::Value, i32, Option<i32>, bool) = sqlx::query_as(
+                "SELECT mi.name, mi.name_translations, mi.base_price,
+                        bmo.price_override,
+                        COALESCE(bmo.is_available, true) = false AS branch_disabled
+                 FROM menu_items mi
+                 LEFT JOIN branch_menu_overrides bmo
+                        ON bmo.menu_item_id = mi.id AND bmo.branch_id = $2
+                 WHERE mi.id = $1 AND mi.deleted_at IS NULL",
             )
             .bind(m_item_id)
+            .bind(body.branch_id)
             .fetch_optional(pool.get_ref())
             .await?
             .ok_or_else(|| AppError::NotFound(
                 format!("Menu item {} not found", m_item_id)
             ))?;
 
+            // Branch-effective base: the override price replaces the catalog base_price.
+            let base_price = branch_price_override.unwrap_or(base_price);
+
             let unit_price: i32 = match &item_input.size_label {
                 Some(size) => {
-                    let p: Option<i32> = sqlx::query_scalar(
-                        "SELECT price_override FROM item_sizes \
-                         WHERE menu_item_id = $1 AND label = $2::item_size AND is_active = true"
+                    // A per-(branch, item, size) override wins for that size; otherwise the
+                    // catalog size price; otherwise the branch-effective base. (A branch base
+                    // override never silently changes an explicitly-priced size.)
+                    let branch_size: Option<i32> = sqlx::query_scalar(
+                        "SELECT price_override FROM branch_menu_size_overrides \
+                         WHERE branch_id = $1 AND menu_item_id = $2 AND size_label = $3::item_size"
                     )
+                    .bind(body.branch_id)
                     .bind(m_item_id)
                     .bind(size)
                     .fetch_optional(pool.get_ref())
-                    .await?
-                    .flatten();
-                    p.unwrap_or(base_price)
+                    .await?;
+
+                    match branch_size {
+                        Some(bs) => bs,
+                        None => {
+                            let p: Option<i32> = sqlx::query_scalar(
+                                "SELECT price_override FROM item_sizes \
+                                 WHERE menu_item_id = $1 AND label = $2::item_size AND is_active = true"
+                            )
+                            .bind(m_item_id)
+                            .bind(size)
+                            .fetch_optional(pool.get_ref())
+                            .await?
+                            .flatten();
+                            p.unwrap_or(base_price)
+                        }
+                    }
                 }
                 None => base_price,
             };
@@ -847,10 +918,20 @@ pub async fn create_order(
             for addon_input in &item_input.addons {
                 let addon_qty = addon_input.quantity.max(1) as f64;
 
+                // default_price is branch-effective: a branch addon override replaces it,
+                // so the EXPECTED addon price (used for flagging + legacy fallback) matches
+                // what the POS charged from the branch addon list.
                 let (addon_name, addon_name_translations, default_price, addon_type): (String, serde_json::Value, i32, String) = sqlx::query_as(
-                    "SELECT name, name_translations, default_price, type FROM addon_items WHERE id = $1"
+                    "SELECT a.name, a.name_translations,
+                            COALESCE(bao.price_override, a.default_price) AS default_price,
+                            a.type
+                     FROM addon_items a
+                     LEFT JOIN branch_addon_overrides bao
+                            ON bao.addon_item_id = a.id AND bao.branch_id = $2
+                     WHERE a.id = $1"
                 )
                 .bind(addon_input.addon_item_id)
+                .bind(body.branch_id)
                 .fetch_optional(pool.get_ref())
                 .await?
                 .ok_or_else(|| AppError::NotFound(
@@ -910,13 +991,16 @@ pub async fn create_order(
                         // Real swap — calculate price difference
                         let base_addon_price: i32 = if let Some(base_id) = base_ing_id {
                             sqlx::query_scalar(
-                                "SELECT COALESCE(MAX(a.default_price), 0)
+                                "SELECT COALESCE(MAX(COALESCE(bao.price_override, a.default_price)), 0)
                                  FROM addon_items a
                                  JOIN addon_item_ingredients i ON i.addon_item_id = a.id
+                                 LEFT JOIN branch_addon_overrides bao
+                                        ON bao.addon_item_id = a.id AND bao.branch_id = $3
                                  WHERE i.org_ingredient_id = $1 AND a.type = $2"
                             )
                             .bind(base_id)
                             .bind(addon_type.as_str())
+                            .bind(body.branch_id)
                             .fetch_optional(pool.get_ref())
                             .await?
                             .flatten()
@@ -1048,32 +1132,53 @@ pub async fn create_order(
                 });
             }
 
-            (Some(m_item_id), item_name, name_translations, unit_price, None, None)
+            // Capture the catalog (expected) addon total per single item unit, then
+            // overlay the POS's charged addon prices — recorded verbatim, with any
+            // deviation surfaced via the line price flag below.
+            let expected_addon_per_unit: i32 =
+                resolved_addons.iter().map(|a| a.unit_price * a.quantity).sum();
+            for (i, a) in resolved_addons.iter_mut().enumerate() {
+                if let Some(p) = item_input.addons.get(i).and_then(|ai| ai.unit_price) {
+                    a.unit_price = p;
+                }
+            }
+
+            (Some(m_item_id), item_name, name_translations, unit_price, None, None, expected_addon_per_unit, branch_disabled)
         } else {
             return Err(AppError::BadRequest("Each line item must have either menu_item_id or bundle_id".into()));
         };
 
-        let item_line = unit_price * item_input.quantity;
-        let addon_line: i32 = if bundle_id.is_some() {
+        // `unit_price` from the resolution is the EXPECTED (catalog + branch override)
+        // price; overlay the POS's charged price so the recorded line equals the
+        // receipt. `resolved_addons` already carry charged prices (overlaid above for
+        // menu items; bundle components stay server-priced via the surcharge).
+        let expected_unit_price = unit_price;
+        let unit_price = item_input.unit_price.unwrap_or(expected_unit_price);
+
+        let charged_addon_per_unit: i32 = if bundle_id.is_some() {
             0
         } else {
-            resolved_addons
-                .iter()
-                .map(|a| a.unit_price * a.quantity)
-                .sum::<i32>()
-                * item_input.quantity
+            resolved_addons.iter().map(|a| a.unit_price * a.quantity).sum()
         };
-        let optional_line: i32 = if bundle_id.is_some() {
+        let optional_per_unit: i32 = if bundle_id.is_some() {
             0
         } else {
-            resolved_optionals
-                .iter()
-                .map(|o| o.price)
-                .sum::<i32>()
-                * item_input.quantity
+            resolved_optionals.iter().map(|o| o.price).sum()
         };
 
-        subtotal += item_line + addon_line + optional_line + component_surcharge;
+        let charged_line_subtotal =
+            (unit_price + charged_addon_per_unit + optional_per_unit) * item_input.quantity
+                + component_surcharge;
+        let expected_line_subtotal =
+            (expected_unit_price + expected_addon_per_unit + optional_per_unit) * item_input.quantity
+                + component_surcharge;
+
+        // Flag the line when the charged price deviated from the catalog, or the item
+        // was disabled at this branch (a stale/offline sale — recorded, not rejected).
+        let line_price_flagged = branch_disabled || charged_line_subtotal != expected_line_subtotal;
+
+        subtotal          += charged_line_subtotal;
+        expected_subtotal += expected_line_subtotal;
 
         resolved_items.push(ResolvedItem {
             menu_item_id:      resolved_menu_item_id,
@@ -1081,6 +1186,7 @@ pub async fn create_order(
             name_translations,
             size_label:        item_input.size_label.clone(),
             unit_price,
+            price_flagged:     line_price_flagged,
             quantity:          item_input.quantity,
             notes:             item_input.notes.clone(),
             addons:            resolved_addons,
@@ -1093,22 +1199,43 @@ pub async fn create_order(
         });
     }
 
-    let discount_amount = match resolved_discount_type.as_deref() {
-        // Round (half away from zero), NOT truncate, so the discount matches the
-        // POS's rounded preview to the piastre (alignment) and is the correct
-        // currency rounding.
-        Some("percentage") => (subtotal as f64 * resolved_discount_value as f64 / 100.0).round() as i32,
-        Some("fixed")      => resolved_discount_value.min(subtotal),
-        _                  => 0,
-    };
-    // A malformed discount (percentage > 100, or a negative value) must never
-    // drive the order to a negative or inflated total: clamp to [0, subtotal].
-    let discount_amount = discount_amount.clamp(0, subtotal);
-    let taxable      = subtotal - discount_amount;
     let tax_rate_f64: f64 = tax_rate.to_string().parse().unwrap_or(0.14);
-    let tax_amount   = (taxable as f64 * tax_rate_f64).round() as i32;
-    let total_amount = taxable + tax_amount;
-    let change_given = body.amount_tendered.map(|t| (t - total_amount).max(0));
+    let calc_discount = |sub: i32| -> i32 {
+        let d = match resolved_discount_type.as_deref() {
+            // Round (half away from zero), NOT truncate, so the discount matches the
+            // POS's rounded preview to the piastre and is the correct currency rounding.
+            Some("percentage") => (sub as f64 * resolved_discount_value as f64 / 100.0).round() as i32,
+            Some("fixed")      => resolved_discount_value.min(sub),
+            _                  => 0,
+        };
+        // A malformed discount (percentage > 100, or negative) must never drive the
+        // order to a negative or inflated total: clamp to [0, sub].
+        d.clamp(0, sub)
+    };
+
+    // Server EXPECTED breakdown (catalog + branch override) — used only to detect and
+    // flag deviations; it never overrides what the customer was actually charged.
+    let expected_discount = calc_discount(expected_subtotal);
+    let expected_taxable  = expected_subtotal - expected_discount;
+    let expected_tax      = (expected_taxable as f64 * tax_rate_f64).round() as i32;
+    let expected_total    = expected_taxable + expected_tax;
+
+    // RECORDED breakdown — the POS's charged numbers are the source of truth; any field
+    // the POS omits falls back to a server computation over the charged subtotal
+    // (legacy / pre-update POS builds / tests).
+    let subtotal        = body.subtotal.unwrap_or(subtotal);
+    let discount_amount = body.discount_amount.unwrap_or_else(|| calc_discount(subtotal)).clamp(0, subtotal);
+    let taxable         = subtotal - discount_amount;
+    let tax_amount      = body.tax_amount.unwrap_or_else(|| (taxable as f64 * tax_rate_f64).round() as i32);
+    let total_amount    = body.total_amount.unwrap_or(taxable + tax_amount);
+    let change_given    = body.change_given.or_else(|| body.amount_tendered.map(|t| (t - total_amount).max(0)));
+
+    // The order is flagged when any line deviated, the charged subtotal differs from the
+    // catalog expectation, or the recorded total differs from the expected total.
+    let price_flagged = resolved_items.iter().any(|r| r.price_flagged)
+        || subtotal != expected_subtotal
+        || total_amount != expected_total;
+
     let created_at   = body.created_at.unwrap_or_else(chrono::Utc::now);
 
     // ── Cost snapshot ─────────────────────────────────────────
@@ -1168,6 +1295,37 @@ pub async fn create_order(
     .fetch_one(&mut *tx)
     .await?;
 
+    // Mint the human-readable order reference (V31): <BRANCHCODE>-<YYMMDD>-<NNNN>,
+    // unique per (branch, business_date). The advisory lock above is keyed on
+    // shift_id and intentionally left UNTOUCHED — close_shift pairs with that exact
+    // key for the cash-snapshot TOCTOU. A single shift can straddle two business
+    // days (client-supplied created_at + AT TIME ZONE midnight), so the per-(branch,
+    // day) counter ROW lock below — not the shift lock — is what serialises this
+    // sequence. The counter bump is in this same tx, so it rolls back with the order
+    // (no burned numbers on failure or on the idempotency-replay path).
+    let (branch_code, biz_date): (String, chrono::NaiveDate) = sqlx::query_as(
+        "SELECT b.code, ($1::timestamptz AT TIME ZONE b.timezone)::date
+         FROM branches b WHERE b.id = $2",
+    )
+    .bind(created_at)
+    .bind(body.branch_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let ref_seq: i32 = sqlx::query_scalar(
+        "INSERT INTO order_ref_counters (branch_id, business_date, last_seq)
+         VALUES ($1, $2, 1)
+         ON CONFLICT (branch_id, business_date)
+         DO UPDATE SET last_seq = order_ref_counters.last_seq + 1
+         RETURNING last_seq",
+    )
+    .bind(body.branch_id)
+    .bind(biz_date)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let order_ref = format!("{}-{}-{:04}", branch_code, biz_date.format("%y%m%d"), ref_seq);
+
     // Snapshot whether the tip was paid in cash (V30) — only meaningful when a
     // tip exists; resolves the tip method now so a later rename can't change it.
     let tip_is_cash: Option<bool> = if body.tip_amount.unwrap_or(0) > 0 {
@@ -1184,13 +1342,15 @@ pub async fn create_order(
              discount_amount, tax_amount, total_amount,
              amount_tendered, change_given, tip_amount, tip_payment_method,
              discount_id, customer_name, notes, status,
-             idempotency_key, created_at, tip_is_cash)
+             idempotency_key, created_at, tip_is_cash, order_ref,
+             price_flagged, price_expected_total)
         VALUES ($1, $2, $3, $4, $5, $6, $7::discount_type, $8,
-                $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'completed', $19, $20, $21)
+                $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'completed', $19, $20, $21, $22,
+                $23, $24)
         RETURNING
             id, branch_id, shift_id, teller_id,
             (SELECT name FROM users WHERE id = $3) AS teller_name,
-            order_number, status::text, payment_method::text,
+            order_number, order_ref, status::text, payment_method::text,
             subtotal, discount_type::text, discount_value,
             discount_amount, tax_amount, total_amount,
             amount_tendered, change_given, tip_amount, tip_payment_method, discount_id,
@@ -1218,6 +1378,9 @@ pub async fn create_order(
     .bind(idempotency_key)
     .bind(created_at)
     .bind(tip_is_cash)
+    .bind(&order_ref)
+    .bind(price_flagged)
+    .bind(expected_total)
     .fetch_one(&mut *tx)
     .await
     {
@@ -1298,8 +1461,9 @@ pub async fn create_order(
             r#"INSERT INTO order_items
                 (order_id, menu_item_id, item_name, name_translations, size_label,
                  unit_price, quantity, line_total, notes, deductions_snapshot,
-                 bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                 bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing,
+                 price_flagged)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                RETURNING id, order_id, menu_item_id, item_name, name_translations, size_label,
                          unit_price, quantity, line_total, notes, deductions_snapshot,
                          bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing"#,
@@ -1319,6 +1483,7 @@ pub async fn create_order(
         .bind(costs.line_cost)
         .bind(costs.unit_cost)
         .bind(costs.cost_missing)
+        .bind(resolved.price_flagged)
         .fetch_one(&mut *tx)
         .await?;
 
@@ -1588,7 +1753,7 @@ pub async fn list_orders(
     } else {
         DEFAULT_PER_PAGE_BRANCH
     };
-    let per_page = query.per_page.unwrap_or(default_per_page).clamp(1, 999999);
+    let per_page = query.per_page.unwrap_or(default_per_page).clamp(1, MAX_PER_PAGE);
     let offset   = (page - 1) * per_page;
 
     let org_id = claims.org_id()
@@ -1814,7 +1979,7 @@ pub async fn void_order(
            RETURNING
                id, branch_id, shift_id, teller_id,
                (SELECT name FROM users WHERE id = teller_id) AS teller_name,
-               order_number, status::text, payment_method::text,
+               order_number, order_ref, status::text, payment_method::text,
                subtotal, discount_type::text, discount_value,
                discount_amount, tax_amount, total_amount,
                amount_tendered, change_given, tip_amount, tip_payment_method,

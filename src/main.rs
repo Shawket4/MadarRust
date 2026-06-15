@@ -13,7 +13,7 @@ use tracing_subscriber::EnvFilter;
 
 use sufrix_rust::openapi::ApiDoc;
 use sufrix_rust::{
-    auth, branches, bundles, costing, discounts, inventory, menu, menu_advisor,
+    auth, branches, bundles, costing, delivery, discounts, inventory, menu, menu_advisor,
     orders, orgs, payment_methods, permissions, purchasing, recipes, reports, shifts, stocktakes,
     uploads, users,
 };
@@ -48,6 +48,8 @@ async fn main() -> std::io::Result<()> {
 
     let pool          = web::Data::new(pool);
     let jwt_secret    = web::Data::new(auth::jwt::JwtSecret(jwt_secret));
+    // One delivery-event hub, shared across all workers (cloned into each App).
+    let delivery_hub  = web::Data::new(delivery::hub::DeliveryHub::new());
     let uploads_clone = uploads_dir.clone();
     let bind_addr     = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     let https_port    = env::var("HTTPS_PORT").unwrap_or_else(|_| "8443".to_string());
@@ -87,6 +89,7 @@ async fn main() -> std::io::Result<()> {
             .wrap(Compress::default())
             .app_data(pool.clone())
             .app_data(jwt_secret.clone())
+            .app_data(delivery_hub.clone())
             .route("/health", web::get().to(|| async { actix_web::HttpResponse::Ok().finish() }))
             .configure(auth::routes::configure)
             .configure(orgs::routes::configure)
@@ -106,7 +109,8 @@ async fn main() -> std::io::Result<()> {
             .configure(bundles::routes::configure)
             .configure(menu_advisor::routes::configure)
             .configure(payment_methods::routes::configure)
-            .configure(costing::routes::configure);
+            .configure(costing::routes::configure)
+            .configure(delivery::routes::configure);
 
         if enable_swagger_ui {
             app = app.service(

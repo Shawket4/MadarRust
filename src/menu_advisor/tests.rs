@@ -1099,9 +1099,9 @@ impl OrderSeeder {
         self.counter += 1;
         sqlx::query_scalar(
             "INSERT INTO orders (branch_id, shift_id, teller_id, order_number, status, \
-                                 payment_method, subtotal, total_amount, created_at) \
+                                 payment_method, subtotal, total_amount, created_at, order_ref) \
              VALUES ($1, $2, $3, $4, 'completed', 'cash', 1000, 1000, \
-                     now() - make_interval(days => $5)) \
+                     now() - make_interval(days => $5), gen_random_uuid()::text) \
              RETURNING id",
         )
         .bind(self.branch)

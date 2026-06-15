@@ -10,7 +10,7 @@ use crate::auth::jwt::JwtSecret;
 use crate::models::UserRole;
 use crate::orders::routes;
 use crate::orders::handlers::{
-    OrderFull, PaginatedOrders, OrderItemInput, PaymentSplitInput, CreateOrderRequest,
+    Order, OrderFull, PaginatedOrders, OrderItemInput, PaymentSplitInput, CreateOrderRequest,
     VoidOrderRequest, PreviewRecipeRequest, PreviewAddonInput, ExportResponse
 };
 
@@ -237,11 +237,11 @@ async fn test_create_order_success(pool: PgPool) {
                 quantity: 1,
                 addons: vec![],
                 optional_field_ids: vec![],
-                bundle_components: vec![],
+                bundle_components: vec![], unit_price: None,
                 notes: None,
             }
         ],
-        created_at: None,
+        created_at: None, ..Default::default()
     };
 
     let req = test::TestRequest::post()
@@ -265,6 +265,116 @@ async fn test_create_order_success(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(new_stock, 980.0); // 1000 - 20
+}
+
+/// V31: order_ref is minted as <BRANCHCODE>-<YYMMDD>-<NNNN>, increments per
+/// (branch, business-day), and round-trips through every decode path
+/// (create RETURNING, the shared ORDER_SELECT read, and the void RETURNING).
+#[sqlx::test]
+async fn test_order_ref_generated_and_decoded(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await; // name "Test Branch" -> code "TESTBR"
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    grant_permission(&pool, "org_admin", "orders", "update").await;
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    let make_body = || CreateOrderRequest {
+        branch_id,
+        shift_id,
+        payment_method: "cash".to_string(),
+        customer_name: None,
+        notes: None,
+        discount_type: None,
+        discount_value: None,
+        discount_id: None,
+        amount_tendered: None,
+        tip_amount: None,
+        tip_payment_method: None,
+        payment_splits: None,
+        items: vec![OrderItemInput {
+            menu_item_id: Some(menu_item_id),
+            bundle_id: None,
+            size_label: None,
+            quantity: 1,
+            addons: vec![],
+            optional_field_ids: vec![],
+            bundle_components: vec![], unit_price: None,
+            notes: None,
+        }],
+        created_at: None, ..Default::default()
+    };
+
+    let create = |body: CreateOrderRequest| {
+        let app = &app;
+        let token = token.clone();
+        async move {
+            let req = test::TestRequest::post()
+                .uri("/orders")
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .set_json(&body)
+                .to_request();
+            let resp = test::call_service(app, req).await;
+            assert!(resp.status().is_success(), "create failed: {:?}", resp.status());
+            test::read_body_json::<OrderFull, _>(resp).await
+        }
+    };
+
+    // First order in the branch/day -> ...-0001 (create RETURNING decode path).
+    let o1 = create(make_body()).await;
+    let ref1 = o1.order.order_ref.clone().expect("order_ref present on create");
+    let parts: Vec<&str> = ref1.split('-').collect();
+    assert_eq!(parts.len(), 3, "order_ref should be CODE-YYMMDD-NNNN, got {ref1}");
+    assert_eq!(parts[0], "TESTBR", "branch code prefix");
+    assert_eq!(parts[1].len(), 6, "YYMMDD segment");
+    assert!(parts[1].chars().all(|c| c.is_ascii_digit()), "date digits in {ref1}");
+    assert_eq!(parts[2], "0001", "first order of the (branch, day)");
+
+    // Second order increments the per-(branch, day) counter -> ...-0002.
+    let o2 = create(make_body()).await;
+    let ref2 = o2.order.order_ref.clone().expect("order_ref present");
+    assert!(ref2.ends_with("-0002"), "second order should be -0002, got {ref2}");
+    assert_ne!(ref1, ref2, "refs must be unique");
+
+    // Read-back via GET /orders/{id} (shared ORDER_SELECT decode path).
+    let req = test::TestRequest::get()
+        .uri(&format!("/orders/{}", o1.order.id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success(), "get failed: {:?}", resp.status());
+    let fetched: OrderFull = test::read_body_json(resp).await;
+    assert_eq!(fetched.order.order_ref.as_deref(), Some(ref1.as_str()), "ref stable on read");
+
+    // Void (void RETURNING decode path) — ref preserved on the voided row.
+    let void_req = VoidOrderRequest {
+        reason: "customer_request".to_string(),
+        note: None,
+        voided_at: None,
+        restore_inventory: Some(false),
+    };
+    let req = test::TestRequest::post()
+        .uri(&format!("/orders/{}/void", o1.order.id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&void_req)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success(), "void failed: {:?}", resp.status());
+    let voided: Order = test::read_body_json(resp).await; // void returns a bare Order
+    assert_eq!(voided.order_ref.as_deref(), Some(ref1.as_str()), "ref preserved on void");
+    assert_eq!(voided.status, "voided");
 }
 
 #[sqlx::test]
@@ -314,14 +424,15 @@ async fn test_create_order_with_addons_and_discount(pool: PgPool) {
                     crate::orders::component_resolve::AddonInput {
                         addon_item_id: addon_id,
                         quantity: 1, // 1 per item = 2 addons total = 200
+                        unit_price: None,
                     }
                 ],
                 optional_field_ids: vec![],
-                bundle_components: vec![],
+                bundle_components: vec![], unit_price: None,
                 notes: None,
             }
         ],
-        created_at: None,
+        created_at: None, ..Default::default()
     };
 
     let req = test::TestRequest::post()
@@ -395,12 +506,12 @@ async fn test_milk_swap_converts_units_across_base_units(pool: PgPool) {
             bundle_id: None,
             size_label: None,
             quantity: 1,
-            addons: vec![crate::orders::component_resolve::AddonInput { addon_item_id: almond_addon, quantity: 1 }],
+            addons: vec![crate::orders::component_resolve::AddonInput { addon_item_id: almond_addon, quantity: 1, unit_price: None }],
             optional_field_ids: vec![],
-            bundle_components: vec![],
+            bundle_components: vec![], unit_price: None,
             notes: None,
         }],
-        created_at: None,
+        created_at: None, ..Default::default()
     };
     let resp = test::call_service(&app, test::TestRequest::post()
         .uri("/orders").insert_header(("Authorization", format!("Bearer {token}")))
@@ -459,11 +570,11 @@ async fn test_list_orders(pool: PgPool) {
                     quantity: 1,
                     addons: vec![],
                     optional_field_ids: vec![],
-                    bundle_components: vec![],
+                    bundle_components: vec![], unit_price: None,
                     notes: None,
                 }
             ],
-            created_at: None,
+            created_at: None, ..Default::default()
         };
 
         let req = test::TestRequest::post()
@@ -533,9 +644,9 @@ async fn test_list_orders_all_branches(pool: PgPool) {
             items: vec![OrderItemInput {
                 menu_item_id: Some(item), bundle_id: None, size_label: None,
                 quantity: 1, addons: vec![], optional_field_ids: vec![],
-                bundle_components: vec![], notes: None,
+                bundle_components: vec![], unit_price: None, notes: None,
             }],
-            created_at: None,
+            created_at: None, ..Default::default()
         };
         let resp = test::call_service(&app, test::TestRequest::post()
             .uri("/orders")
@@ -616,11 +727,11 @@ async fn test_void_order(pool: PgPool) {
                 quantity: 1,
                 addons: vec![],
                 optional_field_ids: vec![],
-                bundle_components: vec![],
+                bundle_components: vec![], unit_price: None,
                 notes: None,
             }
         ],
-        created_at: None,
+        created_at: None, ..Default::default()
     };
 
     let req = test::TestRequest::post()
@@ -747,12 +858,13 @@ async fn test_order_cost_snapshot_with_recipe_and_addon(pool: PgPool) {
             addons: vec![crate::orders::component_resolve::AddonInput {
                 addon_item_id: addon_id,
                 quantity: 1,
+                unit_price: None,
             }],
             optional_field_ids: vec![],
-            bundle_components: vec![],
+            bundle_components: vec![], unit_price: None,
             notes: None,
         }],
-        created_at: None,
+        created_at: None, ..Default::default()
     };
 
     let req = test::TestRequest::post()
@@ -823,10 +935,10 @@ async fn test_order_cost_missing_without_recipe(pool: PgPool) {
             quantity: 1,
             addons: vec![],
             optional_field_ids: vec![],
-            bundle_components: vec![],
+            bundle_components: vec![], unit_price: None,
             notes: None,
         }],
-        created_at: None,
+        created_at: None, ..Default::default()
     };
 
     let req = test::TestRequest::post()
@@ -870,9 +982,9 @@ fn simple_order(branch_id: Uuid, shift_id: Uuid, menu_item_id: Uuid) -> CreateOr
         items: vec![OrderItemInput {
             menu_item_id: Some(menu_item_id), bundle_id: None, size_label: None,
             quantity: 1, addons: vec![], optional_field_ids: vec![],
-            bundle_components: vec![], notes: None,
+            bundle_components: vec![], unit_price: None, notes: None,
         }],
-        created_at: None,
+        created_at: None, ..Default::default()
     }
 }
 
@@ -1139,8 +1251,9 @@ async fn test_bundle_component_swap_converts_units(pool: PgPool) {
 
     let config = crate::orders::component_resolve::resolve_menu_item_configuration(
         &pool, menu_item_id, None, 1,
-        &[crate::orders::component_resolve::AddonInput { addon_item_id: almond_addon, quantity: 1 }],
+        &[crate::orders::component_resolve::AddonInput { addon_item_id: almond_addon, quantity: 1, unit_price: None }],
         &[],
+        Uuid::new_v4(), // branch with no overrides — pricing unaffected
     ).await.unwrap();
 
     let swap = config.deductions.iter().find(|d| d.org_ingredient_id == Some(almond))
@@ -1210,4 +1323,350 @@ async fn test_percentage_discount_is_rounded_not_truncated(pool: PgPool) {
     let o: OrderFull = test::read_body_json(resp).await;
     assert_eq!(o.order.subtotal, 2995);
     assert_eq!(o.order.discount_amount, 300, "10% of 2995 = 299.5 must round to 300");
+}
+
+/// Pricing integrity: the POS's charged prices are recorded VERBATIM and deviations
+/// from the catalog are flagged (never rejected). A branch override feeds both the
+/// "expected" price used for flagging and the legacy (no-client-price) fallback.
+#[sqlx::test]
+async fn test_create_order_records_charged_prices_and_flags(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item = seed_menu_item(&pool, org_id, cat_id).await; // base_price 500
+
+    let post = |body: CreateOrderRequest, t: String| {
+        let app = &app;
+        async move {
+            let resp = test::call_service(app, test::TestRequest::post()
+                .uri("/orders")
+                .insert_header(("Authorization", format!("Bearer {}", t)))
+                .set_json(&body)
+                .to_request()).await;
+            assert!(resp.status().is_success(), "order create failed: {:?}", resp.status());
+            test::read_body_json::<OrderFull, _>(resp).await
+        }
+    };
+
+    // (1) POS charges 600 for a 500-catalog item → recorded verbatim and flagged.
+    let of = post(CreateOrderRequest {
+        branch_id, shift_id,
+        payment_method: "cash".to_string(),
+        items: vec![OrderItemInput {
+            menu_item_id: Some(item),
+            quantity: 1,
+            unit_price: Some(600),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }, token.clone()).await;
+    assert_eq!(of.order.subtotal, 600, "recorded subtotal = what was charged");
+    assert_eq!(of.items[0].item.unit_price, 600, "recorded line price = what was charged");
+
+    let (flagged, expected_total): (bool, Option<i32>) = sqlx::query_as(
+        "SELECT price_flagged, price_expected_total FROM orders WHERE id = $1",
+    )
+    .bind(of.order.id).fetch_one(&pool).await.unwrap();
+    assert!(flagged, "a charged price above the catalog must flag the order");
+    assert_eq!(expected_total, Some(570), "expected = 500 + 14% tax");
+    let line_flagged: bool = sqlx::query_scalar(
+        "SELECT price_flagged FROM order_items WHERE order_id = $1",
+    )
+    .bind(of.order.id).fetch_one(&pool).await.unwrap();
+    assert!(line_flagged, "the deviating line must be flagged");
+
+    // (2) Branch override sets the price to 700. POS sends NO price → the branch-effective
+    // expected (700) is recorded (NOT the 500 catalog) and the order is not flagged.
+    sqlx::query(
+        "INSERT INTO branch_menu_overrides (branch_id, menu_item_id, price_override, is_available)
+         VALUES ($1, $2, 700, true)",
+    )
+    .bind(branch_id).bind(item).execute(&pool).await.unwrap();
+
+    let of2 = post(CreateOrderRequest {
+        branch_id, shift_id,
+        payment_method: "cash".to_string(),
+        items: vec![OrderItemInput { menu_item_id: Some(item), quantity: 1, ..Default::default() }],
+        ..Default::default()
+    }, token.clone()).await;
+    assert_eq!(of2.items[0].item.unit_price, 700, "branch override feeds the fallback price");
+    assert_eq!(of2.order.subtotal, 700);
+    let flagged2: bool = sqlx::query_scalar("SELECT price_flagged FROM orders WHERE id = $1")
+        .bind(of2.order.id).fetch_one(&pool).await.unwrap();
+    assert!(!flagged2, "charged == branch-effective expected → not flagged");
+}
+
+// ── Pricing integrity — intensive coverage ────────────────────
+
+macro_rules! create_order_ok {
+    ($app:expr, $tok:expr, $body:expr) => {{
+        let resp = test::call_service(&$app, test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", $tok)))
+            .set_json(&$body)
+            .to_request()).await;
+        assert!(resp.status().is_success(), "order create failed: {:?}", resp.status());
+        test::read_body_json::<OrderFull, _>(resp).await
+    }};
+}
+
+async fn pricing_ctx(pool: &PgPool) -> (Uuid, Uuid, String, Uuid, Uuid) {
+    let org = seed_org(pool).await;
+    let branch = seed_branch(pool, org).await;
+    let user = seed_user(pool, org, "org_admin").await;
+    grant_permission(pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user, org);
+    let shift = seed_shift(pool, branch, user).await;
+    let cat = seed_category(pool, org).await;
+    (org, branch, token, shift, cat)
+}
+
+async fn pricing_app(pool: PgPool) -> impl actix_web::dev::Service<actix_http::Request, Response = actix_web::dev::ServiceResponse, Error = actix_web::Error> {
+    test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await
+}
+
+async fn order_flagged(pool: &PgPool, id: Uuid) -> bool {
+    sqlx::query_scalar("SELECT price_flagged FROM orders WHERE id = $1").bind(id).fetch_one(pool).await.unwrap()
+}
+async fn order_expected_total(pool: &PgPool, id: Uuid) -> Option<i32> {
+    sqlx::query_scalar("SELECT price_expected_total FROM orders WHERE id = $1").bind(id).fetch_one(pool).await.unwrap()
+}
+async fn line_flagged(pool: &PgPool, order_id: Uuid) -> bool {
+    sqlx::query_scalar("SELECT price_flagged FROM order_items WHERE order_id = $1 LIMIT 1").bind(order_id).fetch_one(pool).await.unwrap()
+}
+async fn set_branch_override(pool: &PgPool, branch: Uuid, item: Uuid, price: Option<i32>, available: bool) {
+    sqlx::query(
+        "INSERT INTO branch_menu_overrides (branch_id, menu_item_id, price_override, is_available)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (branch_id, menu_item_id)
+         DO UPDATE SET price_override = EXCLUDED.price_override, is_available = EXCLUDED.is_available",
+    )
+    .bind(branch).bind(item).bind(price).bind(available).execute(pool).await.unwrap();
+}
+async fn add_size(pool: &PgPool, item: Uuid, label: &str, price: i32) {
+    sqlx::query(
+        "INSERT INTO item_sizes (id, menu_item_id, label, price_override, is_active)
+         VALUES (gen_random_uuid(), $1, $2::item_size, $3, true)",
+    )
+    .bind(item).bind(label).bind(price).execute(pool).await.unwrap();
+}
+async fn seed_item_priced(pool: &PgPool, org: Uuid, cat: Uuid, name: &str, price: i32) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price, is_active) VALUES ($1, $2, $3, $4, $5, true)")
+        .bind(id).bind(org).bind(cat).bind(name).bind(price).execute(pool).await.unwrap();
+    id
+}
+
+/// A charged price BELOW the catalog is recorded verbatim and flagged.
+#[sqlx::test]
+async fn test_create_order_charged_below_catalog_flags(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // 500
+
+    let mut body = simple_order(branch, shift, item);
+    body.items[0].unit_price = Some(400);
+    let of = create_order_ok!(app, token, body);
+
+    assert_eq!(of.order.subtotal, 400, "recorded = charged (below catalog)");
+    assert_eq!(of.items[0].item.unit_price, 400);
+    assert!(order_flagged(&pool, of.order.id).await, "any deviation flags the order");
+    assert!(line_flagged(&pool, of.order.id).await);
+    assert_eq!(order_expected_total(&pool, of.order.id).await, Some(570));
+}
+
+/// A plain order (no client prices, no override) behaves exactly as before and is not flagged.
+#[sqlx::test]
+async fn test_create_order_legacy_no_price_not_flagged(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // 500
+
+    let of = create_order_ok!(app, token, simple_order(branch, shift, item));
+    assert_eq!(of.order.subtotal, 500);
+    assert_eq!(of.order.tax_amount, 70);
+    assert_eq!(of.order.total_amount, 570);
+    assert!(!order_flagged(&pool, of.order.id).await, "no deviation → not flagged");
+    assert!(!line_flagged(&pool, of.order.id).await);
+    assert_eq!(order_expected_total(&pool, of.order.id).await, Some(570));
+}
+
+/// The full money breakdown is recorded verbatim even when it diverges from a server recompute.
+#[sqlx::test]
+async fn test_create_order_full_breakdown_recorded_verbatim(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // 500
+
+    let mut body = simple_order(branch, shift, item);
+    body.items[0].unit_price = Some(500); // matches catalog → line itself not flagged
+    body.amount_tendered = Some(1000);
+    body.subtotal = Some(500);
+    body.discount_amount = Some(50);
+    body.tax_amount = Some(63);
+    body.total_amount = Some(513);
+    body.change_given = Some(480); // deliberately NOT 1000-513=487, to prove verbatim
+    let of = create_order_ok!(app, token, body);
+
+    assert_eq!(of.order.subtotal, 500);
+    assert_eq!(of.order.discount_amount, 50);
+    assert_eq!(of.order.tax_amount, 63);
+    assert_eq!(of.order.total_amount, 513);
+    assert_eq!(of.order.change_given, Some(480), "client change recorded verbatim, not recomputed");
+    assert!(order_flagged(&pool, of.order.id).await, "recorded total != expected 570 → flagged");
+    assert_eq!(order_expected_total(&pool, of.order.id).await, Some(570));
+}
+
+/// A charged ADDON price is recorded verbatim and flags the order.
+#[sqlx::test]
+async fn test_create_order_addon_charged_price_recorded_and_flags(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // 500
+    let addon = seed_addon_item(&pool, org, "Extra Shot", "extra", 100).await;
+
+    let mut body = simple_order(branch, shift, item);
+    body.items[0].addons = vec![crate::orders::component_resolve::AddonInput {
+        addon_item_id: addon, quantity: 1, unit_price: Some(150),
+    }];
+    let of = create_order_ok!(app, token, body);
+
+    assert_eq!(of.items[0].addons[0].unit_price, 150, "charged addon price recorded");
+    assert_eq!(of.order.subtotal, 650, "500 item + 150 charged addon");
+    assert!(order_flagged(&pool, of.order.id).await, "addon deviation flags the order");
+    assert_eq!(order_expected_total(&pool, of.order.id).await, Some(684), "expected 600 + 14% tax");
+}
+
+/// A branch override replaces the base price only — explicit size prices are untouched.
+#[sqlx::test]
+async fn test_create_order_branch_override_replaces_base_not_size(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // base 500
+    add_size(&pool, item, "large", 800).await;
+    set_branch_override(&pool, branch, item, Some(600), true).await;
+
+    // Sized variant: the absolute size price (800) stands.
+    let mut sized = simple_order(branch, shift, item);
+    sized.items[0].size_label = Some("large".to_string());
+    let of = create_order_ok!(app, token, sized);
+    assert_eq!(of.items[0].item.unit_price, 800, "size price unchanged by a base override");
+    assert!(!order_flagged(&pool, of.order.id).await);
+
+    // Sizeless: the branch base override (600) applies, NOT the catalog 500.
+    let of2 = create_order_ok!(app, token, simple_order(branch, shift, item));
+    assert_eq!(of2.items[0].item.unit_price, 600, "branch base override applies to the sizeless line");
+    assert!(!order_flagged(&pool, of2.order.id).await);
+}
+
+/// A branch-disabled item that an (offline/stale) POS still sells is flagged, never rejected.
+#[sqlx::test]
+async fn test_create_order_branch_disabled_item_flagged_not_rejected(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // 500
+    set_branch_override(&pool, branch, item, None, false).await; // disabled at this branch
+
+    let of = create_order_ok!(app, token, simple_order(branch, shift, item));
+    assert_eq!(of.order.subtotal, 500, "still priced from the (inherited) catalog");
+    assert!(order_flagged(&pool, of.order.id).await, "selling a branch-disabled item flags the order");
+    assert!(line_flagged(&pool, of.order.id).await);
+}
+
+/// In a multi-line order, one deviating line flags the order but not the compliant line.
+#[sqlx::test]
+async fn test_create_order_multiline_only_deviating_line_flagged(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item1 = seed_item_priced(&pool, org, cat, "Espresso", 500).await;
+    let item2 = seed_item_priced(&pool, org, cat, "Mocha", 700).await;
+
+    let mut body = simple_order(branch, shift, item1);
+    body.items[0].unit_price = Some(600); // deviation on line 1
+    body.items.push(OrderItemInput { menu_item_id: Some(item2), quantity: 1, ..Default::default() }); // line 2 compliant
+    let of = create_order_ok!(app, token, body);
+
+    assert_eq!(of.order.subtotal, 1300, "600 + 700");
+    assert!(order_flagged(&pool, of.order.id).await, "one deviating line flags the whole order");
+
+    let rows: Vec<(i32, bool)> = sqlx::query_as(
+        "SELECT unit_price, price_flagged FROM order_items WHERE order_id = $1 ORDER BY unit_price",
+    )
+    .bind(of.order.id).fetch_all(&pool).await.unwrap();
+    assert_eq!(rows, vec![(600, true), (700, false)], "only the deviating line is flagged");
+}
+
+/// A per-(branch, item, size) override is the price for that size — winning over the catalog
+/// size price and the branch base override.
+#[sqlx::test]
+async fn test_create_order_branch_size_override_applied(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // base 500
+    add_size(&pool, item, "large", 800).await;
+    set_branch_override(&pool, branch, item, Some(600), true).await; // branch base 600
+    sqlx::query(
+        "INSERT INTO branch_menu_size_overrides (branch_id, menu_item_id, size_label, price_override)
+         VALUES ($1, $2, 'large'::item_size, 950)",
+    )
+    .bind(branch).bind(item).execute(&pool).await.unwrap();
+
+    // No client price → the branch size override (950) is used, not the catalog 800 or base 600.
+    let mut sized = simple_order(branch, shift, item);
+    sized.items[0].size_label = Some("large".to_string());
+    let of = create_order_ok!(app, token, sized);
+    assert_eq!(of.items[0].item.unit_price, 950, "branch size override is the size price");
+    assert!(!order_flagged(&pool, of.order.id).await, "charged matches expected → not flagged");
+
+    // Charging something else for that size is recorded verbatim and flagged.
+    let mut sized = simple_order(branch, shift, item);
+    sized.items[0].size_label = Some("large".to_string());
+    sized.items[0].unit_price = Some(1000);
+    let of2 = create_order_ok!(app, token, sized);
+    assert_eq!(of2.items[0].item.unit_price, 1000);
+    assert!(order_flagged(&pool, of2.order.id).await, "1000 != expected 950 → flagged");
+}
+
+/// A branch addon override feeds the expected addon price, so an order charging that
+/// branch price is recorded at it and not flagged.
+#[sqlx::test]
+async fn test_create_order_branch_addon_override_applied(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // 500
+    let addon = seed_addon_item(&pool, org, "Extra Shot", "extra", 100).await;
+    // Branch reprices the addon to 150.
+    sqlx::query(
+        "INSERT INTO branch_addon_overrides (branch_id, addon_item_id, price_override, is_available)
+         VALUES ($1, $2, 150, true)",
+    )
+    .bind(branch).bind(addon).execute(&pool).await.unwrap();
+
+    let mut body = simple_order(branch, shift, item);
+    body.items[0].addons = vec![crate::orders::component_resolve::AddonInput {
+        addon_item_id: addon, quantity: 1, unit_price: None,
+    }];
+    let of = create_order_ok!(app, token, body);
+
+    assert_eq!(of.items[0].addons[0].unit_price, 150, "branch addon override feeds the addon price");
+    assert_eq!(of.order.subtotal, 650, "500 item + 150 branch addon");
+    assert!(!order_flagged(&pool, of.order.id).await, "charged == branch-effective expected → not flagged");
 }

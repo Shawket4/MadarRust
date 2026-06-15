@@ -105,6 +105,14 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         ("org_admin", "permissions",           "read",   true),
         ("org_admin", "permissions",           "update", true),
         ("org_admin", "permissions",           "delete", true),
+        ("org_admin", "delivery_settings",     "create", true),
+        ("org_admin", "delivery_settings",     "read",   true),
+        ("org_admin", "delivery_settings",     "update", true),
+        ("org_admin", "delivery_settings",     "delete", true),
+        ("org_admin", "delivery_orders",       "create", true),
+        ("org_admin", "delivery_orders",       "read",   true),
+        ("org_admin", "delivery_orders",       "update", true),
+        ("org_admin", "delivery_orders",       "delete", true),
 
         // ── branch_manager: operational access, no org-level management ─
         ("branch_manager", "branches",              "read",   true),
@@ -151,6 +159,12 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         ("branch_manager", "discounts",             "read",   true),
         ("branch_manager", "discounts",             "update", true),
         ("branch_manager", "reports",               "read",   true),
+        ("branch_manager", "delivery_settings",     "create", true),
+        ("branch_manager", "delivery_settings",     "read",   true),
+        ("branch_manager", "delivery_settings",     "update", true),
+        ("branch_manager", "delivery_settings",     "delete", true),
+        ("branch_manager", "delivery_orders",       "read",   true),
+        ("branch_manager", "delivery_orders",       "update", true),
 
         // ── teller: POS-level access only ─────────────────────────
         ("teller", "branches",           "read",   true),
@@ -171,6 +185,11 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         ("teller", "shifts",             "read",   true),
         ("teller", "shifts",             "update", true), // covers cash movements
         ("teller", "discounts",          "read",   true),
+        // Delivery queue: tellers work it (confirm/status/finalize/cancel) and
+        // flip the POS open/close override. They cannot manage delivery_settings
+        // (fees/hours/enable) — that stays with managers.
+        ("teller", "delivery_orders",    "read",   true),
+        ("teller", "delivery_orders",    "update", true),
     ];
 
     for &(role, resource, action, granted) in defaults {
