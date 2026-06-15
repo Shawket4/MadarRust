@@ -296,6 +296,8 @@ paths(
         // GET /orders?include_items=true response shape (the annotation's
         // `body` documents the default PaginatedOrders variant).
         crate::orders::handlers::PaginatedOrdersFull,
+        // Delivery context nested on the single-order detail (GET /orders/{id}).
+        crate::orders::handlers::OrderDeliveryInfo,
         crate::shifts::handlers::PaginatedShifts,
         crate::menu::handlers::PaginatedMenuItems,
         crate::menu::handlers::MenuItemWithCosts,

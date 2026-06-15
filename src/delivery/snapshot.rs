@@ -505,7 +505,8 @@ pub async fn apply_snapshot(
             subtotal, discount_type::text, discount_value,
             discount_amount, tax_amount, total_amount,
             amount_tendered, change_given, tip_amount, tip_payment_method, discount_id,
-            customer_name, notes, voided_at, void_reason::text, void_note, voided_by, created_at
+            customer_name, notes, order_type, delivery_fee, delivery_order_id,
+            voided_at, void_reason::text, void_note, voided_by, created_at
         "#,
     )
     .bind(ctx.branch_id)

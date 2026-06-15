@@ -602,6 +602,133 @@ mod it {
     }
 
     #[sqlx::test]
+    async fn finalize_surfaces_delivery_on_orders_api(pool: PgPool) {
+        // After a delivery order is finalized into a real sale, the standard
+        // /orders API must expose the delivery charge, order_type, the link to
+        // the delivery order, and (on the detail view) the customer/address
+        // context — so the dashboard and POS can show the fee SEPARATELY
+        // instead of silently baking it into the total. This is the keystone
+        // of the cross-repo delivery integration.
+        perms(&pool).await;
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        assign(&pool, teller, branch).await;
+        let shift = seed_shift(&pool, branch, teller).await;
+        seed_settings(&pool, branch, true, false, 300).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
+
+        let id = place_in_mall_order(&pool, branch, item, 2).await;
+        let token = teller_token(teller, org, branch);
+
+        // Combined app: delivery routes (to finalize) + orders routes (to read).
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool.clone()))
+                .app_data(web::Data::new(get_secret()))
+                .app_data(web::Data::new(crate::delivery::hub::DeliveryHub::new()))
+                .configure(crate::delivery::routes::configure)
+                .configure(crate::orders::routes::configure),
+        )
+        .await;
+
+        // Finalize the delivery order → a real completed sale.
+        let (st, b) = send(
+            &app,
+            auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/finalize")), &token)
+                .set_json(json!({ "shift_id": shift, "payment_method": "cash" })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "finalize: {b}");
+        let order_id = b["order_id"].as_str().unwrap().to_string();
+
+        // ── Detail view (GET /orders/{id}) ──
+        let (st, o) = send(
+            &app,
+            auth(test::TestRequest::get().uri(&format!("/orders/{order_id}")), &token),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "get order: {o}");
+        assert_eq!(o["order_type"], "delivery");
+        assert_eq!(o["delivery_fee"], 300);
+        assert_eq!(o["subtotal"], 1000);
+        assert_eq!(o["total_amount"], 1300);
+        assert_eq!(o["delivery_order_id"].as_str().unwrap(), id.to_string());
+        // Subtotal + fee must reconcile to the total (the math the old API broke).
+        assert_eq!(
+            o["subtotal"].as_i64().unwrap() + o["delivery_fee"].as_i64().unwrap(),
+            o["total_amount"].as_i64().unwrap(),
+        );
+        // Nested delivery context for the dashboard order-detail "Delivery" card.
+        let d = &o["delivery"];
+        assert!(d.is_object(), "delivery block missing: {o}");
+        assert_eq!(d["channel"], "in_mall");
+        let norm = crate::delivery::normalize_phone(PHONE).unwrap();
+        assert_eq!(d["customer_phone"], norm);
+        assert_eq!(d["payment_method_hint"], "cash");
+        assert!(d["delivery_ref"].as_str().unwrap().starts_with("D-"));
+
+        // ── List view (GET /orders?shift_id=…) summary breaks out fees ──
+        let (st, list) = send(
+            &app,
+            auth(test::TestRequest::get().uri(&format!("/orders?shift_id={shift}")), &token),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "list: {list}");
+        assert_eq!(list["summary"]["delivery_fees"], 300);
+        let row = &list["data"][0];
+        assert_eq!(row["order_type"], "delivery");
+        assert_eq!(row["delivery_fee"], 300);
+        // The lightweight list row does NOT carry the address block (detail-only).
+        assert!(row.get("delivery").map_or(true, |v| v.is_null()));
+    }
+
+    #[sqlx::test]
+    async fn dine_in_order_defaults_have_no_delivery(pool: PgPool) {
+        // A plain POS sale must report order_type="dine_in", a zero delivery
+        // fee, no delivery link, and no nested delivery block — so the UIs can
+        // safely branch on order_type without showing a phantom delivery row.
+        perms(&pool).await;
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        assign(&pool, teller, branch).await;
+        let shift = seed_shift(&pool, branch, teller).await;
+        let token = teller_token(teller, org, branch);
+
+        // Insert a minimal dine-in order directly so order_type/delivery_fee
+        // take their DB column defaults (the path POST /orders exercises).
+        let oid = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO orders (id, branch_id, shift_id, teller_id, order_number, \
+             payment_method, subtotal, total_amount, status, order_ref) \
+             VALUES ($1,$2,$3,$4,1,'cash',500,500,'completed','DT-000000-0001')",
+        )
+        .bind(oid).bind(branch).bind(shift).bind(teller)
+        .execute(&pool).await.unwrap();
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool.clone()))
+                .app_data(web::Data::new(get_secret()))
+                .configure(crate::orders::routes::configure),
+        )
+        .await;
+
+        let (st, o) = send(
+            &app,
+            auth(test::TestRequest::get().uri(&format!("/orders/{oid}")), &token),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "get order: {o}");
+        assert_eq!(o["order_type"], "dine_in");
+        assert_eq!(o["delivery_fee"], 0);
+        assert!(o["delivery_order_id"].is_null());
+        assert!(o.get("delivery").map_or(true, |v| v.is_null()), "dine-in must have no delivery block");
+    }
+
+    #[sqlx::test]
     async fn finalize_replays_frozen_snapshot_not_live_price(pool: PgPool) {
         perms(&pool).await;
         let org = seed_org(&pool).await;
@@ -783,7 +910,7 @@ mod it {
         let (st, _) = send(
             &app,
             auth(test::TestRequest::post().uri("/delivery/accepting"), &token)
-                .set_json(json!({ "branch_id": branch, "channel": "in_mall", "override": "open" })),
+                .set_json(json!({ "branch_id": branch, "channel": "in_mall", "mode": "open" })),
         )
         .await;
         assert_eq!(st, StatusCode::CONFLICT);
@@ -793,7 +920,7 @@ mod it {
         let (st2, b) = send(
             &app,
             auth(test::TestRequest::post().uri("/delivery/accepting"), &token)
-                .set_json(json!({ "branch_id": branch, "channel": "in_mall", "override": "open" })),
+                .set_json(json!({ "branch_id": branch, "channel": "in_mall", "mode": "open" })),
         )
         .await;
         assert_eq!(st2, StatusCode::OK, "{b}");

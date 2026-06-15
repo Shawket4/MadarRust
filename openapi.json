@@ -21719,7 +21719,7 @@
         "required": [
           "branch_id",
           "channel",
-          "override"
+          "mode"
         ],
         "properties": {
           "branch_id": {
@@ -21730,9 +21730,9 @@
             "type": "string",
             "description": "\"in_mall\" | \"outside\""
           },
-          "override": {
+          "mode": {
             "type": "string",
-            "description": "\"auto\" | \"open\" | \"closed\""
+            "description": "\"auto\" | \"open\" | \"closed\". Named `mode` (not `override`) because a bare\n`override` field is a reserved word in Dart and breaks the POS client\ncode generator."
           }
         }
       },
@@ -27069,6 +27069,8 @@
           "discount_amount",
           "tax_amount",
           "total_amount",
+          "order_type",
+          "delivery_fee",
           "created_at"
         ],
         "properties": {
@@ -27099,6 +27101,19 @@
               "string",
               "null"
             ]
+          },
+          "delivery_fee": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Delivery charge in piastres, shown separately from the item subtotal.\nAlways 0 for dine-in orders; for delivery orders\n`total_amount == subtotal + tax_amount + delivery_fee` (minus discount)."
+          },
+          "delivery_order_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Links a finalized delivery order back to its `delivery_orders` row\n(customer, address, channel, zone). `null` for dine-in orders."
           },
           "discount_amount": {
             "type": "integer",
@@ -27141,6 +27156,10 @@
               "null"
             ],
             "description": "Human-readable, org-unique reference (e.g. \"DT-260614-0042\"). Additive\nalongside the per-shift order_number. Optional only during the rollout\nwindow before the historical backfill runs; never null afterwards."
+          },
+          "order_type": {
+            "type": "string",
+            "description": "Order origin: \"dine_in\" (POS sale) or \"delivery\" (finalized delivery\norder). Defaults to \"dine_in\" for every POS sale."
           },
           "payment_method": {
             "type": "string"
@@ -27349,6 +27368,88 @@
           }
         }
       },
+      "OrderDeliveryInfo": {
+        "type": "object",
+        "description": "Customer-facing delivery context attached to a finalized delivery order's\ndetail view. Sourced from the linked `delivery_orders` row (joined to its\ndelivery zone for the zone name). The delivery *fee* lives on [Order];\nthis carries the non-financial fulfilment details a teller/manager needs.",
+        "required": [
+          "channel",
+          "customer_phone"
+        ],
+        "properties": {
+          "address_line": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "channel": {
+            "type": "string",
+            "description": "\"in_mall\" or \"outside\"."
+          },
+          "customer_phone": {
+            "type": "string"
+          },
+          "delivery_notes": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "delivery_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-readable delivery reference (e.g. \"D-DT-260614-0042\")."
+          },
+          "floor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "landmark": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "payment_method_hint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Payment method the customer indicated at intake (\"cash\"/\"card\"); the\nteller confirms the actual method at finalize."
+          },
+          "place_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "road_distance_meters": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Road distance (meters) used to price the delivery, when known."
+          },
+          "unit_number": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "zone_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Name of the matched delivery zone ring, when an outside order matched one."
+          }
+        }
+      },
       "OrderExport": {
         "allOf": [
           {
@@ -27388,6 +27489,17 @@
               "items"
             ],
             "properties": {
+              "delivery": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OrderDeliveryInfo",
+                    "description": "Delivery context (customer phone, address, channel, zone), populated\nonly on the single-order detail endpoint and only when the order\noriginated from a delivery order. `null`/absent for dine-in orders."
+                  }
+                ]
+              },
               "items": {
                 "type": "array",
                 "items": {
@@ -27771,6 +27883,11 @@
           "completed": {
             "type": "integer",
             "format": "int64"
+          },
+          "delivery_fees": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total delivery charges (piastres) across completed orders in scope.\nLets the dashboard surface delivery revenue separately from item sales."
           },
           "discounts": {
             "type": "integer",

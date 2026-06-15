@@ -30,7 +30,8 @@ const ORDER_SELECT: &str =
      o.subtotal, o.discount_type::text, o.discount_value,
      o.discount_amount, o.tax_amount, o.total_amount,
      o.amount_tendered, o.change_given, o.tip_amount, o.tip_payment_method, o.discount_id,
-     o.customer_name, o.notes, o.voided_at, o.void_reason::text, o.void_note, o.voided_by, o.created_at
+     o.customer_name, o.notes, o.order_type, o.delivery_fee, o.delivery_order_id,
+     o.voided_at, o.void_reason::text, o.void_note, o.voided_by, o.created_at
      FROM orders o JOIN users u ON u.id = o.teller_id ";
 
 // ── Models ────────────────────────────────────────────────────
@@ -62,6 +63,16 @@ pub struct Order {
     pub discount_id:        Option<Uuid>,
     pub customer_name:      Option<String>,
     pub notes:              Option<String>,
+    /// Order origin: "dine_in" (POS sale) or "delivery" (finalized delivery
+    /// order). Defaults to "dine_in" for every POS sale.
+    pub order_type:         String,
+    /// Delivery charge in piastres, shown separately from the item subtotal.
+    /// Always 0 for dine-in orders; for delivery orders
+    /// `total_amount == subtotal + tax_amount + delivery_fee` (minus discount).
+    pub delivery_fee:       i32,
+    /// Links a finalized delivery order back to its `delivery_orders` row
+    /// (customer, address, channel, zone). `null` for dine-in orders.
+    pub delivery_order_id:  Option<Uuid>,
     pub voided_at:          Option<chrono::DateTime<chrono::Utc>>,
     pub void_reason:        Option<String>,
     pub void_note:          Option<String>,
@@ -137,6 +148,37 @@ pub struct OrderFull {
     /// for reads/refunds.
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// Delivery context (customer phone, address, channel, zone), populated
+    /// only on the single-order detail endpoint and only when the order
+    /// originated from a delivery order. `null`/absent for dine-in orders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<OrderDeliveryInfo>,
+}
+
+/// Customer-facing delivery context attached to a finalized delivery order's
+/// detail view. Sourced from the linked `delivery_orders` row (joined to its
+/// delivery zone for the zone name). The delivery *fee* lives on [Order];
+/// this carries the non-financial fulfilment details a teller/manager needs.
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct OrderDeliveryInfo {
+    /// "in_mall" or "outside".
+    pub channel:              String,
+    pub customer_phone:       String,
+    pub place_name:           Option<String>,
+    pub floor:                Option<String>,
+    pub unit_number:          Option<String>,
+    pub landmark:             Option<String>,
+    pub address_line:         Option<String>,
+    pub delivery_notes:       Option<String>,
+    /// Road distance (meters) used to price the delivery, when known.
+    pub road_distance_meters: Option<i32>,
+    /// Name of the matched delivery zone ring, when an outside order matched one.
+    pub zone_name:            Option<String>,
+    /// Human-readable delivery reference (e.g. "D-DT-260614-0042").
+    pub delivery_ref:         Option<String>,
+    /// Payment method the customer indicated at intake ("cash"/"card"); the
+    /// teller confirms the actual method at finalize.
+    pub payment_method_hint:  Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -277,6 +319,10 @@ pub struct OrderSummary {
     pub voided:    i64,
     pub discounts: i64,
     pub tips:      i64,
+    /// Total delivery charges (piastres) across completed orders in scope.
+    /// Lets the dashboard surface delivery revenue separately from item sales.
+    #[serde(default)]
+    pub delivery_fees: i64,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -450,7 +496,7 @@ pub async fn create_order(
     if let Some(key) = idempotency_key
         && let Some(existing) = fetch_order_by_idempotency_key(pool.get_ref(), key).await? {
             let items = fetch_order_items_full(pool.get_ref(), existing.id).await?;
-            return Ok(HttpResponse::Ok().json(OrderFull { order: existing, items, warnings: Vec::new() }));
+            return Ok(HttpResponse::Ok().json(OrderFull { order: existing, items, warnings: Vec::new(), delivery: None }));
         }
 
     if body.items.is_empty() {
@@ -1354,7 +1400,8 @@ pub async fn create_order(
             subtotal, discount_type::text, discount_value,
             discount_amount, tax_amount, total_amount,
             amount_tendered, change_given, tip_amount, tip_payment_method, discount_id,
-            customer_name, notes, voided_at, void_reason::text, void_note, voided_by, created_at
+            customer_name, notes, order_type, delivery_fee, delivery_order_id,
+            voided_at, void_reason::text, void_note, voided_by, created_at
         "#,
     )
     .bind(body.branch_id)
@@ -1396,7 +1443,7 @@ pub async fn create_order(
             if let Some(key) = idempotency_key
                 && let Some(existing) = fetch_order_by_idempotency_key(pool.get_ref(), key).await? {
                     let items = fetch_order_items_full(pool.get_ref(), existing.id).await?;
-                    return Ok(HttpResponse::Ok().json(OrderFull { order: existing, items, warnings: Vec::new() }));
+                    return Ok(HttpResponse::Ok().json(OrderFull { order: existing, items, warnings: Vec::new(), delivery: None }));
                 }
             return Err(AppError::Conflict("Duplicate order".into()));
         }
@@ -1726,7 +1773,7 @@ pub async fn create_order(
     }
 
     tx.commit().await?;
-    Ok(HttpResponse::Created().json(OrderFull { order, items: order_items_full, warnings }))
+    Ok(HttpResponse::Created().json(OrderFull { order, items: order_items_full, warnings, delivery: None }))
 }
 
 // ── GET /orders ───────────────────────────────────────────────
@@ -1866,18 +1913,19 @@ pub async fn list_orders(
             COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN 1              ELSE 0 END), 0),
             COALESCE(SUM(CASE WHEN o.status::text = 'voided'    THEN 1              ELSE 0 END), 0),
             COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN o.discount_amount        ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN COALESCE(o.tip_amount, 0) ELSE 0 END), 0)
+            COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN COALESCE(o.tip_amount, 0) ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN o.delivery_fee ELSE 0 END), 0)
          FROM orders o JOIN users u ON u.id = o.teller_id
          WHERE {} {}",
         scope_condition, count_filter
     );
 
-    let (revenue, completed, voided, discounts, tips): (i64, i64, i64, i64, i64) =
+    let (revenue, completed, voided, discounts, tips, delivery_fees): (i64, i64, i64, i64, i64, i64) =
         bind_filters!(sqlx::query_as(&summary_sql).bind(scope_id))
             .fetch_one(pool.get_ref())
             .await?;
 
-    let summary = OrderSummary { revenue, completed, voided, discounts, tips };
+    let summary = OrderSummary { revenue, completed, voided, discounts, tips, delivery_fees };
 
     let data: Vec<Order> = bind_filters!(
         sqlx::query_as::<_, Order>(&data_sql)
@@ -1897,7 +1945,7 @@ pub async fn list_orders(
             .into_iter()
             .map(|order| {
                 let items = items_map.remove(&order.id).unwrap_or_default();
-                OrderFull { order, items, warnings: Vec::new() }
+                OrderFull { order, items, warnings: Vec::new(), delivery: None }
             })
             .collect();
         return Ok(HttpResponse::Ok().json(PaginatedOrdersFull {
@@ -1928,7 +1976,11 @@ pub async fn get_order(
     let order = fetch_order_or_404(pool.get_ref(), *order_id).await?;
     require_branch_access(pool.get_ref(), &claims, order.branch_id).await?;
     let items = fetch_order_items_full(pool.get_ref(), order.id).await?;
-    Ok(HttpResponse::Ok().json(OrderFull { order, items, warnings: Vec::new() }))
+    let delivery = match order.delivery_order_id {
+        Some(did) => fetch_order_delivery_info(pool.get_ref(), did).await?,
+        None => None,
+    };
+    Ok(HttpResponse::Ok().json(OrderFull { order, items, warnings: Vec::new(), delivery }))
 }
 
 // ── POST /orders/:id/void ─────────────────────────────────────
@@ -1984,6 +2036,7 @@ pub async fn void_order(
                discount_amount, tax_amount, total_amount,
                amount_tendered, change_given, tip_amount, tip_payment_method,
                discount_id, customer_name, notes,
+               order_type, delivery_fee, delivery_order_id,
                voided_at, void_reason::text, void_note, voided_by, created_at"#,
     )
     .bind(*order_id)
@@ -2248,6 +2301,27 @@ async fn fetch_order_or_404(pool: &PgPool, order_id: Uuid) -> Result<Order, AppE
         .fetch_optional(pool)
         .await?
         .ok_or_else(|| AppError::NotFound("Order not found".into()))
+}
+
+/// Load the delivery context for a finalized delivery order's detail view.
+/// Returns `None` if the linked `delivery_orders` row no longer exists.
+async fn fetch_order_delivery_info(
+    pool:              &PgPool,
+    delivery_order_id: Uuid,
+) -> Result<Option<OrderDeliveryInfo>, AppError> {
+    let info = sqlx::query_as::<_, OrderDeliveryInfo>(
+        "SELECT d.channel::text AS channel, d.customer_phone, d.place_name, d.floor,
+                d.unit_number, d.landmark, d.address_line, d.delivery_notes,
+                d.road_distance_meters, z.name AS zone_name, d.delivery_ref,
+                d.payment_method_hint
+         FROM delivery_orders d
+         LEFT JOIN delivery_zones z ON z.id = d.delivery_zone_id
+         WHERE d.id = $1",
+    )
+    .bind(delivery_order_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(info)
 }
 
 async fn fetch_order_by_idempotency_key(
@@ -2736,18 +2810,19 @@ pub async fn export_orders(
             COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN 1              ELSE 0 END), 0), \
             COALESCE(SUM(CASE WHEN o.status::text = 'voided'    THEN 1              ELSE 0 END), 0), \
             COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN o.discount_amount        ELSE 0 END), 0), \
-            COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN COALESCE(o.tip_amount, 0) ELSE 0 END), 0) \
+            COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN COALESCE(o.tip_amount, 0) ELSE 0 END), 0), \
+            COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN o.delivery_fee ELSE 0 END), 0) \
          FROM orders o JOIN users u ON u.id = o.teller_id \
          WHERE {} {}",
         scope_condition, filter
     );
 
-    let (revenue, completed, voided, discounts, tips): (i64, i64, i64, i64, i64) =
+    let (revenue, completed, voided, discounts, tips, delivery_fees): (i64, i64, i64, i64, i64, i64) =
         bind_export_filters!(sqlx::query_as(&summary_sql).bind(scope_id))
             .fetch_one(pool.get_ref())
             .await?;
 
-    let summary = OrderSummary { revenue, completed, voided, discounts, tips };
+    let summary = OrderSummary { revenue, completed, voided, discounts, tips, delivery_fees };
 
     let data_sql = format!(
         "{} WHERE {} {} ORDER BY o.created_at DESC",

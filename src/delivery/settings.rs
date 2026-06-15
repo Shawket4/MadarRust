@@ -181,8 +181,10 @@ pub struct AcceptingInput {
     pub branch_id: Uuid,
     /// "in_mall" | "outside"
     pub channel: String,
-    /// "auto" | "open" | "closed"
-    pub r#override: String,
+    /// "auto" | "open" | "closed". Named `mode` (not `override`) because a bare
+    /// `override` field is a reserved word in Dart and breaks the POS client
+    /// code generator.
+    pub mode: String,
 }
 
 #[utoipa::path(
@@ -201,7 +203,7 @@ pub async fn set_accepting(
     check_permission(pool.get_ref(), &claims, "delivery_orders", "update").await?;
     require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
     validate_channel(&body.channel)?;
-    validate_override(&body.r#override)?;
+    validate_override(&body.mode)?;
 
     sqlx::query(
         "INSERT INTO branch_delivery_settings (branch_id) VALUES ($1) ON CONFLICT (branch_id) DO NOTHING",
@@ -218,7 +220,7 @@ pub async fn set_accepting(
     .bind(body.branch_id)
     .fetch_one(pool.get_ref())
     .await?;
-    if !enabled && body.r#override != "closed" {
+    if !enabled && body.mode != "closed" {
         return Err(AppError::Conflict(
             "This channel is disabled by management and cannot be opened from the POS.".into(),
         ));
@@ -229,7 +231,7 @@ pub async fn set_accepting(
         body.channel
     ))
     .bind(body.branch_id)
-    .bind(&body.r#override)
+    .bind(&body.mode)
     .execute(pool.get_ref())
     .await?;
 
