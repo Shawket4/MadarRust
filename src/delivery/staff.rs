@@ -234,20 +234,53 @@ pub async fn stream_delivery_orders(
 
 #[derive(Deserialize, ToSchema)]
 pub struct StatusInput {
-    /// "confirmed" | "preparing" | "ready" | "out_for_delivery"
+    /// Target line step: "confirmed" | "preparing" | "ready" | "out_for_delivery".
+    /// The teller may jump to ANY of these from any non-terminal state (forward or
+    /// back); the landed step is stamped and all other step stamps are cleared, and
+    /// at most one customer WhatsApp fires (the last newly-crossed step that has one).
     pub status: String,
 }
 
-/// Single forward step. Delivered is reached only via finalize; cancelled/rejected
-/// via the cancel endpoint.
-fn valid_forward(from: &str, to: &str) -> bool {
-    matches!(
-        (from, to),
-        ("received", "confirmed")
-            | ("confirmed", "preparing")
-            | ("preparing", "ready")
-            | ("ready", "out_for_delivery")
-    )
+/// The delivery line, in order. `received` is the intake default (not settable
+/// via this endpoint); `delivered` is reached only via finalize; `cancelled`/
+/// `rejected` via the cancel endpoint.
+const STEP_ORDER: [&str; 5] = ["received", "confirmed", "preparing", "ready", "out_for_delivery"];
+
+/// Position of a status on the forward line, or `None` for terminal states
+/// (delivered/cancelled/rejected) that have left it.
+fn step_index(status: &str) -> Option<usize> {
+    STEP_ORDER.iter().position(|s| *s == status)
+}
+
+/// The customer WhatsApp message a step fires, if any. Single source of truth for
+/// the jump notifier: `confirmed` (order accepted) and `out_for_delivery` notify,
+/// each carrying the tracking link. Adding a message here for another step is all
+/// the jump logic needs to honour it.
+fn step_whatsapp_message(status: &str, delivery_ref: &str, order_id: Uuid) -> Option<String> {
+    match status {
+        "confirmed" => Some(whatsapp::build_order_accepted_message(delivery_ref, order_id)),
+        "out_for_delivery" => Some(whatsapp::build_out_for_delivery_message(delivery_ref, order_id)),
+        _ => None,
+    }
+}
+
+/// The single WhatsApp message a jump from `prev_idx` → `target_idx` should send:
+/// the highest-indexed newly-crossed step (`prev_idx < idx <= target_idx`) that
+/// has a template. If the landed step has none, this falls back to the last
+/// crossed step that does; a backward / no-op jump crosses nothing new → `None`.
+fn jump_whatsapp_message(
+    prev_idx: usize,
+    target_idx: usize,
+    delivery_ref: &str,
+    order_id: Uuid,
+) -> Option<String> {
+    if target_idx <= prev_idx {
+        return None;
+    }
+    STEP_ORDER[prev_idx + 1..=target_idx]
+        .iter()
+        .rev()
+        .find_map(|&step| step_whatsapp_message(step, delivery_ref, order_id))
 }
 
 #[utoipa::path(
@@ -270,39 +303,47 @@ pub async fn set_status(
         .ok_or_else(|| AppError::NotFound("Delivery order not found".into()))?;
     require_branch_access(pool.get_ref(), &claims, order.branch_id).await?;
 
-    if !valid_forward(&order.status, &body.status) {
-        return Err(AppError::Conflict(format!(
-            "Cannot move from {} to {}",
-            order.status, body.status
+    // Target must be a settable line step (`received` is the intake default;
+    // delivered/cancel/reject have their own endpoints).
+    let Some(target_idx) = step_index(&body.status).filter(|&i| i > 0) else {
+        return Err(AppError::BadRequest(format!(
+            "'{}' is not a settable delivery step",
+            body.status
         )));
-    }
-
-    // confirmed = the accept/print moment → stamp receipt_printed_at (print-once).
-    let ts_col = match body.status.as_str() {
-        "confirmed" => "confirmed_at",
-        "preparing" => "preparing_at",
-        "ready" => "ready_at",
-        "out_for_delivery" => "out_for_delivery_at",
-        _ => unreachable!(),
     };
-    let receipt_clause = if body.status == "confirmed" {
-        ", receipt_printed_at = COALESCE(receipt_printed_at, now())"
-    } else {
-        ""
+    // The order must still be on the line (not finalized/cancelled/rejected).
+    let Some(prev_idx) = step_index(&order.status) else {
+        return Err(AppError::Conflict(format!(
+            "Order is {}; its status can no longer change",
+            order.status
+        )));
     };
 
-    sqlx::query(&format!(
-        "UPDATE delivery_orders SET status = $2::delivery_order_status, {ts_col} = now(), updated_at = now(){receipt_clause} WHERE id = $1"
-    ))
+    // Jump to any step (forward or backward): stamp the landed step and CLEAR
+    // every other step stamp, so the recorded position is exactly the landed
+    // step. The print-once guard (receipt_printed_at) is preserved, and set the
+    // first time the order lands on `confirmed`.
+    sqlx::query(
+        "UPDATE delivery_orders SET
+            status              = $2::delivery_order_status,
+            confirmed_at        = CASE WHEN $2 = 'confirmed'        THEN now() ELSE NULL END,
+            preparing_at        = CASE WHEN $2 = 'preparing'        THEN now() ELSE NULL END,
+            ready_at            = CASE WHEN $2 = 'ready'            THEN now() ELSE NULL END,
+            out_for_delivery_at = CASE WHEN $2 = 'out_for_delivery' THEN now() ELSE NULL END,
+            receipt_printed_at  = COALESCE(receipt_printed_at, CASE WHEN $2 = 'confirmed' THEN now() ELSE NULL END),
+            updated_at          = now()
+         WHERE id = $1",
+    )
     .bind(id)
     .bind(&body.status)
     .execute(pool.get_ref())
     .await?;
 
-    if body.status == "out_for_delivery"
-        && let Some(ref dref) = order.delivery_ref
+    // Send EXACTLY one WhatsApp — see jump_whatsapp_message.
+    if let Some(ref dref) = order.delivery_ref
+        && let Some(msg) = jump_whatsapp_message(prev_idx, target_idx, dref, id)
     {
-        whatsapp::send_message(order.customer_phone.clone(), whatsapp::build_out_for_delivery_message(dref));
+        whatsapp::send_message(pool.get_ref().clone(), order.customer_phone.clone(), msg);
     }
 
     let updated = fetch_delivery_order(pool.get_ref(), id).await?.ok_or(AppError::Internal)?;
@@ -352,16 +393,42 @@ pub async fn cancel_delivery_order(
         return Err(AppError::Conflict(format!("Order is already {}", order.status)));
     }
 
-    // received → rejected; any later non-terminal state → cancelled.
-    let (new_status, ts_col) = if order.status == "received" {
-        ("rejected", "rejected_at")
-    } else {
-        ("cancelled", "cancelled_at")
-    };
-
     let mut tx = pool.get_ref().begin().await?;
 
+    // Compare-and-swap: flip the status in ONE guarded UPDATE that only matches a
+    // still-non-terminal row (received → rejected; any later state → cancelled).
+    // Two concurrent cancels race on this statement — exactly one matches and wins
+    // (RETURNING a row); the other matches 0 rows and is rejected below, so the
+    // waste is never deducted twice. (Same guarded-flip-then-act pattern as
+    // void_order, which is cleaner than a separate FOR UPDATE lock.)
+    let won: Option<String> = sqlx::query_scalar(
+        "UPDATE delivery_orders
+         SET status = CASE WHEN status = 'received' THEN 'rejected' ELSE 'cancelled' END::delivery_order_status,
+             rejected_at  = CASE WHEN status =  'received' THEN now() ELSE rejected_at  END,
+             cancelled_at = CASE WHEN status <> 'received' THEN now() ELSE cancelled_at END,
+             cancel_reason = $2, cancel_restocked = $3, cancelled_by = $4, updated_at = now()
+         WHERE id = $1 AND status NOT IN ('delivered','cancelled','rejected')
+         RETURNING status::text",
+    )
+    .bind(id)
+    .bind(&body.reason)
+    .bind(body.restore_inventory)
+    .bind(claims.user_id())
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    // 0 rows ⟹ a concurrent cancel already terminated the order: bail before any
+    // waste is deducted (the winner handled it).
+    if won.is_none() {
+        tx.rollback().await?;
+        let current = fetch_delivery_order(pool.get_ref(), id)
+            .await?
+            .ok_or(AppError::Internal)?;
+        return Err(AppError::Conflict(format!("Order is already {}", current.status)));
+    }
+
     // restore=false ⟹ the food was made → deduct the frozen plan and log waste.
+    // Only the CAS winner reaches here, so waste is deducted exactly once.
     if !body.restore_inventory {
         let deductions: serde_json::Value =
             sqlx::query_scalar("SELECT deductions_snapshot FROM delivery_orders WHERE id = $1")
@@ -373,17 +440,6 @@ pub async fn cancel_delivery_order(
         snapshot::record_waste(&mut tx, order.branch_id, id, &deductions, claims.user_id()).await?;
     }
 
-    sqlx::query(&format!(
-        "UPDATE delivery_orders SET status = $2::delivery_order_status, {ts_col} = now(), \
-         cancel_reason = $3, cancel_restocked = $4, cancelled_by = $5, updated_at = now() WHERE id = $1"
-    ))
-    .bind(id)
-    .bind(new_status)
-    .bind(&body.reason)
-    .bind(body.restore_inventory)
-    .bind(claims.user_id())
-    .execute(&mut *tx)
-    .await?;
     tx.commit().await?;
 
     let updated = fetch_delivery_order(pool.get_ref(), id).await?.ok_or(AppError::Internal)?;
@@ -538,7 +594,11 @@ pub async fn finalize_delivery_order(
     tx.commit().await?;
 
     if let Some(ref dref) = order.delivery_ref {
-        whatsapp::send_message(order.customer_phone.clone(), whatsapp::build_delivered_message(dref));
+        whatsapp::send_message(
+            pool.get_ref().clone(),
+            order.customer_phone.clone(),
+            whatsapp::build_delivered_message(dref, id),
+        );
     }
 
     let delivery_order = fetch_delivery_order(pool.get_ref(), id).await?.ok_or(AppError::Internal)?;
@@ -601,4 +661,84 @@ pub async fn set_prep_time(
         DeliveryEvent { event_type: "updated".into(), order: updated.clone() },
     );
     Ok(HttpResponse::Ok().json(updated))
+}
+
+#[cfg(test)]
+mod jump_logic_tests {
+    use super::{jump_whatsapp_message, step_index};
+    use uuid::Uuid;
+
+    fn i(s: &str) -> usize {
+        step_index(s).unwrap()
+    }
+
+    // A fixed id stands in for the order id (only used to build the tracking
+    // link). When PUBLIC_ORDER_BASE_URL is configured (e.g. via a local .env),
+    // messages get a "\nTrack your order: …" suffix appended; `bare` strips it so
+    // these assertions match the message's first line regardless of the env.
+    const OID: Uuid = Uuid::nil();
+
+    fn bare(msg: Option<String>) -> Option<String> {
+        msg.map(|m| m.split('\n').next().unwrap_or("").to_string())
+    }
+
+    #[test]
+    fn line_steps_are_ordered() {
+        assert_eq!(i("received"), 0);
+        assert!(i("confirmed") < i("preparing"));
+        assert!(i("preparing") < i("ready"));
+        assert!(i("ready") < i("out_for_delivery"));
+        assert_eq!(step_index("delivered"), None);
+        assert_eq!(step_index("cancelled"), None);
+    }
+
+    #[test]
+    fn landing_on_out_for_delivery_notifies_once() {
+        // Skipping preparing+ready still fires the single out_for_delivery msg.
+        let msg = jump_whatsapp_message(i("confirmed"), i("out_for_delivery"), "D-1", OID);
+        assert_eq!(bare(msg).as_deref(), Some("Your order D-1 is on the way!"));
+    }
+
+    #[test]
+    fn landing_on_confirmed_sends_the_accepted_message() {
+        // Accepting an order (received → confirmed) fires the accepted message.
+        let msg = jump_whatsapp_message(i("received"), i("confirmed"), "D-1", OID);
+        assert_eq!(
+            bare(msg).as_deref(),
+            Some("Your order D-1 has been accepted and is being prepared.")
+        );
+    }
+
+    #[test]
+    fn jumping_past_confirmed_to_a_silent_step_still_announces_acceptance() {
+        // received → ready crosses confirmed (accepted) then silent preparing/ready;
+        // the highest-indexed crossed step WITH a template is confirmed, so the
+        // accepted message is the one that fires.
+        assert_eq!(
+            bare(jump_whatsapp_message(i("received"), i("ready"), "D-1", OID)).as_deref(),
+            Some("Your order D-1 has been accepted and is being prepared.")
+        );
+    }
+
+    #[test]
+    fn jumping_past_silent_steps_still_finds_the_last_event() {
+        // received → out_for_delivery: out_for_delivery is the highest crossed
+        // event step and wins over the earlier confirmed message.
+        assert_eq!(
+            bare(jump_whatsapp_message(i("received"), i("out_for_delivery"), "D-1", OID)).as_deref(),
+            Some("Your order D-1 is on the way!")
+        );
+    }
+
+    #[test]
+    fn jumping_only_through_silent_steps_sends_nothing() {
+        // confirmed → ready crosses only silent steps (preparing/ready).
+        assert_eq!(jump_whatsapp_message(i("confirmed"), i("ready"), "D-1", OID), None);
+    }
+
+    #[test]
+    fn backward_and_noop_jumps_notify_no_one() {
+        assert_eq!(jump_whatsapp_message(i("out_for_delivery"), i("confirmed"), "D-1", OID), None);
+        assert_eq!(jump_whatsapp_message(i("ready"), i("ready"), "D-1", OID), None);
+    }
 }

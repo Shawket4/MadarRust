@@ -12,7 +12,10 @@
 use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
+use uuid::Uuid;
 
+use crate::delivery::gateway;
 use crate::errors::AppError;
 
 #[derive(Serialize, Deserialize)]
@@ -51,14 +54,20 @@ pub fn verify_device_token(secret: &str, phone: &str, token: &str) -> bool {
 }
 
 /// Send a WhatsApp message, fire-and-forget. Returns immediately; the request is
-/// never blocked and failures are logged only.
-pub fn send_message(phone: String, message: String) {
+/// never blocked and failures are logged only. Honors the super-admin pause
+/// switch ([`gateway::is_paused`]) — when paused the send is skipped entirely,
+/// so the gateway can be muted for maintenance without unlinking the number.
+pub fn send_message(pool: PgPool, phone: String, message: String) {
     let Ok(base) = std::env::var("WHATSAPP_SERVICE_URL") else {
         tracing::info!(phone = %phone, "WHATSAPP_SERVICE_URL unset — skipping WhatsApp send");
         return;
     };
     let auth = std::env::var("WHATSAPP_AUTH_HEADER").ok();
     tokio::spawn(async move {
+        if gateway::is_paused(&pool).await {
+            tracing::info!(phone = %phone, "WhatsApp sending paused — skipping send");
+            return;
+        }
         let url = format!("{}/send/message", base.trim_end_matches('/'));
         let client = reqwest::Client::new();
         let mut req = client
@@ -75,18 +84,48 @@ pub fn send_message(phone: String, message: String) {
     });
 }
 
+/// The customer-facing tracking link for a delivery order, or `None` when
+/// `PUBLIC_ORDER_BASE_URL` is unset (degrade-safe — the message is sent without
+/// a link, exactly like the `WHATSAPP_SERVICE_URL`-unset send-skip).
+pub fn tracking_url(order_id: Uuid) -> Option<String> {
+    std::env::var("PUBLIC_ORDER_BASE_URL")
+        .ok()
+        .map(|base| format!("{}/track/{}", base.trim_end_matches('/'), order_id))
+}
+
+/// Append the tracking link to a message when one is configured.
+fn with_tracking(message: String, order_id: Uuid) -> String {
+    match tracking_url(order_id) {
+        Some(url) => format!("{message}\nTrack your order: {url}"),
+        None => message,
+    }
+}
+
 pub fn build_otp_message(code: &str) -> String {
     format!("Your Sufrix verification code is {code}. It expires in 5 minutes.")
 }
 
-pub fn build_order_received_message(delivery_ref: &str) -> String {
-    format!("We've received your order {delivery_ref}. We'll let you know when it's on the way.")
+pub fn build_order_received_message(delivery_ref: &str, order_id: Uuid) -> String {
+    with_tracking(
+        format!("We've received your order {delivery_ref}. We'll let you know when it's on the way."),
+        order_id,
+    )
 }
 
-pub fn build_out_for_delivery_message(delivery_ref: &str) -> String {
-    format!("Your order {delivery_ref} is on the way!")
+pub fn build_order_accepted_message(delivery_ref: &str, order_id: Uuid) -> String {
+    with_tracking(
+        format!("Your order {delivery_ref} has been accepted and is being prepared."),
+        order_id,
+    )
 }
 
-pub fn build_delivered_message(delivery_ref: &str) -> String {
-    format!("Your order {delivery_ref} has been delivered. Enjoy!")
+pub fn build_out_for_delivery_message(delivery_ref: &str, order_id: Uuid) -> String {
+    with_tracking(format!("Your order {delivery_ref} is on the way!"), order_id)
+}
+
+pub fn build_delivered_message(delivery_ref: &str, order_id: Uuid) -> String {
+    with_tracking(
+        format!("Your order {delivery_ref} has been delivered. Enjoy!"),
+        order_id,
+    )
 }

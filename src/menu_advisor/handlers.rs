@@ -327,7 +327,7 @@ pub async fn list_runs_handler(
     tag = "menu_advisor",
     params(("branch_id" = Uuid, Path, description = "Branch ID"), LatestRunQuery),
     responses(
-        (status = 200, description = "Latest run (completed unless any_status), or JSON null when none", body = PersistedRun),
+        (status = 200, description = "Latest run (completed unless any_status), or JSON null when none", body = Option<PersistedRun>),
         AppErrorResponse
     ),
     security(("bearer_jwt" = []))
@@ -353,7 +353,7 @@ pub async fn get_latest_run_handler(
     tag = "menu_advisor",
     params(("branch_id" = Uuid, Path, description = "Branch ID")),
     responses(
-        (status = 200, description = "In-progress run, or JSON null when none", body = PersistedRun),
+        (status = 200, description = "In-progress run, or JSON null when none", body = Option<PersistedRun>),
         AppErrorResponse
     ),
     security(("bearer_jwt" = []))

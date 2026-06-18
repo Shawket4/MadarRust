@@ -22,10 +22,6 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/branches/{branch_id}/stock/{id}", web::patch().to(handlers::update_branch_stock))
             .route("/branches/{branch_id}/stock/{id}", web::delete().to(handlers::remove_from_branch_stock))
 
-            // ── Adjustments ───────────────────────────────────────────
-            .route("/branches/{branch_id}/adjustments", web::post().to(handlers::create_adjustment))
-            .route("/branches/{branch_id}/adjustments", web::get().to(handlers::list_adjustments))
-
             // ── Movement ledger ───────────────────────────────────────
             .route("/branches/{branch_id}/movements", web::get().to(handlers::list_movements))
 

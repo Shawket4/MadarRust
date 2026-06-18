@@ -43,6 +43,13 @@ pub struct BranchDeliverySettings {
     /// org `discounts` table). Frozen onto the order at intake. `null` = none.
     pub in_mall_discount_id: Option<Uuid>,
     pub outside_discount_id: Option<Uuid>,
+    /// When false, the public checkout skips OTP phone verification for this
+    /// branch and accepts orders without a device token. Default true.
+    pub otp_required: bool,
+    /// When false, in-mall orders may be placed without a device GPS location
+    /// ("confirm you're at the branch"). Shop/company + floor + unit are always
+    /// required regardless. Default true.
+    pub in_mall_require_location: bool,
 }
 
 impl BranchDeliverySettings {
@@ -62,6 +69,8 @@ impl BranchDeliverySettings {
             max_road_distance_meters: None,
             in_mall_discount_id: None,
             outside_discount_id: None,
+            otp_required: true,
+            in_mall_require_location: true,
         }
     }
 }
@@ -69,7 +78,8 @@ impl BranchDeliverySettings {
 const BRANCH_SETTINGS_SELECT: &str = "SELECT branch_id, in_mall_enabled, outside_enabled, \
     in_mall_override, outside_override, in_mall_open_time, in_mall_close_time, \
     outside_open_time, outside_close_time, in_mall_fee, prep_time_minutes, \
-    max_road_distance_meters, in_mall_discount_id, outside_discount_id \
+    max_road_distance_meters, in_mall_discount_id, outside_discount_id, otp_required, \
+    in_mall_require_location \
     FROM branch_delivery_settings WHERE branch_id = $1";
 
 #[derive(Deserialize, IntoParams)]
@@ -131,6 +141,14 @@ pub struct BranchSettingsInput {
     pub in_mall_discount_id: Option<Uuid>,
     #[serde(default)]
     pub outside_discount_id: Option<Uuid>,
+    /// When false, the public checkout skips OTP for this branch. Defaults to
+    /// true so an omitting client keeps verification on.
+    #[serde(default = "default_true")]
+    pub otp_required: bool,
+    /// When false, in-mall orders are accepted without a device GPS location.
+    /// Defaults to true so an omitting client keeps the location check on.
+    #[serde(default = "default_true")]
+    pub in_mall_require_location: bool,
 }
 
 #[utoipa::path(
@@ -183,8 +201,9 @@ pub async fn put_branch_settings(
         "INSERT INTO branch_delivery_settings
             (branch_id, in_mall_enabled, outside_enabled, in_mall_open_time, in_mall_close_time,
              outside_open_time, outside_close_time, in_mall_fee, prep_time_minutes,
-             max_road_distance_meters, in_mall_discount_id, outside_discount_id, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+             max_road_distance_meters, in_mall_discount_id, outside_discount_id, otp_required,
+             in_mall_require_location, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
          ON CONFLICT (branch_id) DO UPDATE SET
              in_mall_enabled = EXCLUDED.in_mall_enabled,
              outside_enabled = EXCLUDED.outside_enabled,
@@ -197,6 +216,8 @@ pub async fn put_branch_settings(
              max_road_distance_meters = EXCLUDED.max_road_distance_meters,
              in_mall_discount_id = EXCLUDED.in_mall_discount_id,
              outside_discount_id = EXCLUDED.outside_discount_id,
+             otp_required = EXCLUDED.otp_required,
+             in_mall_require_location = EXCLUDED.in_mall_require_location,
              updated_at = now()",
     )
     .bind(body.branch_id)
@@ -211,6 +232,8 @@ pub async fn put_branch_settings(
     .bind(body.max_road_distance_meters)
     .bind(body.in_mall_discount_id)
     .bind(body.outside_discount_id)
+    .bind(body.otp_required)
+    .bind(body.in_mall_require_location)
     .execute(pool.get_ref())
     .await?;
 

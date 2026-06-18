@@ -14,6 +14,7 @@ use crate::reports::handlers::{
     StockRow, BranchStockReport, TimeseriesPoint, TellerStats, AddonSalesRow, BranchComparison, OrgComparisonReport,
     BundleSalesRow, CombinedItemSalesRow,
     InventoryValuationReport, LowStockRow, ConsumptionRow, WasteReportRow, ShrinkageRow,
+    PeakHourPoint,
 };
 
 fn get_secret() -> JwtSecret {
@@ -319,6 +320,66 @@ async fn test_branch_sales_timeseries(pool: PgPool) {
     assert_eq!(ts.len(), 1);
     assert_eq!(ts[0].orders, 1);
     assert_eq!(ts[0].revenue, 570);
+}
+
+#[sqlx::test]
+async fn test_branch_sales_peak_hours(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+
+    seed_order(&pool, branch_id, user_id, shift_id).await;
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/reports/branches/{}/sales/peak-hours", branch_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+
+    let rows: Vec<PeakHourPoint> = test::read_body_json(resp).await;
+
+    // Always returns exactly 24 rows (one per hour of day), even if some are empty.
+    assert_eq!(rows.len(), 24, "peak hours must return exactly 24 buckets");
+
+    // Hours are 0–23 in order.
+    for (i, row) in rows.iter().enumerate() {
+        assert_eq!(row.hour, i as i32, "hour at index {i} must equal {i}");
+    }
+
+    // The seeded order (revenue=570) must appear in exactly one bucket.
+    let nonempty: Vec<&PeakHourPoint> = rows.iter().filter(|r| r.orders > 0).collect();
+    assert_eq!(nonempty.len(), 1, "exactly one hour bucket should have orders");
+    let hot = nonempty[0];
+    assert_eq!(hot.orders, 1);
+    assert_eq!(hot.revenue, 570);
+
+    // Per-day averages: 1 order over 1 distinct day → avg equals total.
+    assert_eq!(hot.avg_revenue_per_day, 570, "avg_revenue_per_day = total when days=1");
+    assert!((hot.avg_orders_per_day - 1.0).abs() < 0.001, "avg_orders_per_day should be 1.0");
+
+    // Percentages: sole active bucket gets 100% of both revenue and orders.
+    assert!((hot.revenue_pct - 100.0).abs() < 0.1, "revenue_pct should be 100.0");
+    assert!((hot.orders_pct - 100.0).abs() < 0.1, "orders_pct should be 100.0");
+
+    // All empty-hour buckets should have zero averages and zero percentages.
+    let empty_nonzero_avg = rows.iter().filter(|r| r.orders == 0 && r.avg_revenue_per_day != 0).count();
+    assert_eq!(empty_nonzero_avg, 0, "empty hour buckets must not carry non-zero averages");
+
+    // Voided orders must not count towards revenue.
+    let total_voided: i64 = rows.iter().map(|r| r.voided).sum();
+    assert_eq!(total_voided, 0, "no voided orders were seeded");
 }
 
 #[sqlx::test]
@@ -1350,9 +1411,10 @@ async fn test_consumption_nets_voided_restock(pool: PgPool) {
     }
 }
 
-/// V1: the timeseries timezone is now a bound parameter, not interpolated.
-/// A valid non-default IANA tz must still be honored; an injection payload must
-/// be rejected as an invalid timezone, never executed.
+/// The timeseries timezone flows as a bound parameter (not interpolated) AND the
+/// column is the `timezone_name` enum, so a valid non-default IANA tz is honored
+/// while an injection payload can't even be stored — the DB rejects it at write
+/// time, so a crafted tz never reaches the report query.
 #[sqlx::test]
 async fn test_timeseries_timezone_is_bound(pool: PgPool) {
     let app = init_app!(pool);
@@ -1371,12 +1433,12 @@ async fn test_timeseries_timezone_is_bound(pool: PgPool) {
         .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
     assert_eq!(resp.status(), 200, "valid timezone must still work after parameterization");
 
-    // An injection payload must NOT yield a 2xx response with attacker SQL.
-    sqlx::query("UPDATE branches SET timezone=$2 WHERE id=$1")
+    // An injection payload can't even be stored: the timezone_name enum rejects
+    // any non-member value at write time (stronger than the bound-param defense —
+    // a crafted tz never exists to reach the report query).
+    let bad = sqlx::query("UPDATE branches SET timezone=$2::timezone_name WHERE id=$1")
         .bind(branch_id)
         .bind("Africa/Cairo' UNION SELECT version() --")
-        .execute(&pool).await.unwrap();
-    let resp = test::call_service(&app, test::TestRequest::get().uri(&url)
-        .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
-    assert!(!resp.status().is_success(), "injection-payload timezone must be rejected, never executed");
+        .execute(&pool).await;
+    assert!(bad.is_err(), "an invalid/injection timezone must be rejected by the timezone_name enum");
 }

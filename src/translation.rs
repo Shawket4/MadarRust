@@ -27,6 +27,14 @@ struct GoogleTranslation {
     translated_text: String,
 }
 
+/// True when `SUFRIX_DISABLE_AUTO_TRANSLATION` is set to a truthy value — the
+/// offline switch for auto-translation (fuzzing / CI / air-gapped environments).
+pub fn auto_translation_disabled() -> bool {
+    std::env::var("SUFRIX_DISABLE_AUTO_TRANSLATION")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 /// Ensures all supported languages exist in `translations`.
 /// If `translations` is missing a language, it will automatically translate it
 /// from English (or the first available language) using Google Translate API.
@@ -36,6 +44,14 @@ struct GoogleTranslation {
 pub async fn ensure_translations(
     translations: &mut HashMap<String, String>,
 ) -> Result<(), String> {
+    // Offline switch: when set, skip ALL outbound Google Translate calls and
+    // leave translations as provided. Auto-translation is a convenience, not a
+    // correctness requirement (entities are creatable without it). Used by the
+    // fuzz harness / CI so fuzzing never makes uncontrolled outbound requests.
+    if auto_translation_disabled() {
+        return Ok(());
+    }
+
     let api_key = std::env::var("GOOGLE_TRANSLATE_API_KEY").unwrap_or_default();
     let supported_str = std::env::var("SUPPORTED_LANGUAGES").unwrap_or_else(|_| "en,ar".into());
     let supported_langs: Vec<&str> = supported_str.split(',').map(|s| s.trim()).collect();
@@ -58,8 +74,12 @@ pub async fn ensure_translations(
     };
 
     let source_text = match translations.get(&source_lang) {
-        Some(t) => t.clone(),
-        None => return Err("No source text provided for translation".into()),
+        Some(t) if !t.trim().is_empty() => t.clone(),
+        // No usable source text → nothing to translate. Leave the translations as
+        // provided (an empty/partial map is a valid state) rather than failing the
+        // whole request. Callers previously mapped this Err to a 500 on empty input
+        // (found via API fuzzing on POST/PUT /payment-methods with empty fields).
+        _ => return Ok(()),
     };
 
     let client = Client::new();

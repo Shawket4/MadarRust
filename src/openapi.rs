@@ -54,7 +54,9 @@ use utoipa::{
         (name = "payment_methods", description = "Dynamic payment methods configuration."),
         (name = "costing",      description = "Canonical recipe/addon cost rollups in piastres. NULL cost = unknown, never zero."),
         (name = "delivery",     description = "Delivery config (settings, zones, org defaults), the staff queue, status transitions, finalize, and cancel/waste."),
-        (name = "delivery-public", description = "Unauthenticated, rate-limited customer endpoints: branch selector, channel menu, OSRM quote, WhatsApp OTP, order intake.")
+        (name = "delivery-public", description = "Unauthenticated, rate-limited customer endpoints: branch selector, channel menu, OSRM quote, WhatsApp OTP, order intake."),
+        (name = "whatsapp",     description = "Super-admin relay to the private WhatsApp gateway: QR pairing, link status, logout, and the global send pause switch."),
+        (name = "qr",           description = "Branded A6 QR card generator (PNG/SVG) and plain receipt QR. Renders a Shlink short URL into a print-perfect, Sufrix-styled image.")
     ),
 paths(
         // ── costing ─────────────────────────────────────────────────
@@ -74,6 +76,7 @@ paths(
         crate::branches::handlers::create_branch,
         crate::branches::handlers::update_branch,
         crate::branches::handlers::delete_branch,
+        crate::branches::handlers::list_timezones,
         // ── orgs ────────────────────────────────────────────────────
         crate::orgs::handlers::list_orgs,
         crate::orgs::handlers::get_org,
@@ -123,6 +126,7 @@ paths(
         crate::menu::handlers::list_addon_overrides,
         crate::menu::handlers::upsert_addon_override,
         crate::menu::handlers::delete_addon_override,
+        crate::menu::handlers::put_allowed_addons,
         crate::menu::handlers::list_optional_fields,
         crate::menu::handlers::create_optional_field,
         crate::menu::handlers::update_optional_field,
@@ -146,8 +150,6 @@ paths(
         crate::inventory::handlers::add_to_branch_stock,
         crate::inventory::handlers::update_branch_stock,
         crate::inventory::handlers::remove_from_branch_stock,
-        crate::inventory::handlers::create_adjustment,
-        crate::inventory::handlers::list_adjustments,
         crate::inventory::handlers::list_movements,
         crate::inventory::handlers::create_waste,
         crate::inventory::handlers::list_waste,
@@ -204,7 +206,11 @@ paths(
         crate::purchasing::handlers::create_order,
         crate::purchasing::handlers::list_orders,
         crate::purchasing::handlers::list_org_orders,
+        crate::purchasing::handlers::reorder_suggestions,
+        crate::purchasing::handlers::create_return,
+        crate::purchasing::handlers::list_po_receipts,
         crate::purchasing::handlers::get_order,
+        crate::purchasing::handlers::submit_order,
         crate::purchasing::handlers::receive_order,
         crate::purchasing::handlers::cancel_order,
         // ── orders ────────────────────────────────────────────────────
@@ -220,9 +226,11 @@ paths(
         crate::reports::handlers::branch_sales,
         crate::reports::handlers::branch_stock,
         crate::reports::handlers::branch_sales_timeseries,
+        crate::reports::handlers::branch_sales_peak_hours,
         crate::reports::handlers::branch_teller_stats,
         crate::reports::handlers::branch_addon_sales,
         crate::reports::handlers::org_branch_comparison,
+        crate::reports::handlers::branch_delivery_sales,
         crate::reports::handlers::branch_bundle_sales,
         crate::reports::handlers::branch_combined_item_sales,
         crate::reports::handlers::branch_inventory_valuation,
@@ -286,6 +294,24 @@ paths(
         crate::delivery::public::otp_request,
         crate::delivery::public::otp_verify,
         crate::delivery::public::create_delivery_order,
+        crate::delivery::public::track_delivery_order,
+        crate::delivery::public::guest_order_history,
+        crate::delivery::public::guest_past_locations,
+        // ── whatsapp gateway relay (super-admin) ──────────────────────
+        crate::delivery::gateway::status,
+        crate::delivery::gateway::pair,
+        crate::delivery::gateway::logout,
+        crate::delivery::gateway::pause,
+        // ── qr (dynamic short-URL + branded card) ────────────────────
+        crate::qr_card::handlers::org_qr,
+        crate::qr_card::handlers::branch_qr,
+        crate::qr_card::handlers::create_table,
+        crate::qr_card::handlers::list_tables,
+        crate::qr_card::handlers::delete_table,
+        crate::qr_card::handlers::table_qr,
+        crate::qr_card::handlers::delivery_order_qr,
+        crate::qr_card::handlers::create_marketing_link,
+        crate::qr_card::handlers::list_marketing_links,
     ),
     components(schemas(
         // Most schemas are pulled in transitively via path responses, but
@@ -327,7 +353,16 @@ paths(
         crate::delivery::public::QuoteResponse,
         crate::delivery::public::OtpRequestResponse,
         crate::delivery::public::OtpVerifyResponse,
+        crate::delivery::public::DeliveryTracking,
         crate::delivery::snapshot::CartLineInput,
+        crate::delivery::gateway::WhatsappStatus,
+        crate::delivery::gateway::PauseInput,
+        // ── qr ────────────────────────────────────────────────────────
+        crate::qr_card::handlers::QrResponse,
+        crate::qr_card::handlers::MarketingLink,
+        crate::qr_card::handlers::CreateMarketingLinkRequest,
+        crate::qr_card::db::BranchTable,
+        crate::qr_card::db::CreateTableRequest,
     ))
 )]
 pub struct ApiDoc;

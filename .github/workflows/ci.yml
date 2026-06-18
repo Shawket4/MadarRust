@@ -1,0 +1,138 @@
+name: CI
+
+# Test gate + robustness tooling. Runs on PRs and on a nightly schedule for the
+# deeper sweeps. Deployment stays in deploy.yml (push to main) — untouched.
+on:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *" # nightly: deeper fuzz + full money-engine mutation sweep
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── The headline win: actually run the test suite (previously CI ran none) ──
+  test:
+    name: test + lint
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      # #[sqlx::test] creates an isolated database per test from this connection.
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - name: System deps
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # fmt + clippy are advisory for now (the tree predates them); promote to
+      # blocking once clean by removing continue-on-error.
+      - name: rustfmt
+        run: cargo fmt --all --check
+        continue-on-error: true
+      - name: clippy
+        run: cargo clippy --all-targets --all-features
+        continue-on-error: true
+      - name: test (blocking gate)
+        run: cargo test --lib
+
+  # ── Mutation testing: adaptive on PRs (only the changed lines) ──────────────
+  mutants:
+    name: mutants
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need history to diff against the base branch
+      - name: System deps
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants,cargo-nextest
+      # PR: mutate ONLY the lines this branch changed — fast and follows the code.
+      - name: Mutants (changed lines)
+        if: github.event_name == 'pull_request'
+        run: |
+          git diff "origin/${{ github.base_ref }}...HEAD" > /tmp/pr.diff
+          cargo mutants --in-diff /tmp/pr.diff --jobs 2
+        continue-on-error: true # advisory until the team opts into gating
+      # Nightly / manual: full sweep of the money/cost engine.
+      - name: Mutants (money-engine deep sweep)
+        if: github.event_name != 'pull_request'
+        run: |
+          cargo mutants --jobs 2 \
+            -f src/costing/service.rs -f src/orders/cost_math.rs -f src/units.rs \
+            -f src/geo/osrm.rs -f src/discounts/handlers.rs -f src/delivery/public.rs
+        continue-on-error: true
+      - name: Upload mutants report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-out
+          path: mutants.out/
+          if-no-files-found: ignore
+
+  # ── Coverage-guided fuzzing of the pure money/geo functions (no DB needed) ──
+  fuzz:
+    name: "fuzz: ${{ matrix.target }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - round_piastres
+          - calc_discount
+          - convert_units
+          - haversine
+          - select_zone_fee
+          - blend_weighted_cost
+          - summarize_line_costs
+    steps:
+      - uses: actions/checkout@v4
+      - name: System deps
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "fuzz -> target"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      # Longer budget on the nightly schedule; quick smoke on PRs.
+      - name: Fuzz ${{ matrix.target }}
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=${{ github.event_name == 'schedule' && 300 || 60 }}
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore

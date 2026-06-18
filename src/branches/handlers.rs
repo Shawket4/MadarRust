@@ -12,13 +12,15 @@ use crate::{
     permissions::checker::check_permission,
 };
 
-/// Reject a timezone PostgreSQL does not recognize. Stored branch timezones are
-/// later used by the reports timeseries (AT TIME ZONE), so validating at write
-/// time keeps a bad value from 500ing every report and is defense-in-depth for
-/// the now-parameterized reports query (audit V1).
-async fn validate_timezone(pool: &PgPool, tz: &str) -> Result<(), AppError> {
+/// Reject a timezone outside the `timezone_name` enum — the frozen, DB-enforced
+/// controlled vocabulary (see migration 20260615140000). Validating here turns a
+/// bad value into a clean 400 instead of a DB enum-cast 500, and keeps the check
+/// in lockstep with the DB constraint and the `GET /timezones` list the dashboard
+/// select is built from. Shared with the orgs handler so the org-level default is
+/// validated identically.
+pub(crate) async fn validate_timezone(pool: &PgPool, tz: &str) -> Result<(), AppError> {
     let ok: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM pg_timezone_names WHERE name = $1)"
+        "SELECT EXISTS(SELECT 1 FROM pg_enum WHERE enumtypid = 'timezone_name'::regtype AND enumlabel = $1)"
     )
     .bind(tz)
     .fetch_one(pool)
@@ -47,7 +49,9 @@ pub struct Branch {
     pub address:           Option<String>,
     #[schema(example = "+201234567890")]
     pub phone:             Option<String>,
-    /// IANA timezone name. Defaults to `Africa/Cairo`.
+    /// Effective IANA timezone name for this branch, resolved as
+    /// `branch.timezone → org.timezone → Africa/Cairo`. Always present;
+    /// clients should format all of this branch's timestamps in this zone.
     #[schema(example = "Africa/Cairo")]
     pub timezone:          String,
     pub printer_brand:     Option<PrinterBrand>,
@@ -82,7 +86,7 @@ pub struct CreateBranchRequest {
     pub name:              String,
     pub address:           Option<String>,
     pub phone:             Option<String>,
-    /// IANA timezone name. Defaults to `Africa/Cairo` if absent.
+    /// IANA timezone name. If absent, the branch inherits the org's timezone.
     #[schema(example = "Africa/Cairo")]
     pub timezone:          Option<String>,
     pub printer_brand:     Option<PrinterBrand>,
@@ -175,7 +179,8 @@ pub async fn list_branches(
     let branches = if claims.role == crate::models::UserRole::BranchManager || claims.role == crate::models::UserRole::Teller {
         sqlx::query_as::<_, Branch>(
             r#"
-            SELECT b.id, b.org_id, b.name, b.address, b.phone, b.timezone,
+            SELECT b.id, b.org_id, b.name, b.address, b.phone,
+                   COALESCE(b.timezone, o.timezone)::text AS timezone,
                    b.printer_brand, b.printer_ip::text, b.printer_port,
                    b.is_active, o.logo_url as org_logo_url,
                    b.latitude, b.longitude, b.geo_radius_meters,
@@ -194,7 +199,8 @@ pub async fn list_branches(
     } else {
         sqlx::query_as::<_, Branch>(
             r#"
-            SELECT b.id, b.org_id, b.name, b.address, b.phone, b.timezone,
+            SELECT b.id, b.org_id, b.name, b.address, b.phone,
+                   COALESCE(b.timezone, o.timezone)::text AS timezone,
                    b.printer_brand, b.printer_ip::text, b.printer_port,
                    b.is_active, o.logo_url as org_logo_url,
                    b.latitude, b.longitude, b.geo_radius_meters,
@@ -268,13 +274,14 @@ pub async fn create_branch(
         r#"
         WITH inserted AS (
             INSERT INTO branches (org_id, name, address, phone, timezone, printer_brand, printer_ip, printer_port, latitude, longitude, geo_radius_meters)
-            VALUES ($1, $2, $3, $4, $5, $6, $7::inet, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5::timezone_name, $6, $7::inet, $8, $9, $10, $11)
             RETURNING id, org_id, name, address, phone, timezone,
                       printer_brand, printer_ip, printer_port,
                       is_active, latitude, longitude, geo_radius_meters,
                       created_at, updated_at
         )
-        SELECT i.id, i.org_id, i.name, i.address, i.phone, i.timezone,
+        SELECT i.id, i.org_id, i.name, i.address, i.phone,
+               COALESCE(i.timezone, o.timezone)::text AS timezone,
                i.printer_brand, i.printer_ip::text, i.printer_port,
                i.is_active, o.logo_url as org_logo_url,
                i.latitude, i.longitude, i.geo_radius_meters,
@@ -287,7 +294,7 @@ pub async fn create_branch(
     .bind(&body.name)
     .bind(&body.address)
     .bind(&body.phone)
-    .bind(body.timezone.as_deref().unwrap_or("Africa/Cairo"))
+    .bind(body.timezone.as_deref().filter(|s| !s.is_empty()))
     .bind(&body.printer_brand)
     .bind(&body.printer_ip)
     .bind(body.printer_port.unwrap_or(9100))
@@ -347,7 +354,7 @@ pub async fn update_branch(
                 name              = COALESCE($2, name),
                 address           = COALESCE($3, address),
                 phone             = COALESCE($4, phone),
-                timezone          = COALESCE($5, timezone),
+                timezone          = COALESCE(NULLIF($5, '')::timezone_name, timezone),
                 is_active         = COALESCE($6, is_active),
                 printer_brand     = CASE
                                       WHEN $7 THEN $8
@@ -376,7 +383,8 @@ pub async fn update_branch(
                       is_active, latitude, longitude, geo_radius_meters,
                       created_at, updated_at
         )
-        SELECT u.id, u.org_id, u.name, u.address, u.phone, u.timezone,
+        SELECT u.id, u.org_id, u.name, u.address, u.phone,
+               COALESCE(u.timezone, o.timezone)::text AS timezone,
                u.printer_brand, u.printer_ip::text, u.printer_port,
                u.is_active, o.logo_url as org_logo_url,
                u.latitude, u.longitude, u.geo_radius_meters,
@@ -443,6 +451,31 @@ pub async fn delete_branch(
     Ok(HttpResponse::NoContent().finish())
 }
 
+/// The full set of selectable IANA timezones — the labels of the `timezone_name`
+/// DB enum. The dashboard's timezone `<select>` is populated from this, so the
+/// frontend can never offer a value the backend/DB would reject (single source
+/// of truth: DB enum → this endpoint → select options).
+#[utoipa::path(
+    get,
+    path = "/timezones",
+    tag = "branches",
+    responses(
+        (status = 200, description = "All selectable IANA timezone names, sorted", body = Vec<String>),
+        AppErrorResponse,
+    ),
+    security(("bearer_jwt" = []))
+)]
+pub async fn list_timezones(
+    pool: web::Data<PgPool>,
+) -> Result<HttpResponse, AppError> {
+    let names: Vec<String> = sqlx::query_scalar(
+        "SELECT enumlabel::text FROM pg_enum WHERE enumtypid = 'timezone_name'::regtype ORDER BY enumlabel",
+    )
+    .fetch_all(pool.get_ref())
+    .await?;
+    Ok(HttpResponse::Ok().json(names))
+}
+
 fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
     req.extensions()
         .get::<Claims>()
@@ -453,7 +486,8 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 async fn fetch_branch(pool: &PgPool, id: Uuid) -> Result<Branch, AppError> {
     sqlx::query_as::<_, Branch>(
         r#"
-        SELECT b.id, b.org_id, b.name, b.address, b.phone, b.timezone,
+        SELECT b.id, b.org_id, b.name, b.address, b.phone,
+               COALESCE(b.timezone, o.timezone)::text AS timezone,
                b.printer_brand, b.printer_ip::text, b.printer_port,
                b.is_active, o.logo_url as org_logo_url,
                b.latitude, b.longitude, b.geo_radius_meters,

@@ -1997,6 +1997,686 @@
         ]
       }
     },
+    "/branches/{id}/qr": {
+      "get": {
+        "tags": [
+          "qr"
+        ],
+        "operationId": "branch_qr",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "card",
+            "in": "query",
+            "description": "`true` (default) → branded A6 card PNG; `false` → plain receipt QR PNG.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "caption",
+            "in": "query",
+            "description": "Dynamic caption line beneath the tagline (A6 card only).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dpi",
+            "in": "query",
+            "description": "Raster DPI for the A6 card (clamped 72–2400). Default 600.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "bleed_mm",
+            "in": "query",
+            "description": "Print bleed in mm (A6 card only). Default 0.",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "format": "float"
+            }
+          },
+          {
+            "name": "crop_marks",
+            "in": "query",
+            "description": "Draw crop marks (A6 card, only meaningful when `bleed_mm > 0`).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "svg",
+            "in": "query",
+            "description": "Return the A6 card as SVG (`data:image/svg+xml;base64,…`). Default false.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "module_px",
+            "in": "query",
+            "description": "Pixels per module for the plain receipt QR (1–40). Default 16.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "slug",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "place_name",
+            "in": "query",
+            "description": "Shop or company name inside the mall (e.g. \"Starbucks Kiosk 3\").",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "floor",
+            "in": "query",
+            "description": "Floor (e.g. \"Ground Floor\").",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "unit_number",
+            "in": "query",
+            "description": "Unit or office number (e.g. \"Unit 42\").",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Branch online-ordering QR (standard or in-mall)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QrResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/branches/{id}/tables": {
+      "get": {
+        "tags": [
+          "qr"
+        ],
+        "operationId": "list_tables",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tables for this branch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BranchTable"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "qr"
+        ],
+        "operationId": "create_table",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTableRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Table created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BranchTable"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/branches/{id}/tables/{tid}": {
+      "delete": {
+        "tags": [
+          "qr"
+        ],
+        "operationId": "delete_table",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tid",
+            "in": "path",
+            "description": "Table ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Table deleted"
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/branches/{id}/tables/{tid}/qr": {
+      "get": {
+        "tags": [
+          "qr"
+        ],
+        "operationId": "table_qr",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tid",
+            "in": "path",
+            "description": "Table ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "card",
+            "in": "query",
+            "description": "`true` (default) → branded A6 card PNG; `false` → plain receipt QR PNG.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "caption",
+            "in": "query",
+            "description": "Dynamic caption line beneath the tagline (A6 card only).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dpi",
+            "in": "query",
+            "description": "Raster DPI for the A6 card (clamped 72–2400). Default 600.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "bleed_mm",
+            "in": "query",
+            "description": "Print bleed in mm (A6 card only). Default 0.",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "format": "float"
+            }
+          },
+          {
+            "name": "crop_marks",
+            "in": "query",
+            "description": "Draw crop marks (A6 card, only meaningful when `bleed_mm > 0`).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "svg",
+            "in": "query",
+            "description": "Return the A6 card as SVG (`data:image/svg+xml;base64,…`). Default false.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "module_px",
+            "in": "query",
+            "description": "Pixels per module for the plain receipt QR (1–40). Default 16.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Table online-ordering QR",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QrResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/bundles": {
       "get": {
         "tags": [
@@ -3346,6 +4026,19 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "branch_id",
+            "in": "query",
+            "description": "Optional: resolve costs at this branch's actual cost (falling back to the\norg default per ingredient). Omit for the org default / standard cost.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
           }
         ],
         "responses": {
@@ -3605,6 +4298,19 @@
             "required": true,
             "schema": {
               "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "branch_id",
+            "in": "query",
+            "description": "Optional: resolve costs at this branch's actual cost (falling back to the\norg default per ingredient). Omit for the org default / standard cost.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
               "format": "uuid"
             }
           }
@@ -4253,6 +4959,171 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DeliveryOrder"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/delivery-orders/{id}/qr": {
+      "get": {
+        "tags": [
+          "qr"
+        ],
+        "operationId": "delivery_order_qr",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Delivery order ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "card",
+            "in": "query",
+            "description": "`true` (default) → branded A6 card PNG; `false` → plain receipt QR PNG.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "caption",
+            "in": "query",
+            "description": "Dynamic caption line beneath the tagline (A6 card only).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dpi",
+            "in": "query",
+            "description": "Raster DPI for the A6 card (clamped 72–2400). Default 600.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "bleed_mm",
+            "in": "query",
+            "description": "Print bleed in mm (A6 card only). Default 0.",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "format": "float"
+            }
+          },
+          {
+            "name": "crop_marks",
+            "in": "query",
+            "description": "Draw crop marks (A6 card, only meaningful when `bleed_mm > 0`).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "svg",
+            "in": "query",
+            "description": "Return the A6 card as SVG (`data:image/svg+xml;base64,…`). Default false.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "module_px",
+            "in": "query",
+            "description": "Pixels per module for the plain receipt QR (1–40). Default 16.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order tracking QR (always a random short code)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QrResponse"
                 }
               }
             }
@@ -6104,211 +6975,6 @@
         ]
       }
     },
-    "/inventory/branches/{branch_id}/adjustments": {
-      "get": {
-        "tags": [
-          "inventory"
-        ],
-        "operationId": "list_adjustments",
-        "parameters": [
-          {
-            "name": "branch_id",
-            "in": "path",
-            "description": "Branch ID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "List adjustments",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/BranchInventoryAdjustment"
-                  }
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request — validation failed or malformed input",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized — missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden — insufficient permission or wrong org",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict — FK or domain invariant violation",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_jwt": []
-          }
-        ]
-      },
-      "post": {
-        "tags": [
-          "inventory"
-        ],
-        "operationId": "create_adjustment",
-        "parameters": [
-          {
-            "name": "branch_id",
-            "in": "path",
-            "description": "Branch ID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateAdjustmentRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "Adjustment created",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BranchInventoryAdjustment"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request — validation failed or malformed input",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized — missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden — insufficient permission or wrong org",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict — FK or domain invariant violation",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_jwt": []
-          }
-        ]
-      }
-    },
     "/inventory/branches/{branch_id}/movements": {
       "get": {
         "tags": [
@@ -6895,6 +7561,24 @@
             "required": false,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
             }
           },
           {
@@ -8688,7 +9372,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PersistedRun"
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/PersistedRun"
+                    }
+                  ]
                 }
               }
             }
@@ -8794,7 +9485,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PersistedRun"
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/PersistedRun"
+                    }
+                  ]
                 }
               }
             }
@@ -10796,6 +11494,116 @@
         ]
       }
     },
+    "/menu-items/{id}/allowed-addons": {
+      "put": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "put_allowed_addons",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Menu item ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutAllowedAddonsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Allowed addon IDs replaced",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/menu-items/{id}/optionals": {
       "get": {
         "tags": [
@@ -11820,6 +12628,24 @@
             "schema": {
               "type": "string",
               "format": "date-time"
+            }
+          },
+          {
+            "name": "order_type",
+            "in": "query",
+            "description": "Filter by order origin: \"dine_in\" or \"delivery\".",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "channel",
+            "in": "query",
+            "description": "Filter delivery orders by channel: \"in_mall\" or \"outside\".",
+            "required": false,
+            "schema": {
+              "type": "string"
             }
           },
           {
@@ -13155,6 +13981,171 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/OnboardingStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/orgs/{id}/qr": {
+      "get": {
+        "tags": [
+          "qr"
+        ],
+        "operationId": "org_qr",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Organisation ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "card",
+            "in": "query",
+            "description": "`true` (default) → branded A6 card PNG; `false` → plain receipt QR PNG.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "caption",
+            "in": "query",
+            "description": "Dynamic caption line beneath the tagline (A6 card only).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dpi",
+            "in": "query",
+            "description": "Raster DPI for the A6 card (clamped 72–2400). Default 600.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "bleed_mm",
+            "in": "query",
+            "description": "Print bleed in mm (A6 card only). Default 0.",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "format": "float"
+            }
+          },
+          {
+            "name": "crop_marks",
+            "in": "query",
+            "description": "Draw crop marks (A6 card, only meaningful when `bleed_mm > 0`).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "svg",
+            "in": "query",
+            "description": "Return the A6 card as SVG (`data:image/svg+xml;base64,…`). Default false.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "module_px",
+            "in": "query",
+            "description": "Pixels per module for the plain receipt QR (1–40). Default 16.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Org-wide branch-picker QR",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QrResponse"
                 }
               }
             }
@@ -14705,6 +15696,335 @@
         }
       }
     },
+    "/public/delivery-orders/history": {
+      "get": {
+        "tags": [
+          "delivery-public"
+        ],
+        "operationId": "guest_order_history",
+        "parameters": [
+          {
+            "name": "phone",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "org_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "device_token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OrderHistorySummary"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/public/delivery-orders/past-locations": {
+      "get": {
+        "tags": [
+          "delivery-public"
+        ],
+        "operationId": "guest_past_locations",
+        "parameters": [
+          {
+            "name": "phone",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "org_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "branch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "device_token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GuestSavedLocation"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/public/delivery-orders/{id}/track": {
+      "get": {
+        "tags": [
+          "delivery-public"
+        ],
+        "operationId": "track_delivery_order",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliveryTracking"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/public/orgs": {
       "get": {
         "tags": [
@@ -15192,6 +16512,215 @@
         ]
       }
     },
+    "/purchasing/branches/{branch_id}/reorder-suggestions": {
+      "get": {
+        "tags": [
+          "purchasing"
+        ],
+        "summary": "Ingredients at/below their reorder point (par_min, else reorder_threshold),\nwith the quantity to reach the order-up-to level (par_max), grouped by the\ningredient's default supplier — the basis for one-click \"create PO\".",
+        "operationId": "reorder_suggestions",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reorder suggestions grouped by supplier",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ReorderSuggestion"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/purchasing/branches/{branch_id}/returns": {
+      "post": {
+        "tags": [
+          "purchasing"
+        ],
+        "summary": "Return stock to a supplier: decrements branch stock and posts a\n'purchase_return' movement per line, recorded as a goods receipt with\nis_return = true. Returns remove stock at its current cost (WAC unchanged).",
+        "operationId": "create_return",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateReturnRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Return recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoodsReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/purchasing/orders/{id}": {
       "get": {
         "tags": [
@@ -15386,6 +16915,107 @@
         ]
       }
     },
+    "/purchasing/orders/{id}/receipts": {
+      "get": {
+        "tags": [
+          "purchasing"
+        ],
+        "summary": "Per-delivery goods-receipt records for a purchase order (multi-shipment audit\ntrail, each with the actual received quantity + cost per line).",
+        "operationId": "list_po_receipts",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Purchase order ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Goods receipts for this PO",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GoodsReceipt"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/purchasing/orders/{id}/receive": {
       "post": {
         "tags": [
@@ -15421,6 +17051,104 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PurchaseOrderFull"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/purchasing/orders/{id}/submit": {
+      "post": {
+        "tags": [
+          "purchasing"
+        ],
+        "summary": "Place a draft PO with the supplier: `draft → ordered`. Makes \"ordered,\nawaiting goods\" a distinct, queryable state (outstanding-orders views) vs a\ndraft still being built. Receiving is still allowed directly from draft for\nworkflows that don't formally place orders first.",
+        "operationId": "submit_purchase_order",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Purchase order ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Purchase order placed (ordered)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PurchaseOrder"
                 }
               }
             }
@@ -15940,6 +17668,187 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Supplier"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/qr/links": {
+      "get": {
+        "tags": [
+          "qr"
+        ],
+        "operationId": "list_marketing_links",
+        "responses": {
+          "200": {
+            "description": "All marketing short links for the org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MarketingLink"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "qr"
+        ],
+        "operationId": "create_marketing_link",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateMarketingLinkRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Marketing QR link created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QrResponse"
                 }
               }
             }
@@ -17001,6 +18910,129 @@
         ]
       }
     },
+    "/reports/branches/{branch_id}/delivery-sales": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "operationId": "branch_delivery_sales",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "branch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Delivery + per-channel sales",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliverySalesReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/reports/branches/{branch_id}/inventory-valuation": {
       "get": {
         "tags": [
@@ -17507,6 +19539,132 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BranchSalesReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/reports/branches/{branch_id}/sales/peak-hours": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "operationId": "branch_sales_peak_hours",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "branch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Peak hours aggregation (24 rows)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PeakHourPoint"
+                  }
                 }
               }
             }
@@ -20801,6 +22959,95 @@
         ]
       }
     },
+    "/timezones": {
+      "get": {
+        "tags": [
+          "branches"
+        ],
+        "summary": "The full set of selectable IANA timezones — the labels of the `timezone_name`\nDB enum. The dashboard's timezone `<select>` is populated from this, so the\nfrontend can never offer a value the backend/DB would reject (single source\nof truth: DB enum → this endpoint → select options).",
+        "operationId": "list_timezones",
+        "responses": {
+          "200": {
+            "description": "All selectable IANA timezone names, sorted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/uploads/menu-items/{menu_item_id}": {
       "post": {
         "tags": [
@@ -21689,6 +23936,366 @@
           }
         ]
       }
+    },
+    "/whatsapp/logout": {
+      "post": {
+        "tags": [
+          "whatsapp"
+        ],
+        "summary": "Unlink the current number. Idempotent — logging out an already-unlinked\nsession still returns the (now logged-out) status.",
+        "operationId": "whatsapp_logout",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhatsappStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "WhatsApp gateway not configured or unreachable"
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/whatsapp/pair": {
+      "post": {
+        "tags": [
+          "whatsapp"
+        ],
+        "summary": "Start (or restart) pairing on the gateway. The QR becomes available a moment\nlater — the dashboard polls `GET /whatsapp/status` until `has_qr`, shows it,\nthen keeps polling until `logged_in`.",
+        "operationId": "whatsapp_pair",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhatsappStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "WhatsApp gateway not configured or unreachable"
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/whatsapp/pause": {
+      "post": {
+        "tags": [
+          "whatsapp"
+        ],
+        "summary": "Pause or resume all outbound WhatsApp sends. Persisted; survives restarts\nand does not touch the linked session.",
+        "operationId": "whatsapp_pause",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PauseInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhatsappStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/whatsapp/status": {
+      "get": {
+        "tags": [
+          "whatsapp"
+        ],
+        "summary": "Current WhatsApp link + pause status, with the pairing QR inlined when one\nis waiting to be scanned. Safe to poll from the dashboard.",
+        "operationId": "whatsapp_status",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhatsappStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -21764,6 +24371,20 @@
           "org_ingredient_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "par_max": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "par_min": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
           },
           "reorder_threshold": {
             "type": [
@@ -22375,7 +24996,7 @@
           },
           "timezone": {
             "type": "string",
-            "description": "IANA timezone name. Defaults to `Africa/Cairo`.",
+            "description": "Effective IANA timezone name for this branch, resolved as\n`branch.timezone → org.timezone → Africa/Cairo`. Always present;\nclients should format all of this branch's timestamps in this zone.",
             "example": "Africa/Cairo"
           },
           "updated_at": {
@@ -22499,7 +25120,9 @@
           "in_mall_override",
           "outside_override",
           "in_mall_fee",
-          "prep_time_minutes"
+          "prep_time_minutes",
+          "otp_required",
+          "in_mall_require_location"
         ],
         "properties": {
           "branch_id": {
@@ -22536,12 +25159,20 @@
           "in_mall_override": {
             "type": "string"
           },
+          "in_mall_require_location": {
+            "type": "boolean",
+            "description": "When false, in-mall orders may be placed without a device GPS location\n(\"confirm you're at the branch\"). Shop/company + floor + unit are always\nrequired regardless. Default true."
+          },
           "max_road_distance_meters": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int32"
+          },
+          "otp_required": {
+            "type": "boolean",
+            "description": "When false, the public checkout skips OTP phone verification for this\nbranch and accepts orders without a device token. Default true."
           },
           "outside_close_time": {
             "type": [
@@ -22571,70 +25202,6 @@
           "prep_time_minutes": {
             "type": "integer",
             "format": "int32"
-          }
-        }
-      },
-      "BranchInventoryAdjustment": {
-        "type": "object",
-        "required": [
-          "id",
-          "branch_id",
-          "branch_inventory_id",
-          "ingredient_name",
-          "unit",
-          "adjustment_type",
-          "quantity",
-          "note",
-          "adjusted_by",
-          "adjusted_by_name",
-          "created_at"
-        ],
-        "properties": {
-          "adjusted_by": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "adjusted_by_name": {
-            "type": "string"
-          },
-          "adjustment_type": {
-            "type": "string"
-          },
-          "branch_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "branch_inventory_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "ingredient_name": {
-            "type": "string"
-          },
-          "note": {
-            "type": "string"
-          },
-          "quantity": {
-            "type": "number",
-            "format": "double"
-          },
-          "transfer_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          },
-          "unit": {
-            "type": "string"
           }
         }
       },
@@ -22700,6 +25267,22 @@
           "org_ingredient_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "par_max": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Order-up-to level (bring stock back up to this when reordering)."
+          },
+          "par_min": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Reorder point (order when on-hand ≤ this). Falls back to reorder_threshold."
           },
           "reorder_threshold": {
             "type": "number",
@@ -23101,12 +25684,20 @@
               "null"
             ]
           },
+          "in_mall_require_location": {
+            "type": "boolean",
+            "description": "When false, in-mall orders are accepted without a device GPS location.\nDefaults to true so an omitting client keeps the location check on."
+          },
           "max_road_distance_meters": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int32"
+          },
+          "otp_required": {
+            "type": "boolean",
+            "description": "When false, the public checkout skips OTP for this branch. Defaults to\ntrue so an omitting client keeps verification on."
           },
           "outside_close_time": {
             "type": [
@@ -23189,6 +25780,47 @@
             "items": {
               "$ref": "#/components/schemas/StockRow"
             }
+          }
+        }
+      },
+      "BranchTable": {
+        "type": "object",
+        "required": [
+          "id",
+          "org_id",
+          "branch_id",
+          "label",
+          "is_active",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "is_active": {
+            "type": "boolean"
+          },
+          "label": {
+            "type": "string",
+            "example": "Table 5"
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },
@@ -23901,6 +26533,14 @@
             "type": "integer",
             "format": "int32"
           },
+          "created_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the movement actually happened. Omit for live (online) movements —\nthe server stamps `now()`. The POS sends this for movements made OFFLINE\nso they keep their real time after syncing. Future values are rejected."
+          },
           "note": {
             "type": "string"
           }
@@ -24459,31 +27099,6 @@
           }
         }
       },
-      "CreateAdjustmentRequest": {
-        "type": "object",
-        "required": [
-          "branch_inventory_id",
-          "adjustment_type",
-          "quantity",
-          "note"
-        ],
-        "properties": {
-          "adjustment_type": {
-            "type": "string"
-          },
-          "branch_inventory_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "note": {
-            "type": "string"
-          },
-          "quantity": {
-            "type": "number",
-            "format": "double"
-          }
-        }
-      },
       "CreateBranchRequest": {
         "type": "object",
         "required": [
@@ -24563,7 +27178,7 @@
               "string",
               "null"
             ],
-            "description": "IANA timezone name. Defaults to `Africa/Cairo` if absent.",
+            "description": "IANA timezone name. If absent, the branch inherits the org's timezone.",
             "example": "Africa/Cairo"
           }
         }
@@ -24688,6 +27303,13 @@
             ],
             "format": "double"
           },
+          "density_g_per_ml": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
           "description": {
             "type": [
               "string",
@@ -24696,6 +27318,20 @@
           },
           "name": {
             "type": "string"
+          },
+          "pack_size": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "pack_unit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional named purchase pack and its base-unit size."
           },
           "supplier_id": {
             "type": [
@@ -24707,6 +27343,13 @@
           },
           "unit": {
             "type": "string"
+          },
+          "yield_pct": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
           }
         }
       },
@@ -24772,6 +27415,29 @@
           "value": {
             "type": "integer",
             "format": "int32"
+          }
+        }
+      },
+      "CreateMarketingLinkRequest": {
+        "type": "object",
+        "required": [
+          "label",
+          "path"
+        ],
+        "properties": {
+          "custom_slug": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "type": "string",
+            "example": "Promo Dec"
+          },
+          "path": {
+            "type": "string",
+            "example": "/menu?promo=december"
           }
         }
       },
@@ -25056,6 +27722,13 @@
             ],
             "format": "double",
             "example": 0.14
+          },
+          "timezone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "Africa/Cairo"
           }
         }
       },
@@ -25138,6 +27811,46 @@
           }
         }
       },
+      "CreateReturnRequest": {
+        "type": "object",
+        "required": [
+          "lines"
+        ],
+        "properties": {
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReturnLineInput"
+            }
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "purchase_order_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "reference": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "supplier_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        }
+      },
       "CreateRunBody": {
         "type": "object",
         "properties": {
@@ -25168,11 +27881,29 @@
       "CreateStocktakeRequest": {
         "type": "object",
         "properties": {
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Cycle-count scope: snapshot only ingredients in this catalog category.\nOmit (with org_ingredient_ids) for a full-branch count."
+          },
           "note": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "org_ingredient_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Cycle-count scope: snapshot only these specific ingredients."
           }
         }
       },
@@ -25202,6 +27933,18 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "CreateTableRequest": {
+        "type": "object",
+        "required": [
+          "label"
+        ],
+        "properties": {
+          "label": {
+            "type": "string",
+            "example": "Table 5"
           }
         }
       },
@@ -25339,7 +28082,7 @@
           },
           "reason": {
             "type": "string",
-            "description": "expired | spoiled | damaged | overproduction | theft | other"
+            "description": "expired | spoiled | damaged | overproduction | order_cancelled | theft | other\n(`order_cancelled` is normally auto-logged by void/cancel, not entered here)"
           }
         }
       },
@@ -25486,6 +28229,46 @@
           }
         }
       },
+      "DeliveryChannelSales": {
+        "type": "object",
+        "description": "Delivery sales for one delivery channel (`in_mall` / `outside`). Revenue and\norder counts are over **delivered** orders only; `cancelled_orders` is shown\nseparately so the UI can surface drop-off without inflating revenue.",
+        "required": [
+          "channel",
+          "orders",
+          "revenue",
+          "delivery_fees",
+          "avg_order_value",
+          "cancelled_orders"
+        ],
+        "properties": {
+          "avg_order_value": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cancelled_orders": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "channel": {
+            "type": "string",
+            "description": "Delivery channel: `in_mall` or `outside`."
+          },
+          "delivery_fees": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sum of `delivery_fee` (piastres) over delivered orders."
+          },
+          "orders": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "revenue": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sum of `total` (piastres) over delivered orders on this channel."
+          }
+        }
+      },
       "DeliveryEvent": {
         "type": "object",
         "description": "What rides the SSE wire. The POS upserts `order` by id, and on\n`event_type == \"created\"` fires its new-order alert. `order` is the exact\nsame shape returned by `GET /delivery-orders`, so the client needs no second\nmodel.",
@@ -25609,9 +28392,18 @@
           "name_translations",
           "price",
           "sizes",
-          "optionals"
+          "optionals",
+          "allowed_addon_ids"
         ],
         "properties": {
+          "allowed_addon_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Explicit per-item addon allowlist (IDs from `menu_item_allowed_addons`).\nWhen non-empty the customizer filters the global catalog to these IDs by\ndefault, with a \"show all\" escape hatch. Empty = no restriction."
+          },
           "category_id": {
             "type": [
               "string",
@@ -26057,6 +28849,216 @@
           }
         }
       },
+      "DeliverySalesReport": {
+        "type": "object",
+        "description": "Delivery sales rolled up across channels, plus a per-channel breakdown.\nAlways returns both `in_mall` and `outside` channels (zero-filled) so the\ndashboard renders a stable shape.",
+        "required": [
+          "total_orders",
+          "total_revenue",
+          "total_delivery_fees",
+          "cancelled_orders",
+          "avg_order_value",
+          "channels"
+        ],
+        "properties": {
+          "avg_order_value": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cancelled_orders": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "channels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeliveryChannelSales"
+            }
+          },
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "total_delivery_fees": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total_orders": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total_revenue": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "DeliveryTracking": {
+        "type": "object",
+        "description": "Customer-safe tracking view of a delivery order, keyed by its opaque UUID\n(same capability-URL trust model as the device-token flow). No phone number\nis exposed; the destination fields are the customer's own inputs. Powers the\npublic `/track/{id}` page (polled, since the public surface has no SSE).",
+        "required": [
+          "id",
+          "org_id",
+          "branch_name",
+          "channel",
+          "status",
+          "created_at",
+          "estimated_prep_minutes",
+          "subtotal",
+          "delivery_fee",
+          "discount_amount",
+          "total",
+          "customer_name"
+        ],
+        "properties": {
+          "address_line": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "branch_name": {
+            "type": "string"
+          },
+          "cancel_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cancelled_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "channel": {
+            "type": "string"
+          },
+          "confirmed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "customer_name": {
+            "type": "string"
+          },
+          "delivered_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "delivery_fee": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "delivery_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "discount_amount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "estimated_prep_minutes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Branch base prep time + the teller's per-order addition (minutes)."
+          },
+          "floor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "out_for_delivery_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "payment_method_hint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "place_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "preparing_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "ready_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "rejected_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string"
+          },
+          "subtotal": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "unit_number": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "DeliveryZone": {
         "type": "object",
         "required": [
@@ -26296,6 +29298,125 @@
           }
         }
       },
+      "GoodsReceipt": {
+        "type": "object",
+        "required": [
+          "id",
+          "branch_id",
+          "is_return",
+          "received_by",
+          "received_at",
+          "lines"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "is_return": {
+            "type": "boolean",
+            "description": "true ⟹ a return to supplier (negative stock effect)."
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GoodsReceiptLine"
+            }
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "purchase_order_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "received_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "received_by": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "received_by_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reference": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "supplier_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "supplier_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "GoodsReceiptLine": {
+        "type": "object",
+        "required": [
+          "id",
+          "org_ingredient_id",
+          "ingredient_name",
+          "quantity"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ingredient_name": {
+            "type": "string"
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "purchase_order_line_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "quantity": {
+            "type": "number",
+            "format": "double",
+            "description": "Base stock units received (+) or returned (−)."
+          },
+          "unit_cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Piastres per base stock unit (actual)."
+          }
+        }
+      },
       "GuardClip": {
         "type": "string",
         "enum": [
@@ -26303,6 +29424,71 @@
           "change_cap",
           "cultural_rounding"
         ]
+      },
+      "GuestSavedLocation": {
+        "type": "object",
+        "required": [
+          "branch_id",
+          "channel",
+          "last_used_at"
+        ],
+        "properties": {
+          "address_line": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "channel": {
+            "type": "string"
+          },
+          "customer_lat": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "customer_lng": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "floor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "landmark": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_used_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "place_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unit_number": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
       },
       "InventoryValuationReport": {
         "type": "object",
@@ -26571,6 +29757,49 @@
             ]
           },
           "unit": {
+            "type": "string"
+          }
+        }
+      },
+      "MarketingLink": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "target_ref",
+          "long_url",
+          "short_code",
+          "short_url",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "long_url": {
+            "type": "string"
+          },
+          "short_code": {
+            "type": "string"
+          },
+          "short_url": {
+            "type": "string"
+          },
+          "target_ref": {
             "type": "string"
           }
         }
@@ -26847,7 +30076,8 @@
               "sizes",
               "addon_slots",
               "optional_fields",
-              "recipes"
+              "recipes",
+              "allowed_addon_ids"
             ],
             "properties": {
               "addon_slots": {
@@ -26855,6 +30085,14 @@
                 "items": {
                   "$ref": "#/components/schemas/AddonSlot"
                 }
+              },
+              "allowed_addon_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "description": "Explicit per-item addon allowlist. Empty = no restriction (use org catalog)."
               },
               "optional_fields": {
                 "type": "array",
@@ -27197,10 +30435,32 @@
               "null"
             ]
           },
+          "delivery_channel": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Delivery channel (\"in_mall\" | \"outside\") of the linked delivery order,\nsurfaced on the list so clients can flag + segment delivery orders\nwithout a per-order detail fetch. `null` for dine-in orders."
+          },
           "delivery_fee": {
             "type": "integer",
             "format": "int32",
             "description": "Delivery charge in piastres, shown separately from the item subtotal.\nAlways 0 for dine-in orders; for delivery orders\n`total_amount == subtotal + tax_amount + delivery_fee` (minus discount)."
+          },
+          "delivery_lat": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Customer location of the linked delivery order, so clients can link out\nto a map (e.g. Google Maps) without a per-order detail fetch. `null` for\ndine-in orders or delivery orders without captured coordinates."
+          },
+          "delivery_lng": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
           },
           "delivery_order_id": {
             "type": [
@@ -27612,6 +30872,100 @@
           }
         ]
       },
+      "OrderHistorySummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "channel",
+          "created_at",
+          "branch_id",
+          "branch_name",
+          "subtotal",
+          "delivery_fee",
+          "discount_amount",
+          "total",
+          "customer_name",
+          "items"
+        ],
+        "properties": {
+          "address_line": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "branch_name": {
+            "type": "string"
+          },
+          "channel": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "customer_lat": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "customer_lng": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "customer_name": {
+            "type": "string"
+          },
+          "delivery_fee": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "delivery_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "discount_amount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "items": {
+            "description": "Frozen cart snapshot: the items at the time of the order (for display)."
+          },
+          "place_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "subtotal": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
       "OrderItem": {
         "type": "object",
         "required": [
@@ -27984,7 +31338,43 @@
             "format": "int64",
             "description": "Total delivery charges (piastres) across completed orders in scope.\nLets the dashboard surface delivery revenue separately from item sales."
           },
+          "delivery_orders": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Count of completed delivery orders."
+          },
+          "delivery_revenue": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Gross revenue (total_amount) of completed delivery orders."
+          },
           "discounts": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "in_mall_fees": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "in_mall_orders": {
+            "type": "integer",
+            "format": "int64",
+            "description": "In-mall channel: order count / gross revenue / delivery fees."
+          },
+          "in_mall_revenue": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "outside_fees": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "outside_orders": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Outside channel: order count / gross revenue / delivery fees."
+          },
+          "outside_revenue": {
             "type": "integer",
             "format": "int64"
           },
@@ -28010,7 +31400,8 @@
           "slug",
           "currency_code",
           "tax_rate",
-          "is_active"
+          "is_active",
+          "timezone"
         ],
         "properties": {
           "currency_code": {
@@ -28049,6 +31440,11 @@
             "format": "double",
             "description": "Tax rate as a decimal (e.g. `0.14` for 14% VAT).\nStored as `BigDecimal` internally; transmitted as a JSON number.",
             "example": 0.14
+          },
+          "timezone": {
+            "type": "string",
+            "description": "IANA timezone name. The org-level default that branches inherit when\ntheir own timezone is unset. Defaults to `Africa/Cairo`.",
+            "example": "Africa/Cairo"
           }
         }
       },
@@ -28113,6 +31509,14 @@
             "type": "string",
             "format": "date-time"
           },
+          "density_g_per_ml": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Grams per millilitre, bridging weight↔volume in recipes; `null` = none."
+          },
           "description": {
             "type": [
               "string",
@@ -28132,6 +31536,21 @@
           "org_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "pack_size": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "How many BASE STOCK units one `pack_unit` yields; `null` = none."
+          },
+          "pack_unit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Named purchase pack (e.g. \"case\", \"sack\"); `null` = none."
           },
           "supplier_id": {
             "type": [
@@ -28153,6 +31572,14 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "yield_pct": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Usable % after trim/cook loss (e.g. 70 = 70%); `null` = 100%. Recipe\nquantities are grossed up by this at save time."
           }
         }
       },
@@ -28515,6 +31942,19 @@
           }
         }
       },
+      "PauseInput": {
+        "type": "object",
+        "description": "Body for `POST /whatsapp/pause`.",
+        "required": [
+          "paused"
+        ],
+        "properties": {
+          "paused": {
+            "type": "boolean",
+            "description": "`true` = mute all sends; `false` = resume."
+          }
+        }
+      },
       "PaymentSplitInput": {
         "type": "object",
         "required": [
@@ -28557,6 +31997,67 @@
             "type": "string"
           },
           "total": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "PeakHourPoint": {
+        "type": "object",
+        "required": [
+          "hour",
+          "orders",
+          "revenue",
+          "voided",
+          "discount",
+          "tax",
+          "avg_revenue_per_day",
+          "avg_orders_per_day",
+          "revenue_pct",
+          "orders_pct"
+        ],
+        "properties": {
+          "avg_orders_per_day": {
+            "type": "number",
+            "format": "double",
+            "description": "Orders averaged over the number of calendar days (may be fractional)."
+          },
+          "avg_revenue_per_day": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Revenue in piastres averaged over the number of calendar days in the queried range."
+          },
+          "discount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "hour": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "orders": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "orders_pct": {
+            "type": "number",
+            "format": "double",
+            "description": "This hour's orders as a percentage of the period total (0–100, 1 dp)."
+          },
+          "revenue": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "revenue_pct": {
+            "type": "number",
+            "format": "double",
+            "description": "This hour's revenue as a percentage of the period total (0–100, 1 dp)."
+          },
+          "tax": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "voided": {
             "type": "integer",
             "format": "int64"
           }
@@ -29059,7 +32560,9 @@
           "in_mall_enabled",
           "outside_enabled",
           "in_mall_open_now",
-          "outside_open_now"
+          "outside_open_now",
+          "otp_required",
+          "in_mall_require_location"
         ],
         "properties": {
           "code": {
@@ -29076,8 +32579,16 @@
             "type": "boolean",
             "description": "Effective-open right now (enabled + open shift + override + window)."
           },
+          "in_mall_require_location": {
+            "type": "boolean",
+            "description": "When false, in-mall ordering does not require a device GPS location."
+          },
           "name": {
             "type": "string"
+          },
+          "otp_required": {
+            "type": "boolean",
+            "description": "When false, the public checkout skips OTP verification for this branch."
           },
           "outside_enabled": {
             "type": "boolean"
@@ -29297,6 +32808,51 @@
           }
         }
       },
+      "PutAllowedAddonsRequest": {
+        "type": "object",
+        "required": [
+          "addon_item_ids"
+        ],
+        "properties": {
+          "addon_item_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Full replacement set of addon item IDs allowed on this menu item.\nSend an empty array to clear the restriction (falls back to org catalog)."
+          }
+        }
+      },
+      "QrResponse": {
+        "type": "object",
+        "description": "JSON returned from every QR-generation endpoint.",
+        "required": [
+          "kind",
+          "long_url",
+          "short_url",
+          "short_code",
+          "qr_data_url"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "long_url": {
+            "type": "string"
+          },
+          "qr_data_url": {
+            "type": "string",
+            "description": "`data:image/png;base64,…` (or `data:image/svg+xml;base64,…` when\n`svg=true`).  Paste into a browser `<img src=\"…\">` to verify."
+          },
+          "short_code": {
+            "type": "string"
+          },
+          "short_url": {
+            "type": "string"
+          }
+        }
+      },
       "QuoteResponse": {
         "type": "object",
         "required": [
@@ -29350,6 +32906,14 @@
           "quantity_received": {
             "type": "number",
             "format": "double"
+          },
+          "unit_cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Optional ACTUAL invoice cost (piastres per purchase unit) for this\ndelivery, when it differs from the ordered price. Drives weighted-average\ncost + the ledger; omitted ⟹ the PO line's ordered cost is used."
           }
         }
       },
@@ -29509,6 +33073,66 @@
           }
         ]
       },
+      "ReorderLine": {
+        "type": "object",
+        "description": "One ingredient to reorder, with the quantity needed to reach its order-up-to\nlevel (par_max, else the reorder point).",
+        "required": [
+          "org_ingredient_id",
+          "ingredient_name",
+          "unit",
+          "current_stock",
+          "suggested_qty"
+        ],
+        "properties": {
+          "current_stock": {
+            "type": "number",
+            "format": "double"
+          },
+          "ingredient_name": {
+            "type": "string"
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "suggested_qty": {
+            "type": "number",
+            "format": "double",
+            "description": "Quantity (in base units) to bring stock up to the order-up-to level."
+          },
+          "unit": {
+            "type": "string"
+          }
+        }
+      },
+      "ReorderSuggestion": {
+        "type": "object",
+        "description": "Reorder suggestions grouped by the ingredient's default supplier so the\ndashboard can raise one draft PO per supplier.",
+        "required": [
+          "lines"
+        ],
+        "properties": {
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReorderLine"
+            }
+          },
+          "supplier_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "supplier_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "ResolveBranchRequest": {
         "type": "object",
         "required": [
@@ -29553,6 +33177,32 @@
             "type": "number",
             "format": "double",
             "description": "Straight-line distance from the supplied coordinates to the branch, in metres."
+          }
+        }
+      },
+      "ReturnLineInput": {
+        "type": "object",
+        "required": [
+          "org_ingredient_id",
+          "quantity"
+        ],
+        "properties": {
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "quantity": {
+            "type": "number",
+            "format": "double",
+            "description": "Base stock units to return (must be ≤ on hand)."
+          },
+          "unit_cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Piastres per base stock unit; defaults to the branch's actual cost."
           }
         }
       },
@@ -30026,7 +33676,7 @@
         "properties": {
           "status": {
             "type": "string",
-            "description": "\"confirmed\" | \"preparing\" | \"ready\" | \"out_for_delivery\""
+            "description": "Target line step: \"confirmed\" | \"preparing\" | \"ready\" | \"out_for_delivery\".\nThe teller may jump to ANY of these from any non-terminal state (forward or\nback); the landed step is stamped and all other step stamps are cleared, and\nat most one customer WhatsApp fires (the last newly-crossed step that has one)."
           }
         }
       },
@@ -30671,6 +34321,13 @@
             ],
             "format": "double"
           },
+          "density_g_per_ml": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
           "description": {
             "type": [
               "string",
@@ -30689,6 +34346,19 @@
               "null"
             ]
           },
+          "pack_size": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "pack_unit": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "supplier_id": {
             "type": [
               "string",
@@ -30702,6 +34372,13 @@
               "string",
               "null"
             ]
+          },
+          "yield_pct": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
           }
         }
       },
@@ -30946,6 +34623,14 @@
             ],
             "format": "double",
             "example": 0.14
+          },
+          "timezone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "IANA timezone name (e.g. `Africa/Cairo`). Validated against the\nPostgreSQL timezone database. Branches inherit this when their own\ntimezone is unset.",
+            "example": "Africa/Cairo"
           }
         }
       },
@@ -31000,6 +34685,20 @@
         "type": "object",
         "properties": {
           "current_stock": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "par_max": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "par_min": {
             "type": [
               "number",
               "null"
@@ -31671,6 +35370,64 @@
           }
         }
       },
+      "WhatsappStatus": {
+        "type": "object",
+        "description": "Snapshot returned to the dashboard. Combines the gateway's live link state\nwith the backend's persisted pause switch.",
+        "required": [
+          "configured",
+          "reachable",
+          "session",
+          "connected",
+          "logged_in",
+          "has_qr",
+          "paused"
+        ],
+        "properties": {
+          "configured": {
+            "type": "boolean",
+            "description": "`WHATSAPP_SERVICE_URL` is set on the backend."
+          },
+          "connected": {
+            "type": "boolean",
+            "description": "Underlying socket is connected to WhatsApp."
+          },
+          "has_qr": {
+            "type": "boolean",
+            "description": "A pairing QR is currently available to scan."
+          },
+          "logged_in": {
+            "type": "boolean",
+            "description": "A number is linked and ready to send."
+          },
+          "paused": {
+            "type": "boolean",
+            "description": "Sending is paused by an admin — the number stays linked but every\noutbound message (OTP + status) is suppressed until resumed."
+          },
+          "paused_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When sending was last paused (audit)."
+          },
+          "qr_image": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Current pairing QR as a `data:image/png;base64,…` URL (only when `has_qr`)."
+          },
+          "reachable": {
+            "type": "boolean",
+            "description": "The gateway answered over HTTP (false = not configured or unreachable)."
+          },
+          "session": {
+            "type": "string",
+            "description": "Session name the relay pairs/sends under."
+          }
+        }
+      },
       "ZoneInput": {
         "type": "object",
         "required": [
@@ -31797,6 +35554,14 @@
     {
       "name": "delivery-public",
       "description": "Unauthenticated, rate-limited customer endpoints: branch selector, channel menu, OSRM quote, WhatsApp OTP, order intake."
+    },
+    {
+      "name": "whatsapp",
+      "description": "Super-admin relay to the private WhatsApp gateway: QR pairing, link status, logout, and the global send pause switch."
+    },
+    {
+      "name": "qr",
+      "description": "Branded A6 QR card generator (PNG/SVG) and plain receipt QR. Renders a Shlink short URL into a print-perfect, Sufrix-styled image."
     }
   ]
 }

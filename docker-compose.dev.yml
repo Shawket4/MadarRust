@@ -1,0 +1,51 @@
+# macOS dev overrides — run with:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+#
+# Differences from production:
+#   - Backend built from local source; uploads bind to ./uploads
+#   - DATABASE_URL rewritten to use host.docker.internal (Mac Docker requirement)
+#   - Shlink uses local SQLite in ./dev-data/shlink/; no HTTPS
+#   - OSRM excluded (backend degrades to haversine distance — no map data needed)
+#   - WhatsApp session data stored in ./dev-data/whatsapp/
+
+services:
+  sufrix-backend:
+    image: sufrix-backend:dev
+    build:
+      context: .
+      args:
+        LTO_MODE: thin
+    env_file: .env
+    environment:
+      # Override the production DATABASE_URL from .env with the local dev DB.
+      # Set DEV_DATABASE_URL in your .env (see .env.example).
+      DATABASE_URL: ${DEV_DATABASE_URL}
+      BIND_ADDR: "0.0.0.0:8081"
+      # Match the dev Shlink container's INITIAL_API_KEY below
+      SHLINK_API_KEY: dev-api-key
+    volumes:
+      - ./uploads:/app/uploads
+
+  sufrix-whatsapp:
+    image: sufrix-whatsapp:dev
+    build:
+      context: ../sufrix-whatsapp
+    volumes:
+      - ./dev-data/whatsapp:/app/data
+
+  # OSRM only starts when map data is present — run `./scripts/dev.sh setup-osrm` first.
+  # dev.sh automatically passes --profile osrm when dev-data/osrm/egypt-latest.osrm exists.
+  osrm:
+    profiles: ["osrm"]
+    volumes:
+      - ./dev-data/osrm:/data
+
+  shlink:
+    volumes:
+      - ./dev-data/shlink:/etc/shlink/data
+    environment:
+      DEFAULT_DOMAIN: localhost:8888
+      IS_HTTPS_ENABLED: "false"
+      INITIAL_API_KEY: dev-api-key
+
+  shlink-web-client: {}

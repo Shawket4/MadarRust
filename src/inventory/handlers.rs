@@ -31,6 +31,21 @@ pub struct OrgIngredient {
     /// Default supplier for reordering this ingredient; `null` = none set.
     pub supplier_id:   Option<Uuid>,
     pub supplier_name: Option<String>,
+    /// Named purchase pack (e.g. "case", "sack"); `null` = none.
+    pub pack_unit:     Option<String>,
+    /// How many BASE STOCK units one `pack_unit` yields; `null` = none.
+    #[serde(default, with = "rust_decimal::serde::float_option")]
+    #[schema(value_type = Option<f64>)]
+    pub pack_size:     Option<Decimal>,
+    /// Usable % after trim/cook loss (e.g. 70 = 70%); `null` = 100%. Recipe
+    /// quantities are grossed up by this at save time.
+    #[serde(default, with = "rust_decimal::serde::float_option")]
+    #[schema(value_type = Option<f64>)]
+    pub yield_pct:     Option<Decimal>,
+    /// Grams per millilitre, bridging weight↔volume in recipes; `null` = none.
+    #[serde(default, with = "rust_decimal::serde::float_option")]
+    #[schema(value_type = Option<f64>)]
+    pub density_g_per_ml: Option<Decimal>,
     pub is_active:     bool,
     pub created_at:    chrono::DateTime<chrono::Utc>,
     pub updated_at:    chrono::DateTime<chrono::Utc>,
@@ -52,6 +67,14 @@ pub struct BranchInventoryItem {
     pub current_stock:     sqlx::types::BigDecimal,
     #[schema(value_type = f64)]
     pub reorder_threshold: sqlx::types::BigDecimal,
+    /// Reorder point (order when on-hand ≤ this). Falls back to reorder_threshold.
+    #[serde(default, with = "rust_decimal::serde::float_option")]
+    #[schema(value_type = Option<f64>)]
+    pub par_min:           Option<Decimal>,
+    /// Order-up-to level (bring stock back up to this when reordering).
+    #[serde(default, with = "rust_decimal::serde::float_option")]
+    #[schema(value_type = Option<f64>)]
+    pub par_max:           Option<Decimal>,
     pub below_reorder:     bool,
     /// When this item was last reconciled by a finalized stock count; `null` =
     /// never counted. Drives the "count due" signal on the inventory home.
@@ -60,22 +83,6 @@ pub struct BranchInventoryItem {
     pub updated_at:        chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
-pub struct BranchInventoryAdjustment {
-    pub id:                  Uuid,
-    pub branch_id:           Uuid,
-    pub branch_inventory_id: Uuid,
-    pub ingredient_name:     String,
-    pub unit:                String,
-    pub adjustment_type:     String,
-    #[schema(value_type = f64)]
-    pub quantity:            sqlx::types::BigDecimal,
-    pub note:                String,
-    pub transfer_id:         Option<Uuid>,
-    pub adjusted_by:         Uuid,
-    pub adjusted_by_name:    String,
-    pub created_at:          chrono::DateTime<chrono::Utc>,
-}
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct BranchInventoryTransfer {
@@ -142,6 +149,17 @@ pub struct CreateCatalogItemRequest {
     pub cost_per_unit: Option<Decimal>,
     /// Optional default supplier for reordering.
     pub supplier_id:   Option<Uuid>,
+    /// Optional named purchase pack and its base-unit size.
+    pub pack_unit:     Option<String>,
+    #[serde(default, with = "rust_decimal::serde::float_option")]
+    #[schema(value_type = Option<f64>)]
+    pub pack_size:     Option<Decimal>,
+    #[serde(default, with = "rust_decimal::serde::float_option")]
+    #[schema(value_type = Option<f64>)]
+    pub yield_pct:     Option<Decimal>,
+    #[serde(default, with = "rust_decimal::serde::float_option")]
+    #[schema(value_type = Option<f64>)]
+    pub density_g_per_ml: Option<Decimal>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -156,6 +174,16 @@ pub struct UpdateCatalogItemRequest {
     /// Set/replace the default supplier. (Omitted = unchanged; clearing to
     /// none is not supported via this field.)
     pub supplier_id:   Option<Uuid>,
+    pub pack_unit:     Option<String>,
+    #[serde(default, with = "rust_decimal::serde::float_option")]
+    #[schema(value_type = Option<f64>)]
+    pub pack_size:     Option<Decimal>,
+    #[serde(default, with = "rust_decimal::serde::float_option")]
+    #[schema(value_type = Option<f64>)]
+    pub yield_pct:     Option<Decimal>,
+    #[serde(default, with = "rust_decimal::serde::float_option")]
+    #[schema(value_type = Option<f64>)]
+    pub density_g_per_ml: Option<Decimal>,
     pub is_active:     Option<bool>,
 }
 
@@ -176,21 +204,18 @@ pub struct AddToStockRequest {
     pub org_ingredient_id: Uuid,
     pub current_stock:     Option<f64>,
     pub reorder_threshold: Option<f64>,
+    pub par_min:           Option<f64>,
+    pub par_max:           Option<f64>,
 }
 
 #[derive(Deserialize, ToSchema)]
 pub struct UpdateStockRequest {
     pub reorder_threshold: Option<f64>,
     pub current_stock:     Option<f64>,
+    pub par_min:           Option<f64>,
+    pub par_max:           Option<f64>,
 }
 
-#[derive(Deserialize, ToSchema)]
-pub struct CreateAdjustmentRequest {
-    pub branch_inventory_id: Uuid,
-    pub adjustment_type:     String, // "add" | "remove"
-    pub quantity:            f64,
-    pub note:                String,
-}
 
 #[derive(Deserialize, ToSchema)]
 pub struct CreateTransferRequest {
@@ -210,6 +235,22 @@ pub struct UpdateTransferRequest {
 #[into_params(parameter_in = Query)]
 pub struct ListTransfersQuery {
     pub direction: Option<String>, // "incoming" | "outgoing" | None = both
+    pub limit:     Option<i64>,
+    pub offset:    Option<i64>,
+}
+
+/// Opt-in pagination for the adjustments / waste list endpoints. Defaults to the
+/// 200 most recent rows (cap 1000) so the queries are always bounded.
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ListPageQuery {
+    pub limit:  Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// Clamp opt-in pagination to a bounded (limit, offset).
+fn page_bounds(limit: Option<i64>, offset: Option<i64>) -> (i64, i64) {
+    (limit.unwrap_or(200).clamp(1, 1000), offset.unwrap_or(0).max(0))
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -228,7 +269,8 @@ pub struct ListMovementsQuery {
 pub struct CreateWasteRequest {
     pub org_ingredient_id: Uuid,
     pub quantity:          f64,
-    /// expired | spoiled | damaged | overproduction | theft | other
+    /// expired | spoiled | damaged | overproduction | order_cancelled | theft | other
+    /// (`order_cancelled` is normally auto-logged by void/cancel, not entered here)
     pub reason:            String,
     pub note:              Option<String>,
 }
@@ -257,6 +299,7 @@ pub async fn list_catalog(
         SELECT oi.id, oi.org_id, oi.name, oi.unit::text, oi.category, oi.description, oi.cost_per_unit,
                oi.supplier_id,
                (SELECT name FROM suppliers WHERE id = oi.supplier_id) AS supplier_name,
+               oi.pack_unit, oi.pack_size, oi.yield_pct, oi.density_g_per_ml,
                oi.is_active, oi.created_at, oi.updated_at
         FROM org_ingredients oi
         WHERE oi.org_id = $1 AND oi.deleted_at IS NULL
@@ -305,11 +348,12 @@ pub async fn create_catalog_item(
 
     let row = sqlx::query_as::<_, OrgIngredient>(
         r#"
-        INSERT INTO org_ingredients (org_id, name, unit, category, description, cost_per_unit, supplier_id)
-        VALUES ($1, $2, $3::inventory_unit, $4, $5, $6, $7)
+        INSERT INTO org_ingredients (org_id, name, unit, category, description, cost_per_unit, supplier_id, pack_unit, pack_size, yield_pct, density_g_per_ml)
+        VALUES ($1, $2, $3::inventory_unit, $4, $5, $6, $7, $8, $9, $10, $11)
         RETURNING id, org_id, name, unit::text, category, description, cost_per_unit,
                   supplier_id,
                   (SELECT name FROM suppliers WHERE id = supplier_id) AS supplier_name,
+                  pack_unit, pack_size, yield_pct, density_g_per_ml,
                   is_active, created_at, updated_at
         "#,
     )
@@ -320,6 +364,10 @@ pub async fn create_catalog_item(
     .bind(&body.description)
     .bind(body.cost_per_unit)
     .bind(body.supplier_id)
+    .bind(&body.pack_unit)
+    .bind(body.pack_size)
+    .bind(body.yield_pct)
+    .bind(body.density_g_per_ml)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
@@ -380,9 +428,9 @@ pub async fn update_catalog_item(
 
     let mut tx = pool.get_ref().begin().await?;
 
-    // Lock the row and read its current base unit.
-    let current_unit: String = sqlx::query_scalar(
-        "SELECT unit::text FROM org_ingredients \
+    // Lock the row and read its current base unit + yield.
+    let (current_unit, current_yield): (String, Option<f64>) = sqlx::query_as(
+        "SELECT unit::text, yield_pct::float8 FROM org_ingredients \
          WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL FOR UPDATE"
     )
     .bind(id)
@@ -419,19 +467,53 @@ pub async fn update_catalog_item(
         ] {
             sqlx::query(q).bind(id).bind(f).bind(new_unit).execute(&mut *tx).await?;
         }
-        // Branch stock + reorder levels are in the base unit too → ÷ F.
+        // Branch stock + reorder levels are in the base unit too → ÷ F. The
+        // per-branch actual cost is piastres per OLD unit → per NEW unit is × F.
         sqlx::query(
             "UPDATE branch_inventory \
              SET current_stock     = round((current_stock / $2)::numeric, 3), \
-                 reorder_threshold = round((reorder_threshold / $2)::numeric, 3) \
+                 reorder_threshold = round((reorder_threshold / $2)::numeric, 3), \
+                 cost_per_unit     = round((cost_per_unit * $2)::numeric, 2) \
              WHERE org_ingredient_id = $1"
         )
         .bind(id).bind(f).execute(&mut *tx).await?;
-        // Cost is piastres per OLD unit → per NEW unit is × F (and its history).
+        // The movement ledger is denominated in the base unit too → rebase
+        // historical quantities + running balances by ÷ F, so SUM(quantity) keeps
+        // reconciling with current_stock after the unit change (no silent drift —
+        // this path used to mutate stock without touching the ledger).
+        sqlx::query(
+            "UPDATE inventory_movements \
+             SET quantity      = round((quantity / $2)::numeric, 3), \
+                 balance_after = round((balance_after / $2)::numeric, 3) \
+             WHERE org_ingredient_id = $1"
+        )
+        .bind(id).bind(f).execute(&mut *tx).await?;
+        // Org default cost is piastres per OLD unit → per NEW unit is × F. Both
+        // the org default and EVERY epoch (org + per-branch) scale identically.
         sqlx::query("UPDATE org_ingredients SET cost_per_unit = round((cost_per_unit * $2)::numeric, 2) WHERE id = $1 AND cost_per_unit IS NOT NULL")
             .bind(id).bind(f).execute(&mut *tx).await?;
         sqlx::query("UPDATE ingredient_cost_history SET cost_per_unit = round((cost_per_unit * $2)::numeric, 2) WHERE org_ingredient_id = $1")
             .bind(id).bind(f).execute(&mut *tx).await?;
+    }
+
+    // Changing yield rebases stored recipe quantities (which are grossed-up by
+    // 1/yield at save time) by old/new, so the effective consumption + COGS stay
+    // correct without re-saving every recipe. NULL yield = 100%.
+    if let Some(new_yield) = body.yield_pct {
+        use rust_decimal::prelude::ToPrimitive;
+        let yf = |pct: f64| (pct / 100.0).max(f64::MIN_POSITIVE);
+        let old_yf = current_yield.map(yf).unwrap_or(1.0);
+        let new_yf = new_yield.to_f64().map(yf).unwrap_or(1.0);
+        let factor = old_yf / new_yf; // stored_new = stored_old * (old_yf/new_yf)
+        if (factor - 1.0).abs() > 1e-9 {
+            for q in [
+                "UPDATE menu_item_recipes         SET quantity_used = round((quantity_used * $2)::numeric, 3) WHERE org_ingredient_id = $1",
+                "UPDATE addon_item_ingredients    SET quantity_used = round((quantity_used * $2)::numeric, 3) WHERE org_ingredient_id = $1",
+                "UPDATE menu_item_optional_fields SET quantity_used = round((quantity_used * $2)::numeric, 3) WHERE org_ingredient_id = $1 AND quantity_used IS NOT NULL",
+            ] {
+                sqlx::query(q).bind(id).bind(factor).execute(&mut *tx).await?;
+            }
+        }
     }
 
     let row = sqlx::query_as::<_, OrgIngredient>(
@@ -443,11 +525,16 @@ pub async fn update_catalog_item(
             description   = COALESCE($5, description),
             cost_per_unit = COALESCE($6, cost_per_unit),
             supplier_id   = COALESCE($9, supplier_id),
+            pack_unit     = COALESCE($10, pack_unit),
+            pack_size     = COALESCE($11, pack_size),
+            yield_pct     = COALESCE($12, yield_pct),
+            density_g_per_ml = COALESCE($13, density_g_per_ml),
             is_active     = COALESCE($7, is_active)
         WHERE id = $1 AND org_id = $8 AND deleted_at IS NULL
         RETURNING id, org_id, name, unit::text, category, description, cost_per_unit,
                   supplier_id,
                   (SELECT name FROM suppliers WHERE id = supplier_id) AS supplier_name,
+                  pack_unit, pack_size, yield_pct, density_g_per_ml,
                   is_active, created_at, updated_at
         "#,
     )
@@ -460,32 +547,39 @@ pub async fn update_catalog_item(
     .bind(body.is_active)
     .bind(org_id)
     .bind(body.supplier_id)
+    .bind(&body.pack_unit)
+    .bind(body.pack_size)
+    .bind(body.yield_pct)
+    .bind(body.density_g_per_ml)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| AppError::NotFound("Ingredient not found".into()))?;
 
     // Maintain cost history whenever cost_per_unit actually changed.
     if let Some(new_cost) = body.cost_per_unit {
+        // The catalog editor sets the ORG default (standard) cost only — its
+        // history epoch is the org-level one (branch_id IS NULL). Per-branch
+        // actual-cost epochs (written by receipts) are left untouched.
         let current_history_cost: Option<Decimal> = sqlx::query_scalar(
             "SELECT cost_per_unit FROM ingredient_cost_history \
-             WHERE org_ingredient_id = $1 AND effective_until IS NULL"
+             WHERE org_ingredient_id = $1 AND branch_id IS NULL AND effective_until IS NULL"
         )
         .bind(id)
         .fetch_optional(&mut *tx)
         .await?;
 
         if current_history_cost != Some(new_cost) {
-            // Close the currently-active row.
+            // Close the currently-active org-level row.
             sqlx::query(
                 "UPDATE ingredient_cost_history \
                  SET effective_until = now() \
-                 WHERE org_ingredient_id = $1 AND effective_until IS NULL"
+                 WHERE org_ingredient_id = $1 AND branch_id IS NULL AND effective_until IS NULL"
             )
             .bind(id)
             .execute(&mut *tx)
             .await?;
 
-            // Open a new row.
+            // Open a new org-level row.
             sqlx::query(
                 "INSERT INTO ingredient_cost_history \
                      (org_ingredient_id, cost_per_unit, effective_from, changed_by) \
@@ -661,10 +755,13 @@ pub async fn list_branch_stock(
             oi.name AS ingredient_name,
             oi.unit::text AS unit,
             oi.description,
-            oi.cost_per_unit,
+            COALESCE(bi.cost_per_unit, oi.cost_per_unit) AS cost_per_unit,
             bi.current_stock,
             bi.reorder_threshold,
-            (bi.reorder_threshold > 0 AND bi.current_stock <= bi.reorder_threshold) AS below_reorder,
+            bi.par_min,
+            bi.par_max,
+            (COALESCE(bi.par_min, bi.reorder_threshold) > 0
+             AND bi.current_stock <= COALESCE(bi.par_min, bi.reorder_threshold)) AS below_reorder,
             (SELECT max(s.finalized_at) FROM stocktakes s
                JOIN stocktake_items si ON si.stocktake_id = s.id
                WHERE s.branch_id = bi.branch_id AND si.org_ingredient_id = bi.org_ingredient_id
@@ -731,16 +828,16 @@ pub async fn add_to_branch_stock(
 
     let row = sqlx::query_as::<_, BranchInventoryItem>(
         r#"
-        INSERT INTO branch_inventory (branch_id, org_ingredient_id, current_stock, reorder_threshold)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO branch_inventory (branch_id, org_ingredient_id, current_stock, reorder_threshold, par_min, par_max)
+        VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING
             id, branch_id, org_ingredient_id,
             (SELECT name        FROM org_ingredients WHERE id = $2) AS ingredient_name,
             (SELECT unit::text  FROM org_ingredients WHERE id = $2) AS unit,
             (SELECT description FROM org_ingredients WHERE id = $2) AS description,
-            (SELECT cost_per_unit FROM org_ingredients WHERE id = $2) AS cost_per_unit,
-            current_stock, reorder_threshold,
-            (reorder_threshold > 0 AND current_stock <= reorder_threshold) AS below_reorder,
+            COALESCE(cost_per_unit, (SELECT cost_per_unit FROM org_ingredients WHERE id = $2)) AS cost_per_unit,
+            current_stock, reorder_threshold, par_min, par_max,
+            (COALESCE(par_min, reorder_threshold) > 0 AND current_stock <= COALESCE(par_min, reorder_threshold)) AS below_reorder,
             (SELECT max(s.finalized_at) FROM stocktakes s
                JOIN stocktake_items si ON si.stocktake_id = s.id
                WHERE s.branch_id = branch_inventory.branch_id
@@ -753,6 +850,8 @@ pub async fn add_to_branch_stock(
     .bind(body.org_ingredient_id)
     .bind(body.current_stock.unwrap_or(0.0))
     .bind(body.reorder_threshold.unwrap_or(0.0))
+    .bind(body.par_min)
+    .bind(body.par_max)
     .fetch_one(pool.get_ref())
     .await
     .map_err(|e| {
@@ -795,16 +894,18 @@ pub async fn update_branch_stock(
         r#"
         UPDATE branch_inventory SET
             reorder_threshold = COALESCE($3, reorder_threshold),
-            current_stock     = COALESCE($4, current_stock)
+            current_stock     = COALESCE($4, current_stock),
+            par_min           = COALESCE($5, par_min),
+            par_max           = COALESCE($6, par_max)
         WHERE id = $1 AND branch_id = $2
         RETURNING
             id, branch_id, org_ingredient_id,
             (SELECT name          FROM org_ingredients WHERE id = org_ingredient_id) AS ingredient_name,
             (SELECT unit::text    FROM org_ingredients WHERE id = org_ingredient_id) AS unit,
             (SELECT description   FROM org_ingredients WHERE id = org_ingredient_id) AS description,
-            (SELECT cost_per_unit FROM org_ingredients WHERE id = org_ingredient_id) AS cost_per_unit,
-            current_stock, reorder_threshold,
-            (reorder_threshold > 0 AND current_stock <= reorder_threshold) AS below_reorder,
+            COALESCE(branch_inventory.cost_per_unit, (SELECT cost_per_unit FROM org_ingredients WHERE id = org_ingredient_id)) AS cost_per_unit,
+            current_stock, reorder_threshold, par_min, par_max,
+            (COALESCE(par_min, reorder_threshold) > 0 AND current_stock <= COALESCE(par_min, reorder_threshold)) AS below_reorder,
             (SELECT max(s.finalized_at) FROM stocktakes s
                JOIN stocktake_items si ON si.stocktake_id = s.id
                WHERE s.branch_id = branch_inventory.branch_id
@@ -817,6 +918,8 @@ pub async fn update_branch_stock(
     .bind(branch_id)
     .bind(body.reorder_threshold)
     .bind(body.current_stock)
+    .bind(body.par_min)
+    .bind(body.par_max)
     .fetch_optional(pool.get_ref())
     .await?
     .ok_or_else(|| AppError::NotFound("Branch inventory item not found".into()))?;
@@ -863,173 +966,6 @@ pub async fn remove_from_branch_stock(
         })?;
 
     Ok(HttpResponse::NoContent().finish())
-}
-
-// ── POST /inventory/branches/:branch_id/adjustments ──────────
-
-#[utoipa::path(
-    post,
-    path = "/inventory/branches/{branch_id}/adjustments",
-    tag = "inventory",
-    params(("branch_id" = Uuid, Path, description = "Branch ID")),
-    request_body = CreateAdjustmentRequest,
-    responses((status = 201, description = "Adjustment created", body = BranchInventoryAdjustment), AppErrorResponse),
-    security(("bearer_jwt" = []))
-)]
-pub async fn create_adjustment(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
-    branch_id: web::Path<Uuid>,
-    body:      web::Json<CreateAdjustmentRequest>,
-) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "inventory_adjustments", "create").await?;
-    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
-
-    match body.adjustment_type.as_str() {
-        "add" | "remove" => {}
-        _ => return Err(AppError::BadRequest("adjustment_type must be 'add' or 'remove'".into())),
-    }
-    if body.quantity <= 0.0 {
-        return Err(AppError::BadRequest("quantity must be greater than 0".into()));
-    }
-    if body.note.trim().is_empty() {
-        return Err(AppError::BadRequest("note is required for adjustments".into()));
-    }
-
-    let mut tx = pool.get_ref().begin().await?;
-
-    // Lock the row inside the tx. This both verifies the item belongs to this
-    // branch AND closes a TOCTOU race: without the lock two concurrent
-    // "remove" requests could each read the same stock, both pass the check,
-    // and drive current_stock negative. (Mirrors create_transfer's FOR UPDATE.)
-    let locked: Option<(sqlx::types::BigDecimal, Uuid, Option<f64>)> = sqlx::query_as(
-        "SELECT bi.current_stock, bi.org_ingredient_id, oi.cost_per_unit::float8 \
-         FROM branch_inventory bi \
-         JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id \
-         WHERE bi.id = $1 AND bi.branch_id = $2 FOR UPDATE OF bi"
-    )
-    .bind(body.branch_inventory_id)
-    .bind(*branch_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    let (current, org_ingredient_id, unit_cost_f) = locked
-        .ok_or_else(|| AppError::BadRequest("Inventory item does not belong to this branch".into()))?;
-
-    let qty = sqlx::types::BigDecimal::try_from(body.quantity)
-        .map_err(|_| AppError::BadRequest("Invalid quantity".into()))?;
-
-    // For remove: check sufficient stock (under the lock taken above).
-    if body.adjustment_type == "remove" && current < qty {
-        return Err(AppError::BadRequest(format!(
-            "Insufficient stock. Current: {}, Requested: {}", current, qty
-        )));
-    }
-
-    let delta: f64 = match body.adjustment_type.as_str() {
-        "add"    =>  body.quantity,
-        "remove" => -body.quantity,
-        _        => unreachable!(),
-    };
-
-    let balance: f64 = sqlx::query_scalar(
-        "UPDATE branch_inventory SET current_stock = current_stock + $1 \
-         WHERE id = $2 RETURNING current_stock::float8"
-    )
-    .bind(delta)
-    .bind(body.branch_inventory_id)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    let adj = sqlx::query_as::<_, BranchInventoryAdjustment>(
-        r#"
-        INSERT INTO branch_inventory_adjustments
-            (branch_id, branch_inventory_id, type, quantity, note, adjusted_by)
-        VALUES ($1, $2, $3::inventory_adjustment_type, $4, $5, $6)
-        RETURNING
-            id, branch_id, branch_inventory_id,
-            (SELECT oi.name FROM branch_inventory bi JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id WHERE bi.id = $2) AS ingredient_name,
-            (SELECT oi.unit::text FROM branch_inventory bi JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id WHERE bi.id = $2) AS unit,
-            type::text AS adjustment_type,
-            quantity, note, transfer_id, adjusted_by,
-            (SELECT name FROM users WHERE id = $6) AS adjusted_by_name,
-            created_at
-        "#,
-    )
-    .bind(*branch_id)
-    .bind(body.branch_inventory_id)
-    .bind(&body.adjustment_type)
-    .bind(body.quantity)
-    .bind(body.note.trim())
-    .bind(claims.user_id())
-    .fetch_one(&mut *tx)
-    .await?;
-
-    record_movement(&mut *tx, MovementParams {
-        branch_id:           *branch_id,
-        org_ingredient_id,
-        branch_inventory_id: Some(body.branch_inventory_id),
-        movement_type:       if body.adjustment_type == "add" { "adjustment_add" } else { "adjustment_remove" },
-        quantity:            delta,
-        balance_after:       Some(balance),
-        unit_cost:           unit_cost_f.map(|c| c.round() as i64),
-        reason:              None,
-        below_zero:          balance < 0.0,
-        source_type:         Some("adjustment"),
-        source_id:           Some(adj.id),
-        note:                Some(body.note.trim()),
-        created_by:          Some(claims.user_id()),
-    })
-    .await?;
-
-    tx.commit().await?;
-
-    Ok(HttpResponse::Created().json(adj))
-}
-
-// ── GET /inventory/branches/:branch_id/adjustments ───────────
-
-#[utoipa::path(
-    get,
-    path = "/inventory/branches/{branch_id}/adjustments",
-    tag = "inventory",
-    params(("branch_id" = Uuid, Path, description = "Branch ID")),
-    responses((status = 200, description = "List adjustments", body = Vec<BranchInventoryAdjustment>), AppErrorResponse),
-    security(("bearer_jwt" = []))
-)]
-pub async fn list_adjustments(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
-    branch_id: web::Path<Uuid>,
-) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "inventory_adjustments", "read").await?;
-    require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
-
-    let rows = sqlx::query_as::<_, BranchInventoryAdjustment>(
-        r#"
-        SELECT
-            a.id, a.branch_id, a.branch_inventory_id,
-            oi.name     AS ingredient_name,
-            oi.unit::text AS unit,
-            a.type::text AS adjustment_type,
-            a.quantity, a.note, a.transfer_id, a.adjusted_by,
-            u.name      AS adjusted_by_name,
-            a.created_at
-        FROM branch_inventory_adjustments a
-        JOIN branch_inventory bi ON bi.id = a.branch_inventory_id
-        JOIN org_ingredients oi  ON oi.id = bi.org_ingredient_id
-        JOIN users u             ON u.id  = a.adjusted_by
-        WHERE a.branch_id = $1
-        ORDER BY a.created_at DESC
-        "#,
-    )
-    .bind(*branch_id)
-    .fetch_all(pool.get_ref())
-    .await?;
-
-    Ok(HttpResponse::Ok().json(rows))
 }
 
 // ── GET /inventory/branches/:branch_id/movements ─────────────
@@ -1123,7 +1059,8 @@ pub async fn create_waste(
 
     // Lock the stock row (also validates the ingredient is tracked here).
     let locked: Option<(Uuid, sqlx::types::BigDecimal, Option<f64>)> = sqlx::query_as(
-        "SELECT bi.id, bi.current_stock, oi.cost_per_unit::float8 \
+        "SELECT bi.id, bi.current_stock, \
+                COALESCE(bi.cost_per_unit, oi.cost_per_unit)::float8 \
          FROM branch_inventory bi \
          JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id \
          WHERE bi.branch_id = $1 AND bi.org_ingredient_id = $2 FOR UPDATE OF bi"
@@ -1190,9 +1127,11 @@ pub async fn list_waste(
     req:       HttpRequest,
     pool:      web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
+    page:      web::Query<ListPageQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory_waste", "read").await?;
+    let (limit, offset) = page_bounds(page.limit, page.offset);
 
     // nil UUID = every branch in the caller's org ("All branches"); any other
     // UUID is that one branch after the usual access check. The org for the
@@ -1227,10 +1166,13 @@ pub async fn list_waste(
         LEFT JOIN users u       ON u.id  = m.created_by
         WHERE {scope_condition} AND m.type = 'waste'
         ORDER BY m.created_at DESC, m.id DESC
+        LIMIT $2 OFFSET $3
         "#
     );
     let rows = sqlx::query_as::<_, BranchInventoryMovement>(&sql)
         .bind(scope_id)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(pool.get_ref())
         .await?;
 
@@ -1339,6 +1281,25 @@ pub async fn create_transfer(
     .fetch_one(&mut *tx)
     .await?;
 
+    // Cost travels with the goods: blend the SOURCE branch's actual cost into the
+    // DESTINATION branch's weighted-average cost before adding the stock (WAC
+    // reads the destination's prior on-hand). Skipped when the source cost is
+    // unknown — there's nothing meaningful to blend. (Transfers stay instant.)
+    let src_cost: Option<Decimal> = sqlx::query_scalar(
+        "SELECT COALESCE(bi.cost_per_unit, oi.cost_per_unit) \
+         FROM branch_inventory bi JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id \
+         WHERE bi.id = $1"
+    )
+    .bind(src_bi_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if let Some(cost) = src_cost {
+        let qty_dec = Decimal::from_f64_retain(body.quantity).unwrap_or(Decimal::ZERO).round_dp(3);
+        crate::costing::service::apply_weighted_average_cost(
+            &mut *tx, body.destination_branch_id, body.org_ingredient_id, qty_dec, cost, claims.user_id(),
+        ).await?;
+    }
+
     // Upsert destination — create if not tracked, add stock if exists
     let (dst_bi_id, dst_balance): (Uuid, f64) = sqlx::query_as(
         r#"
@@ -1352,21 +1313,6 @@ pub async fn create_transfer(
     .bind(body.destination_branch_id)
     .bind(body.org_ingredient_id)
     .bind(body.quantity)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    // Look up branch names for audit notes
-    let src_name: String = sqlx::query_scalar(
-        "SELECT name FROM branches WHERE id = $1"
-    )
-    .bind(body.source_branch_id)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    let dst_name: String = sqlx::query_scalar(
-        "SELECT name FROM branches WHERE id = $1"
-    )
-    .bind(body.destination_branch_id)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -1400,40 +1346,14 @@ pub async fn create_transfer(
     .fetch_one(&mut *tx)
     .await?;
 
-    // Log adjustments on both sides
-    sqlx::query(
-        r#"INSERT INTO branch_inventory_adjustments
-            (branch_id, branch_inventory_id, type, quantity, note, transfer_id, adjusted_by)
-           VALUES ($1, $2, 'transfer_out'::inventory_adjustment_type, $3, $4, $5, $6)"#,
-    )
-    .bind(body.source_branch_id)
-    .bind(src_bi_id)
-    .bind(body.quantity)
-    .bind(format!("Transfer to {} — {} units", dst_name, body.quantity))
-    .bind(transfer.id)
-    .bind(claims.user_id())
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query(
-        r#"INSERT INTO branch_inventory_adjustments
-            (branch_id, branch_inventory_id, type, quantity, note, transfer_id, adjusted_by)
-           VALUES ($1, $2, 'transfer_in'::inventory_adjustment_type, $3, $4, $5, $6)"#,
-    )
-    .bind(body.destination_branch_id)
-    .bind(dst_bi_id)
-    .bind(body.quantity)
-    .bind(format!("Transfer from {} — {} units", src_name, body.quantity))
-    .bind(transfer.id)
-    .bind(claims.user_id())
-    .execute(&mut *tx)
-    .await?;
-
-    // Ledger movements on both sides (cost is the same org-level ingredient).
+    // Ledger movements on both sides. Cost travels with the goods: both legs are
+    // valued at the SOURCE branch's actual cost (falling back to the org default).
     let unit_cost_f: Option<f64> = sqlx::query_scalar(
-        "SELECT cost_per_unit::float8 FROM org_ingredients WHERE id = $1"
+        "SELECT COALESCE(bi.cost_per_unit, oi.cost_per_unit)::float8 \
+         FROM branch_inventory bi JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id \
+         WHERE bi.id = $1"
     )
-    .bind(body.org_ingredient_id)
+    .bind(src_bi_id)
     .fetch_one(&mut *tx)
     .await?;
     let unit_cost = unit_cost_f.map(|c| c.round() as i64);
@@ -1549,12 +1469,16 @@ pub async fn list_transfers(
         JOIN users u            ON u.id   = t.initiated_by
         WHERE {}
         ORDER BY t.initiated_at DESC
+        LIMIT $2 OFFSET $3
         "#,
         condition
     );
 
+    let (limit, offset) = page_bounds(query.limit, query.offset);
     let rows = sqlx::query_as::<_, BranchInventoryTransfer>(&sql)
         .bind(scope_id)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(pool.get_ref())
         .await?;
 
@@ -1678,7 +1602,7 @@ pub async fn delete_transfer(
         .fetch_optional(pool.get_ref())
         .await?;
 
-    let (org_id, src_id, dst_id, ing_id, qty, src_name, dst_name) =
+    let (org_id, src_id, dst_id, ing_id, qty, _src_name, _dst_name) =
         t.ok_or_else(|| AppError::NotFound("Transfer not found".into()))?;
 
     require_org_access(&claims, org_id)?;
@@ -1706,10 +1630,15 @@ pub async fn delete_transfer(
     }
 
     let qty_f: f64 = qty.to_string().parse().unwrap_or(0.0);
+    // Value the reversal at the source branch's actual cost (org default fallback).
     let unit_cost_f: Option<f64> = sqlx::query_scalar(
-        "SELECT cost_per_unit::float8 FROM org_ingredients WHERE id = $1"
+        "SELECT COALESCE(bi.cost_per_unit, oi.cost_per_unit)::float8 \
+         FROM org_ingredients oi \
+         LEFT JOIN branch_inventory bi ON bi.org_ingredient_id = oi.id AND bi.branch_id = $2 \
+         WHERE oi.id = $1"
     )
     .bind(ing_id)
+    .bind(src_id)
     .fetch_one(&mut *tx)
     .await?;
     let unit_cost = unit_cost_f.map(|c| c.round() as i64);
@@ -1738,38 +1667,15 @@ pub async fn delete_transfer(
     .fetch_optional(&mut *tx)
     .await?;
 
-    // Log compensating adjustments on both sides (audit trail)
-    sqlx::query(
-        r#"INSERT INTO branch_inventory_adjustments
-            (branch_id, branch_inventory_id, type, quantity, note, adjusted_by)
-           SELECT $1, bi.id, 'add'::inventory_adjustment_type, $3,
-                  $4, $5
-           FROM branch_inventory bi
-           WHERE bi.branch_id = $1 AND bi.org_ingredient_id = $2"#,
-    )
-    .bind(src_id)
-    .bind(ing_id)
-    .bind(&qty)
-    .bind(format!("Transfer reversal — returned from {}", dst_name))
-    .bind(claims.user_id())
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query(
-        r#"INSERT INTO branch_inventory_adjustments
-            (branch_id, branch_inventory_id, type, quantity, note, adjusted_by)
-           SELECT $1, bi.id, 'remove'::inventory_adjustment_type, $3,
-                  $4, $5
-           FROM branch_inventory bi
-           WHERE bi.branch_id = $1 AND bi.org_ingredient_id = $2"#,
-    )
-    .bind(dst_id)
-    .bind(ing_id)
-    .bind(&qty)
-    .bind(format!("Transfer reversal — returned to {}", src_name))
-    .bind(claims.user_id())
-    .execute(&mut *tx)
-    .await?;
+    // A reversal must apply to BOTH sides or neither — otherwise stock drifts
+    // asymmetrically (the source gets added back while the destination is
+    // skipped, or vice-versa). The destination was validated + locked above; the
+    // source must also still track the ingredient.
+    if src_rev.is_none() || dst_rev.is_none() {
+        return Err(AppError::Conflict(
+            "Cannot reverse transfer: a branch no longer tracks this ingredient.".into(),
+        ));
+    }
 
     // Ledger movements for the reversal.
     if let Some((bi_id, balance)) = src_rev {
@@ -1915,9 +1821,13 @@ fn validate_unit(unit: &str) -> Result<(), AppError> {
 
 fn validate_waste_reason(reason: &str) -> Result<(), AppError> {
     match reason {
-        "expired" | "spoiled" | "damaged" | "overproduction" | "theft" | "other" => Ok(()),
+        // `order_cancelled` is the system reason auto-logged when a made order is
+        // voided / a delivery is cancelled without restock; kept distinct from
+        // `overproduction` (a kitchen-forecasting signal) so waste-by-reason
+        // reports stay honest.
+        "expired" | "spoiled" | "damaged" | "overproduction" | "order_cancelled" | "theft" | "other" => Ok(()),
         _ => Err(AppError::BadRequest(
-            "reason must be one of: expired, spoiled, damaged, overproduction, theft, other".into(),
+            "reason must be one of: expired, spoiled, damaged, overproduction, order_cancelled, theft, other".into(),
         )),
     }
 }

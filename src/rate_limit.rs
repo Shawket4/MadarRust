@@ -9,6 +9,16 @@ use actix_governor::{KeyExtractor, SimpleKeyExtractionError};
 use actix_web::dev::ServiceRequest;
 use std::net::{IpAddr, Ipv4Addr};
 
+/// Rate limiting is ON by default. Set `SUFRIX_DISABLE_RATE_LIMIT=1` (or `=true`)
+/// to turn it off — used by the local API-fuzz harness (scripts/api-fuzz.sh) so
+/// the fuzzer isn't throttled to a wall of 429s. Never set this in production.
+pub fn rate_limiting_enabled() -> bool {
+    !matches!(
+        std::env::var("SUFRIX_DISABLE_RATE_LIMIT").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
 #[derive(Clone)]
 pub struct PeerIpOrLocalhost;
 

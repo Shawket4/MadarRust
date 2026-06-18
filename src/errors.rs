@@ -26,6 +26,9 @@ pub enum AppError {
     #[error("Database error: {0}")]
     Db(#[from] sqlx::Error),
 
+    #[error("Service unavailable: {0}")]
+    ServiceUnavailable(String),
+
     #[error("Internal error")]
     Internal,
 }
@@ -39,6 +42,55 @@ pub struct ErrorBody {
     pub error: String,
 }
 
+impl AppError {
+    /// Classify a database error by its Postgres SQLSTATE so failures caused by
+    /// bad *client* input surface as 4xx instead of a blanket 500. Genuine
+    /// backend failures (connection loss, deadlock, etc.) still map to 500.
+    ///
+    /// Found via API fuzzing: previously a negative `page`, an out-of-range
+    /// number, an invalid enum/UUID, a NUL byte, or a unique/FK violation all
+    /// returned 500 because every sqlx error mapped to InternalServerError.
+    fn db_status(e: &sqlx::Error) -> actix_web::http::StatusCode {
+        status_for_sqlstate(e.as_database_error().and_then(|d| d.code()).as_deref())
+    }
+}
+
+/// Map a Postgres SQLSTATE to an HTTP status. Pure so it can be unit-tested.
+/// Class 22 (data exception) and the check/not-null integrity codes are
+/// client-input faults → 4xx; unique/FK and other integrity violations → 409;
+/// anything else (connection, deadlock, internal) stays 500.
+fn status_for_sqlstate(code: Option<&str>) -> actix_web::http::StatusCode {
+    use actix_web::http::StatusCode;
+    match code {
+        Some("23505") | Some("23503") => StatusCode::CONFLICT,    // unique / foreign-key violation
+        Some("23514") | Some("23502") => StatusCode::BAD_REQUEST, // check / not-null violation
+        Some(c) if c.starts_with("22") => StatusCode::BAD_REQUEST, // data exception (overflow, bad enum/uuid/encoding, offset range)
+        Some(c) if c.starts_with("23") => StatusCode::CONFLICT,    // other integrity violations
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::status_for_sqlstate;
+    use actix_web::http::StatusCode;
+
+    #[test]
+    fn classifies_sqlstates() {
+        assert_eq!(status_for_sqlstate(Some("23505")), StatusCode::CONFLICT); // unique
+        assert_eq!(status_for_sqlstate(Some("23503")), StatusCode::CONFLICT); // foreign key
+        assert_eq!(status_for_sqlstate(Some("23514")), StatusCode::BAD_REQUEST); // check
+        assert_eq!(status_for_sqlstate(Some("23502")), StatusCode::BAD_REQUEST); // not null
+        assert_eq!(status_for_sqlstate(Some("22003")), StatusCode::BAD_REQUEST); // numeric overflow
+        assert_eq!(status_for_sqlstate(Some("22P02")), StatusCode::BAD_REQUEST); // invalid text/enum
+        assert_eq!(status_for_sqlstate(Some("22021")), StatusCode::BAD_REQUEST); // bad encoding / NUL
+        assert_eq!(status_for_sqlstate(Some("2201X")), StatusCode::BAD_REQUEST); // offset out of range
+        assert_eq!(status_for_sqlstate(Some("40P01")), StatusCode::INTERNAL_SERVER_ERROR); // deadlock
+        assert_eq!(status_for_sqlstate(Some("08006")), StatusCode::INTERNAL_SERVER_ERROR); // connection failure
+        assert_eq!(status_for_sqlstate(None), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+}
+
 impl actix_web::ResponseError for AppError {
     fn error_response(&self) -> HttpResponse {
         let body = ErrorBody { error: self.to_string() };
@@ -48,7 +100,8 @@ impl actix_web::ResponseError for AppError {
             AppError::NotFound(_)     => HttpResponse::NotFound().json(body),
             AppError::BadRequest(_)   => HttpResponse::BadRequest().json(body),
             AppError::Conflict(_)     => HttpResponse::Conflict().json(body),
-            AppError::Db(_)           => HttpResponse::InternalServerError().json(body),
+            AppError::Db(e)           => HttpResponse::build(Self::db_status(e)).json(body),
+            AppError::ServiceUnavailable(_) => HttpResponse::ServiceUnavailable().json(body),
             AppError::Internal        => HttpResponse::InternalServerError().json(body),
         }
     }

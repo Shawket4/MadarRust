@@ -9,7 +9,7 @@ use crate::auth::jwt::JwtSecret;
 use crate::models::UserRole;
 use crate::inventory::routes;
 use crate::inventory::handlers::{
-    OrgIngredient, BranchInventoryItem, BranchInventoryAdjustment, BranchInventoryTransfer,
+    OrgIngredient, BranchInventoryItem, BranchInventoryTransfer,
     BranchInventoryMovement, OrgInventorySettings,
 };
 
@@ -757,330 +757,6 @@ async fn test_remove_from_branch_stock_success(pool: PgPool) {
     assert!(!exists);
 }
 
-#[sqlx::test]
-async fn test_remove_from_branch_stock_referenced_conflict(pool: PgPool) {
-    let app = test::init_service(
-        App::new()
-            .app_data(web::Data::new(pool.clone()))
-            .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
-
-    let org_id = seed_org(&pool).await;
-    let branch_id = seed_branch(&pool, org_id).await;
-    let user_id = seed_user(&pool, org_id, "org_admin").await;
-    grant_permission(&pool, "org_admin", "inventory", "delete").await;
-    grant_permission(&pool, "org_admin", "inventory_adjustments", "create").await;
-
-    let ing_id = seed_ingredient(&pool, org_id, "Tomato", "kg").await;
-    let bi_id = seed_branch_inventory(&pool, branch_id, ing_id, 10.0, 2.0).await;
-
-    // Add adjustment history
-    sqlx::query(
-        "INSERT INTO branch_inventory_adjustments (branch_id, branch_inventory_id, type, quantity, note, adjusted_by) \
-         VALUES ($1, $2, 'add'::inventory_adjustment_type, 5.0, 'Initial seed adjustment', $3)"
-    )
-    .bind(branch_id)
-    .bind(bi_id)
-    .bind(user_id)
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    let token = generate_org_admin_token(user_id, org_id);
-    let req = test::TestRequest::delete()
-        .uri(&format!("/inventory/branches/{}/stock/{}", branch_id, bi_id))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .to_request();
-
-    let resp = test::call_service(&app, req).await;
-    // Foreign key constraint branch_inventory_adjustments_branch_inventory_id_fkey blocks deletion
-    assert_eq!(resp.status(), actix_web::http::StatusCode::CONFLICT);
-}
-
-// ──────────────────────────────────────────────────────────────
-// ── Adjustments Tests
-// ──────────────────────────────────────────────────────────────
-
-#[sqlx::test]
-async fn test_create_adjustment_add_success(pool: PgPool) {
-    let app = test::init_service(
-        App::new()
-            .app_data(web::Data::new(pool.clone()))
-            .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
-
-    let org_id = seed_org(&pool).await;
-    let branch_id = seed_branch(&pool, org_id).await;
-    let user_id = seed_user(&pool, org_id, "branch_manager").await;
-    assign_branch(&pool, user_id, branch_id).await;
-    grant_permission(&pool, "branch_manager", "inventory_adjustments", "create").await;
-
-    let ing_id = seed_ingredient(&pool, org_id, "Tomato", "kg").await;
-    let bi_id = seed_branch_inventory(&pool, branch_id, ing_id, 10.0, 2.0).await;
-
-    let token = generate_branch_manager_token(user_id, org_id);
-    let req = test::TestRequest::post()
-        .uri(&format!("/inventory/branches/{}/adjustments", branch_id))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
-            "branch_inventory_id": bi_id,
-            "adjustment_type": "add",
-            "quantity": 5.5,
-            "note": "Received extra tomatoes"
-        }))
-        .to_request();
-
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), actix_web::http::StatusCode::CREATED);
-
-    let adj: BranchInventoryAdjustment = test::read_body_json(resp).await;
-    assert_eq!(adj.adjustment_type, "add");
-    assert_eq!(adj.quantity, sqlx::types::BigDecimal::from_str("5.500").unwrap());
-
-    // Verify stock was updated
-    let new_stock: sqlx::types::BigDecimal = sqlx::query_scalar(
-        "SELECT current_stock FROM branch_inventory WHERE id = $1"
-    )
-    .bind(bi_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(new_stock, sqlx::types::BigDecimal::from_str("15.500").unwrap());
-}
-
-#[sqlx::test]
-async fn test_create_adjustment_remove_success(pool: PgPool) {
-    let app = test::init_service(
-        App::new()
-            .app_data(web::Data::new(pool.clone()))
-            .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
-
-    let org_id = seed_org(&pool).await;
-    let branch_id = seed_branch(&pool, org_id).await;
-    let user_id = seed_user(&pool, org_id, "branch_manager").await;
-    assign_branch(&pool, user_id, branch_id).await;
-    grant_permission(&pool, "branch_manager", "inventory_adjustments", "create").await;
-
-    let ing_id = seed_ingredient(&pool, org_id, "Tomato", "kg").await;
-    let bi_id = seed_branch_inventory(&pool, branch_id, ing_id, 10.0, 2.0).await;
-
-    let token = generate_branch_manager_token(user_id, org_id);
-    let req = test::TestRequest::post()
-        .uri(&format!("/inventory/branches/{}/adjustments", branch_id))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
-            "branch_inventory_id": bi_id,
-            "adjustment_type": "remove",
-            "quantity": 4.0,
-            "note": "Spoiled tomatoes thrown away"
-        }))
-        .to_request();
-
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), actix_web::http::StatusCode::CREATED);
-
-    let adj: BranchInventoryAdjustment = test::read_body_json(resp).await;
-    assert_eq!(adj.adjustment_type, "remove");
-
-    let new_stock: sqlx::types::BigDecimal = sqlx::query_scalar(
-        "SELECT current_stock FROM branch_inventory WHERE id = $1"
-    )
-    .bind(bi_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(new_stock, sqlx::types::BigDecimal::from_str("6.000").unwrap());
-}
-
-#[sqlx::test]
-async fn test_create_adjustment_invalid_type(pool: PgPool) {
-    let app = test::init_service(
-        App::new()
-            .app_data(web::Data::new(pool.clone()))
-            .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
-
-    let org_id = seed_org(&pool).await;
-    let branch_id = seed_branch(&pool, org_id).await;
-    let user_id = seed_user(&pool, org_id, "branch_manager").await;
-    assign_branch(&pool, user_id, branch_id).await;
-    grant_permission(&pool, "branch_manager", "inventory_adjustments", "create").await;
-
-    let ing_id = seed_ingredient(&pool, org_id, "Tomato", "kg").await;
-    let bi_id = seed_branch_inventory(&pool, branch_id, ing_id, 10.0, 2.0).await;
-
-    let token = generate_branch_manager_token(user_id, org_id);
-    let req = test::TestRequest::post()
-        .uri(&format!("/inventory/branches/{}/adjustments", branch_id))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
-            "branch_inventory_id": bi_id,
-            "adjustment_type": "set", // Invalid!
-            "quantity": 5.0,
-            "note": "some note"
-        }))
-        .to_request();
-
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
-}
-
-#[sqlx::test]
-async fn test_create_adjustment_invalid_qty(pool: PgPool) {
-    let app = test::init_service(
-        App::new()
-            .app_data(web::Data::new(pool.clone()))
-            .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
-
-    let org_id = seed_org(&pool).await;
-    let branch_id = seed_branch(&pool, org_id).await;
-    let user_id = seed_user(&pool, org_id, "branch_manager").await;
-    assign_branch(&pool, user_id, branch_id).await;
-    grant_permission(&pool, "branch_manager", "inventory_adjustments", "create").await;
-
-    let ing_id = seed_ingredient(&pool, org_id, "Tomato", "kg").await;
-    let bi_id = seed_branch_inventory(&pool, branch_id, ing_id, 10.0, 2.0).await;
-
-    let token = generate_branch_manager_token(user_id, org_id);
-    let req = test::TestRequest::post()
-        .uri(&format!("/inventory/branches/{}/adjustments", branch_id))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
-            "branch_inventory_id": bi_id,
-            "adjustment_type": "add",
-            "quantity": -1.0, // Invalid!
-            "note": "some note"
-        }))
-        .to_request();
-
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
-}
-
-#[sqlx::test]
-async fn test_create_adjustment_insufficient_stock(pool: PgPool) {
-    let app = test::init_service(
-        App::new()
-            .app_data(web::Data::new(pool.clone()))
-            .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
-
-    let org_id = seed_org(&pool).await;
-    let branch_id = seed_branch(&pool, org_id).await;
-    let user_id = seed_user(&pool, org_id, "branch_manager").await;
-    assign_branch(&pool, user_id, branch_id).await;
-    grant_permission(&pool, "branch_manager", "inventory_adjustments", "create").await;
-
-    let ing_id = seed_ingredient(&pool, org_id, "Tomato", "kg").await;
-    let bi_id = seed_branch_inventory(&pool, branch_id, ing_id, 3.0, 1.0).await;
-
-    let token = generate_branch_manager_token(user_id, org_id);
-    let req = test::TestRequest::post()
-        .uri(&format!("/inventory/branches/{}/adjustments", branch_id))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
-            "branch_inventory_id": bi_id,
-            "adjustment_type": "remove",
-            "quantity": 5.0, // Insufficient!
-            "note": "excessive spoil"
-        }))
-        .to_request();
-
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
-}
-
-#[sqlx::test]
-async fn test_create_adjustment_wrong_branch(pool: PgPool) {
-    let app = test::init_service(
-        App::new()
-            .app_data(web::Data::new(pool.clone()))
-            .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
-
-    let org_id = seed_org(&pool).await;
-    let branch_a = seed_branch(&pool, org_id).await;
-    let branch_b = seed_branch(&pool, org_id).await;
-
-    let user_a = seed_user(&pool, org_id, "branch_manager").await;
-    assign_branch(&pool, user_a, branch_a).await;
-    grant_permission(&pool, "branch_manager", "inventory_adjustments", "create").await;
-
-    let ing_id = seed_ingredient(&pool, org_id, "Tomato", "kg").await;
-    let bi_b_id = seed_branch_inventory(&pool, branch_b, ing_id, 10.0, 2.0).await;
-
-    let token = generate_branch_manager_token(user_a, org_id);
-    // Attempting to make adjustment in branch_a using branch_b's inventory item
-    let req = test::TestRequest::post()
-        .uri(&format!("/inventory/branches/{}/adjustments", branch_a))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
-            "branch_inventory_id": bi_b_id,
-            "adjustment_type": "add",
-            "quantity": 5.0,
-            "note": "some note"
-        }))
-        .to_request();
-
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
-}
-
-#[sqlx::test]
-async fn test_list_adjustments_success(pool: PgPool) {
-    let app = test::init_service(
-        App::new()
-            .app_data(web::Data::new(pool.clone()))
-            .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
-
-    let org_id = seed_org(&pool).await;
-    let branch_id = seed_branch(&pool, org_id).await;
-    let user_id = seed_user(&pool, org_id, "branch_manager").await;
-    assign_branch(&pool, user_id, branch_id).await;
-    grant_permission(&pool, "branch_manager", "inventory_adjustments", "read").await;
-
-    let ing_id = seed_ingredient(&pool, org_id, "Tomato", "kg").await;
-    let bi_id = seed_branch_inventory(&pool, branch_id, ing_id, 10.0, 2.0).await;
-
-    // Add multiple adjustments
-    sqlx::query(
-        "INSERT INTO branch_inventory_adjustments (branch_id, branch_inventory_id, type, quantity, note, adjusted_by) \
-         VALUES ($1, $2, 'add'::inventory_adjustment_type, 1.0, 'Note 1', $3), \
-                ($1, $2, 'remove'::inventory_adjustment_type, 2.0, 'Note 2', $3)"
-    )
-    .bind(branch_id)
-    .bind(bi_id)
-    .bind(user_id)
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    let token = generate_branch_manager_token(user_id, org_id);
-    let req = test::TestRequest::get()
-        .uri(&format!("/inventory/branches/{}/adjustments", branch_id))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .to_request();
-
-    let resp = test::call_service(&app, req).await;
-    assert!(resp.status().is_success());
-
-    let adjs: Vec<BranchInventoryAdjustment> = test::read_body_json(resp).await;
-    assert_eq!(adjs.len(), 2);
-    // Sorted by created_at DESC (Note 2 was inserted last, so it's first)
-    assert_eq!(adjs[0].note, "Note 2");
-    assert_eq!(adjs[1].note, "Note 1");
-}
 
 // ──────────────────────────────────────────────────────────────
 // ── Transfers Tests
@@ -1146,15 +822,16 @@ async fn test_create_transfer_success(pool: PgPool) {
     .unwrap();
     assert_eq!(dst_stock, sqlx::types::BigDecimal::from_str("5.000").unwrap());
 
-    // Verify adjustment entries were created
-    let adj_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM branch_inventory_adjustments WHERE transfer_id = $1"
+    // Verify two ledger movements (transfer_out + transfer_in) were posted —
+    // the movement ledger is the audit trail for transfers.
+    let mv_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM inventory_movements WHERE source_type = 'transfer' AND source_id = $1"
     )
     .bind(transfer.id)
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(adj_count, 2);
+    assert_eq!(mv_count, 2);
 }
 
 #[sqlx::test]
@@ -1593,19 +1270,20 @@ async fn test_list_movements_and_filters(pool: PgPool) {
     let app = init_app!(pool);
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
+    let dst = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
-    for (r, a) in [("inventory", "read"), ("inventory_adjustments", "create"), ("inventory_waste", "create")] {
+    for (r, a) in [("inventory", "read"), ("inventory_transfers", "create"), ("inventory_waste", "create")] {
         grant_permission(&pool, "org_admin", r, a).await;
     }
     let ing = seed_ingredient(&pool, org_id, "Cream", "ml").await;
-    let bi = seed_branch_inventory(&pool, branch_id, ing, 100.0, 0.0).await;
+    let _bi = seed_branch_inventory(&pool, branch_id, ing, 100.0, 0.0).await;
     let token = generate_org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
 
-    // One adjustment (adjustment_add) + one waste → two movements.
+    // One transfer-out + one waste → two movements at this branch (different types).
     test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/inventory/branches/{branch_id}/adjustments")).insert_header(auth.clone())
-        .set_json(serde_json::json!({"branch_inventory_id": bi, "adjustment_type": "add", "quantity": 10.0, "note": "restock"})).to_request()).await;
+        .uri("/inventory/transfers").insert_header(auth.clone())
+        .set_json(serde_json::json!({"source_branch_id": branch_id, "destination_branch_id": dst, "org_ingredient_id": ing, "quantity": 10.0})).to_request()).await;
     test::call_service(&app, test::TestRequest::post()
         .uri(&format!("/inventory/branches/{branch_id}/waste")).insert_header(auth.clone())
         .set_json(serde_json::json!({"org_ingredient_id": ing, "quantity": 5.0, "reason": "spoiled"})).to_request()).await;
@@ -1879,4 +1557,147 @@ async fn test_teller_token_branch_binding_on_inventory(pool: PgPool) {
         .uri(&format!("/inventory/branches/{}/stock", branch_b))
         .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
     assert_eq!(resp_b.status(), 403, "cross-branch teller token must be rejected");
+}
+
+/// Ledger integrity: SUM(movement.quantity) reconciles with current_stock, and
+/// a unit change rebases the ledger alongside stock (it used to mutate stock
+/// without touching the ledger, drifting the two apart permanently).
+#[sqlx::test]
+async fn test_ledger_reconciles_through_unit_change(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let src = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "inventory_transfers", "create").await;
+    grant_permission(&pool, "org_admin", "inventory", "update").await;
+    let token = generate_org_admin_token(user_id, org_id);
+
+    // branch_id starts at 0; all of its stock arrives through the ledger as a
+    // transfer-in (the source's initial stock is on the OTHER branch).
+    let ing_id = seed_ingredient(&pool, org_id, "Flour", "g").await;
+    let bi_id = seed_branch_inventory(&pool, branch_id, ing_id, 0.0, 0.0).await;
+    seed_branch_inventory(&pool, src, ing_id, 1500.0, 0.0).await;
+
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri("/inventory/transfers")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&serde_json::json!({
+            "source_branch_id": src, "destination_branch_id": branch_id,
+            "org_ingredient_id": ing_id, "quantity": 1500.0
+        })).to_request()).await;
+    assert!(resp.status().is_success());
+
+    // Reconciliation invariant: ledger sum == live stock (1500 g).
+    let (stock, ledger): (f64, f64) = sqlx::query_as(
+        "SELECT bi.current_stock::float8, \
+                COALESCE((SELECT SUM(quantity) FROM inventory_movements \
+                          WHERE branch_id = $1 AND org_ingredient_id = $2), 0)::float8 \
+         FROM branch_inventory bi WHERE bi.id = $3"
+    ).bind(branch_id).bind(ing_id).bind(bi_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(stock, 1500.0);
+    assert_eq!(ledger, 1500.0);
+
+    // Change unit g → kg (factor 1000): stock and ledger both rebase to 1.5.
+    let resp = test::call_service(&app, test::TestRequest::patch()
+        .uri(&format!("/inventory/orgs/{}/catalog/{}", org_id, ing_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&serde_json::json!({"unit": "kg"})).to_request()).await;
+    assert!(resp.status().is_success(), "unit change must succeed");
+
+    let (stock2, ledger2): (f64, f64) = sqlx::query_as(
+        "SELECT bi.current_stock::float8, \
+                COALESCE((SELECT SUM(quantity) FROM inventory_movements \
+                          WHERE branch_id = $1 AND org_ingredient_id = $2), 0)::float8 \
+         FROM branch_inventory bi WHERE bi.id = $3"
+    ).bind(branch_id).bind(ing_id).bind(bi_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(stock2, 1.5, "stock rebased to kg");
+    assert_eq!(ledger2, 1.5, "ledger rebased with stock — still reconciles");
+}
+
+/// Changing an ingredient's yield rebases existing recipe quantities by old/new
+/// so the effective consumption stays correct without re-saving recipes.
+#[sqlx::test]
+async fn test_yield_change_rebases_recipe_quantities(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    let org_id = seed_org(&pool).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "inventory", "update").await;
+    let token = generate_org_admin_token(user_id, org_id);
+
+    // Ingredient at 50% yield; a recipe row already stores 200 g (= 100 g needed
+    // grossed up by 1/0.5).
+    let ing = seed_ingredient(&pool, org_id, "Chicken", "g").await;
+    sqlx::query("UPDATE org_ingredients SET yield_pct = 50 WHERE id = $1").bind(ing).execute(&pool).await.unwrap();
+    let item = Uuid::new_v4();
+    sqlx::query("INSERT INTO menu_items (id, org_id, name, base_price) VALUES ($1,$2,'Grill',1000)")
+        .bind(item).bind(org_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, size_label, org_ingredient_id, ingredient_name, ingredient_unit, quantity_used) \
+                 VALUES ($1,'one_size'::item_size,$2,'Chicken','g',200)")
+        .bind(item).bind(ing).execute(&pool).await.unwrap();
+
+    // Drop yield to 25% → consumption doubles → stored qty 200 → 400.
+    let resp = test::call_service(&app, test::TestRequest::patch()
+        .uri(&format!("/inventory/orgs/{}/catalog/{}", org_id, ing))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&serde_json::json!({"yield_pct": 25})).to_request()).await;
+    assert!(resp.status().is_success(), "yield change must succeed");
+
+    let qty: f64 = sqlx::query_scalar("SELECT quantity_used::float8 FROM menu_item_recipes WHERE org_ingredient_id=$1")
+        .bind(ing).fetch_one(&pool).await.unwrap();
+    assert_eq!(qty, 400.0, "recipe quantity rebased by old/new yield (0.5/0.25 = 2×)");
+}
+
+/// A transfer blends the source branch's cost into the destination's WAC (cost
+/// travels with the goods); the source cost is unchanged.
+#[sqlx::test]
+async fn test_transfer_blends_destination_wac(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    let org_id = seed_org(&pool).await;
+    let src = seed_branch(&pool, org_id).await;
+    let dst = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "inventory_transfers", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+
+    let ing = seed_ingredient(&pool, org_id, "Beans", "g").await;
+    seed_branch_inventory(&pool, src, ing, 100.0, 0.0).await;
+    seed_branch_inventory(&pool, dst, ing, 100.0, 0.0).await;
+    // Source actual cost 10/g, destination 20/g.
+    sqlx::query("UPDATE branch_inventory SET cost_per_unit = 10 WHERE branch_id=$1 AND org_ingredient_id=$2").bind(src).bind(ing).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE branch_inventory SET cost_per_unit = 20 WHERE branch_id=$1 AND org_ingredient_id=$2").bind(dst).bind(ing).execute(&pool).await.unwrap();
+
+    // Transfer 100 g src → dst.
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri("/inventory/transfers")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&serde_json::json!({
+            "source_branch_id": src, "destination_branch_id": dst,
+            "org_ingredient_id": ing, "quantity": 100.0
+        })).to_request()).await;
+    assert!(resp.status().is_success());
+
+    // Destination WAC = (100×20 + 100×10) / 200 = 15; source cost unchanged.
+    let dst_cost: f64 = sqlx::query_scalar("SELECT cost_per_unit::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2").bind(dst).bind(ing).fetch_one(&pool).await.unwrap();
+    let src_cost: f64 = sqlx::query_scalar("SELECT cost_per_unit::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2").bind(src).bind(ing).fetch_one(&pool).await.unwrap();
+    assert_eq!(dst_cost, 15.0, "destination WAC blends the incoming source cost");
+    assert_eq!(src_cost, 10.0, "source cost is unchanged by the transfer");
 }

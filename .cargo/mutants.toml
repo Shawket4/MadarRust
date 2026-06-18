@@ -1,0 +1,41 @@
+# cargo-mutants configuration.
+#
+# ── Routine use is ADAPTIVE and needs no edits here ──────────────────────────
+# `cargo mutants --in-diff <diff>` mutates only the lines a branch/PR changed,
+# so it follows the codebase as it moves. This is what CI runs on every PR:
+#   git diff origin/main...HEAD > /tmp/pr.diff
+#   DATABASE_URL=... cargo mutants --in-diff /tmp/pr.diff --jobs 2
+#
+# ── Periodic deep sweep ──────────────────────────────────────────────────────
+# Scope on the command line to keep runtime bounded — e.g. the money/cost engine:
+#   DATABASE_URL=... cargo mutants --jobs 2 \
+#     -f src/costing/service.rs -f src/orders/cost_math.rs -f src/units.rs \
+#     -f src/geo/osrm.rs -f src/discounts/handlers.rs -f src/delivery/public.rs
+#
+# DB-backed tests need a database; export DATABASE_URL first and keep --jobs
+# modest so concurrent sqlx temp-DBs don't exhaust Postgres connections.
+
+# nextest runs tests as separate processes — faster, and isolates the per-test
+# sqlx temp-DB model better than `cargo test`.
+test_tool = "nextest"
+
+# Mutants only need the library's own tests.
+additional_cargo_test_args = ["--lib"]
+
+# DB round-trips make the baseline slow; give mutants generous headroom so a
+# slow-but-correct mutant isn't miscounted as a timeout.
+timeout_multiplier = 3.0
+minimum_test_timeout = 120
+
+# Don't mutate wiring, generated, entry-point, or test code — only real logic.
+# This list is by role/directory, not by feature, so it doesn't rot as modules
+# are added.
+exclude_globs = [
+    "src/bin/**",
+    "src/main.rs",
+    "src/lib.rs",
+    "src/openapi.rs",
+    "src/**/routes.rs",
+    "src/**/tests.rs",
+    "src/e2e_tests.rs",
+]

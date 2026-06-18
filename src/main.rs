@@ -14,8 +14,8 @@ use tracing_subscriber::EnvFilter;
 use sufrix_rust::openapi::ApiDoc;
 use sufrix_rust::{
     auth, branches, bundles, costing, delivery, discounts, inventory, menu, menu_advisor,
-    orders, orgs, payment_methods, permissions, purchasing, recipes, reports, shifts, stocktakes,
-    uploads, users,
+    orders, orgs, payment_methods, permissions, purchasing, qr_card, recipes, reports, shifts,
+    stocktakes, uploads, users,
 };
 
 use utoipa::OpenApi;
@@ -41,6 +41,17 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("Failed to connect to PostgreSQL");
 
+    // Apply pending migrations on boot so the running binary and its schema can
+    // never drift (a query referencing a not-yet-applied column would otherwise
+    // 500 at runtime — invisible to tests, which always provision a fresh DB with
+    // the full migration set). Migrations are embedded at compile time; this is a
+    // no-op when the DB is already current and fails fast on a checksum mismatch.
+    tracing::info!("Applying database migrations...");
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("Failed to apply database migrations");
+
     tracing::info!("Seeding default role permissions into database...");
     permissions::seeder::seed_role_permissions(&pool)
         .await
@@ -50,6 +61,8 @@ async fn main() -> std::io::Result<()> {
     let jwt_secret    = web::Data::new(auth::jwt::JwtSecret(jwt_secret));
     // One delivery-event hub, shared across all workers (cloned into each App).
     let delivery_hub  = web::Data::new(delivery::hub::DeliveryHub::new());
+    // Shlink short-URL provider (reads env vars on each call; degrade-safe).
+    let qr_provider   = qr_card::routes::make_provider();
     let uploads_clone = uploads_dir.clone();
     let bind_addr     = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     let https_port    = env::var("HTTPS_PORT").unwrap_or_else(|_| "8443".to_string());
@@ -90,6 +103,20 @@ async fn main() -> std::io::Result<()> {
             .app_data(pool.clone())
             .app_data(jwt_secret.clone())
             .app_data(delivery_hub.clone())
+            .app_data(qr_provider.clone())
+            // Render actix's built-in extractor parse errors (bad path UUID, bad
+            // query param, malformed JSON body) as our JSON ErrorBody with a 400,
+            // instead of the default text/plain — so the wire contract is uniform.
+            // (API fuzzing flagged these as undocumented text/plain responses.)
+            .app_data(web::PathConfig::default().error_handler(|err, _req| {
+                sufrix_rust::errors::AppError::BadRequest(err.to_string()).into()
+            }))
+            .app_data(web::QueryConfig::default().error_handler(|err, _req| {
+                sufrix_rust::errors::AppError::BadRequest(err.to_string()).into()
+            }))
+            .app_data(web::JsonConfig::default().error_handler(|err, _req| {
+                sufrix_rust::errors::AppError::BadRequest(err.to_string()).into()
+            }))
             .route("/health", web::get().to(|| async { actix_web::HttpResponse::Ok().finish() }))
             .configure(auth::routes::configure)
             .configure(orgs::routes::configure)
@@ -110,7 +137,8 @@ async fn main() -> std::io::Result<()> {
             .configure(menu_advisor::routes::configure)
             .configure(payment_methods::routes::configure)
             .configure(costing::routes::configure)
-            .configure(delivery::routes::configure);
+            .configure(delivery::routes::configure)
+            .configure(qr_card::routes::configure);
 
         if enable_swagger_ui {
             app = app.service(

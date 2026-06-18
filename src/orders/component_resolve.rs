@@ -54,6 +54,11 @@ pub struct ResolvedAddon {
     pub name_translations: serde_json::Value,
     pub unit_price:    i32,
     pub quantity:      i32,
+    /// A milk/coffee swap (replaces the base recipe ingredient) — its cost lives
+    /// inside the item's recipe rollup, so it isn't costed as an additive addon.
+    pub is_swap:       bool,
+    /// An additive addon that has its own ingredient rows (so it carries cost).
+    pub has_ingredients: bool,
 }
 
 #[derive(Clone)]
@@ -121,7 +126,7 @@ pub async fn resolve_menu_item_configuration(
                    LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id
                    WHERE  r.menu_item_id = $1
                      AND  r.size_label = COALESCE(
-                         (SELECT size_label FROM menu_item_recipes WHERE menu_item_id = $1 LIMIT 1),
+                         (SELECT size_label FROM menu_item_recipes WHERE menu_item_id = $1 ORDER BY size_label LIMIT 1),
                          'one_size'::item_size
                      )"#,
             )
@@ -168,6 +173,8 @@ pub async fn resolve_menu_item_configuration(
             name_translations: name_translations.clone(),
             unit_price:    default_price,
             quantity:      addon_input.quantity.max(1),
+            is_swap:       false,
+            has_ingredients: false,
         });
 
         let addon_rows: Vec<(Option<Uuid>, f64, String, String)> = sqlx::query_as(
@@ -199,6 +206,7 @@ pub async fn resolve_menu_item_configuration(
             if is_base {
                 if let Some(last) = resolved_addons.last_mut() {
                     last.unit_price = 0;
+                    last.is_swap = true;
                 }
             } else if let Some((repl_id, _, repl_name, repl_unit)) = addon_rows.first() {
                 let base_addon_price: i32 = if let Some(base_id) = base_ing_id {
@@ -224,6 +232,7 @@ pub async fn resolve_menu_item_configuration(
                 let new_price = (default_price - base_addon_price).max(0);
                 if let Some(last) = resolved_addons.last_mut() {
                     last.unit_price = new_price;
+                    last.is_swap = true;
                 }
 
                 let mut swapped = false;
@@ -259,6 +268,10 @@ pub async fn resolve_menu_item_configuration(
             continue;
         }
 
+        // Additive addon: it carries its own cost iff it has ingredient rows.
+        if let Some(last) = resolved_addons.last_mut() {
+            last.has_ingredients = !addon_rows.is_empty();
+        }
         for (ing_id, qty, name, unit) in addon_rows {
             deductions.push(InventoryDeduction {
                 org_ingredient_id: ing_id,

@@ -275,3 +275,50 @@ pub fn calc_discount(dtype: Option<&str>, value: i32, subtotal: i32) -> i32 {
     };
     d.clamp(0, subtotal)
 }
+
+#[cfg(test)]
+mod calc_discount_tests {
+    use super::calc_discount;
+
+    #[test]
+    fn percentage_of_subtotal() {
+        assert_eq!(calc_discount(Some("percentage"), 10, 1000), 100);
+    }
+
+    #[test]
+    fn percentage_rounds_half_away_from_zero() {
+        // 105 × 10 / 100 = 10.5 → 11.
+        assert_eq!(calc_discount(Some("percentage"), 10, 105), 11);
+    }
+
+    #[test]
+    fn percentage_over_100_is_capped_at_subtotal() {
+        assert_eq!(calc_discount(Some("percentage"), 150, 1000), 1000);
+    }
+
+    #[test]
+    fn negative_percentage_clamps_to_zero() {
+        assert_eq!(calc_discount(Some("percentage"), -10, 1000), 0);
+    }
+
+    #[test]
+    fn fixed_is_taken_verbatim() {
+        assert_eq!(calc_discount(Some("fixed"), 300, 1000), 300);
+    }
+
+    #[test]
+    fn fixed_larger_than_subtotal_caps_at_subtotal() {
+        assert_eq!(calc_discount(Some("fixed"), 5000, 1000), 1000);
+    }
+
+    #[test]
+    fn negative_fixed_clamps_to_zero() {
+        assert_eq!(calc_discount(Some("fixed"), -50, 1000), 0);
+    }
+
+    #[test]
+    fn unknown_type_is_no_discount() {
+        assert_eq!(calc_discount(Some("bogus"), 50, 1000), 0);
+        assert_eq!(calc_discount(None, 50, 1000), 0);
+    }
+}

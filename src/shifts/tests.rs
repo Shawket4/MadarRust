@@ -285,7 +285,7 @@ async fn test_cash_movements(pool: PgPool) {
     test::call_service(&app, req_open).await;
 
     // 1. Add cash movement
-    let move_req = CashMovementRequest { amount: -500, note: "Paid vendor".into() };
+    let move_req = CashMovementRequest { amount: -500, note: "Paid vendor".into(), created_at: None };
     let req_move = test::TestRequest::post()
         .uri(&format!("/shifts/{}/cash-movements", shift_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
@@ -811,4 +811,138 @@ async fn test_force_close_snapshots_system_cash(pool: PgPool) {
     assert_eq!(shift.status, "force_closed");
     assert_eq!(shift.closing_cash_system.unwrap(), 1500, "force-close must freeze expected cash");
     assert!(shift.closing_cash_declared.is_none(), "no declared count at force-close");
+}
+
+/// Client shift timestamps: a future opened_at/closed_at is rejected (clock guard),
+/// while a PAST opened_at is honored verbatim (offline backdating).
+#[sqlx::test]
+async fn test_shift_timestamp_guards(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    ).await;
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "shifts", "create").await;
+    grant_permission(&pool, "org_admin", "shifts", "update").await;
+    grant_permission(&pool, "org_admin", "shifts", "read").await;
+    let token = generate_org_admin_token(user_id, org_id);
+
+    let open = |id: Uuid, opened_at: Option<chrono::DateTime<chrono::Utc>>| {
+        test::TestRequest::post()
+            .uri(&format!("/shifts/branches/{}/open", branch_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&OpenShiftRequest {
+                id: Some(id), opening_cash: 1000, opening_cash_edited: None, edit_reason: None, opened_at,
+            })
+            .to_request()
+    };
+
+    // Future opened_at -> rejected (no shift created).
+    let resp = test::call_service(&app, open(Uuid::new_v4(), Some(chrono::Utc::now() + chrono::Duration::minutes(30)))).await;
+    assert_eq!(resp.status(), 400, "future opened_at must be rejected");
+
+    // Past opened_at -> honored verbatim.
+    let sid = Uuid::new_v4();
+    let backdated = chrono::Utc::now() - chrono::Duration::hours(6);
+    let resp = test::call_service(&app, open(sid, Some(backdated))).await;
+    assert!(resp.status().is_success(), "past opened_at must be honored: {:?}", resp.status());
+    let stored: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT opened_at FROM shifts WHERE id=$1").bind(sid).fetch_one(&pool).await.unwrap();
+    assert_eq!(stored.timestamp(), backdated.timestamp(), "opened_at must round-trip");
+
+    // Close with a future closed_at -> rejected.
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/shifts/{}/close", sid))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&CloseShiftRequest {
+            closing_cash_declared: 1000, cash_note: None,
+            closed_at: Some(chrono::Utc::now() + chrono::Duration::minutes(30)),
+        })
+        .to_request()).await;
+    assert_eq!(resp.status(), 400, "future closed_at must be rejected");
+}
+
+/// Omitting opened_at makes the server stamp ~now (the online path).
+#[sqlx::test]
+async fn test_shift_opened_at_defaults_to_now(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    ).await;
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "shifts", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+
+    let sid = Uuid::new_v4();
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/shifts/branches/{}/open", branch_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&OpenShiftRequest {
+            id: Some(sid), opening_cash: 1000, opening_cash_edited: None, edit_reason: None, opened_at: None,
+        })
+        .to_request()).await;
+    assert!(resp.status().is_success(), "open without opened_at must succeed: {:?}", resp.status());
+    let stored: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT opened_at FROM shifts WHERE id=$1").bind(sid).fetch_one(&pool).await.unwrap();
+    assert!((chrono::Utc::now() - stored).num_seconds().abs() < 120, "server-stamped near now");
+}
+
+/// Cash movements: server-stamps when omitted, honors a past created_at (offline),
+/// rejects a future one.
+#[sqlx::test]
+async fn test_cash_movement_timestamp_contract(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    ).await;
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "shifts", "create").await;
+    grant_permission(&pool, "org_admin", "shifts", "update").await;
+    let token = generate_org_admin_token(user_id, org_id);
+
+    let sid = Uuid::new_v4();
+    test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/shifts/branches/{}/open", branch_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&OpenShiftRequest {
+            id: Some(sid), opening_cash: 1000, opening_cash_edited: None, edit_reason: None, opened_at: None,
+        })
+        .to_request()).await;
+
+    let movement = |created_at: Option<chrono::DateTime<chrono::Utc>>| {
+        test::TestRequest::post()
+            .uri(&format!("/shifts/{}/cash-movements", sid))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&CashMovementRequest { amount: -500, note: "vendor".into(), created_at })
+            .to_request()
+    };
+
+    // Omitted -> server-stamped near now.
+    let resp = test::call_service(&app, movement(None)).await;
+    assert!(resp.status().is_success());
+    let m: CashMovement = test::read_body_json(resp).await;
+    assert!((chrono::Utc::now() - m.created_at).num_seconds().abs() < 120, "server-stamped near now");
+
+    // Past -> honored.
+    let past = chrono::Utc::now() - chrono::Duration::hours(3);
+    let resp = test::call_service(&app, movement(Some(past))).await;
+    assert!(resp.status().is_success(), "past created_at must be honored: {:?}", resp.status());
+    let m: CashMovement = test::read_body_json(resp).await;
+    assert_eq!(m.created_at.timestamp(), past.timestamp(), "created_at round-trips");
+
+    // Future -> rejected.
+    let resp = test::call_service(&app, movement(Some(chrono::Utc::now() + chrono::Duration::minutes(30)))).await;
+    assert_eq!(resp.status(), 400, "future created_at must be rejected");
 }

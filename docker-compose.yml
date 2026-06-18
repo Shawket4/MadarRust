@@ -1,0 +1,86 @@
+# Production compose — all Sufrix services.
+#
+# Prerequisites on the VPS before first `up`:
+#   1. /opt/sufrix-rust/.env  — copy from .env.example and fill in secrets
+#                               DATABASE_URL must use host.docker.internal, not localhost
+#   2. /opt/sufrix-rust/uploads/  — existing upload directory (nginx serves from here)
+#   3. /opt/shlink/data/          — existing Shlink SQLite data
+#   4. /opt/osrm/                 — pre-processed Egypt map (egypt-latest.osrm*)
+#   5. /opt/sufrix-whatsapp/      — persistent WhatsApp session directory
+#
+# To build the WhatsApp image (one-time, or after source changes):
+#   docker compose build sufrix-whatsapp
+#
+# Normal deploy (backend only — triggered by CI):
+#   docker compose up -d --no-deps sufrix-backend
+
+services:
+  sufrix-backend:
+    image: ${BACKEND_IMAGE:-ghcr.io/shawket4/sufrixrust:latest}
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:8081:8081"
+    volumes:
+      - /opt/sufrix-rust/uploads:/app/uploads
+    env_file: .env
+    environment:
+      # Override localhost URLs from .env with container-network addresses
+      OSRM_URL: http://osrm:5000
+      SHLINK_BASE_URL: http://shlink:8080
+      WHATSAPP_SERVICE_URL: http://sufrix-whatsapp:8090
+    networks:
+      - sufrix-net
+
+  sufrix-whatsapp:
+    image: ${WHATSAPP_IMAGE:-ghcr.io/shawket4/sufrix-whatsapp:latest}
+    restart: unless-stopped
+    volumes:
+      - /opt/sufrix-whatsapp:/app/data
+    environment:
+      WA_STORE: /app/data/whatsapp-store.db
+      WA_META: /app/data/whatsapp-sessions.json
+      # Must match WHATSAPP_AUTH_HEADER in the backend .env
+      WA_AUTH_TOKEN: ${WHATSAPP_AUTH_HEADER}
+    networks:
+      - sufrix-net
+
+  osrm:
+    image: osrm/osrm-backend:latest
+    restart: unless-stopped
+    # loopback only — was 0.0.0.0:5000 (publicly exposed) in the standalone container
+    ports:
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - /opt/osrm:/data
+    command: osrm-routed --algorithm mld /data/egypt-latest.osrm
+    networks:
+      - sufrix-net
+
+  shlink:
+    image: shlinkio/shlink:stable
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8888:8080"
+    volumes:
+      - /opt/shlink/data:/etc/shlink/data
+    environment:
+      DB_DRIVER: sqlite
+      DEFAULT_DOMAIN: s.shawket.duckdns.org
+      IS_HTTPS_ENABLED: "true"
+      INITIAL_API_KEY: ${SHLINK_API_KEY}
+    networks:
+      - sufrix-net
+
+  shlink-web-client:
+    image: shlinkio/shlink-web-client:stable
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8889:8080"
+    networks:
+      - sufrix-net
+
+networks:
+  sufrix-net:
+    driver: bridge

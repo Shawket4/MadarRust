@@ -384,3 +384,49 @@ async fn test_drink_recipe_subunit_rounding_to_zero_rejected(pool: PgPool) {
     ).bind(ing).fetch_optional(&pool).await.unwrap();
     assert!(stored.is_none(), "no recipe row should be stored for a rounds-to-zero quantity");
 }
+
+/// Recipe depth: an ml recipe line against a gram-based ingredient converts via
+/// density, and the per-ingredient yield grosses up the stored consumption.
+#[sqlx::test]
+async fn test_recipe_density_and_yield_applied_at_save(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    let org_id = seed_org(&pool).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "recipes", "create").await;
+    let cat_id = seed_category(&pool, org_id, "Drinks").await;
+    let item_id = seed_menu_item(&pool, org_id, cat_id, "Fried Dish", 500).await;
+
+    // Ingredient bought by WEIGHT (g), density 0.92 g/ml, 50% usable yield.
+    let ing = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, category, cost_per_unit, density_g_per_ml, yield_pct) \
+                 VALUES ($1,$2,'Olive Oil','g'::inventory_unit,'fats',3.0,0.92,50)")
+        .bind(ing).bind(org_id).execute(&pool).await.unwrap();
+    let token = generate_org_admin_token(user_id, org_id);
+
+    // Recipe authored in millilitres.
+    let req_body = UpsertDrinkRecipeRequest {
+        size_label: "one_size".to_string(),
+        org_ingredient_id: Some(ing),
+        ingredient_name: "Olive Oil".to_string(),
+        ingredient_unit: "ml".to_string(),
+        quantity_used: 1000.0, // 1000 ml
+    };
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/recipes/drinks/{}", item_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&req_body).to_request()).await;
+    assert!(resp.status().is_success());
+
+    // 1000 ml × 0.92 = 920 g usable; grossed up by 50% yield → 1840 g stored.
+    let (unit, qty): (String, f64) = sqlx::query_as(
+        "SELECT ingredient_unit, quantity_used::float8 FROM menu_item_recipes WHERE org_ingredient_id=$1"
+    ).bind(ing).fetch_one(&pool).await.unwrap();
+    assert_eq!(unit, "g", "stored in the ingredient's base unit");
+    assert_eq!(qty, 1840.0, "density bridge + yield gross-up applied at save");
+}

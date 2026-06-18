@@ -137,9 +137,10 @@ async fn run(
         "SELECT count(*) FROM (
             SELECT 1
             FROM orders o JOIN branches b ON b.id = o.branch_id
+              JOIN organizations bo ON bo.id = b.org_id
             WHERE ($1::uuid IS NULL OR b.org_id = $1)
               AND ($2::uuid IS NULL OR o.branch_id = $2)
-            GROUP BY o.branch_id, (o.created_at AT TIME ZONE b.timezone)::date
+            GROUP BY o.branch_id, (o.created_at AT TIME ZONE COALESCE(b.timezone, bo.timezone)::text)::date
             HAVING bool_or(o.order_ref IS NULL) AND bool_or(o.order_ref IS NOT NULL)
          ) m",
     )
@@ -159,13 +160,14 @@ async fn run(
         "WITH numbered AS (
             SELECT o.id,
                    b.code AS branch_code,
-                   (o.created_at AT TIME ZONE b.timezone)::date AS biz_date,
+                   (o.created_at AT TIME ZONE COALESCE(b.timezone, bo.timezone)::text)::date AS biz_date,
                    row_number() OVER (
-                       PARTITION BY o.branch_id, (o.created_at AT TIME ZONE b.timezone)::date
+                       PARTITION BY o.branch_id, (o.created_at AT TIME ZONE COALESCE(b.timezone, bo.timezone)::text)::date
                        ORDER BY s.opened_at, o.order_number, o.id
                    ) AS seq
             FROM orders o
             JOIN branches b ON b.id = o.branch_id
+            JOIN organizations bo ON bo.id = b.org_id
             JOIN shifts   s ON s.id = o.shift_id
             WHERE o.order_ref IS NULL
               AND ($1::uuid IS NULL OR b.org_id   = $1)
@@ -188,12 +190,13 @@ async fn run(
     let seeded = sqlx::query(
         "INSERT INTO order_ref_counters (branch_id, business_date, last_seq)
          SELECT o.branch_id,
-                (o.created_at AT TIME ZONE b.timezone)::date,
+                (o.created_at AT TIME ZONE COALESCE(b.timezone, bo.timezone)::text)::date,
                 count(*)
          FROM orders o JOIN branches b ON b.id = o.branch_id
+           JOIN organizations bo ON bo.id = b.org_id
          WHERE ($1::uuid IS NULL OR b.org_id   = $1)
            AND ($2::uuid IS NULL OR o.branch_id = $2)
-         GROUP BY o.branch_id, (o.created_at AT TIME ZONE b.timezone)::date
+         GROUP BY o.branch_id, (o.created_at AT TIME ZONE COALESCE(b.timezone, bo.timezone)::text)::date
          ON CONFLICT (branch_id, business_date)
          DO UPDATE SET last_seq = GREATEST(order_ref_counters.last_seq, EXCLUDED.last_seq)",
     )

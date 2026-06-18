@@ -139,6 +139,11 @@ pub struct OpenShiftRequest {
 pub struct CashMovementRequest {
     pub amount: i32,
     pub note:   String,
+    /// When the movement actually happened. Omit for live (online) movements —
+    /// the server stamps `now()`. The POS sends this for movements made OFFLINE
+    /// so they keep their real time after syncing. Future values are rejected.
+    #[serde(default)]
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -334,7 +339,7 @@ pub async fn open_shift(
     }
 
     let opened_at = body.opened_at.unwrap_or_else(chrono::Utc::now);
-    reject_if_future(opened_at, "opened_at")?;
+    crate::clock::reject_if_future(opened_at, "opened_at")?;
 
     // Guards + insert run in one transaction; the unique partial indexes
     // (one open shift per branch AND per teller) are the race-proof backstop —
@@ -721,6 +726,9 @@ pub async fn add_cash_movement(
             "Note is required for cash movements".into(),
         ));
     }
+    if let Some(ts) = body.created_at {
+        crate::clock::reject_if_future(ts, "created_at")?;
+    }
 
     // Serialize against a concurrent close exactly like create_order does:
     // close_shift snapshots `closing_cash_system` under this same per-shift
@@ -747,8 +755,8 @@ pub async fn add_cash_movement(
 
     let movement = sqlx::query_as::<_, CashMovement>(
         r#"
-        INSERT INTO shift_cash_movements (shift_id, amount, note, moved_by)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO shift_cash_movements (shift_id, amount, note, moved_by, created_at)
+        VALUES ($1, $2, $3, $4, COALESCE($5, now()))
         RETURNING
             id, shift_id, amount, note, moved_by,
             (SELECT name FROM users WHERE id = $4) AS moved_by_name,
@@ -759,6 +767,7 @@ pub async fn add_cash_movement(
     .bind(body.amount)
     .bind(&body.note)
     .bind(claims.user_id())
+    .bind(body.created_at)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -851,7 +860,7 @@ pub async fn close_shift(
     }
 
     let closed_at = body.closed_at.unwrap_or_else(chrono::Utc::now);
-    reject_if_future(closed_at, "closed_at")?;
+    crate::clock::reject_if_future(closed_at, "closed_at")?;
     if closed_at < shift.opened_at {
         return Err(AppError::BadRequest(
             "closed_at cannot be before the shift was opened".into(),
@@ -1101,18 +1110,6 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 /// unchecked it would file the shift into a future business day or reorder the
 /// cash-continuity carryover (which keys on `closed_at`). We clamp only the
 /// future side, with a few minutes of skew tolerance.
-fn reject_if_future(
-    ts: chrono::DateTime<chrono::Utc>,
-    label: &str,
-) -> Result<(), AppError> {
-    if ts > chrono::Utc::now() + chrono::Duration::minutes(5) {
-        return Err(AppError::BadRequest(format!(
-            "{label} is too far in the future — check the device clock."
-        )));
-    }
-    Ok(())
-}
-
 /// Narrows the i64 system-cash total to the i32 the cash columns store, turning
 /// what was a silent wrap-around (`as i32`) into a clear error. The columns hold
 /// piastres, so i32 caps a single shift at ~21.4M EGP; exceeding that is a data

@@ -10,6 +10,7 @@
 pub mod auth;
 pub mod branches;
 pub mod cache;
+pub mod clock;
 pub mod costing;
 pub mod bundles;
 pub mod delivery;
@@ -25,6 +26,7 @@ pub mod orders;
 pub mod orgs;
 pub mod payment_methods;
 pub mod permissions;
+pub mod qr_card;
 pub mod rate_limit;
 pub mod recipes;
 pub mod purchasing;

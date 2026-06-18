@@ -107,6 +107,11 @@ pub struct VarianceReport {
 #[derive(Deserialize, ToSchema)]
 pub struct CreateStocktakeRequest {
     pub note: Option<String>,
+    /// Cycle-count scope: snapshot only ingredients in this catalog category.
+    /// Omit (with org_ingredient_ids) for a full-branch count.
+    pub category: Option<String>,
+    /// Cycle-count scope: snapshot only these specific ingredients.
+    pub org_ingredient_ids: Option<Vec<Uuid>>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -194,19 +199,26 @@ pub async fn create_stocktake(
         _ => AppError::Db(e),
     })?;
 
-    // Snapshot current branch stock as the expected counts.
+    // Snapshot current branch stock as the expected counts. Optional cycle-count
+    // scope filters by explicit ingredient list and/or category; omitting both
+    // snapshots the whole branch (soft-deleted ingredients are always excluded).
     sqlx::query(
         r#"
         INSERT INTO stocktake_items
             (stocktake_id, org_ingredient_id, branch_inventory_id, expected_qty, unit_cost)
-        SELECT $1, bi.org_ingredient_id, bi.id, bi.current_stock, round(oi.cost_per_unit)::bigint
+        SELECT $1, bi.org_ingredient_id, bi.id, bi.current_stock,
+               round(COALESCE(bi.cost_per_unit, oi.cost_per_unit))::bigint
         FROM branch_inventory bi
         JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id
-        WHERE bi.branch_id = $2
+        WHERE bi.branch_id = $2 AND oi.deleted_at IS NULL
+          AND ($3::uuid[] IS NULL OR bi.org_ingredient_id = ANY($3))
+          AND ($4::text  IS NULL OR oi.category = $4)
         "#,
     )
     .bind(header.id)
     .bind(*branch_id)
+    .bind(body.org_ingredient_ids.as_deref())
+    .bind(&body.category)
     .execute(&mut *tx)
     .await?;
 
@@ -333,12 +345,26 @@ pub async fn upsert_items(
         if let Some(reason) = &item.variance_reason {
             validate_variance_reason(reason)?;
         }
-        // Only updates rows that exist in this stocktake's snapshot.
-        sqlx::query(
-            "UPDATE stocktake_items \
-             SET counted_qty = $3, note = $4, counted_by = $5, \
-                 variance_reason = $6::stocktake_variance_reason \
-             WHERE stocktake_id = $1 AND org_ingredient_id = $2"
+        // Upsert: update a snapshot row, OR add a FOUND item not in the snapshot
+        // (e.g. physical stock the system wasn't tracking, or outside a cycle-count
+        // scope). A found item snapshots its expected_qty from current branch stock
+        // (0 if untracked) so its variance is meaningful. Cross-org / unknown
+        // ingredients produce no row → rejected below.
+        let affected = sqlx::query(
+            "INSERT INTO stocktake_items \
+                 (stocktake_id, org_ingredient_id, branch_inventory_id, expected_qty, unit_cost, \
+                  counted_qty, note, counted_by, variance_reason) \
+             SELECT $1, oi.id, bi.id, COALESCE(bi.current_stock, 0), \
+                    round(COALESCE(bi.cost_per_unit, oi.cost_per_unit))::bigint, \
+                    $3, $4, $5, $6::stocktake_variance_reason \
+             FROM org_ingredients oi \
+             LEFT JOIN branch_inventory bi \
+                    ON bi.org_ingredient_id = oi.id AND bi.branch_id = $7 \
+             WHERE oi.id = $2 AND oi.org_id = $8 AND oi.deleted_at IS NULL \
+             ON CONFLICT (stocktake_id, org_ingredient_id) \
+             DO UPDATE SET counted_qty = EXCLUDED.counted_qty, note = EXCLUDED.note, \
+                           counted_by = EXCLUDED.counted_by, \
+                           variance_reason = EXCLUDED.variance_reason"
         )
         .bind(*id)
         .bind(item.org_ingredient_id)
@@ -346,8 +372,16 @@ pub async fn upsert_items(
         .bind(&item.note)
         .bind(claims.user_id())
         .bind(&item.variance_reason)
+        .bind(header.branch_id)
+        .bind(header.org_id)
         .execute(&mut *tx)
-        .await?;
+        .await?
+        .rows_affected();
+        if affected == 0 {
+            return Err(AppError::BadRequest(
+                "Ingredient not found in this organization's catalog".into(),
+            ));
+        }
     }
     tx.commit().await?;
 
@@ -380,36 +414,7 @@ pub async fn finalize_stocktake(
         return Err(AppError::Conflict("Stocktake is not open".into()));
     }
 
-    // Org variance tolerance + counted rows (with reason + name for the guardrail).
     let threshold = fetch_threshold(pool.get_ref(), header.org_id).await?;
-
-    type CountedRow = (Uuid, Option<Uuid>, String, f64, f64, Option<i64>, Option<String>);
-    let counted: Vec<CountedRow> = sqlx::query_as(
-        "SELECT si.org_ingredient_id, si.branch_inventory_id, oi.name, \
-                si.expected_qty::float8, si.counted_qty::float8, si.unit_cost, \
-                si.variance_reason::text \
-         FROM stocktake_items si \
-         JOIN org_ingredients oi ON oi.id = si.org_ingredient_id \
-         WHERE si.stocktake_id = $1 AND si.counted_qty IS NOT NULL"
-    )
-    .bind(*id)
-    .fetch_all(pool.get_ref())
-    .await?;
-
-    // Guardrail: every flagged (suspicious) difference must carry a reason
-    // before the count can be finalized. Validate before any stock is touched.
-    let unexplained: Vec<String> = counted.iter()
-        .filter(|(_, _, _, expected, counted_qty, _, reason)| {
-            is_variance_flagged(*expected, *counted_qty, threshold) && reason.is_none()
-        })
-        .map(|(_, _, name, _, _, _, _)| name.clone())
-        .collect();
-    if !unexplained.is_empty() {
-        return Err(AppError::Conflict(format!(
-            "These items have a large difference and need a reason before finalizing: {}",
-            unexplained.join(", ")
-        )));
-    }
 
     let mut tx = pool.get_ref().begin().await?;
 
@@ -426,30 +431,95 @@ pub async fn finalize_stocktake(
         return Err(AppError::Conflict("Stocktake is not open".into()));
     }
 
-    for (ing_id, bi_id_opt, _name, expected, counted_qty, unit_cost, variance_reason) in counted {
-        let Some(bi_id) = bi_id_opt else { continue }; // tracking row removed since snapshot
+    // Counted items (snapshot values are immutable; live stock is read+locked
+    // per row below). The reconciliation baseline is the LIVE book stock
+    // (`system_qty`), NOT the open-time snapshot: legitimate sales/purchases
+    // during the count already moved live stock, so true unexplained variance =
+    // counted - live and those movements are preserved rather than erased /
+    // mislabeled as shrinkage.
+    type ItemRow = (Uuid, Option<Uuid>, String, f64, Option<i64>, Option<String>);
+    let items: Vec<ItemRow> = sqlx::query_as(
+        "SELECT si.org_ingredient_id, si.branch_inventory_id, oi.name, \
+                si.counted_qty::float8, si.unit_cost, si.variance_reason::text \
+         FROM stocktake_items si \
+         JOIN org_ingredients oi ON oi.id = si.org_ingredient_id \
+         WHERE si.stocktake_id = $1 AND si.counted_qty IS NOT NULL"
+    )
+    .bind(*id)
+    .fetch_all(&mut *tx)
+    .await?;
 
-        // Lock then set stock to the counted ground-truth value.
-        let balance: Option<f64> = sqlx::query_scalar(
-            "UPDATE branch_inventory SET current_stock = $1 \
-             WHERE id = $2 AND branch_id = $3 RETURNING current_stock::float8"
+    // Lock + read each branch row's LIVE stock (can't FOR UPDATE the nullable
+    // side of an outer join, so lock per row). The lock is held to commit, so
+    // the live value can't move between read and reconcile.
+    let mut counted: Vec<(Uuid, String, f64, Option<f64>, Option<i64>, Option<String>)> =
+        Vec::with_capacity(items.len());
+    for (ing_id, bi_id_opt, name, counted_qty, unit_cost, reason) in items {
+        let live: Option<f64> = if let Some(bi_id) = bi_id_opt {
+            sqlx::query_scalar(
+                "SELECT current_stock::float8 FROM branch_inventory \
+                 WHERE id = $1 AND branch_id = $2 FOR UPDATE"
+            )
+            .bind(bi_id).bind(header.branch_id)
+            .fetch_optional(&mut *tx).await?
+        } else {
+            None
+        };
+        counted.push((ing_id, name, counted_qty, live, unit_cost, reason));
+    }
+
+    // Guardrail: every suspicious difference (vs LIVE book stock) must carry a
+    // reason before the count is committed. A row whose tracking row was deleted
+    // mid-count reconciles from a zero baseline (re-created below).
+    let unexplained: Vec<String> = counted.iter()
+        .filter(|(_, _, counted_qty, live, _, reason)| {
+            is_variance_flagged(live.unwrap_or(0.0), *counted_qty, threshold) && reason.is_none()
+        })
+        .map(|(_, name, _, _, _, _)| name.clone())
+        .collect();
+    if !unexplained.is_empty() {
+        return Err(AppError::Conflict(format!(
+            "These items have a large difference and need a reason before finalizing: {}",
+            unexplained.join(", ")
+        )));
+    }
+
+    for (ing_id, _name, counted_qty, live_opt, unit_cost, variance_reason) in counted {
+        // Reconcile to the counted ground-truth via a DELTA off live book stock,
+        // so any sale/purchase posted during the count survives. A missing
+        // tracking row (deleted mid-count) reconciles from 0 and is re-created,
+        // so a counted item is never silently dropped.
+        let system_qty = live_opt.unwrap_or(0.0);
+        let delta = counted_qty - system_qty;
+
+        let (bi_id, balance): (Uuid, f64) = sqlx::query_as(
+            "INSERT INTO branch_inventory (branch_id, org_ingredient_id, current_stock, reorder_threshold) \
+             VALUES ($1, $2, $3, 0) \
+             ON CONFLICT (branch_id, org_ingredient_id) \
+             DO UPDATE SET current_stock = EXCLUDED.current_stock, updated_at = now() \
+             RETURNING id, current_stock::float8"
         )
-        .bind(counted_qty)
-        .bind(bi_id)
         .bind(header.branch_id)
-        .fetch_optional(&mut *tx)
+        .bind(ing_id)
+        .bind(counted_qty)
+        .fetch_one(&mut *tx)
         .await?;
 
-        let Some(balance) = balance else { continue };
+        // Freeze the reconciliation baseline on the item for the variance report.
+        sqlx::query(
+            "UPDATE stocktake_items SET system_qty = $2 \
+             WHERE stocktake_id = $1 AND org_ingredient_id = $3"
+        )
+        .bind(*id).bind(system_qty).bind(ing_id)
+        .execute(&mut *tx).await?;
 
-        let variance = counted_qty - expected;
-        if variance != 0.0 {
+        if delta != 0.0 {
             record_movement(&mut *tx, MovementParams {
                 branch_id:           header.branch_id,
                 org_ingredient_id:   ing_id,
                 branch_inventory_id: Some(bi_id),
                 movement_type:       "stock_count",
-                quantity:            variance,
+                quantity:            delta,
                 balance_after:       Some(balance),
                 unit_cost,
                 reason:              variance_reason.as_deref(),
@@ -553,15 +623,19 @@ pub async fn variance_report(
             oi.unit::text AS unit,
             si.expected_qty::float8,
             si.counted_qty::float8,
-            si.variance::float8,
+            -- True variance is measured against the live book stock at finalize
+            -- (`system_qty`); legitimate activity during the count nets out. For
+            -- a not-yet-finalized count, fall back to the open-time snapshot.
+            (si.counted_qty - COALESCE(si.system_qty, si.expected_qty))::float8 AS variance,
             si.unit_cost,
-            CASE WHEN si.unit_cost IS NULL OR si.variance IS NULL THEN NULL
-                 ELSE round(si.variance * si.unit_cost)::bigint END AS variance_value,
+            CASE WHEN si.unit_cost IS NULL OR si.counted_qty IS NULL THEN NULL
+                 ELSE round((si.counted_qty - COALESCE(si.system_qty, si.expected_qty)) * si.unit_cost)::bigint END AS variance_value,
             si.variance_reason::text AS variance_reason,
             CASE
                 WHEN si.counted_qty IS NULL THEN false
-                WHEN si.expected_qty = 0 THEN si.counted_qty <> 0
-                ELSE (abs(si.variance) / abs(si.expected_qty) * 100)::float8 >= $2
+                WHEN COALESCE(si.system_qty, si.expected_qty) = 0 THEN si.counted_qty <> 0
+                ELSE (abs(si.counted_qty - COALESCE(si.system_qty, si.expected_qty))
+                      / abs(COALESCE(si.system_qty, si.expected_qty)) * 100)::float8 >= $2
             END AS is_flagged
         FROM stocktake_items si
         JOIN org_ingredients oi ON oi.id = si.org_ingredient_id

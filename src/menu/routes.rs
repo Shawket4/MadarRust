@@ -39,10 +39,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/{id}/optionals/{field_id}",   web::patch().to(update_optional_field))
                 .route("/{id}/optionals/{field_id}",   web::delete().to(delete_optional_field))
 
-                // Addon overrides
+                // Addon overrides (per-item ingredient recipe overrides)
                 .route("/{id}/overrides",                web::get().to(list_addon_overrides))
                 .route("/{id}/overrides",                web::post().to(upsert_addon_override))
-                .route("/{id}/overrides/{override_id}",  web::delete().to(delete_addon_override)),
+                .route("/{id}/overrides/{override_id}",  web::delete().to(delete_addon_override))
+
+                // Allowed addon list (per-item availability allowlist)
+                .route("/{id}/allowed-addons",           web::put().to(put_allowed_addons)),
         )
 
         // ── Branch menu overrides (per-branch price + availability) ───────────

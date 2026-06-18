@@ -13,7 +13,11 @@ use super::hub::{DeliveryEvent, DeliveryHub};
 use super::snapshot::{self, CartLineInput};
 use super::staff::DeliveryOrder;
 use super::whatsapp;
-use super::{channel_open, normalize_phone, validate_channel, CHANNEL_OUTSIDE};
+use super::{
+    channel_open, normalize_phone, validate_channel, validate_coords, validate_optional_text,
+    validate_payment_hint, validate_required_text, CHANNEL_OUTSIDE, MAX_ADDRESS_LEN, MAX_NAME_LEN,
+    MAX_NOTES_LEN, MAX_OTP_CODE_LEN, MAX_SHORT_TEXT_LEN,
+};
 use crate::auth::jwt::JwtSecret;
 use crate::errors::{AppError, AppErrorResponse};
 use crate::geo::osrm::{haversine_meters, road_distance_meters, LatLng, OsrmError};
@@ -30,6 +34,10 @@ pub struct PublicBranch {
     /// Effective-open right now (enabled + open shift + override + window).
     pub in_mall_open_now: bool,
     pub outside_open_now: bool,
+    /// When false, the public checkout skips OTP verification for this branch.
+    pub otp_required: bool,
+    /// When false, in-mall ordering does not require a device GPS location.
+    pub in_mall_require_location: bool,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -52,6 +60,8 @@ struct BranchOpenRow {
     outside_close_time: Option<chrono::NaiveTime>,
     local_time: chrono::NaiveTime,
     has_open_shift: bool,
+    otp_required: bool,
+    in_mall_require_location: bool,
 }
 
 #[utoipa::path(
@@ -70,9 +80,12 @@ pub async fn public_branches(
                   COALESCE(s.outside_override, 'auto') AS outside_override,
                   s.in_mall_open_time, s.in_mall_close_time,
                   s.outside_open_time, s.outside_close_time,
-                  (now() AT TIME ZONE b.timezone)::time AS local_time,
+                  COALESCE(s.otp_required, true) AS otp_required,
+                  COALESCE(s.in_mall_require_location, true) AS in_mall_require_location,
+                  (now() AT TIME ZONE COALESCE(b.timezone, o.timezone)::text)::time AS local_time,
                   EXISTS(SELECT 1 FROM shifts sh WHERE sh.branch_id = b.id AND sh.status = 'open') AS has_open_shift
            FROM branches b
+           JOIN organizations o ON o.id = b.org_id
            LEFT JOIN branch_delivery_settings s ON s.branch_id = b.id
            WHERE b.org_id = $1 AND b.is_active = true AND b.deleted_at IS NULL
              AND (COALESCE(s.in_mall_enabled, false) OR COALESCE(s.outside_enabled, false))
@@ -98,9 +111,43 @@ pub async fn public_branches(
             code: r.code,
             in_mall_enabled: r.in_mall_enabled,
             outside_enabled: r.outside_enabled,
+            otp_required: r.otp_required,
+            in_mall_require_location: r.in_mall_require_location,
         })
         .collect();
     Ok(HttpResponse::Ok().json(branches))
+}
+
+/// Whether a branch channel is open *right now* (enabled + override + window +
+/// an open shift). Mirrors the per-row computation in `public_branches`, reused
+/// to gate the menu, the quote, and order intake against direct-link bypass.
+async fn channel_open_now(pool: &PgPool, branch_id: Uuid, channel: &str) -> Result<bool, AppError> {
+    let row: Option<BranchOpenRow> = sqlx::query_as(
+        r#"SELECT b.id, b.name, b.code,
+                  COALESCE(s.in_mall_enabled, false)  AS in_mall_enabled,
+                  COALESCE(s.outside_enabled, false)  AS outside_enabled,
+                  COALESCE(s.in_mall_override, 'auto') AS in_mall_override,
+                  COALESCE(s.outside_override, 'auto') AS outside_override,
+                  s.in_mall_open_time, s.in_mall_close_time,
+                  s.outside_open_time, s.outside_close_time,
+                  COALESCE(s.otp_required, true) AS otp_required,
+                  COALESCE(s.in_mall_require_location, true) AS in_mall_require_location,
+                  (now() AT TIME ZONE COALESCE(b.timezone, o.timezone)::text)::time AS local_time,
+                  EXISTS(SELECT 1 FROM shifts sh WHERE sh.branch_id = b.id AND sh.status = 'open') AS has_open_shift
+           FROM branches b
+           JOIN organizations o ON o.id = b.org_id
+           LEFT JOIN branch_delivery_settings s ON s.branch_id = b.id
+           WHERE b.id = $1 AND b.is_active = true AND b.deleted_at IS NULL"#,
+    )
+    .bind(branch_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(r) = row else { return Ok(false) };
+    Ok(if channel == CHANNEL_OUTSIDE {
+        channel_open(r.outside_enabled, &r.outside_override, r.outside_open_time, r.outside_close_time, r.local_time, r.has_open_shift)
+    } else {
+        channel_open(r.in_mall_enabled, &r.in_mall_override, r.in_mall_open_time, r.in_mall_close_time, r.local_time, r.has_open_shift)
+    })
 }
 
 // ── Public channel-resolved menu ──────────────────────────────
@@ -159,6 +206,10 @@ pub struct DeliveryMenuItem {
     /// pre-selects it (mirrors the POS default-milk selection). `None` when the
     /// item has no milk in its recipe or no matching milk addon exists.
     pub default_milk_addon_id: Option<Uuid>,
+    /// Explicit per-item addon allowlist (IDs from `menu_item_allowed_addons`).
+    /// When non-empty the customizer filters the global catalog to these IDs by
+    /// default, with a "show all" escape hatch. Empty = no restriction.
+    pub allowed_addon_ids: Vec<Uuid>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -226,6 +277,9 @@ pub async fn public_menu(
     let (org_id, enabled) = branch.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
     if !enabled {
         return Err(AppError::NotFound("This branch does not offer this channel".into()));
+    }
+    if !channel_open_now(pool.get_ref(), branch_id, &query.channel).await? {
+        return Err(AppError::Conflict("This channel is closed right now.".into()));
     }
 
     // The channel's active discount (customer-facing), if any.
@@ -318,14 +372,16 @@ pub async fn public_menu(
     let mut optionals_by_item = load_optional_fields(pool.get_ref(), &item_ids).await?;
 
     // Default/base milk per item (POS pre-select), batched over the item list.
-    let mut default_milk_by_item = load_default_milk(pool.get_ref(), &item_ids).await?;
+    let mut default_milk_by_item   = load_default_milk(pool.get_ref(), &item_ids).await?;
+    let mut allowed_addons_by_item = load_allowed_addon_ids(pool.get_ref(), &item_ids).await?;
 
     let items: Vec<DeliveryMenuItem> = item_rows
         .into_iter()
         .map(|(id, category_id, name, name_translations, description, image_url, price)| DeliveryMenuItem {
-            sizes: sizes_by_item.remove(&id).unwrap_or_default(),
-            optionals: optionals_by_item.remove(&id).unwrap_or_default(),
+            sizes:                sizes_by_item.remove(&id).unwrap_or_default(),
+            optionals:            optionals_by_item.remove(&id).unwrap_or_default(),
             default_milk_addon_id: default_milk_by_item.remove(&id),
+            allowed_addon_ids:    allowed_addons_by_item.remove(&id).unwrap_or_default(),
             id,
             category_id,
             name,
@@ -457,6 +513,31 @@ async fn load_default_milk(
     Ok(by_item)
 }
 
+/// Batch-load per-item allowed addon IDs from `menu_item_allowed_addons`.
+/// Items with no rows → absent from map (empty Vec after the `.remove` default).
+async fn load_allowed_addon_ids(
+    pool:     &PgPool,
+    item_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, Vec<Uuid>>, AppError> {
+    let mut by_item: std::collections::HashMap<Uuid, Vec<Uuid>> = std::collections::HashMap::new();
+    if item_ids.is_empty() {
+        return Ok(by_item);
+    }
+    let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT menu_item_id, addon_item_id \
+         FROM menu_item_allowed_addons \
+         WHERE menu_item_id = ANY($1) \
+         ORDER BY menu_item_id, sort_order ASC, created_at ASC",
+    )
+    .bind(item_ids)
+    .fetch_all(pool)
+    .await?;
+    for (menu_item_id, addon_id) in rows {
+        by_item.entry(menu_item_id).or_default().push(addon_id);
+    }
+    Ok(by_item)
+}
+
 // ── Delivery quote (OSRM-proxied) ─────────────────────────────
 
 #[derive(Serialize, ToSchema)]
@@ -476,14 +557,25 @@ pub struct QuoteQuery {
     pub channel: String,
 }
 
-pub(crate) enum FeeOutcome {
+pub enum FeeOutcome {
     Ok { fee: i32, zone_id: Uuid, zone_name: String, distance_meters: i32 },
     OutOfRange,
     Unavailable,
 }
 
+impl FeeOutcome {
+    /// The flat fee (piastres) for a covered quote, or `None` when the address is
+    /// out of range / delivery is unavailable.
+    pub fn fee(&self) -> Option<i32> {
+        match self {
+            FeeOutcome::Ok { fee, .. } => Some(*fee),
+            _ => None,
+        }
+    }
+}
+
 #[derive(sqlx::FromRow, Clone)]
-pub(crate) struct ZoneRow {
+pub struct ZoneRow {
     pub id: Uuid,
     pub name: String,
     pub fee: i32,
@@ -492,7 +584,7 @@ pub(crate) struct ZoneRow {
 
 /// Pure zone match (no OSRM, no DB) so it can be unit-tested. `zones` must be
 /// ordered by ring_order ASC — the smallest covering ring's flat fee wins.
-pub(crate) fn select_zone_fee(distance_i: i32, max_dist: Option<i32>, zones: &[ZoneRow]) -> FeeOutcome {
+pub fn select_zone_fee(distance_i: i32, max_dist: Option<i32>, zones: &[ZoneRow]) -> FeeOutcome {
     if max_dist.is_some_and(|m| distance_i > m) {
         return FeeOutcome::OutOfRange;
     }
@@ -561,6 +653,7 @@ pub async fn delivery_quote(
 ) -> Result<HttpResponse, AppError> {
     let branch_id = path.into_inner();
     validate_channel(&query.channel)?;
+    validate_coords(query.lat, query.lng)?;
     let outside = query.channel == CHANNEL_OUTSIDE;
 
     let row: Option<(bool, i32)> = sqlx::query_as(&format!(
@@ -576,14 +669,31 @@ pub async fn delivery_quote(
     if !enabled {
         return Err(AppError::NotFound("This branch does not offer this channel".into()));
     }
+    if !channel_open_now(pool.get_ref(), branch_id, &query.channel).await? {
+        return Err(AppError::Conflict("This channel is closed right now.".into()));
+    }
 
-    // In-mall: flat per-branch fee, no distance.
+    // In-mall: flat per-branch fee + the walking (haversine) distance from the
+    // branch, so the teller can flag orders placed far from the mall (spam). No
+    // zones, no OSRM, and distance never blocks the order.
     if !outside {
+        let coords: Option<(Option<f64>, Option<f64>)> =
+            sqlx::query_as("SELECT latitude, longitude FROM branches WHERE id = $1")
+                .bind(branch_id)
+                .fetch_optional(pool.get_ref())
+                .await?;
+        let distance_meters = coords.and_then(|(blat, blng)| match (blat, blng) {
+            (Some(blat), Some(blng)) => Some(
+                haversine_meters(LatLng { lat: blat, lng: blng }, LatLng { lat: query.lat, lng: query.lng })
+                    .round() as i32,
+            ),
+            _ => None,
+        });
         return Ok(HttpResponse::Ok().json(QuoteResponse {
             status: "ok".into(),
             zone_id: None,
             zone_name: None,
-            distance_meters: Some(0),
+            distance_meters,
             fee: Some(in_mall_fee),
         }));
     }
@@ -666,7 +776,7 @@ pub async fn otp_request(
     .execute(pool.get_ref())
     .await?;
 
-    whatsapp::send_message(phone, whatsapp::build_otp_message(&code));
+    whatsapp::send_message(pool.get_ref().clone(), phone, whatsapp::build_otp_message(&code));
 
     Ok(HttpResponse::Ok().json(OtpRequestResponse { sent: true }))
 }
@@ -692,6 +802,13 @@ pub async fn otp_verify(
     body: web::Json<OtpVerifyInput>,
 ) -> Result<HttpResponse, AppError> {
     let phone = normalize_phone(&body.phone)?;
+    // The code is a short numeric string; reject anything else before bcrypt.
+    if body.code.is_empty()
+        || body.code.len() > MAX_OTP_CODE_LEN
+        || !body.code.chars().all(|c| c.is_ascii_digit())
+    {
+        return Err(AppError::BadRequest("Incorrect code.".into()));
+    }
 
     let row: Option<(Uuid, String, i32)> = sqlx::query_as(
         "SELECT id, code_hash, attempts FROM delivery_otp \
@@ -769,13 +886,42 @@ pub async fn create_delivery_order(
     body: web::Json<DeliveryOrderInput>,
 ) -> Result<HttpResponse, AppError> {
     validate_channel(&body.channel)?;
+    // Strict field validation up front (untrusted public client): bound every
+    // free-text field, the payment hint, and the coordinates before any DB work.
+    validate_payment_hint(&body.payment_method_hint)?;
+    validate_required_text("Customer name", &body.customer_name, MAX_NAME_LEN)?;
+    validate_optional_text("Landmark", body.landmark.as_deref(), MAX_SHORT_TEXT_LEN)?;
+    validate_optional_text("Delivery notes", body.delivery_notes.as_deref(), MAX_NOTES_LEN)?;
+    // Channel-appropriate destination details. In a mall the runner finds the
+    // customer by shop/company + floor + unit, so those are required and there is
+    // no street address. For an outside (street) order the dropped pin sets the
+    // route but a written address line finds the door, so the address is required.
+    if body.channel == CHANNEL_OUTSIDE {
+        validate_required_text("Delivery address", body.address_line.as_deref().unwrap_or(""), MAX_ADDRESS_LEN)?;
+        validate_optional_text("Place name", body.place_name.as_deref(), MAX_SHORT_TEXT_LEN)?;
+        validate_optional_text("Floor", body.floor.as_deref(), MAX_SHORT_TEXT_LEN)?;
+        validate_optional_text("Unit number", body.unit_number.as_deref(), MAX_SHORT_TEXT_LEN)?;
+    } else {
+        validate_required_text("Shop or company name", body.place_name.as_deref().unwrap_or(""), MAX_SHORT_TEXT_LEN)?;
+        validate_required_text("Floor", body.floor.as_deref().unwrap_or(""), MAX_SHORT_TEXT_LEN)?;
+        validate_required_text("Unit or office", body.unit_number.as_deref().unwrap_or(""), MAX_SHORT_TEXT_LEN)?;
+        validate_optional_text("Address", body.address_line.as_deref(), MAX_ADDRESS_LEN)?;
+    }
+    if let (Some(lat), Some(lng)) = (body.customer_lat, body.customer_lng) {
+        validate_coords(lat, lng)?;
+    }
     let phone = normalize_phone(&body.customer_phone)?;
 
-    if !whatsapp::verify_device_token(&secret.0, &phone, &body.device_token) {
+    // OTP verification is per-branch (managers can turn it off in delivery settings).
+    let otp_required: bool = sqlx::query_scalar(
+        "SELECT COALESCE(otp_required, true) FROM branch_delivery_settings WHERE branch_id = $1",
+    )
+    .bind(body.branch_id)
+    .fetch_optional(pool.get_ref())
+    .await?
+    .unwrap_or(true);
+    if otp_required && !whatsapp::verify_device_token(&secret.0, &phone, &body.device_token) {
         return Err(AppError::Unauthorized("Phone not verified on this device.".into()));
-    }
-    if body.customer_name.trim().is_empty() {
-        return Err(AppError::BadRequest("Customer name is required".into()));
     }
 
     // Idempotency replay.
@@ -791,39 +937,18 @@ pub async fn create_delivery_order(
     }
 
     // Branch + channel must be open right now (enabled + accepting + window + shift).
-    let branch: Option<(Uuid, String, String)> = sqlx::query_as(
-        "SELECT org_id, code, timezone FROM branches WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
+    let branch: Option<(Uuid, String)> = sqlx::query_as(
+        "SELECT org_id, code FROM branches WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
     )
     .bind(body.branch_id)
     .fetch_optional(pool.get_ref())
     .await?;
-    let (org_id, branch_code, _tz) = branch.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    let (org_id, branch_code) = branch.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
 
-    let open_row: Option<BranchOpenRow> = sqlx::query_as(
-        r#"SELECT b.id, b.name, b.code,
-                  COALESCE(s.in_mall_enabled, false)  AS in_mall_enabled,
-                  COALESCE(s.outside_enabled, false)  AS outside_enabled,
-                  COALESCE(s.in_mall_override, 'auto') AS in_mall_override,
-                  COALESCE(s.outside_override, 'auto') AS outside_override,
-                  s.in_mall_open_time, s.in_mall_close_time,
-                  s.outside_open_time, s.outside_close_time,
-                  (now() AT TIME ZONE b.timezone)::time AS local_time,
-                  EXISTS(SELECT 1 FROM shifts sh WHERE sh.branch_id = b.id AND sh.status = 'open') AS has_open_shift
-           FROM branches b LEFT JOIN branch_delivery_settings s ON s.branch_id = b.id WHERE b.id = $1"#,
-    )
-    .bind(body.branch_id)
-    .fetch_optional(pool.get_ref())
-    .await?;
-    let r = open_row.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
-    let is_outside = body.channel == CHANNEL_OUTSIDE;
-    let open = if is_outside {
-        channel_open(r.outside_enabled, &r.outside_override, r.outside_open_time, r.outside_close_time, r.local_time, r.has_open_shift)
-    } else {
-        channel_open(r.in_mall_enabled, &r.in_mall_override, r.in_mall_open_time, r.in_mall_close_time, r.local_time, r.has_open_shift)
-    };
-    if !open {
+    if !channel_open_now(pool.get_ref(), body.branch_id, &body.channel).await? {
         return Err(AppError::Conflict("This branch is not accepting orders for this channel right now.".into()));
     }
+    let is_outside = body.channel == CHANNEL_OUTSIDE;
 
     let now = Utc::now();
 
@@ -841,12 +966,47 @@ pub async fn create_delivery_order(
             FeeOutcome::Unavailable => return Err(AppError::Conflict("Delivery distance is temporarily unavailable. Please try again.".into())),
         }
     } else {
-        let fee: i32 = sqlx::query_scalar("SELECT COALESCE(in_mall_fee, 0) FROM branch_delivery_settings WHERE branch_id = $1")
-            .bind(body.branch_id)
-            .fetch_optional(pool.get_ref())
-            .await?
-            .unwrap_or(0);
-        (fee, None, None)
+        // In-mall: the customer confirms they're at the branch with device GPS
+        // (never a manual pin). Whether that location is *required* is a per-branch
+        // manager toggle (`in_mall_require_location`) — indoor GPS is noisy, so a
+        // branch may relax it. When a location IS sent it's registered for the
+        // teller as a spam signal (walking/haversine distance); it never blocks.
+        let settings: Option<(i32, bool)> = sqlx::query_as(
+            "SELECT COALESCE(in_mall_fee, 0), COALESCE(in_mall_require_location, true) \
+             FROM branch_delivery_settings WHERE branch_id = $1",
+        )
+        .bind(body.branch_id)
+        .fetch_optional(pool.get_ref())
+        .await?;
+        let (fee, require_location) = settings.unwrap_or((0, true));
+
+        let coords = match (body.customer_lat, body.customer_lng) {
+            (Some(lat), Some(lng)) => Some((lat, lng)),
+            _ if require_location => {
+                return Err(AppError::BadRequest(
+                    "A location is required to confirm you're at the branch.".into(),
+                ));
+            }
+            _ => None,
+        };
+
+        let distance = if let Some((lat, lng)) = coords {
+            let branch_coords: Option<(Option<f64>, Option<f64>)> =
+                sqlx::query_as("SELECT latitude, longitude FROM branches WHERE id = $1")
+                    .bind(body.branch_id)
+                    .fetch_optional(pool.get_ref())
+                    .await?;
+            branch_coords.and_then(|(blat, blng)| match (blat, blng) {
+                (Some(blat), Some(blng)) => Some(
+                    haversine_meters(LatLng { lat: blat, lng: blng }, LatLng { lat, lng }).round()
+                        as i32,
+                ),
+                _ => None,
+            })
+        } else {
+            None
+        };
+        (fee, None, distance)
     };
 
     let subtotal = resolved.subtotal;
@@ -893,7 +1053,8 @@ pub async fn create_delivery_order(
     // Mint the delivery_ref from its own counter (business date in branch tz).
     let mut tx = pool.get_ref().begin().await?;
     let biz_date: chrono::NaiveDate = sqlx::query_scalar(
-        "SELECT ($1::timestamptz AT TIME ZONE timezone)::date FROM branches WHERE id = $2",
+        "SELECT ($1::timestamptz AT TIME ZONE COALESCE(b.timezone, o.timezone)::text)::date
+         FROM branches b JOIN organizations o ON o.id = b.org_id WHERE b.id = $2",
     )
     .bind(now)
     .bind(body.branch_id)
@@ -957,7 +1118,11 @@ pub async fn create_delivery_order(
     .await?;
     tx.commit().await?;
 
-    whatsapp::send_message(phone, whatsapp::build_order_received_message(&delivery_ref));
+    whatsapp::send_message(
+        pool.get_ref().clone(),
+        phone,
+        whatsapp::build_order_received_message(&delivery_ref, id),
+    );
 
     let order = super::staff::fetch_delivery_order(pool.get_ref(), id)
         .await?
@@ -967,4 +1132,303 @@ pub async fn create_delivery_order(
         DeliveryEvent { event_type: "created".into(), order: order.clone() },
     );
     Ok(HttpResponse::Created().json(order))
+}
+
+// ── Guest history: past orders by phone + org ─────────────────
+
+#[derive(Deserialize, IntoParams)]
+pub struct GuestHistoryQuery {
+    pub phone: String,
+    pub org_id: Uuid,
+    #[serde(default)]
+    pub device_token: Option<String>,
+}
+
+/// Compact item snapshot for the order history list.
+#[derive(Serialize, ToSchema, sqlx::FromRow)]
+pub struct OrderHistoryItem {
+    pub name: String,
+    pub quantity: i32,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct OrderHistorySummary {
+    pub id: Uuid,
+    pub delivery_ref: Option<String>,
+    pub status: String,
+    pub channel: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub branch_id: Uuid,
+    pub branch_name: String,
+    pub subtotal: i32,
+    pub delivery_fee: i32,
+    pub discount_amount: i32,
+    pub total: i32,
+    pub address_line: Option<String>,
+    pub place_name: Option<String>,
+    pub customer_lat: Option<f64>,
+    pub customer_lng: Option<f64>,
+    pub customer_name: String,
+    /// Frozen cart snapshot: the items at the time of the order (for display).
+    pub items: serde_json::Value,
+}
+
+#[derive(sqlx::FromRow)]
+struct OrderHistoryRow {
+    id: Uuid,
+    delivery_ref: Option<String>,
+    status: String,
+    channel: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+    branch_id: Uuid,
+    branch_name: String,
+    subtotal: i32,
+    delivery_fee: i32,
+    discount_amount: i32,
+    total: i32,
+    address_line: Option<String>,
+    place_name: Option<String>,
+    customer_lat: Option<f64>,
+    customer_lng: Option<f64>,
+    customer_name: String,
+    cart: serde_json::Value,
+}
+
+#[utoipa::path(
+    get, path = "/public/delivery-orders/history", tag = "delivery-public",
+    params(GuestHistoryQuery),
+    responses((status = 200, body = [OrderHistorySummary]), AppErrorResponse)
+)]
+pub async fn guest_order_history(
+    pool: web::Data<PgPool>,
+    secret: web::Data<JwtSecret>,
+    query: web::Query<GuestHistoryQuery>,
+) -> Result<HttpResponse, AppError> {
+    let phone = normalize_phone(&query.phone)?;
+
+    // If a device_token is supplied, it must be valid for this phone.
+    // For branches without OTP (otp_required = false), no token is expected —
+    // we accept phone-only reads (addresses are non-sensitive).
+    if let Some(token) = &query.device_token {
+        if !token.is_empty() && !whatsapp::verify_device_token(&secret.0, &phone, token) {
+            return Err(AppError::Unauthorized("Invalid device token.".into()));
+        }
+    }
+
+    let rows: Vec<OrderHistoryRow> = sqlx::query_as(
+        "SELECT d.id, d.delivery_ref, d.status::text AS status, d.channel::text AS channel,
+                d.created_at, d.branch_id, b.name AS branch_name,
+                d.subtotal, d.delivery_fee, d.discount_amount, d.total,
+                d.address_line, d.place_name,
+                d.customer_lat, d.customer_lng, d.customer_name, d.cart
+         FROM delivery_orders d
+         JOIN branches b ON b.id = d.branch_id
+         WHERE d.customer_phone = $1 AND d.org_id = $2
+         ORDER BY d.created_at DESC
+         LIMIT 50",
+    )
+    .bind(&phone)
+    .bind(query.org_id)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    let summaries: Vec<OrderHistorySummary> = rows
+        .into_iter()
+        .map(|r| {
+            // Extract a compact [{name, quantity}] list from the frozen cart JSONB.
+            let items = r
+                .cart
+                .as_array()
+                .map(|lines| {
+                    lines
+                        .iter()
+                        .filter_map(|l| {
+                            let name = l.get("name")?.as_str()?.to_string();
+                            let quantity = l.get("quantity")?.as_i64().unwrap_or(1) as i32;
+                            Some(serde_json::json!({ "name": name, "quantity": quantity }))
+                        })
+                        .collect::<serde_json::Value>()
+                })
+                .unwrap_or(serde_json::Value::Array(vec![]));
+            OrderHistorySummary {
+                id: r.id,
+                delivery_ref: r.delivery_ref,
+                status: r.status,
+                channel: r.channel,
+                created_at: r.created_at,
+                branch_id: r.branch_id,
+                branch_name: r.branch_name,
+                subtotal: r.subtotal,
+                delivery_fee: r.delivery_fee,
+                discount_amount: r.discount_amount,
+                total: r.total,
+                address_line: r.address_line,
+                place_name: r.place_name,
+                customer_lat: r.customer_lat,
+                customer_lng: r.customer_lng,
+                customer_name: r.customer_name,
+                items,
+            }
+        })
+        .collect();
+
+    Ok(HttpResponse::Ok().json(summaries))
+}
+
+// ── Guest past locations: distinct delivery addresses by phone + org ──
+
+#[derive(Deserialize, IntoParams)]
+pub struct GuestLocationsQuery {
+    pub phone: String,
+    pub org_id: Uuid,
+    #[serde(default)]
+    pub branch_id: Option<Uuid>,
+    #[serde(default)]
+    pub device_token: Option<String>,
+}
+
+#[derive(Serialize, ToSchema, sqlx::FromRow)]
+pub struct GuestSavedLocation {
+    pub branch_id: Uuid,
+    pub channel: String,
+    pub address_line: Option<String>,
+    pub place_name: Option<String>,
+    pub floor: Option<String>,
+    pub unit_number: Option<String>,
+    pub landmark: Option<String>,
+    pub customer_lat: Option<f64>,
+    pub customer_lng: Option<f64>,
+    pub last_used_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[utoipa::path(
+    get, path = "/public/delivery-orders/past-locations", tag = "delivery-public",
+    params(GuestLocationsQuery),
+    responses((status = 200, body = [GuestSavedLocation]), AppErrorResponse)
+)]
+pub async fn guest_past_locations(
+    pool: web::Data<PgPool>,
+    secret: web::Data<JwtSecret>,
+    query: web::Query<GuestLocationsQuery>,
+) -> Result<HttpResponse, AppError> {
+    let phone = normalize_phone(&query.phone)?;
+
+    if let Some(token) = &query.device_token {
+        if !token.is_empty() && !whatsapp::verify_device_token(&secret.0, &phone, token) {
+            return Err(AppError::Unauthorized("Invalid device token.".into()));
+        }
+    }
+
+    // DISTINCT ON (branch_id, channel, coalesced address key) ordered by most recent.
+    // Derived from order history — no separate table needed.
+    let rows: Vec<GuestSavedLocation> = if let Some(bid) = query.branch_id {
+        sqlx::query_as(
+            "SELECT DISTINCT ON (d.branch_id, d.channel::text,
+                                  COALESCE(d.address_line, d.place_name, ''))
+                    d.branch_id, d.channel::text AS channel,
+                    d.address_line, d.place_name, d.floor, d.unit_number, d.landmark,
+                    d.customer_lat, d.customer_lng, d.created_at AS last_used_at
+             FROM delivery_orders d
+             WHERE d.customer_phone = $1 AND d.org_id = $2 AND d.branch_id = $3
+               AND (d.address_line IS NOT NULL OR d.place_name IS NOT NULL
+                    OR d.customer_lat IS NOT NULL)
+             ORDER BY d.branch_id, d.channel::text,
+                      COALESCE(d.address_line, d.place_name, ''),
+                      d.created_at DESC",
+        )
+        .bind(&phone)
+        .bind(query.org_id)
+        .bind(bid)
+        .fetch_all(pool.get_ref())
+        .await?
+    } else {
+        sqlx::query_as(
+            "SELECT DISTINCT ON (d.branch_id, d.channel::text,
+                                  COALESCE(d.address_line, d.place_name, ''))
+                    d.branch_id, d.channel::text AS channel,
+                    d.address_line, d.place_name, d.floor, d.unit_number, d.landmark,
+                    d.customer_lat, d.customer_lng, d.created_at AS last_used_at
+             FROM delivery_orders d
+             WHERE d.customer_phone = $1 AND d.org_id = $2
+               AND (d.address_line IS NOT NULL OR d.place_name IS NOT NULL
+                    OR d.customer_lat IS NOT NULL)
+             ORDER BY d.branch_id, d.channel::text,
+                      COALESCE(d.address_line, d.place_name, ''),
+                      d.created_at DESC",
+        )
+        .bind(&phone)
+        .bind(query.org_id)
+        .fetch_all(pool.get_ref())
+        .await?
+    };
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+// ── Public order tracking (unauthenticated, capability URL) ───
+
+/// Customer-safe tracking view of a delivery order, keyed by its opaque UUID
+/// (same capability-URL trust model as the device-token flow). No phone number
+/// is exposed; the destination fields are the customer's own inputs. Powers the
+/// public `/track/{id}` page (polled, since the public surface has no SSE).
+#[derive(Serialize, ToSchema, sqlx::FromRow)]
+pub struct DeliveryTracking {
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub branch_name: String,
+    pub delivery_ref: Option<String>,
+    pub channel: String,
+    pub status: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub confirmed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub preparing_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub ready_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub out_for_delivery_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub delivered_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub cancelled_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub rejected_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub cancel_reason: Option<String>,
+    /// Branch base prep time + the teller's per-order addition (minutes).
+    pub estimated_prep_minutes: i32,
+    pub subtotal: i32,
+    pub delivery_fee: i32,
+    pub discount_amount: i32,
+    pub total: i32,
+    pub payment_method_hint: Option<String>,
+    pub customer_name: String,
+    pub place_name: Option<String>,
+    pub floor: Option<String>,
+    pub unit_number: Option<String>,
+    pub address_line: Option<String>,
+}
+
+#[utoipa::path(
+    get, path = "/public/delivery-orders/{id}/track", tag = "delivery-public",
+    responses((status = 200, body = DeliveryTracking), AppErrorResponse)
+)]
+pub async fn track_delivery_order(
+    pool: web::Data<PgPool>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let id = path.into_inner();
+    let row: Option<DeliveryTracking> = sqlx::query_as(
+        "SELECT d.id, d.org_id, b.name AS branch_name, d.delivery_ref, \
+                d.channel::text AS channel, d.status::text AS status, \
+                d.created_at, d.confirmed_at, d.preparing_at, d.ready_at, \
+                d.out_for_delivery_at, d.delivered_at, d.cancelled_at, d.rejected_at, \
+                d.cancel_reason, \
+                COALESCE(s.prep_time_minutes, 0) + d.extra_prep_minutes AS estimated_prep_minutes, \
+                d.subtotal, d.delivery_fee, d.discount_amount, d.total, \
+                d.payment_method_hint, d.customer_name, \
+                d.place_name, d.floor, d.unit_number, d.address_line \
+         FROM delivery_orders d \
+         JOIN branches b ON b.id = d.branch_id \
+         LEFT JOIN branch_delivery_settings s ON s.branch_id = d.branch_id \
+         WHERE d.id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool.get_ref())
+    .await?;
+    let tracking = row.ok_or_else(|| AppError::NotFound("Order not found".into()))?;
+    Ok(HttpResponse::Ok().json(tracking))
 }

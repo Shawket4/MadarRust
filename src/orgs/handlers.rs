@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::{guards::{require_super_admin, require_same_org}, jwt::Claims},
+    branches::handlers::validate_timezone,
     errors::{AppError, AppErrorResponse},
     permissions::checker::check_permission,
     uploads::handlers::delete_old_image,
@@ -32,6 +33,10 @@ pub struct Org {
     pub tax_rate:       sqlx::types::BigDecimal,
     pub receipt_footer: Option<String>,
     pub is_active:      bool,
+    /// IANA timezone name. The org-level default that branches inherit when
+    /// their own timezone is unset. Defaults to `Africa/Cairo`.
+    #[schema(example = "Africa/Cairo")]
+    pub timezone:       String,
 }
 
 // ── Request types ─────────────────────────────────────────────
@@ -45,6 +50,7 @@ struct CreateOrgFields {
     currency_code:  Option<String>,
     tax_rate:       Option<f64>,
     receipt_footer: Option<String>,
+    timezone:       Option<String>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -56,6 +62,11 @@ pub struct UpdateOrgRequest {
     pub tax_rate:       Option<f64>,
     pub receipt_footer: Option<String>,
     pub is_active:      Option<bool>,
+    /// IANA timezone name (e.g. `Africa/Cairo`). Validated against the
+    /// PostgreSQL timezone database. Branches inherit this when their own
+    /// timezone is unset.
+    #[schema(example = "Africa/Cairo")]
+    pub timezone:       Option<String>,
     /// `null` clears the logo; absent leaves it unchanged. To set a new
     /// logo, use `PUT /orgs/{id}/logo` (multipart) instead — JSON updates
     /// only accept the clear-to-null case here.
@@ -87,6 +98,9 @@ pub struct CreateOrgMultipart {
     pub tax_rate: Option<f64>,
 
     pub receipt_footer: Option<String>,
+
+    #[schema(example = "Africa/Cairo")]
+    pub timezone: Option<String>,
 
     /// Logo image file. PNG, JPEG, or WebP. Optional — omit the field
     /// entirely to create the org without a logo.
@@ -175,6 +189,7 @@ pub async fn create_org(
                 }
             }
             "receipt_footer" => fields.receipt_footer = text_field(&mut field).await?,
+            "timezone"       => fields.timezone       = text_field(&mut field).await?,
             _                => { drain_field(&mut field).await?; }
         }
     }
@@ -199,13 +214,16 @@ pub async fn create_org(
         return Err(AppError::BadRequest("tax_rate must be between 0 and 1".into()));
     }
 
+    let timezone = fields.timezone.as_deref().filter(|s| !s.is_empty()).unwrap_or("Africa/Cairo");
+    validate_timezone(pool.get_ref(), timezone).await?;
+
     let mut tx = pool.begin().await?;
 
     let org = sqlx::query_as::<_, Org>(
         r#"
-        INSERT INTO organizations (name, slug, logo_url, currency_code, tax_rate, receipt_footer)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, is_active
+        INSERT INTO organizations (name, slug, logo_url, currency_code, tax_rate, receipt_footer, timezone)
+        VALUES ($1, $2, $3, $4, $5, $6, $7::timezone_name)
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, is_active, timezone::text AS timezone
         "#,
     )
     .bind(&name)
@@ -214,6 +232,7 @@ pub async fn create_org(
     .bind(currency)
     .bind(tax_rate)
     .bind(&fields.receipt_footer)
+    .bind(timezone)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -260,7 +279,7 @@ pub async fn list_orgs(
 
     let orgs = sqlx::query_as::<_, Org>(
         r#"
-        SELECT id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, is_active
+        SELECT id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, is_active, timezone::text AS timezone
         FROM organizations
         WHERE deleted_at IS NULL
         ORDER BY name
@@ -349,6 +368,10 @@ pub async fn update_org(
         }
     }
 
+    if let Some(tz) = body.timezone.as_deref().filter(|s| !s.is_empty()) {
+        validate_timezone(pool.get_ref(), tz).await?;
+    }
+
     let logo_url_is_present = body.logo_url.is_some();
     let logo_url_val        = body.logo_url.as_ref().and_then(|o| o.clone());
 
@@ -362,9 +385,10 @@ pub async fn update_org(
             receipt_footer = COALESCE($6, receipt_footer),
             is_active      = COALESCE($7, is_active),
             logo_url       = CASE WHEN $9 THEN $8 ELSE logo_url END,
+            timezone       = COALESCE(NULLIF($10, '')::timezone_name, timezone),
             updated_at     = NOW()
         WHERE id = $1 AND deleted_at IS NULL
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, is_active
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, is_active, timezone::text AS timezone
         "#,
     )
     .bind(*org_id)
@@ -376,6 +400,7 @@ pub async fn update_org(
     .bind(body.is_active)
     .bind(&logo_url_val)
     .bind(logo_url_is_present)
+    .bind(&body.timezone)
     .fetch_optional(pool.get_ref())
     .await?
     .ok_or_else(|| AppError::NotFound("Org not found".into()))?;
@@ -468,7 +493,7 @@ pub async fn upload_org_logo(
         UPDATE organizations
         SET logo_url = $2, updated_at = NOW()
         WHERE id = $1 AND deleted_at IS NULL
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, is_active
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, is_active, timezone::text AS timezone
         "#,
     )
     .bind(*org_id)
@@ -534,7 +559,7 @@ pub(crate) fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 
 async fn fetch_org(pool: &PgPool, id: Uuid) -> Result<Org, AppError> {
     sqlx::query_as::<_, Org>(
-        "SELECT id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, is_active
+        "SELECT id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, is_active, timezone::text AS timezone
          FROM organizations
          WHERE id = $1 AND deleted_at IS NULL",
     )

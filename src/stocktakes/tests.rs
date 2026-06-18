@@ -118,6 +118,75 @@ async fn test_stocktake_reconciles_stock_and_posts_variance(pool: PgPool) {
     assert_eq!(report.net_variance_value, -2400);
 }
 
+/// Regression: a count must reconcile to LIVE stock, so a legitimate sale during
+/// the count window is NOT mislabeled as shrinkage (the old finalize overwrote
+/// stock with the count and scored variance against the open-time snapshot).
+#[sqlx::test]
+async fn test_finalize_reconciles_to_live_not_snapshot(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    ).await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id).await;
+    for (r, a) in [("stocktakes", "create"), ("stocktakes", "read"), ("stocktakes", "update")] {
+        grant(&pool, r, a).await;
+    }
+    let ing = seed_ingredient(&pool, org_id).await;
+    seed_stock(&pool, branch_id, ing, 100.0).await; // snapshot expected = 100
+    let token = org_admin_token(user_id, org_id);
+
+    // Open the count (snapshots expected_qty = 100).
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/stocktakes/branches/{branch_id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({})).to_request()).await;
+    let full: StocktakeFull = test::read_body_json(resp).await;
+    let stocktake_id = full.stocktake.id;
+
+    // While the count is open, 8 units are legitimately sold → live stock = 92.
+    sqlx::query("UPDATE branch_inventory SET current_stock = 92 WHERE branch_id = $1 AND org_ingredient_id = $2")
+        .bind(branch_id).bind(ing).execute(&pool).await.unwrap();
+
+    // Physical count finds 90 (2 genuinely missing on top of the 8 sold).
+    let resp = test::call_service(&app, test::TestRequest::put()
+        .uri(&format!("/stocktakes/{stocktake_id}/items"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({"items": [{"org_ingredient_id": ing, "counted_qty": 90.0}]}))
+        .to_request()).await;
+    assert!(resp.status().is_success());
+
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/stocktakes/{stocktake_id}/finalize"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request()).await;
+    assert!(resp.status().is_success());
+
+    // Stock settles at the counted value.
+    let stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE branch_id = $1 AND org_ingredient_id = $2")
+        .bind(branch_id).bind(ing).fetch_one(&pool).await.unwrap();
+    assert_eq!(stock, 90.0);
+
+    // The reconciling movement is the delta vs LIVE (90 - 92 = -2), NOT vs the
+    // snapshot (which would be the wrong -10 that includes the 8 sold).
+    let mqty: f64 = sqlx::query_scalar("SELECT quantity::float8 FROM inventory_movements WHERE source_type = 'stocktake' AND source_id = $1")
+        .bind(stocktake_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(mqty, -2.0);
+
+    // Variance report attributes only the TRUE 2-unit shrinkage (2 × 300 = 600),
+    // not the 8 sold units.
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/stocktakes/{stocktake_id}/variance-report"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request()).await;
+    let report: VarianceReport = test::read_body_json(resp).await;
+    assert_eq!(report.total_shrinkage_value, 600);
+}
+
 #[sqlx::test]
 async fn test_only_one_open_stocktake_per_branch(pool: PgPool) {
     let app = test::init_service(
@@ -538,4 +607,58 @@ async fn test_list_stocktakes_all_branches(pool: PgPool) {
     let just_a: Vec<Stocktake> = test::read_body_json(resp).await;
     assert_eq!(just_a.len(), 1);
     assert_eq!(just_a[0].branch_id, branch_a);
+}
+
+/// Cycle-count scope (by category) limits the snapshot; a found item outside the
+/// scope can still be counted in (added to the count with a snapshot baseline).
+#[sqlx::test]
+async fn test_cycle_count_scope_and_found_item(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    ).await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id).await;
+    for (r, a) in [("stocktakes","create"),("stocktakes","read"),("stocktakes","update")] { grant(&pool, r, a).await; }
+    let token = org_admin_token(user_id, org_id);
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    // Two ingredients in different categories.
+    let dairy = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, category, cost_per_unit) VALUES ($1,$2,'Milk','ml'::inventory_unit,'dairy',300)")
+        .bind(dairy).bind(org_id).execute(&pool).await.unwrap();
+    let dry = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, category, cost_per_unit) VALUES ($1,$2,'Flour','g'::inventory_unit,'dry',5)")
+        .bind(dry).bind(org_id).execute(&pool).await.unwrap();
+    seed_stock(&pool, branch_id, dairy, 100.0).await;
+    seed_stock(&pool, branch_id, dry, 5000.0).await;
+
+    // Scope the count to the 'dairy' category → only Milk is snapshotted.
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/stocktakes/branches/{branch_id}")).insert_header(auth.clone())
+        .set_json(serde_json::json!({"category": "dairy"})).to_request()).await;
+    assert_eq!(resp.status(), 201);
+    let full: StocktakeFull = test::read_body_json(resp).await;
+    assert_eq!(full.items.len(), 1, "only the dairy ingredient is in scope");
+    assert_eq!(full.items[0].org_ingredient_id, dairy);
+    let st_id = full.stocktake.id;
+
+    // Count a FOUND item (Flour) that's outside the scope → it gets added with
+    // its current stock (5000 g) as the expected baseline.
+    let resp = test::call_service(&app, test::TestRequest::put()
+        .uri(&format!("/stocktakes/{st_id}/items")).insert_header(auth.clone())
+        .set_json(serde_json::json!({"items": [{"org_ingredient_id": dry, "counted_qty": 4900.0}]})).to_request()).await;
+    assert!(resp.status().is_success());
+    let updated: StocktakeFull = test::read_body_json(resp).await;
+    assert_eq!(updated.items.len(), 2, "found item added to the count");
+    let (exp, cnt): (f64, Option<f64>) = sqlx::query_as(
+        "SELECT expected_qty::float8, counted_qty::float8 FROM stocktake_items \
+         WHERE stocktake_id=$1 AND org_ingredient_id=$2"
+    ).bind(st_id).bind(dry).fetch_one(&pool).await.unwrap();
+    assert_eq!(exp, 5000.0, "found item snapshots current stock as expected");
+    assert_eq!(cnt, Some(4900.0));
 }

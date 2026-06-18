@@ -32,9 +32,18 @@ rust_decimal_macros = "1"
 utoipa = { version = "5.5.0", features = ["actix_extras", "chrono", "uuid", "decimal"] }
 utoipa-swagger-ui = { version = "9.0.2", features = ["actix-web"] }
 reqwest = { version = "0.13.4", features = ["json"] }
+base64 = "0.22"
 urlencoding = "2.1.3"
 actix-governor = "0.6"
 moka               = { version = "0.12", features = ["future"] }
+# QR card generation. `resvg` re-exports `usvg` and `tiny-skia` from the same
+# release, so depending on it alone keeps the SVG/raster stack version-locked
+# (no chance of a mismatched usvg/tiny-skia).
+qrcode             = { version = "0.14", default-features = false }
+# default-features=false drops `system-fonts`/`raster-images`: text shaping only,
+# and font resolution is limited to the faces we explicitly load (no system-font
+# fallback, no runtime filesystem dependency).
+resvg              = { version = "0.47", default-features = false, features = ["text"] }
 
 [profile.release]
 lto = true
@@ -46,6 +55,8 @@ tempfile = "3.27.0"
 # Already in the tree via actix-web; named directly so tests can write
 # `Service<actix_http::Request>` bounds for shared helpers.
 actix-http = "3"
+# Decode-verify rasterised QR output in tests (scannability is non-negotiable).
+rqrr = "0.10"
 
 
 [[bin]]
@@ -67,6 +78,10 @@ path = "src/bin/backfill_recipe_units.rs"
 [[bin]]
 name = "backfill-order-ref"
 path = "src/bin/backfill_order_ref.rs"
+
+[[bin]]
+name = "fuzz-token"
+path = "src/bin/fuzz_token.rs"
 
 [lib]
 name = "sufrix_rust"

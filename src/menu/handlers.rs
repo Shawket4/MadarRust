@@ -141,11 +141,13 @@ pub struct AddonItemIngredient {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
 pub struct MenuItemFull {
     #[serde(flatten)]
-    pub item:            MenuItem,
-    pub sizes:           Vec<ItemSize>,
-    pub addon_slots:     Vec<AddonSlot>,
-    pub optional_fields: Vec<OptionalField>,
-    pub recipes:         Vec<MenuItemRecipe>,
+    pub item:               MenuItem,
+    pub sizes:              Vec<ItemSize>,
+    pub addon_slots:        Vec<AddonSlot>,
+    pub optional_fields:    Vec<OptionalField>,
+    pub recipes:            Vec<MenuItemRecipe>,
+    /// Explicit per-item addon allowlist. Empty = no restriction (use org catalog).
+    pub allowed_addon_ids:  Vec<Uuid>,
 }
 
 // ── Request types ─────────────────────────────────────────────
@@ -662,10 +664,11 @@ pub async fn list_menu_items(
             if let Some(branch_id) = query.branch_id {
                 apply_branch_size_overrides(pool.get_ref(), branch_id, item.id, &mut sizes).await?;
             }
-            let addon_slots = fetch_addon_slots(pool.get_ref(), item.id).await?;
-            let optional_fields = fetch_optional_fields(pool.get_ref(), item.id).await?;
-            let recipes = fetch_item_recipes(pool.get_ref(), item.id).await?;
-            result.push(MenuItemFull { item, sizes, addon_slots, optional_fields, recipes });
+            let addon_slots        = fetch_addon_slots(pool.get_ref(), item.id).await?;
+            let optional_fields    = fetch_optional_fields(pool.get_ref(), item.id).await?;
+            let recipes            = fetch_item_recipes(pool.get_ref(), item.id).await?;
+            let allowed_addon_ids  = fetch_allowed_addon_ids(pool.get_ref(), item.id).await?;
+            result.push(MenuItemFull { item, sizes, addon_slots, optional_fields, recipes, allowed_addon_ids });
         }
         return Ok(HttpResponse::Ok().json(result));
     }
@@ -762,7 +765,7 @@ pub async fn list_menu_catalog(
     // Embed per-SKU costs for just this page so the dashboard catalog renders
     // food-cost chips in the same round trip.
     let ids: Vec<Uuid> = rows.iter().map(|m| m.id).collect();
-    let costs = crate::costing::sku_costs_for_items(pool.get_ref(), query.org_id, &ids).await?;
+    let costs = crate::costing::sku_costs_for_items(pool.get_ref(), query.org_id, &ids, query.branch_id).await?;
     let mut by_item: std::collections::HashMap<Uuid, Vec<crate::costing::SkuCost>> =
         std::collections::HashMap::new();
     for c in costs {
@@ -804,12 +807,13 @@ pub async fn get_menu_item(
     let item = fetch_menu_item(pool.get_ref(), *id).await?;
     require_same_org(&claims, Some(item.org_id))?;
 
-    let sizes       = fetch_sizes(pool.get_ref(), *id).await?;
-    let addon_slots = fetch_addon_slots(pool.get_ref(), *id).await?;
-    let optional_fields = fetch_optional_fields(pool.get_ref(), *id).await?;
-    let recipes = fetch_item_recipes(pool.get_ref(), *id).await?;
+    let sizes             = fetch_sizes(pool.get_ref(), *id).await?;
+    let addon_slots       = fetch_addon_slots(pool.get_ref(), *id).await?;
+    let optional_fields   = fetch_optional_fields(pool.get_ref(), *id).await?;
+    let recipes           = fetch_item_recipes(pool.get_ref(), *id).await?;
+    let allowed_addon_ids = fetch_allowed_addon_ids(pool.get_ref(), *id).await?;
 
-    Ok(HttpResponse::Ok().json(MenuItemFull { item, sizes, addon_slots, optional_fields, recipes }))
+    Ok(HttpResponse::Ok().json(MenuItemFull { item, sizes, addon_slots, optional_fields, recipes, allowed_addon_ids }))
 }
 
 #[utoipa::path(
@@ -880,10 +884,11 @@ pub async fn create_menu_item(
 
     Ok(HttpResponse::Created().json(MenuItemFull {
         item,
-        sizes:           vec![],
-        addon_slots:     vec![],
-        optional_fields: vec![],
-        recipes:         vec![],
+        sizes:             vec![],
+        addon_slots:       vec![],
+        optional_fields:   vec![],
+        recipes:           vec![],
+        allowed_addon_ids: vec![],
     }))
 }
 
@@ -1747,7 +1752,7 @@ pub async fn upsert_addon_override(
     }
     // Normalize the deduction to the replacement ingredient's base unit.
     let (norm_unit, norm_qty) = crate::recipes::handlers::normalize_recipe_unit(
-        pool.get_ref(), body.org_ingredient_id, &body.ingredient_unit, body.quantity_used,
+        pool.get_ref(), addon.org_id, body.org_ingredient_id, &body.ingredient_unit, body.quantity_used,
     ).await?;
 
     // Upsert using the appropriate partial unique index path.
@@ -1904,6 +1909,66 @@ pub async fn delete_addon_override(
 }
 
 // ═══════════════════════════════════════════════════════════════
+// PER-ITEM ALLOWED ADDON LIST
+// ═══════════════════════════════════════════════════════════════
+
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
+pub struct PutAllowedAddonsRequest {
+    /// Full replacement set of addon item IDs allowed on this menu item.
+    /// Send an empty array to clear the restriction (falls back to org catalog).
+    pub addon_item_ids: Vec<Uuid>,
+}
+
+#[utoipa::path(
+    put,
+    path = "/menu-items/{id}/allowed-addons",
+    tag = "menu",
+    params(("id" = Uuid, Path, description = "Menu item ID")),
+    request_body = PutAllowedAddonsRequest,
+    responses((status = 200, description = "Allowed addon IDs replaced", body = Vec<String>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn put_allowed_addons(
+    req:  HttpRequest,
+    pool: web::Data<PgPool>,
+    id:   web::Path<Uuid>,
+    body: web::Json<PutAllowedAddonsRequest>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
+
+    let item = fetch_menu_item(pool.get_ref(), *id).await?;
+    require_same_org(&claims, Some(item.org_id))?;
+
+    // Validate every addon belongs to the same org.
+    for addon_id in &body.addon_item_ids {
+        let addon = fetch_addon_item(pool.get_ref(), *addon_id).await?;
+        require_same_org(&claims, Some(addon.org_id))?;
+    }
+
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM menu_item_allowed_addons WHERE menu_item_id = $1")
+        .bind(*id)
+        .execute(&mut *tx)
+        .await?;
+
+    for (i, addon_id) in body.addon_item_ids.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO menu_item_allowed_addons (menu_item_id, addon_item_id, sort_order)
+             VALUES ($1, $2, $3)",
+        )
+        .bind(*id)
+        .bind(addon_id)
+        .bind(i as i32)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+
+    Ok(HttpResponse::Ok().json(&body.addon_item_ids))
+}
+
+// ═══════════════════════════════════════════════════════════════
 // OPTIONAL FIELDS
 // ═══════════════════════════════════════════════════════════════
 
@@ -2037,7 +2102,7 @@ pub async fn create_optional_field(
         let unit = mut_body.ingredient_unit.clone().unwrap_or_default();
         let qty  = mut_body.quantity_used.unwrap_or(0.0);
         let (nu, nq) = crate::recipes::handlers::normalize_recipe_unit(
-            pool.get_ref(), mut_body.org_ingredient_id, &unit, qty,
+            pool.get_ref(), item.org_id, mut_body.org_ingredient_id, &unit, qty,
         ).await?;
         mut_body.ingredient_unit = Some(nu);
         mut_body.quantity_used   = Some(nq);
@@ -2134,7 +2199,7 @@ pub async fn update_optional_field(
             .or_else(|| existing.ingredient_unit.clone())
             .unwrap_or_default();
         let (nu, nq) = crate::recipes::handlers::normalize_recipe_unit(
-            pool.get_ref(), effective_id, &unit, qty,
+            pool.get_ref(), item.org_id, effective_id, &unit, qty,
         ).await?;
         mut_body.ingredient_unit = Some(nu);
         mut_body.quantity_used   = Some(nq);
@@ -2660,6 +2725,21 @@ async fn fetch_addon_slots(
     .bind(item_id)
     .fetch_all(pool)
     .await?)
+}
+
+async fn fetch_allowed_addon_ids(
+    pool:    &PgPool,
+    item_id: Uuid,
+) -> Result<Vec<Uuid>, AppError> {
+    let rows: Vec<(Uuid,)> = sqlx::query_as(
+        "SELECT addon_item_id FROM menu_item_allowed_addons
+         WHERE menu_item_id = $1
+         ORDER BY sort_order ASC, created_at ASC",
+    )
+    .bind(item_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
 }
 
 async fn fetch_optional_fields(

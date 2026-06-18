@@ -211,22 +211,18 @@ async fn load_snapshots(
                     CASE
                         WHEN COUNT(*) = 0 THEN NULL
                         WHEN bool_or(r.org_ingredient_id IS NULL
-                                     OR COALESCE(ich.cost_per_unit, oing.cost_per_unit) IS NULL)
+                                     OR COALESCE(bi.cost_per_unit, oing.cost_per_unit) IS NULL)
                             THEN NULL
-                        -- costs are stored in piastres; round the fractional sum
+                        -- costs are stored in piastres; round the fractional sum.
+                        -- Per-branch actual cost, falling back to the org default.
                         ELSE round(SUM(r.quantity_used
-                                 * COALESCE(ich.cost_per_unit, oing.cost_per_unit)))
+                                 * COALESCE(bi.cost_per_unit, oing.cost_per_unit)))
                     END
                 FROM menu_item_recipes r
                 LEFT JOIN org_ingredients oing ON oing.id = r.org_ingredient_id
-                LEFT JOIN LATERAL (
-                    SELECT h.cost_per_unit
-                    FROM ingredient_cost_history h
-                    WHERE h.org_ingredient_id = r.org_ingredient_id
-                      AND h.effective_until IS NULL
-                    ORDER BY h.effective_from DESC
-                    LIMIT 1
-                ) ich ON TRUE
+                LEFT JOIN branch_inventory bi
+                       ON bi.org_ingredient_id = r.org_ingredient_id
+                      AND bi.branch_id = $2
                 WHERE r.menu_item_id = e.menu_item_id
                   AND COALESCE(r.size_label::text, 'one_size') = e.size_label_text
             ) AS cost_per_serving
@@ -235,6 +231,7 @@ async fn load_snapshots(
         "#,
     )
     .bind(org_id)
+    .bind(branch_id)
     .fetch_all(pool)
     .await?;
 
@@ -299,9 +296,11 @@ async fn load_sales(
                         SELECT h.cost_per_unit
                         FROM ingredient_cost_history h
                         WHERE h.org_ingredient_id = r.org_ingredient_id
+                          AND (h.branch_id = o.branch_id OR h.branch_id IS NULL)
                           AND h.effective_from <= o.created_at
                           AND (h.effective_until IS NULL OR h.effective_until > o.created_at)
-                        ORDER BY h.effective_from DESC
+                        -- prefer this order's branch epoch over the org default
+                        ORDER BY (h.branch_id IS NULL), h.effective_from DESC
                         LIMIT 1
                     ) ich ON TRUE
                     WHERE r.menu_item_id = oi.menu_item_id

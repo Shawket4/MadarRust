@@ -1,61 +1,66 @@
-name: Build and Deploy SufrixRust
+name: Build and Deploy
 
 on:
   push:
     branches: [main, master]
   workflow_dispatch:
 
+env:
+  IMAGE: ghcr.io/shawket4/sufrixrust
+
 jobs:
-  build-and-deploy:
+  # ── Build Docker image and push to GHCR ─────────────────────────────────────
+  build-push:
+    name: build + push image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image: ${{ steps.meta.outputs.tags }}
+      sha_tag: ${{ env.IMAGE }}:${{ github.sha }}
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
         with:
-          toolchain: stable
-          targets: x86_64-unknown-linux-gnu
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-registry-
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref_name == 'main' || github.ref_name == 'master' }}
+            type=sha,format=long
 
-      - name: Cache cargo git
-        uses: actions/cache@v4
+      - name: Build and push
+        uses: docker/build-push-action@v6
         with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-git-
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - name: Cache target directory
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-target-release-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-target-release-
+  # ── Deploy to VPS ────────────────────────────────────────────────────────────
+  deploy:
+    name: deploy to VPS
+    needs: build-push
+    runs-on: ubuntu-latest
+    environment: production
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev
-
-      - name: Build release binary
-        run: |
-          cargo build --release --target x86_64-unknown-linux-gnu
-          strip target/x86_64-unknown-linux-gnu/release/sufrix-rust
-          chmod +x target/x86_64-unknown-linux-gnu/release/sufrix-rust
-
-      - name: Package deployment
-        run: |
-          mkdir -p deployment
-          cp target/x86_64-unknown-linux-gnu/release/sufrix-rust deployment/
-          tar -czf deployment.tar.gz -C deployment .
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Setup SSH
         run: |
@@ -63,46 +68,37 @@ jobs:
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           echo "${{ secrets.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
-          chmod 644 ~/.ssh/known_hosts
 
-      - name: Upload to VPS
+      - name: Copy compose file
         run: |
           scp -i ~/.ssh/deploy_key -P ${{ secrets.SSH_PORT }} \
-            deployment.tar.gz \
-            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/tmp/sufrix-rust-deployment.tar.gz
+            docker-compose.yml \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/opt/sufrix-rust/docker-compose.yml
 
-      - name: Deploy on VPS
+      - name: Pull image and restart backend
+        env:
+          DEPLOY_IMAGE: ${{ env.IMAGE }}:sha-${{ github.sha }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
         run: |
           ssh -i ~/.ssh/deploy_key -p ${{ secrets.SSH_PORT }} \
-            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
-            set -e
-            DEPLOY_DIR="/opt/sufrix-rust"
-            SERVICE="sufrix-rust"
-            BACKUP_DIR="/opt/sufrix-rust/backups"
+              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+              "GHCR_TOKEN='${GHCR_TOKEN}' GH_ACTOR='${GH_ACTOR}' DEPLOY_IMAGE='${DEPLOY_IMAGE}' bash -s" << 'SCRIPT'
+          set -e
 
-            sudo mkdir -p $DEPLOY_DIR $BACKUP_DIR
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
 
-            # Backup existing binary
-            if [ -f $DEPLOY_DIR/sufrix-rust ]; then
-              TS=$(date +%Y%m%d_%H%M%S)
-              sudo cp $DEPLOY_DIR/sufrix-rust $BACKUP_DIR/sufrix-rust.$TS
-              sudo ls -t $BACKUP_DIR/sufrix-rust.* | tail -n +6 | xargs -r sudo rm
-            fi
+          docker pull "$DEPLOY_IMAGE"
 
-            # Stop service
-            sudo systemctl stop $SERVICE || true
+          # Restart only the backend — other services keep running
+          BACKEND_IMAGE="$DEPLOY_IMAGE" \
+            docker compose -f /opt/sufrix-rust/docker-compose.yml \
+            up -d --no-deps --pull never sufrix-backend
 
-            # Extract new binary
-            sudo tar -xzf /tmp/sufrix-rust-deployment.tar.gz -C $DEPLOY_DIR
-            sudo chmod +x $DEPLOY_DIR/sufrix-rust
-            sudo chown -R root:root $DEPLOY_DIR
-
-            # Start service
-            sudo systemctl daemon-reload
-            sudo systemctl start $SERVICE
-            sudo systemctl status $SERVICE --no-pager
-
-            # Cleanup
-            rm /tmp/sufrix-rust-deployment.tar.gz
-            echo "✅ Deployment complete"
-          EOF
+          # Verify
+          sleep 4
+          curl -sf http://127.0.0.1:8081/health && echo "✅ healthy" || {
+            docker compose -f /opt/sufrix-rust/docker-compose.yml logs sufrix-backend --tail 50
+            exit 1
+          }
+          SCRIPT

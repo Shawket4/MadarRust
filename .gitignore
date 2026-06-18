@@ -1,2 +1,19 @@
 /target
 db-backups/
+.DS_Store
+node_modules/
+*.env
+package-lock.json
+INVENTORY_OVERHAUL_FRONTEND_SYNC.md
+
+# Robustness tooling artifacts
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz-out/
+/.fuzzvenv/
+/mutants.out*/
+/restler_work/
+
+# Local dev container data (OSRM map files, Shlink DB, WhatsApp sessions)
+/dev-data/

@@ -1,8 +1,8 @@
 use actix_governor::{Governor, GovernorConfigBuilder};
-use actix_web::web;
+use actix_web::{middleware::Condition, web};
 
 use crate::auth::{handlers, middleware::JwtMiddleware};
-use crate::rate_limit::PeerIpOrLocalhost;
+use crate::rate_limit::{rate_limiting_enabled, PeerIpOrLocalhost};
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     // 10 req/min per IP, burst of 10.
@@ -15,6 +15,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .burst_size(10)
         .finish()
         .expect("Invalid rate limiter configuration");
+    // Disabled wholesale by SUFRIX_DISABLE_RATE_LIMIT for local API fuzzing.
+    let limited = rate_limiting_enabled();
 
     cfg.service(
         web::scope("/auth")
@@ -23,12 +25,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             // cause the first scope to intercept all /auth/* requests).
             .service(
                 web::resource("/login")
-                    .wrap(Governor::new(&gov))
+                    .wrap(Condition::new(limited, Governor::new(&gov)))
                     .route(web::post().to(handlers::login))
             )
             .service(
                 web::resource("/resolve-branch")
-                    .wrap(Governor::new(&gov))
+                    .wrap(Condition::new(limited, Governor::new(&gov)))
                     .route(web::post().to(handlers::resolve_branch))
             )
             .service(

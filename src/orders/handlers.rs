@@ -31,8 +31,30 @@ const ORDER_SELECT: &str =
      o.discount_amount, o.tax_amount, o.total_amount,
      o.amount_tendered, o.change_given, o.tip_amount, o.tip_payment_method, o.discount_id,
      o.customer_name, o.notes, o.order_type, o.delivery_fee, o.delivery_order_id,
+     d.channel::text AS delivery_channel, d.customer_lat AS delivery_lat, d.customer_lng AS delivery_lng,
      o.voided_at, o.void_reason::text, o.void_note, o.voided_by, o.created_at
-     FROM orders o JOIN users u ON u.id = o.teller_id ";
+     FROM orders o JOIN users u ON u.id = o.teller_id
+     LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id ";
+
+// ── Shared summary aggregate columns ──────────────────────────
+/// Aggregate columns hydrating [OrderSummary] (by name, via `FromRow`). Used by
+/// both the list and export summary queries; assumes `orders o` is LEFT JOINed
+/// to `delivery_orders d` (for the channel split).
+const ORDER_SUMMARY_COLS: &str =
+    "COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN o.total_amount ELSE 0 END), 0) AS revenue,
+     COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN 1 ELSE 0 END), 0) AS completed,
+     COALESCE(SUM(CASE WHEN o.status::text = 'voided'    THEN 1 ELSE 0 END), 0) AS voided,
+     COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN o.discount_amount ELSE 0 END), 0) AS discounts,
+     COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN COALESCE(o.tip_amount, 0) ELSE 0 END), 0) AS tips,
+     COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN o.delivery_fee ELSE 0 END), 0) AS delivery_fees,
+     COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND o.order_type = 'delivery' THEN 1 ELSE 0 END), 0) AS delivery_orders,
+     COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND o.order_type = 'delivery' THEN o.total_amount ELSE 0 END), 0) AS delivery_revenue,
+     COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND d.channel::text = 'in_mall' THEN 1 ELSE 0 END), 0) AS in_mall_orders,
+     COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND d.channel::text = 'in_mall' THEN o.total_amount ELSE 0 END), 0) AS in_mall_revenue,
+     COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND d.channel::text = 'in_mall' THEN o.delivery_fee ELSE 0 END), 0) AS in_mall_fees,
+     COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND d.channel::text = 'outside' THEN 1 ELSE 0 END), 0) AS outside_orders,
+     COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND d.channel::text = 'outside' THEN o.total_amount ELSE 0 END), 0) AS outside_revenue,
+     COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND d.channel::text = 'outside' THEN o.delivery_fee ELSE 0 END), 0) AS outside_fees";
 
 // ── Models ────────────────────────────────────────────────────
 
@@ -73,6 +95,15 @@ pub struct Order {
     /// Links a finalized delivery order back to its `delivery_orders` row
     /// (customer, address, channel, zone). `null` for dine-in orders.
     pub delivery_order_id:  Option<Uuid>,
+    /// Delivery channel ("in_mall" | "outside") of the linked delivery order,
+    /// surfaced on the list so clients can flag + segment delivery orders
+    /// without a per-order detail fetch. `null` for dine-in orders.
+    pub delivery_channel:   Option<String>,
+    /// Customer location of the linked delivery order, so clients can link out
+    /// to a map (e.g. Google Maps) without a per-order detail fetch. `null` for
+    /// dine-in orders or delivery orders without captured coordinates.
+    pub delivery_lat:       Option<f64>,
+    pub delivery_lng:       Option<f64>,
     pub voided_at:          Option<chrono::DateTime<chrono::Utc>>,
     pub void_reason:        Option<String>,
     pub void_note:          Option<String>,
@@ -305,6 +336,10 @@ pub struct ListOrdersQuery {
     pub status:         Option<String>,
     pub from:           Option<chrono::DateTime<chrono::Utc>>,
     pub to:             Option<chrono::DateTime<chrono::Utc>>,
+    /// Filter by order origin: "dine_in" or "delivery".
+    pub order_type:     Option<String>,
+    /// Filter delivery orders by channel: "in_mall" or "outside".
+    pub channel:        Option<String>,
     /// When true, each order in `data` embeds its full line items
     /// (addons/optionals/bundle components) — the response shape becomes
     /// [PaginatedOrdersFull]. Lets offline-first clients cache complete
@@ -312,7 +347,7 @@ pub struct ListOrdersQuery {
     pub include_items:  Option<bool>,
 }
 
-#[derive(Serialize, Deserialize, ToSchema)]
+#[derive(Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct OrderSummary {
     pub revenue:   i64,
     pub completed: i64,
@@ -323,6 +358,27 @@ pub struct OrderSummary {
     /// Lets the dashboard surface delivery revenue separately from item sales.
     #[serde(default)]
     pub delivery_fees: i64,
+    // ── Delivery channel split (completed orders in scope) ──────────────
+    /// Count of completed delivery orders.
+    #[serde(default)]
+    pub delivery_orders:  i64,
+    /// Gross revenue (total_amount) of completed delivery orders.
+    #[serde(default)]
+    pub delivery_revenue: i64,
+    /// In-mall channel: order count / gross revenue / delivery fees.
+    #[serde(default)]
+    pub in_mall_orders:   i64,
+    #[serde(default)]
+    pub in_mall_revenue:  i64,
+    #[serde(default)]
+    pub in_mall_fees:     i64,
+    /// Outside channel: order count / gross revenue / delivery fees.
+    #[serde(default)]
+    pub outside_orders:   i64,
+    #[serde(default)]
+    pub outside_revenue:  i64,
+    #[serde(default)]
+    pub outside_fees:     i64,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -386,87 +442,10 @@ pub struct ExportOrdersQuery {
 }
 
 // ── Deduction helper ──────────────────────────────────────────
-
-#[derive(Serialize, Clone)]
-struct InventoryDeduction {
-    org_ingredient_id: Option<Uuid>,
-    ingredient_name:   String,
-    unit:              String,
-    quantity:          f64,
-    source:            String, // "drink_recipe" | "addon" | "addon_swap:<name>" | "optional" | "bundle_component:<name>"
-    category:          String,
-    /// Additive-addon attribution (None for recipe/swap/optional entries).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    addon_item_id:     Option<Uuid>,
-    /// Optional-field attribution.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    optional_field_id: Option<Uuid>,
-    /// Bundle-component attribution (which component this entry belongs to).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    component_item_id: Option<Uuid>,
-    /// Piastre cost per ingredient unit at sale time. None ⟺ unknown.
-    cost_per_unit:     Option<f64>,
-    /// quantity × cost_per_unit in piastres, rounded. None ⟺ unknown.
-    line_cost:         Option<i64>,
-}
-
-struct LineCostSummary {
-    line_cost:    Option<i64>,
-    unit_cost:    Option<i64>,
-    cost_missing: bool,
-}
-
-/// Roll a line's enriched deductions up into the stored cost columns.
-///
-/// * `line_cost` — full COGS in piastres; `None` when anything is unknown.
-/// * `unit_cost` — recipe-scope (drink_recipe + addon_swap) cost ÷ quantity;
-///   `None` for bundle lines and whenever recipe cost is unknown.
-/// * `cost_missing` — any unresolved entry, a menu line with no recipe at
-///   all, or an additive addon with no ingredient rows.
-fn summarize_line_costs(
-    deductions: &[InventoryDeduction],
-    quantity: i32,
-    is_bundle_line: bool,
-    has_uncosted_addon: bool,
-) -> LineCostSummary {
-    let mut cost_missing = deductions.iter().any(|d| d.line_cost.is_none())
-        || deductions.is_empty()
-        || has_uncosted_addon;
-
-    // Ingredient costs are stored in piastres; no currency conversion here.
-    let total_cost: f64 = deductions
-        .iter()
-        .filter_map(|d| d.cost_per_unit.map(|c| c * d.quantity))
-        .sum();
-    let line_cost = if cost_missing {
-        None
-    } else {
-        Some(total_cost.round() as i64)
-    };
-
-    let recipe_scope =
-        |d: &&InventoryDeduction| d.source == "drink_recipe" || d.source.starts_with("addon_swap:");
-    let unit_cost = if is_bundle_line {
-        None
-    } else {
-        let entries: Vec<&InventoryDeduction> = deductions.iter().filter(recipe_scope).collect();
-        if entries.is_empty() || entries.iter().any(|d| d.cost_per_unit.is_none()) {
-            None
-        } else {
-            let cost: f64 = entries
-                .iter()
-                .map(|d| d.cost_per_unit.unwrap() * d.quantity)
-                .sum();
-            Some((cost / quantity.max(1) as f64).round() as i64)
-        }
-    };
-
-    if is_bundle_line && deductions.is_empty() {
-        cost_missing = true;
-    }
-
-    LineCostSummary { line_cost, unit_cost, cost_missing }
-}
+// The enriched `InventoryDeduction`, `LineCostSummary`, and the pure
+// `summarize_line_costs` rollup live in `cost_math` so they can be unit-tested
+// and fuzzed without a DB. Imported here so construction sites read unchanged.
+use crate::orders::cost_math::{summarize_line_costs, InventoryDeduction};
 
 // ── POST /orders ──────────────────────────────────────────────
 
@@ -687,7 +666,8 @@ pub async fn create_order(
             // Date / Time window validation
             let order_time = body.created_at.unwrap_or_else(Utc::now);
             let branch_tz: String = sqlx::query_scalar(
-                "SELECT timezone FROM branches WHERE id = $1"
+                "SELECT COALESCE(b.timezone, o.timezone)::text
+                 FROM branches b JOIN organizations o ON o.id = b.org_id WHERE b.id = $1"
             )
             .bind(body.branch_id)
             .fetch_one(pool.get_ref())
@@ -911,270 +891,56 @@ pub async fn create_order(
                 None => base_price,
             };
 
-            // Base drink recipe
-            let recipe_rows: Vec<(Option<Uuid>, f64, String, String, String)> =
-                if let Some(size) = &item_input.size_label {
-                    sqlx::query_as(
-                        r#"SELECT r.org_ingredient_id, r.quantity_used::float8,
-                                  r.ingredient_name, r.ingredient_unit,
-                                  COALESCE(i.category, 'general') as category
-                           FROM   menu_item_recipes r
-                           LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id
-                           WHERE  r.menu_item_id = $1 AND r.size_label = $2::item_size"#,
-                    )
-                    .bind(m_item_id)
-                    .bind(size)
-                    .fetch_all(pool.get_ref())
-                    .await?
-                } else {
-                    sqlx::query_as(
-                        r#"SELECT r.org_ingredient_id, r.quantity_used::float8,
-                                  r.ingredient_name, r.ingredient_unit,
-                                  COALESCE(i.category, 'general') as category
-                           FROM   menu_item_recipes r
-                           LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id
-                           WHERE  r.menu_item_id = $1
-                             AND  r.size_label = (
-                                 SELECT size_label FROM menu_item_recipes
-                                 WHERE  menu_item_id = $1 LIMIT 1
-                             )"#,
-                    )
-                    .bind(m_item_id)
-                    .fetch_all(pool.get_ref())
-                    .await?
-                };
-
-            for (ing_id, qty, name, unit, category) in recipe_rows {
+            // Resolve recipe + addons (incl. milk/coffee swaps) + optionals via the
+            // SHARED resolver that bundle components also use, so the deduction +
+            // swap rules live in exactly one place. Map its output into the
+            // order-line structs (which additionally carry cost fields).
+            let config = crate::orders::component_resolve::resolve_menu_item_configuration(
+                pool.get_ref(),
+                m_item_id,
+                item_input.size_label.clone(),
+                item_input.quantity,
+                &item_input.addons,
+                &item_input.optional_field_ids,
+                body.branch_id,
+            )
+            .await?;
+            for d in config.deductions {
                 deductions.push(InventoryDeduction {
-                    org_ingredient_id: ing_id,
-                    ingredient_name:   name,
-                    unit,
-                    quantity:          qty * item_input.quantity as f64,
-                    source:            "drink_recipe".into(),
-                    category,
-                    addon_item_id:     None,
-                    optional_field_id: None,
+                    org_ingredient_id: d.org_ingredient_id,
+                    ingredient_name:   d.ingredient_name,
+                    unit:              d.unit,
+                    quantity:          d.quantity,
+                    source:            d.source,
+                    category:          d.category,
+                    addon_item_id:     d.addon_item_id,
+                    optional_field_id: d.optional_field_id,
                     component_item_id: None,
                     cost_per_unit:     None,
                     line_cost:         None,
                 });
             }
-
-            // ── 2. Addon ingredients (flat — no overrides) ────────
-            for addon_input in &item_input.addons {
-                let addon_qty = addon_input.quantity.max(1) as f64;
-
-                // default_price is branch-effective: a branch addon override replaces it,
-                // so the EXPECTED addon price (used for flagging + legacy fallback) matches
-                // what the POS charged from the branch addon list.
-                let (addon_name, addon_name_translations, default_price, addon_type): (String, serde_json::Value, i32, String) = sqlx::query_as(
-                    "SELECT a.name, a.name_translations,
-                            COALESCE(bao.price_override, a.default_price) AS default_price,
-                            a.type
-                     FROM addon_items a
-                     LEFT JOIN branch_addon_overrides bao
-                            ON bao.addon_item_id = a.id AND bao.branch_id = $2
-                     WHERE a.id = $1"
-                )
-                .bind(addon_input.addon_item_id)
-                .bind(body.branch_id)
-                .fetch_optional(pool.get_ref())
-                .await?
-                .ok_or_else(|| AppError::NotFound(
-                    format!("Addon {} not found", addon_input.addon_item_id)
-                ))?;
-
+            for a in config.addons {
                 resolved_addons.push(ResolvedAddon {
-                    addon_item_id: addon_input.addon_item_id,
-                    addon_name:    addon_name.clone(),
-                    name_translations: addon_name_translations.clone(),
-                    unit_price:    default_price,
-                    quantity:      addon_input.quantity.max(1),
-                    has_ingredients: false, // patched below once addon_rows is known
-                    is_swap:       false,
+                    addon_item_id:     a.addon_item_id,
+                    addon_name:        a.addon_name,
+                    name_translations: a.name_translations,
+                    unit_price:        a.unit_price,
+                    quantity:          a.quantity,
+                    has_ingredients:   a.has_ingredients,
+                    is_swap:           a.is_swap,
                 });
-
-                let addon_rows: Vec<(Option<Uuid>, f64, String, String)> = sqlx::query_as(
-                    "SELECT org_ingredient_id, quantity_used::float8,
-                            ingredient_name, ingredient_unit
-                     FROM   addon_item_ingredients
-                     WHERE  addon_item_id = $1",
-                )
-                .bind(addon_input.addon_item_id)
-                .fetch_all(pool.get_ref())
-                .await?;
-
-                // Dynamic swap logic for milk and coffee types
-                let target_category = match addon_type.as_str() {
-                    "milk_type" => Some("milk"),
-                    "coffee_type" => Some("coffee_bean"),
-                    _ => None,
-                };
-
-                if let Some(cat) = target_category {
-                    // Find the base recipe's ingredient for this category
-                    let base_ing_id = deductions.iter()
-                        .find(|d| d.source == "drink_recipe" && d.category == cat)
-                        .and_then(|d| d.org_ingredient_id);
-
-                    // Find the addon's ingredient
-                    let addon_ing_id = addon_rows.first()
-                        .and_then(|(id, _, _, _)| *id);
-
-                    // If both point to the same org_ingredient → this IS the base, not a swap
-                    let is_base = base_ing_id.is_some()
-                        && addon_ing_id.is_some()
-                        && base_ing_id == addon_ing_id;
-
-                    if is_base {
-                        // No charge — the drink already uses this ingredient as its base
-                        if let Some(last) = resolved_addons.last_mut() {
-                            last.unit_price = 0;
-                            last.is_swap = true;
-                        }
-                        // Don't touch deductions — recipe already has the right ingredient
-                    } else if let Some((repl_id, _, repl_name, repl_unit)) = addon_rows.first() {
-                        // Real swap — calculate price difference
-                        let base_addon_price: i32 = if let Some(base_id) = base_ing_id {
-                            sqlx::query_scalar(
-                                "SELECT COALESCE(MAX(COALESCE(bao.price_override, a.default_price)), 0)
-                                 FROM addon_items a
-                                 JOIN addon_item_ingredients i ON i.addon_item_id = a.id
-                                 LEFT JOIN branch_addon_overrides bao
-                                        ON bao.addon_item_id = a.id AND bao.branch_id = $3
-                                 WHERE i.org_ingredient_id = $1 AND a.type = $2"
-                            )
-                            .bind(base_id)
-                            .bind(addon_type.as_str())
-                            .bind(body.branch_id)
-                            .fetch_optional(pool.get_ref())
-                            .await?
-                            .flatten()
-                            .unwrap_or(0)
-                        } else {
-                            0
-                        };
-
-                        let new_price = (default_price - base_addon_price).max(0);
-                        if let Some(last) = resolved_addons.last_mut() {
-                            last.unit_price = new_price;
-                            last.is_swap = true;
-                        }
-
-                        // Replace base ingredient. Keep the SAME physical amount the
-                        // recipe called for, but expressed in the replacement
-                        // ingredient's base unit — e.g. 250 g milk → 0.25 kg almond
-                        // milk. Without this conversion a g↔kg / ml↔l base-unit
-                        // mismatch between the two ingredients would deduct the wrong
-                        // amount by 1000×.
-                        let mut swapped = false;
-                        for ded in deductions.iter_mut() {
-                            if ded.source == "drink_recipe" && ded.category == cat {
-                                match crate::units::convert(ded.quantity, &ded.unit, repl_unit) {
-                                    Ok(q) => {
-                                        ded.quantity = q;
-                                        ded.org_ingredient_id = *repl_id;
-                                    }
-                                    // Different measure families (e.g. ml vs g) have no defined
-                                    // conversion — a swap setup error. Deducting the raw number
-                                    // would be a meaningless 1000×-class corruption of stock/COGS,
-                                    // so SKIP the deduction (leave it untracked) and flag it rather
-                                    // than block the sale (V20).
-                                    Err(_) => {
-                                        tracing::warn!(
-                                            from_unit = %ded.unit, to_unit = %repl_unit, addon = %addon_name,
-                                            "addon swap across incompatible unit families; inventory not deducted"
-                                        );
-                                        ded.org_ingredient_id = None;
-                                    }
-                                }
-                                ded.ingredient_name = repl_name.clone();
-                                ded.unit = repl_unit.clone();
-                                ded.source = format!("addon_swap:{}", addon_name);
-                                swapped = true;
-                            }
-                        }
-                        if !swapped {
-                            tracing::warn!(addon_name = %addon_name, cat = %cat, "Addon swap failed, no base ingredient found with category");
-                        }
-                    }
-                    continue; // Skip the normal additive deduction for these addon types
-                }
-
-                if let Some(last) = resolved_addons.last_mut() {
-                    last.has_ingredients = !addon_rows.is_empty();
-                }
-                for (ing_id, qty, name, unit) in addon_rows {
-                    deductions.push(InventoryDeduction {
-                        org_ingredient_id: ing_id,
-                        ingredient_name:   name,
-                        unit,
-                        quantity:          qty * item_input.quantity as f64 * addon_qty,
-                        source:            "addon".into(),
-                        category:          "general".into(),
-                        addon_item_id:     Some(addon_input.addon_item_id),
-                        optional_field_id: None,
-                        component_item_id: None,
-                        cost_per_unit:     None,
-                        line_cost:         None,
-                    });
-                }
             }
-
-            for &field_id in &item_input.optional_field_ids {
-                let row_result = sqlx::query_as::<_, (String, i32, Option<Uuid>, Option<String>, Option<String>, Option<f64>, Option<String>, serde_json::Value)>(
-                    r#"SELECT name, price, org_ingredient_id,
-                              ingredient_name, ingredient_unit,
-                              quantity_used::float8, size_label::text,
-                              name_translations
-                       FROM menu_item_optional_fields
-                       WHERE id = $1 AND menu_item_id = $2 AND is_active = true"#,
-                )
-                .bind(field_id)
-                .bind(m_item_id)
-                .fetch_optional(pool.get_ref())
-                .await?;
-            
-                let Some((fname, fprice, ing_id, ing_name, ing_unit, qty_used, field_size, name_translations)) = row_result else {
-                    tracing::warn!(field_id = %field_id, "Optional field not found or inactive — skipping");
-                    continue;
-                };
-
-                // If field is size-restricted, check it matches
-                if let Some(fs) = &field_size
-                    && item_input.size_label.as_deref() != Some(fs.as_str()) {
-                        tracing::warn!(field_id = %field_id, "Optional field size mismatch — skipping");
-                        continue;
-                    }
-
-                // Add ingredient deduction if configured
-                if let (Some(ref name), Some(ref unit), Some(qty)) =
-                    (ing_name.clone(), ing_unit.clone(), qty_used)
-                {
-                    deductions.push(InventoryDeduction {
-                        org_ingredient_id: ing_id,
-                        ingredient_name:   name.clone(),
-                        unit:              unit.clone(),
-                        quantity:          qty * item_input.quantity as f64,
-                        source:            "optional".into(),
-                        category:          "general".into(),
-                        addon_item_id:     None,
-                        optional_field_id: Some(field_id),
-                        component_item_id: None,
-                        cost_per_unit:     None,
-                        line_cost:         None,
-                    });
-                }
-
+            for o in config.optionals {
                 resolved_optionals.push(ResolvedOptional {
-                    optional_field_id: field_id,
-                    field_name:        fname,
-                    name_translations,
-                    price:             fprice,
-                    org_ingredient_id: ing_id,
-                    ingredient_name:   ing_name,
-                    ingredient_unit:   ing_unit,
-                    quantity_used:     qty_used,
+                    optional_field_id: o.optional_field_id,
+                    field_name:        o.field_name,
+                    name_translations: o.name_translations,
+                    price:             o.price,
+                    org_ingredient_id: o.org_ingredient_id,
+                    ingredient_name:   o.ingredient_name,
+                    ingredient_unit:   o.ingredient_unit,
+                    quantity_used:     o.quantity_used,
                 });
             }
 
@@ -1294,12 +1060,8 @@ pub async fn create_order(
     let created_at   = body.created_at.unwrap_or_else(chrono::Utc::now);
     // A future-dated order would mint its order_ref in a future business day and
     // hide the sale from "today" reports. An offline POS legitimately syncs PAST
-    // timestamps, so clamp only the future side (small clock-skew tolerance).
-    if created_at > chrono::Utc::now() + chrono::Duration::minutes(5) {
-        return Err(AppError::BadRequest(
-            "created_at is too far in the future — check the device clock.".into(),
-        ));
-    }
+    // timestamps, so reject only the future side (small clock-skew tolerance).
+    crate::clock::reject_if_future(created_at, "created_at")?;
 
     // ── Cost snapshot ─────────────────────────────────────────
     // Resolve point-in-time ingredient costs once for the whole order and
@@ -1313,7 +1075,7 @@ pub async fn create_order(
             .into_iter()
             .collect();
         let ingredient_costs =
-            crate::costing::ingredient_costs_at(pool.get_ref(), &ingredient_ids, created_at)
+            crate::costing::ingredient_costs_at(pool.get_ref(), body.branch_id, &ingredient_ids, created_at)
                 .await?;
         for ri in &mut resolved_items {
             for d in &mut ri.deductions {
@@ -1385,8 +1147,8 @@ pub async fn create_order(
     // sequence. The counter bump is in this same tx, so it rolls back with the order
     // (no burned numbers on failure or on the idempotency-replay path).
     let (branch_code, biz_date): (String, chrono::NaiveDate) = sqlx::query_as(
-        "SELECT b.code, ($1::timestamptz AT TIME ZONE b.timezone)::date
-         FROM branches b WHERE b.id = $2",
+        "SELECT b.code, ($1::timestamptz AT TIME ZONE COALESCE(b.timezone, o.timezone)::text)::date
+         FROM branches b JOIN organizations o ON o.id = b.org_id WHERE b.id = $2",
     )
     .bind(created_at)
     .bind(body.branch_id)
@@ -1436,6 +1198,9 @@ pub async fn create_order(
             discount_amount, tax_amount, total_amount,
             amount_tendered, change_given, tip_amount, tip_payment_method, discount_id,
             customer_name, notes, order_type, delivery_fee, delivery_order_id,
+            (SELECT channel::text FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_channel,
+            (SELECT customer_lat FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_lat,
+            (SELECT customer_lng FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_lng,
             voided_at, void_reason::text, void_note, voided_by, created_at
         "#,
     )
@@ -1909,13 +1674,17 @@ pub async fn list_orders(
     push_filter!("o.created_at >=",          query.from);
     push_filter!("o.created_at <=",          query.to);
     push_filter!("o.updated_at >",           query.updated_after);
+    push_filter!("o.order_type =",           query.order_type);
+    push_filter!("d.channel::text =",        query.channel);
 
     let data_sql = format!(
         "{} WHERE {} {} ORDER BY o.created_at DESC LIMIT ${} OFFSET ${}",
         ORDER_SELECT, scope_condition, data_filter, data_idx, data_idx + 1
     );
     let count_sql = format!(
-        "SELECT COUNT(*) FROM orders o JOIN users u ON u.id = o.teller_id WHERE {} {}",
+        "SELECT COUNT(*) FROM orders o JOIN users u ON u.id = o.teller_id
+         LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id
+         WHERE {} {}",
         scope_condition, count_filter
     );
 
@@ -1934,6 +1703,8 @@ pub async fn list_orders(
             if let Some(v)     = query.from            { q = q.bind(v); }
             if let Some(v)     = query.to              { q = q.bind(v); }
             if let Some(v)     = query.updated_after   { q = q.bind(v); }
+            if let Some(ref v) = query.order_type     { q = q.bind(v.clone()); }
+            if let Some(ref v) = query.channel        { q = q.bind(v.clone()); }
             q
         }};
     }
@@ -1943,24 +1714,17 @@ pub async fn list_orders(
         .await?;
 
     let summary_sql = format!(
-        "SELECT
-            COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN o.total_amount ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN 1              ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN o.status::text = 'voided'    THEN 1              ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN o.discount_amount        ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN COALESCE(o.tip_amount, 0) ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN o.delivery_fee ELSE 0 END), 0)
-         FROM orders o JOIN users u ON u.id = o.teller_id
+        "SELECT {} \
+         FROM orders o JOIN users u ON u.id = o.teller_id \
+         LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id \
          WHERE {} {}",
-        scope_condition, count_filter
+        ORDER_SUMMARY_COLS, scope_condition, count_filter
     );
 
-    let (revenue, completed, voided, discounts, tips, delivery_fees): (i64, i64, i64, i64, i64, i64) =
-        bind_filters!(sqlx::query_as(&summary_sql).bind(scope_id))
+    let summary: OrderSummary =
+        bind_filters!(sqlx::query_as::<_, OrderSummary>(&summary_sql).bind(scope_id))
             .fetch_one(pool.get_ref())
             .await?;
-
-    let summary = OrderSummary { revenue, completed, voided, discounts, tips, delivery_fees };
 
     let data: Vec<Order> = bind_filters!(
         sqlx::query_as::<_, Order>(&data_sql)
@@ -2066,12 +1830,14 @@ pub async fn void_order(
         return Err(AppError::BadRequest("A note is required when void reason is 'other'".into()));
     }
     let voided_at = body.voided_at.unwrap_or_else(chrono::Utc::now);
+    // Offline voids carry their real time; reject only a future device clock.
+    crate::clock::reject_if_future(voided_at, "voided_at")?;
 
-    let items_to_restore = if body.restore_inventory.unwrap_or(false) {
-        Some(fetch_order_items_full(pool.get_ref(), *order_id).await?)
-    } else {
-        None
-    };
+    // restock=true → items go back to stock; restock=false → they were made and
+    // discarded (logged as waste). Either way the void touches the ledger, so
+    // fetch the lines now.
+    let restock = body.restore_inventory.unwrap_or(false);
+    let items = fetch_order_items_full(pool.get_ref(), *order_id).await?;
 
     let mut tx = pool.begin().await?;
 
@@ -2092,6 +1858,9 @@ pub async fn void_order(
                amount_tendered, change_given, tip_amount, tip_payment_method,
                discount_id, customer_name, notes,
                order_type, delivery_fee, delivery_order_id,
+               (SELECT channel::text FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_channel,
+               (SELECT customer_lat FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_lat,
+               (SELECT customer_lng FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_lng,
                voided_at, void_reason::text, void_note, voided_by, created_at"#,
     )
     .bind(*order_id)
@@ -2111,51 +1880,81 @@ pub async fn void_order(
         return Ok(HttpResponse::Ok().json(current));
     };
 
-    if let Some(items) = items_to_restore {
-        for item in items {
-            if let Some(deductions) = item.item.deductions_snapshot.as_array() {
-                for d in deductions {
-                    if let (Some(qty), Some(ing_id_str)) = (
-                        d.get("quantity").and_then(|v| v.as_f64()),
-                        d.get("org_ingredient_id").and_then(|v| v.as_str()),
-                    )
-                        && let Ok(ing_id) = Uuid::parse_str(ing_id_str) {
-                            let restored: Option<(Uuid, f64)> = sqlx::query_as(
-                                "UPDATE branch_inventory \
-                                 SET current_stock = current_stock + $1 \
-                                 WHERE branch_id = $2 AND org_ingredient_id = $3 \
-                                 RETURNING id, current_stock::float8"
-                            )
-                            .bind(qty)
-                            .bind(order.branch_id)
-                            .bind(ing_id)
-                            .fetch_optional(&mut *tx)
-                            .await?;
+    // A void always REVERSES the original sale deduction (void_restock +). When
+    // the food was NOT put back (restock=false) it was made and discarded, so we
+    // then re-deduct it as WASTE (−). Net stock for a discard is unchanged, but
+    // the ledger now reads "sale reversed → logged as waste" — self-describing and
+    // consistent with how a delivery cancel logs a made-but-not-restocked order,
+    // instead of leaving an orphan `sale` deduction on a voided order.
+    for item in items {
+        let Some(deductions) = item.item.deductions_snapshot.as_array() else { continue };
+        for d in deductions {
+            let (Some(qty), Some(ing_id_str)) = (
+                d.get("quantity").and_then(|v| v.as_f64()),
+                d.get("org_ingredient_id").and_then(|v| v.as_str()),
+            ) else { continue };
+            let Ok(ing_id) = Uuid::parse_str(ing_id_str) else { continue };
+            let unit_cost = d.get("cost_per_unit").and_then(|v| v.as_f64()).map(|c| c.round() as i64);
 
-                            if let Some((bi_id, balance)) = restored {
-                                crate::inventory::movements::record_movement(
-                                    &mut *tx,
-                                    crate::inventory::movements::MovementParams {
-                                        branch_id:           order.branch_id,
-                                        org_ingredient_id:   ing_id,
-                                        branch_inventory_id: Some(bi_id),
-                                        movement_type:       "void_restock",
-                                        quantity:            qty,
-                                        balance_after:       Some(balance),
-                                        unit_cost:           d.get("cost_per_unit")
-                                            .and_then(|v| v.as_f64())
-                                            .map(|c| c.round() as i64),
-                                        reason:              None,
-                                        below_zero:          false,
-                                        source_type:         Some("order"),
-                                        source_id:           Some(order.id),
-                                        note:                Some("Void restock"),
-                                        created_by:          Some(claims.user_id()),
-                                    },
-                                )
-                                .await?;
-                            }
-                        }
+            // Reverse the sale deduction (back into stock).
+            let restored: Option<(Uuid, f64)> = sqlx::query_as(
+                "UPDATE branch_inventory SET current_stock = current_stock + $1 \
+                 WHERE branch_id = $2 AND org_ingredient_id = $3 \
+                 RETURNING id, current_stock::float8"
+            )
+            .bind(qty).bind(order.branch_id).bind(ing_id)
+            .fetch_optional(&mut *tx).await?;
+            let Some((bi_id, balance)) = restored else { continue };
+
+            crate::inventory::movements::record_movement(
+                &mut *tx,
+                crate::inventory::movements::MovementParams {
+                    branch_id:           order.branch_id,
+                    org_ingredient_id:   ing_id,
+                    branch_inventory_id: Some(bi_id),
+                    movement_type:       "void_restock",
+                    quantity:            qty,
+                    balance_after:       Some(balance),
+                    unit_cost,
+                    reason:              None,
+                    below_zero:          false,
+                    source_type:         Some("order"),
+                    source_id:           Some(order.id),
+                    note:                Some("Void restock"),
+                    created_by:          Some(claims.user_id()),
+                },
+            )
+            .await?;
+
+            if !restock {
+                // Made & discarded → re-deduct, logged as waste.
+                let wasted: Option<(Uuid, f64)> = sqlx::query_as(
+                    "UPDATE branch_inventory SET current_stock = current_stock - $1 \
+                     WHERE branch_id = $2 AND org_ingredient_id = $3 \
+                     RETURNING id, current_stock::float8"
+                )
+                .bind(qty).bind(order.branch_id).bind(ing_id)
+                .fetch_optional(&mut *tx).await?;
+                if let Some((wbi, wbal)) = wasted {
+                    crate::inventory::movements::record_movement(
+                        &mut *tx,
+                        crate::inventory::movements::MovementParams {
+                            branch_id:           order.branch_id,
+                            org_ingredient_id:   ing_id,
+                            branch_inventory_id: Some(wbi),
+                            movement_type:       "waste",
+                            quantity:            -qty,
+                            balance_after:       Some(wbal),
+                            unit_cost,
+                            reason:              Some("order_cancelled"),
+                            below_zero:          wbal < 0.0,
+                            source_type:         Some("order"),
+                            source_id:           Some(order.id),
+                            note:                Some("Order voided — made, not restocked"),
+                            created_by:          Some(claims.user_id()),
+                        },
+                    )
+                    .await?;
                 }
             }
         }
@@ -2235,7 +2034,7 @@ pub async fn preview_recipe(
                    WHERE  r.menu_item_id = $1
                      AND  r.size_label = (
                          SELECT size_label FROM menu_item_recipes
-                         WHERE  r.menu_item_id = $1 LIMIT 1
+                         WHERE  menu_item_id = $1 ORDER BY size_label LIMIT 1
                      )"#,
             )
             .bind(body.menu_item_id)
@@ -2860,24 +2659,17 @@ pub async fn export_orders(
     }
 
     let summary_sql = format!(
-        "SELECT \
-            COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN o.total_amount ELSE 0 END), 0), \
-            COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN 1              ELSE 0 END), 0), \
-            COALESCE(SUM(CASE WHEN o.status::text = 'voided'    THEN 1              ELSE 0 END), 0), \
-            COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN o.discount_amount        ELSE 0 END), 0), \
-            COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN COALESCE(o.tip_amount, 0) ELSE 0 END), 0), \
-            COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN o.delivery_fee ELSE 0 END), 0) \
+        "SELECT {} \
          FROM orders o JOIN users u ON u.id = o.teller_id \
+         LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id \
          WHERE {} {}",
-        scope_condition, filter
+        ORDER_SUMMARY_COLS, scope_condition, filter
     );
 
-    let (revenue, completed, voided, discounts, tips, delivery_fees): (i64, i64, i64, i64, i64, i64) =
-        bind_export_filters!(sqlx::query_as(&summary_sql).bind(scope_id))
+    let summary: OrderSummary =
+        bind_export_filters!(sqlx::query_as::<_, OrderSummary>(&summary_sql).bind(scope_id))
             .fetch_one(pool.get_ref())
             .await?;
-
-    let summary = OrderSummary { revenue, completed, voided, discounts, tips, delivery_fees };
 
     let data_sql = format!(
         "{} WHERE {} {} ORDER BY o.created_at DESC",

@@ -1,5 +1,5 @@
 use actix_web::web;
-use crate::{auth::middleware::JwtMiddleware, orgs::handlers};
+use crate::{auth::middleware::JwtMiddleware, orgs::handlers, qr_card::handlers as qr_handlers};
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
@@ -12,7 +12,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/{id}",      web::delete().to(handlers::delete_org))
             .route("/{id}/logo", web::put().to(handlers::upload_org_logo))
             .route("/{id}/onboarding",          web::get().to(crate::orgs::onboarding::get_onboarding))
-            .route("/{id}/onboarding/complete", web::post().to(crate::orgs::onboarding::complete_onboarding)),
+            .route("/{id}/onboarding/complete", web::post().to(crate::orgs::onboarding::complete_onboarding))
+            .route("/{id}/qr",                  web::get().to(qr_handlers::org_qr)),
     );
 
     cfg.service(

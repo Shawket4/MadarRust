@@ -527,6 +527,94 @@ async fn test_milk_swap_converts_units_across_base_units(pool: PgPool) {
     assert_eq!(milk_stock, 5000.0);
 }
 
+/// Locks the standalone→shared-resolver de-dup: one order exercising all three
+/// deduction branches at once — a milk SWAP (unit-converted), an ADDITIVE addon
+/// with its own ingredient, and an OPTIONAL ingredient — must deduct each
+/// correctly through the single shared resolver.
+#[sqlx::test]
+async fn test_standalone_resolver_swap_additive_and_optional(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    // Base recipe: 200 g milk (category 'milk'); a milk_type addon swaps to almond (kg).
+    let milk = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,'Milk','g'::inventory_unit,5,'milk')")
+        .bind(milk).bind(org_id).execute(&pool).await.unwrap();
+    let almond = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,'Almond','kg'::inventory_unit,8000,'milk')")
+        .bind(almond).bind(org_id).execute(&pool).await.unwrap();
+    // Additive addon ingredient (cream) + optional ingredient (syrup).
+    let cream = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,'Cream','g'::inventory_unit,3,'general')")
+        .bind(cream).bind(org_id).execute(&pool).await.unwrap();
+    let syrup = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,'Syrup','ml'::inventory_unit,2,'general')")
+        .bind(syrup).bind(org_id).execute(&pool).await.unwrap();
+    seed_branch_inventory(&pool, branch_id, milk, 5000.0).await;
+    seed_branch_inventory(&pool, branch_id, almond, 10.0).await;
+    seed_branch_inventory(&pool, branch_id, cream, 1000.0).await;
+    seed_branch_inventory(&pool, branch_id, syrup, 1000.0).await;
+
+    add_menu_item_recipe(&pool, menu_item_id, milk, 200.0).await;
+
+    let swap_addon = seed_addon_item(&pool, org_id, "Almond", "milk_type", 0).await;
+    sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1,$2,1,'Almond','kg')")
+        .bind(swap_addon).bind(almond).execute(&pool).await.unwrap();
+    let whip_addon = seed_addon_item(&pool, org_id, "Whip", "other", 100).await;
+    sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1,$2,15,'Cream','g')")
+        .bind(whip_addon).bind(cream).execute(&pool).await.unwrap();
+    let vanilla_field = Uuid::new_v4();
+    sqlx::query("INSERT INTO menu_item_optional_fields (id, menu_item_id, name, price, org_ingredient_id, ingredient_name, ingredient_unit, quantity_used, is_active) \
+                 VALUES ($1,$2,'Vanilla',50,$3,'Syrup','ml',5,true)")
+        .bind(vanilla_field).bind(menu_item_id).bind(syrup).execute(&pool).await.unwrap();
+
+    let req_body = CreateOrderRequest {
+        branch_id, shift_id, payment_method: "cash".to_string(),
+        customer_name: None, notes: None,
+        discount_type: None, discount_value: None, discount_id: None,
+        amount_tendered: None, tip_amount: None, tip_payment_method: None, payment_splits: None,
+        items: vec![OrderItemInput {
+            menu_item_id: Some(menu_item_id), bundle_id: None, size_label: None, quantity: 1,
+            addons: vec![
+                crate::orders::component_resolve::AddonInput { addon_item_id: swap_addon, quantity: 1, unit_price: None },
+                crate::orders::component_resolve::AddonInput { addon_item_id: whip_addon, quantity: 1, unit_price: None },
+            ],
+            optional_field_ids: vec![vanilla_field],
+            bundle_components: vec![], unit_price: None, notes: None,
+        }],
+        created_at: None, ..Default::default()
+    };
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri("/orders").insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(&req_body).to_request()).await;
+    assert_eq!(resp.status(), 201);
+
+    let stock = |ing: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, f64>("SELECT current_stock::float8 FROM branch_inventory WHERE org_ingredient_id=$1")
+                .bind(ing).fetch_one(&pool).await.unwrap()
+        }
+    };
+    assert_eq!(stock(almond).await, 9.80, "swap: 200 g milk → 0.20 kg almond");
+    assert_eq!(stock(milk).await, 5000.0, "swapped-out base milk untouched");
+    assert_eq!(stock(cream).await, 985.0, "additive addon deducts its ingredient (15 g)");
+    assert_eq!(stock(syrup).await, 995.0, "optional deducts its ingredient (5 ml)");
+}
+
 #[sqlx::test]
 async fn test_list_orders(pool: PgPool) {
     let app = test::init_service(
@@ -768,6 +856,74 @@ async fn test_void_order(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(new_stock, 1000.0); // Restored 20
+}
+
+/// Voiding WITHOUT restock logs the made-but-discarded food as WASTE (not as an
+/// orphan sale): the sale is reversed (void_restock +) and re-deducted as waste
+/// (−), so net stock stays consumed but the ledger is self-describing.
+#[sqlx::test]
+async fn test_void_no_restock_logs_waste(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    grant_permission(&pool, "org_admin", "orders", "update").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+    let ing_id = seed_ingredient(&pool, org_id, "Coffee Beans", "g").await;
+    seed_branch_inventory(&pool, branch_id, ing_id, 1000.0).await;
+    add_menu_item_recipe(&pool, menu_item_id, ing_id, 20.0).await;
+
+    let req_body = CreateOrderRequest {
+        branch_id, shift_id, payment_method: "cash".to_string(),
+        customer_name: None, notes: None,
+        discount_type: None, discount_value: None, discount_id: None,
+        amount_tendered: None, tip_amount: None, tip_payment_method: None, payment_splits: None,
+        items: vec![OrderItemInput {
+            menu_item_id: Some(menu_item_id), bundle_id: None, size_label: None, quantity: 1,
+            addons: vec![], optional_field_ids: vec![], bundle_components: vec![], unit_price: None, notes: None,
+        }],
+        created_at: None, ..Default::default()
+    };
+    let order_full: OrderFull = test::read_body_json(test::call_service(&app, test::TestRequest::post()
+        .uri("/orders").insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(&req_body).to_request()).await).await;
+    let order_id = order_full.order.id;
+
+    // Void WITHOUT restock (food was made).
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/orders/{order_id}/void"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(&VoidOrderRequest { reason: "customer_request".into(), note: None, voided_at: None, restore_inventory: Some(false) })
+        .to_request()).await;
+    assert!(resp.status().is_success());
+
+    // Net stock stays consumed (980 = sale −20, void_restock +20, waste −20).
+    let stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE org_ingredient_id=$1")
+        .bind(ing_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(stock, 980.0);
+
+    // The discard is logged as WASTE with the dedicated `order_cancelled` reason
+    // (not `overproduction`, which is a kitchen-forecasting signal).
+    let waste: i64 = sqlx::query_scalar("SELECT count(*) FROM inventory_movements WHERE source_id=$1 AND type='waste' AND reason='order_cancelled'")
+        .bind(order_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(waste, 1, "discarded food logged as waste with reason order_cancelled");
+    let restock: i64 = sqlx::query_scalar("SELECT count(*) FROM inventory_movements WHERE source_id=$1 AND type='void_restock'")
+        .bind(order_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(restock, 1, "sale reversed via void_restock");
+    // Ledger reconciles with live stock for this ingredient (sale + restock + waste = −20).
+    let ledger: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(quantity),0)::float8 FROM inventory_movements WHERE branch_id=$1 AND org_ingredient_id=$2")
+        .bind(branch_id).bind(ing_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(ledger, -20.0, "ledger nets to the real consumption");
 }
 
 #[sqlx::test]
@@ -1933,4 +2089,110 @@ async fn test_order_cannot_target_shift_in_another_org(pool: PgPool) {
         .set_json(&simple_order(branch_b, shift_b, item_a)).to_request()).await;
     assert!(!resp.status().is_success(), "cross-org order must be rejected");
     assert_eq!(orders_on_shift(&pool, shift_b).await, 0);
+}
+
+/// Client `created_at` contract: server-stamps when omitted, accepts a near-future
+/// instant within the skew tolerance, rejects a far-future one, and honors a PAST
+/// instant — bucketing the order_ref business-day in the BRANCH timezone, not UTC.
+#[sqlx::test]
+async fn test_order_created_at_contract(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    ).await;
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await; // "Test Branch" -> code TESTBR
+    // Tokyo (UTC+9): a UTC-evening instant is the NEXT calendar day locally.
+    sqlx::query("UPDATE branches SET timezone='Asia/Tokyo' WHERE id=$1")
+        .bind(branch_id).execute(&pool).await.unwrap();
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    let post = |created_at: Option<chrono::DateTime<Utc>>| {
+        let mut b = simple_order(branch_id, shift_id, item_id);
+        b.created_at = created_at;
+        test::TestRequest::post().uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&b).to_request()
+    };
+
+    // (a) Omitted -> server-stamped near now.
+    let resp = test::call_service(&app, post(None)).await;
+    assert!(resp.status().is_success(), "omit must succeed: {:?}", resp.status());
+    let o: OrderFull = test::read_body_json(resp).await;
+    assert!((Utc::now() - o.order.created_at).num_seconds().abs() < 120, "server-stamped near now");
+
+    // (b) Far-future -> rejected.
+    let resp = test::call_service(&app, post(Some(Utc::now() + chrono::Duration::minutes(30)))).await;
+    assert_eq!(resp.status(), 400, "far-future created_at must be rejected");
+
+    // (c) Near-future within skew -> accepted.
+    let resp = test::call_service(&app, post(Some(Utc::now() + chrono::Duration::minutes(2)))).await;
+    assert!(resp.status().is_success(), "near-future within skew must be accepted: {:?}", resp.status());
+
+    // (d) Past -> honored; business-day in BRANCH tz. 2026-06-12T16:30Z = Tokyo 2026-06-13.
+    let past = chrono::DateTime::parse_from_rfc3339("2026-06-12T16:30:00Z").unwrap().with_timezone(&Utc);
+    let resp = test::call_service(&app, post(Some(past))).await;
+    assert!(resp.status().is_success(), "past created_at must be honored: {:?}", resp.status());
+    let o: OrderFull = test::read_body_json(resp).await;
+    assert_eq!(o.order.created_at.timestamp(), past.timestamp(), "created_at must round-trip");
+    let r = o.order.order_ref.expect("order_ref present");
+    let parts: Vec<&str> = r.split('-').collect();
+    assert_eq!(parts[1], "260613",
+        "business-day must be the Tokyo date (260613), not UTC (260612): {r}");
+}
+
+/// Void honors a past voided_at (offline) and rejects a future one (clock guard).
+#[sqlx::test]
+async fn test_void_voided_at_guard(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    ).await;
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    grant_permission(&pool, "org_admin", "orders", "update").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    let void = |oid: Uuid, voided_at: Option<chrono::DateTime<Utc>>| {
+        test::TestRequest::post().uri(&format!("/orders/{}/void", oid))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&VoidOrderRequest {
+                reason: "customer_request".into(), note: None, voided_at, restore_inventory: Some(false),
+            })
+            .to_request()
+    };
+
+    // Future voided_at -> rejected.
+    let resp = test::call_service(&app, test::TestRequest::post().uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&simple_order(branch_id, shift_id, item_id)).to_request()).await;
+    let id1 = { let o: OrderFull = test::read_body_json(resp).await; o.order.id };
+    let resp = test::call_service(&app, void(id1, Some(Utc::now() + chrono::Duration::minutes(30)))).await;
+    assert_eq!(resp.status(), 400, "future voided_at must be rejected");
+
+    // Past voided_at -> honored & stored.
+    let resp = test::call_service(&app, test::TestRequest::post().uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&simple_order(branch_id, shift_id, item_id)).to_request()).await;
+    let id2 = { let o: OrderFull = test::read_body_json(resp).await; o.order.id };
+    let past = Utc::now() - chrono::Duration::hours(2);
+    let resp = test::call_service(&app, void(id2, Some(past))).await;
+    assert!(resp.status().is_success(), "past voided_at must be honored: {:?}", resp.status());
+    let voided: Order = test::read_body_json(resp).await;
+    assert_eq!(voided.voided_at.unwrap().timestamp(), past.timestamp(), "voided_at round-trips");
 }

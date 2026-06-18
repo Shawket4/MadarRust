@@ -228,7 +228,7 @@ pub async fn compute_item_cost(pool: &PgPool, item_id: Uuid) -> Result<Option<i3
         LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id
         WHERE r.menu_item_id = $1
           AND r.size_label = COALESCE(
-              (SELECT size_label FROM menu_item_recipes WHERE menu_item_id = $1 LIMIT 1),
+              (SELECT size_label FROM menu_item_recipes WHERE menu_item_id = $1 ORDER BY size_label LIMIT 1),
               'one_size'::item_size
           )
         "#
@@ -407,8 +407,11 @@ pub async fn list_bundles(
     let org_id = query.org_id.or_else(|| claims.org_id()).ok_or_else(|| AppError::BadRequest("org_id is required".into()))?;
     require_same_org(&claims, Some(org_id))?;
 
-    let page = query.page.unwrap_or(1);
-    let per_page = query.per_page.unwrap_or(20);
+    // Clamp so a negative/zero page or out-of-range per_page can't produce a
+    // negative SQL OFFSET (which Postgres rejects → 500). Matches the bounds used
+    // by the inventory/menu list handlers.
+    let page = query.page.unwrap_or(1).max(1);
+    let per_page = query.per_page.unwrap_or(20).clamp(1, 500);
     let offset = (page - 1) * per_page;
 
     let search_pattern = query.search.as_ref().map(|s| format!("%{}%", s.to_lowercase()));
@@ -1016,9 +1019,11 @@ pub async fn available_bundles(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
 
-    // Branch timezone lookup
+    // Effective branch timezone (branch override → org default → Africa/Cairo).
     let branch: (Uuid, String) = sqlx::query_as(
-        "SELECT org_id, timezone FROM branches WHERE id = $1 AND deleted_at IS NULL"
+        "SELECT b.org_id, COALESCE(b.timezone, o.timezone)::text
+         FROM branches b JOIN organizations o ON o.id = b.org_id
+         WHERE b.id = $1 AND b.deleted_at IS NULL"
     )
     .bind(query.branch_id)
     .fetch_optional(pool.get_ref())

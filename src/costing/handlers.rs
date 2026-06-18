@@ -24,6 +24,9 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 #[derive(Deserialize, IntoParams)]
 pub struct OrgQuery {
     pub org_id: Uuid,
+    /// Optional: resolve costs at this branch's actual cost (falling back to the
+    /// org default per ingredient). Omit for the org default / standard cost.
+    pub branch_id: Option<Uuid>,
 }
 
 // ── GET /costing/menu-items ───────────────────────────────────
@@ -45,7 +48,7 @@ pub async fn list_sku_costs(
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
     require_same_org(&claims, Some(query.org_id))?;
 
-    let costs = service::org_sku_costs(pool.get_ref(), query.org_id).await?;
+    let costs = service::org_sku_costs(pool.get_ref(), query.org_id, query.branch_id).await?;
     Ok(HttpResponse::Ok().json(costs))
 }
 
@@ -68,6 +71,6 @@ pub async fn list_addon_costs(
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
     require_same_org(&claims, Some(query.org_id))?;
 
-    let costs = service::org_addon_costs(pool.get_ref(), query.org_id).await?;
+    let costs = service::org_addon_costs(pool.get_ref(), query.org_id, query.branch_id).await?;
     Ok(HttpResponse::Ok().json(costs))
 }

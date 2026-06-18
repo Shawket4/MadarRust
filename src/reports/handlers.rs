@@ -489,7 +489,7 @@ pub async fn branch_stock(
                 oi.unit::text      AS unit,
                 bi.current_stock::float8,
                 bi.reorder_threshold::float8,
-                oi.cost_per_unit,
+                COALESCE(bi.cost_per_unit, oi.cost_per_unit) AS cost_per_unit,
                 (bi.reorder_threshold > 0 AND bi.current_stock <= bi.reorder_threshold) AS below_reorder
             FROM branch_inventory bi
             JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id
@@ -527,19 +527,23 @@ pub async fn branch_sales_timeseries(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+    let (branch_ids, org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
-    // For "all branches" the per-branch timezone lookup finds nothing and falls
-    // back to the org default — periods are bucketed in one consistent zone.
+    // Resolve the bucketing timezone as branch → org → Africa/Cairo. For a
+    // specific branch this is its effective tz; for "all branches" (nil UUID)
+    // the branch subquery is NULL and we bucket every branch in one consistent
+    // org-level zone.
     let tz: String = sqlx::query_scalar(
-        "SELECT timezone FROM branches WHERE id = $1 AND deleted_at IS NULL"
+        "SELECT COALESCE(
+            (SELECT timezone::text FROM branches WHERE id = $1 AND deleted_at IS NULL),
+            (SELECT timezone::text FROM organizations WHERE id = $2),
+            'Africa/Cairo'
+         )"
     )
     .bind(*branch_id)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .flatten()
-    .filter(|s: &String| !s.is_empty())
-    .unwrap_or_else(|| "Africa/Cairo".to_string());
+    .bind(org)
+    .fetch_one(pool.get_ref())
+    .await?;
 
     let trunc = match query.granularity.as_deref().unwrap_or("daily") {
         "hourly"  => "hour",
@@ -601,6 +605,134 @@ pub async fn branch_sales_timeseries(
         .bind(&tz)
         .fetch_all(pool.get_ref())
         .await?;
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+// ── GET /reports/branches/:id/sales/peak-hours ───────────────
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct PeakHourPoint {
+    pub hour:                i32,
+    pub orders:              i64,
+    pub revenue:             i64,
+    pub voided:              i64,
+    pub discount:            i64,
+    pub tax:                 i64,
+    /// Revenue in piastres averaged over the number of calendar days in the queried range.
+    pub avg_revenue_per_day: i64,
+    /// Orders averaged over the number of calendar days (may be fractional).
+    pub avg_orders_per_day:  f64,
+    /// This hour's revenue as a percentage of the period total (0–100, 1 dp).
+    pub revenue_pct:         f64,
+    /// This hour's orders as a percentage of the period total (0–100, 1 dp).
+    pub orders_pct:          f64,
+}
+
+#[utoipa::path(
+    get,
+    path = "/reports/branches/{branch_id}/sales/peak-hours",
+    tag = "reports",
+    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    params(DateRangeQuery),
+    responses((status = 200, description = "Peak hours aggregation (24 rows)", body = Vec<PeakHourPoint>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn branch_sales_peak_hours(
+    req:       HttpRequest,
+    pool:      web::Data<PgPool>,
+    branch_id: web::Path<Uuid>,
+    query:     web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "orders", "read").await?;
+    let (branch_ids, org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+
+    let tz: String = sqlx::query_scalar(
+        "SELECT COALESCE(
+            (SELECT timezone::text FROM branches WHERE id = $1 AND deleted_at IS NULL),
+            (SELECT timezone::text FROM organizations WHERE id = $2),
+            'Africa/Cairo'
+         )"
+    )
+    .bind(*branch_id)
+    .bind(org)
+    .fetch_one(pool.get_ref())
+    .await?;
+
+    // Always return all 24 hours so the chart has a complete x-axis.
+    // Also surfaces per-day averages and share-of-total percentages for each bucket.
+    let rows = sqlx::query_as::<_, PeakHourPoint>(
+        r#"
+        WITH all_hours AS (
+            SELECT generate_series(0, 23)::int AS hour
+        ),
+        -- Number of calendar days in the requested range (branch-local time).
+        -- Uses the explicit date span when from/to are bound; otherwise counts
+        -- distinct order dates so we still normalise correctly for open ranges.
+        day_count AS (
+            SELECT GREATEST(1,
+                COALESCE(
+                    CASE WHEN $2::timestamptz IS NOT NULL AND $3::timestamptz IS NOT NULL
+                         THEN (($3::timestamptz AT TIME ZONE $4)::date
+                               - ($2::timestamptz AT TIME ZONE $4)::date)::int + 1
+                    END,
+                    (SELECT COUNT(DISTINCT (o2.created_at AT TIME ZONE $4)::date)::int
+                     FROM orders o2
+                     WHERE o2.branch_id = ANY($1)
+                       AND ($2::timestamptz IS NULL OR o2.created_at >= $2)
+                       AND ($3::timestamptz IS NULL OR o2.created_at <= $3))
+                )
+            )::int AS days
+        ),
+        aggregated AS (
+            SELECT
+                EXTRACT(hour FROM o.created_at AT TIME ZONE $4)::int AS hour,
+                COUNT(o.id)   FILTER (WHERE o.status != 'voided')::bigint  AS orders,
+                COALESCE(SUM(o.total_amount)    FILTER (WHERE o.status != 'voided'), 0)::bigint AS revenue,
+                COUNT(o.id)   FILTER (WHERE o.status  = 'voided')::bigint  AS voided,
+                COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status != 'voided'), 0)::bigint AS discount,
+                COALESCE(SUM(o.tax_amount)      FILTER (WHERE o.status != 'voided'), 0)::bigint AS tax
+            FROM orders o
+            WHERE o.branch_id = ANY($1)
+              AND ($2::timestamptz IS NULL OR o.created_at >= $2)
+              AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+            GROUP BY 1
+        ),
+        totals AS (
+            SELECT
+                COALESCE(SUM(revenue), 0) AS total_revenue,
+                COALESCE(SUM(orders),  0) AS total_orders
+            FROM aggregated
+        )
+        SELECT
+            h.hour,
+            COALESCE(a.orders,   0)::bigint AS orders,
+            COALESCE(a.revenue,  0)::bigint AS revenue,
+            COALESCE(a.voided,   0)::bigint AS voided,
+            COALESCE(a.discount, 0)::bigint AS discount,
+            COALESCE(a.tax,      0)::bigint AS tax,
+            ROUND(COALESCE(a.revenue, 0)::numeric / d.days)::bigint        AS avg_revenue_per_day,
+            (COALESCE(a.orders,  0)::float8 / d.days::float8)              AS avg_orders_per_day,
+            CASE WHEN t.total_revenue > 0
+                 THEN ROUND(COALESCE(a.revenue, 0)::numeric / t.total_revenue * 100, 1)::float8
+                 ELSE 0.0::float8 END                                       AS revenue_pct,
+            CASE WHEN t.total_orders > 0
+                 THEN ROUND(COALESCE(a.orders,  0)::numeric / t.total_orders  * 100, 1)::float8
+                 ELSE 0.0::float8 END                                       AS orders_pct
+        FROM all_hours h
+        CROSS JOIN day_count d
+        CROSS JOIN totals t
+        LEFT JOIN aggregated a ON a.hour = h.hour
+        ORDER BY h.hour ASC
+        "#,
+    )
+    .bind(&branch_ids)
+    .bind(query.from)
+    .bind(query.to)
+    .bind(&tz)
+    .fetch_all(pool.get_ref())
+    .await?;
 
     Ok(HttpResponse::Ok().json(rows))
 }
@@ -803,6 +935,124 @@ pub async fn org_branch_comparison(
     }))
 }
 
+// ── GET /reports/branches/:branch_id/delivery-sales ──────────
+
+/// Delivery sales for one delivery channel (`in_mall` / `outside`). Revenue and
+/// order counts are over **delivered** orders only; `cancelled_orders` is shown
+/// separately so the UI can surface drop-off without inflating revenue.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct DeliveryChannelSales {
+    /// Delivery channel: `in_mall` or `outside`.
+    pub channel:          String,
+    pub orders:           i64,
+    /// Sum of `total` (piastres) over delivered orders on this channel.
+    pub revenue:          i64,
+    /// Sum of `delivery_fee` (piastres) over delivered orders.
+    pub delivery_fees:    i64,
+    pub avg_order_value:  i64,
+    pub cancelled_orders: i64,
+}
+
+/// Delivery sales rolled up across channels, plus a per-channel breakdown.
+/// Always returns both `in_mall` and `outside` channels (zero-filled) so the
+/// dashboard renders a stable shape.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct DeliverySalesReport {
+    pub from:                Option<DateTime<Utc>>,
+    pub to:                  Option<DateTime<Utc>>,
+    pub total_orders:        i64,
+    pub total_revenue:       i64,
+    pub total_delivery_fees: i64,
+    pub cancelled_orders:    i64,
+    pub avg_order_value:     i64,
+    pub channels:            Vec<DeliveryChannelSales>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/reports/branches/{branch_id}/delivery-sales",
+    tag = "reports",
+    params(("branch_id" = Uuid, Path, description = "Branch ID, or the nil UUID for all branches in scope")),
+    params(DateRangeQuery),
+    responses((status = 200, description = "Delivery + per-channel sales", body = DeliverySalesReport), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn branch_delivery_sales(
+    req:       HttpRequest,
+    pool:      web::Data<PgPool>,
+    branch_id: web::Path<Uuid>,
+    query:     web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "orders", "read").await?;
+    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        channel:          String,
+        orders:           i64,
+        revenue:          i64,
+        delivery_fees:    i64,
+        cancelled_orders: i64,
+    }
+
+    let rows = sqlx::query_as::<_, Row>(
+        r#"
+        SELECT
+            channel::text                                                              AS channel,
+            COUNT(*) FILTER (WHERE status = 'delivered')::bigint                        AS orders,
+            COALESCE(SUM(total)        FILTER (WHERE status = 'delivered'), 0)::bigint  AS revenue,
+            COALESCE(SUM(delivery_fee) FILTER (WHERE status = 'delivered'), 0)::bigint  AS delivery_fees,
+            COUNT(*) FILTER (WHERE status = 'cancelled')::bigint                        AS cancelled_orders
+        FROM delivery_orders
+        WHERE branch_id = ANY($1)
+          AND ($2::timestamptz IS NULL OR created_at >= $2)
+          AND ($3::timestamptz IS NULL OR created_at <= $3)
+        GROUP BY channel
+        "#,
+    )
+    .bind(&branch_ids)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    // Always emit both channels in a fixed order, zero-filling any that had no
+    // orders in the period, so the dashboard shape never shifts.
+    let channels: Vec<DeliveryChannelSales> = ["in_mall", "outside"]
+        .iter()
+        .map(|&name| {
+            let row = rows.iter().find(|r| r.channel == name);
+            let orders = row.map(|r| r.orders).unwrap_or(0);
+            let revenue = row.map(|r| r.revenue).unwrap_or(0);
+            DeliveryChannelSales {
+                channel:          name.to_string(),
+                orders,
+                revenue,
+                delivery_fees:    row.map(|r| r.delivery_fees).unwrap_or(0),
+                avg_order_value:  if orders == 0 { 0 } else { revenue / orders },
+                cancelled_orders: row.map(|r| r.cancelled_orders).unwrap_or(0),
+            }
+        })
+        .collect();
+
+    let total_orders:        i64 = channels.iter().map(|c| c.orders).sum();
+    let total_revenue:       i64 = channels.iter().map(|c| c.revenue).sum();
+    let total_delivery_fees: i64 = channels.iter().map(|c| c.delivery_fees).sum();
+    let cancelled_orders:    i64 = channels.iter().map(|c| c.cancelled_orders).sum();
+
+    Ok(HttpResponse::Ok().json(DeliverySalesReport {
+        from: query.from,
+        to:   query.to,
+        total_orders,
+        total_revenue,
+        total_delivery_fees,
+        cancelled_orders,
+        avg_order_value: if total_orders == 0 { 0 } else { total_revenue / total_orders },
+        channels,
+    }))
+}
+
 // ── Inventory valuation / low-stock / consumption / waste ─────
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -886,9 +1136,16 @@ pub async fn branch_inventory_valuation(
         r#"
         SELECT oi.id AS org_ingredient_id, oi.name AS ingredient_name, oi.unit::text AS unit,
                SUM(bi.current_stock)::float8 AS current_stock,
-               round(oi.cost_per_unit)::bigint AS cost_per_unit,
-               CASE WHEN oi.cost_per_unit IS NULL THEN NULL
-                    ELSE round(SUM(bi.current_stock) * oi.cost_per_unit)::bigint END AS value
+               -- effective (stock-weighted) cost across the branch(es); each
+               -- branch's stock is valued at its OWN actual cost (org default
+               -- fallback), so value/qty is the blended cost.
+               round(CASE WHEN SUM(bi.current_stock) <> 0
+                          THEN SUM(bi.current_stock * COALESCE(bi.cost_per_unit, oi.cost_per_unit))
+                               / NULLIF(SUM(bi.current_stock), 0)
+                          ELSE oi.cost_per_unit END)::bigint AS cost_per_unit,
+               CASE WHEN bool_or(COALESCE(bi.cost_per_unit, oi.cost_per_unit) IS NULL) THEN NULL
+                    ELSE round(SUM(bi.current_stock * COALESCE(bi.cost_per_unit, oi.cost_per_unit)))::bigint
+               END AS value
         FROM branch_inventory bi
         JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id
         WHERE bi.branch_id = ANY($1)
@@ -926,9 +1183,13 @@ pub async fn org_inventory_valuation(
         r#"
         SELECT oi.id AS org_ingredient_id, oi.name AS ingredient_name, oi.unit::text AS unit,
                SUM(bi.current_stock)::float8 AS current_stock,
-               round(oi.cost_per_unit)::bigint AS cost_per_unit,
-               CASE WHEN oi.cost_per_unit IS NULL THEN NULL
-                    ELSE round(SUM(bi.current_stock) * oi.cost_per_unit)::bigint END AS value
+               round(CASE WHEN SUM(bi.current_stock) <> 0
+                          THEN SUM(bi.current_stock * COALESCE(bi.cost_per_unit, oi.cost_per_unit))
+                               / NULLIF(SUM(bi.current_stock), 0)
+                          ELSE oi.cost_per_unit END)::bigint AS cost_per_unit,
+               CASE WHEN bool_or(COALESCE(bi.cost_per_unit, oi.cost_per_unit) IS NULL) THEN NULL
+                    ELSE round(SUM(bi.current_stock * COALESCE(bi.cost_per_unit, oi.cost_per_unit)))::bigint
+               END AS value
         FROM branch_inventory bi
         JOIN branches b        ON b.id = bi.branch_id AND b.org_id = $1 AND b.deleted_at IS NULL
         JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id
@@ -1811,10 +2072,12 @@ pub async fn branch_menu_engineering(
     // (no recipe, missing ingredient cost, item deleted/deactivated since
     // the sale) become unresolvable, exactly like snapshot cost-missing rows.
     if basis == CostBasis::Current {
-        // org_id resolved with the scope above — for "all branches" there is no
-        // single branch row to derive it from.
+        // Per-branch actual cost when scoped to a single branch; for "all
+        // branches" (nil path id) there is no single branch, so fall back to the
+        // org default (standard) cost.
+        let cost_branch = if branch_id.is_nil() { None } else { Some(*branch_id) };
         let current_costs: std::collections::HashMap<(Uuid, String), Option<i64>> =
-            crate::costing::org_sku_costs(pool.get_ref(), org_id)
+            crate::costing::org_sku_costs(pool.get_ref(), org_id, cost_branch)
                 .await?
                 .into_iter()
                 .map(|s| ((s.menu_item_id, s.size_label), s.cost))

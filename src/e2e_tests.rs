@@ -1236,8 +1236,8 @@ async fn test_e2e_purchasing_stocktake_reporting_lifecycle(pool: PgPool) {
         .set_json(serde_json::json!({"lines":[{"line_id":beans_line,"quantity_received":1.0}]})).to_request());
     assert_eq!(st, 200);
     assert_eq!(recv["status"], "received");
-    // (1000×10 + 1000×20)/2000 = 15 piastres/g; stock 2000 g.
-    let beans_cost: f64 = sqlx::query_scalar("SELECT cost_per_unit::float8 FROM org_ingredients WHERE id=$1").bind(Uuid::parse_str(&beans).unwrap()).fetch_one(&pool).await.unwrap();
+    // (1000×10 + 1000×20)/2000 = 15 piastres/g on the BRANCH cost; stock 2000 g.
+    let beans_cost: f64 = sqlx::query_scalar("SELECT cost_per_unit::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2").bind(branch_id).bind(Uuid::parse_str(&beans).unwrap()).fetch_one(&pool).await.unwrap();
     assert_eq!(beans_cost, 15.0);
     let beans_stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2").bind(branch_id).bind(Uuid::parse_str(&beans).unwrap()).fetch_one(&pool).await.unwrap();
     assert_eq!(beans_stock, 2000.0);

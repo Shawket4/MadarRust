@@ -138,8 +138,15 @@ pub async fn resolve_cart(
     lines: &[CartLineInput],
     at: DateTime<Utc>,
 ) -> Result<ResolvedCart, AppError> {
+    use crate::delivery::{MAX_ADDON_QTY, MAX_CART_LINES, MAX_LINE_NOTES_LEN, MAX_LINE_QTY, MAX_SIZE_LABEL_LEN};
+
     if lines.is_empty() {
         return Err(AppError::BadRequest("Cart is empty".into()));
+    }
+    if lines.len() > MAX_CART_LINES {
+        return Err(AppError::BadRequest(format!(
+            "A cart may contain at most {MAX_CART_LINES} items"
+        )));
     }
 
     let mut snapshot_lines: Vec<SnapshotLine> = Vec::new();
@@ -147,8 +154,27 @@ pub async fn resolve_cart(
     let mut subtotal: i32 = 0;
 
     for (idx, line) in lines.iter().enumerate() {
-        if line.quantity <= 0 {
-            return Err(AppError::BadRequest("Item quantity must be > 0".into()));
+        if line.quantity <= 0 || line.quantity > MAX_LINE_QTY {
+            return Err(AppError::BadRequest(format!(
+                "Item quantity must be between 1 and {MAX_LINE_QTY}"
+            )));
+        }
+        if line.addons.iter().any(|a| a.quantity <= 0 || a.quantity > MAX_ADDON_QTY) {
+            return Err(AppError::BadRequest(format!(
+                "Addon quantity must be between 1 and {MAX_ADDON_QTY}"
+            )));
+        }
+        if let Some(notes) = &line.notes
+            && notes.chars().count() > MAX_LINE_NOTES_LEN
+        {
+            return Err(AppError::BadRequest(format!(
+                "Item notes must be at most {MAX_LINE_NOTES_LEN} characters"
+            )));
+        }
+        if let Some(size) = &line.size_label
+            && size.chars().count() > MAX_SIZE_LABEL_LEN
+        {
+            return Err(AppError::BadRequest("Invalid size".into()));
         }
 
         // Resolve org → branch → channel price + availability.
@@ -236,7 +262,7 @@ pub async fn resolve_cart(
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect();
-        let costs = crate::costing::ingredient_costs_at(pool, &ids, at).await?;
+        let costs = crate::costing::ingredient_costs_at(pool, branch_id, &ids, at).await?;
         for d in &mut line_deductions {
             let c = d
                 .org_ingredient_id
@@ -322,10 +348,16 @@ pub async fn resolve_cart(
             })
             .collect();
 
-        let addon_per_unit: i32 = addons.iter().map(|a| a.unit_price * a.quantity).sum();
-        let optional_per_unit: i32 = optionals.iter().map(|o| o.price).sum();
-        let line_total = (unit_price + addon_per_unit + optional_per_unit) * line.quantity;
-        subtotal += line_total;
+        // Money math in i64, then range-check back to i32. Even with the per-field
+        // caps above this guards against a server-side price/quantity combination
+        // overflowing the integer-piastre line total (release builds do not panic
+        // on overflow — they would silently wrap and mis-price the order).
+        let too_large = || AppError::BadRequest("Order total is too large".into());
+        let addon_per_unit: i64 = addons.iter().map(|a| a.unit_price as i64 * a.quantity as i64).sum();
+        let optional_per_unit: i64 = optionals.iter().map(|o| o.price as i64).sum();
+        let line_total_i64 = (unit_price as i64 + addon_per_unit + optional_per_unit) * line.quantity as i64;
+        let line_total = i32::try_from(line_total_i64).map_err(|_| too_large())?;
+        subtotal = subtotal.checked_add(line_total).ok_or_else(too_large)?;
 
         snapshot_lines.push(SnapshotLine {
             menu_item_id: line.menu_item_id,
@@ -353,6 +385,11 @@ pub async fn resolve_cart(
 }
 
 /// branch-size override > catalog-size override > the branch/channel-effective base.
+///
+/// The size label arrives from an untrusted client. Comparing on `label::text`
+/// (rather than casting the inbound string to `::item_size`) means an unknown
+/// size is a clean 400 instead of a Postgres enum-cast 500. A size the item does
+/// not actually offer is rejected — it must exist as an active catalog size.
 async fn resolve_size_price(
     pool: &PgPool,
     branch_id: Uuid,
@@ -360,28 +397,27 @@ async fn resolve_size_price(
     size: &str,
     effective_base: i32,
 ) -> Result<i32, AppError> {
+    let catalog: Option<Option<i32>> = sqlx::query_scalar(
+        "SELECT price_override FROM item_sizes \
+         WHERE menu_item_id = $1 AND label::text = $2 AND is_active = true",
+    )
+    .bind(menu_item_id)
+    .bind(size)
+    .fetch_optional(pool)
+    .await?;
+    let Some(catalog_override) = catalog else {
+        return Err(AppError::BadRequest(format!("Unknown size '{size}'")));
+    };
     let branch_size: Option<i32> = sqlx::query_scalar(
         "SELECT price_override FROM branch_menu_size_overrides \
-         WHERE branch_id = $1 AND menu_item_id = $2 AND size_label = $3::item_size",
+         WHERE branch_id = $1 AND menu_item_id = $2 AND size_label::text = $3",
     )
     .bind(branch_id)
     .bind(menu_item_id)
     .bind(size)
     .fetch_optional(pool)
     .await?;
-    if let Some(p) = branch_size {
-        return Ok(p);
-    }
-    let catalog_size: Option<i32> = sqlx::query_scalar(
-        "SELECT price_override FROM item_sizes \
-         WHERE menu_item_id = $1 AND label = $2::item_size AND is_active = true",
-    )
-    .bind(menu_item_id)
-    .bind(size)
-    .fetch_optional(pool)
-    .await?
-    .flatten();
-    Ok(catalog_size.unwrap_or(effective_base))
+    Ok(branch_size.or(catalog_override).unwrap_or(effective_base))
 }
 
 /// Full line COGS, recipe-scope unit cost, and a cost-missing flag — mirrors the
@@ -471,7 +507,8 @@ pub async fn apply_snapshot(
     // Mint a normal order_ref off the per-(branch, business_date) counter — same
     // infra POS orders use (the delivery_ref was minted separately at intake).
     let (branch_code, biz_date): (String, chrono::NaiveDate) = sqlx::query_as(
-        "SELECT b.code, ($1::timestamptz AT TIME ZONE b.timezone)::date FROM branches b WHERE b.id = $2",
+        "SELECT b.code, ($1::timestamptz AT TIME ZONE COALESCE(b.timezone, o.timezone)::text)::date
+         FROM branches b JOIN organizations o ON o.id = b.org_id WHERE b.id = $2",
     )
     .bind(ctx.created_at)
     .bind(ctx.branch_id)
@@ -514,6 +551,9 @@ pub async fn apply_snapshot(
             discount_amount, tax_amount, total_amount,
             amount_tendered, change_given, tip_amount, tip_payment_method, discount_id,
             customer_name, notes, order_type, delivery_fee, delivery_order_id,
+            (SELECT channel::text FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_channel,
+            (SELECT customer_lat FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_lat,
+            (SELECT customer_lng FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_lng,
             voided_at, void_reason::text, void_note, voided_by, created_at
         "#,
     )
@@ -720,7 +760,7 @@ pub async fn record_waste(
                 quantity: -d.quantity,
                 balance_after: Some(balance),
                 unit_cost: d.cost_per_unit.map(|c| c.round() as i64),
-                reason: Some("overproduction"),
+                reason: Some("order_cancelled"),
                 below_zero: balance < 0.0,
                 source_type: Some("delivery_order"),
                 source_id: Some(delivery_order_id),

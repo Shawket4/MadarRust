@@ -94,3 +94,39 @@ pub fn haversine_meters(from: LatLng, to: LatLng) -> f64 {
     let a = (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlng / 2.0).sin().powi(2);
     R * 2.0 * a.sqrt().atan2((1.0 - a).sqrt())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EARTH_R: f64 = 6_371_000.0;
+    const HALF_CIRCUMFERENCE: f64 = std::f64::consts::PI * EARTH_R; // max great-circle distance
+
+    #[test]
+    fn same_point_is_zero() {
+        let p = LatLng { lat: 30.0444, lng: 31.2357 }; // Cairo
+        assert!(haversine_meters(p, p).abs() < 1e-6);
+    }
+
+    #[test]
+    fn is_symmetric() {
+        let a = LatLng { lat: 30.0444, lng: 31.2357 };
+        let b = LatLng { lat: 31.2001, lng: 29.9187 }; // Alexandria
+        assert!((haversine_meters(a, b) - haversine_meters(b, a)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn one_degree_of_latitude_is_about_111km() {
+        // One degree of latitude ≈ R · π/180 ≈ 111_195 m, anywhere.
+        let d = haversine_meters(LatLng { lat: 0.0, lng: 0.0 }, LatLng { lat: 1.0, lng: 0.0 });
+        assert!((d - 111_195.0).abs() < 50.0, "got {d}");
+    }
+
+    #[test]
+    fn antipodal_is_bounded_by_half_circumference() {
+        // Points half the globe apart are the farthest possible.
+        let d = haversine_meters(LatLng { lat: 0.0, lng: 0.0 }, LatLng { lat: 0.0, lng: 180.0 });
+        assert!(d <= HALF_CIRCUMFERENCE + 1.0, "got {d}");
+        assert!(d > HALF_CIRCUMFERENCE - 1.0, "got {d}");
+    }
+}

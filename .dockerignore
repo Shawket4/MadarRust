@@ -1,0 +1,9 @@
+target/
+uploads/
+fuzz/
+api_dumps/
+.git/
+.env
+.env.*
+*.md
+openapi.json

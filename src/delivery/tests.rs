@@ -57,7 +57,14 @@ fn normalize_phone_egypt() {
     assert_eq!(normalize_phone("201012345678").unwrap(), "201012345678");
     assert_eq!(normalize_phone("+20 101 234 5678").unwrap(), "201012345678");
     assert_eq!(normalize_phone("0020 1012345678").unwrap(), "201012345678");
+    // Bare national mobile typed without the leading 0 still resolves to +20.
+    assert_eq!(normalize_phone("1012345678").unwrap(), "201012345678");
+    assert_eq!(normalize_phone("1 012 345 678").unwrap(), "201012345678");
     assert!(normalize_phone("123").is_err());
+    // Bounded on both ends: an over-long raw string and an implausibly long
+    // normalised number (> 15 digits, beyond E.164) are both rejected.
+    assert!(normalize_phone(&"0".repeat(40)).is_err());
+    assert!(normalize_phone("2010123456789012").is_err());
 }
 
 #[test]
@@ -69,6 +76,35 @@ fn validate_helpers() {
     assert!(validate_override("open").is_ok());
     assert!(validate_override("closed").is_ok());
     assert!(validate_override("paused").is_err());
+}
+
+#[test]
+fn validate_field_helpers() {
+    // Required text: non-empty after trim, bounded length (chars, not bytes).
+    assert!(validate_required_text("Name", "Sara", 120).is_ok());
+    assert!(validate_required_text("Name", "   ", 120).is_err());
+    assert!(validate_required_text("Name", &"x".repeat(121), 120).is_err());
+    // Multi-byte chars counted as chars, not bytes.
+    assert!(validate_required_text("Name", &"أ".repeat(120), 120).is_ok());
+
+    // Optional text: None is fine; bounded when present.
+    assert!(validate_optional_text("Floor", None, 120).is_ok());
+    assert!(validate_optional_text("Floor", Some("3"), 120).is_ok());
+    assert!(validate_optional_text("Floor", Some(&"x".repeat(121)), 120).is_err());
+
+    // Payment hint is constrained to the documented set.
+    assert!(validate_payment_hint("cash").is_ok());
+    assert!(validate_payment_hint("card").is_ok());
+    assert!(validate_payment_hint("crypto").is_err());
+    assert!(validate_payment_hint("").is_err());
+
+    // Coordinates must be finite and within WGS84 bounds.
+    assert!(validate_coords(30.0, 31.0).is_ok());
+    assert!(validate_coords(0.0, 0.0).is_ok());
+    assert!(validate_coords(91.0, 0.0).is_err());
+    assert!(validate_coords(0.0, 181.0).is_err());
+    assert!(validate_coords(f64::NAN, 0.0).is_err());
+    assert!(validate_coords(0.0, f64::INFINITY).is_err());
 }
 
 // ── Pure zone/fee math (no OSRM, no DB) ───────────────────────
@@ -111,6 +147,15 @@ mod zone_fee {
     #[test]
     fn no_zones_is_out_of_range() {
         assert!(matches!(select_zone_fee(100, None, &[]), FeeOutcome::OutOfRange));
+    }
+
+    #[test]
+    fn distance_exactly_at_branch_cap_is_allowed() {
+        // distance == max_dist is WITHIN range (the cap is inclusive). Mutating the
+        // cap check `distance > max` to `>=` would wrongly reject this exact-boundary
+        // case — flagged by mutation testing at delivery/public.rs:557.
+        let zones = [zone(1000, 1500)];
+        assert_eq!(fee_of(select_zone_fee(1000, Some(1000), &zones)), 1500);
     }
 }
 
@@ -263,10 +308,14 @@ mod it {
         id
     }
     async fn seed_branch(pool: &PgPool, org: Uuid) -> Uuid {
+        seed_branch_named(pool, org, "Br").await
+    }
+    async fn seed_branch_named(pool: &PgPool, org: Uuid, name: &str) -> Uuid {
         let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO branches (id, org_id, name, latitude, longitude) VALUES ($1,$2,'Br',30.0,31.0)")
+        sqlx::query("INSERT INTO branches (id, org_id, name, latitude, longitude) VALUES ($1,$2,$3,30.0,31.0)")
             .bind(id)
             .bind(org)
+            .bind(name)
             .execute(pool)
             .await
             .unwrap();
@@ -332,6 +381,14 @@ mod it {
         sqlx::query("UPDATE branch_delivery_settings SET in_mall_discount_id = $2 WHERE branch_id = $1")
             .bind(branch)
             .bind(discount)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    async fn set_in_mall_require_location(pool: &PgPool, branch: Uuid, required: bool) {
+        sqlx::query("UPDATE branch_delivery_settings SET in_mall_require_location = $2 WHERE branch_id = $1")
+            .bind(branch)
+            .bind(required)
             .execute(pool)
             .await
             .unwrap();
@@ -407,9 +464,17 @@ mod it {
     const PHONE: &str = "01000000000";
 
     fn intake_body(branch: Uuid, channel: &str, items: Value) -> Value {
+        // Destination details satisfy both channels' required-field rules:
+        // in-mall needs shop/company + floor + unit; outside needs an address line.
+        // Coordinates (at the seeded branch) satisfy the location requirement for
+        // both channels (outside: the delivery pin; in-mall: the at-branch GPS
+        // check, which is on by default).
         json!({
             "branch_id": branch, "channel": channel,
             "customer_name": "Sara", "customer_phone": PHONE,
+            "place_name": "Shop 12", "floor": "2", "unit_number": "B4",
+            "address_line": "12 Main St, Bldg 3",
+            "customer_lat": 30.0, "customer_lng": 31.0,
             "payment_method_hint": "cash", "device_token": device_token(PHONE),
             "items": items,
         })
@@ -444,6 +509,190 @@ mod it {
         assert_eq!(b["delivery_fee"], 300);
         assert_eq!(b["total"], 1300);
         assert!(b["delivery_ref"].as_str().unwrap().starts_with("D-"));
+    }
+
+    /// By default in-mall requires the device GPS "confirm you're at the branch"
+    /// location — an order with no coordinates is rejected.
+    #[sqlx::test]
+    async fn intake_in_mall_requires_location_by_default(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, true, false, 300).await;
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
+
+        let app = app!(&pool);
+        let mut body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 1 }]));
+        body["customer_lat"] = json!(null);
+        body["customer_lng"] = json!(null);
+        let (st, b) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
+    }
+
+    /// When a manager turns the in-mall location requirement off, an order with no
+    /// coordinates is accepted (the fee is still the flat in-mall fee).
+    #[sqlx::test]
+    async fn intake_in_mall_allows_missing_location_when_toggled_off(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, true, false, 300).await;
+        set_in_mall_require_location(&pool, branch, false).await;
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
+
+        let app = app!(&pool);
+        let mut body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 1 }]));
+        body["customer_lat"] = json!(null);
+        body["customer_lng"] = json!(null);
+        let (st, b) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        assert_eq!(st, StatusCode::CREATED, "{b}");
+        assert_eq!(b["status"], "received");
+        assert_eq!(b["delivery_fee"], 300);
+    }
+
+    // ── Strict field validation (untrusted public surface) ──
+
+    /// A quantity far above the cap is rejected (and never reaches the
+    /// integer-piastre money math where it could overflow / wrap).
+    #[sqlx::test]
+    async fn intake_rejects_excessive_quantity(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, true, false, 0).await;
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
+
+        let app = app!(&pool);
+        let body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 1_000_000 }]));
+        let (st, _) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    /// A cart with more lines than the cap is rejected before any per-line work.
+    #[sqlx::test]
+    async fn intake_rejects_too_many_lines(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, true, false, 0).await;
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+
+        let lines: Vec<Value> = (0..101).map(|_| json!({ "menu_item_id": item, "quantity": 1 })).collect();
+        let app = app!(&pool);
+        let body = intake_body(branch, "in_mall", Value::Array(lines));
+        let (st, _) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    /// The payment-method hint is constrained to the documented set.
+    #[sqlx::test]
+    async fn intake_rejects_bad_payment_hint(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, true, false, 0).await;
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+
+        let app = app!(&pool);
+        let mut body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 1 }]));
+        body["payment_method_hint"] = json!("bitcoin");
+        let (st, _) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    /// An over-long free-text field (here: customer name) is rejected.
+    #[sqlx::test]
+    async fn intake_rejects_oversized_name(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, true, false, 0).await;
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+
+        let app = app!(&pool);
+        let mut body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 1 }]));
+        body["customer_name"] = json!("x".repeat(200));
+        let (st, _) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    /// A size the item does not offer is a clean 400 (not a Postgres enum-cast 500).
+    #[sqlx::test]
+    async fn intake_rejects_unknown_size(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, true, false, 0).await;
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
+
+        let app = app!(&pool);
+        let body = intake_body(
+            branch,
+            "in_mall",
+            json!([{ "menu_item_id": item, "quantity": 1, "size_label": "ginormous" }]),
+        );
+        let (st, _) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    /// In-mall orders must carry the shop/company (here: omitted) so the runner
+    /// can find the customer inside the mall.
+    #[sqlx::test]
+    async fn intake_in_mall_requires_destination(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, true, false, 0).await;
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+
+        let app = app!(&pool);
+        let mut body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 1 }]));
+        body["place_name"] = json!(null);
+        let (st, _) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    /// Outside orders must carry a written address line (the pin alone is the
+    /// route, not the doorstep).
+    #[sqlx::test]
+    async fn intake_outside_requires_address(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, false, true, 0).await;
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+
+        let app = app!(&pool);
+        let mut body = intake_body(branch, "outside", json!([{ "menu_item_id": item, "quantity": 1 }]));
+        body["address_line"] = json!(null);
+        body["customer_lat"] = json!(30.05);
+        body["customer_lng"] = json!(31.23);
+        let (st, _) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    /// Out-of-range coordinates are rejected on the public delivery quote.
+    #[sqlx::test]
+    async fn quote_rejects_invalid_coords(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let app = app!(&pool);
+        let uri = format!("/public/branches/{branch}/delivery-quote?lat=999&lng=0&channel=outside");
+        let (st, _) = send(&app, test::TestRequest::get().uri(&uri)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
     #[sqlx::test]
@@ -622,6 +871,83 @@ mod it {
     }
 
     #[sqlx::test]
+    async fn status_jump_clears_skipped_and_rejects_non_steps(pool: PgPool) {
+        // Jumping to any step stamps only the landed step and clears the rest, so
+        // the recorded position is exactly where the teller jumped to.
+        perms(&pool).await;
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        assign(&pool, teller, branch).await;
+        seed_shift(&pool, branch, teller).await;
+        seed_settings(&pool, branch, true, false, 300).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
+
+        let id = place_in_mall_order(&pool, branch, item, 1).await;
+        let token = teller_token(teller, org, branch);
+        let app = app!(&pool);
+
+        let set = |status: &'static str| {
+            let app = &app;
+            let token = &token;
+            async move {
+                send(
+                    app,
+                    auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/status")), token)
+                        .set_json(json!({ "status": status })),
+                )
+                .await
+            }
+        };
+
+        // Forward jump received → out_for_delivery (skips confirmed/preparing/ready).
+        let (st, b) = set("out_for_delivery").await;
+        assert_eq!(st, StatusCode::OK, "forward jump: {b}");
+        let (status, c_at, p_at, r_at, o_at): (
+            String,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<chrono::DateTime<chrono::Utc>>,
+        ) = sqlx::query_as(
+            "SELECT status::text, confirmed_at, preparing_at, ready_at, out_for_delivery_at
+             FROM delivery_orders WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "out_for_delivery");
+        assert!(o_at.is_some(), "landed step stamped");
+        assert!(c_at.is_none() && p_at.is_none() && r_at.is_none(), "skipped steps cleared");
+
+        // Backward jump out_for_delivery → confirmed clears the later stamp.
+        let (st, b) = set("confirmed").await;
+        assert_eq!(st, StatusCode::OK, "backward jump: {b}");
+        let (status, c_at, o_at): (
+            String,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<chrono::DateTime<chrono::Utc>>,
+        ) = sqlx::query_as(
+            "SELECT status::text, confirmed_at, out_for_delivery_at FROM delivery_orders WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "confirmed");
+        assert!(c_at.is_some());
+        assert!(o_at.is_none(), "later step cleared on backward jump");
+
+        // Non-settable targets are rejected (delivered = finalize; received = intake).
+        let (st, _) = set("delivered").await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "delivered is not settable here");
+        let (st, _) = set("received").await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "received is not settable here");
+    }
+
+    #[sqlx::test]
     async fn finalize_surfaces_delivery_on_orders_api(pool: PgPool) {
         // After a delivery order is finalized into a real sale, the standard
         // /orders API must expose the delivery charge, order_type, the link to
@@ -696,11 +1022,22 @@ mod it {
         )
         .await;
         assert_eq!(st, StatusCode::OK, "list: {list}");
-        assert_eq!(list["summary"]["delivery_fees"], 300);
+        let summary = &list["summary"];
+        assert_eq!(summary["delivery_fees"], 300);
+        // Channel-split KPIs (computed server-side over the whole filtered set).
+        assert_eq!(summary["delivery_orders"], 1);
+        assert_eq!(summary["delivery_revenue"], 1300);
+        assert_eq!(summary["in_mall_orders"], 1);
+        assert_eq!(summary["in_mall_revenue"], 1300);
+        assert_eq!(summary["in_mall_fees"], 300);
+        assert_eq!(summary["outside_orders"], 0);
+        assert_eq!(summary["outside_revenue"], 0);
         let row = &list["data"][0];
         assert_eq!(row["order_type"], "delivery");
         assert_eq!(row["delivery_fee"], 300);
-        // The lightweight list row does NOT carry the address block (detail-only).
+        // The list row carries the lightweight channel flag (for badges + KPIs)…
+        assert_eq!(row["delivery_channel"], "in_mall");
+        // …but NOT the full address block (detail-only).
         assert!(row.get("delivery").map_or(true, |v| v.is_null()));
     }
 
@@ -745,6 +1082,7 @@ mod it {
         assert_eq!(o["order_type"], "dine_in");
         assert_eq!(o["delivery_fee"], 0);
         assert!(o["delivery_order_id"].is_null());
+        assert!(o["delivery_channel"].is_null(), "dine-in must have no channel flag");
         assert!(o.get("delivery").map_or(true, |v| v.is_null()), "dine-in must have no delivery block");
     }
 
@@ -1023,6 +1361,39 @@ mod it {
         assert_eq!(waste, 1);
     }
 
+    /// Regression for the double-cancel race: a second cancel hits the in-tx
+    /// FOR UPDATE status re-check, returns 409, and does NOT deduct waste again.
+    #[sqlx::test]
+    async fn cancel_twice_does_not_double_waste(pool: PgPool) {
+        perms(&pool).await;
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        assign(&pool, teller, branch).await;
+        seed_shift(&pool, branch, teller).await;
+        seed_settings(&pool, branch, true, false, 0).await;
+        let item = seed_item(&pool, org, 500).await;
+        let ing = seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
+        let id = place_in_mall_order(&pool, branch, item, 1).await;
+
+        let token = teller_token(teller, org, branch);
+        let app = app!(&pool);
+        // Move past received so it's a cancel (not a reject).
+        send(&app, auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/status")), &token).set_json(json!({"status":"confirmed"}))).await;
+
+        let body = json!({ "reason": "no-show", "restore_inventory": false });
+        let (st1, _) = send(&app, auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/cancel")), &token).set_json(body.clone())).await;
+        assert_eq!(st1, StatusCode::OK);
+        let (st2, _) = send(&app, auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/cancel")), &token).set_json(body)).await;
+        assert_eq!(st2, StatusCode::CONFLICT, "second cancel must be rejected");
+
+        // Waste posted exactly once; stock deducted exactly once (1000 − 20).
+        let waste: i64 = sqlx::query_scalar("SELECT count(*) FROM inventory_movements WHERE source_id=$1 AND type='waste'").bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!(waste, 1, "waste must not be double-deducted");
+        let stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2").bind(branch).bind(ing).fetch_one(&pool).await.unwrap();
+        assert!((stock - 980.0).abs() < 1e-6, "stock={stock}");
+    }
+
     #[sqlx::test]
     async fn reject_from_received(pool: PgPool) {
         perms(&pool).await;
@@ -1198,6 +1569,64 @@ mod it {
         assert_eq!(s["outside_enabled"], true);
         assert_eq!(s["in_mall_fee"], 250);
         assert_eq!(s["prep_time_minutes"], 30);
+        // Omitted in the PUT above → defaults to true (mandatory in-mall location).
+        assert_eq!(s["in_mall_require_location"], true);
+
+        // Now turn the in-mall location requirement off and confirm it round-trips.
+        let (sst2, _) = send(
+            &app,
+            auth(test::TestRequest::put().uri("/delivery/settings"), &token).set_json(json!({
+                "branch_id": branch, "in_mall_enabled": true, "outside_enabled": true,
+                "in_mall_fee": 250, "prep_time_minutes": 30, "in_mall_require_location": false
+            })),
+        )
+        .await;
+        assert_eq!(sst2, StatusCode::OK);
+        let (_, s2) = send(&app, auth(test::TestRequest::get().uri(&format!("/delivery/settings?branch_id={branch}")), &token)).await;
+        assert_eq!(s2["in_mall_require_location"], false);
+    }
+
+    /// The public tracking endpoint returns a customer-safe view (status, ref,
+    /// totals, org for theming) keyed by the opaque order UUID, exposes no phone,
+    /// and 404s for an unknown id.
+    #[sqlx::test]
+    async fn public_track_returns_customer_safe_view(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, true, false, 300).await;
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
+        let id = place_in_mall_order(&pool, branch, item, 1).await;
+
+        let app = app!(&pool);
+        let (st, b) = send(
+            &app,
+            test::TestRequest::get().uri(&format!("/public/delivery-orders/{id}/track")),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{b}");
+        assert_eq!(b["status"], "received");
+        assert_eq!(b["channel"], "in_mall");
+        assert_eq!(b["org_id"], org.to_string());
+        assert_eq!(b["branch_name"], "Br");
+        assert!(b["delivery_ref"].as_str().unwrap().starts_with("D-"));
+        assert_eq!(b["subtotal"], 500);
+        assert_eq!(b["delivery_fee"], 300);
+        assert_eq!(b["total"], 800);
+        assert_eq!(b["estimated_prep_minutes"], 20); // branch default base, no extra yet
+        // No phone is ever exposed on the public tracking view.
+        assert!(b["customer_phone"].is_null());
+
+        // Unknown id → 404.
+        let unknown = Uuid::new_v4();
+        let (st2, _) = send(
+            &app,
+            test::TestRequest::get().uri(&format!("/public/delivery-orders/{unknown}/track")),
+        )
+        .await;
+        assert_eq!(st2, StatusCode::NOT_FOUND);
     }
 
     /// A teller has `delivery_orders:read` (so they can flip the POS open/close
@@ -1326,6 +1755,10 @@ mod it {
         let org = seed_org(&pool).await;
         let branch = seed_branch(&pool, org).await;
         seed_settings(&pool, branch, true, false, 0).await;
+        // The public menu is gated on the channel being open right now, which
+        // requires an open shift.
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_shift(&pool, branch, teller).await;
         let item = seed_item(&pool, org, 500).await;
 
         // Org-wide global addon catalog (POS model): no per-item slots involved.
@@ -1388,6 +1821,9 @@ mod it {
         let org = seed_org(&pool).await;
         let branch = seed_branch(&pool, org).await;
         seed_settings(&pool, branch, true, false, 0).await;
+        // The public menu is gated on the channel being open (needs an open shift).
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_shift(&pool, branch, teller).await;
 
         // Latte: recipe milk ingredient + a milk_type addon bound to that ingredient
         // → that addon is the item's base/default milk.
@@ -1521,6 +1957,9 @@ mod it {
         let org = seed_org(&pool).await;
         let branch = seed_branch(&pool, org).await; // seeded at lat 30.0, lng 31.0
         seed_settings(&pool, branch, false, true, 0).await; // outside enabled
+        // The quote is gated on the channel being open (needs an open shift).
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_shift(&pool, branch, teller).await;
         // A wide ring (50 km) so the ~1 km straight-line distance is covered.
         sqlx::query("INSERT INTO delivery_zones (branch_id, name, max_road_distance_meters, fee) VALUES ($1,'Zone 1',50000,2500)")
             .bind(branch)
@@ -1605,5 +2044,381 @@ mod it {
         // Must opt out of compression so the Compress middleware can't buffer
         // SSE frames (it skips any response that already has Content-Encoding).
         assert_eq!(resp.headers().get("content-encoding").unwrap(), "identity");
+    }
+
+    // ── WhatsApp gateway relay (super-admin only) ────────────────
+
+    /// super_admin rows must have NULL org_id (chk_super_admin_no_org), so this
+    /// can't reuse `seed_user`.
+    async fn seed_super_admin(pool: &PgPool) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, org_id, name, email, password_hash, role) \
+             VALUES ($1, NULL, 'SA', $2, 'h', 'super_admin')",
+        )
+        .bind(id)
+        .bind(format!("sa-{id}@t.com"))
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+    fn super_admin_token(uid: Uuid) -> String {
+        create_token(&get_secret(), uid, None, UserRole::SuperAdmin, None, 24).unwrap()
+    }
+
+    #[sqlx::test]
+    async fn whatsapp_relay_is_super_admin_only(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        assign(&pool, teller, branch).await;
+        let admin = seed_user(&pool, org, "org_admin").await;
+        let sa = seed_super_admin(&pool).await;
+        let app = app!(&pool);
+
+        // Teller and org-admin are rejected on EVERY relay route.
+        for tok in [teller_token(teller, org, branch), admin_token(admin, org)] {
+            let (st, _) = send(&app, auth(test::TestRequest::get().uri("/whatsapp/status"), &tok)).await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            let (st, _) = send(&app, auth(test::TestRequest::post().uri("/whatsapp/pair"), &tok)).await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            let (st, _) = send(&app, auth(test::TestRequest::post().uri("/whatsapp/logout"), &tok)).await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            let (st, _) = send(
+                &app,
+                auth(test::TestRequest::post().uri("/whatsapp/pause"), &tok)
+                    .set_json(json!({ "paused": true })),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+        }
+
+        // Super-admin reaches status (gateway unconfigured in tests → safe,
+        // no network call; just reports reachable=false).
+        let (st, body) =
+            send(&app, auth(test::TestRequest::get().uri("/whatsapp/status"), &super_admin_token(sa))).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["paused"], false);
+    }
+
+    #[sqlx::test]
+    async fn whatsapp_pause_persists_and_gates_sending(pool: PgPool) {
+        let sa = seed_super_admin(&pool).await;
+        let token = super_admin_token(sa);
+        let app = app!(&pool);
+
+        assert!(!crate::delivery::gateway::is_paused(&pool).await);
+
+        // Pause → persisted; reflected in status and the send-path gate.
+        let (st, body) = send(
+            &app,
+            auth(test::TestRequest::post().uri("/whatsapp/pause"), &token)
+                .set_json(json!({ "paused": true })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["paused"], true);
+        assert!(crate::delivery::gateway::is_paused(&pool).await);
+
+        // Resume.
+        let (st, body) = send(
+            &app,
+            auth(test::TestRequest::post().uri("/whatsapp/pause"), &token)
+                .set_json(json!({ "paused": false })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["paused"], false);
+        assert!(!crate::delivery::gateway::is_paused(&pool).await);
+    }
+
+    // ── Public branch selector ────────────────────────────────────────────────
+
+    /// GET /public/branches?org_id=... returns branches where at least one
+    /// delivery channel is enabled, with correct open-now / enabled fields.
+    #[sqlx::test]
+    async fn public_branches_returns_delivery_enabled_branches(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, true, false, 300).await;
+        seed_shift(&pool, branch, teller).await;
+
+        let app = app!(&pool);
+        let (st, body) = send(
+            &app,
+            test::TestRequest::get().uri(&format!("/public/branches?org_id={org}")),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let list = body.as_array().expect("array");
+        assert_eq!(list.len(), 1, "one delivery-enabled branch");
+        let b = &list[0];
+        assert_eq!(b["id"].as_str().unwrap(), branch.to_string()); // branch id comes back
+        // in_mall is enabled and has an open shift with no time window → open now
+        assert_eq!(b["in_mall_enabled"], true);
+        assert_eq!(b["in_mall_open_now"], true);
+        assert_eq!(b["outside_enabled"], false);
+    }
+
+    /// Branches without any delivery settings (or all channels disabled) must
+    /// not appear in the public branch list.
+    #[sqlx::test]
+    async fn public_branches_hides_non_delivery_branches(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        // Branch with no delivery settings at all.
+        let _b1 = seed_branch_named(&pool, org, "BrA").await;
+        // Branch with both channels explicitly disabled.
+        let b2 = seed_branch_named(&pool, org, "BrB").await;
+        seed_settings(&pool, b2, false, false, 0).await;
+
+        let app = app!(&pool);
+        let (st, body) = send(
+            &app,
+            test::TestRequest::get().uri(&format!("/public/branches?org_id={org}")),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(
+            body.as_array().unwrap().len(),
+            0,
+            "no delivery-enabled branches should appear"
+        );
+    }
+
+    // ── OTP cooldown ─────────────────────────────────────────────────────────
+
+    /// Requesting a second OTP for the same phone within 60 seconds returns 409.
+    #[sqlx::test]
+    async fn otp_rapid_resend_rejected(pool: PgPool) {
+        // Seed an unconsumed OTP that was just created.
+        let phone = "201000000001";
+        sqlx::query(
+            "INSERT INTO delivery_otp (phone, code_hash, expires_at) \
+             VALUES ($1, 'x', now() + interval '5 minutes')",
+        )
+        .bind(phone)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let app = app!(&pool);
+        let (st, body) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/otp/request")
+                .set_json(json!({ "phone": phone })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "rapid resend must be 409: {body}");
+    }
+
+    // ── Guest order history ───────────────────────────────────────────────────
+
+    #[sqlx::test]
+    async fn guest_order_history_shows_own_orders(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, true, false, 300).await;
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 10.0, 1000.0).await;
+
+        let _order = place_in_mall_order(&pool, branch, item, 1).await;
+
+        let app = app!(&pool);
+        let (st, body) = send(
+            &app,
+            test::TestRequest::get().uri(&format!(
+                "/public/delivery-orders/history?phone={PHONE}&org_id={org}"
+            )),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let list = body.as_array().expect("array");
+        assert_eq!(list.len(), 1, "customer should see their own order");
+        assert_eq!(list[0]["branch_id"], branch.to_string().as_str().to_string());
+        assert_eq!(list[0]["channel"], "in_mall");
+    }
+
+    /// History for a different phone returns an empty list, not another
+    /// customer's orders (tenant isolation at the phone level).
+    #[sqlx::test]
+    async fn guest_order_history_isolated_by_phone(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, true, false, 300).await;
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 10.0, 1000.0).await;
+        place_in_mall_order(&pool, branch, item, 1).await;
+
+        let app = app!(&pool);
+        // A different phone number should get zero results.
+        let (st, body) = send(
+            &app,
+            test::TestRequest::get().uri(&format!(
+                "/public/delivery-orders/history?phone=01099999999&org_id={org}"
+            )),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body.as_array().unwrap().len(), 0);
+    }
+
+    /// Supplying an invalid device token for the history endpoint → 401.
+    #[sqlx::test]
+    async fn guest_order_history_invalid_device_token_rejected(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let app = app!(&pool);
+
+        let (st, _) = send(
+            &app,
+            test::TestRequest::get().uri(&format!(
+                "/public/delivery-orders/history?phone={PHONE}&org_id={org}&device_token=garbage"
+            )),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+    }
+
+    // ── Guest past locations ──────────────────────────────────────────────────
+
+    /// Two orders placed to the same in-mall location appear as a single entry
+    /// in the past-locations list.
+    #[sqlx::test]
+    async fn guest_past_locations_deduplicates_same_address(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, true, false, 300).await;
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 10.0, 1000.0).await;
+
+        // Two orders with identical place_name/floor/unit — should collapse.
+        place_in_mall_order(&pool, branch, item, 1).await;
+        place_in_mall_order(&pool, branch, item, 1).await;
+
+        let app = app!(&pool);
+        let (st, body) = send(
+            &app,
+            test::TestRequest::get().uri(&format!(
+                "/public/delivery-orders/past-locations?phone={PHONE}&org_id={org}"
+            )),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let list = body.as_array().expect("array");
+        assert_eq!(
+            list.len(),
+            1,
+            "two orders to the same location must deduplicate to one past-location entry"
+        );
+    }
+
+    // ── Outside delivery ──────────────────────────────────────────────────────
+
+    /// Outside-channel order without coordinates → 400 Bad Request.
+    #[sqlx::test]
+    async fn outside_intake_requires_coordinates(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, false, true, 0).await;
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 10.0, 1000.0).await;
+
+        let app = app!(&pool);
+        let mut body = intake_body(branch, "outside", json!([{ "menu_item_id": item, "quantity": 1 }]));
+        body["customer_lat"] = json!(null);
+        body["customer_lng"] = json!(null);
+        let (st, b) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "outside without coords must be 400: {b}");
+    }
+
+    /// Outside delivery with a zone covering the customer's location applies the
+    /// zone fee (haversine fallback used when OSRM is not configured).
+    #[sqlx::test]
+    async fn outside_intake_zone_fee_applied(pool: PgPool) {
+        // Unset OSRM so haversine is used as fallback.
+        unsafe { std::env::remove_var("OSRM_URL") };
+
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;   // at (30.0, 31.0)
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, false, true, 0).await;
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 10.0, 1000.0).await;
+        perms(&pool).await;
+
+        // Seed a delivery zone that covers any address within 50 km.
+        let admin_uid = seed_user(&pool, org, "org_admin").await;
+        let admin_tok = admin_token(admin_uid, org);
+        let app = app!(&pool);
+        let (st, _) = send(
+            &app,
+            auth(
+                test::TestRequest::post().uri("/delivery/zones").set_json(
+                    json!({ "branch_id": branch, "name": "City", "fee": 750, "max_road_distance_meters": 50_000 }),
+                ),
+                &admin_tok,
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "zone seed failed");
+
+        // Customer is ~160m from the branch — well within the 50 km zone.
+        let mut body = intake_body(branch, "outside", json!([{ "menu_item_id": item, "quantity": 1 }]));
+        body["customer_lat"] = json!(30.001);
+        body["customer_lng"] = json!(31.001);
+        let (st, b) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        assert_eq!(st, StatusCode::CREATED, "outside order should be accepted: {b}");
+        assert_eq!(b["delivery_fee"], 750, "zone fee must be applied");
+        assert_eq!(b["subtotal"], 500);
+        assert_eq!(b["total"], 1250);
+    }
+
+    /// Outside delivery when the address falls outside all configured zones → 400.
+    #[sqlx::test]
+    async fn outside_intake_out_of_range_rejected(pool: PgPool) {
+        unsafe { std::env::remove_var("OSRM_URL") };
+
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;   // at (30.0, 31.0)
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, false, true, 0).await;
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 10.0, 1000.0).await;
+        perms(&pool).await;
+
+        // Zone only covers up to 1 km; customer is ~110 km away.
+        let admin_uid = seed_user(&pool, org, "org_admin").await;
+        let admin_tok = admin_token(admin_uid, org);
+        let app = app!(&pool);
+        let (st, _) = send(
+            &app,
+            auth(
+                test::TestRequest::post().uri("/delivery/zones").set_json(
+                    json!({ "branch_id": branch, "name": "Near", "fee": 200, "max_road_distance_meters": 1_000 }),
+                ),
+                &admin_tok,
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED);
+
+        // Cairo to Alexandria is ~110 km — way outside the 1 km zone.
+        let mut body = intake_body(branch, "outside", json!([{ "menu_item_id": item, "quantity": 1 }]));
+        body["customer_lat"] = json!(31.2);
+        body["customer_lng"] = json!(29.9);
+        let (st, b) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "out-of-range address must be 400: {b}");
     }
 }

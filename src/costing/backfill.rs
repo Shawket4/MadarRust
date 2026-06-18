@@ -62,9 +62,11 @@ pub struct BackfillSummary {
     pub dry_run: bool,
 }
 
-/// Current piastre cost per ingredient: open history epoch first, catalog
-/// value second — identical to the costing-service resolution. NULL ⟺
-/// never entered.
+/// Current piastre cost per ingredient on the ORG-DEFAULT (standard) basis:
+/// org-level open history epoch first, catalog value second. NULL ⟺ never
+/// entered. (Per-branch actual cost lives on branch_inventory; this operator
+/// backfill deliberately recomputes against the org standard cost so a single
+/// run is branch-agnostic.)
 const CURRENT_COSTS_CTE: &str = r#"
     current_costs AS (
         SELECT i.id,
@@ -72,7 +74,7 @@ const CURRENT_COSTS_CTE: &str = r#"
         FROM org_ingredients i
         LEFT JOIN LATERAL (
             SELECT cost_per_unit FROM ingredient_cost_history
-            WHERE org_ingredient_id = i.id AND effective_until IS NULL
+            WHERE org_ingredient_id = i.id AND branch_id IS NULL AND effective_until IS NULL
             ORDER BY effective_from DESC LIMIT 1
         ) h ON TRUE
     )
