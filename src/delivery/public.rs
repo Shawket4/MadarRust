@@ -197,6 +197,7 @@ pub struct DeliveryMenuItem {
     #[schema(value_type = Object)]
     pub name_translations: serde_json::Value,
     pub description: Option<String>,
+    #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
     pub image_url: Option<String>,
     pub price: i32,
     pub sizes: Vec<DeliveryMenuSize>,
@@ -218,6 +219,7 @@ pub struct DeliveryMenuCategory {
     pub name: String,
     #[schema(value_type = Object)]
     pub name_translations: serde_json::Value,
+    #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
     pub image_url: Option<String>,
 }
 
