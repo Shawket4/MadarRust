@@ -49,9 +49,9 @@ services:
   osrm:
     image: osrm/osrm-backend:latest
     restart: unless-stopped
-    # loopback only — was 0.0.0.0:5000 (publicly exposed) in the standalone container
+    # publicly accessible — other projects call OSRM directly from their frontends
     ports:
-      - "127.0.0.1:5000:5000"
+      - "0.0.0.0:5000:5000"
     volumes:
       - /opt/osrm:/data
     command: osrm-routed --algorithm mld /data/egypt-latest.osrm
