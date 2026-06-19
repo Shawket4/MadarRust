@@ -1526,7 +1526,7 @@ async fn test_catalog_unit_change_rebases_all_references(pool: PgPool) {
 /// V26: a teller token bound to branch A must not read another branch's
 /// inventory, even when the teller is assigned to both branches.
 #[sqlx::test]
-async fn test_teller_token_branch_binding_on_inventory(pool: PgPool) {
+async fn test_teller_token_org_scoped_on_inventory(pool: PgPool) {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
@@ -1552,11 +1552,12 @@ async fn test_teller_token_branch_binding_on_inventory(pool: PgPool) {
         .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
     assert!(resp_a.status().is_success(), "own branch must work");
 
-    // Branch B → forbidden, because the token is bound to branch A.
+    // D13: org-scoped — a teller token from branch A may read branch B in the
+    // same org (no token-branch binding).
     let resp_b = test::call_service(&app, test::TestRequest::get()
         .uri(&format!("/inventory/branches/{}/stock", branch_b))
         .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
-    assert_eq!(resp_b.status(), 403, "cross-branch teller token must be rejected");
+    assert!(resp_b.status().is_success(), "org teller may read any org branch's stock");
 }
 
 /// Ledger integrity: SUM(movement.quantity) reconciles with current_stock, and

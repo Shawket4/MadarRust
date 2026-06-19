@@ -319,7 +319,7 @@ async fn test_login_pin_invalid_branch_returns_401(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn test_login_pin_teller_not_assigned_to_branch_returns_403(pool: PgPool) {
+async fn test_login_pin_unassigned_org_teller_allowed(pool: PgPool) {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
@@ -355,12 +355,12 @@ async fn test_login_pin_teller_not_assigned_to_branch_returns_403(pool: PgPool) 
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    // Valid teller (correct name+PIN in this org) but NOT assigned to this
-    // branch → a distinct 403, NOT the generic "invalid credentials" 401.
-    assert_eq!(resp.status(), 403, "valid teller without branch access should return 403");
+    // D13: tellers are ORG-scoped — a valid teller in the branch's org may sign
+    // in at ANY branch in that org, even one they're not explicitly assigned to.
+    assert_eq!(resp.status(), 200, "org teller should be allowed at any org branch");
     let body: serde_json::Value = test::read_body_json(resp).await;
-    assert!(body["error"].as_str().unwrap_or("").to_lowercase().contains("branch"),
-        "403 error should mention branch access, got {body:?}");
+    assert!(body["token"].as_str().map(|t| !t.is_empty()).unwrap_or(false),
+        "successful login should return a token, got {body:?}");
 }
 
 #[sqlx::test(migrations = "./migrations")]

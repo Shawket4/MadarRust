@@ -675,7 +675,7 @@ async fn test_list_shifts_all_branches(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn test_teller_token_is_bound_to_login_branch(pool: PgPool) {
+async fn test_teller_token_org_scoped_across_branches(pool: PgPool) {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
@@ -693,13 +693,14 @@ async fn test_teller_token_is_bound_to_login_branch(pool: PgPool) {
     // Token minted for branch A (as login does for this device).
     let token = crate::auth::jwt::create_token(&get_secret(), teller, Some(org_id), UserRole::Teller, Some(branch_a), 24).unwrap();
 
-    // Bound to A → cannot read branch B, even though assigned to both.
+    // D13: org-scoped — a teller token minted for branch A may read branch B in
+    // the SAME org (the token-branch binding is gone).
     let resp = test::call_service(&app, test::TestRequest::get()
         .uri(&format!("/shifts/branches/{branch_b}/current"))
         .insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;
-    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.status(), 200);
 
-    // Its own branch works.
+    // Its own branch works too.
     let resp = test::call_service(&app, test::TestRequest::get()
         .uri(&format!("/shifts/branches/{branch_a}/current"))
         .insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;

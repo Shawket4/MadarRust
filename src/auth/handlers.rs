@@ -206,19 +206,10 @@ pub async fn login(
                 // from a DIFFERENT org) → generic invalid credentials.
                 .ok_or_else(|| AppError::Unauthorized("Invalid credentials".into()))?;
 
-            // Valid teller for this org — but they must be assigned to this branch.
-            let has_branch_access: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)"
-            )
-            .bind(matched.id)
-            .bind(branch_id)
-            .fetch_one(pool.get_ref())
-            .await?;
-            if !has_branch_access {
-                return Err(AppError::Forbidden(
-                    "Your account is not assigned to this branch.".into(),
-                ));
-            }
+            // D13: tellers are ORG-scoped, not branch-scoped. The teller was
+            // resolved within the branch's own org above (that's the boundary),
+            // so any active org teller may sign in at this branch's device — no
+            // per-branch `user_branch_assignments` gate.
             matched
         }
 

@@ -2464,6 +2464,13 @@ async fn require_branch_access(
     }
     if claims.role == UserRole::OrgAdmin { return Ok(()); }
 
+    // D13: tellers are ORG-scoped, not branch-scoped — any active teller in the
+    // branch's org may ring up here (the org check above is the boundary). The
+    // order still records this device's branch, so revenue stays attributed
+    // correctly.
+    if claims.role == UserRole::Teller { return Ok(()); }
+
+    // Branch managers stay branch-scoped via their explicit assignments.
     let assigned: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM user_branch_assignments \
          WHERE user_id = $1 AND branch_id = $2)"
@@ -2475,19 +2482,6 @@ async fn require_branch_access(
 
     if !assigned {
         return Err(AppError::Forbidden("Not assigned to this branch".into()));
-    }
-
-    // A teller is bound to the branch they authenticated for: a token minted
-    // for one branch cannot ring up / read another, even when the teller is
-    // assigned to both. This stops revenue + inventory being attributed to the
-    // wrong branch. (Tokens always carry a branch for tellers; the `None` guard
-    // keeps legacy/unit-test tokens working.)
-    if claims.role == UserRole::Teller
-        && let Some(token_branch) = claims.branch_id()
-        && token_branch != branch_id {
-        return Err(AppError::Forbidden(
-            "This device is signed in to a different branch.".into(),
-        ));
     }
 
     Ok(())

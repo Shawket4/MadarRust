@@ -208,6 +208,12 @@ pub(crate) async fn require_branch_access(
     if claims.role == UserRole::OrgAdmin {
         return Ok(());
     }
+    // D13: tellers are ORG-scoped, not branch-scoped — the org check above is the
+    // boundary; any active org teller may act on this branch's deliveries.
+    if claims.role == UserRole::Teller {
+        return Ok(());
+    }
+    // Branch managers stay branch-scoped via their explicit assignments.
     let assigned: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)",
     )
@@ -217,14 +223,6 @@ pub(crate) async fn require_branch_access(
     .await?;
     if !assigned {
         return Err(AppError::Forbidden("Not assigned to this branch".into()));
-    }
-    if claims.role == UserRole::Teller
-        && let Some(token_branch) = claims.branch_id()
-        && token_branch != branch_id
-    {
-        return Err(AppError::Forbidden(
-            "This device is signed in to a different branch.".into(),
-        ));
     }
     Ok(())
 }
