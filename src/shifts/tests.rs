@@ -285,7 +285,7 @@ async fn test_cash_movements(pool: PgPool) {
     test::call_service(&app, req_open).await;
 
     // 1. Add cash movement
-    let move_req = CashMovementRequest { amount: -500, note: "Paid vendor".into(), created_at: None };
+    let move_req = CashMovementRequest { amount: -500, note: "Paid vendor".into(), created_at: None, client_ref: None };
     let req_move = test::TestRequest::post()
         .uri(&format!("/shifts/{}/cash-movements", shift_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
@@ -357,6 +357,104 @@ async fn test_close_and_force_close_shift(pool: PgPool) {
     assert!(resp_force2.status().is_success());
     let shift: Shift = test::read_body_json(resp_force2).await;
     assert_eq!(shift.status, "force_closed");
+}
+
+// Offline-first P0: a replayed cash movement (same client_ref) must apply ONCE.
+#[sqlx::test]
+async fn test_cash_movement_client_ref_idempotent(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "shifts", "read").await;
+    grant_permission(&pool, "org_admin", "shifts", "create").await;
+    grant_permission(&pool, "org_admin", "shifts", "update").await;
+    let token = generate_org_admin_token(user_id, org_id);
+
+    let shift_id = Uuid::new_v4();
+    test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/shifts/branches/{}/open", branch_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&OpenShiftRequest { id: Some(shift_id), opening_cash: 5000, opening_cash_edited: None, edit_reason: None, opened_at: None })
+        .to_request()).await;
+
+    // Same client_ref sent twice (a replayed offline movement).
+    let cref = Uuid::new_v4();
+    let body = CashMovementRequest { amount: -500, note: "Paid vendor".into(), created_at: None, client_ref: Some(cref) };
+
+    let first = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/shifts/{}/cash-movements", shift_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&body).to_request()).await;
+    assert!(first.status().is_success());
+    let m1: CashMovement = test::read_body_json(first).await;
+    assert_eq!(m1.client_ref, Some(cref), "server must echo client_ref");
+
+    let second = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/shifts/{}/cash-movements", shift_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&body).to_request()).await;
+    assert!(second.status().is_success());
+    let m2: CashMovement = test::read_body_json(second).await;
+
+    assert_eq!(m1.id, m2.id, "same client_ref must return the same movement");
+
+    // Exactly one movement exists despite the duplicate request.
+    let list = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/shifts/{}/cash-movements", shift_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request()).await;
+    let movements: Vec<CashMovement> = test::read_body_json(list).await;
+    assert_eq!(movements.len(), 1, "duplicate client_ref must not create a second movement");
+}
+
+// Offline-first P0: a replayed force-close returns the terminal shift (200), not 400.
+#[sqlx::test]
+async fn test_force_close_idempotent(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+    ).await;
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_admin = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "shifts", "create").await;
+    grant_permission(&pool, "org_admin", "shifts", "update").await;
+    let token = generate_org_admin_token(user_admin, org_id);
+
+    let shift_id = Uuid::new_v4();
+    test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/shifts/branches/{}/open", branch_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&OpenShiftRequest { id: Some(shift_id), opening_cash: 5000, opening_cash_edited: None, edit_reason: None, opened_at: None })
+        .to_request()).await;
+
+    let r1 = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/shifts/{}/force-close", shift_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&ForceCloseRequest { reason: Some("Forgot".into()) })
+        .to_request()).await;
+    assert!(r1.status().is_success());
+    let s1: Shift = test::read_body_json(r1).await;
+    assert_eq!(s1.status, "force_closed");
+
+    // Replay must be idempotent: 200 + the same terminal shift, not a 400.
+    let r2 = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/shifts/{}/force-close", shift_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&ForceCloseRequest { reason: Some("Forgot".into()) })
+        .to_request()).await;
+    assert_eq!(r2.status().as_u16(), 200, "replayed force-close must be idempotent");
+    let s2: Shift = test::read_body_json(r2).await;
+    assert_eq!(s2.status, "force_closed");
+    assert_eq!(s1.id, s2.id);
 }
 
 #[sqlx::test]
@@ -925,7 +1023,7 @@ async fn test_cash_movement_timestamp_contract(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/shifts/{}/cash-movements", sid))
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&CashMovementRequest { amount: -500, note: "vendor".into(), created_at })
+            .set_json(&CashMovementRequest { amount: -500, note: "vendor".into(), created_at, client_ref: None })
             .to_request()
     };
 

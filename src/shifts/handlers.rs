@@ -56,6 +56,11 @@ pub struct CashMovement {
     pub moved_by:      Uuid,
     pub moved_by_name: String,
     pub created_at:    chrono::DateTime<chrono::Utc>,
+    /// Client-minted idempotency / reconciliation key, echoed back so an
+    /// offline client can map its queued movement to the server row. NULL for
+    /// live online movements.
+    #[serde(default)]
+    pub client_ref:    Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
@@ -144,6 +149,11 @@ pub struct CashMovementRequest {
     /// so they keep their real time after syncing. Future values are rejected.
     #[serde(default)]
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Client-minted idempotency / reconciliation key. The POS sends a stable
+    /// UUID per movement so a replayed offline movement dedupes instead of
+    /// double-applying. Omit for live online movements.
+    #[serde(default)]
+    pub client_ref: Option<Uuid>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -688,6 +698,29 @@ pub async fn get_shift_report(
     }))
 }
 
+/// Look up a cash movement by its client-minted `client_ref` (idempotency /
+/// reconciliation key). Lets a replayed offline movement return the original
+/// row instead of double-applying.
+async fn fetch_cash_movement_by_client_ref(
+    pool:       &PgPool,
+    client_ref: Uuid,
+) -> Result<Option<CashMovement>, AppError> {
+    let m = sqlx::query_as::<_, CashMovement>(
+        r#"
+        SELECT
+            m.id, m.shift_id, m.amount, m.note, m.moved_by,
+            (SELECT name FROM users WHERE id = m.moved_by) AS moved_by_name,
+            m.created_at, m.client_ref
+        FROM shift_cash_movements m
+        WHERE m.client_ref = $1
+        "#,
+    )
+    .bind(client_ref)
+    .fetch_optional(pool)
+    .await?;
+    Ok(m)
+}
+
 // ── POST /shifts/:shift_id/cash-movements ─────────────────────
 
 #[utoipa::path(
@@ -730,6 +763,14 @@ pub async fn add_cash_movement(
         crate::clock::reject_if_future(ts, "created_at")?;
     }
 
+    // Idempotent replay: a queued offline movement that already landed returns
+    // the original instead of double-applying (which corrupts expected_cash).
+    if let Some(cref) = body.client_ref
+        && let Some(existing) = fetch_cash_movement_by_client_ref(pool.get_ref(), cref).await?
+    {
+        return Ok(HttpResponse::Ok().json(existing));
+    }
+
     // Serialize against a concurrent close exactly like create_order does:
     // close_shift snapshots `closing_cash_system` under this same per-shift
     // advisory lock, so taking it here (and re-checking `open` inside the lock)
@@ -753,14 +794,14 @@ pub async fn add_cash_movement(
         ));
     }
 
-    let movement = sqlx::query_as::<_, CashMovement>(
+    let movement = match sqlx::query_as::<_, CashMovement>(
         r#"
-        INSERT INTO shift_cash_movements (shift_id, amount, note, moved_by, created_at)
-        VALUES ($1, $2, $3, $4, COALESCE($5, now()))
+        INSERT INTO shift_cash_movements (shift_id, amount, note, moved_by, created_at, client_ref)
+        VALUES ($1, $2, $3, $4, COALESCE($5, now()), $6)
         RETURNING
             id, shift_id, amount, note, moved_by,
             (SELECT name FROM users WHERE id = $4) AS moved_by_name,
-            created_at
+            created_at, client_ref
         "#,
     )
     .bind(*shift_id)
@@ -768,8 +809,28 @@ pub async fn add_cash_movement(
     .bind(&body.note)
     .bind(claims.user_id())
     .bind(body.created_at)
+    .bind(body.client_ref)
     .fetch_one(&mut *tx)
-    .await?;
+    .await
+    {
+        Ok(m) => m,
+        // client_ref race: a concurrent replay of the same offline movement
+        // already committed. Return the original instead of a raw 500.
+        Err(sqlx::Error::Database(db))
+            if db.code().as_deref() == Some("23505")
+                && db.constraint().is_some_and(|c| c.contains("client_ref")) =>
+        {
+            drop(tx);
+            if let Some(cref) = body.client_ref
+                && let Some(existing) =
+                    fetch_cash_movement_by_client_ref(pool.get_ref(), cref).await?
+            {
+                return Ok(HttpResponse::Ok().json(existing));
+            }
+            return Err(AppError::Conflict("Duplicate cash movement".into()));
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     tx.commit().await?;
 
@@ -802,7 +863,7 @@ pub async fn list_cash_movements(
         SELECT
             m.id, m.shift_id, m.amount, m.note, m.moved_by,
             u.name AS moved_by_name,
-            m.created_at
+            m.created_at, m.client_ref
         FROM shift_cash_movements m
         JOIN users u ON u.id = m.moved_by
         WHERE m.shift_id = $1
@@ -958,8 +1019,11 @@ pub async fn force_close_shift(
         ));
     }
 
+    // Idempotent replay: a force-close re-sent on reconnect (or a shift already
+    // closed/force-closed) returns the existing terminal shift instead of a 400,
+    // so a retried request is safe. Mirrors close_shift's early-return.
     if shift.status != "open" {
-        return Err(AppError::BadRequest("Shift is not open".into()));
+        return Ok(HttpResponse::Ok().json(shift));
     }
 
     // Snapshot the expected drawer cash under the same per-shift advisory lock
