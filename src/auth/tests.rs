@@ -363,6 +363,50 @@ async fn test_login_pin_unassigned_org_teller_allowed(pool: PgPool) {
         "successful login should return a token, got {body:?}");
 }
 
+// Layer 3: a successful PIN login silently derives + stores the teller's
+// argon2id OFFLINE verifier (so the org bundle can later let them unlock offline).
+#[sqlx::test(migrations = "./migrations")]
+async fn test_pin_login_derives_offline_pin_hash(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org_id).await;
+    let user_id = Uuid::new_v4();
+    let hash = bcrypt::hash("1234", bcrypt::DEFAULT_COST).unwrap();
+    sqlx::query!(
+        "INSERT INTO users (id, org_id, name, role, pin_hash)
+         VALUES ($1, $2, 'Teller One', 'teller'::user_role, $3)",
+        user_id, org_id, hash
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let before: Option<String> =
+        sqlx::query_scalar("SELECT offline_pin_hash FROM users WHERE id = $1")
+            .bind(user_id).fetch_one(&pool).await.unwrap();
+    assert!(before.is_none(), "no offline hash before first login");
+
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri("/auth/login")
+        .set_json(&json!({ "name": "Teller One", "pin": "1234", "branch_id": branch }))
+        .to_request()).await;
+    assert!(resp.status().is_success(), "login should succeed, got {:?}", resp.status());
+
+    let after: Option<String> =
+        sqlx::query_scalar("SELECT offline_pin_hash FROM users WHERE id = $1")
+            .bind(user_id).fetch_one(&pool).await.unwrap();
+    let phc = after.expect("offline_pin_hash must be derived on PIN login");
+    assert!(crate::auth::offline::verify_offline_pin("1234", &phc),
+        "stored argon2id verifier must match the PIN");
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn test_login_pin_cross_org_isolation(pool: PgPool) {
     // Org A teller cannot log in using Org B's branch

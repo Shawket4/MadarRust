@@ -319,6 +319,74 @@ pub async fn get_org(
     Ok(HttpResponse::Ok().json(org))
 }
 
+// ── GET /orgs/:id/offline-auth-bundle  (org-scoped) ──────────
+//
+// The org's offline-auth bundle: an argon2id PIN verifier per active teller, so
+// any teller in the org can unlock the POS OFFLINE on a device that synced this
+// bundle while online. Authorization is org-scoped (`require_same_org`) — a
+// token must belong to the org it asks for. The verifier is NOT the login
+// credential (see `auth::offline`); tellers who never logged in online have a
+// `null` hash and can't offline-unlock until they do.
+
+#[derive(Debug, sqlx::FromRow, Serialize, ToSchema)]
+pub struct OfflineTellerCredential {
+    pub user_id:          Uuid,
+    pub name:             String,
+    pub role:             String,
+    pub is_active:        bool,
+    /// argon2id verifier of the teller's PIN (derived at online login). `null`
+    /// until the teller has logged in online at least once.
+    pub offline_pin_hash: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct OfflineAuthBundle {
+    pub org_id:       Uuid,
+    pub generated_at: chrono::DateTime<chrono::Utc>,
+    pub tellers:      Vec<OfflineTellerCredential>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/orgs/{id}/offline-auth-bundle",
+    tag = "orgs",
+    params(("id" = Uuid, Path, description = "Organization ID")),
+    responses(
+        (status = 200, description = "Org offline-auth bundle", body = OfflineAuthBundle),
+        AppErrorResponse,
+    ),
+    security(("bearer_jwt" = []))
+)]
+pub async fn offline_auth_bundle(
+    req:    HttpRequest,
+    pool:   web::Data<PgPool>,
+    org_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    // Authorization: the caller's token MUST belong to this org. The bundle is
+    // fetched by the device's signed-in teller to enable offline unlock for the
+    // whole org — no extra role gate, but never across orgs.
+    require_same_org(&claims, Some(*org_id))?;
+
+    let tellers = sqlx::query_as::<_, OfflineTellerCredential>(
+        r#"
+        SELECT id AS user_id, name, role::text AS role, is_active, offline_pin_hash
+        FROM users
+        WHERE org_id = $1 AND role = 'teller' AND deleted_at IS NULL
+        ORDER BY name
+        "#,
+    )
+    .bind(*org_id)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(OfflineAuthBundle {
+        org_id: *org_id,
+        generated_at: chrono::Utc::now(),
+        tellers,
+    }))
+}
+
 // ── PATCH /orgs/:id  (super_admin only) ──────────────────────
 // JSON only — logo swap uses PUT /orgs/{id}/logo.
 

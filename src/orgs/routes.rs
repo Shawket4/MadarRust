@@ -11,6 +11,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/{id}",      web::patch().to(handlers::update_org))
             .route("/{id}",      web::delete().to(handlers::delete_org))
             .route("/{id}/logo", web::put().to(handlers::upload_org_logo))
+            .route("/{id}/offline-auth-bundle", web::get().to(handlers::offline_auth_bundle))
             .route("/{id}/onboarding",          web::get().to(crate::orgs::onboarding::get_onboarding))
             .route("/{id}/onboarding/complete", web::post().to(crate::orgs::onboarding::complete_onboarding))
             .route("/{id}/qr",                  web::get().to(qr_handlers::org_qr)),

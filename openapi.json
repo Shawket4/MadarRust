@@ -13859,6 +13859,103 @@
         ]
       }
     },
+    "/orgs/{id}/offline-auth-bundle": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "operationId": "offline_auth_bundle",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Org offline-auth bundle",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OfflineAuthBundle"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/orgs/{id}/onboarding": {
       "get": {
         "tags": [
@@ -24419,17 +24516,19 @@
               "null"
             ],
             "format": "int64",
-            "description": "Ingredient cost rollup in piastres. `null` ⟺ unknown."
+            "description": "Ingredient cost rollup in piastres over the ingredients that *are*\npriced. A partial rollup still returns the sum so far, with\n`cost_missing = true`; `null` only when nothing is priced."
           },
           "cost_missing": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "`true` when at least one ingredient is unlinked or has no cost, so `cost`\n(if any) is partial rather than the full figure."
           },
           "margin_pct": {
             "type": [
               "number",
               "null"
             ],
-            "format": "double"
+            "format": "double",
+            "description": "`(price - cost) / price` — only when the cost is *complete* and price > 0."
           },
           "name": {
             "type": "string"
@@ -26498,6 +26597,14 @@
             "type": "integer",
             "format": "int32"
           },
+          "client_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Client-minted idempotency / reconciliation key, echoed back so an\noffline client can map its queued movement to the server row. NULL for\nlive online movements."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -26532,6 +26639,14 @@
           "amount": {
             "type": "integer",
             "format": "int32"
+          },
+          "client_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Client-minted idempotency / reconciliation key. The POS sends a stable\nUUID per movement so a replayed offline movement dedupes instead of\ndouble-applying. Omit for live online movements."
           },
           "created_at": {
             "type": [
@@ -30200,6 +30315,61 @@
           }
         }
       },
+      "OfflineAuthBundle": {
+        "type": "object",
+        "required": [
+          "org_id",
+          "generated_at",
+          "tellers"
+        ],
+        "properties": {
+          "generated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "tellers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OfflineTellerCredential"
+            }
+          }
+        }
+      },
+      "OfflineTellerCredential": {
+        "type": "object",
+        "required": [
+          "user_id",
+          "name",
+          "role",
+          "is_active"
+        ],
+        "properties": {
+          "is_active": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "offline_pin_hash": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "argon2id verifier of the teller's PIN (derived at online login). `null`\nuntil the teller has logged in online at least once."
+          },
+          "role": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "OnboardingStatus": {
         "type": "object",
         "required": [
@@ -33629,10 +33799,11 @@
               "null"
             ],
             "format": "int64",
-            "description": "Recipe cost rollup in piastres. `null` ⟺ unknown (no recipe, or any\ningredient unlinked / missing a cost)."
+            "description": "Recipe cost rollup in piastres over the ingredients that *are* priced.\n`null` only when there is no recipe, or no recipe ingredient has a known\ncost at all. A partial rollup (some ingredients unpriced) still returns\nthe sum so far, with `cost_missing = true` flagging it as incomplete."
           },
           "cost_missing": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "`true` when at least one recipe ingredient is unlinked or has no cost, so\n`cost` (if any) is a partial figure rather than the full COGS."
           },
           "food_cost_pct": {
             "type": [
@@ -33640,7 +33811,7 @@
               "null"
             ],
             "format": "double",
-            "description": "`cost / price` when both known and price > 0."
+            "description": "`cost / price` — only when the cost is *complete* and price > 0."
           },
           "item_name": {
             "type": "string"
@@ -33651,7 +33822,7 @@
               "null"
             ],
             "format": "double",
-            "description": "`(price - cost) / price` when both known and price > 0."
+            "description": "`(price - cost) / price` — only when the cost is *complete* and price > 0.\nSuppressed (`null`) for partial rollups so an incomplete cost is never\ngraded as a food-cost percentage."
           },
           "menu_item_id": {
             "type": "string",

@@ -210,6 +210,19 @@ pub async fn login(
             // resolved within the branch's own org above (that's the boundary),
             // so any active org teller may sign in at this branch's device — no
             // per-branch `user_branch_assignments` gate.
+
+            // Layer 3: silently (re)derive the teller's OFFLINE PIN verifier
+            // (argon2id, distinct from the bcrypt login hash) so the org's
+            // offline-auth bundle can let them unlock offline later. Best-effort
+            // — a hashing/store failure must never block a valid login.
+            if let Ok(off_hash) = crate::auth::offline::hash_offline_pin(pin) {
+                let _ = sqlx::query("UPDATE users SET offline_pin_hash = $1 WHERE id = $2")
+                    .bind(&off_hash)
+                    .bind(matched.id)
+                    .execute(pool.get_ref())
+                    .await;
+            }
+
             matched
         }
 

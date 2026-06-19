@@ -206,6 +206,66 @@ async fn test_get_org(pool: PgPool) {
     assert_eq!(resp3.status(), actix_web::http::StatusCode::FORBIDDEN);
 }
 
+// Offline-auth bundle: returns argon2id PIN verifiers for the org's tellers
+// (only tellers, with null for those who never logged in online).
+#[sqlx::test]
+async fn test_offline_auth_bundle_returns_org_tellers(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    ).await;
+
+    let org_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Org', $2)")
+        .bind(org_id).bind(format!("org-{org_id}")).execute(&pool).await.unwrap();
+
+    // Teller WITH an offline hash (has logged in online before).
+    let off_hash = crate::auth::offline::hash_offline_pin("1234").unwrap();
+    sqlx::query("INSERT INTO users (id, org_id, name, role, pin_hash, offline_pin_hash) VALUES ($1,$2,'Alice','teller'::user_role,'h',$3)")
+        .bind(Uuid::new_v4()).bind(org_id).bind(&off_hash).execute(&pool).await.unwrap();
+    // Teller WITHOUT (never logged in online) → null hash.
+    sqlx::query("INSERT INTO users (id, org_id, name, role, pin_hash) VALUES ($1,$2,'Bob','teller'::user_role,'h')")
+        .bind(Uuid::new_v4()).bind(org_id).execute(&pool).await.unwrap();
+    // A non-teller in the org must NOT appear in the bundle.
+    sqlx::query("INSERT INTO users (id, org_id, name, email, password_hash, role) VALUES ($1,$2,'Mgr',$3,'h','org_admin'::user_role)")
+        .bind(Uuid::new_v4()).bind(org_id).bind(format!("m-{org_id}@t.com")).execute(&pool).await.unwrap();
+
+    let token = generate_org_admin_token(org_id);
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/orgs/{org_id}/offline-auth-bundle"))
+        .insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;
+    assert!(resp.status().is_success(), "got {:?}", resp.status());
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let tellers = body["tellers"].as_array().unwrap();
+    assert_eq!(tellers.len(), 2, "only tellers, no org_admin");
+    let alice = tellers.iter().find(|t| t["name"] == "Alice").unwrap();
+    assert_eq!(alice["offline_pin_hash"].as_str().unwrap(), off_hash);
+    let bob = tellers.iter().find(|t| t["name"] == "Bob").unwrap();
+    assert!(bob["offline_pin_hash"].is_null(), "Bob never logged in online → null");
+}
+
+// Authorization: a token from a DIFFERENT org cannot fetch this org's bundle.
+#[sqlx::test]
+async fn test_offline_auth_bundle_cross_org_forbidden(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    ).await;
+    let org_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Org', $2)")
+        .bind(org_id).bind(format!("org-{org_id}")).execute(&pool).await.unwrap();
+
+    let other_token = generate_org_admin_token(Uuid::new_v4());
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri(&format!("/orgs/{org_id}/offline-auth-bundle"))
+        .insert_header(("Authorization", format!("Bearer {other_token}"))).to_request()).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::FORBIDDEN);
+}
+
 #[sqlx::test]
 async fn test_update_org(pool: PgPool) {
     let app = test::init_service(
