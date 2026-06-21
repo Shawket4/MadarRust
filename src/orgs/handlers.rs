@@ -480,6 +480,14 @@ pub async fn update_org(
             delete_old_image(&old_url, &base_url, &uploads_dir, None).await;
         }
 
+    // If this update toggled the active flag, drop the cached org status so the
+    // suspension (or reactivation) is enforced on the next request rather than
+    // after the cache TTL elapses.
+    if body.is_active.is_some()
+        && let Some(cache) = req.app_data::<web::Data<crate::auth::org_status::OrgStatusCache>>() {
+            cache.invalidate(*org_id);
+        }
+
     Ok(HttpResponse::Ok().json(org))
 }
 
@@ -611,6 +619,11 @@ pub async fn delete_org(
 
     if rows_affected == 0 {
         return Err(AppError::NotFound("Org not found".into()));
+    }
+
+    // Evict the cached status so the soft-delete is enforced immediately.
+    if let Some(cache) = req.app_data::<web::Data<crate::auth::org_status::OrgStatusCache>>() {
+        cache.invalidate(*org_id);
     }
 
     Ok(HttpResponse::NoContent().finish())

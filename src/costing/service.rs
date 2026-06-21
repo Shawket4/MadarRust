@@ -209,13 +209,19 @@ pub struct SkuCost {
     pub category_id: Option<Uuid>,
     /// Current price in piastres for this SKU.
     pub price: i64,
-    /// Recipe cost rollup in piastres. `null` ⟺ unknown (no recipe, or any
-    /// ingredient unlinked / missing a cost).
+    /// Recipe cost rollup in piastres over the ingredients that *are* priced.
+    /// `null` only when there is no recipe, or no recipe ingredient has a known
+    /// cost at all. A partial rollup (some ingredients unpriced) still returns
+    /// the sum so far, with `cost_missing = true` flagging it as incomplete.
     pub cost: Option<i64>,
+    /// `true` when at least one recipe ingredient is unlinked or has no cost, so
+    /// `cost` (if any) is a partial figure rather than the full COGS.
     pub cost_missing: bool,
-    /// `(price - cost) / price` when both known and price > 0.
+    /// `(price - cost) / price` — only when the cost is *complete* and price > 0.
+    /// Suppressed (`null`) for partial rollups so an incomplete cost is never
+    /// graded as a food-cost percentage.
     pub margin_pct: Option<f64>,
-    /// `cost / price` when both known and price > 0.
+    /// `cost / price` — only when the cost is *complete* and price > 0.
     pub food_cost_pct: Option<f64>,
 }
 
@@ -224,9 +230,10 @@ pub struct SkuCost {
 /// `branch_id` selects whose actual cost to use: `Some(b)` resolves each
 /// ingredient at branch `b`'s actual cost (falling back to the org default),
 /// `None` uses the org default (standard) cost — for org-wide views with no
-/// branch context. The rollup is NULL-propagating: any unlinked ingredient or
-/// missing cost makes the whole SKU cost unknown — `COALESCE(..., 0)` is never
-/// used.
+/// branch context. The rollup is partial-tolerant: priced ingredients are
+/// summed even when others are unlinked or lack a cost, and `cost_missing`
+/// flags that the figure is incomplete. `COALESCE(..., 0)` is never used — an
+/// unpriced ingredient is excluded from the sum, not treated as free.
 pub async fn org_sku_costs(
     pool: &PgPool,
     org_id: Uuid,
@@ -264,6 +271,7 @@ async fn sku_costs_impl(
         category_id: Option<Uuid>,
         price: i64,
         cost_piastres: Option<Decimal>,
+        cost_incomplete: Option<bool>,
         has_recipe: bool,
     }
 
@@ -291,17 +299,18 @@ async fn sku_costs_impl(
             e.category_id,
             e.price,
             r.cost_piastres,
+            r.cost_incomplete,
             r.has_recipe
         FROM expanded e
         CROSS JOIN LATERAL (
             SELECT
-                CASE
-                    WHEN COUNT(*) = 0 THEN NULL
-                    WHEN bool_or(r.org_ingredient_id IS NULL
-                                 OR COALESCE(bi.cost_per_unit, oi.cost_per_unit) IS NULL)
-                        THEN NULL
-                    ELSE SUM(r.quantity_used * COALESCE(bi.cost_per_unit, oi.cost_per_unit))
-                END        AS cost_piastres,
+                SUM(r.quantity_used * COALESCE(bi.cost_per_unit, oi.cost_per_unit))
+                    FILTER (WHERE r.org_ingredient_id IS NOT NULL
+                              AND COALESCE(bi.cost_per_unit, oi.cost_per_unit) IS NOT NULL)
+                           AS cost_piastres,
+                bool_or(r.org_ingredient_id IS NULL
+                        OR COALESCE(bi.cost_per_unit, oi.cost_per_unit) IS NULL)
+                           AS cost_incomplete,
                 COUNT(*) > 0 AS has_recipe
             FROM menu_item_recipes r
             LEFT JOIN org_ingredients oi ON oi.id = r.org_ingredient_id
@@ -324,8 +333,11 @@ async fn sku_costs_impl(
         .into_iter()
         .map(|r| {
             let cost = r.cost_piastres.map(round_piastres);
+            let incomplete = r.cost_incomplete.unwrap_or(false);
+            // Only grade a food-cost % when the rollup is *complete* — a partial
+            // cost would otherwise be flattered with a misleadingly low %.
             let (margin_pct, food_cost_pct) = match cost {
-                Some(c) if r.price > 0 => (
+                Some(c) if !incomplete && r.price > 0 => (
                     Some((r.price - c) as f64 / r.price as f64),
                     Some(c as f64 / r.price as f64),
                 ),
@@ -338,7 +350,7 @@ async fn sku_costs_impl(
                 item_name: r.item_name,
                 category_id: r.category_id,
                 price: r.price,
-                cost_missing: cost.is_none(),
+                cost_missing: incomplete,
                 cost,
                 margin_pct,
                 food_cost_pct,
@@ -355,9 +367,14 @@ pub struct AddonCost {
     pub addon_type: String,
     /// Default price in piastres.
     pub price: i64,
-    /// Ingredient cost rollup in piastres. `null` ⟺ unknown.
+    /// Ingredient cost rollup in piastres over the ingredients that *are*
+    /// priced. A partial rollup still returns the sum so far, with
+    /// `cost_missing = true`; `null` only when nothing is priced.
     pub cost: Option<i64>,
+    /// `true` when at least one ingredient is unlinked or has no cost, so `cost`
+    /// (if any) is partial rather than the full figure.
     pub cost_missing: bool,
+    /// `(price - cost) / price` — only when the cost is *complete* and price > 0.
     pub margin_pct: Option<f64>,
 }
 
@@ -377,6 +394,7 @@ pub async fn org_addon_costs(
         addon_type: String,
         price: i64,
         cost_piastres: Option<Decimal>,
+        cost_incomplete: Option<bool>,
     }
 
     let rows: Vec<Row> = sqlx::query_as::<_, Row>(
@@ -386,23 +404,25 @@ pub async fn org_addon_costs(
             a.name,
             a.type          AS addon_type,
             a.default_price::bigint AS price,
-            (
-                SELECT
-                    CASE
-                        WHEN COUNT(*) = 0 THEN NULL
-                        WHEN bool_or(ai.org_ingredient_id IS NULL
-                                     OR COALESCE(bi.cost_per_unit, oi.cost_per_unit) IS NULL)
-                            THEN NULL
-                        ELSE SUM(ai.quantity_used * COALESCE(bi.cost_per_unit, oi.cost_per_unit))
-                    END
-                FROM addon_item_ingredients ai
-                LEFT JOIN org_ingredients oi ON oi.id = ai.org_ingredient_id
-                LEFT JOIN branch_inventory bi
-                       ON bi.org_ingredient_id = ai.org_ingredient_id
-                      AND bi.branch_id = $2
-                WHERE ai.addon_item_id = a.id
-            ) AS cost_piastres
+            c.cost_piastres,
+            c.cost_incomplete
         FROM addon_items a
+        LEFT JOIN LATERAL (
+            SELECT
+                SUM(ai.quantity_used * COALESCE(bi.cost_per_unit, oi.cost_per_unit))
+                    FILTER (WHERE ai.org_ingredient_id IS NOT NULL
+                              AND COALESCE(bi.cost_per_unit, oi.cost_per_unit) IS NOT NULL)
+                           AS cost_piastres,
+                bool_or(ai.org_ingredient_id IS NULL
+                        OR COALESCE(bi.cost_per_unit, oi.cost_per_unit) IS NULL)
+                           AS cost_incomplete
+            FROM addon_item_ingredients ai
+            LEFT JOIN org_ingredients oi ON oi.id = ai.org_ingredient_id
+            LEFT JOIN branch_inventory bi
+                   ON bi.org_ingredient_id = ai.org_ingredient_id
+                  AND bi.branch_id = $2
+            WHERE ai.addon_item_id = a.id
+        ) c ON TRUE
         WHERE a.org_id = $1 AND a.is_active = TRUE
         ORDER BY a.name
         "#,
@@ -416,8 +436,9 @@ pub async fn org_addon_costs(
         .into_iter()
         .map(|r| {
             let cost = r.cost_piastres.map(round_piastres);
+            let incomplete = r.cost_incomplete.unwrap_or(false);
             let margin_pct = match cost {
-                Some(c) if r.price > 0 => Some((r.price - c) as f64 / r.price as f64),
+                Some(c) if !incomplete && r.price > 0 => Some((r.price - c) as f64 / r.price as f64),
                 _ => None,
             };
             AddonCost {
@@ -425,7 +446,7 @@ pub async fn org_addon_costs(
                 name: r.name,
                 addon_type: r.addon_type,
                 price: r.price,
-                cost_missing: cost.is_none(),
+                cost_missing: incomplete,
                 cost,
                 margin_pct,
             }

@@ -235,6 +235,16 @@ pub async fn login(
         return Err(AppError::Unauthorized("Account is disabled".into()));
     }
 
+    // Refuse to issue a token to a suspended / soft-deleted org. The middleware
+    // also rejects live requests for such an org, but stopping it here means we
+    // never hand out a fresh token in the first place. Super admins carry no
+    // org_id and are unaffected.
+    if let Some(org_id) = user.org_id
+        && !crate::auth::org_status::org_is_allowed(pool.get_ref(), org_id).await?
+    {
+        return Err(AppError::OrgSuspended);
+    }
+
     // Open-shift login rules (authoritative — the backend is the source of truth):
     //   • same teller, SAME branch as their open shift  → allow (resume; e.g.
     //     after a token expiry — don't lock them out of the shift they must close)

@@ -17,3 +17,6 @@ INVENTORY_OVERHAUL_FRONTEND_SYNC.md
 
 # Local dev container data (OSRM map files, Shlink DB, WhatsApp sessions)
 /dev-data/
+
+# Runtime upload artifacts (user-uploaded logos/images)
+/uploads/

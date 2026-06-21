@@ -4,6 +4,7 @@ use uuid::Uuid;
 use serde_json::json;
 
 use crate::auth::jwt::JwtSecret;
+use crate::auth::org_status::OrgStatusCache;
 use crate::models::UserRole;
 use crate::auth::routes;
 use crate::auth::handlers::{LoginResponse, MeResponse, AuthPermissionsResponse, ResolveBranchResponse};
@@ -953,4 +954,211 @@ async fn test_pin_login_blocked_when_branch_has_other_tellers_open_shift(pool: P
     // Bob at a branch with no open shift → allowed.
     assert_eq!(test::call_service(&app, login(other_branch)).await.status(), 200,
         "a branch with no open shift accepts a fresh teller login");
+}
+
+// ── Org-suspension kill-switch ────────────────────────────────
+
+/// Login must refuse to issue a token to a suspended org, with the stable
+/// `ORG_SUSPENDED` code so the client can show the right message.
+#[sqlx::test(migrations = "./migrations")]
+async fn test_login_suspended_org_rejected(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    sqlx::query("UPDATE organizations SET is_active = false WHERE id = $1")
+        .bind(org_id).execute(&pool).await.unwrap();
+
+    let user_id = Uuid::new_v4();
+    let hash = bcrypt::hash("password123", bcrypt::DEFAULT_COST).unwrap();
+    sqlx::query!(
+        "INSERT INTO users (id, org_id, name, role, email, password_hash)
+         VALUES ($1, $2, 'Admin', 'org_admin'::user_role, 'sus@test.com', $3)",
+        user_id, org_id, hash
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let req = test::TestRequest::post()
+        .uri("/auth/login")
+        .set_json(&json!({ "email": "sus@test.com", "password": "password123" }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 403, "login into a suspended org must be rejected");
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["code"].as_str(), Some("ORG_SUSPENDED"),
+        "rejection must carry the ORG_SUSPENDED code, got {body:?}");
+}
+
+/// A soft-deleted org (deleted_at set) is also refused at login.
+#[sqlx::test(migrations = "./migrations")]
+async fn test_login_soft_deleted_org_rejected(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    sqlx::query("UPDATE organizations SET deleted_at = NOW() WHERE id = $1")
+        .bind(org_id).execute(&pool).await.unwrap();
+
+    let user_id = Uuid::new_v4();
+    let hash = bcrypt::hash("password123", bcrypt::DEFAULT_COST).unwrap();
+    sqlx::query!(
+        "INSERT INTO users (id, org_id, name, role, email, password_hash)
+         VALUES ($1, $2, 'Admin', 'org_admin'::user_role, 'del@test.com', $3)",
+        user_id, org_id, hash
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri("/auth/login")
+        .set_json(&json!({ "email": "del@test.com", "password": "password123" }))
+        .to_request()).await;
+    assert_eq!(resp.status(), 403, "login into a soft-deleted org must be rejected");
+}
+
+/// With the cache registered (enforcement armed), an authenticated request
+/// scoped to a suspended org is rejected by the middleware — even on a token
+/// that was issued while the org was still active.
+#[sqlx::test(migrations = "./migrations")]
+async fn test_middleware_blocks_request_for_suspended_org(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .app_data(web::Data::new(OrgStatusCache::new()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let user_id = Uuid::new_v4();
+    sqlx::query!(
+        "INSERT INTO users (id, org_id, name, role, email, password_hash)
+         VALUES ($1, $2, 'Admin', 'org_admin'::user_role, 'mw@test.com', 'h')",
+        user_id, org_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Token minted while the org is healthy.
+    let token = generate_token(user_id, Some(org_id), UserRole::OrgAdmin);
+
+    // Suspend the org out from under the live token.
+    sqlx::query("UPDATE organizations SET is_active = false WHERE id = $1")
+        .bind(org_id).execute(&pool).await.unwrap();
+
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri("/auth/me")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request()).await;
+    assert_eq!(resp.status(), 403, "a live token for a suspended org must be rejected");
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["code"].as_str(), Some("ORG_SUSPENDED"));
+}
+
+/// The allow path with enforcement armed: an active org passes through.
+#[sqlx::test(migrations = "./migrations")]
+async fn test_middleware_allows_request_for_active_org(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .app_data(web::Data::new(OrgStatusCache::new()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let user_id = Uuid::new_v4();
+    sqlx::query!(
+        "INSERT INTO users (id, org_id, name, role, email, password_hash)
+         VALUES ($1, $2, 'Admin', 'org_admin'::user_role, 'ok@test.com', 'h')",
+        user_id, org_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let token = generate_token(user_id, Some(org_id), UserRole::OrgAdmin);
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri("/auth/me")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request()).await;
+    assert_eq!(resp.status(), 200, "an active org must pass the kill-switch");
+}
+
+/// Super admins carry no org_id, so the kill-switch never applies to them —
+/// this is what keeps the reactivation path usable against a down org.
+#[sqlx::test(migrations = "./migrations")]
+async fn test_middleware_super_admin_bypasses_kill_switch(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .app_data(web::Data::new(OrgStatusCache::new()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let user_id = Uuid::new_v4();
+    sqlx::query!(
+        "INSERT INTO users (id, name, role, email, password_hash)
+         VALUES ($1, 'Super Admin', 'super_admin'::user_role, 'sa@test.com', 'h')",
+        user_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let token = generate_token(user_id, None, UserRole::SuperAdmin);
+    let resp = test::call_service(&app, test::TestRequest::get()
+        .uri("/auth/permissions")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request()).await;
+    assert_eq!(resp.status(), 200, "super admin (no org_id) must bypass the kill-switch");
+}
+
+/// The cache caches within its TTL, and `invalidate` forces an immediate
+/// re-read — the mechanism the org-mutating handlers rely on for instant effect.
+#[sqlx::test(migrations = "./migrations")]
+async fn test_org_status_cache_caches_and_invalidates(pool: PgPool) {
+    let cache = OrgStatusCache::new();
+    let org_id = seed_org(&pool).await;
+
+    assert!(cache.is_allowed(&pool, org_id).await.unwrap(),
+        "a fresh active org is allowed");
+
+    // Suspend in the DB; the cached "allowed" verdict survives the TTL window.
+    sqlx::query("UPDATE organizations SET is_active = false WHERE id = $1")
+        .bind(org_id).execute(&pool).await.unwrap();
+    assert!(cache.is_allowed(&pool, org_id).await.unwrap(),
+        "within the TTL the cached allow verdict is still served");
+
+    // Invalidation forces a re-read, which now sees the suspension.
+    cache.invalidate(org_id);
+    assert!(!cache.is_allowed(&pool, org_id).await.unwrap(),
+        "after invalidation the suspension is observed");
+}
+
+/// A token referencing an org that does not exist resolves to "not allowed".
+#[sqlx::test(migrations = "./migrations")]
+async fn test_org_status_unknown_org_not_allowed(pool: PgPool) {
+    let cache = OrgStatusCache::new();
+    assert!(!cache.is_allowed(&pool, Uuid::new_v4()).await.unwrap(),
+        "an unknown org id must not be allowed");
 }

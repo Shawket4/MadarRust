@@ -7,7 +7,12 @@ use futures::future::{ready, LocalBoxFuture, Ready};
 use std::rc::Rc;
 use uuid::Uuid;
 
-use crate::{auth::jwt::{verify_token, JwtSecret}, errors::AppError};
+use sqlx::PgPool;
+
+use crate::{
+    auth::{jwt::{verify_token, JwtSecret}, org_status::OrgStatusCache},
+    errors::AppError,
+};
 
 /// The org the dashboard pinned via the `X-Org-Id` request header, if present
 /// and a valid UUID. Pair with [`crate::auth::jwt::Claims::scope_org`]: the
@@ -91,6 +96,43 @@ where
                     return Ok(req.into_response(resp).map_into_right_body());
                 }
             };
+
+            // Org-suspension kill-switch: reject every authenticated request
+            // scoped to a suspended / soft-deleted org. Super admins carry no
+            // `org_id` (None) and so bypass this — which also keeps the
+            // reactivation path (super-admin-only) working against a down org.
+            //
+            // Enforcement is gated on `OrgStatusCache` being registered: prod
+            // wires it in `main.rs`, so the check is always live there; the many
+            // test apps that don't register it simply skip the check (no behaviour
+            // change, no DB hit). The pool is read the same way so a stray test
+            // without one degrades gracefully rather than panicking.
+            if let (Some(org_id), Some(cache), Some(pool)) = (
+                claims.org_id(),
+                req.app_data::<web::Data<OrgStatusCache>>().cloned(),
+                req.app_data::<web::Data<PgPool>>().cloned(),
+            ) {
+                match cache.is_allowed(pool.get_ref(), org_id).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let resp = AppError::OrgSuspended
+                            .error_response()
+                            .map_into_boxed_body();
+                        return Ok(req.into_response(resp).map_into_right_body());
+                    }
+                    // DB unreachable while resolving org status — fail closed.
+                    // The handler would fail on its own queries anyway; a 503
+                    // here is the honest signal.
+                    Err(_) => {
+                        let resp = AppError::ServiceUnavailable(
+                            "Could not verify organization status".into(),
+                        )
+                        .error_response()
+                        .map_into_boxed_body();
+                        return Ok(req.into_response(resp).map_into_right_body());
+                    }
+                }
+            }
 
             // Attach claims to request extensions so handlers can read them
             req.extensions_mut().insert(claims);

@@ -78,6 +78,21 @@ async fn test_sku_costs_rollup_and_missing(pool: PgPool) {
     sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price, is_active) VALUES ($1, $2, $3, 'Water', 1000, true)")
         .bind(bare).bind(org_id).bind(cat_id).execute(&pool).await.unwrap();
 
+    // Partially-costed item: one PRICED ingredient (Beans, 10 g → 2 500) plus one
+    // UNPRICED ingredient (Milk, no cost_per_unit). The rollup sums the priced
+    // part and flags it incomplete — this is the genuine `cost_missing == true`
+    // case under the partial-tolerant semantics.
+    let partial = Uuid::new_v4();
+    sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price, is_active) VALUES ($1, $2, $3, 'Mocha', 9000, true)")
+        .bind(partial).bind(org_id).bind(cat_id).execute(&pool).await.unwrap();
+    let unpriced = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1, $2, 'Milk', 'g'::inventory_unit, NULL, 'milk')")
+        .bind(unpriced).bind(org_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1, $2, 10.0, 'one_size', 'Beans', 'g')")
+        .bind(partial).bind(ing).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1, $2, 200.0, 'one_size', 'Milk', 'g')")
+        .bind(partial).bind(unpriced).execute(&pool).await.unwrap();
+
     let req = test::TestRequest::get()
         .uri(&format!("/costing/menu-items?org_id={org_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
@@ -91,9 +106,18 @@ async fn test_sku_costs_rollup_and_missing(pool: PgPool) {
     assert!(!latte.cost_missing);
     assert!((latte.food_cost_pct.unwrap() - 2_500.0 / 7_000.0).abs() < 1e-9);
 
+    // Recipe-less ⇒ no cost, but NOT "missing": cost_missing flags an incomplete
+    // *recipe* rollup, and Water has no recipe at all (see SkuCost::cost_missing).
     let water = rows.iter().find(|r| r.menu_item_id == bare).unwrap();
     assert_eq!(water.cost, None);
-    assert!(water.cost_missing);
+    assert!(!water.cost_missing);
+
+    // Partial recipe ⇒ priced part summed (2 500), flagged incomplete, and no
+    // food-cost % graded on a partial figure.
+    let mocha = rows.iter().find(|r| r.menu_item_id == partial).unwrap();
+    assert_eq!(mocha.cost, Some(2_500));
+    assert!(mocha.cost_missing);
+    assert!(mocha.food_cost_pct.is_none());
 }
 
 #[sqlx::test]

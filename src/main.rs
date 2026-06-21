@@ -59,6 +59,9 @@ async fn main() -> std::io::Result<()> {
 
     let pool          = web::Data::new(pool);
     let jwt_secret    = web::Data::new(auth::jwt::JwtSecret(jwt_secret));
+    // Per-process org-suspension cache, consulted by JwtMiddleware on every
+    // authenticated request. Registering it is what arms the kill-switch.
+    let org_status    = web::Data::new(auth::org_status::OrgStatusCache::new());
     // One delivery-event hub, shared across all workers (cloned into each App).
     let delivery_hub  = web::Data::new(delivery::hub::DeliveryHub::new());
     // Shlink short-URL provider (reads env vars on each call; degrade-safe).
@@ -102,6 +105,7 @@ async fn main() -> std::io::Result<()> {
             .wrap(Compress::default())
             .app_data(pool.clone())
             .app_data(jwt_secret.clone())
+            .app_data(org_status.clone())
             .app_data(delivery_hub.clone())
             .app_data(qr_provider.clone())
             // Render actix's built-in extractor parse errors (bad path UUID, bad

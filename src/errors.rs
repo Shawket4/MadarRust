@@ -14,6 +14,9 @@ pub enum AppError {
     #[error("Forbidden: {0}")]
     Forbidden(String),
 
+    #[error("This organization is suspended. Contact support to reactivate it.")]
+    OrgSuspended,
+
     #[error("Not found: {0}")]
     NotFound(String),
 
@@ -40,6 +43,12 @@ pub struct ErrorBody {
     /// Human-readable error message.
     #[schema(example = "Something went wrong")]
     pub error: String,
+    /// Stable, machine-readable code for the error classes a client must branch
+    /// on programmatically (e.g. `ORG_SUSPENDED`). Omitted for the generic
+    /// cases where the status code alone is enough.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "ORG_SUSPENDED")]
+    pub code: Option<String>,
 }
 
 impl AppError {
@@ -52,6 +61,15 @@ impl AppError {
     /// returned 500 because every sqlx error mapped to InternalServerError.
     fn db_status(e: &sqlx::Error) -> actix_web::http::StatusCode {
         status_for_sqlstate(e.as_database_error().and_then(|d| d.code()).as_deref())
+    }
+
+    /// Stable machine-readable code surfaced in [`ErrorBody::code`]. Only the
+    /// classes a client must branch on carry one; everything else is `None`.
+    fn code(&self) -> Option<String> {
+        match self {
+            AppError::OrgSuspended => Some("ORG_SUSPENDED".to_string()),
+            _ => None,
+        }
     }
 }
 
@@ -93,10 +111,11 @@ mod tests {
 
 impl actix_web::ResponseError for AppError {
     fn error_response(&self) -> HttpResponse {
-        let body = ErrorBody { error: self.to_string() };
+        let body = ErrorBody { error: self.to_string(), code: self.code() };
         match self {
             AppError::Unauthorized(_) => HttpResponse::Unauthorized().json(body),
             AppError::Forbidden(_)    => HttpResponse::Forbidden().json(body),
+            AppError::OrgSuspended    => HttpResponse::Forbidden().json(body),
             AppError::NotFound(_)     => HttpResponse::NotFound().json(body),
             AppError::BadRequest(_)   => HttpResponse::BadRequest().json(body),
             AppError::Conflict(_)     => HttpResponse::Conflict().json(body),
