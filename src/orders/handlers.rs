@@ -312,6 +312,11 @@ pub struct CreateOrderRequest {
     #[serde(default)] pub tax_amount:      Option<i32>,
     #[serde(default)] pub total_amount:    Option<i32>,
     #[serde(default)] pub change_given:    Option<i32>,
+    // Exactly-once key. The canonical, in-body idempotency token (preferred over
+    // the legacy `Idempotency-Key` header): a client mints it once per sale and
+    // it rides inside the persisted offline payload, so a replay after a lost
+    // response — even months later — dedups against `orders.idempotency_key`.
+    #[serde(default)] pub idempotency_key: Option<Uuid>,
 }
 
 #[derive(Deserialize, Serialize, ToSchema)]
@@ -466,11 +471,14 @@ pub async fn create_order(
     check_permission(pool.get_ref(), &claims, "orders", "create").await?;
     require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
 
-    let idempotency_key = req
-        .headers()
-        .get("Idempotency-Key")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| Uuid::parse_str(s).ok());
+    // Prefer the in-body idempotency key (the canonical, replay-durable token);
+    // fall back to the legacy `Idempotency-Key` header for older clients.
+    let idempotency_key = body.idempotency_key.or_else(|| {
+        req.headers()
+            .get("Idempotency-Key")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| Uuid::parse_str(s).ok())
+    });
 
     if let Some(key) = idempotency_key
         && let Some(existing) = fetch_order_by_idempotency_key(pool.get_ref(), key).await? {
