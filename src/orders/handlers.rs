@@ -151,6 +151,22 @@ pub struct OrderItemAddon {
     pub line_cost:     Option<i64>,
 }
 
+/// Serialize an `Option<BigDecimal>` as a JSON number (or null) instead of
+/// bigdecimal's default string form, so the wire matches the `number` the
+/// OpenAPI schema + generated POS client expect.
+fn serialize_bigdecimal_opt_as_number<S>(
+    v: &Option<sqlx::types::BigDecimal>,
+    s: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match v {
+        Some(bd) => s.serialize_f64(bd.to_string().parse::<f64>().unwrap_or(0.0)),
+        None => s.serialize_none(),
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct OrderItemOptional {
     pub id:               Uuid,
@@ -162,7 +178,12 @@ pub struct OrderItemOptional {
     pub org_ingredient_id: Option<Uuid>,
     pub ingredient_name:  Option<String>,
     pub ingredient_unit:  Option<String>,
+    // bigdecimal's Serialize emits a JSON STRING ("0.5"), but the OpenAPI schema
+    // (and the generated client) advertise a `number`. Without this adapter the
+    // POS can't decode the create-order response → the queued sale never acks and
+    // dead-letters even though it was saved. Emit a real JSON number.
     #[schema(value_type = Option<f64>)]
+    #[serde(serialize_with = "serialize_bigdecimal_opt_as_number")]
     pub quantity_deducted: Option<sqlx::types::BigDecimal>,
     /// Ingredient cost per parent-item unit in piastres. `null` ⟺ unknown or
     /// no ingredient linked.
@@ -2757,4 +2778,42 @@ pub async fn export_orders(
         summary,
         ingredient_costs,
     }))
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+
+    /// Regression: `quantity_deducted` must serialize as a JSON NUMBER (not the
+    /// bigdecimal default string), so the generated POS client can decode the
+    /// create-order response and ack the queued sale. (A string here was
+    /// dead-lettering every order that had an ingredient-deducting optional.)
+    #[test]
+    fn quantity_deducted_serializes_as_number_not_string() {
+        let opt = OrderItemOptional {
+            id: Uuid::nil(),
+            order_item_id: Uuid::nil(),
+            optional_field_id: None,
+            field_name: "Extra shot".into(),
+            name_translations: serde_json::json!({}),
+            price: 0,
+            org_ingredient_id: None,
+            ingredient_name: None,
+            ingredient_unit: None,
+            quantity_deducted: Some("0.5".parse().unwrap()),
+            cost: None,
+        };
+        let v = serde_json::to_value(&opt).unwrap();
+        assert!(
+            v["quantity_deducted"].is_number(),
+            "must be a JSON number, got {}",
+            v["quantity_deducted"]
+        );
+        assert_eq!(v["quantity_deducted"].as_f64(), Some(0.5));
+
+        // None serializes as null, never a string.
+        let opt_none = OrderItemOptional { quantity_deducted: None, ..opt };
+        let vn = serde_json::to_value(&opt_none).unwrap();
+        assert!(vn["quantity_deducted"].is_null());
+    }
 }
