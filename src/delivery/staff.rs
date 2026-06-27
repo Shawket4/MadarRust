@@ -12,7 +12,8 @@ use tokio_stream::wrappers::{BroadcastStream, IntervalStream};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use super::hub::{DeliveryEvent, DeliveryHub};
+use crate::realtime::event::{BranchEvent, Topic};
+use crate::realtime::hub::BranchEventHub;
 use super::snapshot::{self, CartSnapshot, FinalizeCtx, SnapshotDeduction};
 use super::whatsapp;
 use super::{extract_claims, require_branch_access};
@@ -176,11 +177,11 @@ pub struct StreamQuery {
 #[utoipa::path(
     get, path = "/delivery-orders/stream", tag = "delivery", params(StreamQuery),
     responses(
-        (status = 200, content_type = "text/event-stream", body = DeliveryEvent,
-         description = "SSE stream. Each event is `event: created|updated` followed by a \
-            `data:` line carrying a DeliveryOrder JSON object (identical to a \
-            GET /delivery-orders item). `: ping` comment lines arrive ~every 20s as \
-            keep-alive. On ANY stream error or close, re-GET /delivery-orders and reconnect."),
+        (status = 200, content_type = "text/event-stream",
+         description = "DEPRECATED delivery-only view of the unified bus — prefer \
+            GET /realtime/stream?topics=delivery. Each event is `event: delivery.created|\
+            delivery.updated` + a `data:` DeliveryOrder JSON line. `: ping` every ~20s. On \
+            ANY error/close, re-GET /delivery-orders and reconnect."),
         AppErrorResponse
     ),
     security(("bearer_jwt" = []))
@@ -188,7 +189,7 @@ pub struct StreamQuery {
 pub async fn stream_delivery_orders(
     req: HttpRequest,
     pool: web::Data<PgPool>,
-    hub: web::Data<DeliveryHub>,
+    hub: web::Data<BranchEventHub>,
     query: web::Query<StreamQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -197,18 +198,19 @@ pub async fn stream_delivery_orders(
 
     let rx = hub.subscribe(query.branch_id);
 
-    // Broadcast events → SSE frames. A lagged/closed receiver yields `Err`, which
-    // we turn into a body error so actix drops the connection; the POS then
-    // reconnects and re-GETs to catch up on anything it missed during the lag.
-    let events = BroadcastStream::new(rx).map(|res| match res {
-        Ok(ev) => {
-            let json = serde_json::to_string(&ev.order).unwrap_or_else(|_| "{}".into());
-            Ok::<Bytes, actix_web::Error>(Bytes::from(format!(
+    // The unified bus carries every topic — keep only Delivery events for this
+    // backward-compatible endpoint. A lagged/closed receiver yields `Err`, surfaced
+    // as a body error so actix drops the connection; the POS reconnects + re-GETs.
+    let events = BroadcastStream::new(rx).filter_map(|res| {
+        let out: Option<Result<Bytes, actix_web::Error>> = match res {
+            Ok(ev) if ev.topic == Topic::Delivery => Some(Ok(Bytes::from(format!(
                 "event: {}\ndata: {}\n\n",
-                ev.event_type, json
-            )))
-        }
-        Err(_) => Err(actix_web::error::ErrorInternalServerError("delivery stream lagged")),
+                ev.event_type, ev.data
+            )))),
+            Ok(_) => None,
+            Err(_) => Some(Err(actix_web::error::ErrorInternalServerError("delivery stream lagged"))),
+        };
+        futures::future::ready(out)
     });
 
     // Keep-alive comment ticks so idle connections survive proxy timeouts and a
@@ -291,7 +293,7 @@ fn jump_whatsapp_message(
 pub async fn set_status(
     req: HttpRequest,
     pool: web::Data<PgPool>,
-    hub: web::Data<DeliveryHub>,
+    hub: web::Data<BranchEventHub>,
     path: web::Path<Uuid>,
     body: web::Json<StatusInput>,
 ) -> Result<HttpResponse, AppError> {
@@ -349,7 +351,7 @@ pub async fn set_status(
     let updated = fetch_delivery_order(pool.get_ref(), id).await?.ok_or(AppError::Internal)?;
     hub.publish(
         updated.branch_id,
-        DeliveryEvent { event_type: "updated".into(), order: updated.clone() },
+        BranchEvent::new(Topic::Delivery, "delivery.updated", &updated),
     );
     Ok(HttpResponse::Ok().json(updated))
 }
@@ -377,7 +379,7 @@ fn default_true() -> bool {
 pub async fn cancel_delivery_order(
     req: HttpRequest,
     pool: web::Data<PgPool>,
-    hub: web::Data<DeliveryHub>,
+    hub: web::Data<BranchEventHub>,
     path: web::Path<Uuid>,
     body: web::Json<CancelInput>,
 ) -> Result<HttpResponse, AppError> {
@@ -445,7 +447,7 @@ pub async fn cancel_delivery_order(
     let updated = fetch_delivery_order(pool.get_ref(), id).await?.ok_or(AppError::Internal)?;
     hub.publish(
         updated.branch_id,
-        DeliveryEvent { event_type: "updated".into(), order: updated.clone() },
+        BranchEvent::new(Topic::Delivery, "delivery.updated", &updated),
     );
     Ok(HttpResponse::Ok().json(updated))
 }
@@ -475,7 +477,7 @@ pub struct FinalizeResponse {
 pub async fn finalize_delivery_order(
     req: HttpRequest,
     pool: web::Data<PgPool>,
-    hub: web::Data<DeliveryHub>,
+    hub: web::Data<BranchEventHub>,
     path: web::Path<Uuid>,
     body: web::Json<FinalizeInput>,
 ) -> Result<HttpResponse, AppError> {
@@ -577,7 +579,8 @@ pub async fn finalize_delivery_order(
         discount_amount: order.discount_amount,
         customer_name: Some(order.customer_name.as_str()),
         notes: order.delivery_notes.as_deref(),
-        delivery_order_id: id,
+        order_type: "delivery",
+        delivery_order_id: Some(id),
     };
     let (created, warnings) =
         snapshot::apply_snapshot(&mut tx, &ctx, &cart.lines, &deductions).await?;
@@ -604,7 +607,7 @@ pub async fn finalize_delivery_order(
     let delivery_order = fetch_delivery_order(pool.get_ref(), id).await?.ok_or(AppError::Internal)?;
     hub.publish(
         delivery_order.branch_id,
-        DeliveryEvent { event_type: "updated".into(), order: delivery_order.clone() },
+        BranchEvent::new(Topic::Delivery, "delivery.updated", &delivery_order),
     );
     Ok(HttpResponse::Ok().json(FinalizeResponse {
         order_id: created.id,
@@ -631,7 +634,7 @@ pub struct PrepTimeInput {
 pub async fn set_prep_time(
     req: HttpRequest,
     pool: web::Data<PgPool>,
-    hub: web::Data<DeliveryHub>,
+    hub: web::Data<BranchEventHub>,
     path: web::Path<Uuid>,
     body: web::Json<PrepTimeInput>,
 ) -> Result<HttpResponse, AppError> {
@@ -658,7 +661,7 @@ pub async fn set_prep_time(
     let updated = fetch_delivery_order(pool.get_ref(), id).await?.ok_or(AppError::Internal)?;
     hub.publish(
         updated.branch_id,
-        DeliveryEvent { event_type: "updated".into(), order: updated.clone() },
+        BranchEvent::new(Topic::Delivery, "delivery.updated", &updated),
     );
     Ok(HttpResponse::Ok().json(updated))
 }

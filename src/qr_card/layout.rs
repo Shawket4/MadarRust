@@ -5,7 +5,7 @@
 //! in real units gives exact A6 output and lets the same document be returned
 //! as SVG for unlimited-scale print.
 //!
-//! The Sufrix **mark** and **label** (wordmark) are supplied as brand assets and
+//! The Madar **mark** and **label** (wordmark) are supplied as brand assets and
 //! embedded verbatim — never reconstructed in code. Each asset is parsed for its
 //! own `viewBox`, then scaled-to-fit and centred on its target point, so dropping
 //! in a redrawn asset of any dimensions just works.
@@ -13,7 +13,7 @@
 use std::fmt::Write as _;
 
 use super::render::Matrix;
-use super::{QrCardError, QrCardOptions, CREAM, NAVY, TERRACOTTA};
+use super::{QrCardError, QrCardOptions, PAPER, TEAL, TEAL_LIGHT};
 
 // ── A6 geometry (trim-relative mm) ──────────────────────────────────────────
 const TRIM_W: f32 = 105.0;
@@ -34,7 +34,7 @@ const PLAQUE_SIDE: f32 = 21.0;
 const PLAQUE_RADIUS: f32 = 4.5;
 const MARK_SIZE: f32 = 15.0; // ≤ 22% of QR width (15.4 mm); ≥3 mm cream clear space each side
 
-// "Sufrix" wordmark asset, centred in the space below the QR.
+// "madar" wordmark asset, centred in the space below the QR.
 const LABEL_CENTER_Y: f32 = 112.0;
 const LABEL_MAX_W: f32 = 46.0;
 const LABEL_MAX_H: f32 = 15.0;
@@ -44,10 +44,10 @@ const CAPTION_BASELINE: f32 = 128.0;
 const CAPTION_SIZE: f32 = 4.0;
 const CAPTION_OPACITY: f32 = 0.72;
 
-/// The Sufrix mark — embedded verbatim, the single source of truth.
-const MARK_SVG: &str = include_str!("../../assets/sufrix-mark.svg");
-/// The Sufrix "Sufrix" wordmark (includes the terracotta tittle) — embedded verbatim.
-const LABEL_SVG: &str = include_str!("../../assets/sufrix-label.svg");
+/// The Madar mark — embedded verbatim, the single source of truth.
+const MARK_SVG: &str = include_str!("../../assets/madar-mark.svg");
+/// The Madar "madar" wordmark (includes the terracotta tittle) — embedded verbatim.
+const LABEL_SVG: &str = include_str!("../../assets/madar-label.svg");
 
 /// Compose the full card SVG for a given QR matrix + options.
 pub fn build_card_svg(m: &Matrix, opts: &QrCardOptions) -> Result<String, QrCardError> {
@@ -66,7 +66,7 @@ pub fn build_card_svg(m: &Matrix, opts: &QrCardOptions) -> Result<String, QrCard
     // Cream bleed background across the whole canvas (also the QR quiet zone).
     let _ = write!(
         s,
-        r#"<rect x="0" y="0" width="{cw}" height="{ch}" fill="{CREAM}"/>"#,
+        r#"<rect x="0" y="0" width="{cw}" height="{ch}" fill="{PAPER}"/>"#,
         cw = f(canvas_w),
         ch = f(canvas_h),
     );
@@ -93,7 +93,7 @@ pub fn build_card_svg(m: &Matrix, opts: &QrCardOptions) -> Result<String, QrCard
 fn push_frame(s: &mut String) {
     let _ = write!(
         s,
-        r#"<rect x="{x}" y="{x}" width="{w}" height="{h}" rx="{r}" ry="{r}" fill="none" stroke="{NAVY}" stroke-width="{sw}"/>"#,
+        r#"<rect x="{x}" y="{x}" width="{w}" height="{h}" rx="{r}" ry="{r}" fill="none" stroke="{TEAL}" stroke-width="{sw}"/>"#,
         x = f(FRAME_INSET),
         w = f(TRIM_W - 2.0 * FRAME_INSET),
         h = f(TRIM_H - 2.0 * FRAME_INSET),
@@ -108,7 +108,7 @@ fn push_qr_modules(s: &mut String, m: &Matrix) {
     let n = m.size as u32;
     let module = QR_SIZE / (n + 2 * QUIET) as f32;
     s.push_str(r#"<g fill=""#);
-    s.push_str(NAVY);
+    s.push_str(TEAL);
     s.push_str(r#"" shape-rendering="crispEdges">"#);
     for row in 0..n {
         for col in 0..n {
@@ -135,7 +135,7 @@ fn push_centre(s: &mut String) -> Result<(), QrCardError> {
     let py = QR_CY - PLAQUE_SIDE / 2.0;
     let _ = write!(
         s,
-        r#"<rect x="{x}" y="{y}" width="{side}" height="{side}" rx="{r}" ry="{r}" fill="{CREAM}"/>"#,
+        r#"<rect x="{x}" y="{y}" width="{side}" height="{side}" rx="{r}" ry="{r}" fill="{PAPER}"/>"#,
         x = f(px),
         y = f(py),
         side = f(PLAQUE_SIDE),
@@ -145,7 +145,7 @@ fn push_centre(s: &mut String) -> Result<(), QrCardError> {
     Ok(())
 }
 
-/// The "Sufrix" wordmark, embedded from the brand asset (not font-rendered).
+/// The "madar" wordmark, embedded from the brand asset (not font-rendered).
 /// The asset already carries the terracotta tittle.
 fn push_label(s: &mut String) -> Result<(), QrCardError> {
     s.push_str(&embed_asset(
@@ -170,7 +170,7 @@ fn push_caption(s: &mut String, caption: Option<&str>) {
     };
     let _ = write!(
         s,
-        r#"<text x="{cx}" y="{y}" font-family="{family}" font-weight="500" font-size="{fs}" fill="{NAVY}" fill-opacity="{op}" text-anchor="middle"{dir}>{t}</text>"#,
+        r#"<text x="{cx}" y="{y}" font-family="{family}" font-weight="500" font-size="{fs}" fill="{TEAL}" fill-opacity="{op}" text-anchor="middle"{dir}>{t}</text>"#,
         cx = f(QR_CX),
         y = f(CAPTION_BASELINE),
         fs = f(CAPTION_SIZE),
@@ -187,7 +187,7 @@ fn push_crop_marks(s: &mut String, b: f32) {
     let xs = [b, b + TRIM_W];
     let ys = [b, b + TRIM_H];
     s.push_str(r#"<g stroke=""#);
-    s.push_str(NAVY);
+    s.push_str(TEAL);
     let _ = write!(s, r#"" stroke-width="{}">"#, f(hair));
     for (ci, &cx) in xs.iter().enumerate() {
         for (ri, &cy) in ys.iter().enumerate() {
@@ -257,8 +257,8 @@ fn parse_viewbox(svg: &str) -> Result<(f32, f32, f32, f32), QrCardError> {
 
 /// Replace the brand CSS classes used by the assets with inline fills.
 fn inline_brand_classes(svg: &str) -> String {
-    svg.replace(r#"class="cls-1""#, &format!(r#"fill="{NAVY}""#))
-        .replace(r#"class="cls-2""#, &format!(r#"fill="{TERRACOTTA}""#))
+    svg.replace(r#"class="cls-1""#, &format!(r#"fill="{TEAL}""#))
+        .replace(r#"class="cls-2""#, &format!(r#"fill="{TEAL_LIGHT}""#))
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────

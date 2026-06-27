@@ -102,7 +102,7 @@ fn with_tracking(message: String, order_id: Uuid) -> String {
 }
 
 pub fn build_otp_message(code: &str) -> String {
-    format!("Your Sufrix verification code is {code}. It expires in 5 minutes.")
+    format!("Your Madar verification code is {code}. It expires in 5 minutes.")
 }
 
 pub fn build_order_received_message(delivery_ref: &str, order_id: Uuid) -> String {

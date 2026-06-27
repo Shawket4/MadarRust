@@ -1,4 +1,4 @@
-use sufrix_rust::openapi::ApiDoc;
+use madar_rust::openapi::ApiDoc;
 use utoipa::OpenApi;
 
 #[test]

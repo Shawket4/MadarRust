@@ -206,8 +206,9 @@ async fn test_get_org(pool: PgPool) {
     assert_eq!(resp3.status(), actix_web::http::StatusCode::FORBIDDEN);
 }
 
-// Offline-auth bundle: returns argon2id PIN verifiers for the org's tellers
-// (only tellers, with null for those who never logged in online).
+// Offline-auth bundle: returns argon2id PIN verifiers for the org's PIN-login
+// roles (teller, waiter, kitchen — with null for those who never logged in
+// online). Email/password roles (org_admin, etc.) are excluded.
 #[sqlx::test]
 async fn test_offline_auth_bundle_returns_org_tellers(pool: PgPool) {
     let app = test::init_service(
@@ -228,7 +229,15 @@ async fn test_offline_auth_bundle_returns_org_tellers(pool: PgPool) {
     // Teller WITHOUT (never logged in online) → null hash.
     sqlx::query("INSERT INTO users (id, org_id, name, role, pin_hash) VALUES ($1,$2,'Bob','teller'::user_role,'h')")
         .bind(Uuid::new_v4()).bind(org_id).execute(&pool).await.unwrap();
-    // A non-teller in the org must NOT appear in the bundle.
+    // A WAITER with an offline hash MUST appear (offline fire-now-pay-later).
+    let waiter_hash = crate::auth::offline::hash_offline_pin("2345").unwrap();
+    sqlx::query("INSERT INTO users (id, org_id, name, role, pin_hash, offline_pin_hash) VALUES ($1,$2,'Wendy','waiter'::user_role,'h',$3)")
+        .bind(Uuid::new_v4()).bind(org_id).bind(&waiter_hash).execute(&pool).await.unwrap();
+    // A KITCHEN device user with an offline hash MUST appear (offline KDS unlock).
+    let kitchen_hash = crate::auth::offline::hash_offline_pin("3456").unwrap();
+    sqlx::query("INSERT INTO users (id, org_id, name, role, pin_hash, offline_pin_hash) VALUES ($1,$2,'Kds1','kitchen'::user_role,'h',$3)")
+        .bind(Uuid::new_v4()).bind(org_id).bind(&kitchen_hash).execute(&pool).await.unwrap();
+    // A non-PIN role in the org must NOT appear in the bundle.
     sqlx::query("INSERT INTO users (id, org_id, name, email, password_hash, role) VALUES ($1,$2,'Mgr',$3,'h','org_admin'::user_role)")
         .bind(Uuid::new_v4()).bind(org_id).bind(format!("m-{org_id}@t.com")).execute(&pool).await.unwrap();
 
@@ -239,11 +248,23 @@ async fn test_offline_auth_bundle_returns_org_tellers(pool: PgPool) {
     assert!(resp.status().is_success(), "got {:?}", resp.status());
     let body: serde_json::Value = test::read_body_json(resp).await;
     let tellers = body["tellers"].as_array().unwrap();
-    assert_eq!(tellers.len(), 2, "only tellers, no org_admin");
+    assert_eq!(tellers.len(), 4, "teller + waiter + kitchen, no org_admin");
     let alice = tellers.iter().find(|t| t["name"] == "Alice").unwrap();
     assert_eq!(alice["offline_pin_hash"].as_str().unwrap(), off_hash);
     let bob = tellers.iter().find(|t| t["name"] == "Bob").unwrap();
     assert!(bob["offline_pin_hash"].is_null(), "Bob never logged in online → null");
+    let wendy = tellers.iter().find(|t| t["name"] == "Wendy").unwrap();
+    assert_eq!(wendy["role"], "waiter");
+    assert_eq!(wendy["offline_pin_hash"].as_str().unwrap(), waiter_hash);
+    let kds = tellers.iter().find(|t| t["name"] == "Kds1").unwrap();
+    assert_eq!(kds["role"], "kitchen");
+    assert_eq!(kds["offline_pin_hash"].as_str().unwrap(), kitchen_hash);
+    assert!(tellers.iter().all(|t| t["name"] != "Mgr"), "org_admin excluded");
+
+    // The bundle ships the org's stable LAN secret (32 bytes → 64 hex chars).
+    let lan_secret = body["lan_secret"].as_str().expect("lan_secret present");
+    assert_eq!(lan_secret.len(), 64, "32-byte secret hex-encoded");
+    assert!(lan_secret.chars().all(|c| c.is_ascii_hexdigit()), "hex");
 }
 
 // Authorization: a token from a DIFFERENT org cannot fetch this org's bundle.

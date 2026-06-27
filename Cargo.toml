@@ -1,7 +1,8 @@
 [package]
-name = "sufrix-rust"
+name = "madar-rust"
 version = "0.1.0"
 edition = "2024"
+default-run = "madar-rust"
 
 [dependencies]
 actix-web = { version = "4", features = ["compress-brotli", "compress-gzip", "compress-zstd", "rustls-0_23"] }
@@ -61,7 +62,7 @@ rqrr = "0.10"
 
 
 [[bin]]
-name = "sufrix-rust"
+name = "madar-rust"
 path = "src/main.rs"
 
 [[bin]]
@@ -85,5 +86,5 @@ name = "fuzz-token"
 path = "src/bin/fuzz_token.rs"
 
 [lib]
-name = "sufrix_rust"
+name = "madar_rust"
 path = "src/lib.rs"

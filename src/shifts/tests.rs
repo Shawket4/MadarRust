@@ -116,7 +116,7 @@ async fn test_open_shift_cash_continuity(pool: PgPool) {
             let req = test::TestRequest::post()
                 .uri(&format!("/shifts/branches/{}/open", branch_id))
                 .insert_header(("Authorization", format!("Bearer {}", token)))
-                .set_json(&OpenShiftRequest {
+                .set_json(&OpenShiftRequest { till_id: None,
                     id: None,
                     opening_cash: opening,
                     opening_cash_edited: None,
@@ -212,7 +212,7 @@ async fn test_open_shift_and_get_current(pool: PgPool) {
     assert_eq!(prefill.suggested_opening_cash, 0);
 
     // 2. Open shift
-    let req_body = OpenShiftRequest {
+    let req_body = OpenShiftRequest { till_id: None,
         id: None,
         opening_cash: 5000,
         opening_cash_edited: Some(true),
@@ -270,7 +270,7 @@ async fn test_cash_movements(pool: PgPool) {
 
     // Open shift
     let shift_id = Uuid::new_v4();
-    let req_body = OpenShiftRequest {
+    let req_body = OpenShiftRequest { till_id: None,
         id: Some(shift_id),
         opening_cash: 5000,
         opening_cash_edited: None,
@@ -334,7 +334,7 @@ async fn test_close_and_force_close_shift(pool: PgPool) {
     let req_open = test::TestRequest::post()
         .uri(&format!("/shifts/branches/{}/open", branch_id))
         .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-        .set_json(&OpenShiftRequest { id: Some(shift_id), opening_cash: 5000, opening_cash_edited: None, edit_reason: None, opened_at: None })
+        .set_json(&OpenShiftRequest { till_id: None, id: Some(shift_id), opening_cash: 5000, opening_cash_edited: None, edit_reason: None, opened_at: None })
         .to_request();
     test::call_service(&app, req_open).await;
 
@@ -380,7 +380,7 @@ async fn test_cash_movement_client_ref_idempotent(pool: PgPool) {
     test::call_service(&app, test::TestRequest::post()
         .uri(&format!("/shifts/branches/{}/open", branch_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&OpenShiftRequest { id: Some(shift_id), opening_cash: 5000, opening_cash_edited: None, edit_reason: None, opened_at: None })
+        .set_json(&OpenShiftRequest { till_id: None, id: Some(shift_id), opening_cash: 5000, opening_cash_edited: None, edit_reason: None, opened_at: None })
         .to_request()).await;
 
     // Same client_ref sent twice (a replayed offline movement).
@@ -433,7 +433,7 @@ async fn test_force_close_idempotent(pool: PgPool) {
     test::call_service(&app, test::TestRequest::post()
         .uri(&format!("/shifts/branches/{}/open", branch_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&OpenShiftRequest { id: Some(shift_id), opening_cash: 5000, opening_cash_edited: None, edit_reason: None, opened_at: None })
+        .set_json(&OpenShiftRequest { till_id: None, id: Some(shift_id), opening_cash: 5000, opening_cash_edited: None, edit_reason: None, opened_at: None })
         .to_request()).await;
 
     let r1 = test::call_service(&app, test::TestRequest::post()
@@ -480,7 +480,7 @@ async fn test_normal_close_and_report(pool: PgPool) {
     let req_open = test::TestRequest::post()
         .uri(&format!("/shifts/branches/{}/open", branch_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&OpenShiftRequest { id: Some(shift_id), opening_cash: 1000, opening_cash_edited: None, edit_reason: None, opened_at: None })
+        .set_json(&OpenShiftRequest { till_id: None, id: Some(shift_id), opening_cash: 1000, opening_cash_edited: None, edit_reason: None, opened_at: None })
         .to_request();
     test::call_service(&app, req_open).await;
 
@@ -536,7 +536,7 @@ async fn test_delete_shift_forbidden(pool: PgPool) {
     let req_open = test::TestRequest::post()
         .uri(&format!("/shifts/branches/{}/open", branch_id))
         .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-        .set_json(&OpenShiftRequest { id: Some(shift_id), opening_cash: 1000, opening_cash_edited: None, edit_reason: None, opened_at: None })
+        .set_json(&OpenShiftRequest { till_id: None, id: Some(shift_id), opening_cash: 1000, opening_cash_edited: None, edit_reason: None, opened_at: None })
         .to_request();
     test::call_service(&app, req_open).await;
 
@@ -731,7 +731,7 @@ async fn test_close_cash_uses_is_cash_snapshot(pool: PgPool) {
     let open = test::call_service(&app, test::TestRequest::post()
         .uri(&format!("/shifts/branches/{}/open", branch_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&OpenShiftRequest { id: Some(shift_id), opening_cash: 1000, opening_cash_edited: None, edit_reason: None, opened_at: None })
+        .set_json(&OpenShiftRequest { till_id: None, id: Some(shift_id), opening_cash: 1000, opening_cash_edited: None, edit_reason: None, opened_at: None })
         .to_request()).await;
     assert!(open.status().is_success());
 
@@ -789,7 +789,7 @@ async fn test_teller_cannot_close_another_tellers_shift(pool: PgPool) {
     let open = test::call_service(&app, test::TestRequest::post()
         .uri(&format!("/shifts/branches/{}/open", branch_id))
         .insert_header(("Authorization", format!("Bearer {}", token_a)))
-        .set_json(&OpenShiftRequest { id: Some(shift_id), opening_cash: 0, opening_cash_edited: None, edit_reason: None, opened_at: None })
+        .set_json(&OpenShiftRequest { till_id: None, id: Some(shift_id), opening_cash: 0, opening_cash_edited: None, edit_reason: None, opened_at: None })
         .to_request()).await;
     assert!(open.status().is_success());
 
@@ -836,7 +836,7 @@ async fn test_delete_shift_with_orders_blocked(pool: PgPool) {
     let open = test::call_service(&app, test::TestRequest::post()
         .uri(&format!("/shifts/branches/{}/open", branch_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&OpenShiftRequest { id: Some(shift_id), opening_cash: 0, opening_cash_edited: None, edit_reason: None, opened_at: None })
+        .set_json(&OpenShiftRequest { till_id: None, id: Some(shift_id), opening_cash: 0, opening_cash_edited: None, edit_reason: None, opened_at: None })
         .to_request()).await;
     assert!(open.status().is_success());
 
@@ -888,7 +888,7 @@ async fn test_force_close_snapshots_system_cash(pool: PgPool) {
     let open = test::call_service(&app, test::TestRequest::post()
         .uri(&format!("/shifts/branches/{}/open", branch_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&OpenShiftRequest { id: Some(shift_id), opening_cash: 1000, opening_cash_edited: None, edit_reason: None, opened_at: None })
+        .set_json(&OpenShiftRequest { till_id: None, id: Some(shift_id), opening_cash: 1000, opening_cash_edited: None, edit_reason: None, opened_at: None })
         .to_request()).await;
     assert!(open.status().is_success());
 
@@ -934,7 +934,7 @@ async fn test_shift_timestamp_guards(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/shifts/branches/{}/open", branch_id))
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&OpenShiftRequest {
+            .set_json(&OpenShiftRequest { till_id: None,
                 id: Some(id), opening_cash: 1000, opening_cash_edited: None, edit_reason: None, opened_at,
             })
             .to_request()
@@ -984,7 +984,7 @@ async fn test_shift_opened_at_defaults_to_now(pool: PgPool) {
     let resp = test::call_service(&app, test::TestRequest::post()
         .uri(&format!("/shifts/branches/{}/open", branch_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&OpenShiftRequest {
+        .set_json(&OpenShiftRequest { till_id: None,
             id: Some(sid), opening_cash: 1000, opening_cash_edited: None, edit_reason: None, opened_at: None,
         })
         .to_request()).await;
@@ -1015,7 +1015,7 @@ async fn test_cash_movement_timestamp_contract(pool: PgPool) {
     test::call_service(&app, test::TestRequest::post()
         .uri(&format!("/shifts/branches/{}/open", branch_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&OpenShiftRequest {
+        .set_json(&OpenShiftRequest { till_id: None,
             id: Some(sid), opening_cash: 1000, opening_cash_edited: None, edit_reason: None, opened_at: None,
         })
         .to_request()).await;
@@ -1044,4 +1044,145 @@ async fn test_cash_movement_timestamp_contract(pool: PgPool) {
     // Future -> rejected.
     let resp = test::call_service(&app, movement(Some(chrono::Utc::now() + chrono::Duration::minutes(30)))).await;
     assert_eq!(resp.status(), 400, "future created_at must be rejected");
+}
+
+// ── Multi-teller / tills ──────────────────────────────────────
+
+async fn seed_till(pool: &PgPool, org_id: Uuid, branch_id: Uuid, name: &str, is_default: bool) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO tills (id, org_id, branch_id, name, is_default, is_active) \
+         VALUES ($1, $2, $3, $4, $5, true)",
+    )
+    .bind(id).bind(org_id).bind(branch_id).bind(name).bind(is_default)
+    .execute(pool).await.unwrap();
+    id
+}
+
+/// Several tills may be open at one branch at once (one per drawer), but a single
+/// till holds only one open shift — the per-till index, not the branch, is the guard.
+#[sqlx::test]
+async fn test_multiple_tills_open_concurrently_at_one_branch(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    grant_permission(&pool, "org_admin", "shifts", "create").await;
+    grant_permission(&pool, "org_admin", "shifts", "read").await;
+    let till_a = seed_till(&pool, org_id, branch_id, "A", true).await;
+    let till_b = seed_till(&pool, org_id, branch_id, "B", false).await;
+
+    let open = |user: Uuid, till: Uuid| {
+        let app = &app;
+        async move {
+            let token = generate_org_admin_token(user, org_id);
+            let req = test::TestRequest::post()
+                .uri(&format!("/shifts/branches/{}/open", branch_id))
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .set_json(&OpenShiftRequest {
+                    till_id: Some(till), id: None, opening_cash: 0,
+                    opening_cash_edited: None, edit_reason: None, opened_at: None,
+                })
+                .to_request();
+            test::call_service(app, req).await
+        }
+    };
+
+    // Two different tellers open two different tills at the same branch concurrently.
+    let u1 = seed_user(&pool, org_id, "org_admin").await;
+    let u2 = seed_user(&pool, org_id, "org_admin").await;
+    let u3 = seed_user(&pool, org_id, "org_admin").await;
+
+    let s1 = open(u1, till_a).await;
+    assert_eq!(s1.status(), 201, "first till opens");
+    let s1: Shift = test::read_body_json(s1).await;
+    assert_eq!(s1.till_id, Some(till_a));
+    assert_eq!(s1.till_name.as_deref(), Some("A"));
+
+    assert_eq!(open(u2, till_b).await.status(), 201,
+        "a second, different till opens concurrently at the same branch");
+
+    // A third teller cannot open the SAME till that's already open.
+    assert_eq!(open(u3, till_a).await.status().as_u16(), 409,
+        "one open shift per till — re-opening an occupied drawer is rejected");
+}
+
+/// Cash continuity is per-TILL (the drawer), not per teller: a handover keeps the
+/// float. A fresh, never-used till has no carryover.
+#[sqlx::test]
+async fn test_cash_continuity_is_per_till(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    grant_permission(&pool, "org_admin", "shifts", "create").await;
+    grant_permission(&pool, "org_admin", "shifts", "read").await;
+    grant_permission(&pool, "org_admin", "shifts", "update").await;
+    let till_a = seed_till(&pool, org_id, branch_id, "A", true).await;
+    let till_b = seed_till(&pool, org_id, branch_id, "B", false).await;
+
+    let open = |user: Uuid, till: Uuid, opening: i32, reason: Option<String>| {
+        let app = &app;
+        async move {
+            let token = generate_org_admin_token(user, org_id);
+            let req = test::TestRequest::post()
+                .uri(&format!("/shifts/branches/{}/open", branch_id))
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .set_json(&OpenShiftRequest {
+                    till_id: Some(till), id: None, opening_cash: opening,
+                    opening_cash_edited: None, edit_reason: reason, opened_at: None,
+                })
+                .to_request();
+            test::call_service(app, req).await
+        }
+    };
+    let close = |user: Uuid, shift_id: Uuid, declared: i32| {
+        let app = &app;
+        async move {
+            let token = generate_org_admin_token(user, org_id);
+            let req = test::TestRequest::post()
+                .uri(&format!("/shifts/{}/close", shift_id))
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .set_json(&CloseShiftRequest { closing_cash_declared: declared, cash_note: None, closed_at: None })
+                .to_request();
+            test::call_service(app, req).await
+        }
+    };
+
+    // Teller A opens Till A at 1000, closes declaring 1500.
+    let teller_a = seed_user(&pool, org_id, "org_admin").await;
+    let r = open(teller_a, till_a, 1000, None).await;
+    assert_eq!(r.status(), 201);
+    let s1: Shift = test::read_body_json(r).await;
+    assert_eq!(close(teller_a, s1.id, 1500).await.status(), 200);
+
+    // Teller B (handover, different person) opens the SAME drawer: the 1500 float
+    // carries over, so a silent deviation is rejected …
+    let teller_b = seed_user(&pool, org_id, "org_admin").await;
+    assert_eq!(open(teller_b, till_a, 1000, None).await.status(), 400,
+        "carryover is per-till: Till A's 1500 close must gate Teller B's open");
+    // … and matching the carryover opens cleanly with the right baseline.
+    let r = open(teller_b, till_a, 1500, None).await;
+    assert_eq!(r.status(), 201);
+    let s2: Shift = test::read_body_json(r).await;
+    assert!(!s2.opening_cash_was_edited);
+    assert_eq!(s2.opening_cash_original, Some(1500));
+
+    // A different drawer (Till B) has its own (empty) history — no carryover.
+    let teller_c = seed_user(&pool, org_id, "org_admin").await;
+    let r = open(teller_c, till_b, 9999, None).await;
+    assert_eq!(r.status(), 201, "a fresh till has no carryover, any float is the starting amount");
+    let s3: Shift = test::read_body_json(r).await;
+    assert!(!s3.opening_cash_was_edited);
+    assert_eq!(s3.opening_cash_original, None);
 }

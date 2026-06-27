@@ -99,7 +99,7 @@ const TINY_JPEG: &[u8] = &[
 ];
 
 fn setup_env_vars() -> tempfile::TempDir {
-    let tmp_dir = tempfile::Builder::new().prefix("sufrix-test-uploads").tempdir().unwrap();
+    let tmp_dir = tempfile::Builder::new().prefix("madar-test-uploads").tempdir().unwrap();
     unsafe {
         env::set_var("UPLOADS_DIR", tmp_dir.path().to_str().unwrap());
         env::set_var("UPLOADS_BASE_URL", "http://localhost:8080/uploads");
@@ -274,7 +274,7 @@ async fn test_upload_menu_item_image_invalid_image_data(pool: PgPool) {
 #[tokio::test]
 async fn test_delete_old_image_blocks_cross_tenant() {
     use std::fs;
-    let base = env::temp_dir().join(format!("sufrix-del-test-{}", Uuid::new_v4()));
+    let base = env::temp_dir().join(format!("madar-del-test-{}", Uuid::new_v4()));
     let org_a = Uuid::new_v4();
     let org_b = Uuid::new_v4();
 
@@ -302,7 +302,7 @@ async fn test_delete_old_image_blocks_cross_tenant() {
 #[tokio::test]
 async fn test_delete_old_image_blocks_escape() {
     use std::fs;
-    let base = env::temp_dir().join(format!("sufrix-esc-test-{}", Uuid::new_v4()));
+    let base = env::temp_dir().join(format!("madar-esc-test-{}", Uuid::new_v4()));
     fs::create_dir_all(&base).unwrap();
     let secret = base.join("secret.txt");
     fs::write(&secret, b"top").unwrap();

@@ -71,6 +71,8 @@ pub async fn check_permission(
         UserRole::OrgAdmin      => "org_admin",
         UserRole::BranchManager => "branch_manager",
         UserRole::Teller        => "teller",
+        UserRole::Waiter        => "waiter",
+        UserRole::Kitchen       => "kitchen",
         UserRole::SuperAdmin    => unreachable!(),
     };
 

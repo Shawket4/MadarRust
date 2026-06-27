@@ -163,8 +163,9 @@ mod zone_fee {
 
 #[cfg(test)]
 mod hub_tests {
-    use crate::delivery::hub::{DeliveryEvent, DeliveryHub};
     use crate::delivery::staff::DeliveryOrder;
+    use crate::realtime::event::{BranchEvent, Topic};
+    use crate::realtime::hub::BranchEventHub;
     use tokio::sync::broadcast;
     use uuid::Uuid;
 
@@ -191,13 +192,13 @@ mod hub_tests {
         .unwrap()
     }
 
-    fn event(branch_id: Uuid) -> DeliveryEvent {
-        DeliveryEvent { event_type: "created".into(), order: make_order(branch_id) }
+    fn event(branch_id: Uuid) -> BranchEvent {
+        BranchEvent::new(Topic::Delivery, "delivery.created", &make_order(branch_id))
     }
 
     #[test]
     fn publish_reaches_only_its_branch() {
-        let hub = DeliveryHub::new();
+        let hub = BranchEventHub::new();
         let branch_a = Uuid::new_v4();
         let branch_b = Uuid::new_v4();
         let mut rx_a = hub.subscribe(branch_a);
@@ -206,8 +207,9 @@ mod hub_tests {
         hub.publish(branch_a, event(branch_a));
 
         let ev = rx_a.try_recv().expect("branch A subscriber should receive its event");
-        assert_eq!(ev.event_type, "created");
-        assert_eq!(ev.order.branch_id, branch_a);
+        assert_eq!(ev.event_type, "delivery.created");
+        assert_eq!(ev.topic, Topic::Delivery);
+        assert_eq!(ev.data["branch_id"], serde_json::Value::String(branch_a.to_string()));
 
         // Tenant isolation: branch B must NEVER see branch A's event.
         assert!(matches!(rx_b.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
@@ -215,14 +217,14 @@ mod hub_tests {
 
     #[test]
     fn publish_with_no_subscribers_is_noop() {
-        let hub = DeliveryHub::new();
+        let hub = BranchEventHub::new();
         // No channel exists for this branch yet — must not panic.
         hub.publish(Uuid::new_v4(), event(Uuid::new_v4()));
     }
 
     #[test]
     fn multiple_subscribers_on_a_branch_all_receive() {
-        let hub = DeliveryHub::new();
+        let hub = BranchEventHub::new();
         let branch = Uuid::new_v4();
         let mut rx1 = hub.subscribe(branch);
         let mut rx2 = hub.subscribe(branch);
@@ -266,7 +268,7 @@ mod it {
                 App::new()
                     .app_data(web::Data::new($pool.clone()))
                     .app_data(web::Data::new(get_secret()))
-                    .app_data(web::Data::new(crate::delivery::hub::DeliveryHub::new()))
+                    .app_data(web::Data::new(crate::realtime::hub::BranchEventHub::new()))
                     .configure(crate::delivery::routes::configure),
             )
             .await
@@ -973,7 +975,7 @@ mod it {
             App::new()
                 .app_data(web::Data::new(pool.clone()))
                 .app_data(web::Data::new(get_secret()))
-                .app_data(web::Data::new(crate::delivery::hub::DeliveryHub::new()))
+                .app_data(web::Data::new(crate::realtime::hub::BranchEventHub::new()))
                 .configure(crate::delivery::routes::configure)
                 .configure(crate::orders::routes::configure),
         )
@@ -1176,7 +1178,7 @@ mod it {
             App::new()
                 .app_data(web::Data::new(pool.clone()))
                 .app_data(web::Data::new(get_secret()))
-                .app_data(web::Data::new(crate::delivery::hub::DeliveryHub::new()))
+                .app_data(web::Data::new(crate::realtime::hub::BranchEventHub::new()))
                 .configure(crate::delivery::routes::configure)
                 .configure(crate::orders::routes::configure),
         )

@@ -2,7 +2,7 @@
 #
 # Local schema-driven API fuzzing with Schemathesis.
 #
-# Boots the REAL server binary against a DISPOSABLE `sufrix_fuzz` database, seeds
+# Boots the REAL server binary against a DISPOSABLE `madar_fuzz` database, seeds
 # a minimal fixture, mints a JWT, re-exports the current OpenAPI spec, and fuzzes
 # every endpoint for 5xx / schema-conformance violations. The fuzz DB is dropped
 # and recreated each run, and external integrations (OSRM, WhatsApp) are left
@@ -18,7 +18,7 @@ REPO="$PWD"
 PG_HOST="${PG_HOST:-localhost}"
 PG_PORT="${PG_PORT:-5432}"
 PG_USER="${PG_USER:-shawket}"
-FUZZ_DB="${FUZZ_DB:-sufrix_fuzz}"
+FUZZ_DB="${FUZZ_DB:-madar_fuzz}"
 FUZZ_DATABASE_URL="${FUZZ_DATABASE_URL:-postgres://${PG_USER}@${PG_HOST}:${PG_PORT}/${FUZZ_DB}}"
 ADMIN_DATABASE_URL="${ADMIN_DATABASE_URL:-postgres://${PG_USER}@${PG_HOST}:${PG_PORT}/postgres}"
 JWT_SECRET="${JWT_SECRET:-fuzz-secret-not-for-prod}"
@@ -29,11 +29,11 @@ OUT="${OUT:-$REPO/fuzz-out}"
 
 # ── Guardrail: refuse anything that isn't the throwaway fuzz DB ───────────────
 case "$FUZZ_DATABASE_URL" in
-  *sufrix_fuzz*) : ;;
-  *) echo "REFUSING: FUZZ_DATABASE_URL must point at a 'sufrix_fuzz' DB, got: $FUZZ_DATABASE_URL" >&2; exit 1 ;;
+  *madar_fuzz*) : ;;
+  *) echo "REFUSING: FUZZ_DATABASE_URL must point at a 'madar_fuzz' DB, got: $FUZZ_DATABASE_URL" >&2; exit 1 ;;
 esac
 case "$FUZZ_DATABASE_URL" in
-  *sufrix_dev*|*sufrix_prod*|*@*prod*) echo "REFUSING: looks like a real DB: $FUZZ_DATABASE_URL" >&2; exit 1 ;;
+  *madar_dev*|*sufrix_prod*|*@*prod*) echo "REFUSING: looks like a real DB: $FUZZ_DATABASE_URL" >&2; exit 1 ;;
 esac
 
 # Resolve the Schemathesis CLI: PATH first, then a local ./.fuzzvenv (created by
@@ -85,8 +85,8 @@ echo "▶ booting server on $BASE_URL (rate limiting OFF, external integrations 
     JWT_SECRET="$JWT_SECRET" \
     BIND_ADDR="$BIND_ADDR" \
     UPLOADS_DIR="$RUN_DIR/uploads" \
-    SUFRIX_DISABLE_RATE_LIMIT=1 \
-    SUFRIX_DISABLE_AUTO_TRANSLATION=1 \
+    MADAR_DISABLE_RATE_LIMIT=1 \
+    MADAR_DISABLE_AUTO_TRANSLATION=1 \
     "$REPO/target/debug/sufrix-rust" ) >"$OUT/server.log" 2>&1 &
 SERVER_PID=$!
 

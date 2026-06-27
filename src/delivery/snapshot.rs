@@ -134,7 +134,11 @@ pub async fn resolve_cart(
     pool: &PgPool,
     org_id: Uuid,
     branch_id: Uuid,
-    channel: &str,
+    // The delivery channel for public/delivery orders, or `None` for dine-in
+    // (POS / waiter tickets). When `None`, the `branch_channel_*_overrides`
+    // joins bind `NULL::delivery_channel` and never match, so pricing/availability
+    // fall back to the org→branch layer — exactly the dine-in behaviour.
+    channel: Option<&str>,
     lines: &[CartLineInput],
     at: DateTime<Utc>,
 ) -> Result<ResolvedCart, AppError> {
@@ -486,7 +490,13 @@ pub struct FinalizeCtx<'a> {
     pub discount_amount: i32,
     pub customer_name: Option<&'a str>,
     pub notes: Option<&'a str>,
-    pub delivery_order_id: Uuid,
+    /// `'delivery'` for a finalized delivery order, `'dine_in'` for a settled
+    /// waiter open ticket (and any other POS-style materialization).
+    pub order_type: &'a str,
+    /// The originating delivery order, when materializing a delivery. `None` for
+    /// dine-in tickets (which have no `delivery_orders` row) — the delivery-only
+    /// RETURNING subselects resolve to NULL in that case.
+    pub delivery_order_id: Option<Uuid>,
 }
 
 /// Replay the frozen snapshot into a normal completed `orders` row inside an
@@ -542,7 +552,7 @@ pub async fn apply_snapshot(
                 $7, $8, 0, 'completed',
                 $9, $10, $11, $12,
                 false, $8, NULL,
-                'delivery', $13, $14)
+                $19, $13, $14)
         RETURNING
             id, branch_id, shift_id, teller_id,
             (SELECT name FROM users WHERE id = $3) AS teller_name,
@@ -575,6 +585,7 @@ pub async fn apply_snapshot(
     .bind(ctx.discount_value)  // $16
     .bind(ctx.discount_amount) // $17
     .bind(ctx.discount_id)     // $18
+    .bind(ctx.order_type)      // $19
     .fetch_one(&mut **tx)
     .await?;
 

@@ -39,7 +39,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .burst_size(10)
         .finish()
         .expect("Invalid delivery intake rate limiter");
-    // Disabled wholesale by SUFRIX_DISABLE_RATE_LIMIT for local API fuzzing.
+    // Disabled wholesale by MADAR_DISABLE_RATE_LIMIT for local API fuzzing.
     let limited = rate_limiting_enabled();
 
     cfg

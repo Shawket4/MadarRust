@@ -9,7 +9,7 @@
 
 use std::{env, fs, process::ExitCode};
 
-use sufrix_rust::openapi::ApiDoc;
+use madar_rust::openapi::ApiDoc;
 use utoipa::OpenApi;
 
 fn main() -> ExitCode {

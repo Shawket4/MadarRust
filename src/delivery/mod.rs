@@ -21,7 +21,6 @@ use crate::models::UserRole;
 
 pub(crate) use crate::orgs::handlers::extract_claims;
 
-pub mod hub;
 pub mod public;
 pub mod gateway;
 pub mod routes;
@@ -210,7 +209,9 @@ pub(crate) async fn require_branch_access(
     }
     // D13: tellers are ORG-scoped, not branch-scoped — the org check above is the
     // boundary; any active org teller may act on this branch's deliveries.
-    if claims.role == UserRole::Teller {
+    // Waiters and kitchen users are org-scoped the same way (device-bound, no
+    // branch assignment).
+    if matches!(claims.role, UserRole::Teller | UserRole::Waiter | UserRole::Kitchen) {
         return Ok(());
     }
     // Branch managers stay branch-scoped via their explicit assignments.

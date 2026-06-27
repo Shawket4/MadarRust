@@ -9,7 +9,8 @@ use sqlx::PgPool;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use super::hub::{DeliveryEvent, DeliveryHub};
+use crate::realtime::event::{BranchEvent, Topic};
+use crate::realtime::hub::BranchEventHub;
 use super::snapshot::{self, CartLineInput};
 use super::staff::DeliveryOrder;
 use super::whatsapp;
@@ -884,7 +885,7 @@ pub async fn create_delivery_order(
     req: HttpRequest,
     pool: web::Data<PgPool>,
     secret: web::Data<JwtSecret>,
-    hub: web::Data<DeliveryHub>,
+    hub: web::Data<BranchEventHub>,
     body: web::Json<DeliveryOrderInput>,
 ) -> Result<HttpResponse, AppError> {
     validate_channel(&body.channel)?;
@@ -955,7 +956,7 @@ pub async fn create_delivery_order(
     let now = Utc::now();
 
     // Server-price + freeze the cart.
-    let resolved = snapshot::resolve_cart(pool.get_ref(), org_id, body.branch_id, &body.channel, &body.items, now).await?;
+    let resolved = snapshot::resolve_cart(pool.get_ref(), org_id, body.branch_id, Some(body.channel.as_str()), &body.items, now).await?;
 
     // Server-authoritative delivery fee.
     let (delivery_fee, zone_id, road_distance): (i32, Option<Uuid>, Option<i32>) = if is_outside {
@@ -1131,7 +1132,7 @@ pub async fn create_delivery_order(
         .ok_or(AppError::Internal)?;
     hub.publish(
         order.branch_id,
-        DeliveryEvent { event_type: "created".into(), order: order.clone() },
+        BranchEvent::new(Topic::Delivery, "delivery.created", &order),
     );
     Ok(HttpResponse::Created().json(order))
 }

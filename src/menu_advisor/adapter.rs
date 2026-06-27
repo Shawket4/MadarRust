@@ -1,4 +1,4 @@
-//! Adapter — bridges Sufrix's schema into the engine's input types.
+//! Adapter — bridges Madar's schema into the engine's input types.
 //!
 //! ALL money leaving this module is integer **piastres**. Ingredient costs
 //! (`org_ingredients` / `ingredient_cost_history` `cost_per_unit`) are also

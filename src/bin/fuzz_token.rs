@@ -2,14 +2,14 @@
 //!
 //! NOT for production. It signs a token with whatever `JWT_SECRET` is in the
 //! environment for one of the fixed seed users created by scripts/seed_fuzz.sql,
-//! so Schemathesis can authenticate against a throwaway `sufrix_fuzz` database.
+//! so Schemathesis can authenticate against a throwaway `madar_fuzz` database.
 //!
 //! Usage:
 //!   JWT_SECRET=... cargo run --bin fuzz-token -- super-admin   # org_id=NULL, needs X-Org-Id
 //!   JWT_SECRET=... cargo run --bin fuzz-token -- org-admin     # org-scoped
 
-use sufrix_rust::auth::jwt::{create_token, JwtSecret};
-use sufrix_rust::models::UserRole;
+use madar_rust::auth::jwt::{create_token, JwtSecret};
+use madar_rust::models::UserRole;
 use uuid::Uuid;
 
 // Must match the fixed UUIDs in scripts/seed_fuzz.sql.

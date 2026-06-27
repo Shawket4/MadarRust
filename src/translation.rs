@@ -27,10 +27,10 @@ struct GoogleTranslation {
     translated_text: String,
 }
 
-/// True when `SUFRIX_DISABLE_AUTO_TRANSLATION` is set to a truthy value — the
+/// True when `MADAR_DISABLE_AUTO_TRANSLATION` is set to a truthy value — the
 /// offline switch for auto-translation (fuzzing / CI / air-gapped environments).
 pub fn auto_translation_disabled() -> bool {
-    std::env::var("SUFRIX_DISABLE_AUTO_TRANSLATION")
+    std::env::var("MADAR_DISABLE_AUTO_TRANSLATION")
         .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
 }

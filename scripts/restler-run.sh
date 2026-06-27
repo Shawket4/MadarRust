@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# RESTler stateful API fuzzing against a DISPOSABLE sufrix_fuzz DB.
+# RESTler stateful API fuzzing against a DISPOSABLE madar_fuzz DB.
 #
 # Prereqs (one-time): a colima x86_64 VM (RESTler's amd64 .NET segfaults under
 # Rosetta, so the VM must be x86_64), the RESTler image, and a compiled grammar:
@@ -16,18 +16,18 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO="$PWD"
 PG_ADMIN="${PG_ADMIN:-postgres://shawket@localhost:5432/postgres}"
-FUZZ_DB_URL="${FUZZ_DB_URL:-postgres://shawket@localhost:5432/sufrix_fuzz}"
+FUZZ_DB_URL="${FUZZ_DB_URL:-postgres://shawket@localhost:5432/madar_fuzz}"
 JWT_SECRET="${JWT_SECRET:-fuzz-secret-not-for-prod}"
 IMG="mcr.microsoft.com/restlerfuzzer/restler"
 MODE="${1:-test}"
 
-case "$FUZZ_DB_URL" in *sufrix_fuzz*) : ;; *) echo "REFUSING: not a sufrix_fuzz DB" >&2; exit 1;; esac
+case "$FUZZ_DB_URL" in *madar_fuzz*) : ;; *) echo "REFUSING: not a madar_fuzz DB" >&2; exit 1;; esac
 docker info >/dev/null 2>&1 || { echo "docker/colima not running" >&2; exit 1; }
 [ -f restler_work/Compile/grammar.py ] || { echo "no grammar — run the compile step (see header)" >&2; exit 1; }
 
-echo "▶ (re)seed sufrix_fuzz"
-psql "$PG_ADMIN" -c "DROP DATABASE IF EXISTS sufrix_fuzz WITH (FORCE);" >/dev/null
-psql "$PG_ADMIN" -c "CREATE DATABASE sufrix_fuzz;" >/dev/null
+echo "▶ (re)seed madar_fuzz"
+psql "$PG_ADMIN" -c "DROP DATABASE IF EXISTS madar_fuzz WITH (FORCE);" >/dev/null
+psql "$PG_ADMIN" -c "CREATE DATABASE madar_fuzz;" >/dev/null
 DATABASE_URL="$FUZZ_DB_URL" sqlx migrate run --source ./migrations >/dev/null
 psql "$FUZZ_DB_URL" -v ON_ERROR_STOP=1 -f scripts/seed_fuzz.sql >/dev/null
 
@@ -47,14 +47,14 @@ echo "▶ boot server on 0.0.0.0:8099 (reachable from the VM via host.docker.int
 RUN_DIR="$(mktemp -d)"; mkdir -p "$RUN_DIR/uploads"
 ( cd "$RUN_DIR" && exec env -i PATH="$PATH" HOME="$HOME" \
     DATABASE_URL="$FUZZ_DB_URL" JWT_SECRET="$JWT_SECRET" BIND_ADDR="0.0.0.0:8099" \
-    UPLOADS_DIR="$RUN_DIR/uploads" SUFRIX_DISABLE_RATE_LIMIT=1 SUFRIX_DISABLE_AUTO_TRANSLATION=1 \
+    UPLOADS_DIR="$RUN_DIR/uploads" MADAR_DISABLE_RATE_LIMIT=1 MADAR_DISABLE_AUTO_TRANSLATION=1 \
     "$REPO/target/debug/sufrix-rust" ) > "$RUN_DIR/server.log" 2>&1 &
 SRV=$!
 cleanup() {
   kill "$SRV" 2>/dev/null || true
   pkill -f "target/debug/sufrix-rust" 2>/dev/null || true
   rm -rf "$RUN_DIR"
-  psql "$PG_ADMIN" -c "DROP DATABASE IF EXISTS sufrix_fuzz WITH (FORCE);" >/dev/null 2>&1 || true
+  psql "$PG_ADMIN" -c "DROP DATABASE IF EXISTS madar_fuzz WITH (FORCE);" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 for _ in $(seq 1 60); do curl -fsS http://127.0.0.1:8099/health >/dev/null 2>&1 && break; sleep 0.5; done

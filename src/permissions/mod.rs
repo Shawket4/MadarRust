@@ -36,6 +36,9 @@ pub const RESOURCES: &[&str] = &[
     "discounts",
     "reports",
     "permissions",
+    "kitchen_stations",
+    "kitchen_orders",
+    "open_tickets",
 ];
 
 pub const ACTIONS: &[&str] = &["create", "read", "update", "delete"];

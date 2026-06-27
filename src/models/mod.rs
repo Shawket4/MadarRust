@@ -14,6 +14,13 @@ pub enum UserRole {
     OrgAdmin,
     BranchManager,
     Teller,
+    /// Org-scoped, device-bound (PIN) like a teller, but holds NO shift/cash.
+    /// Takes dine-in orders and fires them to the kitchen as open tickets.
+    Waiter,
+    /// Org-scoped, device-bound (PIN) for a Kitchen Display device. Reads the
+    /// kitchen feed + bumps lines; holds NO shift/cash and CANNOT touch the POS
+    /// (orders/payments) or settle tickets. The KDS device signs in as this.
+    Kitchen,
 }
 
 // ── User ─────────────────────────────────────────────────────
@@ -50,7 +57,7 @@ pub struct UserPublic {
     #[schema(example = "Ahmad Ghazal")]
     pub name:      String,
     
-    #[schema(example = "ahmad@sufrix.com")]
+    #[schema(example = "ahmad@madar.com")]
     pub email:     Option<String>,
     
     #[schema(example = "+201001234567")]

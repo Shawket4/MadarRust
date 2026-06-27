@@ -1,4 +1,4 @@
-//! Root OpenAPI document for the Sufrix backend.
+//! Root OpenAPI document for the Madar backend.
 //!
 //! - [`ApiDoc`] is the single `#[derive(OpenApi)]` aggregator.
 //! - Each handler annotated with `#[utoipa::path]` is registered here via
@@ -19,14 +19,14 @@ use utoipa::{
 #[derive(OpenApi)]
 #[openapi(
     info(
-    title = "Sufrix API",
+    title = "Madar API",
     version = env!("CARGO_PKG_VERSION"),
-    description = "Sufrix POS — multi-tenant cafe and restaurant management. \
+    description = "Madar POS — multi-tenant cafe and restaurant management. \
                    The Rust backend is the source of truth for this spec; \
                    the Flutter teller app and React management dashboard \
                    consume the generated openapi.json.",
-    contact(name = "Sufrix", url = "https://sufrix.app"),
-    license(name = "Proprietary", identifier = "LicenseRef-Sufrix-Proprietary")
+    contact(name = "Madar", url = "https://sufrix.app"),
+    license(name = "Proprietary", identifier = "LicenseRef-Madar-Proprietary")
 ),
     servers(
         (url = "http://localhost:8080", description = "Local development"),
@@ -44,6 +44,10 @@ use utoipa::{
         (name = "inventory",    description = "Org-level ingredient catalog and branch-level stock."),
         (name = "orders",       description = "Order lifecycle, split payments, voids, aggregator handling."),
         (name = "shifts",       description = "Shift open/close, cash reconciliation, printable reports."),
+        (name = "tills",        description = "Physical cash drawers (registers) per branch — the unit of shift concurrency and cash continuity."),
+        (name = "realtime",     description = "The unified per-branch SSE bus — one connection multiplexing delivery/kitchen/tickets/orders, filtered by topic + permission."),
+        (name = "kitchen",      description = "Kitchen Display System: stations, category→station routing, routing mode, the KDS feed, and per-line bump."),
+        (name = "open_tickets", description = "Waiter fire-now-pay-later open tickets: fire, add rounds, settle into a paid dine-in order."),
         (name = "stocktakes",   description = "Standalone physical-count sessions that reconcile branch stock and post variance movements."),
         (name = "purchasing",   description = "Suppliers, purchase orders, and receiving (weighted-average cost + purchase_in movements)."),
         (name = "discounts",    description = "Discount definitions and applicability rules."),
@@ -56,7 +60,7 @@ use utoipa::{
         (name = "delivery",     description = "Delivery config (settings, zones, org defaults), the staff queue, status transitions, finalize, and cancel/waste."),
         (name = "delivery-public", description = "Unauthenticated, rate-limited customer endpoints: branch selector, channel menu, OSRM quote, WhatsApp OTP, order intake."),
         (name = "whatsapp",     description = "Super-admin relay to the private WhatsApp gateway: QR pairing, link status, logout, and the global send pause switch."),
-        (name = "qr",           description = "Branded A6 QR card generator (PNG/SVG) and plain receipt QR. Renders a Shlink short URL into a print-perfect, Sufrix-styled image.")
+        (name = "qr",           description = "Branded A6 QR card generator (PNG/SVG) and plain receipt QR. Renders a Shlink short URL into a print-perfect, Madar-styled image.")
     ),
 paths(
         // ── costing ─────────────────────────────────────────────────
@@ -191,6 +195,31 @@ paths(
         crate::shifts::handlers::close_shift,
         crate::shifts::handlers::force_close_shift,
         crate::shifts::handlers::delete_shift,
+        crate::tills::handlers::list_tills,
+        crate::tills::handlers::create_till,
+        crate::tills::handlers::update_till,
+        crate::tills::handlers::delete_till,
+        crate::realtime::stream::stream,
+        crate::kitchen::stations::list_stations,
+        crate::kitchen::stations::create_station,
+        crate::kitchen::stations::update_station,
+        crate::kitchen::stations::delete_station,
+        crate::kitchen::stations::list_routes,
+        crate::kitchen::stations::put_category_route,
+        crate::kitchen::stations::delete_category_route,
+        crate::kitchen::stations::put_item_route,
+        crate::kitchen::stations::delete_item_route,
+        crate::kitchen::stations::get_routing_mode,
+        crate::kitchen::stations::set_routing_mode,
+        crate::kitchen::kds::feed,
+        crate::kitchen::kds::bump,
+        crate::kitchen::kds::unbump,
+        crate::tickets::handlers::create_open_ticket,
+        crate::tickets::handlers::add_round,
+        crate::tickets::handlers::list_open_tickets,
+        crate::tickets::handlers::get_open_ticket,
+        crate::tickets::handlers::void_open_ticket,
+        crate::tickets::handlers::settle_open_ticket,
         // ── stocktakes ────────────────────────────────────────────────
         crate::stocktakes::handlers::create_stocktake,
         crate::stocktakes::handlers::list_stocktakes,
@@ -326,6 +355,17 @@ paths(
         // Delivery context nested on the single-order detail (GET /orders/{id}).
         crate::orders::handlers::OrderDeliveryInfo,
         crate::shifts::handlers::PaginatedShifts,
+        crate::tills::handlers::Till,
+        crate::tills::handlers::CreateTillRequest,
+        crate::tills::handlers::UpdateTillRequest,
+        crate::kitchen::stations::KitchenStation,
+        crate::kitchen::stations::StationRoutes,
+        crate::kitchen::stations::RoutingModeResponse,
+        crate::kitchen::KitchenTicketView,
+        crate::kitchen::KitchenTicketItemView,
+        crate::kitchen::KitchenLine,
+        crate::tickets::OpenTicketView,
+        crate::tickets::OpenTicketItemView,
         crate::menu::handlers::PaginatedMenuItems,
         crate::menu::handlers::MenuItemWithCosts,
         crate::menu::handlers::PaginatedAddonItems,
@@ -342,7 +382,6 @@ paths(
         crate::delivery::settings::ChannelAddonOverride,
         crate::delivery::staff::DeliveryOrder,
         crate::delivery::staff::FinalizeResponse,
-        crate::delivery::hub::DeliveryEvent,
         crate::delivery::public::PublicBranch,
         crate::delivery::public::DeliveryMenu,
         crate::delivery::public::DeliveryMenuDiscount,

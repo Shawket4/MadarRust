@@ -11,7 +11,7 @@ mod render {
 
     use crate::qr_card::{
         render, render_qr_card_png, render_qr_card_svg, render_qr_receipt_png, QrCardOptions,
-        CREAM, NAVY, TERRACOTTA,
+        PAPER, TEAL, TEAL_LIGHT,
     };
 
     const SHORT: &str = "https://sfx.link/Ab3xK";
@@ -131,9 +131,9 @@ mod render {
     #[test]
     fn svg_contains_brand_tokens() {
         let svg = render_qr_card_svg(&opts(SHORT)).expect("svg");
-        assert!(svg.contains(NAVY));
-        assert!(svg.contains(CREAM));
-        assert!(svg.contains(TERRACOTTA));
+        assert!(svg.contains(TEAL));
+        assert!(svg.contains(PAPER));
+        assert!(svg.contains(TEAL_LIGHT));
         assert!(svg.starts_with("<svg"));
     }
 

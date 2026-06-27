@@ -184,6 +184,48 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         // (fees/hours/enable) — that stays with managers.
         ("teller", "delivery_orders",    "read",   true),
         ("teller", "delivery_orders",    "update", true),
+        // KDS + open tickets: a teller on a KDS/till device reads + bumps the
+        // kitchen feed and settles waiter tickets into their drawer.
+        ("teller", "kitchen_orders",     "read",   true),
+        ("teller", "kitchen_orders",     "update", true),
+        ("teller", "open_tickets",       "read",   true),
+        ("teller", "open_tickets",       "update", true),
+
+        // ── kitchen station + routing config (managers) ───────────
+        ("org_admin", "kitchen_stations", "create", true),
+        ("org_admin", "kitchen_stations", "read",   true),
+        ("org_admin", "kitchen_stations", "update", true),
+        ("org_admin", "kitchen_stations", "delete", true),
+        ("org_admin", "kitchen_orders",   "read",   true),
+        ("org_admin", "kitchen_orders",   "update", true),
+        ("org_admin", "open_tickets",     "read",   true),
+        ("org_admin", "open_tickets",     "create", true),
+        ("org_admin", "open_tickets",     "update", true),
+        ("branch_manager", "kitchen_stations", "create", true),
+        ("branch_manager", "kitchen_stations", "read",   true),
+        ("branch_manager", "kitchen_stations", "update", true),
+        ("branch_manager", "kitchen_stations", "delete", true),
+        ("branch_manager", "kitchen_orders",   "read",   true),
+        ("branch_manager", "kitchen_orders",   "update", true),
+        ("branch_manager", "open_tickets",     "read",   true),
+        ("branch_manager", "open_tickets",     "update", true),
+
+        // ── waiter: menu reads + open-ticket fire (no shift/cash) ──
+        ("waiter", "branches",      "read",   true),
+        ("waiter", "categories",    "read",   true),
+        ("waiter", "menu_items",    "read",   true),
+        ("waiter", "addon_groups",  "read",   true),
+        ("waiter", "addon_items",   "read",   true),
+        ("waiter", "discounts",     "read",   true),
+        ("waiter", "open_tickets",  "create", true),
+        ("waiter", "open_tickets",  "read",   true),
+        ("waiter", "open_tickets",  "update", true),
+        ("waiter", "kitchen_orders", "read",  true),
+        // Kitchen Display role: read the feed + bump lines, and read stations (to
+        // resolve the device's station). NOTHING on the POS/cash/ticket side.
+        ("kitchen", "kitchen_orders",   "read",   true),
+        ("kitchen", "kitchen_orders",   "update", true),
+        ("kitchen", "kitchen_stations", "read",   true),
     ];
 
     for &(role, resource, action, granted) in defaults {

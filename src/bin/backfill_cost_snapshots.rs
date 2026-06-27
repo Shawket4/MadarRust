@@ -18,7 +18,7 @@ use std::process::ExitCode;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
-use sufrix_rust::costing::backfill::{backfill_cost_snapshots, BackfillScope};
+use madar_rust::costing::backfill::{backfill_cost_snapshots, BackfillScope};
 
 const USAGE: &str = "\
 Reprices historical order cost snapshots at CURRENT ingredient costs.

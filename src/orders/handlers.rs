@@ -11,6 +11,7 @@ use crate::{
     errors::{AppError, AppErrorResponse},
     models::UserRole,
     permissions::checker::check_permission,
+    sync::ActingContext,
 };
 use utoipa::{IntoParams, ToSchema};
 
@@ -289,14 +290,20 @@ pub use crate::orders::component_resolve::AddonInput;
 
 #[derive(Deserialize, Serialize, Default, ToSchema)]
 pub struct OrderItemInput {
+    #[serde(default)]
     pub menu_item_id:      Option<Uuid>,
+    #[serde(default)]
     pub bundle_id:         Option<Uuid>,
+    #[serde(default)]
     pub size_label:        Option<String>,
     pub quantity:          i32,
+    #[serde(default)]
     pub addons:            Vec<AddonInput>,
+    #[serde(default)]
     pub optional_field_ids: Vec<Uuid>,
     #[serde(default)]
     pub bundle_components: Vec<crate::orders::component_resolve::BundleComponentInput>,
+    #[serde(default)]
     pub notes:             Option<String>,
     /// Charged unit price (piastres) the POS applied for this item/bundle line. When
     /// present it is RECORDED as the line's unit_price; absent → the server's expected
@@ -338,6 +345,16 @@ pub struct CreateOrderRequest {
     // it rides inside the persisted offline payload, so a replay after a lost
     // response — even months later — dedups against `orders.idempotency_key`.
     #[serde(default)] pub idempotency_key: Option<Uuid>,
+    /// Client-minted human order number (the device's per-day sequence). Stored
+    /// VERBATIM when present — the device is authoritative so its OFFLINE receipt
+    /// at ring-up is byte-identical to the synced reprint. Absent → the server
+    /// computes a per-shift number.
+    #[serde(default)] pub order_number: Option<i32>,
+    /// Client-minted order reference (`<BRANCH>-<YYMMDD>-<DEVICE>-<NNNN>`). Stored
+    /// verbatim when present; absent → the server mints the deterministic
+    /// shift-based ref. The global `UNIQUE(order_ref)` index keeps both paths
+    /// collision-safe (a managed per-device code makes concurrent tills unique).
+    #[serde(default)] pub order_ref: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, ToSchema)]
@@ -486,6 +503,9 @@ use crate::orders::cost_math::{summarize_line_costs, InventoryDeduction};
 pub async fn create_order(
     req:  HttpRequest,
     pool: web::Data<PgPool>,
+    // Optional so test apps (and any harness) that don't register the bus still
+    // create orders — only the live KDS push is skipped when it's absent.
+    hub:  Option<web::Data<crate::realtime::hub::BranchEventHub>>,
     body: web::Json<CreateOrderRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -493,16 +513,37 @@ pub async fn create_order(
     require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
 
     // Prefer the in-body idempotency key (the canonical, replay-durable token);
-    // fall back to the legacy `Idempotency-Key` header for older clients.
-    let idempotency_key = body.idempotency_key.or_else(|| {
-        req.headers()
+    // fall back to the legacy `Idempotency-Key` header for older clients. Resolve
+    // it HERE (the only place with the request headers) so the inner core — which
+    // the replay path also calls, and which has no headers — works off `body`.
+    let mut body = body;
+    if body.idempotency_key.is_none() {
+        body.idempotency_key = req
+            .headers()
             .get("Idempotency-Key")
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| Uuid::parse_str(s).ok())
-    });
+            .and_then(|s| Uuid::parse_str(s).ok());
+    }
+    create_order_inner(pool.clone(), body, ActingContext::live(&claims)?, hub.as_ref().map(|d| d.get_ref())).await
+}
 
-    if let Some(key) = idempotency_key
-        && let Some(existing) = fetch_order_by_idempotency_key(pool.get_ref(), key).await? {
+/// Create-order core. LIVE attributes the order to the JWT teller and requires
+/// the target shift to belong to them; REPLAY attributes it to the queued op's
+/// embedded teller and drops that ownership filter (a different teller may be
+/// flushing the device). BOTH still require the shift to be OPEN at the branch —
+/// a queued order whose shift was force-closed server-side genuinely has nowhere
+/// to land and must surface, not silently vanish — and dedup on the in-body
+/// idempotency key.
+pub(crate) async fn create_order_inner(
+    pool:  web::Data<PgPool>,
+    body:  web::Json<CreateOrderRequest>,
+    actor: ActingContext,
+    // The realtime bus, for firing a LIVE order to the KDS. `None` on replay (a
+    // queued offline order is historical and must not re-appear on the kitchen).
+    hub:   Option<&crate::realtime::hub::BranchEventHub>,
+) -> Result<HttpResponse, AppError> {
+    if let Some(key) = body.idempotency_key
+        && let Some(existing) = fetch_order_by_idempotency_key(pool.get_ref(), key, actor.org_id).await? {
             let items = fetch_order_items_full(pool.get_ref(), existing.id).await?;
             return Ok(HttpResponse::Ok().json(OrderFull { order: existing, items, warnings: Vec::new(), delivery: None }));
         }
@@ -511,12 +552,11 @@ pub async fn create_order(
         return Err(AppError::BadRequest("Order must have at least one item".into()));
     }
 
-    // The order must attach to an OPEN shift at this branch — and, for tellers,
-    // one that belongs to them. This stops orders posting to a closed shift
-    // (cash already settled → money goes missing) or to another teller's / a
-    // different branch's shift.
-    let teller_match = if claims.role == UserRole::Teller {
-        Some(claims.user_id())
+    // The order must attach to an OPEN shift at this branch — and, for a LIVE
+    // teller action, one that belongs to them. Replay drops the teller filter
+    // (recorded history) but keeps the open-at-branch requirement.
+    let teller_match = if !actor.replay && actor.role == UserRole::Teller {
+        Some(actor.teller_id)
     } else {
         None
     };
@@ -537,8 +577,7 @@ pub async fn create_order(
         ));
     }
 
-    let org_id = claims.org_id()
-        .ok_or_else(|| AppError::Forbidden("No org in token".into()))?;
+    let org_id = actor.org_id;
 
     validate_payment_method(pool.get_ref(), org_id, &body.payment_method).await?;
     if let Some(dt)  = &body.discount_type      { validate_discount_type(dt)?; }
@@ -666,7 +705,7 @@ pub async fn create_order(
                 "SELECT id, name, price, status::text FROM bundles WHERE id = $1 AND org_id = $2"
             )
             .bind(b_id)
-            .bind(claims.org_id())
+            .bind(org_id)
             .fetch_optional(pool.get_ref())
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Bundle {} not found", b_id)))?;
@@ -1154,49 +1193,47 @@ pub async fn create_order(
             "Shift does not belong to the specified branch".into(),
         ));
     }
-    if claims.role == UserRole::Teller && shift_teller_id != claims.user_id() {
+    // Live only: a teller's order must target their OWN shift. Replay bypasses
+    // this — the order is attributed to its embedded teller, which may differ
+    // from whoever is flushing the device backlog.
+    if !actor.replay && actor.role == UserRole::Teller && shift_teller_id != actor.teller_id {
         return Err(AppError::Forbidden(
             "This shift belongs to another teller".into(),
         ));
     }
 
+    // order_number stays SERVER-COMPUTED and per-shift — it's `UNIQUE(shift_id,
+    // order_number)`, so a client value can't be authoritative (two devices would
+    // both mint #1 into a shared shift and collide). A POS device PREDICTS the same
+    // per-shift number offline (single numberer per shift) for its receipt.
     let order_number: i32 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(order_number), 0) + 1 FROM orders WHERE shift_id = $1"
+        "SELECT COALESCE(MAX(order_number), 0) + 1 FROM orders WHERE shift_id = $1",
     )
     .bind(body.shift_id)
     .fetch_one(&mut *tx)
     .await?;
 
-    // Mint the human-readable order reference (V31): <BRANCHCODE>-<YYMMDD>-<NNNN>,
-    // unique per (branch, business_date). The advisory lock above is keyed on
-    // shift_id and intentionally left UNTOUCHED — close_shift pairs with that exact
-    // key for the cash-snapshot TOCTOU. A single shift can straddle two business
-    // days (client-supplied created_at + AT TIME ZONE midnight), so the per-(branch,
-    // day) counter ROW lock below — not the shift lock — is what serialises this
-    // sequence. The counter bump is in this same tx, so it rolls back with the order
-    // (no burned numbers on failure or on the idempotency-replay path).
-    let (branch_code, biz_date): (String, chrono::NaiveDate) = sqlx::query_as(
-        "SELECT b.code, ($1::timestamptz AT TIME ZONE COALESCE(b.timezone, o.timezone)::text)::date
-         FROM branches b JOIN organizations o ON o.id = b.org_id WHERE b.id = $2",
-    )
-    .bind(created_at)
-    .bind(body.branch_id)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    let ref_seq: i32 = sqlx::query_scalar(
-        "INSERT INTO order_ref_counters (branch_id, business_date, last_seq)
-         VALUES ($1, $2, 1)
-         ON CONFLICT (branch_id, business_date)
-         DO UPDATE SET last_seq = order_ref_counters.last_seq + 1
-         RETURNING last_seq",
-    )
-    .bind(body.branch_id)
-    .bind(biz_date)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    let order_ref = format!("{}-{}-{:04}", branch_code, biz_date.format("%y%m%d"), ref_seq);
+    // The order_ref IS client-authoritative: a POS device mints it once with its
+    // MANAGED DEVICE CODE + a per-device-day sequence (independent of order_number),
+    // so the OFFLINE receipt is byte-identical to the synced reprint and concurrent
+    // devices never collide. Stored VERBATIM when present; absent (dashboard/legacy)
+    // → the server mints the deterministic <BRANCH>-<YYMMDD>-<SHIFT6>-<NNN> fallback.
+    // The global UNIQUE(order_ref) index backstops either path.
+    let order_ref = match &body.order_ref {
+        Some(r) => r.clone(),
+        None => {
+            let (branch_code, biz_date): (String, chrono::NaiveDate) = sqlx::query_as(
+                "SELECT b.code, ($1::timestamptz AT TIME ZONE COALESCE(b.timezone, o.timezone)::text)::date
+                 FROM branches b JOIN organizations o ON o.id = b.org_id WHERE b.id = $2",
+            )
+            .bind(created_at)
+            .bind(body.branch_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            let shift6 = body.shift_id.simple().to_string()[..6].to_uppercase();
+            format!("{}-{}-{}-{:03}", branch_code, biz_date.format("%y%m%d"), shift6, order_number)
+        }
+    };
 
     // Snapshot whether the tip was paid in cash (V30) — only meaningful when a
     // tip exists; resolves the tip method now so a later rename can't change it.
@@ -1235,7 +1272,7 @@ pub async fn create_order(
     )
     .bind(shift_branch_id) // authoritative: the order's branch IS its shift's branch
     .bind(body.shift_id)
-    .bind(claims.user_id())
+    .bind(actor.teller_id)
     .bind(order_number)
     .bind(&body.payment_method)
     .bind(subtotal)
@@ -1251,7 +1288,7 @@ pub async fn create_order(
     .bind(body.discount_id)
     .bind(&body.customer_name)
     .bind(&body.notes)
-    .bind(idempotency_key)
+    .bind(body.idempotency_key)
     .bind(created_at)
     .bind(tip_is_cash)
     .bind(&order_ref)
@@ -1269,8 +1306,8 @@ pub async fn create_order(
                 && db.constraint().is_some_and(|c| c.contains("idempotency")) =>
         {
             drop(tx);
-            if let Some(key) = idempotency_key
-                && let Some(existing) = fetch_order_by_idempotency_key(pool.get_ref(), key).await? {
+            if let Some(key) = body.idempotency_key
+                && let Some(existing) = fetch_order_by_idempotency_key(pool.get_ref(), key, actor.org_id).await? {
                     let items = fetch_order_items_full(pool.get_ref(), existing.id).await?;
                     return Ok(HttpResponse::Ok().json(OrderFull { order: existing, items, warnings: Vec::new(), delivery: None }));
                 }
@@ -1315,6 +1352,39 @@ pub async fn create_order(
 
     let mut order_items_full: Vec<OrderItemFull> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
+
+    // Build the slim kitchen display lines BEFORE the insert loop consumes
+    // `resolved_items` (live orders fire to the KDS after the items commit).
+    let kitchen_lines: Vec<crate::kitchen::KitchenLine> = if actor.replay {
+        Vec::new()
+    } else {
+        resolved_items
+            .iter()
+            .map(|ri| {
+                let modifiers: Vec<String> = ri
+                    .addons
+                    .iter()
+                    .map(|a| {
+                        if a.quantity > 1 {
+                            format!("{}× {}", a.quantity, a.addon_name)
+                        } else {
+                            a.addon_name.clone()
+                        }
+                    })
+                    .collect();
+                crate::kitchen::KitchenLine {
+                    menu_item_id: ri.menu_item_id,
+                    name: ri.item_name.clone(),
+                    qty: ri.quantity,
+                    size_label: ri.size_label.clone(),
+                    modifiers,
+                    notes: ri.notes.clone(),
+                    // Teller orders fire to the KDS LIVE (online) only → server ids.
+                    kitchen_item_id: None,
+                }
+            })
+            .collect()
+    };
 
     for resolved in resolved_items {
         let line_total = resolved.unit_price * resolved.quantity
@@ -1587,7 +1657,7 @@ pub async fn create_order(
                     source_type:         Some("order"),
                     source_id:           Some(order.id),
                     note:                None,
-                    created_by:          Some(claims.user_id()),
+                    created_by:          Some(actor.teller_id),
                 },
             )
             .await?;
@@ -1601,7 +1671,33 @@ pub async fn create_order(
         });
     }
 
+    // Fire the order to the kitchen — LIVE orders only (a replayed offline order is
+    // historical and must not re-appear on the KDS). Same source-agnostic substrate
+    // the waiter tickets use; the routing mode decides where it renders client-side.
+    let mut kitchen_ticket_id: Option<Uuid> = None;
+    if !actor.replay && !kitchen_lines.is_empty() {
+        kitchen_ticket_id = crate::kitchen::emit_kitchen_ticket(
+            &mut tx,
+            &crate::kitchen::EmitKitchen {
+                org_id: actor.org_id,
+                branch_id: body.branch_id,
+                source_type: "order",
+                source_id: order.id,
+                round_number: 1,
+                table_label: None,
+                kitchen_ref: order.order_ref.as_deref(),
+                kitchen_ticket_id: None, // live-only fire → server-generated id
+            },
+            &kitchen_lines,
+        )
+        .await?;
+    }
+
     tx.commit().await?;
+
+    if let (Some(hub), Some(kt_id)) = (hub, kitchen_ticket_id) {
+        crate::kitchen::publish_kitchen(pool.get_ref(), hub, body.branch_id, "kitchen.fired", kt_id).await;
+    }
     Ok(HttpResponse::Created().json(OrderFull { order, items: order_items_full, warnings, delivery: None }))
 }
 
@@ -1832,14 +1928,28 @@ pub async fn void_order(
     check_permission(pool.get_ref(), &claims, "orders", "update").await?;
     let order = fetch_order_or_404(pool.get_ref(), *order_id).await?;
     require_branch_access(pool.get_ref(), &claims, order.branch_id).await?;
+    void_order_inner(pool.clone(), order_id.into_inner(), body, ActingContext::live(&claims)?).await
+}
+
+/// Void-order core. LIVE attributes `voided_by` to the JWT teller and blocks a
+/// teller from voiding into a SETTLED (closed) shift; REPLAY attributes it to the
+/// queued op's teller and skips that guard — a queued void was rung while the
+/// shift was still open and is recorded history. Idempotent (guarded CAS).
+pub(crate) async fn void_order_inner(
+    pool:     web::Data<PgPool>,
+    order_id: Uuid,
+    body:     web::Json<VoidOrderRequest>,
+    actor:    ActingContext,
+) -> Result<HttpResponse, AppError> {
+    let order = fetch_order_or_404(pool.get_ref(), order_id).await?;
     if order.status == "voided" { return Ok(HttpResponse::Ok().json(order)); }
 
     // A teller may not rewrite the history of a SETTLED shift: once a shift is
     // closed / force-closed its cash is reconciled, so voiding one of its orders
     // is a correction that belongs to a manager. (The closing snapshot is frozen,
     // so a manager's void does not silently move a closed shift's recorded drawer
-    // figure.)
-    if claims.role == UserRole::Teller {
+    // figure.) Replay bypasses this — the void happened while the shift was open.
+    if !actor.replay && actor.role == UserRole::Teller {
         let shift_open: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND status = 'open')"
         )
@@ -1866,7 +1976,7 @@ pub async fn void_order(
     // discarded (logged as waste). Either way the void touches the ledger, so
     // fetch the lines now.
     let restock = body.restore_inventory.unwrap_or(false);
-    let items = fetch_order_items_full(pool.get_ref(), *order_id).await?;
+    let items = fetch_order_items_full(pool.get_ref(), order_id).await?;
 
     let mut tx = pool.begin().await?;
 
@@ -1892,10 +2002,10 @@ pub async fn void_order(
                (SELECT customer_lng FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_lng,
                voided_at, void_reason::text, void_note, voided_by, created_at"#,
     )
-    .bind(*order_id)
+    .bind(order_id)
     .bind(&body.reason)
     .bind(voided_at)
-    .bind(claims.user_id())
+    .bind(actor.teller_id)
     .bind(void_note)
     .fetch_optional(&mut *tx)
     .await?;
@@ -1905,7 +2015,7 @@ pub async fn void_order(
     // return the already-voided order idempotently.
     let Some(updated) = updated else {
         tx.rollback().await?;
-        let current = fetch_order_or_404(pool.get_ref(), *order_id).await?;
+        let current = fetch_order_or_404(pool.get_ref(), order_id).await?;
         return Ok(HttpResponse::Ok().json(current));
     };
 
@@ -1950,7 +2060,7 @@ pub async fn void_order(
                     source_type:         Some("order"),
                     source_id:           Some(order.id),
                     note:                Some("Void restock"),
-                    created_by:          Some(claims.user_id()),
+                    created_by:          Some(actor.teller_id),
                 },
             )
             .await?;
@@ -1980,7 +2090,7 @@ pub async fn void_order(
                             source_type:         Some("order"),
                             source_id:           Some(order.id),
                             note:                Some("Order voided — made, not restocked"),
-                            created_by:          Some(claims.user_id()),
+                            created_by:          Some(actor.teller_id),
                         },
                     )
                     .await?;
@@ -2207,13 +2317,23 @@ async fn fetch_order_delivery_info(
     Ok(info)
 }
 
-async fn fetch_order_by_idempotency_key(
-    pool: &PgPool,
-    key:  Uuid,
+pub(crate) async fn fetch_order_by_idempotency_key(
+    pool:   &PgPool,
+    key:    Uuid,
+    org_id: Uuid,
 ) -> Result<Option<Order>, AppError> {
-    let sql = format!("{} WHERE o.idempotency_key = $1", ORDER_SELECT);
+    // Org-scope the lookup: an idempotency key is only unique within an org, and
+    // an unscoped match would return (and echo back) another org's full order to
+    // a caller that merely guessed/collided on the key. Scope by the actor's org
+    // via the order's branch so the early-return can only ever surface our own.
+    let sql = format!(
+        "{} WHERE o.idempotency_key = $1 \
+           AND o.branch_id IN (SELECT id FROM branches WHERE org_id = $2)",
+        ORDER_SELECT
+    );
     Ok(sqlx::query_as::<_, Order>(&sql)
         .bind(key)
+        .bind(org_id)
         .fetch_optional(pool)
         .await?)
 }

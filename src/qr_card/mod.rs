@@ -1,4 +1,4 @@
-//! Sufrix branded QR card generator — rendering layer (pure) + dynamic
+//! Madar branded QR card generator — rendering layer (pure) + dynamic
 //! short-URL layer (Shlink-backed, server-to-server).
 //!
 //! ## Rendering (pure, no I/O)
@@ -25,13 +25,13 @@ use qrcode::EcLevel;
 
 use crate::errors::AppError;
 
-// ── brand tokens (single source of truth) ───────────────────────────────────
-/// Navy — QR modules, frame, wordmark, primary text.
-pub const NAVY: &str = "#0A2540";
-/// Terracotta — the precision dot only (mark dot / wordmark tittle).
-pub const TERRACOTTA: &str = "#C25B3F";
-/// Cream — background and centre plaque.
-pub const CREAM: &str = "#FAF7F2";
+// ── Madar brand tokens (single source of truth) ─────────────────────────────
+/// Teal deep — QR modules, frame, wordmark, primary text.
+pub const TEAL: &str = "#0D6273";
+/// Teal light — the precision accent (mark satellite / wordmark dot).
+pub const TEAL_LIGHT: &str = "#2E94A6";
+/// Paper — background and centre plaque.
+pub const PAPER: &str = "#EFF3F4";
 
 /// Encoded data longer than this is rejected: long payloads + a centre overlay
 /// fail to scan on cheap cameras. Shlink short URLs are well under this.

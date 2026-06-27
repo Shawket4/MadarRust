@@ -104,9 +104,9 @@ pub async fn create_user(
     require_same_org(&claims, Some(body.org_id))?;
 
     if claims.role == UserRole::BranchManager {
-        if body.role != UserRole::Teller {
+        if !matches!(body.role, UserRole::Teller | UserRole::Waiter | UserRole::Kitchen) {
             return Err(AppError::Forbidden(
-                "Branch managers can only create teller accounts".into(),
+                "Branch managers can only create teller, waiter and kitchen accounts".into(),
             ));
         }
 
@@ -136,9 +136,9 @@ pub async fn create_user(
     }
 
     match body.role {
-        UserRole::Teller => {
+        UserRole::Teller | UserRole::Waiter | UserRole::Kitchen => {
             if body.pin.is_none() {
-                return Err(AppError::BadRequest("Tellers require a PIN".into()));
+                return Err(AppError::BadRequest("Tellers, waiters and kitchen users require a PIN".into()));
             }
             let pin = body.pin.as_deref().unwrap();
             if pin.len() < 4 || pin.len() > 6 || !pin.chars().all(|c| c.is_ascii_digit()) {
@@ -172,11 +172,13 @@ pub async fn create_user(
         }
     }
 
-    if body.role == UserRole::Teller {
+    if matches!(body.role, UserRole::Teller | UserRole::Waiter | UserRole::Kitchen) {
+        // PIN login matches by name across the teller+waiter+kitchen namespace, so
+        // names must be unique within it (not just among tellers).
         let name_taken: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM users
              WHERE org_id = $1 AND LOWER(name) = LOWER($2)
-               AND role = 'teller' AND deleted_at IS NULL)"
+               AND role IN ('teller', 'waiter', 'kitchen') AND deleted_at IS NULL)"
         )
         .bind(body.org_id)
         .bind(&body.name)
@@ -185,7 +187,7 @@ pub async fn create_user(
 
         if name_taken {
             return Err(AppError::Conflict(
-                "A teller with this name already exists in this organization".into(),
+                "A teller, waiter or kitchen user with this name already exists in this organization".into(),
             ));
         }
     }
@@ -441,6 +443,8 @@ pub async fn update_user(
         UserRole::OrgAdmin => 2,
         UserRole::BranchManager => 1,
         UserRole::Teller => 0,
+        UserRole::Waiter => 0,
+        UserRole::Kitchen => 0,
     };
     let sensitive = body.password.is_some() || body.pin.is_some()
         || body.is_active.is_some() || body.role.is_some();

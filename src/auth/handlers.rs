@@ -113,6 +113,7 @@ struct DbPermission {
     )
 )]
 pub async fn login(
+    _req:   HttpRequest,
     pool:   web::Data<PgPool>,
     secret: web::Data<JwtSecret>,
     body:   web::Json<LoginRequest>,
@@ -185,7 +186,7 @@ pub async fn login(
                 WHERE LOWER(u.name) = LOWER($1)
                   AND u.org_id      = $2
                   AND u.pin_hash    IS NOT NULL
-                  AND u.role        = 'teller'
+                  AND u.role        IN ('teller', 'waiter', 'kitchen')
                   AND u.is_active   = TRUE
                   AND u.deleted_at  IS NULL
                 "#,
@@ -249,8 +250,10 @@ pub async fn login(
     //   • same teller, SAME branch as their open shift  → allow (resume; e.g.
     //     after a token expiry — don't lock them out of the shift they must close)
     //   • same teller, DIFFERENT branch                 → reject (no two live places)
-    //   • DIFFERENT teller, a branch that already has someone else's open shift
-    //                                                    → reject (can't take it over)
+    //   • DIFFERENT teller at a branch that already has open shifts → ALLOW: with
+    //     multi-teller tills, several tellers operate concurrently at one branch,
+    //     each on their own till/drawer. The one-open-per-till index (not login)
+    //     prevents two people sharing one drawer.
     //
     // (1) This teller's own open shift must be at the branch they're signing into.
     let open_shift_branch: Option<Uuid> = sqlx::query_scalar(
@@ -272,36 +275,20 @@ pub async fn login(
         ));
     }
 
-    // (2) The branch being signed into must not already hold a DIFFERENT teller's
-    //     open shift.
-    if let Some(branch) = body.branch_id {
-        let other_teller: Option<String> = sqlx::query_scalar(
-            "SELECT u.name FROM shifts s JOIN users u ON u.id = s.teller_id \
-             WHERE s.branch_id = $1 AND s.status = 'open' AND s.teller_id <> $2"
-        )
-        .bind(branch)
-        .bind(user.id)
-        .fetch_optional(pool.get_ref())
-        .await?;
-        if let Some(name) = other_teller {
-            tracing::warn!(
-                target: "auth.login.blocked_branch_shift",
-                user_id = %user.id, attempted_branch = %branch,
-                "login blocked: branch already has another teller's open shift"
-            );
-            return Err(AppError::Conflict(format!(
-                "This branch has an open shift belonging to {name}. It must be closed before signing in here."
-            )));
-        }
-    }
+    // (2) [removed for multi-teller] A branch may now hold several tellers' open
+    //     shifts at once — one per till — so signing in alongside another teller's
+    //     live shift is allowed. The previous `X-Sufrix-Closing-Shifts` handover
+    //     handshake is no longer needed (a closing shift simply replays its close).
 
-    let token_branch_id = if user.role == UserRole::Teller {
+    // Tellers, waiters AND kitchen users are device-bound (PIN) and branch-bound;
+    // waiters/kitchen just never hold a shift. All get the short device TTL.
+    let token_branch_id = if matches!(user.role, UserRole::Teller | UserRole::Waiter | UserRole::Kitchen) {
         body.branch_id
     } else {
         None
     };
 
-    let hours = if user.role == UserRole::Teller { 12 } else { 24 };
+    let hours = if matches!(user.role, UserRole::Teller | UserRole::Waiter | UserRole::Kitchen) { 12 } else { 24 };
 
     let token = create_token(
         &secret,
@@ -318,9 +305,9 @@ pub async fn login(
         .execute(pool.get_ref())
         .await?;
 
-    // For tellers, branch_id is already validated above (from body.branch_id).
+    // For tellers/waiters, branch_id is the device branch (from body.branch_id).
     // For other roles, fall back to looking up the first assignment.
-    let branch_id_for_response: Option<Uuid> = if user.role == UserRole::Teller {
+    let branch_id_for_response: Option<Uuid> = if matches!(user.role, UserRole::Teller | UserRole::Waiter | UserRole::Kitchen) {
         body.branch_id
     } else {
         sqlx::query_scalar(

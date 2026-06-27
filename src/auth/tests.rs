@@ -915,10 +915,11 @@ async fn test_me_returns_org_tax_rate(pool: PgPool) {
     assert_eq!(body.currency_code, "EGP");
 }
 
-/// Open-shift login rule (different teller, same branch → reject): a teller may
-/// not sign in at a branch that already holds another teller's open shift.
+/// Multi-teller: a different teller MAY sign in at a branch that already holds
+/// another teller's open shift — they'll operate their own till. (Pre-multi-teller
+/// this was rejected; the one-open-per-till index, not login, now guards a drawer.)
 #[sqlx::test(migrations = "./migrations")]
-async fn test_pin_login_blocked_when_branch_has_other_tellers_open_shift(pool: PgPool) {
+async fn test_pin_login_allowed_when_branch_has_other_tellers_open_shift(pool: PgPool) {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
@@ -948,9 +949,9 @@ async fn test_pin_login_blocked_when_branch_has_other_tellers_open_shift(pool: P
     let login = |b: Uuid| test::TestRequest::post().uri("/auth/login")
         .set_json(&json!({"name":"Bob","pin":"2222","branch_id": b})).to_request();
 
-    // Bob at Alice's open-shift branch → blocked.
-    assert_eq!(test::call_service(&app, login(branch)).await.status(), 409,
-        "a different teller must not sign in at a branch with someone else's open shift");
+    // Bob at Alice's open-shift branch → now ALLOWED (his own till).
+    assert_eq!(test::call_service(&app, login(branch)).await.status(), 200,
+        "multi-teller: a fresh teller may sign in alongside another teller's open shift");
     // Bob at a branch with no open shift → allowed.
     assert_eq!(test::call_service(&app, login(other_branch)).await.status(), 200,
         "a branch with no open shift accepts a fresh teller login");

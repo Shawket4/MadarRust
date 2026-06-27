@@ -332,10 +332,13 @@ pub async fn get_org(
 pub struct OfflineTellerCredential {
     pub user_id:          Uuid,
     pub name:             String,
+    /// PIN-login role: `teller`, `waiter`, or `kitchen`. The device uses this to
+    /// route the offline session (a waiter lands on tickets, a kitchen device on
+    /// the KDS) without re-querying the backend.
     pub role:             String,
     pub is_active:        bool,
-    /// argon2id verifier of the teller's PIN (derived at online login). `null`
-    /// until the teller has logged in online at least once.
+    /// argon2id verifier of the user's PIN (derived at online login). `null`
+    /// until the user has logged in online at least once.
     pub offline_pin_hash: Option<String>,
 }
 
@@ -343,7 +346,14 @@ pub struct OfflineTellerCredential {
 pub struct OfflineAuthBundle {
     pub org_id:       Uuid,
     pub generated_at: chrono::DateTime<chrono::Utc>,
+    /// All PIN-login credentials for the org (tellers, waiters, and kitchen
+    /// devices). Field name kept as `tellers` for wire compatibility; it carries
+    /// every offline-capable role, distinguished by `role`.
     pub tellers:      Vec<OfflineTellerCredential>,
+    /// The org's stable LAN-relay secret, hex-encoded. Devices derive a per-branch
+    /// HMAC-SHA256 subkey from it to sign every LAN message (Phase E), so only
+    /// branch-provisioned devices are trusted on the shared Wi-Fi.
+    pub lan_secret:   String,
 }
 
 #[utoipa::path(
@@ -364,15 +374,18 @@ pub async fn offline_auth_bundle(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     // Authorization: the caller's token MUST belong to this org. The bundle is
-    // fetched by the device's signed-in teller to enable offline unlock for the
+    // fetched by the device's signed-in user to enable offline unlock for the
     // whole org — no extra role gate, but never across orgs.
     require_same_org(&claims, Some(*org_id))?;
 
+    // All PIN-login roles ship in the bundle so a waiter or kitchen device can
+    // unlock offline, not just tellers. The role rides along so the device can
+    // route the offline session (waiter → tickets, kitchen → KDS).
     let tellers = sqlx::query_as::<_, OfflineTellerCredential>(
         r#"
         SELECT id AS user_id, name, role::text AS role, is_active, offline_pin_hash
         FROM users
-        WHERE org_id = $1 AND role = 'teller' AND deleted_at IS NULL
+        WHERE org_id = $1 AND role IN ('teller', 'waiter', 'kitchen') AND deleted_at IS NULL
         ORDER BY name
         "#,
     )
@@ -380,10 +393,18 @@ pub async fn offline_auth_bundle(
     .fetch_all(pool.get_ref())
     .await?;
 
+    // The org's stable LAN secret, hex-encoded in SQL (no Rust encoding dep).
+    let lan_secret: String =
+        sqlx::query_scalar("SELECT encode(lan_secret, 'hex') FROM organizations WHERE id = $1")
+            .bind(*org_id)
+            .fetch_one(pool.get_ref())
+            .await?;
+
     Ok(HttpResponse::Ok().json(OfflineAuthBundle {
         org_id: *org_id,
         generated_at: chrono::Utc::now(),
         tellers,
+        lan_secret,
     }))
 }
 

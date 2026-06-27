@@ -1,6 +1,6 @@
 -- Minimal fixture for the API-fuzz harness (scripts/api-fuzz.sh).
 --
--- Run ONLY against the throwaway `sufrix_fuzz` database, after `sqlx migrate run`.
+-- Run ONLY against the throwaway `madar_fuzz` database, after `sqlx migrate run`.
 -- Fixed UUIDs match src/bin/fuzz_token.rs so the minted JWT resolves to real rows
 -- and fuzzed requests reach handler logic instead of bouncing on empty-DB 404s.
 -- Idempotent (ON CONFLICT DO NOTHING) so reseeding a reused DB is safe.

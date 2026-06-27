@@ -16,7 +16,7 @@ use std::process::ExitCode;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
-use sufrix_rust::recipes::backfill::{backfill_recipe_units, BackfillScope};
+use madar_rust::recipes::backfill::{backfill_recipe_units, BackfillScope};
 
 const USAGE: &str = "\
 Normalizes existing recipe quantities to each ingredient's base stock unit.

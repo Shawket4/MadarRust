@@ -11,11 +11,11 @@ use sqlx::postgres::PgPoolOptions;
 use std::{env, fs};
 use tracing_subscriber::EnvFilter;
 
-use sufrix_rust::openapi::ApiDoc;
-use sufrix_rust::{
-    auth, branches, bundles, costing, delivery, discounts, inventory, menu, menu_advisor,
-    orders, orgs, payment_methods, permissions, purchasing, qr_card, recipes, reports, shifts,
-    stocktakes, uploads, users,
+use madar_rust::openapi::ApiDoc;
+use madar_rust::{
+    auth, branches, bundles, costing, delivery, discounts, inventory, kitchen, menu, menu_advisor,
+    orders, orgs, payment_methods, permissions, purchasing, qr_card, realtime, recipes, reports,
+    shifts, stocktakes, sync, tickets, tills, uploads, users,
 };
 
 use utoipa::OpenApi;
@@ -62,8 +62,9 @@ async fn main() -> std::io::Result<()> {
     // Per-process org-suspension cache, consulted by JwtMiddleware on every
     // authenticated request. Registering it is what arms the kill-switch.
     let org_status    = web::Data::new(auth::org_status::OrgStatusCache::new());
-    // One delivery-event hub, shared across all workers (cloned into each App).
-    let delivery_hub  = web::Data::new(delivery::hub::DeliveryHub::new());
+    // The unified per-branch realtime bus — delivery, kitchen, waiter tickets, and
+    // order events all ride one connection. Shared across all workers.
+    let realtime_bus  = web::Data::new(realtime::hub::BranchEventHub::new());
     // Shlink short-URL provider (reads env vars on each call; degrade-safe).
     let qr_provider   = qr_card::routes::make_provider();
     let uploads_clone = uploads_dir.clone();
@@ -74,21 +75,21 @@ async fn main() -> std::io::Result<()> {
     // Swagger UI is dev/staging only. In production leave the env var
     // unset (or set to a falsy value) and front the spec endpoint with
     // nginx basic auth if you need to expose it to a partner.
-    let enable_swagger_ui = env::var("SUFRIX_ENABLE_SWAGGER_UI")
+    let enable_swagger_ui = env::var("MADAR_ENABLE_SWAGGER_UI")
         .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false);
 
     let tls_config = build_tls_config();
 
-    tracing::info!("Starting sufrix-rust");
+    tracing::info!("Starting madar-rust");
     tracing::info!("Uploads directory: {}", uploads_dir);
     if enable_swagger_ui {
         tracing::warn!("⚠️  Swagger UI ENABLED — exposes full API surface unauthenticated.");
-        tracing::warn!("    Do NOT run with SUFRIX_ENABLE_SWAGGER_UI=true in production");
+        tracing::warn!("    Do NOT run with MADAR_ENABLE_SWAGGER_UI=true in production");
         tracing::warn!("    without nginx basic-auth in front of /api-docs/.");
         tracing::info!("Swagger UI at /api-docs/swagger-ui/  |  OpenAPI JSON at /api-docs/openapi.json");
     } else {
-        tracing::info!("Swagger UI disabled (set SUFRIX_ENABLE_SWAGGER_UI=true to enable in dev)");
+        tracing::info!("Swagger UI disabled (set MADAR_ENABLE_SWAGGER_UI=true to enable in dev)");
     }
 
     let server = HttpServer::new(move || {
@@ -106,20 +107,20 @@ async fn main() -> std::io::Result<()> {
             .app_data(pool.clone())
             .app_data(jwt_secret.clone())
             .app_data(org_status.clone())
-            .app_data(delivery_hub.clone())
+            .app_data(realtime_bus.clone())
             .app_data(qr_provider.clone())
             // Render actix's built-in extractor parse errors (bad path UUID, bad
             // query param, malformed JSON body) as our JSON ErrorBody with a 400,
             // instead of the default text/plain — so the wire contract is uniform.
             // (API fuzzing flagged these as undocumented text/plain responses.)
             .app_data(web::PathConfig::default().error_handler(|err, _req| {
-                sufrix_rust::errors::AppError::BadRequest(err.to_string()).into()
+                madar_rust::errors::AppError::BadRequest(err.to_string()).into()
             }))
             .app_data(web::QueryConfig::default().error_handler(|err, _req| {
-                sufrix_rust::errors::AppError::BadRequest(err.to_string()).into()
+                madar_rust::errors::AppError::BadRequest(err.to_string()).into()
             }))
             .app_data(web::JsonConfig::default().error_handler(|err, _req| {
-                sufrix_rust::errors::AppError::BadRequest(err.to_string()).into()
+                madar_rust::errors::AppError::BadRequest(err.to_string()).into()
             }))
             .route("/health", web::get().to(|| async { actix_web::HttpResponse::Ok().finish() }))
             .configure(auth::routes::configure)
@@ -131,7 +132,12 @@ async fn main() -> std::io::Result<()> {
             .configure(inventory::routes::configure)
             .configure(recipes::routes::configure)
             .configure(shifts::routes::configure)
+            .configure(tills::routes::configure)
+            .configure(realtime::routes::configure)
+            .configure(kitchen::routes::configure)
+            .configure(tickets::routes::configure)
             .configure(stocktakes::routes::configure)
+            .configure(sync::routes::configure)
             .configure(purchasing::routes::configure)
             .configure(orders::routes::configure)
             .configure(discounts::routes::configure)

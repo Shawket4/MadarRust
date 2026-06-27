@@ -41,6 +41,8 @@ async fn seed_user(pool: &PgPool, org_id: Uuid, name: &str, role: UserRole, emai
         UserRole::OrgAdmin => "org_admin",
         UserRole::BranchManager => "branch_manager",
         UserRole::Teller => "teller",
+        UserRole::Waiter => "waiter",
+        UserRole::Kitchen => "kitchen",
     };
     sqlx::query(
         "INSERT INTO users (id, org_id, name, role, email, password_hash) VALUES ($1, $2, $3, $4::user_role, $5, 'h')"
@@ -559,4 +561,45 @@ async fn test_disabled_user_token_is_rejected(pool: PgPool) {
     let req = test::TestRequest::get().uri("/permissions/roles")
         .insert_header(("Authorization", format!("Bearer {}", token))).to_request();
     assert_eq!(test::call_service(&app, req).await.status(), 403, "soft-deleted account token must be rejected");
+}
+
+/// The `kitchen` role's security boundary: it may read the KDS feed + bump lines
+/// and read stations, but is DENIED everything on the POS / cash / ticket side.
+/// This is the whole point of the dedicated role — a kitchen tablet's token can't
+/// ring a sale, take a payment, or settle/fire a ticket.
+#[sqlx::test]
+async fn kitchen_role_can_bump_but_not_touch_the_pos(pool: PgPool) {
+    use crate::auth::jwt::Claims;
+    use crate::permissions::checker::check_permission;
+
+    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+    let org_id = seed_org(&pool).await;
+    let user_id = seed_user(&pool, org_id, "Grill Screen", UserRole::Kitchen, "kds@t.com").await;
+
+    let claims = Claims {
+        sub: user_id.to_string(),
+        org_id: Some(org_id.to_string()),
+        role: UserRole::Kitchen,
+        branch_id: None,
+        exp: 9_999_999_999,
+        iat: 0,
+    };
+
+    // GRANTED — the kitchen workflow.
+    for (res, act) in [("kitchen_orders", "read"), ("kitchen_orders", "update"), ("kitchen_stations", "read")] {
+        assert!(
+            check_permission(&pool, &claims, res, act).await.is_ok(),
+            "kitchen should be allowed {res}:{act}"
+        );
+    }
+    // DENIED — the POS / cash / ticket side a kitchen device must never reach.
+    for (res, act) in [
+        ("orders", "create"), ("payments", "create"), ("open_tickets", "create"),
+        ("open_tickets", "update"), ("shifts", "create"), ("kitchen_stations", "create"),
+    ] {
+        assert!(
+            check_permission(&pool, &claims, res, act).await.is_err(),
+            "kitchen must be denied {res}:{act}"
+        );
+    }
 }

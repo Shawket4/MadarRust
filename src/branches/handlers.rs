@@ -43,6 +43,11 @@ pub enum PrinterBrand {
 pub struct Branch {
     pub id:                Uuid,
     pub org_id:            Uuid,
+    /// Short org-unique branch prefix (A-Z0-9) embedded in every order_ref
+    /// (`<CODE>-YYMMDD-…`). Exposed so an offline device can mint the same ref the
+    /// server would, from first boot, without waiting for a synced order.
+    #[schema(example = "RT1")]
+    pub code:              Option<String>,
     #[schema(example = "Zamalek")]
     pub name:              String,
     #[schema(example = "26 July Corridor, Zamalek, Cairo")]
@@ -179,7 +184,7 @@ pub async fn list_branches(
     let branches = if claims.role == crate::models::UserRole::BranchManager || claims.role == crate::models::UserRole::Teller {
         sqlx::query_as::<_, Branch>(
             r#"
-            SELECT b.id, b.org_id, b.name, b.address, b.phone,
+            SELECT b.id, b.org_id, b.code, b.name, b.address, b.phone,
                    COALESCE(b.timezone, o.timezone)::text AS timezone,
                    b.printer_brand, b.printer_ip::text, b.printer_port,
                    b.is_active, o.logo_url as org_logo_url,
@@ -199,7 +204,7 @@ pub async fn list_branches(
     } else {
         sqlx::query_as::<_, Branch>(
             r#"
-            SELECT b.id, b.org_id, b.name, b.address, b.phone,
+            SELECT b.id, b.org_id, b.code, b.name, b.address, b.phone,
                    COALESCE(b.timezone, o.timezone)::text AS timezone,
                    b.printer_brand, b.printer_ip::text, b.printer_port,
                    b.is_active, o.logo_url as org_logo_url,
@@ -275,12 +280,12 @@ pub async fn create_branch(
         WITH inserted AS (
             INSERT INTO branches (org_id, name, address, phone, timezone, printer_brand, printer_ip, printer_port, latitude, longitude, geo_radius_meters)
             VALUES ($1, $2, $3, $4, $5::timezone_name, $6, $7::inet, $8, $9, $10, $11)
-            RETURNING id, org_id, name, address, phone, timezone,
+            RETURNING id, org_id, code, name, address, phone, timezone,
                       printer_brand, printer_ip, printer_port,
                       is_active, latitude, longitude, geo_radius_meters,
                       created_at, updated_at
         )
-        SELECT i.id, i.org_id, i.name, i.address, i.phone,
+        SELECT i.id, i.org_id, i.code, i.name, i.address, i.phone,
                COALESCE(i.timezone, o.timezone)::text AS timezone,
                i.printer_brand, i.printer_ip::text, i.printer_port,
                i.is_active, o.logo_url as org_logo_url,
@@ -302,6 +307,17 @@ pub async fn create_branch(
     .bind(body.longitude)
     .bind(body.geo_radius_meters)
     .fetch_one(pool.get_ref())
+    .await?;
+
+    // Every branch gets a default "Till 1" drawer out of the box, so the dashboard
+    // and devices have a till to bind to and shifts can open without extra setup.
+    sqlx::query(
+        "INSERT INTO tills (org_id, branch_id, name, is_default, is_active) \
+         VALUES ($1, $2, 'Till 1', true, true) ON CONFLICT DO NOTHING",
+    )
+    .bind(branch.org_id)
+    .bind(branch.id)
+    .execute(pool.get_ref())
     .await?;
 
     Ok(HttpResponse::Created().json(branch))
@@ -378,12 +394,12 @@ pub async fn update_branch(
                                     END,
                 geo_radius_meters = COALESCE($17, geo_radius_meters)
             WHERE id = $1 AND deleted_at IS NULL
-            RETURNING id, org_id, name, address, phone, timezone,
+            RETURNING id, org_id, code, name, address, phone, timezone,
                       printer_brand, printer_ip, printer_port,
                       is_active, latitude, longitude, geo_radius_meters,
                       created_at, updated_at
         )
-        SELECT u.id, u.org_id, u.name, u.address, u.phone,
+        SELECT u.id, u.org_id, u.code, u.name, u.address, u.phone,
                COALESCE(u.timezone, o.timezone)::text AS timezone,
                u.printer_brand, u.printer_ip::text, u.printer_port,
                u.is_active, o.logo_url as org_logo_url,
@@ -486,7 +502,7 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 async fn fetch_branch(pool: &PgPool, id: Uuid) -> Result<Branch, AppError> {
     sqlx::query_as::<_, Branch>(
         r#"
-        SELECT b.id, b.org_id, b.name, b.address, b.phone,
+        SELECT b.id, b.org_id, b.code, b.name, b.address, b.phone,
                COALESCE(b.timezone, o.timezone)::text AS timezone,
                b.printer_brand, b.printer_ip::text, b.printer_port,
                b.is_active, o.logo_url as org_logo_url,

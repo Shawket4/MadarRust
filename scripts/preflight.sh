@@ -5,7 +5,7 @@
 #
 #   scripts/preflight.sh                # FAST gate: fmt + clippy + cargo test --lib
 #   scripts/preflight.sh --mutants      # + cargo-mutants on the lines you changed (--in-diff)
-#   scripts/preflight.sh --schemathesis # + Schemathesis API fuzz (throwaway sufrix_fuzz DB)
+#   scripts/preflight.sh --schemathesis # + Schemathesis API fuzz (throwaway madar_fuzz DB)
 #   scripts/preflight.sh --fuzz         # + cargo-fuzz smoke on the money fns (nightly, ~30s each)
 #   scripts/preflight.sh --full-mutants # + full money-engine mutation sweep (~15 min)
 #   scripts/preflight.sh --restler      # + RESTler stateful fuzz (needs the x86_64 colima VM; slow)
@@ -21,7 +21,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 REPO="$PWD"
 export PATH="$HOME/.cargo/bin:$PATH"
-export DATABASE_URL="${DATABASE_URL:-postgres://shawket@localhost:5432/sufrix_dev}"
+export DATABASE_URL="${DATABASE_URL:-postgres://shawket@localhost:5432/madar_dev}"
 # Money-engine unit tests used to keep mutation runs fast (each mutant reruns only these).
 FAST_TESTS='test(/units::tests::/) | test(/osrm::tests::/) | test(/cost_math::tests::/) | test(/service::unit_tests::/) | test(/calc_discount_tests::/) | test(/select_zone/) | test(/zone_fee/)'
 MONEY_FILES=(-f src/costing/service.rs -f src/orders/cost_math.rs -f src/units.rs -f src/geo/osrm.rs -f src/discounts/handlers.rs -f src/delivery/public.rs)
@@ -95,7 +95,7 @@ fi
 
 # ── opt-in: Schemathesis API fuzz (throwaway DB) ──────────────────────────────
 if [ $S = 1 ]; then
-  hdr "Schemathesis API fuzz (throwaway sufrix_fuzz DB)  (GATE on 5xx)"
+  hdr "Schemathesis API fuzz (throwaway madar_fuzz DB)  (GATE on 5xx)"
   if [ ! -x ./.fuzzvenv/bin/st ] && ! have st; then SKIPPED+=("schemathesis: not installed (python3 -m venv .fuzzvenv && .fuzzvenv/bin/pip install schemathesis)")
   else
     if bash scripts/api-fuzz.sh >/tmp/preflight-apifuzz.log 2>&1; then :; fi
