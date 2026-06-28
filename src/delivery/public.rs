@@ -254,6 +254,12 @@ pub struct DeliveryMenuDiscount {
 #[derive(Deserialize, IntoParams)]
 pub struct ChannelParam {
     pub channel: String,
+    /// Read-only browse preview. When `true`, the menu is returned even if the
+    /// channel is closed right now, so customers can browse while a branch is
+    /// closed. This NEVER relaxes the channel-*enabled* check, and the
+    /// delivery-quote / order-intake endpoints stay gated on open-now — so a
+    /// preview can never become a real order against a closed channel.
+    pub preview: Option<bool>,
 }
 
 #[utoipa::path(
@@ -281,7 +287,12 @@ pub async fn public_menu(
     if !enabled {
         return Err(AppError::NotFound("This branch does not offer this channel".into()));
     }
-    if !channel_open_now(pool.get_ref(), branch_id, &query.channel).await? {
+    // Read-only browse preview skips the open-now gate (so a closed-but-enabled
+    // channel can still show its menu). The enabled check above always stands,
+    // and quote/intake remain gated on open-now — preview can't become an order.
+    if !query.preview.unwrap_or(false)
+        && !channel_open_now(pool.get_ref(), branch_id, &query.channel).await?
+    {
         return Err(AppError::Conflict("This channel is closed right now.".into()));
     }
 

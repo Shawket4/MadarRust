@@ -1819,6 +1819,48 @@ mod it {
     }
 
     #[sqlx::test]
+    async fn public_menu_preview_returns_menu_when_channel_closed(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        // in_mall enabled, outside NOT enabled. Critically: NO open shift is
+        // seeded, so the in_mall channel is closed right now.
+        seed_settings(&pool, branch, true, false, 0).await;
+        let item = seed_item(&pool, org, 500).await;
+
+        let app = app!(&pool);
+
+        // Without preview: a closed channel still 409s (unchanged behavior).
+        let (st, _b) = send(
+            &app,
+            test::TestRequest::get().uri(&format!("/public/branches/{branch}/menu?channel=in_mall")),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "closed channel must 409 without preview");
+
+        // With preview=true: read-only browse returns the menu though it's closed.
+        let (st, b) = send(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!("/public/branches/{branch}/menu?channel=in_mall&preview=true")),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "preview must return the menu for a closed channel: {b}");
+        let items = b["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "preview menu should list the item: {b}");
+        assert_eq!(items[0]["id"], item.to_string());
+
+        // Preview never relaxes the channel-*enabled* check: a non-enabled channel
+        // 404s even with preview.
+        let (st, _b) = send(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!("/public/branches/{branch}/menu?channel=outside&preview=true")),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "preview must not bypass the channel-enabled check");
+    }
+
+    #[sqlx::test]
     async fn public_menu_exposes_default_milk_addon(pool: PgPool) {
         let org = seed_org(&pool).await;
         let branch = seed_branch(&pool, org).await;
