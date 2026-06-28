@@ -93,11 +93,22 @@ async fn main() -> std::io::Result<()> {
     }
 
     let server = HttpServer::new(move || {
-        let cors = Cors::default()
-            .allow_any_origin()
-            .allow_any_method()
-            .allow_any_header()
-            .max_age(3600);
+        // Restrict CORS to first-party frontends via CORS_ALLOWED_ORIGINS
+        // (comma-separated). Unset/empty → allow any origin (local dev fallback).
+        let cors = {
+            let base = Cors::default()
+                .allow_any_method()
+                .allow_any_header()
+                .max_age(3600);
+            match std::env::var("CORS_ALLOWED_ORIGINS") {
+                Ok(list) if !list.trim().is_empty() => list
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .fold(base, |c, origin| c.allowed_origin(origin)),
+                _ => base.allow_any_origin(),
+            }
+        };
 
         // Build the App. All `.wrap()` calls happen first so the App's
         // generic type is stable when we conditionally add Swagger UI.
