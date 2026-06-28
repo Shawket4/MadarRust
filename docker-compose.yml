@@ -1,50 +1,50 @@
-# Production compose — all Sufrix services.
+# Production compose — all Madar services.
 #
 # Prerequisites on the VPS before first `up`:
-#   1. /opt/sufrix-rust/.env  — copy from .env.example and fill in secrets
+#   1. /opt/madar-rust/.env  — copy from .env.example and fill in secrets
 #                               DATABASE_URL must use host.docker.internal, not localhost
-#   2. /opt/sufrix-rust/uploads/  — existing upload directory (nginx serves from here)
+#   2. /opt/madar-rust/uploads/  — existing upload directory (nginx serves from here)
 #   3. /opt/shlink/data/          — existing Shlink SQLite data
 #   4. /opt/osrm/                 — pre-processed Egypt map (egypt-latest.osrm*)
-#   5. /opt/sufrix-whatsapp/      — persistent WhatsApp session directory
+#   5. /opt/madar-whatsapp/      — persistent WhatsApp session directory
 #
 # To build the WhatsApp image (one-time, or after source changes):
-#   docker compose build sufrix-whatsapp
+#   docker compose build madar-whatsapp
 #
 # Normal deploy (backend only — triggered by CI):
-#   docker compose up -d --no-deps sufrix-backend
+#   docker compose up -d --no-deps madar-backend
 
 services:
-  sufrix-backend:
-    image: ${BACKEND_IMAGE:-ghcr.io/shawket4/sufrixrust:latest}
+  madar-backend:
+    image: ${BACKEND_IMAGE:-ghcr.io/shawket4/madarrust:latest}
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:8081:8081"
     volumes:
-      - /opt/sufrix-rust/uploads:/app/uploads
+      - /opt/madar-rust/uploads:/app/uploads
     env_file: .env
     environment:
       # Override localhost URLs from .env with container-network addresses
       OSRM_URL: http://osrm:5000
       SHLINK_BASE_URL: http://shlink:8080
-      WHATSAPP_SERVICE_URL: http://sufrix-whatsapp:8090
+      WHATSAPP_SERVICE_URL: http://madar-whatsapp:8090
     networks:
-      - sufrix-net
+      - madar-net
 
-  sufrix-whatsapp:
-    image: ${WHATSAPP_IMAGE:-ghcr.io/shawket4/sufrix-whatsapp:latest}
+  madar-whatsapp:
+    image: ${WHATSAPP_IMAGE:-ghcr.io/shawket4/madar-whatsapp:latest}
     restart: unless-stopped
     volumes:
-      - /opt/sufrix-whatsapp:/app/data
+      - /opt/madar-whatsapp:/app/data
     environment:
       WA_STORE: /app/data/whatsapp-store.db
       WA_META: /app/data/whatsapp-sessions.json
       # Must match WHATSAPP_AUTH_HEADER in the backend .env
       WA_AUTH_TOKEN: ${WHATSAPP_AUTH_HEADER}
     networks:
-      - sufrix-net
+      - madar-net
 
   osrm:
     image: osrm/osrm-backend:latest
@@ -56,7 +56,7 @@ services:
       - /opt/osrm:/data
     command: osrm-routed --algorithm mld /data/egypt-latest.osrm
     networks:
-      - sufrix-net
+      - madar-net
 
   shlink:
     image: shlinkio/shlink:stable
@@ -71,7 +71,7 @@ services:
       IS_HTTPS_ENABLED: "true"
       INITIAL_API_KEY: ${SHLINK_API_KEY}
     networks:
-      - sufrix-net
+      - madar-net
 
   shlink-web-client:
     image: shlinkio/shlink-web-client:stable
@@ -79,8 +79,8 @@ services:
     ports:
       - "127.0.0.1:8889:8080"
     networks:
-      - sufrix-net
+      - madar-net
 
 networks:
-  sufrix-net:
+  madar-net:
     driver: bridge

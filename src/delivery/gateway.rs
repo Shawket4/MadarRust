@@ -1,4 +1,4 @@
-//! Super-admin relay to the WhatsApp send gateway (the Go `sufrix-whatsapp`
+//! Super-admin relay to the WhatsApp send gateway (the Go `madar-whatsapp`
 //! service). The gateway is **never** exposed to the public; only the backend
 //! reaches it over the private network. These endpoints let a super-admin pair
 //! a number (scan the QR from the dashboard), see the link status, log out, and
@@ -8,7 +8,7 @@
 //! permission table is intentionally NOT consulted, so no per-role grant can
 //! ever open these up to org admins or below.
 //!
-//! Upstream contract (see `sufrix-whatsapp/main.go`):
+//! Upstream contract (see `madar-whatsapp/main.go`):
 //!   `POST /sessions/{name}/pair`    → start pairing (QR appears shortly after)
 //!   `GET  /sessions/{name}/status`  → { connected, logged_in, has_qr }
 //!   `GET  /sessions/{name}/qr.png`  → current pairing QR as a PNG

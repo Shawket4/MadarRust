@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Local pre-push robustness gate for sufrix-rust — run the same checks CI would,
+# Local pre-push robustness gate for madar-rust — run the same checks CI would,
 # on your machine, before you `git push`.
 #
 #   scripts/preflight.sh                # FAST gate: fmt + clippy + cargo test --lib

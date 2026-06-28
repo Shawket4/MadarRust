@@ -4,7 +4,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use sufrix_rust::units::convert;
+use madar_rust::units::convert;
 
 const UNITS: &[&str] = &[
     "g", "kg", "mg", "ml", "l", "cl", "pcs", "piece", "unit", "G", "KG", " g ", "", "bogus",

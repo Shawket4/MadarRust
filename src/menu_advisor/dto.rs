@@ -2,7 +2,7 @@
 //! crosses the HTTP boundary.
 //!
 //! The React dashboard consumes these shapes with a hand-written client
-//! (`SufrixDashboard/src/entities/menu-advisor/schemas.ts`), so every serde
+//! (`MadarDashboard/src/entities/menu-advisor/schemas.ts`), so every serde
 //! attribute here is load-bearing: field names, `snake_case` renames, the
 //! internally-tagged `Classification` enum, the `#[serde(flatten)]` record
 //! wrappers, and `PriceRoundingRule`'s PascalCase variants. Change values,

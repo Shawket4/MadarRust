@@ -1,7 +1,7 @@
-# Sufrix Dashboard — Agent Implementation Prompt
+# Madar Dashboard — Agent Implementation Prompt
 
-**Working directory:** `/Users/shawket/Desktop/SufrixDashboard`
-**Backend:** Already complete at `/Users/shawket/Desktop/SufrixRust` — zero backend changes required or allowed.
+**Working directory:** `/Users/shawket/Desktop/MadarDashboard`
+**Backend:** Already complete at `/Users/shawket/Desktop/MadarRust` — zero backend changes required or allowed.
 **Scope:** Onboarding wizard (new), cost-engine integration, piastres/form audits, UX streamlining.
 
 ---
@@ -36,7 +36,7 @@ Key hooks already in place:
 
 ## Step 0 — Regenerate the API client (do this first, blocks everything)
 
-A fresh `openapi.json` is already exported at `/Users/shawket/Desktop/SufrixRust/openapi.json`. Copy it into this project (wherever the orval config points) and run:
+A fresh `openapi.json` is already exported at `/Users/shawket/Desktop/MadarRust/openapi.json`. Copy it into this project (wherever the orval config points) and run:
 
 ```bash
 npm run generate:api
@@ -162,7 +162,7 @@ Single route `/onboarding` with `?step=` URL sync (refresh/back must work).
 - **Branch (1):** single branch form. After create, success card + "Add another / Continue". The branch form now also has optional `latitude`, `longitude`, `geo_radius_meters` fields (see Part 2.6) — keep them in an "advanced" collapsible here.
 - **Payments (2):** the backend PRE-SEEDS 6 payment methods (cash, card, digital_wallet, mixed, talabat_online, talabat_cash) on org creation, so `payment_methods.done` is almost always ALREADY TRUE. Frame as "These are on — confirm and customize", not "add your first method". Note: the step counts ACTIVE methods — if the user deactivates all of them the step regresses; surface that inline.
 - **Menu (3):** two-pane — categories left, items right (reuse existing components). Gate "Continue" on ≥1 category AND ≥1 active item; the authoritative check is the refetched `steps`.
-- **Costs (4):** sell the cost engine — "Add ingredient costs and Sufrix computes profit per item, classifies your menu, and suggests prices." Show `recipe_coverage` as a live progress ring. Fully skippable, never guilt-block.
+- **Costs (4):** sell the cost engine — "Add ingredient costs and Madar computes profit per item, classifies your menu, and suggests prices." Show `recipe_coverage` as a live progress ring. Fully skippable, never guilt-block.
 - **Addons (5) / Team (6):** thin wrappers over existing managers, both skippable.
 - **Review (7):** render `steps` as a checklist (done = green check, optional-undone = gray "later"), the coverage ring, and the **Finish** button bound to `can_complete`. If false, disable Finish with "Finish requires: <missing required steps>" — each missing item deep-links to its step. On Finish → `POST .../complete` → light success state → route to overview.
 

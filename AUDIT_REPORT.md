@@ -1,9 +1,9 @@
-# Sufrix Backend — Overnight Audit Report
+# Madar Backend — Overnight Audit Report
 
 **Branch:** `audit/overnight` (off `main` @ `10dc120`)
 **Scope:** Bug/edge-case hardening of the Rust backend (Actix-Web + SQLx + Postgres).
 **Test status:** **315 passing / 0 failing** (baseline was **289**; +26 new regression tests). Build clean, no OpenAPI contract drift (no client regeneration needed).
-**DB safety:** Production (`100.101.100.57`) was never touched. All test runs used the ephemeral superuser DB (`postgres@localhost:5432/sufrix_local`, built from `./migrations`); the dev copy (`localhost:5433`) was used **read-only** for schema ground truth.
+**DB safety:** Production (`100.101.100.57`) was never touched. All test runs used the ephemeral superuser DB (`postgres@localhost:5432/madar_local`, built from `./migrations`); the dev copy (`localhost:5433`) was used **read-only** for schema ground truth.
 
 ## Method
 1. **Map** — 27 parallel readers over every backend module + POS + dashboard produced 172 suspicious spots.
@@ -150,7 +150,7 @@ Each entry: root cause → fix (file) → guarding test.
   Added `order_payments.is_cash` and `orders.tip_is_cash`, snapshotted at sale time (migration `20260614010000`, with best-effort backfill). `close_shift` and the shift report now read those snapshots (with a `method='cash'` fallback for legacy rows) instead of joining `org_payment_methods` by name, so later config changes can't rewrite a closed shift's cash. Guarded by `orders::test_order_payment_snapshots_is_cash` + `shifts::test_close_cash_uses_is_cash_snapshot`.
 
 **Money-math alignment (frontend ↔ backend):**
-- Percentage discount and tax now **round** (half away from zero) instead of truncating, matching the POS's rounded preview to the piastre (`orders::test_percentage_discount_is_rounded_not_truncated`). The dashboard's `egpToPiastres` was likewise switched to `Math.round`. Verified the generated clients are in sync: regenerating the dashboard Orval client and the POS `sufrix_api` package against the current `openapi.json` produced no contract change.
+- Percentage discount and tax now **round** (half away from zero) instead of truncating, matching the POS's rounded preview to the piastre (`orders::test_percentage_discount_is_rounded_not_truncated`). The dashboard's `egpToPiastres` was likewise switched to `Math.round`. Verified the generated clients are in sync: regenerating the dashboard Orval client and the POS `madar_api` package against the current `openapi.json` produced no contract change.
 
 **Tax made first-class across the stack (feature, on request):**
 - `/auth/login` + `/auth/me` now return the org `tax_rate` + `currency_code` (OpenAPI regenerated; both generated clients regenerate to no-diff → in sync).
@@ -166,12 +166,12 @@ Each entry: root cause → fix (file) → guarding test.
 
 The frontend was subsequently audited and fixed; full details in each repo's `AUDIT_REPORT.md`. Summary:
 
-**Dashboard** (`SufrixDashboard/AUDIT_REPORT.md`) — `tsc`/`eslint` clean, Vitest green:
+**Dashboard** (`MadarDashboard/AUDIT_REPORT.md`) — `tsc`/`eslint` clean, Vitest green:
 - **Fixed: `egpToPiastres` used `Math.trunc`** → dropped a piastre on ~5.7% of two-decimal prices (`19.99*100 = 1998.999…` → 1998). Switched to `Math.round` (+ the inline editable-card / bulk-price paths), guarded by a new test.
 - **Fixed: the Vitest harness was broken** (config referenced a missing `src/test/setup.ts`; zero tests) → added the setup file + first test; `npm run test` now runs.
 - Documented (not changed): read-query empty-state error surfacing, 403-on-GET banner, void detail-cache invalidation, super_admin org switcher.
 
-**POS** (`sufrix_pos/AUDIT_REPORT.md`) — `flutter test` **318 pass / 0 fail** (was **13 failing on baseline**), `flutter analyze` clean:
+**POS** (`madar_pos/AUDIT_REPORT.md`) — `flutter test` **318 pass / 0 fail** (was **13 failing on baseline**), `flutter analyze` clean:
 - **Fixed: 13 stale tests** (test rot, no `lib/` change) from recent refactors — `display_order` removed (now server-order rendering), the open-shift redirect flow (`/open-shift`), and a new `PendingVoidOrder.note`. Each was verified against the shipped models; none masked a code bug.
 - Documented (not changed, with rationale): cart total omits tax + split/tender validate against the tax-free total — **no current impact (every org has `tax_rate = 0`)** and a correct fix is a *feature* (the POS has no tax model); swallowed 403/409 login errors; percentage-discount round-vs-truncate (1 piastre); offline-void-of-offline-order id mismatch.
 

@@ -33,7 +33,7 @@ case "$FUZZ_DATABASE_URL" in
   *) echo "REFUSING: FUZZ_DATABASE_URL must point at a 'madar_fuzz' DB, got: $FUZZ_DATABASE_URL" >&2; exit 1 ;;
 esac
 case "$FUZZ_DATABASE_URL" in
-  *madar_dev*|*sufrix_prod*|*@*prod*) echo "REFUSING: looks like a real DB: $FUZZ_DATABASE_URL" >&2; exit 1 ;;
+  *madar_dev*|*madar_prod*|*@*prod*) echo "REFUSING: looks like a real DB: $FUZZ_DATABASE_URL" >&2; exit 1 ;;
 esac
 
 # Resolve the Schemathesis CLI: PATH first, then a local ./.fuzzvenv (created by
@@ -49,7 +49,7 @@ RUN_DIR="$(mktemp -d)"   # run the server here so its dotenv() finds no real .en
 cleanup() {
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true
   # Belt-and-suspenders: make sure no fuzz server survives to hold the DB open.
-  pkill -f "target/debug/sufrix-rust" 2>/dev/null || true
+  pkill -f "target/debug/madar-rust" 2>/dev/null || true
   rm -rf "$RUN_DIR"
   psql "$ADMIN_DATABASE_URL" -c "DROP DATABASE IF EXISTS ${FUZZ_DB} WITH (FORCE);" >/dev/null 2>&1 || true
 }
@@ -66,7 +66,7 @@ echo "▶ seeding fixture"
 psql "$FUZZ_DATABASE_URL" -v ON_ERROR_STOP=1 -f "$REPO/scripts/seed_fuzz.sql" >/dev/null
 
 echo "▶ building server + token bin (debug — release uses slow LTO and isn't needed here)"
-cargo build --bin sufrix-rust --bin fuzz-token >/dev/null 2>&1
+cargo build --bin madar-rust --bin fuzz-token >/dev/null 2>&1
 ORG_TOKEN="$(JWT_SECRET="$JWT_SECRET" "$REPO/target/debug/fuzz-token" org-admin)"
 SUPER_TOKEN="$(JWT_SECRET="$JWT_SECRET" "$REPO/target/debug/fuzz-token" super-admin)"
 
@@ -87,7 +87,7 @@ echo "▶ booting server on $BASE_URL (rate limiting OFF, external integrations 
     UPLOADS_DIR="$RUN_DIR/uploads" \
     MADAR_DISABLE_RATE_LIMIT=1 \
     MADAR_DISABLE_AUTO_TRANSLATION=1 \
-    "$REPO/target/debug/sufrix-rust" ) >"$OUT/server.log" 2>&1 &
+    "$REPO/target/debug/madar-rust" ) >"$OUT/server.log" 2>&1 &
 SERVER_PID=$!
 
 echo "▶ waiting for /health"

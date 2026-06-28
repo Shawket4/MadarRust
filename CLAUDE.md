@@ -1,7 +1,7 @@
 # Claude Code Conventions
 
 ## Project Overview
-This is a Rust backend project (`sufrix-rust`) built for the Sufrix ecosystem. It uses Actix-Web for the HTTP framework and SQLx (PostgreSQL) for database interactions.
+This is a Rust backend project (`madar-rust`) built for the Madar ecosystem. It uses Actix-Web for the HTTP framework and SQLx (PostgreSQL) for database interactions.
 
 ## Technology Stack
 - **Language**: Rust (Edition 2024)
@@ -35,13 +35,13 @@ Deterministic test tooling guards the codebase (especially the money/cost engine
 The tools (and where they live):
 - **cargo-mutants** (`.cargo/mutants.toml`) — mutation testing; `--in-diff` follows changed lines, so it stays fast and adaptive. `cargo install cargo-mutants cargo-nextest`.
 - **cargo-fuzz** (`fuzz/`, nightly) — coverage-guided fuzzing of the pure money/geo/discount fns (`round_piastres`, `calc_discount`, `convert`/`convert_with_density`, `blend_weighted_cost`, `summarize_line_costs`, `select_zone_fee`, `haversine_meters`). `cargo +nightly fuzz run <target>`.
-- **Schemathesis** (`scripts/api-fuzz.sh`, `scripts/seed_fuzz.sql`, `src/bin/fuzz-token`) — schema-driven API fuzzing of every endpoint against a **disposable `sufrix_fuzz` DB**; checks for 5xx + schema/contract conformance. Re-exports the spec each run so it always matches the current API.
+- **Schemathesis** (`scripts/api-fuzz.sh`, `scripts/seed_fuzz.sql`, `src/bin/fuzz-token`) — schema-driven API fuzzing of every endpoint against a **disposable `madar_fuzz` DB**; checks for 5xx + schema/contract conformance. Re-exports the spec each run so it always matches the current API.
 - **RESTler** (`scripts/restler-run.sh`, `scripts/openapi_31_to_30.py`) — stateful API fuzzing. RESTler's amd64 .NET **segfaults under Rosetta**, so it needs a real x86_64 VM: `colima start --arch x86_64 --vm-type qemu` (after `brew install qemu lima-additional-guestagents`). RESTler can't parse OpenAPI 3.1, so the spec is downconverted to 3.0 first.
 - **CI** (`.github/workflows/ci.yml`) — PR gate (test + clippy + fmt with a Postgres service) + nightly mutants/fuzz; mirrors `preflight.sh`.
 
 Notes:
-- Tests + mutants need Postgres and `DATABASE_URL` set **at build time** (the suite uses the `sqlx::query!` compile-time macro and `#[sqlx::test]` per-test DBs): `DATABASE_URL=postgres://shawket@localhost:5432/sufrix_dev cargo test --lib`.
-- Fuzz/API-fuzz runs set `SUFRIX_DISABLE_AUTO_TRANSLATION=1` (no outbound Google Translate) and `SUFRIX_DISABLE_RATE_LIMIT=1` (no 429 throttling). **Never set these in production.**
+- Tests + mutants need Postgres and `DATABASE_URL` set **at build time** (the suite uses the `sqlx::query!` compile-time macro and `#[sqlx::test]` per-test DBs): `DATABASE_URL=postgres://shawket@localhost:5432/madar_dev cargo test --lib`.
+- Fuzz/API-fuzz runs set `MADAR_DISABLE_AUTO_TRANSLATION=1` (no outbound Google Translate) and `MADAR_DISABLE_RATE_LIMIT=1` (no 429 throttling). **Never set these in production.**
 - DB-error → HTTP mapping is centralized in `src/errors.rs` (`status_for_sqlstate`): client-caused SQLSTATEs become 4xx, not 500. Keep new handlers leaning on `AppError` so they inherit this.
 
 ## Coding Guidelines
@@ -62,7 +62,7 @@ Notes:
 - `api_dumps/`: Stored OpenAPI and API dump data.
 
 ## Related Projects (Ecosystem)
-When working on API changes or feature implementations, be aware that this backend interacts with other projects in the Sufrix ecosystem. You may need to search or modify code in these directories:
-- **SufrixDashboard**: `/Users/shawket/Desktop/SufrixDashboard` (Frontend Dashboard application)
-- **Sufrix POS**: `/Users/shawket/Desktop/sufrix_pos` (Point of Sale frontend application)
+When working on API changes or feature implementations, be aware that this backend interacts with other projects in the Madar ecosystem. You may need to search or modify code in these directories:
+- **MadarDashboard**: `/Users/shawket/Desktop/MadarDashboard` (Frontend Dashboard application)
+- **Madar POS**: `/Users/shawket/Desktop/madar_pos` (Point of Sale frontend application)
 You can use file read commands or `cd` into these directories to analyze frontend consumption of this backend API.

@@ -11,7 +11,7 @@ Feature modules live in `src/<feature>/`. Each module contains:
 - `handlers.rs` — all logic (models, queries, request/response DTOs, business logic)
 - `routes.rs` — one `configure(cfg: &mut web::ServiceConfig)` function
 
-No workspace crates. All code lives in a single binary crate (`sufrix-rust`).
+No workspace crates. All code lives in a single binary crate (`madar-rust`).
 
 ---
 
@@ -189,7 +189,7 @@ In Rust (discovered by usage): passed as strings in most places (`size_label tex
 
 ## ItemKey Design
 
-The engine prompt specifies `ItemKey { menu_item_id: Uuid, size_label: SizeLabel }`. In Sufrix, items with sizes are represented by:
+The engine prompt specifies `ItemKey { menu_item_id: Uuid, size_label: SizeLabel }`. In Madar, items with sizes are represented by:
 - One row in `menu_items` (the base item)
 - One or more rows in `item_sizes` (size variants with price overrides)
 

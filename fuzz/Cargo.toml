@@ -1,5 +1,5 @@
 [package]
-name = "sufrix-rust-fuzz"
+name = "madar-rust-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
@@ -12,7 +12,7 @@ libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 rust_decimal = "1"
 uuid = { version = "1", features = ["v4"] }
-sufrix-rust = { path = ".." }
+madar-rust = { path = ".." }
 
 # Detach from the parent package so cargo doesn't try to fold fuzz/ into it.
 [workspace]

@@ -1,6 +1,6 @@
-# Sufrix Backend — Cost Engine & Menu Advisor Rebuild
+# Madar Backend — Cost Engine & Menu Advisor Rebuild
 
-**Audience:** the agent working on the Sufrix React dashboard (`React 19, TypeScript, FSD, TanStack Query/Table, shadcn/ui, OpenAPI-generated client`).
+**Audience:** the agent working on the Madar React dashboard (`React 19, TypeScript, FSD, TanStack Query/Table, shadcn/ui, OpenAPI-generated client`).
 **Backend version:** cost-engine rebuild, June 2026. Regenerate the OpenAPI client from the new `openapi.json` before touching any code — every change below is reflected in the spec.
 
 ---

@@ -32,7 +32,7 @@ DATABASE_URL="$FUZZ_DB_URL" sqlx migrate run --source ./migrations >/dev/null
 psql "$FUZZ_DB_URL" -v ON_ERROR_STOP=1 -f scripts/seed_fuzz.sql >/dev/null
 
 echo "▶ build server + mint token"
-cargo build --quiet --bin sufrix-rust --bin fuzz-token
+cargo build --quiet --bin madar-rust --bin fuzz-token
 JWT_SECRET="$JWT_SECRET" ./target/debug/fuzz-token super-admin > restler_work/token.txt
 # RESTler token-refresh contract: a metadata line, then the auth header line(s).
 cat > restler_work/token.sh <<'EOF'
@@ -48,11 +48,11 @@ RUN_DIR="$(mktemp -d)"; mkdir -p "$RUN_DIR/uploads"
 ( cd "$RUN_DIR" && exec env -i PATH="$PATH" HOME="$HOME" \
     DATABASE_URL="$FUZZ_DB_URL" JWT_SECRET="$JWT_SECRET" BIND_ADDR="0.0.0.0:8099" \
     UPLOADS_DIR="$RUN_DIR/uploads" MADAR_DISABLE_RATE_LIMIT=1 MADAR_DISABLE_AUTO_TRANSLATION=1 \
-    "$REPO/target/debug/sufrix-rust" ) > "$RUN_DIR/server.log" 2>&1 &
+    "$REPO/target/debug/madar-rust" ) > "$RUN_DIR/server.log" 2>&1 &
 SRV=$!
 cleanup() {
   kill "$SRV" 2>/dev/null || true
-  pkill -f "target/debug/sufrix-rust" 2>/dev/null || true
+  pkill -f "target/debug/madar-rust" 2>/dev/null || true
   rm -rf "$RUN_DIR"
   psql "$PG_ADMIN" -c "DROP DATABASE IF EXISTS madar_fuzz WITH (FORCE);" >/dev/null 2>&1 || true
 }

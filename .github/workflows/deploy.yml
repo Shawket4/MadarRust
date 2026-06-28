@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE: ghcr.io/shawket4/sufrixrust
+  IMAGE: ghcr.io/shawket4/madarrust
 
 jobs:
   # ── Build Docker image and push to GHCR ─────────────────────────────────────
@@ -73,7 +73,7 @@ jobs:
         run: |
           scp -i ~/.ssh/deploy_key -P ${{ secrets.SSH_PORT }} \
             docker-compose.yml \
-            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/opt/sufrix-rust/docker-compose.yml
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/opt/madar-rust/docker-compose.yml
 
       - name: Pull image and restart backend
         env:
@@ -92,13 +92,13 @@ jobs:
 
           # Restart only the backend — other services keep running
           BACKEND_IMAGE="$DEPLOY_IMAGE" \
-            docker compose -f /opt/sufrix-rust/docker-compose.yml \
-            up -d --no-deps --pull never sufrix-backend
+            docker compose -f /opt/madar-rust/docker-compose.yml \
+            up -d --no-deps --pull never madar-backend
 
           # Verify
           sleep 4
           curl -sf http://127.0.0.1:8081/health && echo "✅ healthy" || {
-            docker compose -f /opt/sufrix-rust/docker-compose.yml logs sufrix-backend --tail 50
+            docker compose -f /opt/madar-rust/docker-compose.yml logs madar-backend --tail 50
             exit 1
           }
           SCRIPT

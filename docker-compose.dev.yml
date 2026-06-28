@@ -9,8 +9,8 @@
 #   - WhatsApp session data stored in ./dev-data/whatsapp/
 
 services:
-  sufrix-backend:
-    image: sufrix-backend:dev
+  madar-backend:
+    image: madar-backend:dev
     build:
       context: .
       args:
@@ -26,10 +26,10 @@ services:
     volumes:
       - ./uploads:/app/uploads
 
-  sufrix-whatsapp:
-    image: sufrix-whatsapp:dev
+  madar-whatsapp:
+    image: madar-whatsapp:dev
     build:
-      context: ../sufrix-whatsapp
+      context: ../madar-whatsapp
     volumes:
       - ./dev-data/whatsapp:/app/data
 

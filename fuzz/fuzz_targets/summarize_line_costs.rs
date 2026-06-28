@@ -5,7 +5,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use sufrix_rust::orders::cost_math::{summarize_line_costs, InventoryDeduction};
+use madar_rust::orders::cost_math::{summarize_line_costs, InventoryDeduction};
 
 const SOURCES: &[&str] =
     &["drink_recipe", "addon", "addon_swap:x", "optional", "bundle_component:y"];

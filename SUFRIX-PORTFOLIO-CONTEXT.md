@@ -1,11 +1,11 @@
-# Sufrix — Portfolio context for `SufrixRust`
+# Madar — Portfolio context for `MadarRust`
 
 ---
 
 ## 1. Repository identity
 
-- **Repo name:** `SufrixRust` (GitHub remote: `https://github.com/shawket4/RueRust.git`)
-- **Role in the system:** Sole HTTP backend for the Sufrix POS platform. Serves a Flutter teller app and a React management dashboard. Acts as the source of truth for the generated `openapi.json` that both clients consume.
+- **Repo name:** `MadarRust` (GitHub remote: `https://github.com/shawket4/RueRust.git`)
+- **Role in the system:** Sole HTTP backend for the Madar POS platform. Serves a Flutter teller app and a React management dashboard. Acts as the source of truth for the generated `openapi.json` that both clients consume.
 - **Primary language(s) with %:** Rust — 100% of production source (82 `.rs` files in `src/`). Utility scripts at repo root are Python/Bash (not counted as production code).
 - **LOC (excluding deps and build output):** 27,340 lines across all `.rs` files in `src/`; 30,165 lines total when `.sql` and `Cargo.toml` are included (measured with `wc -l`).
 - **Source file count by extension:**
@@ -241,7 +241,7 @@ The codebase is structured as a **Rust library crate** (`src/lib.rs`) plus two b
   | `payment_methods` | 5 |
   | `menu_advisor` | not in OpenAPI `paths()` list — served but not documented in `openapi.rs` |
   | `/health` | 1 (anonymous, no auth) |
-  | `/api-docs/openapi.json` + Swagger UI | conditional on `SUFRIX_ENABLE_SWAGGER_UI` env var |
+  | `/api-docs/openapi.json` + Swagger UI | conditional on `MADAR_ENABLE_SWAGGER_UI` env var |
 
 - **Auth model:**
   - Dual-mode login (`POST /auth/login`): email+password for admins/managers, PIN+name for tellers.
@@ -260,7 +260,7 @@ The codebase is structured as a **Rust library crate** (`src/lib.rs`) plus two b
 
 ## 7. Frontend specifics
 
-Not applicable — backend repo. The Flutter teller app and React dashboard are separate codebases. This repo generates `openapi.json` (committed at root, 469 KB) that both clients consume. The `.env` references `UPLOADS_BASE_URL=https://sufrix-pos.ddns.net/api/uploads`.
+Not applicable — backend repo. The Flutter teller app and React dashboard are separate codebases. This repo generates `openapi.json` (committed at root, 469 KB) that both clients consume. The `.env` references `UPLOADS_BASE_URL=https://madar-pos.ddns.net/api/uploads`.
 
 ---
 
@@ -285,7 +285,7 @@ Not applicable — backend repo. The Flutter teller app and React dashboard are 
 |---|---|---|
 | **Google Translate API** (paid v2) | Implemented, active; falls back to free unofficial endpoint if `GOOGLE_TRANSLATE_API_KEY` is unset or placeholder. Supported languages configured via `SUPPORTED_LANGUAGES` env var (default: `en,ar`). | `src/translation.rs` — `ensure_translations()` and `ensure_translations_json()` |
 | **Talabat** (food aggregator) | Referenced only in default payment method seed data: `talabat_online` and `talabat_cash` payment method names (`.env`-seeded labels). No API integration in this repo. | `migrations/20260531130918_dynamic_payment_methods.sql` lines 39–40 |
-| **Let's Encrypt / DDNS** | TLS cert paths referenced in `.env` (commented out): `SSL_CERT_FILE=/etc/letsencrypt/live/sufrix-pos.ddns.net/fullchain.pem`. Server builds TLS config from env vars via `build_tls_config()` in `main.rs`. | `src/main.rs` lines 128–165 |
+| **Let's Encrypt / DDNS** | TLS cert paths referenced in `.env` (commented out): `SSL_CERT_FILE=/etc/letsencrypt/live/madar-pos.ddns.net/fullchain.pem`. Server builds TLS config from env vars via `build_tls_config()` in `main.rs`. | `src/main.rs` lines 128–165 |
 
 ---
 
@@ -303,7 +303,7 @@ Not applicable — backend repo. The Flutter teller app and React dashboard are 
   6. Package binary into `deployment.tar.gz`
   7. SSH keyscan + key setup from `secrets.SSH_PRIVATE_KEY`, `secrets.SSH_KNOWN_HOSTS`
   8. `scp` tarball to `$SSH_HOST:/tmp/`
-  9. Remote SSH: stop `sufrix-rust` systemd service → extract binary to `/opt/sufrix-rust/` → backup previous binary to `/opt/sufrix-rust/backups/` (keeps last 5) → `systemctl start sufrix-rust` → print status
+  9. Remote SSH: stop `madar-rust` systemd service → extract binary to `/opt/madar-rust/` → backup previous binary to `/opt/madar-rust/backups/` (keeps last 5) → `systemctl start madar-rust` → print status
 - **Target:** A single VPS (SSH host configured via GitHub secret `SSH_HOST`)
 - **Mechanism:** Binary replacement via SCP + systemd service restart
 - **Environments:** One production environment (no staging environment visible in workflow)
@@ -384,7 +384,7 @@ Client sends `Idempotency-Key: <uuid>` header; duplicate network retries return 
 When a customer changes milk type or coffee type via an addon, the engine replaces the base recipe ingredient in the deduction list rather than doubling it. The swap logic uses ingredient `category` (`milk`, `coffee_bean`) to identify base vs. replacement, and recalculates the addon's price delta vs. the base addon's price.
 
 ### 5. Library crate / binary separation (`src/lib.rs`, `src/main.rs`, `src/bin/export_openapi.rs`)
-The entire app lives in a library crate (`sufrix_rust`). Both `src/main.rs` (HTTP server) and `src/bin/export_openapi.rs` (offline OpenAPI exporter) depend on the library. This means `cargo run --bin export-openapi` regenerates `openapi.json` without starting the server — the committed `openapi.json` (469 KB) at root is the artifact from this exporter.
+The entire app lives in a library crate (`madar_rust`). Both `src/main.rs` (HTTP server) and `src/bin/export_openapi.rs` (offline OpenAPI exporter) depend on the library. This means `cargo run --bin export-openapi` regenerates `openapi.json` without starting the server — the committed `openapi.json` (469 KB) at root is the artifact from this exporter.
 
 ---
 
@@ -398,7 +398,7 @@ The entire app lives in a library crate (`sufrix_rust`). Both `src/main.rs` (HTT
 
 - **Comprehensive integration tests:** 142 `#[sqlx::test]` functions covering auth, multi-tenancy boundaries, inventory lifecycle, shift reconciliation, and menu advisor promotion workflow. Tests hit real PostgreSQL with isolated per-test databases.
 
-- **OpenAPI-first documentation:** Every production handler is annotated with `#[utoipa::path]` and registered in `src/openapi.rs`. The `export-openapi` binary generates a self-consistent spec. Swagger UI is feature-flagged for dev/staging via `SUFRIX_ENABLE_SWAGGER_UI=true` and explicitly disabled in production.
+- **OpenAPI-first documentation:** Every production handler is annotated with `#[utoipa::path]` and registered in `src/openapi.rs`. The `export-openapi` binary generates a self-consistent spec. Swagger UI is feature-flagged for dev/staging via `MADAR_ENABLE_SWAGGER_UI=true` and explicitly disabled in production.
 
 ---
 
@@ -418,10 +418,10 @@ The entire app lives in a library crate (`sufrix_rust`). Both `src/main.rs` (HTT
 
 ## 17. Production deployments
 
-- **Deployment target:** A VPS at `sufrix-pos.ddns.net` (from `.env`: `UPLOADS_BASE_URL=https://sufrix-pos.ddns.net/api/uploads`)
-- **Production server URL declared in OpenAPI spec:** `https://api.sufrix.app` (`src/openapi.rs` line 33)
-- **Service name on VPS:** `sufrix-rust` (systemd unit, from deploy script)
-- **Install path on VPS:** `/opt/sufrix-rust/sufrix-rust`
+- **Deployment target:** A VPS at `madar-pos.ddns.net` (from `.env`: `UPLOADS_BASE_URL=https://madar-pos.ddns.net/api/uploads`)
+- **Production server URL declared in OpenAPI spec:** `https://api.madar.app` (`src/openapi.rs` line 33)
+- **Service name on VPS:** `madar-rust` (systemd unit, from deploy script)
+- **Install path on VPS:** `/opt/madar-rust/madar-rust`
 - **HTTP port:** `0.0.0.0:8081` (from `.env` `BIND_ADDR`)
 - **HTTPS port:** TLS cert paths commented out in `.env` — HTTPS may not be active locally, served via nginx reverse proxy based on DDNS domain
 - **No git tags marking release versions are visible** (not checked; `git rev-list --all --count` = 133 with no tag references shown)

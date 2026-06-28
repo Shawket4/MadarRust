@@ -694,7 +694,7 @@ async fn text_field(field: &mut actix_multipart::Field) -> Result<Option<String>
 pub struct PublicOrg {
     #[schema(example = "The Rue")]
     pub name: String,
-    #[schema(nullable, example = "https://sufrix-pos.ddns.net/api/uploads/logos/123.png")]
+    #[schema(nullable, example = "https://madar-pos.cloud/api/uploads/logos/123.png")]
     pub logo_url: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     #[schema(example = 5)]

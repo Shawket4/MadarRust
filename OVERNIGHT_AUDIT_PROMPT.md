@@ -1,7 +1,7 @@
-# Overnight autonomous audit — Sufrix ecosystem (backend + POS + dashboard)
+# Overnight autonomous audit — Madar ecosystem (backend + POS + dashboard)
 
 You are running **unattended for ~8 hours in auto mode** with a large usage budget. Your job is an
-**exhaustive bug-and-edge-case audit, with fixes and intensive tests**, across all three Sufrix
+**exhaustive bug-and-edge-case audit, with fixes and intensive tests**, across all three Madar
 repos. **Token cost is not a constraint — favor exhaustiveness.** You are explicitly authorized to
 **orchestrate many subagents in parallel** (use the Workflow tool and/or many Agent calls) and to
 loop until findings dry up.
@@ -17,45 +17,45 @@ loop until findings dry up.
   leave a suite red. If you can't fix something safely, **revert your change and log the finding.**
 
 ## 🔴 SAFETY — non-negotiable
-- **PRODUCTION DB must never be touched.** Prod is `postgres://sufrix:…@100.101.100.57:5432/sufrix`.
+- **PRODUCTION DB must never be touched.** Prod is `postgres://madar:…@100.101.100.57:5432/madar`.
   The backend `.env` `DATABASE_URL` points at **prod** — so **always override `DATABASE_URL`**
   explicitly for every command. NEVER run migrations, backfills, writes, or even casual connections
   against `100.101.100.57`. Do not `sqlx migrate run` against prod. If a command would inherit `.env`,
   override the URL first.
-- **Use the dev DB for everything runtime.** Dev = `postgres://sufrix:REDACTED@localhost:5433/sufrix_dev`
+- **Use the dev DB for everything runtime.** Dev = `postgres://madar:${DB_PASSWORD}@localhost:5433/madar_dev`
   (PostgreSQL 17, a real prod copy, already migrated to latest). It's disposable — safe to read/write.
   - If dev PG isn't running:
-    `/opt/homebrew/opt/postgresql@17/bin/pg_ctl -D ~/sufrix_dev_pg17 -o "-p 5433" -l ~/sufrix_dev_pg17/server.log start`
+    `/opt/homebrew/opt/postgresql@17/bin/pg_ctl -D ~/madar_dev_pg17 -o "-p 5433" -l ~/madar_dev_pg17/server.log start`
 - **Backend unit/integration tests** use a separate **superuser** Postgres (`#[sqlx::test]` builds
   ephemeral DBs from `./migrations`): run with
-  `DATABASE_URL=postgres://postgres@localhost:5432/sufrix_local cargo test`.
+  `DATABASE_URL=postgres://postgres@localhost:5432/madar_local cargo test`.
 - Do **not** push, tag, or touch `origin`/`main` on any repo. Commit only to a local audit branch
   (see Git workflow).
 
 ## Repos & stacks
-1. **Backend** `/Users/shawket/Desktop/SufrixRust` — Rust, Actix-Web 4, SQLx 0.7, Postgres, utoipa
+1. **Backend** `/Users/shawket/Desktop/MadarRust` — Rust, Actix-Web 4, SQLx 0.7, Postgres, utoipa
    OpenAPI, `rust_decimal`/`BigDecimal`. Tests: `#[sqlx::test]` per-module `tests.rs` + `src/e2e_tests.rs`.
    The working tree currently has a large **uncommitted** inventory overhaul + shift/unit fixes —
    audit the working-tree state as-is.
-2. **POS** `/Users/shawket/Desktop/sufrix_pos` — Flutter, Riverpod, dio. Generated API package
-   `packages/sufrix_api` (regenerate via `tool/generate_api.sh`). Tests: `flutter test`. Hand-written
+2. **POS** `/Users/shawket/Desktop/madar_pos` — Flutter, Riverpod, dio. Generated API package
+   `packages/madar_api` (regenerate via `tool/generate_api.sh`). Tests: `flutter test`. Hand-written
    models facade over the generated package in `lib/core/models/`.
-3. **Dashboard** `/Users/shawket/Desktop/SufrixDashboard` — React 19 + Vite + TS, TanStack Query,
-   Zustand, Orval-generated client (`npm run generate:api`, reads `../SufrixRust/openapi.json`),
+3. **Dashboard** `/Users/shawket/Desktop/MadarDashboard` — React 19 + Vite + TS, TanStack Query,
+   Zustand, Orval-generated client (`npm run generate:api`, reads `../MadarRust/openapi.json`),
    Vitest + React Testing Library + MSW, Tailwind/Radix, i18next (en/ar, RTL).
 
 ## Environment setup (do this first)
-1. Ensure dev PG is up (above). Build the backend: `cd /Users/shawket/Desktop/SufrixRust && cargo build`.
+1. Ensure dev PG is up (above). Build the backend: `cd /Users/shawket/Desktop/MadarRust && cargo build`.
 2. Run the dev backend at **:8081** for any frontend↔backend / live testing (routes serve at **ROOT**,
    no `/api` prefix — that prefix is prod's nginx):
    ```
-   cd /Users/shawket/Desktop/SufrixRust && \
-   DATABASE_URL='postgres://sufrix:REDACTED@localhost:5433/sufrix_dev' \
-   BIND_ADDR='0.0.0.0:8081' ./target/debug/sufrix-rust
+   cd /Users/shawket/Desktop/MadarRust && \
+   DATABASE_URL='postgres://madar:${DB_PASSWORD}@localhost:5433/madar_dev' \
+   BIND_ADDR='0.0.0.0:8081' ./target/debug/madar-rust
    ```
    Swagger/OpenAPI: `http://localhost:8081/api-docs/swagger-ui/`.
 3. **Point BOTH frontends at the local dev backend** (`http://localhost:8081`, **NO `/api` suffix**):
-   - POS: `/Users/shawket/Desktop/sufrix_pos/lib/core/config/api_config.dart` — set
+   - POS: `/Users/shawket/Desktop/madar_pos/lib/core/config/api_config.dart` — set
      `kApiBaseUrl = 'http://localhost:8081'` (there's already a commented localhost line; the active
      line is the duckdns prod URL — swap it).
    - Dashboard: find the runtime API base (grep `duckdns`, `baseURL`, `VITE_`, `/api` under
@@ -64,12 +64,12 @@ loop until findings dry up.
      ship them. Note the original prod URLs so they can be restored.
 
 ## Test / build / lint commands
-- **Backend:** `DATABASE_URL=postgres://postgres@localhost:5432/sufrix_local cargo test`
+- **Backend:** `DATABASE_URL=postgres://postgres@localhost:5432/madar_local cargo test`
   (and `cargo build` / `cargo run --bin export-openapi` if a contract changes). `cargo clippy` optional.
 - **POS:** `flutter pub get`; `flutter analyze`; `flutter test`. Note: `flutter analyze` does **not**
-  compile `packages/sufrix_api` internals — catch compiler-only errors with `flutter build bundle`
-  (Dart CFE) and `dart analyze packages/sufrix_api/lib`. Regenerate the client only if the backend
-  contract changed: `OPENAPI_SPEC=/Users/shawket/Desktop/SufrixRust/openapi.json bash tool/generate_api.sh`.
+  compile `packages/madar_api` internals — catch compiler-only errors with `flutter build bundle`
+  (Dart CFE) and `dart analyze packages/madar_api/lib`. Regenerate the client only if the backend
+  contract changed: `OPENAPI_SPEC=/Users/shawket/Desktop/MadarRust/openapi.json bash tool/generate_api.sh`.
 - **Dashboard:** `npm install` (if needed); `npm run lint`; `npm run test` (Vitest); `npm run build`
   (typecheck+build). Regenerate client if contract changed: `npm run generate:api`.
 

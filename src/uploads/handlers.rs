@@ -214,7 +214,7 @@ pub fn extract_relative_path(url: &str) -> &str {
 }
 
 pub fn normalize_upload_url(url: &str) -> String {
-    let base_url = std::env::var("UPLOADS_BASE_URL").unwrap_or_else(|_| "https://sufrix-pos.ddns.net/api/uploads".to_string());
+    let base_url = std::env::var("UPLOADS_BASE_URL").unwrap_or_else(|_| "https://madar-pos.cloud/api/uploads".to_string());
     let base = base_url.trim_end_matches('/');
     let rel = extract_relative_path(url);
     format!("{}/{}", base, rel)

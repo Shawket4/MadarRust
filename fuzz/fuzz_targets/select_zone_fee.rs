@@ -4,7 +4,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use sufrix_rust::delivery::public::{select_zone_fee, FeeOutcome, ZoneRow};
+use madar_rust::delivery::public::{select_zone_fee, FeeOutcome, ZoneRow};
 use uuid::Uuid;
 
 fuzz_target!(|data: &[u8]| {

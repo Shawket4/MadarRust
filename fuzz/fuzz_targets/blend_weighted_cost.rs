@@ -6,7 +6,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use rust_decimal::Decimal;
-use sufrix_rust::costing::blend_weighted_cost;
+use madar_rust::costing::blend_weighted_cost;
 
 fn arb_decimal(u: &mut Unstructured) -> Option<Decimal> {
     // Bound the magnitude to the real cost/quantity domain. `cost_per_unit` is

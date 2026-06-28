@@ -6,7 +6,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use sufrix_rust::geo::osrm::{haversine_meters, LatLng};
+use madar_rust::geo::osrm::{haversine_meters, LatLng};
 
 const MAX_DIST: f64 = std::f64::consts::PI * 6_371_000.0; // half Earth circumference
 

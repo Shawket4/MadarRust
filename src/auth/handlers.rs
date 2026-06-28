@@ -277,7 +277,7 @@ pub async fn login(
 
     // (2) [removed for multi-teller] A branch may now hold several tellers' open
     //     shifts at once — one per till — so signing in alongside another teller's
-    //     live shift is allowed. The previous `X-Sufrix-Closing-Shifts` handover
+    //     live shift is allowed. The previous `X-Madar-Closing-Shifts` handover
     //     handshake is no longer needed (a closing shift simply replays its close).
 
     // Tellers, waiters AND kitchen users are device-bound (PIN) and branch-bound;

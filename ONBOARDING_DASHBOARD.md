@@ -1,6 +1,6 @@
-# Sufrix Dashboard — Organization Onboarding Experience
+# Madar Dashboard — Organization Onboarding Experience
 
-**Audience:** the agent working on the Sufrix React dashboard (`React 19, TypeScript, FSD, TanStack Query, shadcn/ui, react-router, OpenAPI-generated client`).
+**Audience:** the agent working on the Madar React dashboard (`React 19, TypeScript, FSD, TanStack Query, shadcn/ui, react-router, OpenAPI-generated client`).
 **Backend version:** includes the onboarding endpoints (regenerate the client from the new `openapi.json` first — operations live under the `orgs` tag).
 **Goal:** a new organization signs in for the first time and is walked through setting up everything needed to take their first order — then never sees the wizard again.
 
@@ -73,7 +73,7 @@ A single route `/onboarding` with an internal stepper (URL-synced via `?step=` s
 - **Branch (1):** single branch form. After create, show the success state with the branch card and "Add another / Continue".
 - **Payments (2):** the payment-methods list pre-seeded by the backend (cash etc.) — the step is about toggling/adding, so `done` is usually already true; frame it as confirmation: "These are on. Add card / wallet methods if you take them."
 - **Menu (3):** two-pane: categories left, items right (same components as the menu screen). Gate "Continue" on ≥1 category AND ≥1 active item (mirror the server's logic; the authoritative check is the refetched `steps`). Offer a "common café starter" hint but no fake data injection.
-- **Costs (4):** this is the cost-engine on-ramp — sell it: "Add ingredient costs and Sufrix computes profit per item, classifies your menu, and suggests prices." Show `recipe_coverage` as a live progress ring. Skippable with one click; never guilt-block.
+- **Costs (4):** this is the cost-engine on-ramp — sell it: "Add ingredient costs and Madar computes profit per item, classifies your menu, and suggests prices." Show `recipe_coverage` as a live progress ring. Skippable with one click; never guilt-block.
 - **Addons (5) / Team (6):** thin wrappers over existing managers, both skippable.
 - **Review (7):** render the `steps` array as a checklist (done = green check, optional-undone = gray "later"), the recipe-coverage ring, and the **Finish** button bound to `can_complete`. On click → `POST …/complete` → confetti-light success → route to overview. If `can_complete` is false, the button is disabled with "Finish requires: <missing required steps>" and each missing item deep-links back to its step.
 

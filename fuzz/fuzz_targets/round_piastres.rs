@@ -6,7 +6,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use rust_decimal::Decimal;
-use sufrix_rust::costing::round_piastres;
+use madar_rust::costing::round_piastres;
 
 fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);

@@ -2,7 +2,7 @@
 
 Brings **production** from its current head (`20260612130000`) to `20260613011000`, deploys the
 new backend binary, and regenerates the API clients. Every migration is additive/data-preserving.
-Validated end-to-end on `sufrix_dev` (a fresh prod copy): all 286 lib tests pass and the full
+Validated end-to-end on `madar_dev` (a fresh prod copy): all 286 lib tests pass and the full
 migration chain applies cleanly.
 
 > 🔴 `.env` `DATABASE_URL` points at **PROD**. The migrate step is the only time prod is written.
@@ -12,9 +12,9 @@ migration chain applies cleanly.
 > 🔴🔴 **CLIENT LOCKSTEP — the current POS build will BREAK against this backend.** This release
 > bundles the inventory overhaul, which **removed `display_order`** from 8 entities (categories,
 > menu items, item sizes, addon items, addon slots, optional fields, bundles, payment methods).
-> The POS's generated `sufrix_api` (built_value) marks `display_order` **required**, so the missing
+> The POS's generated `madar_api` (built_value) marks `display_order` **required**, so the missing
 > field throws on deserialize → **menu/categories/addons/bundles/payment-methods fail to load → the
-> POS cannot sell.** You **must** ship a new POS build (regenerated `sufrix_api` from the new
+> POS cannot sell.** You **must** ship a new POS build (regenerated `madar_api` from the new
 > `openapi.json`, + the login/branch changes) **in lockstep** with this deploy — do not deploy the
 > backend to prod while tills run the old build. The **dashboard** (React/Orval/TS) does *not* hard-
 > break (TS is compile-time; stale fields are just `undefined` at runtime) — it works but should be
@@ -24,9 +24,9 @@ migration chain applies cleanly.
 
 ## 0. Backup (mandatory)
 ```
-PROD='postgres://sufrix:<PWD>@100.101.100.57:5432/sufrix'
+PROD='postgres://madar:<PWD>@100.101.100.57:5432/madar'
 /opt/homebrew/opt/postgresql@17/bin/pg_dump "$PROD" --no-owner --no-privileges -Fc \
-  -f sufrix_prod_pre_deploy_$(date +%Y%m%d_%H%M).dump
+  -f madar_prod_pre_deploy_$(date +%Y%m%d_%H%M).dump
 ```
 
 ## 1. Verify head
@@ -51,9 +51,9 @@ For each, close the **extra** shift(s) deliberately — keep the one the teller 
 Re-run the query until it returns nothing.
 
 ## 3. Apply migrations (the prod write)
-From the repo root (`/Users/shawket/Desktop/SufrixRust`):
+From the repo root (`/Users/shawket/Desktop/MadarRust`):
 ```
-cd /Users/shawket/Desktop/SufrixRust
+cd /Users/shawket/Desktop/MadarRust
 DATABASE_URL="$PROD" ~/.cargo/bin/sqlx migrate run
 ```
 Applies, in order:
@@ -86,9 +86,9 @@ Build and ship the binary from this repo (it expects the new schema — deploy i
 migrations, not before). The OpenAPI spec (`openapi.json`, 702 KB) is current.
 
 ## 6. Regenerate API clients
-- **Dashboard:** `npm run generate:api` (Orval, reads `../SufrixRust/openapi.json`). See
-  `SufrixDashboard/INVENTORY_FRONTEND_HANDOFF.md` and `SufrixDashboard/SHIFT_AUTH_FIX_HANDOFF.md`.
-- **POS (MANDATORY — old build breaks):** regenerate the `sufrix_api` dart package from the new
+- **Dashboard:** `npm run generate:api` (Orval, reads `../MadarRust/openapi.json`). See
+  `MadarDashboard/INVENTORY_FRONTEND_HANDOFF.md` and `MadarDashboard/SHIFT_AUTH_FIX_HANDOFF.md`.
+- **POS (MANDATORY — old build breaks):** regenerate the `madar_api` dart package from the new
   `openapi.json` (`tool/codegen.sh` / `tool/generate_api.sh`), then rebuild and release the app.
   Regeneration drops the now-removed `display_order` from the models (so it's no longer required) and
   adds the new inventory models. The login error-state + fetched-branch-name changes ship in the same

@@ -1,6 +1,6 @@
-You have read access to the Sufrix backend codebase and database schema. Your job is to
+You have read access to the Madar backend codebase and database schema. Your job is to
 produce an implementation plan for integrating Talabat as a fully operational channel, where
-Sufrix becomes the control surface and the Talabat merchant dashboard is bypassed entirely.
+Madar becomes the control surface and the Talabat merchant dashboard is bypassed entirely.
 Investigate the actual code — do not give generic advice. Cite real files, models, and paths.
 
 === TREAT THIS AS GIVEN (Talabat = Delivery Hero POS Middleware) ===

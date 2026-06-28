@@ -1,6 +1,6 @@
-# Sufrix POS — Agent Implementation Prompt
+# Madar POS — Agent Implementation Prompt
 
-**Working directory:** `/Users/shawket/Desktop/sufrix_pos`
+**Working directory:** `/Users/shawket/Desktop/madar_pos`
 **Backend:** Already complete — zero backend changes required.
 **Goal:** Implement device setup flow (one-time manager login → branch selection) so teller PIN login can include the required `branch_id`, plus handle two new API behaviours.
 

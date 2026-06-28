@@ -25,12 +25,12 @@ use utoipa::{
                    The Rust backend is the source of truth for this spec; \
                    the Flutter teller app and React management dashboard \
                    consume the generated openapi.json.",
-    contact(name = "Madar", url = "https://sufrix.app"),
+    contact(name = "Madar", url = "https://madar-pos.cloud"),
     license(name = "Proprietary", identifier = "LicenseRef-Madar-Proprietary")
 ),
     servers(
         (url = "http://localhost:8080", description = "Local development"),
-        (url = "https://api.sufrix.app", description = "Production")
+        (url = "https://api.madar-pos.cloud", description = "Production")
     ),
     modifiers(&SecurityAddon),
     tags(

@@ -17,7 +17,7 @@ reality is cleaner and better:
   `makeComingSoon(...)`. There is **no `src/features/inventory/` directory** and **zero inventory
   feature components**. This is greenfield, not repair.
 - **The Orval client is already regenerated** against the new backend spec
-  (`orval.config.ts` reads `../SufrixRust/openapi.json` directly). Every new hook already exists:
+  (`orval.config.ts` reads `../MadarRust/openapi.json` directly). Every new hook already exists:
   stocktakes, waste, movements, purchasing, inventory reports. No regen needed to start.
 - **The breaking changes are already absorbed.** Close-shift no longer sends `inventory_counts`
   (`src/features/shifts/close-shift-dialog.tsx`); the void dialog already sends `reason` + `note`

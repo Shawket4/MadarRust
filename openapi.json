@@ -5,7 +5,7 @@
     "description": "Madar POS — multi-tenant cafe and restaurant management. The Rust backend is the source of truth for this spec; the Flutter teller app and React management dashboard consume the generated openapi.json.",
     "contact": {
       "name": "Madar",
-      "url": "https://sufrix.app"
+      "url": "https://madar-pos.cloud"
     },
     "license": {
       "name": "Proprietary",
@@ -19,7 +19,7 @@
       "description": "Local development"
     },
     {
-      "url": "https://api.sufrix.app",
+      "url": "https://api.madar-pos.cloud",
       "description": "Production"
     }
   ],
@@ -35911,7 +35911,7 @@
               "string",
               "null"
             ],
-            "example": "https://sufrix-pos.ddns.net/api/uploads/logos/123.png"
+            "example": "https://madar-pos.cloud/api/uploads/logos/123.png"
           },
           "name": {
             "type": "string",

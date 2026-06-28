@@ -2,19 +2,19 @@
 
 > Brings **prod** from head `20260612130000` to `20260614030000` — **13 pending migrations** — plus
 > two required backfills, then deploys the new backend and clients. **Fully rehearsed** on
-> `sufrix_dev`, a fresh prod-data copy taken 2026‑06‑14 (2015 orders, 293 shifts, 8 branches, 4 orgs):
+> `madar_dev`, a fresh prod-data copy taken 2026‑06‑14 (2015 orders, 293 shifts, 8 branches, 4 orgs):
 > all 13 migrations apply, both backfills run clean (0 cross-family recipes, 0 duplicate refs), and
 > the 330‑test suite is green on the result.
 >
 > 🔴 Read **§0 Safety** before running anything. Prod is PG 17.10; reachable at
-> `100.101.100.57:5432/sufrix` over Tailscale (`srv1460366`).
+> `100.101.100.57:5432/madar` over Tailscale (`srv1460366`).
 
 ```bash
 # Used throughout. The migrate/backfill steps are the ONLY writes to prod.
-PROD='postgres://sufrix:<PWD>@100.101.100.57:5432/sufrix'
+PROD='postgres://madar:<PWD>@100.101.100.57:5432/madar'
 BIN=/opt/homebrew/opt/postgresql@17/bin     # pg_dump/psql/pg_restore 17.x
 SQLX=~/.cargo/bin/sqlx
-cd /Users/shawket/Desktop/SufrixRust         # so sqlx reads ./migrations
+cd /Users/shawket/Desktop/MadarRust         # so sqlx reads ./migrations
 ```
 
 ---
@@ -73,12 +73,12 @@ done
 ### 2a. Back up prod
 ```bash
 $BIN/pg_dump "$PROD" --no-owner --no-privileges -Fc \
-  -f sufrix_prod_pre_release_$(date +%Y%m%d_%H%M).dump
+  -f madar_prod_pre_release_$(date +%Y%m%d_%H%M).dump
 ```
 
 ### 2b. Stop the backend (POS drops to offline mode)
 ```bash
-ssh <vps> 'sudo systemctl stop sufrix-rust'
+ssh <vps> 'sudo systemctl stop madar-rust'
 ```
 
 ### 2c. Migrations — phase 1 (applies 12, then the order_ref guard stops it — THIS IS EXPECTED)
@@ -114,11 +114,11 @@ $BIN/psql "$PROD" -tAc "SELECT version FROM _sqlx_migrations WHERE success ORDER
 ### 2f. Deploy the new backend & bring it up on the migrated schema
 Merge `audit/overnight` → `main`; CI builds and runs its deploy step (`systemctl stop` → swap binary →
 `start`). Because migrations are already applied, the new binary starts on the correct schema.
-*(Shorter window alternative: pre‑build the artifact, `scp` it to `/opt/sufrix-rust/sufrix-rust`, then
-`sudo systemctl start sufrix-rust` — skips the CI build wait.)*
+*(Shorter window alternative: pre‑build the artifact, `scp` it to `/opt/madar-rust/madar-rust`, then
+`sudo systemctl start madar-rust` — skips the CI build wait.)*
 
 ### 2g. Ship clients (lockstep)
-- **POS:** install the new build on every till (regenerated `sufrix_api`; order_ref shown, shift‑open
+- **POS:** install the new build on every till (regenerated `madar_api`; order_ref shown, shift‑open
   reason flow, void/inventory contract). Tills sync their offline queue once they hit the new backend.
 - **Dashboard:** deploy the new build (`npm run generate:api` already done in repo; order_ref replaces
   the order number, shift opening‑edit flag).
@@ -142,7 +142,7 @@ Confirm a fresh POS sync drains the offline queue.
 
 ## 4. Rollback
 Migrations are forward‑only (phase 1 has the two drops). To revert: restore the §2a dump
-(`pg_restore`) and redeploy the previous binary (kept in `/opt/sufrix-rust/backups/`). If only phase 2
+(`pg_restore`) and redeploy the previous binary (kept in `/opt/madar-rust/backups/`). If only phase 2
 misbehaves, it's safe to **defer** it: the new binary reads `order_ref` as nullable, so the system runs
 without the UNIQUE/NOT NULL constraint until you re‑run `sqlx migrate run`.
 
@@ -155,6 +155,6 @@ without the UNIQUE/NOT NULL constraint until you re‑run `sqlx migrate run`.
 one_open_shift_per_teller · `20260614000000` one_open_stocktake_per_branch · `…010000`
 payment_is_cash_snapshot · `…020000` **order_ref (phase 1)** · `…030000` **order_ref_finalize (phase 2)**.
 
-Rehearsal (sufrix_dev, fresh prod copy): all 12 phase‑1 migrations <100 ms total; recipe‑units 0
+Rehearsal (madar_dev, fresh prod copy): all 12 phase‑1 migrations <100 ms total; recipe‑units 0
 cross‑family / 1 convertible; order‑ref 2015 orders / 201 groups / **0 dupes**; phase‑2 applied in
 ~5 ms; `cargo test` → **330 passed**.

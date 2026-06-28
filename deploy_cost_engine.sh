@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════
-# Sufrix cost-engine deploy — run ON THE VPS from the repo root.
+# Madar cost-engine deploy — run ON THE VPS from the repo root.
 #
-#   ./deploy_cost_engine.sh "postgres://user:pass@localhost:5432/sufrix"
+#   ./deploy_cost_engine.sh "postgres://user:pass@localhost:5432/madar"
 #   (or export DATABASE_URL and run with no args)
 #
 # What it does, in order:
@@ -37,7 +37,7 @@ COST_MIG="$MIG_DIR/20260610090000_cost_engine.sql"
 [ -f "$COST_MIG" ] || { echo "missing $COST_MIG — run from the repo root" >&2; exit 1; }
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
-BACKUP="$SCRIPT_DIR/sufrix_pre_cost_engine_${STAMP}.dump"
+BACKUP="$SCRIPT_DIR/madar_pre_cost_engine_${STAMP}.dump"
 
 echo "── 1/3 backup → $BACKUP"
 pg_dump "$DB" -Fc -f "$BACKUP"

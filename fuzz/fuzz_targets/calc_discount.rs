@@ -8,7 +8,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use sufrix_rust::discounts::handlers::calc_discount;
+use madar_rust::discounts::handlers::calc_discount;
 
 fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
