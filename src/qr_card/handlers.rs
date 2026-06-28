@@ -111,27 +111,28 @@ fn render_data_url(short_url: &str, q: &QrRenderQuery) -> Result<String, AppErro
     Ok(format!("data:image/png;base64,{}", B64.encode(&png)))
 }
 
-/// Build `{PUBLIC_ORDER_BASE_URL}/order/{org_id}?branch={branch_id}`.
-/// The dashboard route is `/order/$orgId` — org lives in the path segment.
+/// Build `{PUBLIC_ORDER_BASE_URL}/{org_id}/{branch_id}`.
+/// The ordering app lives on its own origin (e.g. order.madar-pos.cloud); org and
+/// branch are path segments: `/{orgId}/{branchId}`.
 fn branch_order_url(org_id: Uuid, branch_id: Uuid) -> Result<String, AppError> {
     let base = std::env::var("PUBLIC_ORDER_BASE_URL").map_err(|_| {
         AppError::ServiceUnavailable("PUBLIC_ORDER_BASE_URL not configured".into())
     })?;
     Ok(format!(
-        "{}/order/{}?branch={}",
+        "{}/{}/{}",
         base.trim_end_matches('/'),
         org_id,
         branch_id
     ))
 }
 
-/// Build `{PUBLIC_ORDER_BASE_URL}/order/{org_id}?branch={b}&table={t}`.
+/// Build `{PUBLIC_ORDER_BASE_URL}/{org_id}/{branch_id}?table={t}`.
 fn table_order_url(org_id: Uuid, branch_id: Uuid, table_id: Uuid) -> Result<String, AppError> {
     let base = std::env::var("PUBLIC_ORDER_BASE_URL").map_err(|_| {
         AppError::ServiceUnavailable("PUBLIC_ORDER_BASE_URL not configured".into())
     })?;
     Ok(format!(
-        "{}/order/{}?branch={}&table={}",
+        "{}/{}/{}?table={}",
         base.trim_end_matches('/'),
         org_id,
         branch_id,
@@ -168,7 +169,7 @@ fn marketing_url(path: &str) -> Result<String, AppError> {
     Ok(format!("{}{}", base.trim_end_matches('/'), path))
 }
 
-/// Build `{base}/order/{org_id}?branch={b}&channel=in_mall&place_name={p}&floor={f}&unit_number={u}`.
+/// Build `{base}/{org_id}/{b}?channel=in_mall&place_name={p}&floor={f}&unit_number={u}`.
 fn in_mall_order_url(org_id: Uuid, branch_id: Uuid, place_name: &str, floor: &str, unit_number: &str) -> Result<String, AppError> {
     let base = std::env::var("PUBLIC_ORDER_BASE_URL").map_err(|_| {
         AppError::ServiceUnavailable("PUBLIC_ORDER_BASE_URL not configured".into())
@@ -177,18 +178,18 @@ fn in_mall_order_url(org_id: Uuid, branch_id: Uuid, place_name: &str, floor: &st
     let f = urlencoding::encode(floor);
     let u = urlencoding::encode(unit_number);
     Ok(format!(
-        "{}/order/{}?branch={}&channel=in_mall&place_name={}&floor={}&unit_number={}",
+        "{}/{}/{}?channel=in_mall&place_name={}&floor={}&unit_number={}",
         base.trim_end_matches('/'), org_id, branch_id, p, f, u
     ))
 }
 
-/// Build `{base}/order/{org_id}` — org-wide branch picker.
+/// Build `{base}/{org_id}` — org-wide branch picker.
 /// Org is the path segment; no branch pre-selection so the customer sees the picker.
 fn org_order_url(org_id: Uuid) -> Result<String, AppError> {
     let base = std::env::var("PUBLIC_ORDER_BASE_URL").map_err(|_| {
         AppError::ServiceUnavailable("PUBLIC_ORDER_BASE_URL not configured".into())
     })?;
-    Ok(format!("{}/order/{}", base.trim_end_matches('/'), org_id))
+    Ok(format!("{}/{}", base.trim_end_matches('/'), org_id))
 }
 
 /// Fetch the branch, checking it belongs to the caller's org.

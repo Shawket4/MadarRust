@@ -505,8 +505,9 @@ mod http {
         assert_eq!(resp.status(), 200, "org QR should succeed");
         let qr: QrResponse = test::read_body_json(resp).await;
         assert_eq!(qr.kind, "org_order");
-        // org_id must be in the path segment, not a query param
-        assert!(qr.long_url.contains(&format!("/order/{}", org_id)), "long_url must use /order/<org_id> path");
+        // org_id is the trailing path segment on the ordering origin: {base}/<org_id>
+        assert!(qr.long_url.ends_with(&format!("/{}", org_id)), "org long_url must end with /<org_id>; got: {}", qr.long_url);
+        assert!(!qr.long_url.contains("/order/"), "ordering moved to its own origin — no /order/ prefix");
         assert!(!qr.short_url.is_empty());
         assert!(qr.qr_data_url.starts_with("data:image/"));
     }
