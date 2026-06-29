@@ -1,9 +1,15 @@
 use actix_web::web;
+use sqlx::PgPool;
 use crate::{auth::middleware::JwtMiddleware, reports::handlers};
 
-pub fn configure(cfg: &mut web::ServiceConfig) {
+/// `read_pool` overrides the app-wide write pool for THIS scope only: every reports
+/// handler extracts `web::Data<PgPool>`, and actix resolves scope-level `app_data`
+/// ahead of app-level, so they all run against the read replica (when
+/// `READ_DATABASE_URL` is set) with zero per-handler changes. Reports are read-only.
+pub fn configure(cfg: &mut web::ServiceConfig, read_pool: web::Data<PgPool>) {
     cfg.service(
         web::scope("/reports")
+            .app_data(read_pool)
             .wrap(JwtMiddleware)
             .route("/shifts/{shift_id}/summary",             web::get().to(handlers::shift_summary))
             .route("/shifts/{shift_id}/deductions",          web::get().to(handlers::shift_deductions))

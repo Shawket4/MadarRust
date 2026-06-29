@@ -21,7 +21,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 REPO="$PWD"
 export PATH="$HOME/.cargo/bin:$PATH"
-export DATABASE_URL="${DATABASE_URL:-postgres://shawket@localhost:5432/madar_dev}"
+export DATABASE_URL="${DATABASE_URL:-postgres://shawket@localhost:5432/madar}"
 # Money-engine unit tests used to keep mutation runs fast (each mutant reruns only these).
 FAST_TESTS='test(/units::tests::/) | test(/osrm::tests::/) | test(/cost_math::tests::/) | test(/service::unit_tests::/) | test(/calc_discount_tests::/) | test(/select_zone/) | test(/zone_fee/)'
 MONEY_FILES=(-f src/costing/service.rs -f src/orders/cost_math.rs -f src/units.rs -f src/geo/osrm.rs -f src/discounts/handlers.rs -f src/delivery/public.rs)
@@ -39,6 +39,15 @@ FAILED=(); WARNED=(); SKIPPED=()
 hdr(){ printf '\n\033[1m── %s ──\033[0m\n' "$1"; }
 have(){ command -v "$1" >/dev/null 2>&1; }
 pg_up(){ pg_isready -d "$DATABASE_URL" >/dev/null 2>&1; }
+# Pre-rebrand migrations GRANT to a legacy 'sufrix' DB role. Every #[sqlx::test]
+# provisions a fresh database and re-runs those grants, so the role must exist
+# cluster-wide or the whole migration set aborts (SQLSTATE 42704). Idempotent;
+# NOLOGIN — it only needs to exist as a grant target.
+ensure_legacy_role(){
+  psql "$DATABASE_URL" -qtAc \
+    "DO \$do\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='sufrix') THEN CREATE ROLE sufrix NOLOGIN; END IF; END \$do\$;" \
+    >/dev/null 2>&1 || true
+}
 
 # ── fast gate ────────────────────────────────────────────────────────────────
 hdr "rustfmt --check"
@@ -52,8 +61,10 @@ elif [ "${STRICT:-0}" = 1 ]; then FAILED+=("clippy"); else WARNED+=("clippy"); f
 hdr "cargo test --lib  (GATE)"
 if ! pg_up; then
   echo "✗ Postgres not reachable at \$DATABASE_URL ($DATABASE_URL)"; FAILED+=("test: no DB")
-elif cargo test --lib; then echo "✓ tests pass"
-else FAILED+=("test"); fi
+else
+  ensure_legacy_role
+  if cargo test --lib; then echo "✓ tests pass"; else FAILED+=("test"); fi
+fi
 
 # ── opt-in: mutation testing on changed lines (adaptive) ──────────────────────
 if [ $M = 1 ]; then

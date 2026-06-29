@@ -345,10 +345,12 @@ pub struct CreateOrderRequest {
     // it rides inside the persisted offline payload, so a replay after a lost
     // response — even months later — dedups against `orders.idempotency_key`.
     #[serde(default)] pub idempotency_key: Option<Uuid>,
-    /// Client-minted human order number (the device's per-day sequence). Stored
-    /// VERBATIM when present — the device is authoritative so its OFFLINE receipt
-    /// at ring-up is byte-identical to the synced reprint. Absent → the server
-    /// computes a per-shift number.
+    /// IGNORED by the server (accepted for backward compatibility only). The
+    /// authoritative per-shift number is ALWAYS `MAX(order_number)+1` computed under
+    /// the shift advisory lock — never the client value, which is used only on the
+    /// device's local receipt. The byte-identical-at-reprint guarantee rides on
+    /// `order_ref`, not this field. Two tills on one shift get distinct numbers
+    /// (UNIQUE(shift_id, order_number) + the lock).
     #[serde(default)] pub order_number: Option<i32>,
     /// Client-minted order reference (`<BRANCH>-<YYMMDD>-<DEVICE>-<NNNN>`). Stored
     /// verbatim when present; absent → the server mints the deterministic
@@ -1303,11 +1305,24 @@ pub(crate) async fn create_order_inner(
         // raw 500 from the unique-violation.
         Err(sqlx::Error::Database(db))
             if db.code().as_deref() == Some("23505")
-                && db.constraint().is_some_and(|c| c.contains("idempotency")) =>
+                && db
+                    .constraint()
+                    .is_some_and(|c| c.contains("idempotency") || c.contains("order_ref")) =>
         {
             drop(tx);
+            // Idempotent replay: a prior attempt already committed this order. Match
+            // it by idempotency_key OR by the client-minted order_ref — a device
+            // whose ref_seq counter rewound after a reinstall/restore re-sends with a
+            // NEW idempotency key but a REUSED order_ref, which trips the global
+            // UNIQUE(order_ref). Return the existing order, not a money-losing 409
+            // that the offline client would dead-letter into a lost sale.
             if let Some(key) = body.idempotency_key
                 && let Some(existing) = fetch_order_by_idempotency_key(pool.get_ref(), key, actor.org_id).await? {
+                    let items = fetch_order_items_full(pool.get_ref(), existing.id).await?;
+                    return Ok(HttpResponse::Ok().json(OrderFull { order: existing, items, warnings: Vec::new(), delivery: None }));
+                }
+            if let Some(order_ref) = &body.order_ref
+                && let Some(existing) = fetch_order_by_order_ref(pool.get_ref(), order_ref, actor.org_id).await? {
                     let items = fetch_order_items_full(pool.get_ref(), existing.id).await?;
                     return Ok(HttpResponse::Ok().json(OrderFull { order: existing, items, warnings: Vec::new(), delivery: None }));
                 }
@@ -2333,6 +2348,28 @@ pub(crate) async fn fetch_order_by_idempotency_key(
     );
     Ok(sqlx::query_as::<_, Order>(&sql)
         .bind(key)
+        .bind(org_id)
+        .fetch_optional(pool)
+        .await?)
+}
+
+/// Like [`fetch_order_by_idempotency_key`] but keyed on the CLIENT-minted
+/// `order_ref` (also globally unique, also org-scoped for the same safety reason).
+/// Used to make a replayed order whose `order_ref` collides — but whose idempotency
+/// key does NOT match — idempotent (return the existing order) instead of a 409 the
+/// offline client would dead-letter into a lost sale.
+pub(crate) async fn fetch_order_by_order_ref(
+    pool:      &PgPool,
+    order_ref: &str,
+    org_id:    Uuid,
+) -> Result<Option<Order>, AppError> {
+    let sql = format!(
+        "{} WHERE o.order_ref = $1 \
+           AND o.branch_id IN (SELECT id FROM branches WHERE org_id = $2)",
+        ORDER_SELECT
+    );
+    Ok(sqlx::query_as::<_, Order>(&sql)
+        .bind(order_ref)
         .bind(org_id)
         .fetch_optional(pool)
         .await?)

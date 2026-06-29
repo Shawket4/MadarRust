@@ -20,3 +20,6 @@ INVENTORY_OVERHAUL_FRONTEND_SYNC.md
 
 # Runtime upload artifacts (user-uploaded logos/images)
 /uploads/
+
+# Load-test run artifacts
+/loadtest/results/

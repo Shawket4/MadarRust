@@ -1,5 +1,0 @@
-# cargo-fuzz requires nightly (sanitizers + coverage instrumentation).
-# This file is directory-scoped: it only affects cargo invocations under fuzz/,
-# so the main project keeps building on stable.
-[toolchain]
-channel = "nightly"

@@ -35,11 +35,25 @@ async fn main() -> std::io::Result<()> {
 
     fs::create_dir_all(&uploads_dir).expect("Failed to create uploads directory");
 
-    let pool = PgPoolOptions::new()
-        .max_connections(10)
-        .connect(&db_url)
-        .await
-        .expect("Failed to connect to PostgreSQL");
+    // Connection pool sizing is env-driven so a SaaS deployment can tune it to its
+    // box/core count (and to PgBouncer) without a rebuild. Defaults preserve the
+    // historical behavior (10 conns, sqlx's default prepared-statement cache).
+    let max_conns: u32 = env::var("DB_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
+    let pool = build_pool(&db_url, max_conns).await;
+
+    // Reports/analytics read pool. When READ_DATABASE_URL points at a read replica
+    // the heavy aggregation queries run there, off the primary's order path. Unset
+    // → reuse the primary pool, so there is NO behavior change by default.
+    let read_pool = match env::var("READ_DATABASE_URL") {
+        Ok(u) if !u.trim().is_empty() => {
+            tracing::info!("Reports read pool → replica ({} max conns)", max_conns);
+            build_pool(&u, max_conns).await
+        }
+        _ => pool.clone(),
+    };
 
     // Apply pending migrations on boot so the running binary and its schema can
     // never drift (a query referencing a not-yet-applied column would otherwise
@@ -58,6 +72,10 @@ async fn main() -> std::io::Result<()> {
         .expect("Failed to seed default role permissions");
 
     let pool          = web::Data::new(pool);
+    // Read pool handed to the /reports scope only (see configure call below).
+    let read_pool     = web::Data::new(read_pool);
+    // Optional per-org menu cache; a no-op unless MENU_CACHE_TTL_SECS>0.
+    let menu_cache    = web::Data::new(menu::cache::MenuCache::from_env());
     let jwt_secret    = web::Data::new(auth::jwt::JwtSecret(jwt_secret));
     // Per-process org-suspension cache, consulted by JwtMiddleware on every
     // authenticated request. Registering it is what arms the kill-switch.
@@ -116,6 +134,7 @@ async fn main() -> std::io::Result<()> {
             .wrap(cors)
             .wrap(Compress::default())
             .app_data(pool.clone())
+            .app_data(menu_cache.clone())
             .app_data(jwt_secret.clone())
             .app_data(org_status.clone())
             .app_data(realtime_bus.clone())
@@ -152,7 +171,7 @@ async fn main() -> std::io::Result<()> {
             .configure(purchasing::routes::configure)
             .configure(orders::routes::configure)
             .configure(discounts::routes::configure)
-            .configure(reports::routes::configure)
+            .configure(|cfg| reports::routes::configure(cfg, read_pool.clone()))
             .configure(uploads::routes::configure)
             .configure(bundles::routes::configure)
             .configure(menu_advisor::routes::configure)
@@ -185,6 +204,27 @@ async fn main() -> std::io::Result<()> {
         tracing::info!("HTTP on {} (no TLS certs found)", bind_addr);
         server.bind(&bind_addr)?.run().await
     }
+}
+
+/// Build a Postgres pool with env-tunable sizing and PgBouncer compatibility.
+/// `DB_STATEMENT_CACHE_CAPACITY=0` disables sqlx's prepared-statement cache —
+/// REQUIRED behind PgBouncer in transaction-pooling mode, where pooled server
+/// connections are shared per-transaction and server-side prepared statements
+/// would otherwise collide. Unset → sqlx's default cache (direct-Postgres path).
+async fn build_pool(url: &str, max_conns: u32) -> sqlx::Pool<sqlx::Postgres> {
+    use std::str::FromStr;
+    let mut opts = sqlx::postgres::PgConnectOptions::from_str(url).expect("invalid database URL");
+    if let Some(cap) = env::var("DB_STATEMENT_CACHE_CAPACITY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        opts = opts.statement_cache_capacity(cap);
+    }
+    PgPoolOptions::new()
+        .max_connections(max_conns)
+        .connect_with(opts)
+        .await
+        .expect("Failed to connect to PostgreSQL")
 }
 
 fn build_tls_config() -> Option<rustls::ServerConfig> {

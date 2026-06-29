@@ -615,11 +615,27 @@ pub async fn delete_category(
 pub async fn list_menu_items(
     req:   HttpRequest,
     pool:  web::Data<PgPool>,
+    cache: Option<web::Data<crate::menu::cache::MenuCache>>,
     query: web::Query<MenuItemQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
     require_same_org(&claims, Some(query.org_id))?;
+
+    // Serve from the per-org menu cache when enabled (MENU_CACHE_TTL_SECS>0). The
+    // variant folds in every param that changes the body so views never alias.
+    // Disabled / unregistered (every test) → `cache` is None and we hit the DB.
+    let variant = format!(
+        "menu|{}|{}|{}",
+        query.category_id.map(|c| c.to_string()).unwrap_or_default(),
+        query.branch_id.map(|b| b.to_string()).unwrap_or_default(),
+        query.full.unwrap_or(false),
+    );
+    if let Some(c) = &cache {
+        if let Some(body) = c.get(query.org_id, &variant).await {
+            return Ok(HttpResponse::Ok().content_type("application/json").body(body));
+        }
+    }
 
     // When branch_id is supplied, prices are branch-effective (override replaces
     // base_price) and branch-disabled items are excluded — the per-branch menu the POS
@@ -670,10 +686,18 @@ pub async fn list_menu_items(
             let allowed_addon_ids  = fetch_allowed_addon_ids(pool.get_ref(), item.id).await?;
             result.push(MenuItemFull { item, sizes, addon_slots, optional_fields, recipes, allowed_addon_ids });
         }
-        return Ok(HttpResponse::Ok().json(result));
+        let body = web::Bytes::from(serde_json::to_vec(&result).map_err(|_| AppError::Internal)?);
+        if let Some(c) = &cache {
+            c.put(query.org_id, &variant, body.clone()).await;
+        }
+        return Ok(HttpResponse::Ok().content_type("application/json").body(body));
     }
 
-    Ok(HttpResponse::Ok().json(items))
+    let body = web::Bytes::from(serde_json::to_vec(&items).map_err(|_| AppError::Internal)?);
+    if let Some(c) = &cache {
+        c.put(query.org_id, &variant, body.clone()).await;
+    }
+    Ok(HttpResponse::Ok().content_type("application/json").body(body))
 }
 
 #[utoipa::path(

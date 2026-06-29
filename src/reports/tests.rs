@@ -193,7 +193,7 @@ async fn test_shift_summary(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
     ).await;
 
     let org_id = seed_org(&pool).await;
@@ -228,7 +228,7 @@ async fn test_branch_sales(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
     ).await;
 
     let org_id = seed_org(&pool).await;
@@ -265,7 +265,7 @@ async fn test_branch_stock(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
     ).await;
 
     let org_id = seed_org(&pool).await;
@@ -296,7 +296,7 @@ async fn test_branch_sales_timeseries(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
     ).await;
 
     let org_id = seed_org(&pool).await;
@@ -328,7 +328,7 @@ async fn test_branch_sales_peak_hours(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
     ).await;
 
     let org_id = seed_org(&pool).await;
@@ -388,7 +388,7 @@ async fn test_branch_teller_stats(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
     ).await;
 
     let org_id = seed_org(&pool).await;
@@ -420,7 +420,7 @@ async fn test_org_branch_comparison(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
     ).await;
 
     let org_id = seed_org(&pool).await;
@@ -451,7 +451,7 @@ async fn test_shift_deductions(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
     ).await;
 
     let org_id = seed_org(&pool).await;
@@ -479,7 +479,7 @@ async fn test_branch_addon_sales(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
     ).await;
 
     let org_id = seed_org(&pool).await;
@@ -531,7 +531,7 @@ async fn test_branch_bundle_sales(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
     ).await;
 
     let org_id = seed_org(&pool).await;
@@ -571,7 +571,7 @@ async fn test_branch_combined_item_sales(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
     ).await;
 
     let org_id = seed_org(&pool).await;
@@ -635,7 +635,7 @@ async fn test_branch_menu_engineering_cost_basis(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure),
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
     )
     .await;
 
@@ -822,7 +822,7 @@ async fn test_menu_engineering_bases_match_after_backfill(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure),
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
     )
     .await;
 
@@ -1007,7 +1007,7 @@ macro_rules! init_app {
             App::new()
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(get_secret()))
-                .configure(routes::configure),
+                .configure(|cfg| routes::configure(cfg, web::Data::new($pool.clone()))),
         ).await
     };
 }

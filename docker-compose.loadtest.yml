@@ -1,0 +1,111 @@
+# Local load-test rig that mimics the production VPS: 1 vCPU / 4 GB, with
+# Postgres co-resident with the backend (matches docker-compose.yml, where the
+# backend container talks to a Postgres native on the same host).
+#
+# FIDELITY MODEL: both containers are pinned to the SAME single core
+# (cpuset: "0"), so they contend for one vCPU exactly as they do on the VPS.
+# Memory caps (1.5G db + 1G app) keep the pair inside the 4 GB envelope with
+# headroom for page cache. CAVEAT: an Apple-silicon core is faster than a
+# Hostinger vCPU, so absolute latency is OPTIMISTIC — read results as a ceiling /
+# for relative comparison. To approach the weaker core, lower BACKEND_CPUS.
+#
+# Driven by scripts/loadtest.sh; not meant to be `up`'d by hand.
+
+name: madar-loadtest
+
+services:
+  loadtest-db:
+    image: postgres:15
+    cpuset: "0"
+    cpus: ${DB_CPUS:-1.0}
+    mem_limit: 1536m
+    environment:
+      POSTGRES_USER: madar
+      POSTGRES_PASSWORD: madar
+      POSTGRES_DB: madar_loadtest
+      # Isolated, ephemeral, localhost-only load-test DB → trust auth. Avoids the
+      # PG15-scram vs PgBouncer auth friction (PgBouncer connects with trust too).
+      POSTGRES_HOST_AUTH_METHOD: trust
+    # Tuned for a small box: modest shared_buffers; connection ceiling sized for the
+    # app pool + PgBouncer's server pool + the host seeder.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=1GB
+      - -c
+      - max_connections=100
+    volumes:
+      - ./loadtest/db-init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "55432:5432" # host seeder/psql reach the DB here
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U madar -d madar_loadtest"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  loadtest-backend:
+    image: madar-backend:loadtest
+    build:
+      context: .
+      args:
+        LTO_MODE: thin # halve link time/memory; release codegen is unaffected enough for load shape
+    cpuset: "0" # SAME core as Postgres → 1 shared vCPU
+    cpus: ${BACKEND_CPUS:-1.0}
+    mem_limit: 1024m
+    depends_on:
+      loadtest-db:
+        condition: service_healthy
+    environment:
+      # Route through PgBouncer by setting LT_DB_HOST=loadtest-pgbouncer LT_DB_PORT=6432
+      # (scripts/loadtest.sh --pgbouncer). Default = straight to Postgres.
+      DATABASE_URL: postgres://madar:madar@${LT_DB_HOST:-loadtest-db}:${LT_DB_PORT:-5432}/madar_loadtest
+      JWT_SECRET: ${LOADTEST_JWT_SECRET:-loadtest-secret-not-for-prod}
+      BIND_ADDR: 0.0.0.0:8081
+      RUST_LOG: warn
+      UPLOADS_DIR: /app/uploads
+      # ── Performance knobs (the #3/#5/#6 work; defaults preserve old behavior) ──
+      DB_MAX_CONNECTIONS: ${DB_MAX_CONNECTIONS:-10}
+      # 0 disables sqlx's prepared-statement cache — REQUIRED behind PgBouncer
+      # transaction pooling. The runner sets it to 0 in --pgbouncer mode.
+      DB_STATEMENT_CACHE_CAPACITY: ${DB_STATEMENT_CACHE_CAPACITY:-100}
+      # >0 turns on the per-org menu cache (#5).
+      MENU_CACHE_TTL_SECS: ${MENU_CACHE_TTL_SECS:-0}
+      # Read replica for /reports (#6); empty → reuse the primary.
+      READ_DATABASE_URL: ${READ_DATABASE_URL:-}
+      # Measure the APP's capacity, not the rate limiter (one source IP would
+      # otherwise be throttled to 429s). Prod keeps the limiter ON.
+      MADAR_DISABLE_RATE_LIMIT: "1"
+      MADAR_DISABLE_AUTO_TRANSLATION: "1"
+    ports:
+      - "8085:8081"
+    # No container healthcheck: the slim runtime image has no curl/wget.
+    # scripts/loadtest.sh polls http://localhost:8085/health from the host.
+
+  # PgBouncer (transaction pooling) — opt-in via `--profile pgbouncer`. Safe for
+  # this app: every advisory lock is pg_advisory_XACT_lock (transaction-scoped)
+  # and the realtime bus is in-process (no LISTEN/NOTIFY), so transaction pooling
+  # holds. Multiplexes many app connections onto a small server pool.
+  loadtest-pgbouncer:
+    image: edoburu/pgbouncer:latest
+    profiles: ["pgbouncer"]
+    cpuset: "0"
+    mem_limit: 128m
+    depends_on:
+      loadtest-db:
+        condition: service_healthy
+    environment:
+      DB_HOST: loadtest-db
+      DB_PORT: "5432"
+      DB_USER: madar
+      DB_PASSWORD: madar
+      DB_NAME: madar_loadtest
+      AUTH_TYPE: trust
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: "2000"
+      DEFAULT_POOL_SIZE: "25"
+      MIN_POOL_SIZE: "5"
+    ports:
+      - "56432:6432" # host visibility for debugging

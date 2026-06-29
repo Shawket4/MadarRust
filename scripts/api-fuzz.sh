@@ -59,6 +59,11 @@ echo "▶ (re)creating $FUZZ_DB"
 psql "$ADMIN_DATABASE_URL" -c "DROP DATABASE IF EXISTS ${FUZZ_DB} WITH (FORCE);" >/dev/null
 psql "$ADMIN_DATABASE_URL" -c "CREATE DATABASE ${FUZZ_DB};" >/dev/null
 
+# Pre-rebrand migrations GRANT to a legacy 'sufrix' role (cluster-global). Create
+# it (idempotent, NOLOGIN) or `sqlx migrate run` aborts with SQLSTATE 42704.
+echo "▶ ensuring legacy 'sufrix' grant-target role exists"
+psql "$ADMIN_DATABASE_URL" -qtAc "DO \$do\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='sufrix') THEN CREATE ROLE sufrix NOLOGIN; END IF; END \$do\$;" >/dev/null 2>&1 || true
+
 echo "▶ applying migrations"
 DATABASE_URL="$FUZZ_DATABASE_URL" sqlx migrate run --source "$REPO/migrations" >/dev/null
 
@@ -104,9 +109,22 @@ curl -fsS "$BASE_URL/health" >/dev/null || { echo "server did not become healthy
 # separately last (it tears the fixture down).
 EXCLUDE=(
   --exclude-path "/delivery-orders/stream"
-  --exclude-path-regex "/whatsapp"
   --exclude-path "/menu-items/{id}/image"
   --exclude-path "/orgs/{id}/logo"
+  # External-dependency endpoints that correctly return 503 when their service is
+  # UNSET (as it deliberately is here): the WhatsApp gateway and the Shlink/QR
+  # stack. not_a_server_error counts 503 as a 5xx, so they'd be false positives.
+  # Listed as EXACT paths — Schemathesis v4's --exclude-path-regex did not reliably
+  # match these, but exact --exclude-path does.
+  --exclude-path "/whatsapp/status"
+  --exclude-path "/whatsapp/pair"
+  --exclude-path "/whatsapp/logout"
+  --exclude-path "/whatsapp/pause"
+  --exclude-path "/qr/links"
+  --exclude-path "/orgs/{id}/qr"
+  --exclude-path "/branches/{id}/qr"
+  --exclude-path "/branches/{id}/tables/{tid}/qr"
+  --exclude-path "/delivery-orders/{id}/qr"
 )
 
 CHECKS="not_a_server_error,status_code_conformance,content_type_conformance,response_schema_conformance"

@@ -332,20 +332,24 @@ async fn test_order_ref_generated_and_decoded(pool: PgPool) {
         }
     };
 
-    // First order in the branch/day -> ...-0001 (create RETURNING decode path).
+    // First order in the shift -> ...-001 (create RETURNING decode path). The
+    // server-minted fallback is <BRANCH>-<YYMMDD>-<SHIFT6>-<NNN>: NNN is the
+    // per-shift order_number and SHIFT6 disambiguates concurrent offline devices.
     let o1 = create(make_body()).await;
     let ref1 = o1.order.order_ref.clone().expect("order_ref present on create");
     let parts: Vec<&str> = ref1.split('-').collect();
-    assert_eq!(parts.len(), 3, "order_ref should be CODE-YYMMDD-NNNN, got {ref1}");
+    let shift6 = shift_id.simple().to_string()[..6].to_uppercase();
+    assert_eq!(parts.len(), 4, "order_ref should be CODE-YYMMDD-SHIFT6-NNN, got {ref1}");
     assert_eq!(parts[0], "TESTBR", "branch code prefix");
     assert_eq!(parts[1].len(), 6, "YYMMDD segment");
     assert!(parts[1].chars().all(|c| c.is_ascii_digit()), "date digits in {ref1}");
-    assert_eq!(parts[2], "0001", "first order of the (branch, day)");
+    assert_eq!(parts[2], shift6, "shift6 segment derived from shift_id");
+    assert_eq!(parts[3], "001", "first order of the shift");
 
-    // Second order increments the per-(branch, day) counter -> ...-0002.
+    // Second order increments the per-shift counter -> ...-002.
     let o2 = create(make_body()).await;
     let ref2 = o2.order.order_ref.clone().expect("order_ref present");
-    assert!(ref2.ends_with("-0002"), "second order should be -0002, got {ref2}");
+    assert!(ref2.ends_with("-002"), "second order should be -002, got {ref2}");
     assert_ne!(ref1, ref2, "refs must be unique");
 
     // Read-back via GET /orders/{id} (shared ORDER_SELECT decode path).
@@ -1356,6 +1360,41 @@ async fn test_idempotency_key_replays_same_order(pool: PgPool) {
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE shift_id=$1")
         .bind(shift_id).fetch_one(&pool).await.unwrap();
     assert_eq!(count, 1, "no duplicate order created");
+}
+
+/// A replayed order whose CLIENT-MINTED `order_ref` collides — but whose idempotency
+/// key does NOT match (a device whose ref_seq counter rewound after a restore) —
+/// must return the existing order (200), NOT a 409 the offline client would
+/// dead-letter into a lost sale.
+#[sqlx::test]
+async fn test_order_ref_collision_replays_same_order(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    let mut ids = Vec::new();
+    for i in 0..2 {
+        // Same order_ref, DIFFERENT idempotency key each attempt.
+        let mut body = simple_order(branch_id, shift_id, menu_item_id);
+        body.order_ref = Some("BR1-260620-T1-0001".to_string());
+        body.idempotency_key = Some(Uuid::new_v4());
+        let resp = test::call_service(&app, test::TestRequest::post().uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&body).to_request()).await;
+        assert!(resp.status().is_success(), "attempt {i}: order_ref replay must be 200, not 409");
+        let of: OrderFull = test::read_body_json(resp).await;
+        ids.push(of.order.id);
+    }
+    assert_eq!(ids[0], ids[1], "same order_ref must return the SAME order");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE order_ref=$1")
+        .bind("BR1-260620-T1-0001").fetch_one(&pool).await.unwrap();
+    assert_eq!(count, 1, "no duplicate order persisted");
 }
 
 /// V13: an order cannot attach to a shift that is no longer open.

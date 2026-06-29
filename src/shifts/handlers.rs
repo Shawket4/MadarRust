@@ -199,13 +199,18 @@ where
     E: sqlx::PgExecutor<'e>,
 {
     sqlx::query_scalar::<_, Option<i32>>(
+        // Order by `opened_at` (the stable real-world shift sequence on a till —
+        // set once at open), NOT `closed_at`: a shift FORCE-CLOSED out of sequence
+        // gets a late `closed_at`, which would otherwise mis-pick it as the
+        // immediate predecessor. (The live opening_cash is the teller's counted
+        // value regardless; this only sources the audit baseline.)
         r#"
         SELECT closing_cash_declared
         FROM shifts
         WHERE till_id = $1
           AND status IN ('closed', 'force_closed')
           AND closing_cash_declared IS NOT NULL
-        ORDER BY closed_at DESC
+        ORDER BY opened_at DESC
         LIMIT 1
         "#,
     )
@@ -939,6 +944,7 @@ pub async fn get_shift_report(
 async fn fetch_cash_movement_by_client_ref(
     pool:       &PgPool,
     client_ref: Uuid,
+    org_id:     Uuid,
 ) -> Result<Option<CashMovement>, AppError> {
     let m = sqlx::query_as::<_, CashMovement>(
         r#"
@@ -948,9 +954,16 @@ async fn fetch_cash_movement_by_client_ref(
             m.created_at, m.client_ref
         FROM shift_cash_movements m
         WHERE m.client_ref = $1
+          -- Org-scope via shift→branch so a cross-org client_ref collision can't
+          -- echo another org's movement (mirrors fetch_order_by_idempotency_key).
+          AND m.shift_id IN (
+              SELECT s.id FROM shifts s
+              JOIN branches b ON b.id = s.branch_id
+              WHERE b.org_id = $2)
         "#,
     )
     .bind(client_ref)
+    .bind(org_id)
     .fetch_optional(pool)
     .await?;
     Ok(m)
@@ -1017,7 +1030,7 @@ pub(crate) async fn add_cash_movement_inner(
     // Idempotent replay: a queued offline movement that already landed returns
     // the original instead of double-applying (which corrupts expected_cash).
     if let Some(cref) = body.client_ref
-        && let Some(existing) = fetch_cash_movement_by_client_ref(pool.get_ref(), cref).await?
+        && let Some(existing) = fetch_cash_movement_by_client_ref(pool.get_ref(), cref, actor.org_id).await?
     {
         return Ok(HttpResponse::Ok().json(existing));
     }
@@ -1074,7 +1087,7 @@ pub(crate) async fn add_cash_movement_inner(
             drop(tx);
             if let Some(cref) = body.client_ref
                 && let Some(existing) =
-                    fetch_cash_movement_by_client_ref(pool.get_ref(), cref).await?
+                    fetch_cash_movement_by_client_ref(pool.get_ref(), cref, actor.org_id).await?
             {
                 return Ok(HttpResponse::Ok().json(existing));
             }

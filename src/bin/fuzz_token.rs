@@ -22,7 +22,7 @@ fn main() {
     let role_arg = std::env::args().nth(1).unwrap_or_else(|| "org-admin".to_string());
 
     let org_id = Uuid::parse_str(ORG_ID).unwrap();
-    let (user_id, org, role) = match role_arg.as_str() {
+    let (mut user_id, mut org, role) = match role_arg.as_str() {
         "super-admin" => (Uuid::parse_str(SUPER_ADMIN_ID).unwrap(), None, UserRole::SuperAdmin),
         "org-admin" => (Uuid::parse_str(ORG_ADMIN_ID).unwrap(), Some(org_id), UserRole::OrgAdmin),
         other => {
@@ -30,6 +30,15 @@ fn main() {
             std::process::exit(2);
         }
     };
+
+    // Optional positional overrides for the MULTI-TENANT load test, which mints one
+    // token per seeded org:  fuzz-token org-admin <user_id> <org_id>
+    if let Some(u) = std::env::args().nth(2) {
+        user_id = Uuid::parse_str(&u).expect("invalid user_id arg");
+    }
+    if let Some(o) = std::env::args().nth(3) {
+        org = Some(Uuid::parse_str(&o).expect("invalid org_id arg"));
+    }
 
     let token = create_token(&JwtSecret(secret), user_id, org, role, None, 48)
         .expect("failed to mint token");

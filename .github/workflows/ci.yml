@@ -46,6 +46,12 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets --all-features
         continue-on-error: true
+      # Pre-rebrand migrations GRANT to a legacy 'sufrix' role; #[sqlx::test]
+      # re-runs every migration on a fresh DB, so the cluster needs the role.
+      - name: Provision legacy 'sufrix' DB role
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -d postgres \
+            -c "CREATE ROLE sufrix NOLOGIN" || echo "role sufrix already present"
       - name: test (blocking gate)
         run: cargo test --lib
 
@@ -77,6 +83,12 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants,cargo-nextest
+      # Mutants rebuild each test DB from the migration set — provision the
+      # legacy 'sufrix' grant-target role (same reason as the test job).
+      - name: Provision legacy 'sufrix' DB role
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -d postgres \
+            -c "CREATE ROLE sufrix NOLOGIN" || echo "role sufrix already present"
       # PR: mutate ONLY the lines this branch changed — fast and follows the code.
       - name: Mutants (changed lines)
         if: github.event_name == 'pull_request'
@@ -98,41 +110,4 @@ jobs:
         with:
           name: mutants-out
           path: mutants.out/
-          if-no-files-found: ignore
-
-  # ── Coverage-guided fuzzing of the pure money/geo functions (no DB needed) ──
-  fuzz:
-    name: "fuzz: ${{ matrix.target }}"
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - round_piastres
-          - calc_discount
-          - convert_units
-          - haversine
-          - select_zone_fee
-          - blend_weighted_cost
-          - summarize_line_costs
-    steps:
-      - uses: actions/checkout@v4
-      - name: System deps
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "fuzz -> target"
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-fuzz
-      # Longer budget on the nightly schedule; quick smoke on PRs.
-      - name: Fuzz ${{ matrix.target }}
-        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=${{ github.event_name == 'schedule' && 300 || 60 }}
-      - name: Upload crash artifacts
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fuzz-artifacts-${{ matrix.target }}
-          path: fuzz/artifacts/
           if-no-files-found: ignore

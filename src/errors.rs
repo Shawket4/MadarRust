@@ -27,7 +27,7 @@ pub enum AppError {
     Conflict(String),
 
     #[error("Database error: {0}")]
-    Db(#[from] sqlx::Error),
+    Db(sqlx::Error),
 
     #[error("Service unavailable: {0}")]
     ServiceUnavailable(String),
@@ -49,6 +49,22 @@ pub struct ErrorBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = "ORG_SUSPENDED")]
     pub code: Option<String>,
+}
+
+/// Convert sqlx errors into `AppError`. `RowNotFound` — what `fetch_one` /
+/// `query_scalar` return when a client asks for a row that doesn't exist — has
+/// no SQLSTATE, so it would otherwise fall through `db_status` to a blanket 500.
+/// It's a client-caused "resource absent" condition, so map it to a clean 404;
+/// everything else keeps its SQLSTATE-based classification via [`AppError::Db`].
+/// (API fuzzing flagged `GET /orgs/{id}/offline-auth-bundle` 500-ing on an
+/// unknown id — this fixes that whole `fetch_one`-on-missing-row class.)
+impl From<sqlx::Error> for AppError {
+    fn from(e: sqlx::Error) -> Self {
+        match e {
+            sqlx::Error::RowNotFound => AppError::NotFound("Resource not found".into()),
+            other => AppError::Db(other),
+        }
+    }
 }
 
 impl AppError {
@@ -90,8 +106,16 @@ fn status_for_sqlstate(code: Option<&str>) -> actix_web::http::StatusCode {
 
 #[cfg(test)]
 mod tests {
-    use super::status_for_sqlstate;
+    use super::{status_for_sqlstate, AppError};
     use actix_web::http::StatusCode;
+    use actix_web::ResponseError;
+
+    #[test]
+    fn row_not_found_maps_to_404() {
+        // `fetch_one` on a missing row must surface as 404, not 500.
+        let resp = AppError::from(sqlx::Error::RowNotFound).error_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
 
     #[test]
     fn classifies_sqlstates() {

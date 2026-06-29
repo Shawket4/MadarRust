@@ -369,7 +369,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
             .configure(crate::shifts::routes::configure)
             .configure(crate::orders::routes::configure)
             .configure(crate::discounts::routes::configure)
-            .configure(crate::reports::routes::configure)
+            .configure(|cfg| crate::reports::routes::configure(cfg, web::Data::new(pool.clone())))
     ).await;
 
     // STEP 3.1: Seed merchant setup
@@ -1164,7 +1164,7 @@ async fn test_e2e_purchasing_stocktake_reporting_lifecycle(pool: PgPool) {
             .configure(crate::stocktakes::routes::configure)
             .configure(crate::shifts::routes::configure)
             .configure(crate::orders::routes::configure)
-            .configure(crate::reports::routes::configure)
+            .configure(|cfg| crate::reports::routes::configure(cfg, web::Data::new(pool.clone())))
     ).await;
 
     macro_rules! jget {
