@@ -1,6 +1,7 @@
 # Public demo playground — fully isolated from production.
 #
-# Same image as prod, but: separate host port (8082 vs 8081), separate database
+# Same image as prod, but: separate host port (8083 vs 8081; 8082 is taken by
+# pihole on the VPS), separate database
 # (madar_demo vs madar), and DEMO_MODE=1. No uploads volume (uploads are disabled
 # under DEMO_MODE) and no WhatsApp/OSRM/Shlink wiring (outbound is neutered).
 #
@@ -20,7 +21,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "127.0.0.1:8082:8081"
+      - "127.0.0.1:8083:8081"
     env_file: .env
     networks:
       - madar-demo-net

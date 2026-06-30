@@ -156,7 +156,7 @@ jobs:
             up -d --no-deps --pull never madar-demo-backend
 
           sleep 4
-          curl -sf http://127.0.0.1:8082/health && echo "✅ demo healthy" || {
+          curl -sf http://127.0.0.1:8083/health && echo "✅ demo healthy" || {
             docker compose -f /opt/madar-demo/docker-compose.demo.yml logs madar-demo-backend --tail 50
             exit 1
           }

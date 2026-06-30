@@ -26,8 +26,11 @@ sudo nano /opt/madar-demo/.env     # set DB password (same as prod) + fresh JWT_
 
 ## 3. nginx vhosts (the part you asked me to do via SSH — run these)
 ```bash
-sudo cp deploy/demo/nginx-demo-api.conf /etc/nginx/conf.d/demo-api.madar-pos.cloud.conf
-sudo cp deploy/demo/nginx-demo.conf     /etc/nginx/conf.d/demo.madar-pos.cloud.conf
+# This box uses sites-available + sites-enabled symlinks (not conf.d).
+sudo cp deploy/demo/nginx-demo-api.conf /etc/nginx/sites-available/demo-api.madar-pos.cloud
+sudo cp deploy/demo/nginx-demo.conf     /etc/nginx/sites-available/demo.madar-pos.cloud
+sudo ln -sf /etc/nginx/sites-available/demo-api.madar-pos.cloud /etc/nginx/sites-enabled/
+sudo ln -sf /etc/nginx/sites-available/demo.madar-pos.cloud     /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx          # additive — prod vhosts untouched
 sudo certbot --nginx -d demo.madar-pos.cloud -d demo-api.madar-pos.cloud
 ```
@@ -45,6 +48,6 @@ sudo crontab -e
 
 ## Verify
 ```bash
-curl -sf http://127.0.0.1:8082/health && echo ok
+curl -sf http://127.0.0.1:8083/health && echo ok
 curl -s "https://demo-api.madar-pos.cloud/demo/session?variant=full" -X POST | head -c 200
 ```
