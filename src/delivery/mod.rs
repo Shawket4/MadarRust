@@ -34,6 +34,36 @@ mod tests;
 
 pub const CHANNEL_IN_MALL: &str = "in_mall";
 pub const CHANNEL_OUTSIDE: &str = "outside";
+/// Deliver to a beach/pool umbrella or sunbed (by number); flat per-branch fee.
+pub const CHANNEL_UMBRELLA: &str = "umbrella";
+/// Customer self-collects at the branch; flat fee (typically 0).
+pub const CHANNEL_PICKUP: &str = "pickup";
+
+/// Channels with no GPS/zone — the customer isn't at a mappable address
+/// (umbrella = a sunbed number; pickup = at the counter). Flat fee, no quote.
+pub fn channel_is_flat(channel: &str) -> bool {
+    matches!(channel, CHANNEL_UMBRELLA | CHANNEL_PICKUP)
+}
+
+/// The flat per-branch fee column on `branch_delivery_settings` for a channel.
+/// (Outside uses distance zones, not a flat column — never call this for it.)
+pub fn channel_fee_col(channel: &str) -> &'static str {
+    match channel {
+        CHANNEL_UMBRELLA => "umbrella_fee",
+        CHANNEL_PICKUP => "pickup_fee",
+        _ => "in_mall_fee",
+    }
+}
+
+/// The optional per-channel discount column on `branch_delivery_settings`.
+pub fn channel_discount_col(channel: &str) -> &'static str {
+    match channel {
+        CHANNEL_OUTSIDE => "outside_discount_id",
+        CHANNEL_UMBRELLA => "umbrella_discount_id",
+        CHANNEL_PICKUP => "pickup_discount_id",
+        _ => "in_mall_discount_id",
+    }
+}
 
 // ── Public-surface input limits ───────────────────────────────
 // The public ordering endpoints are unauthenticated and rate-limited; every
@@ -108,9 +138,9 @@ pub fn validate_payment_hint(value: &str) -> Result<(), AppError> {
 /// Reject anything that isn't a known channel before it reaches a `::delivery_channel` cast.
 pub fn validate_channel(channel: &str) -> Result<(), AppError> {
     match channel {
-        CHANNEL_IN_MALL | CHANNEL_OUTSIDE => Ok(()),
+        CHANNEL_IN_MALL | CHANNEL_OUTSIDE | CHANNEL_UMBRELLA | CHANNEL_PICKUP => Ok(()),
         _ => Err(AppError::BadRequest(
-            "channel must be 'in_mall' or 'outside'".into(),
+            "channel must be 'in_mall', 'outside', 'umbrella' or 'pickup'".into(),
         )),
     }
 }

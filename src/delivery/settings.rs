@@ -50,6 +50,24 @@ pub struct BranchDeliverySettings {
     /// ("confirm you're at the branch"). Shop/company + floor + unit are always
     /// required regardless. Default true.
     pub in_mall_require_location: bool,
+    // ── Umbrella (deliver-to-umbrella/sunbed) + pickup (self-collect) channels ──
+    pub umbrella_enabled: bool,
+    pub pickup_enabled: bool,
+    pub umbrella_override: String,
+    pub pickup_override: String,
+    #[schema(value_type = Option<String>)]
+    pub umbrella_open_time: Option<NaiveTime>,
+    #[schema(value_type = Option<String>)]
+    pub umbrella_close_time: Option<NaiveTime>,
+    #[schema(value_type = Option<String>)]
+    pub pickup_open_time: Option<NaiveTime>,
+    #[schema(value_type = Option<String>)]
+    pub pickup_close_time: Option<NaiveTime>,
+    /// Flat per-branch fees (piastres). Pickup defaults to free.
+    pub umbrella_fee: i32,
+    pub pickup_fee: i32,
+    pub umbrella_discount_id: Option<Uuid>,
+    pub pickup_discount_id: Option<Uuid>,
 }
 
 impl BranchDeliverySettings {
@@ -71,6 +89,18 @@ impl BranchDeliverySettings {
             outside_discount_id: None,
             otp_required: true,
             in_mall_require_location: true,
+            umbrella_enabled: false,
+            pickup_enabled: false,
+            umbrella_override: "auto".into(),
+            pickup_override: "auto".into(),
+            umbrella_open_time: None,
+            umbrella_close_time: None,
+            pickup_open_time: None,
+            pickup_close_time: None,
+            umbrella_fee: 0,
+            pickup_fee: 0,
+            umbrella_discount_id: None,
+            pickup_discount_id: None,
         }
     }
 }
@@ -79,7 +109,10 @@ const BRANCH_SETTINGS_SELECT: &str = "SELECT branch_id, in_mall_enabled, outside
     in_mall_override, outside_override, in_mall_open_time, in_mall_close_time, \
     outside_open_time, outside_close_time, in_mall_fee, prep_time_minutes, \
     max_road_distance_meters, in_mall_discount_id, outside_discount_id, otp_required, \
-    in_mall_require_location \
+    in_mall_require_location, \
+    umbrella_enabled, pickup_enabled, umbrella_override, pickup_override, \
+    umbrella_open_time, umbrella_close_time, pickup_open_time, pickup_close_time, \
+    umbrella_fee, pickup_fee, umbrella_discount_id, pickup_discount_id \
     FROM branch_delivery_settings WHERE branch_id = $1";
 
 #[derive(Deserialize, IntoParams)]
@@ -150,6 +183,32 @@ pub struct BranchSettingsInput {
     /// Defaults to true so an omitting client keeps the location check on.
     #[serde(default = "default_true")]
     pub in_mall_require_location: bool,
+    // Umbrella + pickup (the *_override columns are POS-owned, set via
+    // /delivery/accepting). All default so older clients keep working.
+    #[serde(default)]
+    pub umbrella_enabled: bool,
+    #[serde(default)]
+    pub pickup_enabled: bool,
+    #[schema(value_type = Option<String>)]
+    #[serde(default)]
+    pub umbrella_open_time: Option<NaiveTime>,
+    #[schema(value_type = Option<String>)]
+    #[serde(default)]
+    pub umbrella_close_time: Option<NaiveTime>,
+    #[schema(value_type = Option<String>)]
+    #[serde(default)]
+    pub pickup_open_time: Option<NaiveTime>,
+    #[schema(value_type = Option<String>)]
+    #[serde(default)]
+    pub pickup_close_time: Option<NaiveTime>,
+    #[serde(default)]
+    pub umbrella_fee: i32,
+    #[serde(default)]
+    pub pickup_fee: i32,
+    #[serde(default)]
+    pub umbrella_discount_id: Option<Uuid>,
+    #[serde(default)]
+    pub pickup_discount_id: Option<Uuid>,
 }
 
 #[utoipa::path(
@@ -167,8 +226,8 @@ pub async fn put_branch_settings(
     check_permission(pool.get_ref(), &claims, "delivery_settings", "update").await?;
     require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
 
-    if body.in_mall_fee < 0 {
-        return Err(AppError::BadRequest("in_mall_fee must be >= 0".into()));
+    if body.in_mall_fee < 0 || body.umbrella_fee < 0 || body.pickup_fee < 0 {
+        return Err(AppError::BadRequest("channel fees must be >= 0".into()));
     }
     if body.prep_time_minutes < 0 {
         return Err(AppError::BadRequest(
@@ -185,9 +244,14 @@ pub async fn put_branch_settings(
     let org_id = claims
         .org_id()
         .ok_or_else(|| AppError::Forbidden("No org in token".into()))?;
-    for did in [body.in_mall_discount_id, body.outside_discount_id]
-        .into_iter()
-        .flatten()
+    for did in [
+        body.in_mall_discount_id,
+        body.outside_discount_id,
+        body.umbrella_discount_id,
+        body.pickup_discount_id,
+    ]
+    .into_iter()
+    .flatten()
     {
         let ok: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM discounts WHERE id = $1 AND org_id = $2 AND is_active = true)",
@@ -209,8 +273,12 @@ pub async fn put_branch_settings(
             (branch_id, in_mall_enabled, outside_enabled, in_mall_open_time, in_mall_close_time,
              outside_open_time, outside_close_time, in_mall_fee, prep_time_minutes,
              max_road_distance_meters, in_mall_discount_id, outside_discount_id, otp_required,
-             in_mall_require_location, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
+             in_mall_require_location,
+             umbrella_enabled, pickup_enabled, umbrella_open_time, umbrella_close_time,
+             pickup_open_time, pickup_close_time, umbrella_fee, pickup_fee,
+             umbrella_discount_id, pickup_discount_id, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                 $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, now())
          ON CONFLICT (branch_id) DO UPDATE SET
              in_mall_enabled = EXCLUDED.in_mall_enabled,
              outside_enabled = EXCLUDED.outside_enabled,
@@ -225,6 +293,16 @@ pub async fn put_branch_settings(
              outside_discount_id = EXCLUDED.outside_discount_id,
              otp_required = EXCLUDED.otp_required,
              in_mall_require_location = EXCLUDED.in_mall_require_location,
+             umbrella_enabled = EXCLUDED.umbrella_enabled,
+             pickup_enabled = EXCLUDED.pickup_enabled,
+             umbrella_open_time = EXCLUDED.umbrella_open_time,
+             umbrella_close_time = EXCLUDED.umbrella_close_time,
+             pickup_open_time = EXCLUDED.pickup_open_time,
+             pickup_close_time = EXCLUDED.pickup_close_time,
+             umbrella_fee = EXCLUDED.umbrella_fee,
+             pickup_fee = EXCLUDED.pickup_fee,
+             umbrella_discount_id = EXCLUDED.umbrella_discount_id,
+             pickup_discount_id = EXCLUDED.pickup_discount_id,
              updated_at = now()",
     )
     .bind(body.branch_id)
@@ -241,6 +319,16 @@ pub async fn put_branch_settings(
     .bind(body.outside_discount_id)
     .bind(body.otp_required)
     .bind(body.in_mall_require_location)
+    .bind(body.umbrella_enabled)
+    .bind(body.pickup_enabled)
+    .bind(body.umbrella_open_time)
+    .bind(body.umbrella_close_time)
+    .bind(body.pickup_open_time)
+    .bind(body.pickup_close_time)
+    .bind(body.umbrella_fee)
+    .bind(body.pickup_fee)
+    .bind(body.umbrella_discount_id)
+    .bind(body.pickup_discount_id)
     .execute(pool.get_ref())
     .await?;
 

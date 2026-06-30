@@ -13,9 +13,10 @@ use super::snapshot::{self, CartLineInput};
 use super::staff::DeliveryOrder;
 use super::whatsapp;
 use super::{
-    CHANNEL_OUTSIDE, MAX_ADDRESS_LEN, MAX_NAME_LEN, MAX_NOTES_LEN, MAX_OTP_CODE_LEN,
-    MAX_SHORT_TEXT_LEN, channel_open, normalize_phone, validate_channel, validate_coords,
-    validate_optional_text, validate_payment_hint, validate_required_text,
+    CHANNEL_IN_MALL, CHANNEL_OUTSIDE, CHANNEL_PICKUP, CHANNEL_UMBRELLA, MAX_ADDRESS_LEN,
+    MAX_NAME_LEN, MAX_NOTES_LEN, MAX_OTP_CODE_LEN, MAX_SHORT_TEXT_LEN, channel_discount_col,
+    channel_fee_col, channel_is_flat, channel_open, normalize_phone, validate_channel,
+    validate_coords, validate_optional_text, validate_payment_hint, validate_required_text,
 };
 use crate::auth::jwt::JwtSecret;
 use crate::errors::{AppError, AppErrorResponse};
@@ -32,9 +33,13 @@ pub struct PublicBranch {
     pub code: String,
     pub in_mall_enabled: bool,
     pub outside_enabled: bool,
+    pub umbrella_enabled: bool,
+    pub pickup_enabled: bool,
     /// Effective-open right now (enabled + open shift + override + window).
     pub in_mall_open_now: bool,
     pub outside_open_now: bool,
+    pub umbrella_open_now: bool,
+    pub pickup_open_now: bool,
     /// When false, the public checkout skips OTP verification for this branch.
     pub otp_required: bool,
     /// When false, in-mall ordering does not require a device GPS location.
@@ -53,17 +58,78 @@ struct BranchOpenRow {
     code: String,
     in_mall_enabled: bool,
     outside_enabled: bool,
+    umbrella_enabled: bool,
+    pickup_enabled: bool,
     in_mall_override: String,
     outside_override: String,
+    umbrella_override: String,
+    pickup_override: String,
     in_mall_open_time: Option<chrono::NaiveTime>,
     in_mall_close_time: Option<chrono::NaiveTime>,
     outside_open_time: Option<chrono::NaiveTime>,
     outside_close_time: Option<chrono::NaiveTime>,
+    umbrella_open_time: Option<chrono::NaiveTime>,
+    umbrella_close_time: Option<chrono::NaiveTime>,
+    pickup_open_time: Option<chrono::NaiveTime>,
+    pickup_close_time: Option<chrono::NaiveTime>,
     local_time: chrono::NaiveTime,
     has_open_shift: bool,
     otp_required: bool,
     in_mall_require_location: bool,
 }
+
+impl BranchOpenRow {
+    /// Effective-open for one channel, by name.
+    fn open_for(&self, channel: &str) -> bool {
+        let (enabled, ov, open, close) = match channel {
+            CHANNEL_OUTSIDE => (
+                self.outside_enabled,
+                self.outside_override.as_str(),
+                self.outside_open_time,
+                self.outside_close_time,
+            ),
+            CHANNEL_UMBRELLA => (
+                self.umbrella_enabled,
+                self.umbrella_override.as_str(),
+                self.umbrella_open_time,
+                self.umbrella_close_time,
+            ),
+            CHANNEL_PICKUP => (
+                self.pickup_enabled,
+                self.pickup_override.as_str(),
+                self.pickup_open_time,
+                self.pickup_close_time,
+            ),
+            _ => (
+                self.in_mall_enabled,
+                self.in_mall_override.as_str(),
+                self.in_mall_open_time,
+                self.in_mall_close_time,
+            ),
+        };
+        channel_open(enabled, ov, open, close, self.local_time, self.has_open_shift)
+    }
+}
+
+/// SELECT list shared by `public_branches` and `channel_open_now` — every
+/// channel's enabled/override/window plus the org-local time + open-shift flag.
+const BRANCH_OPEN_SELECT: &str = r#"b.id, b.name, b.code,
+    COALESCE(s.in_mall_enabled, false)  AS in_mall_enabled,
+    COALESCE(s.outside_enabled, false)  AS outside_enabled,
+    COALESCE(s.umbrella_enabled, false) AS umbrella_enabled,
+    COALESCE(s.pickup_enabled, false)   AS pickup_enabled,
+    COALESCE(s.in_mall_override, 'auto')  AS in_mall_override,
+    COALESCE(s.outside_override, 'auto')  AS outside_override,
+    COALESCE(s.umbrella_override, 'auto') AS umbrella_override,
+    COALESCE(s.pickup_override, 'auto')   AS pickup_override,
+    s.in_mall_open_time, s.in_mall_close_time,
+    s.outside_open_time, s.outside_close_time,
+    s.umbrella_open_time, s.umbrella_close_time,
+    s.pickup_open_time, s.pickup_close_time,
+    COALESCE(s.otp_required, true) AS otp_required,
+    COALESCE(s.in_mall_require_location, true) AS in_mall_require_location,
+    (now() AT TIME ZONE COALESCE(b.timezone, o.timezone)::text)::time AS local_time,
+    EXISTS(SELECT 1 FROM shifts sh WHERE sh.branch_id = b.id AND sh.status = 'open') AS has_open_shift"#;
 
 #[utoipa::path(
     get, path = "/public/branches", tag = "delivery-public", params(PublicBranchesQuery),
@@ -73,25 +139,16 @@ pub async fn public_branches(
     pool: web::Data<PgPool>,
     query: web::Query<PublicBranchesQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let rows: Vec<BranchOpenRow> = sqlx::query_as(
-        r#"SELECT b.id, b.name, b.code,
-                  COALESCE(s.in_mall_enabled, false)  AS in_mall_enabled,
-                  COALESCE(s.outside_enabled, false)  AS outside_enabled,
-                  COALESCE(s.in_mall_override, 'auto') AS in_mall_override,
-                  COALESCE(s.outside_override, 'auto') AS outside_override,
-                  s.in_mall_open_time, s.in_mall_close_time,
-                  s.outside_open_time, s.outside_close_time,
-                  COALESCE(s.otp_required, true) AS otp_required,
-                  COALESCE(s.in_mall_require_location, true) AS in_mall_require_location,
-                  (now() AT TIME ZONE COALESCE(b.timezone, o.timezone)::text)::time AS local_time,
-                  EXISTS(SELECT 1 FROM shifts sh WHERE sh.branch_id = b.id AND sh.status = 'open') AS has_open_shift
+    let rows: Vec<BranchOpenRow> = sqlx::query_as(&format!(
+        r#"SELECT {BRANCH_OPEN_SELECT}
            FROM branches b
            JOIN organizations o ON o.id = b.org_id
            LEFT JOIN branch_delivery_settings s ON s.branch_id = b.id
            WHERE b.org_id = $1 AND b.is_active = true AND b.deleted_at IS NULL
-             AND (COALESCE(s.in_mall_enabled, false) OR COALESCE(s.outside_enabled, false))
+             AND (COALESCE(s.in_mall_enabled, false) OR COALESCE(s.outside_enabled, false)
+                  OR COALESCE(s.umbrella_enabled, false) OR COALESCE(s.pickup_enabled, false))
            ORDER BY b.name"#,
-    )
+    ))
     .bind(query.org_id)
     .fetch_all(pool.get_ref())
     .await?;
@@ -99,29 +156,19 @@ pub async fn public_branches(
     let branches: Vec<PublicBranch> = rows
         .into_iter()
         .map(|r| PublicBranch {
-            in_mall_open_now: channel_open(
-                r.in_mall_enabled,
-                &r.in_mall_override,
-                r.in_mall_open_time,
-                r.in_mall_close_time,
-                r.local_time,
-                r.has_open_shift,
-            ),
-            outside_open_now: channel_open(
-                r.outside_enabled,
-                &r.outside_override,
-                r.outside_open_time,
-                r.outside_close_time,
-                r.local_time,
-                r.has_open_shift,
-            ),
+            in_mall_open_now: r.open_for(CHANNEL_IN_MALL),
+            outside_open_now: r.open_for(CHANNEL_OUTSIDE),
+            umbrella_open_now: r.open_for(CHANNEL_UMBRELLA),
+            pickup_open_now: r.open_for(CHANNEL_PICKUP),
+            in_mall_enabled: r.in_mall_enabled,
+            outside_enabled: r.outside_enabled,
+            umbrella_enabled: r.umbrella_enabled,
+            pickup_enabled: r.pickup_enabled,
+            otp_required: r.otp_required,
+            in_mall_require_location: r.in_mall_require_location,
             id: r.id,
             name: r.name,
             code: r.code,
-            in_mall_enabled: r.in_mall_enabled,
-            outside_enabled: r.outside_enabled,
-            otp_required: r.otp_required,
-            in_mall_require_location: r.in_mall_require_location,
         })
         .collect();
     Ok(HttpResponse::Ok().json(branches))
@@ -131,46 +178,18 @@ pub async fn public_branches(
 /// an open shift). Mirrors the per-row computation in `public_branches`, reused
 /// to gate the menu, the quote, and order intake against direct-link bypass.
 async fn channel_open_now(pool: &PgPool, branch_id: Uuid, channel: &str) -> Result<bool, AppError> {
-    let row: Option<BranchOpenRow> = sqlx::query_as(
-        r#"SELECT b.id, b.name, b.code,
-                  COALESCE(s.in_mall_enabled, false)  AS in_mall_enabled,
-                  COALESCE(s.outside_enabled, false)  AS outside_enabled,
-                  COALESCE(s.in_mall_override, 'auto') AS in_mall_override,
-                  COALESCE(s.outside_override, 'auto') AS outside_override,
-                  s.in_mall_open_time, s.in_mall_close_time,
-                  s.outside_open_time, s.outside_close_time,
-                  COALESCE(s.otp_required, true) AS otp_required,
-                  COALESCE(s.in_mall_require_location, true) AS in_mall_require_location,
-                  (now() AT TIME ZONE COALESCE(b.timezone, o.timezone)::text)::time AS local_time,
-                  EXISTS(SELECT 1 FROM shifts sh WHERE sh.branch_id = b.id AND sh.status = 'open') AS has_open_shift
+    let row: Option<BranchOpenRow> = sqlx::query_as(&format!(
+        r#"SELECT {BRANCH_OPEN_SELECT}
            FROM branches b
            JOIN organizations o ON o.id = b.org_id
            LEFT JOIN branch_delivery_settings s ON s.branch_id = b.id
            WHERE b.id = $1 AND b.is_active = true AND b.deleted_at IS NULL"#,
-    )
+    ))
     .bind(branch_id)
     .fetch_optional(pool)
     .await?;
     let Some(r) = row else { return Ok(false) };
-    Ok(if channel == CHANNEL_OUTSIDE {
-        channel_open(
-            r.outside_enabled,
-            &r.outside_override,
-            r.outside_open_time,
-            r.outside_close_time,
-            r.local_time,
-            r.has_open_shift,
-        )
-    } else {
-        channel_open(
-            r.in_mall_enabled,
-            &r.in_mall_override,
-            r.in_mall_open_time,
-            r.in_mall_close_time,
-            r.local_time,
-            r.has_open_shift,
-        )
-    })
+    Ok(r.open_for(channel))
 }
 
 // ── Public channel-resolved menu ──────────────────────────────
@@ -323,11 +342,7 @@ pub async fn public_menu(
     }
 
     // The channel's active discount (customer-facing), if any.
-    let discount_col = if query.channel == "outside" {
-        "outside_discount_id"
-    } else {
-        "in_mall_discount_id"
-    };
+    let discount_col = channel_discount_col(&query.channel);
     let discount: Option<DeliveryMenuDiscount> =
         sqlx::query_as::<_, (Uuid, String, serde_json::Value, String, i32)>(&format!(
             "SELECT d.id, d.name, d.name_translations, d.type::text, d.value \
@@ -740,18 +755,20 @@ pub async fn delivery_quote(
     validate_channel(&query.channel)?;
     validate_coords(query.lat, query.lng)?;
     let outside = query.channel == CHANNEL_OUTSIDE;
+    // Channel is validated above, so interpolating it is safe.
+    let fee_col = channel_fee_col(&query.channel);
 
     let row: Option<(bool, i32)> = sqlx::query_as(&format!(
-        "SELECT COALESCE(s.{ch}_enabled, false), COALESCE(s.in_mall_fee, 0) \
+        "SELECT COALESCE(s.{ch}_enabled, false), COALESCE(s.{fee_col}, 0) \
          FROM branches b LEFT JOIN branch_delivery_settings s ON s.branch_id = b.id \
          WHERE b.id = $1 AND b.is_active = true AND b.deleted_at IS NULL",
-        ch = if outside { "outside" } else { "in_mall" }
+        ch = query.channel,
+        fee_col = fee_col,
     ))
     .bind(branch_id)
     .fetch_optional(pool.get_ref())
     .await?;
-    let (enabled, in_mall_fee) =
-        row.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    let (enabled, flat_fee) = row.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
     if !enabled {
         return Err(AppError::NotFound(
             "This branch does not offer this channel".into(),
@@ -763,37 +780,35 @@ pub async fn delivery_quote(
         ));
     }
 
-    // In-mall: flat per-branch fee + the walking (haversine) distance from the
-    // branch, so the teller can flag orders placed far from the mall (spam). No
-    // zones, no OSRM, and distance never blocks the order.
+    // Flat-fee channels (in-mall / umbrella / pickup): a flat per-branch fee, no
+    // zones/OSRM. Only in-mall reports a walking (haversine) distance from the
+    // branch as a teller spam signal; umbrella/pickup have no mappable location.
     if !outside {
-        let coords: Option<(Option<f64>, Option<f64>)> =
-            sqlx::query_as("SELECT latitude, longitude FROM branches WHERE id = $1")
-                .bind(branch_id)
-                .fetch_optional(pool.get_ref())
-                .await?;
-        let distance_meters = coords.and_then(|(blat, blng)| match (blat, blng) {
-            (Some(blat), Some(blng)) => Some(
-                haversine_meters(
-                    LatLng {
-                        lat: blat,
-                        lng: blng,
-                    },
-                    LatLng {
-                        lat: query.lat,
-                        lng: query.lng,
-                    },
-                )
-                .round() as i32,
-            ),
-            _ => None,
-        });
+        let distance_meters = if query.channel == CHANNEL_IN_MALL {
+            let coords: Option<(Option<f64>, Option<f64>)> =
+                sqlx::query_as("SELECT latitude, longitude FROM branches WHERE id = $1")
+                    .bind(branch_id)
+                    .fetch_optional(pool.get_ref())
+                    .await?;
+            coords.and_then(|(blat, blng)| match (blat, blng) {
+                (Some(blat), Some(blng)) => Some(
+                    haversine_meters(
+                        LatLng { lat: blat, lng: blng },
+                        LatLng { lat: query.lat, lng: query.lng },
+                    )
+                    .round() as i32,
+                ),
+                _ => None,
+            })
+        } else {
+            None
+        };
         return Ok(HttpResponse::Ok().json(QuoteResponse {
             status: "ok".into(),
             zone_id: None,
             zone_name: None,
             distance_meters,
-            fee: Some(in_mall_fee),
+            fee: Some(flat_fee),
         }));
     }
 
@@ -1028,36 +1043,46 @@ pub async fn create_delivery_order(
     // customer by shop/company + floor + unit, so those are required and there is
     // no street address. For an outside (street) order the dropped pin sets the
     // route but a written address line finds the door, so the address is required.
-    if body.channel == CHANNEL_OUTSIDE {
-        validate_required_text(
-            "Delivery address",
-            body.address_line.as_deref().unwrap_or(""),
-            MAX_ADDRESS_LEN,
-        )?;
-        validate_optional_text("Place name", body.place_name.as_deref(), MAX_SHORT_TEXT_LEN)?;
-        validate_optional_text("Floor", body.floor.as_deref(), MAX_SHORT_TEXT_LEN)?;
-        validate_optional_text(
-            "Unit number",
-            body.unit_number.as_deref(),
-            MAX_SHORT_TEXT_LEN,
-        )?;
-    } else {
-        validate_required_text(
-            "Shop or company name",
-            body.place_name.as_deref().unwrap_or(""),
-            MAX_SHORT_TEXT_LEN,
-        )?;
-        validate_required_text(
-            "Floor",
-            body.floor.as_deref().unwrap_or(""),
-            MAX_SHORT_TEXT_LEN,
-        )?;
-        validate_required_text(
-            "Unit or office",
-            body.unit_number.as_deref().unwrap_or(""),
-            MAX_SHORT_TEXT_LEN,
-        )?;
-        validate_optional_text("Address", body.address_line.as_deref(), MAX_ADDRESS_LEN)?;
+    match body.channel.as_str() {
+        CHANNEL_OUTSIDE => {
+            validate_required_text(
+                "Delivery address",
+                body.address_line.as_deref().unwrap_or(""),
+                MAX_ADDRESS_LEN,
+            )?;
+            validate_optional_text("Place name", body.place_name.as_deref(), MAX_SHORT_TEXT_LEN)?;
+            validate_optional_text("Floor", body.floor.as_deref(), MAX_SHORT_TEXT_LEN)?;
+            validate_optional_text("Unit number", body.unit_number.as_deref(), MAX_SHORT_TEXT_LEN)?;
+        }
+        CHANNEL_UMBRELLA => {
+            // Umbrella/sunbed: the runner finds the customer by umbrella number
+            // (stored in place_name); an optional section/zone goes in landmark.
+            validate_required_text(
+                "Umbrella number",
+                body.place_name.as_deref().unwrap_or(""),
+                MAX_SHORT_TEXT_LEN,
+            )?;
+            validate_optional_text("Section", body.landmark.as_deref(), MAX_SHORT_TEXT_LEN)?;
+        }
+        CHANNEL_PICKUP => {
+            // Self-collect: no destination details; name + phone (below) suffice.
+            validate_optional_text("Note", body.place_name.as_deref(), MAX_SHORT_TEXT_LEN)?;
+        }
+        _ => {
+            // in_mall
+            validate_required_text(
+                "Shop or company name",
+                body.place_name.as_deref().unwrap_or(""),
+                MAX_SHORT_TEXT_LEN,
+            )?;
+            validate_required_text("Floor", body.floor.as_deref().unwrap_or(""), MAX_SHORT_TEXT_LEN)?;
+            validate_required_text(
+                "Unit or office",
+                body.unit_number.as_deref().unwrap_or(""),
+                MAX_SHORT_TEXT_LEN,
+            )?;
+            validate_optional_text("Address", body.address_line.as_deref(), MAX_ADDRESS_LEN)?;
+        }
     }
     if let (Some(lat), Some(lng)) = (body.customer_lat, body.customer_lng) {
         validate_coords(lat, lng)?;
@@ -1146,6 +1171,17 @@ pub async fn create_delivery_order(
                 ));
             }
         }
+    } else if channel_is_flat(&body.channel) {
+        // Umbrella / pickup: a flat per-branch fee — no GPS, no zone, no distance.
+        let fee: i32 = sqlx::query_scalar(&format!(
+            "SELECT COALESCE({fee_col}, 0) FROM branch_delivery_settings WHERE branch_id = $1",
+            fee_col = channel_fee_col(&body.channel),
+        ))
+        .bind(body.branch_id)
+        .fetch_optional(pool.get_ref())
+        .await?
+        .unwrap_or(0);
+        (fee, None, None)
     } else {
         // In-mall: the customer confirms they're at the branch with device GPS
         // (never a manual pin). Whether that location is *required* is a per-branch
@@ -1202,11 +1238,7 @@ pub async fn create_delivery_order(
     // item subtotal only (the delivery fee is always charged in full). The
     // discount id is configured per channel on branch_delivery_settings; only an
     // *active* discount is honored, otherwise it silently drops to none.
-    let discount_col = if is_outside {
-        "outside_discount_id"
-    } else {
-        "in_mall_discount_id"
-    };
+    let discount_col = channel_discount_col(&body.channel);
     let configured_discount: Option<Uuid> = sqlx::query_scalar(&format!(
         "SELECT {discount_col} FROM branch_delivery_settings WHERE branch_id = $1"
     ))

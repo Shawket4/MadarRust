@@ -29960,7 +29960,13 @@
           "in_mall_fee",
           "prep_time_minutes",
           "otp_required",
-          "in_mall_require_location"
+          "in_mall_require_location",
+          "umbrella_enabled",
+          "pickup_enabled",
+          "umbrella_override",
+          "pickup_override",
+          "umbrella_fee",
+          "pickup_fee"
         ],
         "properties": {
           "branch_id": {
@@ -30037,9 +30043,68 @@
           "outside_override": {
             "type": "string"
           },
+          "pickup_close_time": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pickup_discount_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "pickup_enabled": {
+            "type": "boolean"
+          },
+          "pickup_fee": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "pickup_open_time": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pickup_override": {
+            "type": "string"
+          },
           "prep_time_minutes": {
             "type": "integer",
             "format": "int32"
+          },
+          "umbrella_close_time": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "umbrella_discount_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "umbrella_enabled": {
+            "type": "boolean"
+          },
+          "umbrella_fee": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Flat per-branch fees (piastres). Pickup defaults to free."
+          },
+          "umbrella_open_time": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "umbrella_override": {
+            "type": "string"
           }
         }
       },
@@ -30559,9 +30624,61 @@
               "null"
             ]
           },
+          "pickup_close_time": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pickup_discount_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "pickup_enabled": {
+            "type": "boolean"
+          },
+          "pickup_fee": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "pickup_open_time": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "prep_time_minutes": {
             "type": "integer",
             "format": "int32"
+          },
+          "umbrella_close_time": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "umbrella_discount_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "umbrella_enabled": {
+            "type": "boolean"
+          },
+          "umbrella_fee": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "umbrella_open_time": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -38450,8 +38567,12 @@
           "code",
           "in_mall_enabled",
           "outside_enabled",
+          "umbrella_enabled",
+          "pickup_enabled",
           "in_mall_open_now",
           "outside_open_now",
+          "umbrella_open_now",
+          "pickup_open_now",
           "otp_required",
           "in_mall_require_location"
         ],
@@ -38485,6 +38606,18 @@
             "type": "boolean"
           },
           "outside_open_now": {
+            "type": "boolean"
+          },
+          "pickup_enabled": {
+            "type": "boolean"
+          },
+          "pickup_open_now": {
+            "type": "boolean"
+          },
+          "umbrella_enabled": {
+            "type": "boolean"
+          },
+          "umbrella_open_now": {
             "type": "boolean"
           }
         }
