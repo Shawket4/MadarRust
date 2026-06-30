@@ -133,10 +133,14 @@ export default function () {
     createOrder(t);
   } else {
     const r = Math.random();
-    if (r < 0.45) get(t, `/menu-items?org_id=${t.org}`, 'GET /menu-items');
-    else if (r < 0.65) get(t, `/categories?org_id=${t.org}`, 'GET /categories');
-    else if (r < 0.80) get(t, `/branches?org_id=${t.org}`, 'GET /branches');
-    else if (r < 0.95) get(t, '/orders?per_page=20', 'GET /orders');
+    if (r < 0.40) get(t, `/menu-items?org_id=${t.org}`, 'GET /menu-items');
+    else if (r < 0.58) get(t, `/categories?org_id=${t.org}`, 'GET /categories');
+    else if (r < 0.72) get(t, `/branches?org_id=${t.org}`, 'GET /branches');
+    else if (r < 0.87) get(t, '/orders?per_page=20', 'GET /orders');
+    // ~10%: the heavy "other endpoint" — per-branch sales aggregation on the read
+    // pool. NOTE: test branches hold little history, so this is a latency FLOOR;
+    // real reports over months of orders are heavier.
+    else if (r < 0.97) get(t, `/reports/branches/${t.branch}/sales`, 'GET /reports/branch-sales');
     else get(t, '/health', 'GET /health');
   }
   if (SLEEP > 0) sleep(SLEEP);

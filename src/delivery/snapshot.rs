@@ -27,7 +27,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::errors::AppError;
-use crate::orders::component_resolve::{resolve_menu_item_configuration, AddonInput};
+use crate::orders::component_resolve::{AddonInput, resolve_menu_item_configuration};
 use crate::orders::handlers::Order;
 
 // ── Intake input ──────────────────────────────────────────────
@@ -142,7 +142,9 @@ pub async fn resolve_cart(
     lines: &[CartLineInput],
     at: DateTime<Utc>,
 ) -> Result<ResolvedCart, AppError> {
-    use crate::delivery::{MAX_ADDON_QTY, MAX_CART_LINES, MAX_LINE_NOTES_LEN, MAX_LINE_QTY, MAX_SIZE_LABEL_LEN};
+    use crate::delivery::{
+        MAX_ADDON_QTY, MAX_CART_LINES, MAX_LINE_NOTES_LEN, MAX_LINE_QTY, MAX_SIZE_LABEL_LEN,
+    };
 
     if lines.is_empty() {
         return Err(AppError::BadRequest("Cart is empty".into()));
@@ -163,7 +165,11 @@ pub async fn resolve_cart(
                 "Item quantity must be between 1 and {MAX_LINE_QTY}"
             )));
         }
-        if line.addons.iter().any(|a| a.quantity <= 0 || a.quantity > MAX_ADDON_QTY) {
+        if line
+            .addons
+            .iter()
+            .any(|a| a.quantity <= 0 || a.quantity > MAX_ADDON_QTY)
+        {
             return Err(AppError::BadRequest(format!(
                 "Addon quantity must be between 1 and {MAX_ADDON_QTY}"
             )));
@@ -183,9 +189,16 @@ pub async fn resolve_cart(
 
         // Resolve org → branch → channel price + availability.
         #[allow(clippy::type_complexity)]
-        let row: Option<(String, serde_json::Value, i32, Option<i32>, bool, Option<i32>, Option<bool>)> =
-            sqlx::query_as(
-                r#"SELECT mi.name, mi.name_translations, mi.base_price,
+        let row: Option<(
+            String,
+            serde_json::Value,
+            i32,
+            Option<i32>,
+            bool,
+            Option<i32>,
+            Option<bool>,
+        )> = sqlx::query_as(
+            r#"SELECT mi.name, mi.name_translations, mi.base_price,
                           bmo.price_override,
                           COALESCE(bmo.is_available, true) AS branch_available,
                           bcmo.price_override AS channel_price,
@@ -197,18 +210,25 @@ pub async fn resolve_cart(
                           ON bcmo.menu_item_id = mi.id AND bcmo.branch_id = $2
                          AND bcmo.channel = $3::delivery_channel
                    WHERE mi.id = $1 AND mi.org_id = $4 AND mi.deleted_at IS NULL"#,
-            )
-            .bind(line.menu_item_id)
-            .bind(branch_id)
-            .bind(channel)
-            .bind(org_id)
-            .fetch_optional(pool)
-            .await?;
+        )
+        .bind(line.menu_item_id)
+        .bind(branch_id)
+        .bind(channel)
+        .bind(org_id)
+        .fetch_optional(pool)
+        .await?;
 
-        let (item_name, name_translations, base_price, branch_price, branch_available, channel_price, channel_available) =
-            row.ok_or_else(|| {
-                AppError::NotFound(format!("Menu item {} not found", line.menu_item_id))
-            })?;
+        let (
+            item_name,
+            name_translations,
+            base_price,
+            branch_price,
+            branch_available,
+            channel_price,
+            channel_available,
+        ) = row.ok_or_else(|| {
+            AppError::NotFound(format!("Menu item {} not found", line.menu_item_id))
+        })?;
 
         // channel availability overrides branch availability; either can disable.
         let available = channel_available.unwrap_or(branch_available);
@@ -223,8 +243,9 @@ pub async fn resolve_cart(
         let effective_base = channel_price.or(branch_price).unwrap_or(base_price);
 
         let unit_price = match &line.size_label {
-            Some(size) => resolve_size_price(pool, branch_id, line.menu_item_id, size, effective_base)
-                .await?,
+            Some(size) => {
+                resolve_size_price(pool, branch_id, line.menu_item_id, size, effective_base).await?
+            }
             None => effective_base,
         };
 
@@ -276,7 +297,8 @@ pub async fn resolve_cart(
             d.line_cost = c.map(|c| (d.quantity * c).round() as i64);
         }
 
-        let (line_cost, unit_cost, cost_missing) = rollup_line_cost(&line_deductions, line.quantity);
+        let (line_cost, unit_cost, cost_missing) =
+            rollup_line_cost(&line_deductions, line.quantity);
 
         // Addons: server prices, with per-addon COGS rolled from attributed deductions.
         let mut addons: Vec<SnapshotAddon> = config
@@ -357,9 +379,13 @@ pub async fn resolve_cart(
         // overflowing the integer-piastre line total (release builds do not panic
         // on overflow — they would silently wrap and mis-price the order).
         let too_large = || AppError::BadRequest("Order total is too large".into());
-        let addon_per_unit: i64 = addons.iter().map(|a| a.unit_price as i64 * a.quantity as i64).sum();
+        let addon_per_unit: i64 = addons
+            .iter()
+            .map(|a| a.unit_price as i64 * a.quantity as i64)
+            .sum();
         let optional_per_unit: i64 = optionals.iter().map(|o| o.price as i64).sum();
-        let line_total_i64 = (unit_price as i64 + addon_per_unit + optional_per_unit) * line.quantity as i64;
+        let line_total_i64 =
+            (unit_price as i64 + addon_per_unit + optional_per_unit) * line.quantity as i64;
         let line_total = i32::try_from(line_total_i64).map_err(|_| too_large())?;
         subtotal = subtotal.checked_add(line_total).ok_or_else(too_large)?;
 
@@ -382,7 +408,9 @@ pub async fn resolve_cart(
     }
 
     Ok(ResolvedCart {
-        snapshot: CartSnapshot { lines: snapshot_lines },
+        snapshot: CartSnapshot {
+            lines: snapshot_lines,
+        },
         deductions: all_deductions,
         subtotal,
     })
@@ -391,7 +419,7 @@ pub async fn resolve_cart(
 /// branch-size override > catalog-size override > the branch/channel-effective base.
 ///
 /// The size label arrives from an untrusted client. Comparing on `label::text`
-/// (rather than casting the inbound string to `::item_size`) means an unknown
+/// (rather than casting the inbound string to ``) means an unknown
 /// size is a clean 400 instead of a Postgres enum-cast 500. A size the item does
 /// not actually offer is rejected — it must exist as an active catalog size.
 async fn resolve_size_price(
@@ -426,7 +454,10 @@ async fn resolve_size_price(
 
 /// Full line COGS, recipe-scope unit cost, and a cost-missing flag — mirrors the
 /// POS `summarize_line_costs` rollup for one line's deductions.
-fn rollup_line_cost(deductions: &[SnapshotDeduction], quantity: i32) -> (Option<i64>, Option<i64>, bool) {
+fn rollup_line_cost(
+    deductions: &[SnapshotDeduction],
+    quantity: i32,
+) -> (Option<i64>, Option<i64>, bool) {
     let cost_missing = deductions.is_empty() || deductions.iter().any(|d| d.line_cost.is_none());
     let line_cost = if cost_missing {
         None
@@ -447,7 +478,10 @@ fn rollup_line_cost(deductions: &[SnapshotDeduction], quantity: i32) -> (Option<
         None
     } else {
         Some(
-            (recipe.iter().map(|d| d.cost_per_unit.unwrap() * d.quantity).sum::<f64>()
+            (recipe
+                .iter()
+                .map(|d| d.cost_per_unit.unwrap() * d.quantity)
+                .sum::<f64>()
                 / quantity.max(1) as f64)
                 .round() as i64,
         )
@@ -465,7 +499,13 @@ fn addon_cost(deductions: &[SnapshotDeduction], addon_item_id: Uuid) -> Option<i
     if entries.is_empty() || entries.iter().any(|d| d.cost_per_unit.is_none()) {
         None
     } else {
-        Some(entries.iter().map(|d| d.cost_per_unit.unwrap() * d.quantity).sum::<f64>().round() as i64)
+        Some(
+            entries
+                .iter()
+                .map(|d| d.cost_per_unit.unwrap() * d.quantity)
+                .sum::<f64>()
+                .round() as i64,
+        )
     }
 }
 
@@ -535,7 +575,12 @@ pub async fn apply_snapshot(
     .bind(biz_date)
     .fetch_one(&mut **tx)
     .await?;
-    let order_ref = format!("{}-{}-{:04}", branch_code, biz_date.format("%y%m%d"), ref_seq);
+    let order_ref = format!(
+        "{}-{}-{:04}",
+        branch_code,
+        biz_date.format("%y%m%d"),
+        ref_seq
+    );
 
     let order = sqlx::query_as::<_, Order>(
         r#"
@@ -671,8 +716,15 @@ pub async fn apply_snapshot(
             .await?;
         }
 
-        apply_one_deductions(tx, ctx.branch_id, order.id, ctx.teller_id, &line_deductions, &mut warnings)
-            .await?;
+        apply_one_deductions(
+            tx,
+            ctx.branch_id,
+            order.id,
+            ctx.teller_id,
+            &line_deductions,
+            &mut warnings,
+        )
+        .await?;
     }
 
     Ok((order, warnings))

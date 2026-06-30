@@ -10,7 +10,7 @@
 //! device re-verifies. Signed with the app's JWT secret (HS256), 90-day expiry.
 
 use chrono::{Duration, Utc};
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -48,9 +48,13 @@ pub fn issue_device_token(secret: &str, phone: &str) -> Result<String, AppError>
 /// True when `token` is a valid, unexpired device token for `phone`.
 pub fn verify_device_token(secret: &str, phone: &str, token: &str) -> bool {
     let validation = Validation::default(); // HS256 + exp enforced
-    decode::<DeviceClaims>(token, &DecodingKey::from_secret(secret.as_bytes()), &validation)
-        .map(|d| d.claims.kind == DEVICE_KIND && d.claims.sub == phone)
-        .unwrap_or(false)
+    decode::<DeviceClaims>(
+        token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &validation,
+    )
+    .map(|d| d.claims.kind == DEVICE_KIND && d.claims.sub == phone)
+    .unwrap_or(false)
 }
 
 /// Send a WhatsApp message, fire-and-forget. Returns immediately; the request is
@@ -58,6 +62,13 @@ pub fn verify_device_token(secret: &str, phone: &str, token: &str) -> bool {
 /// switch ([`gateway::is_paused`]) — when paused the send is skipped entirely,
 /// so the gateway can be muted for maintenance without unlinking the number.
 pub fn send_message(pool: PgPool, phone: String, message: String) {
+    // Hard-skip all outbound WhatsApp (incl. OTP codes) in the public demo, so a
+    // playground visitor can never make us message a real phone number — even if
+    // WHATSAPP_SERVICE_URL is somehow configured on the demo box.
+    if crate::demo::config::demo_mode() {
+        tracing::info!(phone = %phone, "DEMO_MODE — skipping WhatsApp send");
+        return;
+    }
     let Ok(base) = std::env::var("WHATSAPP_SERVICE_URL") else {
         tracing::info!(phone = %phone, "WHATSAPP_SERVICE_URL unset — skipping WhatsApp send");
         return;
@@ -78,7 +89,9 @@ pub fn send_message(pool: PgPool, phone: String, message: String) {
         }
         match req.send().await {
             Ok(resp) if resp.status().is_success() => {}
-            Ok(resp) => tracing::warn!(status = %resp.status(), "WhatsApp gateway returned non-2xx"),
+            Ok(resp) => {
+                tracing::warn!(status = %resp.status(), "WhatsApp gateway returned non-2xx")
+            }
             Err(e) => tracing::warn!(error = %e, "WhatsApp send failed"),
         }
     });
@@ -107,7 +120,9 @@ pub fn build_otp_message(code: &str) -> String {
 
 pub fn build_order_received_message(delivery_ref: &str, order_id: Uuid) -> String {
     with_tracking(
-        format!("We've received your order {delivery_ref}. We'll let you know when it's on the way."),
+        format!(
+            "We've received your order {delivery_ref}. We'll let you know when it's on the way."
+        ),
         order_id,
     )
 }
@@ -120,12 +135,49 @@ pub fn build_order_accepted_message(delivery_ref: &str, order_id: Uuid) -> Strin
 }
 
 pub fn build_out_for_delivery_message(delivery_ref: &str, order_id: Uuid) -> String {
-    with_tracking(format!("Your order {delivery_ref} is on the way!"), order_id)
+    with_tracking(
+        format!("Your order {delivery_ref} is on the way!"),
+        order_id,
+    )
 }
 
 pub fn build_delivered_message(delivery_ref: &str, order_id: Uuid) -> String {
     with_tracking(
         format!("Your order {delivery_ref} has been delivered. Enjoy!"),
         order_id,
+    )
+}
+
+// ── Reservations & waitlist nudges ────────────────────────────────────────────
+
+/// Flat departure nudge: fires `lead_minutes` before a reservation's time.
+pub fn build_reservation_departure_message(name: &str, when: &str) -> String {
+    format!(
+        "Hi {name}, it's almost time for your reservation ({when}). \
+         Time to head out so you arrive right on time! See you soon."
+    )
+}
+
+/// No-show warn: the table is being held but the guest is past their grace.
+pub fn build_reservation_running_late_message(name: &str) -> String {
+    format!(
+        "Hi {name}, we're holding your table but you're running late. \
+         Please call the branch to keep your reservation."
+    )
+}
+
+/// Waitlist: the table is ready now — come to the host stand.
+pub fn build_waitlist_ready_message(name: &str) -> String {
+    format!(
+        "Hi {name}, your table is ready! Please come to the host stand \
+         within the next few minutes."
+    )
+}
+
+/// Waitlist (OSRM-driven): table will free about when the guest can arrive.
+pub fn build_waitlist_headout_message(name: &str, eta_minutes: i64) -> String {
+    format!(
+        "Hi {name}, your table will be ready soon. You're about {eta_minutes} min \
+         away — head out now so you arrive right as it frees up."
     )
 }

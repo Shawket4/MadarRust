@@ -1,22 +1,29 @@
 //! Engine integration tests: the frozen wire contract, determinism, and
 //! pathological-input robustness.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
 
 use std::collections::{HashMap, HashSet};
 
 use chrono::{Duration, TimeZone, Utc};
 use uuid::Uuid;
 
+use super::{EngineError, ItemSnapshot, SaleEvent, run_advisor};
 use crate::menu_advisor::dto::{
-    Action, AnalysisConfig, BundleAssociation, BundleForecast, BundleItemPair,
-    BundleSuggestion, Classification, CmQuadrant, Confidence, GuardClip, ItemKey,
-    PeerComparison, PeerPosition, PriceAnchors, PriceSuggestion, RemovalRecommendation,
-    Triplet,
+    Action, AnalysisConfig, BundleAssociation, BundleForecast, BundleItemPair, BundleSuggestion,
+    Classification, CmQuadrant, Confidence, GuardClip, ItemKey, PeerComparison, PeerPosition,
+    PriceAnchors, PriceSuggestion, RemovalRecommendation, Triplet,
 };
-use super::{run_advisor, EngineError, ItemSnapshot, SaleEvent};
 
 fn key(id: u8) -> ItemKey {
-    ItemKey { menu_item_id: Uuid::from_u128(id as u128), size_label: "one_size".into() }
+    ItemKey {
+        menu_item_id: Uuid::from_u128(id as u128),
+        size_label: "one_size".into(),
+    }
 }
 
 fn snap(id: u8, price: i64, cost: Option<i64>) -> ItemSnapshot {
@@ -52,7 +59,9 @@ fn frozen_contract_json_shapes() {
     let suggestion = PriceSuggestion {
         key: key(1),
         item_name: "Latte".into(),
-        classification: Classification::Cm { quadrant: CmQuadrant::Star },
+        classification: Classification::Cm {
+            quadrant: CmQuadrant::Star,
+        },
         current_price: 4500,
         units_sold_raw: 120.0,
         effective_price: 4450.0,
@@ -88,16 +97,35 @@ fn frozen_contract_json_shapes() {
     assert_eq!(v["classification"]["quadrant"], "star");
     assert_eq!(v["action"], "raise_price");
     assert_eq!(v["confidence"], "high");
-    assert_eq!(v["guard_clips"], serde_json::json!(["margin_floor", "cultural_rounding"]));
+    assert_eq!(
+        v["guard_clips"],
+        serde_json::json!(["margin_floor", "cultural_rounding"])
+    );
     assert_eq!(v["peer_comparison"]["your_position"], "below");
     assert_eq!(v["key"]["size_label"], "one_size");
     let keys: HashSet<&str> = v.as_object().unwrap().keys().map(|s| s.as_str()).collect();
     for expected in [
-        "key", "item_name", "classification", "current_price", "units_sold_raw",
-        "effective_price", "popularity_share", "cm_per_unit", "margin_pct",
-        "food_cost_pct", "anchors", "suggested_price", "suggested_delta_abs",
-        "suggested_delta_pct", "action", "confidence", "explanation", "guard_clips",
-        "peer_comparison", "price_changed_in_window", "cost_reduction_whatif_margin",
+        "key",
+        "item_name",
+        "classification",
+        "current_price",
+        "units_sold_raw",
+        "effective_price",
+        "popularity_share",
+        "cm_per_unit",
+        "margin_pct",
+        "food_cost_pct",
+        "anchors",
+        "suggested_price",
+        "suggested_delta_abs",
+        "suggested_delta_pct",
+        "action",
+        "confidence",
+        "explanation",
+        "guard_clips",
+        "peer_comparison",
+        "price_changed_in_window",
+        "cost_reduction_whatif_margin",
         "cost_missing",
     ] {
         assert!(keys.contains(expected), "missing key {expected}");
@@ -137,11 +165,19 @@ fn frozen_contract_json_shapes() {
             composite_score: 0.27,
         },
         forecast: BundleForecast {
-            expected_velocity: Triplet { lo: 0.5, mid: 0.625, hi: 0.9375 },
+            expected_velocity: Triplet {
+                lo: 0.5,
+                mid: 0.625,
+                hi: 0.9375,
+            },
             inside_bundle_units_x: 18.75,
             halo_units_x: 2.39,
             total_units_uplift_x: 21.14,
-            incremental_cm: Some(Triplet { lo: -300.0, mid: 500.0, hi: 1400.0 }),
+            incremental_cm: Some(Triplet {
+                lo: -300.0,
+                mid: 500.0,
+                hi: 1400.0,
+            }),
         },
         guard_clips: vec![],
         explanation: "x".into(),
@@ -150,9 +186,19 @@ fn frozen_contract_json_shapes() {
     let v = serde_json::to_value(&bundle).unwrap();
     let keys: HashSet<&str> = v.as_object().unwrap().keys().map(|s| s.as_str()).collect();
     for expected in [
-        "focus_item", "bundle_items", "bundle_list_price", "bundle_suggested_price",
-        "bundle_discount_pct", "bundle_cost", "bundle_cm", "bundle_margin_pct",
-        "association", "forecast", "guard_clips", "explanation", "missing_costs",
+        "focus_item",
+        "bundle_items",
+        "bundle_list_price",
+        "bundle_suggested_price",
+        "bundle_discount_pct",
+        "bundle_cost",
+        "bundle_cm",
+        "bundle_margin_pct",
+        "association",
+        "forecast",
+        "guard_clips",
+        "explanation",
+        "missing_costs",
     ] {
         assert!(keys.contains(expected), "missing key {expected}");
     }
@@ -164,7 +210,10 @@ fn frozen_contract_json_shapes() {
 
     // AnalysisConfig: tuple range serializes as [lo, hi]; rounding rule PascalCase.
     let cfg = serde_json::to_value(AnalysisConfig::default()).unwrap();
-    assert_eq!(cfg["bundle_discount_pct_range"], serde_json::json!([0.10, 0.25]));
+    assert_eq!(
+        cfg["bundle_discount_pct_range"],
+        serde_json::json!([0.10, 0.25])
+    );
     assert_eq!(cfg["price_rounding_rule"], "EgyptianCafe");
     // Partial configs deserialize with defaults.
     let partial: AnalysisConfig =
@@ -219,12 +268,21 @@ fn full_run_deterministic() {
 fn mode_summary_counts_sum_to_total() {
     let (snaps, sales, baskets) = scenario();
     let r = run_advisor(
-        &snaps, &sales, &baskets, now(), &AnalysisConfig::default(), None, &HashSet::new(),
+        &snaps,
+        &sales,
+        &baskets,
+        now(),
+        &AnalysisConfig::default(),
+        None,
+        &HashSet::new(),
     )
     .unwrap();
     let s = r.mode_summary;
     assert_eq!(s.items_total, 7);
-    assert_eq!(s.items_cm_tracked + s.items_revenue_only + s.items_insufficient, s.items_total);
+    assert_eq!(
+        s.items_cm_tracked + s.items_revenue_only + s.items_insufficient,
+        s.items_total
+    );
     assert_eq!(s.items_cm_tracked, 4);
     assert_eq!(s.items_revenue_only, 2);
     assert_eq!(s.items_insufficient, 1);
@@ -235,14 +293,26 @@ fn mode_summary_counts_sum_to_total() {
 fn only_cm_dogs_get_removal_scenarios() {
     let (snaps, sales, baskets) = scenario();
     let r = run_advisor(
-        &snaps, &sales, &baskets, now(), &AnalysisConfig::default(), None, &HashSet::new(),
+        &snaps,
+        &sales,
+        &baskets,
+        now(),
+        &AnalysisConfig::default(),
+        None,
+        &HashSet::new(),
     )
     .unwrap();
     for sc in &r.removal_scenarios {
-        let ps = r.price_suggestions.iter().find(|p| p.key == sc.key).unwrap();
+        let ps = r
+            .price_suggestions
+            .iter()
+            .find(|p| p.key == sc.key)
+            .unwrap();
         assert!(matches!(
             ps.classification,
-            Classification::Cm { quadrant: CmQuadrant::Dog }
+            Classification::Cm {
+                quadrant: CmQuadrant::Dog
+            }
         ));
     }
     assert!(r.removal_scenarios.iter().any(|sc| sc.key == key(2)));
@@ -252,7 +322,13 @@ fn only_cm_dogs_get_removal_scenarios() {
 fn empty_sales_yields_all_insufficient_monitor() {
     let snaps = vec![snap(1, 1000, Some(300)), snap(2, 2000, None)];
     let r = run_advisor(
-        &snaps, &[], &[], now(), &AnalysisConfig::default(), None, &HashSet::new(),
+        &snaps,
+        &[],
+        &[],
+        now(),
+        &AnalysisConfig::default(),
+        None,
+        &HashSet::new(),
     )
     .unwrap();
     assert_eq!(r.mode_summary.items_insufficient, 2);
@@ -267,7 +343,13 @@ fn empty_sales_yields_all_insufficient_monitor() {
 #[test]
 fn no_items_is_an_error() {
     let r = run_advisor(
-        &[], &[], &[], now(), &AnalysisConfig::default(), None, &HashSet::new(),
+        &[],
+        &[],
+        &[],
+        now(),
+        &AnalysisConfig::default(),
+        None,
+        &HashSet::new(),
     );
     assert!(matches!(r, Err(EngineError::NoItems)));
 }
@@ -285,11 +367,18 @@ fn pathological_inputs_produce_finite_report() {
         // Negative CM everywhere (cost above price).
         (
             vec![snap(1, 100, Some(900)), snap(2, 100, Some(800))],
-            vec![sale(1, 60, 100, Some(900), 1), sale(2, 60, 100, Some(800), 1)],
+            vec![
+                sale(1, 60, 100, Some(900), 1),
+                sale(2, 60, 100, Some(800), 1),
+            ],
             std::iter::repeat_n(vec![key(1), key(2)], 30).collect(),
         ),
         // Single item, no baskets.
-        (vec![snap(1, 1000, Some(300))], vec![sale(1, 100, 1000, Some(300), 0)], vec![]),
+        (
+            vec![snap(1, 1000, Some(300))],
+            vec![sale(1, 100, 1000, Some(300), 0)],
+            vec![],
+        ),
         // Item with sales but zero-price sales mixed in.
         (
             vec![snap(1, 1000, Some(300)), snap(2, 1000, Some(300))],
@@ -303,7 +392,13 @@ fn pathological_inputs_produce_finite_report() {
     ];
     for (i, (snaps, sales, baskets)) in cases.iter().enumerate() {
         let r = run_advisor(
-            snaps, sales, baskets, now(), &AnalysisConfig::default(), None, &HashSet::new(),
+            snaps,
+            sales,
+            baskets,
+            now(),
+            &AnalysisConfig::default(),
+            None,
+            &HashSet::new(),
         );
         let report = r.unwrap_or_else(|e| panic!("case {i} failed: {e}"));
         // validate_report ran inside run_advisor; double-check via JSON: no nulls
@@ -327,14 +422,31 @@ fn previous_classifications_flow_through() {
         sale(3, 262, 1000, Some(500), 0),
     ];
     let mut prev = HashMap::new();
-    prev.insert(key(1), Classification::Cm { quadrant: CmQuadrant::Puzzle });
+    prev.insert(
+        key(1),
+        Classification::Cm {
+            quadrant: CmQuadrant::Puzzle,
+        },
+    );
     let r = run_advisor(
-        &snaps, &sales, &[], now(), &AnalysisConfig::default(), Some(&prev), &HashSet::new(),
+        &snaps,
+        &sales,
+        &[],
+        now(),
+        &AnalysisConfig::default(),
+        Some(&prev),
+        &HashSet::new(),
     )
     .unwrap();
-    let s = r.price_suggestions.iter().find(|s| s.key == key(1)).unwrap();
+    let s = r
+        .price_suggestions
+        .iter()
+        .find(|s| s.key == key(1))
+        .unwrap();
     assert!(matches!(
         s.classification,
-        Classification::Cm { quadrant: CmQuadrant::Puzzle }
+        Classification::Cm {
+            quadrant: CmQuadrant::Puzzle
+        }
     ));
 }

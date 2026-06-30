@@ -1,4 +1,4 @@
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::{
     auth::jwt::Claims,
     errors::{AppError, AppErrorResponse},
-    inventory::movements::{record_movement, MovementParams},
+    inventory::movements::{MovementParams, record_movement},
     models::UserRole,
     permissions::checker::check_permission,
 };
@@ -16,53 +16,53 @@ use utoipa::ToSchema;
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct Stocktake {
-    pub id:              Uuid,
-    pub org_id:          Uuid,
-    pub branch_id:       Uuid,
-    pub status:          String,
-    pub note:            Option<String>,
-    pub started_by:      Uuid,
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub branch_id: Uuid,
+    pub status: String,
+    pub note: Option<String>,
+    pub started_by: Uuid,
     pub started_by_name: Option<String>,
-    pub started_at:      chrono::DateTime<chrono::Utc>,
-    pub finalized_by:    Option<Uuid>,
-    pub finalized_at:    Option<chrono::DateTime<chrono::Utc>>,
-    pub created_at:      chrono::DateTime<chrono::Utc>,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub finalized_by: Option<Uuid>,
+    pub finalized_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
     /// Branch label — only populated by the stocktakes list (so the "All
     /// branches" view can show which branch each stocktake belongs to). Other
     /// stocktake endpoints leave it `null`.
     #[serde(default)]
     #[sqlx(default)]
-    pub branch_name:     Option<String>,
+    pub branch_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct StocktakeItem {
-    pub id:                  Uuid,
-    pub stocktake_id:        Uuid,
-    pub org_ingredient_id:   Uuid,
-    pub ingredient_name:     String,
-    pub unit:                String,
+    pub id: Uuid,
+    pub stocktake_id: Uuid,
+    pub org_ingredient_id: Uuid,
+    pub ingredient_name: String,
+    pub unit: String,
     pub branch_inventory_id: Option<Uuid>,
     #[schema(value_type = f64)]
-    pub expected_qty:        sqlx::types::BigDecimal,
+    pub expected_qty: sqlx::types::BigDecimal,
     #[schema(value_type = Option<f64>)]
-    pub counted_qty:         Option<sqlx::types::BigDecimal>,
+    pub counted_qty: Option<sqlx::types::BigDecimal>,
     #[schema(value_type = Option<f64>)]
-    pub variance:            Option<sqlx::types::BigDecimal>,
+    pub variance: Option<sqlx::types::BigDecimal>,
     /// Piastres per unit snapshot; `null` ⟺ unknown.
-    pub unit_cost:           Option<i64>,
-    pub note:                Option<String>,
+    pub unit_cost: Option<i64>,
+    pub note: Option<String>,
     /// theft | spoilage | breakage | miscount | supplier_short | transfer_error | other.
-    pub variance_reason:     Option<String>,
-    pub counted_by:          Option<Uuid>,
-    pub created_at:          chrono::DateTime<chrono::Utc>,
+    pub variance_reason: Option<String>,
+    pub counted_by: Option<Uuid>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct StocktakeFull {
     #[serde(flatten)]
     pub stocktake: Stocktake,
-    pub items:     Vec<StocktakeItem>,
+    pub items: Vec<StocktakeItem>,
     /// Org tolerance: a counted row whose |difference| is >= this percent of the
     /// expected quantity (or that appears-from / vanishes-to zero) is flagged and
     /// requires a `variance_reason` before the count can be finalized.
@@ -72,32 +72,32 @@ pub struct StocktakeFull {
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct VarianceRow {
     pub org_ingredient_id: Uuid,
-    pub ingredient_name:   String,
-    pub unit:              String,
-    pub expected_qty:      f64,
-    pub counted_qty:       Option<f64>,
-    pub variance:          Option<f64>,
-    pub unit_cost:         Option<i64>,
+    pub ingredient_name: String,
+    pub unit: String,
+    pub expected_qty: f64,
+    pub counted_qty: Option<f64>,
+    pub variance: Option<f64>,
+    pub unit_cost: Option<i64>,
     /// variance × unit_cost in piastres; `null` when cost unknown.
-    pub variance_value:    Option<i64>,
+    pub variance_value: Option<i64>,
     /// theft | spoilage | breakage | miscount | supplier_short | transfer_error | other.
-    pub variance_reason:   Option<String>,
+    pub variance_reason: Option<String>,
     /// True when |difference| exceeds the org threshold (or appears/vanishes from zero).
-    pub is_flagged:        bool,
+    pub is_flagged: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct VarianceReport {
-    pub stocktake_id:          Uuid,
-    pub rows:                  Vec<VarianceRow>,
+    pub stocktake_id: Uuid,
+    pub rows: Vec<VarianceRow>,
     /// Piastres lost to shrinkage (negative variances), as a positive number.
     pub total_shrinkage_value: i64,
     /// Piastres of overage (positive variances).
-    pub total_overage_value:   i64,
+    pub total_overage_value: i64,
     /// overage − shrinkage (net effect on inventory value).
-    pub net_variance_value:    i64,
+    pub net_variance_value: i64,
     /// Count of counted rows whose cost was unknown (excluded from totals).
-    pub unknown_cost_count:    i64,
+    pub unknown_cost_count: i64,
     /// Org tolerance used to compute `is_flagged`.
     pub variance_threshold_pct: f64,
 }
@@ -117,12 +117,12 @@ pub struct CreateStocktakeRequest {
 #[derive(Deserialize, ToSchema)]
 pub struct ItemCountInput {
     pub org_ingredient_id: Uuid,
-    pub counted_qty:       f64,
-    pub note:              Option<String>,
+    pub counted_qty: f64,
+    pub note: Option<String>,
     /// Why the count differs from expected. One of: theft | spoilage | breakage |
     /// miscount | supplier_short | transfer_error | other. Required at finalize for
     /// rows whose difference exceeds the org's variance threshold.
-    pub variance_reason:   Option<String>,
+    pub variance_reason: Option<String>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -142,28 +142,27 @@ pub struct UpsertItemsRequest {
     security(("bearer_jwt" = []))
 )]
 pub async fn create_stocktake(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
-    body:      web::Json<CreateStocktakeRequest>,
+    body: web::Json<CreateStocktakeRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "stocktakes", "create").await?;
     require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
 
-    let org_id: Uuid = sqlx::query_scalar(
-        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(*branch_id)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .flatten()
-    .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    let org_id: Uuid =
+        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
+            .bind(*branch_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .flatten()
+            .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
 
     // One active stocktake per branch at a time.
     let open_exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM stocktakes \
-         WHERE branch_id = $1 AND status IN ('draft','in_progress'))"
+         WHERE branch_id = $1 AND status IN ('draft','in_progress'))",
     )
     .bind(*branch_id)
     .fetch_one(pool.get_ref())
@@ -226,7 +225,11 @@ pub async fn create_stocktake(
     let variance_threshold_pct = fetch_threshold(&mut *tx, org_id).await?;
 
     tx.commit().await?;
-    Ok(HttpResponse::Created().json(StocktakeFull { stocktake: header, items, variance_threshold_pct }))
+    Ok(HttpResponse::Created().json(StocktakeFull {
+        stocktake: header,
+        items,
+        variance_threshold_pct,
+    }))
 }
 
 // ── GET /stocktakes/branches/:branch_id ──────────────────────
@@ -240,8 +243,8 @@ pub async fn create_stocktake(
     security(("bearer_jwt" = []))
 )]
 pub async fn list_stocktakes(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -295,9 +298,9 @@ pub async fn list_stocktakes(
     security(("bearer_jwt" = []))
 )]
 pub async fn get_stocktake(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "stocktakes", "read").await?;
@@ -306,7 +309,11 @@ pub async fn get_stocktake(
 
     let items = fetch_items(pool.get_ref(), *id).await?;
     let variance_threshold_pct = fetch_threshold(pool.get_ref(), header.org_id).await?;
-    Ok(HttpResponse::Ok().json(StocktakeFull { stocktake: header, items, variance_threshold_pct }))
+    Ok(HttpResponse::Ok().json(StocktakeFull {
+        stocktake: header,
+        items,
+        variance_threshold_pct,
+    }))
 }
 
 // ── PUT /stocktakes/:id/items ────────────────────────────────
@@ -321,9 +328,9 @@ pub async fn get_stocktake(
     security(("bearer_jwt" = []))
 )]
 pub async fn upsert_items(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
     body: web::Json<UpsertItemsRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -340,7 +347,9 @@ pub async fn upsert_items(
     let mut tx = pool.get_ref().begin().await?;
     for item in &body.items {
         if item.counted_qty < 0.0 {
-            return Err(AppError::BadRequest("counted_qty cannot be negative".into()));
+            return Err(AppError::BadRequest(
+                "counted_qty cannot be negative".into(),
+            ));
         }
         if let Some(reason) = &item.variance_reason {
             validate_variance_reason(reason)?;
@@ -364,7 +373,7 @@ pub async fn upsert_items(
              ON CONFLICT (stocktake_id, org_ingredient_id) \
              DO UPDATE SET counted_qty = EXCLUDED.counted_qty, note = EXCLUDED.note, \
                            counted_by = EXCLUDED.counted_by, \
-                           variance_reason = EXCLUDED.variance_reason"
+                           variance_reason = EXCLUDED.variance_reason",
         )
         .bind(*id)
         .bind(item.org_ingredient_id)
@@ -387,7 +396,11 @@ pub async fn upsert_items(
 
     let items = fetch_items(pool.get_ref(), *id).await?;
     let variance_threshold_pct = fetch_threshold(pool.get_ref(), header.org_id).await?;
-    Ok(HttpResponse::Ok().json(StocktakeFull { stocktake: header, items, variance_threshold_pct }))
+    Ok(HttpResponse::Ok().json(StocktakeFull {
+        stocktake: header,
+        items,
+        variance_threshold_pct,
+    }))
 }
 
 // ── POST /stocktakes/:id/finalize ────────────────────────────
@@ -401,9 +414,9 @@ pub async fn upsert_items(
     security(("bearer_jwt" = []))
 )]
 pub async fn finalize_stocktake(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "stocktakes", "update").await?;
@@ -421,12 +434,11 @@ pub async fn finalize_stocktake(
     // Lock the stocktake row and re-check it is still open INSIDE the tx, so a
     // concurrent/retried finalize can't both pass the status gate above and
     // double-post stock_count movements (doubling shrinkage reports) (V11).
-    let locked_status: String = sqlx::query_scalar(
-        "SELECT status::text FROM stocktakes WHERE id = $1 FOR UPDATE"
-    )
-    .bind(*id)
-    .fetch_one(&mut *tx)
-    .await?;
+    let locked_status: String =
+        sqlx::query_scalar("SELECT status::text FROM stocktakes WHERE id = $1 FOR UPDATE")
+            .bind(*id)
+            .fetch_one(&mut *tx)
+            .await?;
     if locked_status != "in_progress" && locked_status != "draft" {
         return Err(AppError::Conflict("Stocktake is not open".into()));
     }
@@ -443,7 +455,7 @@ pub async fn finalize_stocktake(
                 si.counted_qty::float8, si.unit_cost, si.variance_reason::text \
          FROM stocktake_items si \
          JOIN org_ingredients oi ON oi.id = si.org_ingredient_id \
-         WHERE si.stocktake_id = $1 AND si.counted_qty IS NOT NULL"
+         WHERE si.stocktake_id = $1 AND si.counted_qty IS NOT NULL",
     )
     .bind(*id)
     .fetch_all(&mut *tx)
@@ -458,10 +470,12 @@ pub async fn finalize_stocktake(
         let live: Option<f64> = if let Some(bi_id) = bi_id_opt {
             sqlx::query_scalar(
                 "SELECT current_stock::float8 FROM branch_inventory \
-                 WHERE id = $1 AND branch_id = $2 FOR UPDATE"
+                 WHERE id = $1 AND branch_id = $2 FOR UPDATE",
             )
-            .bind(bi_id).bind(header.branch_id)
-            .fetch_optional(&mut *tx).await?
+            .bind(bi_id)
+            .bind(header.branch_id)
+            .fetch_optional(&mut *tx)
+            .await?
         } else {
             None
         };
@@ -471,7 +485,8 @@ pub async fn finalize_stocktake(
     // Guardrail: every suspicious difference (vs LIVE book stock) must carry a
     // reason before the count is committed. A row whose tracking row was deleted
     // mid-count reconciles from a zero baseline (re-created below).
-    let unexplained: Vec<String> = counted.iter()
+    let unexplained: Vec<String> = counted
+        .iter()
         .filter(|(_, _, counted_qty, live, _, reason)| {
             is_variance_flagged(live.unwrap_or(0.0), *counted_qty, threshold) && reason.is_none()
         })
@@ -508,27 +523,33 @@ pub async fn finalize_stocktake(
         // Freeze the reconciliation baseline on the item for the variance report.
         sqlx::query(
             "UPDATE stocktake_items SET system_qty = $2 \
-             WHERE stocktake_id = $1 AND org_ingredient_id = $3"
+             WHERE stocktake_id = $1 AND org_ingredient_id = $3",
         )
-        .bind(*id).bind(system_qty).bind(ing_id)
-        .execute(&mut *tx).await?;
+        .bind(*id)
+        .bind(system_qty)
+        .bind(ing_id)
+        .execute(&mut *tx)
+        .await?;
 
         if delta != 0.0 {
-            record_movement(&mut *tx, MovementParams {
-                branch_id:           header.branch_id,
-                org_ingredient_id:   ing_id,
-                branch_inventory_id: Some(bi_id),
-                movement_type:       "stock_count",
-                quantity:            delta,
-                balance_after:       Some(balance),
-                unit_cost,
-                reason:              variance_reason.as_deref(),
-                below_zero:          balance < 0.0,
-                source_type:         Some("stocktake"),
-                source_id:           Some(*id),
-                note:                Some("Stocktake reconciliation"),
-                created_by:          Some(claims.user_id()),
-            })
+            record_movement(
+                &mut *tx,
+                MovementParams {
+                    branch_id: header.branch_id,
+                    org_ingredient_id: ing_id,
+                    branch_inventory_id: Some(bi_id),
+                    movement_type: "stock_count",
+                    quantity: delta,
+                    balance_after: Some(balance),
+                    unit_cost,
+                    reason: variance_reason.as_deref(),
+                    below_zero: balance < 0.0,
+                    source_type: Some("stocktake"),
+                    source_id: Some(*id),
+                    note: Some("Stocktake reconciliation"),
+                    created_by: Some(claims.user_id()),
+                },
+            )
             .await?;
         }
     }
@@ -550,7 +571,11 @@ pub async fn finalize_stocktake(
 
     let items = fetch_items(&mut *tx, *id).await?;
     tx.commit().await?;
-    Ok(HttpResponse::Ok().json(StocktakeFull { stocktake: header, items, variance_threshold_pct: threshold }))
+    Ok(HttpResponse::Ok().json(StocktakeFull {
+        stocktake: header,
+        items,
+        variance_threshold_pct: threshold,
+    }))
 }
 
 // ── POST /stocktakes/:id/cancel ──────────────────────────────
@@ -564,9 +589,9 @@ pub async fn finalize_stocktake(
     security(("bearer_jwt" = []))
 )]
 pub async fn cancel_stocktake(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "stocktakes", "update").await?;
@@ -574,7 +599,9 @@ pub async fn cancel_stocktake(
     require_branch_access(pool.get_ref(), &claims, header.branch_id).await?;
 
     if header.status != "in_progress" && header.status != "draft" {
-        return Err(AppError::Conflict("Only an open stocktake can be cancelled".into()));
+        return Err(AppError::Conflict(
+            "Only an open stocktake can be cancelled".into(),
+        ));
     }
 
     let updated = sqlx::query_as::<_, Stocktake>(
@@ -604,9 +631,9 @@ pub async fn cancel_stocktake(
     security(("bearer_jwt" = []))
 )]
 pub async fn variance_report(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "stocktakes", "read").await?;
@@ -654,18 +681,18 @@ pub async fn variance_report(
     for r in &rows {
         match (r.counted_qty, r.variance_value) {
             (Some(_), Some(v)) if v < 0 => total_shrinkage_value += -v,
-            (Some(_), Some(v))          => total_overage_value += v,
-            (Some(_), None)             => unknown_cost_count += 1,
+            (Some(_), Some(v)) => total_overage_value += v,
+            (Some(_), None) => unknown_cost_count += 1,
             _ => {}
         }
     }
 
     Ok(HttpResponse::Ok().json(VarianceReport {
-        stocktake_id:          *id,
+        stocktake_id: *id,
         rows,
         total_shrinkage_value,
         total_overage_value,
-        net_variance_value:    total_overage_value - total_shrinkage_value,
+        net_variance_value: total_overage_value - total_shrinkage_value,
         unknown_cost_count,
         variance_threshold_pct: threshold,
     }))
@@ -721,7 +748,7 @@ where
     E: sqlx::PgExecutor<'e>,
 {
     let pct: f64 = sqlx::query_scalar(
-        "SELECT stocktake_variance_threshold_pct::float8 FROM organizations WHERE id = $1"
+        "SELECT stocktake_variance_threshold_pct::float8 FROM organizations WHERE id = $1",
     )
     .bind(org_id)
     .fetch_one(executor)
@@ -739,8 +766,15 @@ fn is_variance_flagged(expected: f64, counted: f64, pct: f64) -> bool {
     }
 }
 
-const VARIANCE_REASONS: &[&str] =
-    &["theft", "spoilage", "breakage", "miscount", "supplier_short", "transfer_error", "other"];
+const VARIANCE_REASONS: &[&str] = &[
+    "theft",
+    "spoilage",
+    "breakage",
+    "miscount",
+    "supplier_short",
+    "transfer_error",
+    "other",
+];
 
 fn validate_variance_reason(reason: &str) -> Result<(), AppError> {
     if VARIANCE_REASONS.contains(&reason) {
@@ -762,27 +796,32 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 }
 
 async fn require_branch_access(
-    pool:      &PgPool,
-    claims:    &Claims,
+    pool: &PgPool,
+    claims: &Claims,
     branch_id: Uuid,
 ) -> Result<(), AppError> {
-    if claims.role == UserRole::SuperAdmin { return Ok(()); }
+    if claims.role == UserRole::SuperAdmin {
+        return Ok(());
+    }
 
-    let branch_org: Option<Uuid> = sqlx::query_scalar(
-        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(branch_id)
-    .fetch_optional(pool)
-    .await?
-    .flatten();
+    let branch_org: Option<Uuid> =
+        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
+            .bind(branch_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
 
     let branch_org = branch_org.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
 
     if claims.org_id() != Some(branch_org) {
-        return Err(AppError::Forbidden("Branch belongs to a different org".into()));
+        return Err(AppError::Forbidden(
+            "Branch belongs to a different org".into(),
+        ));
     }
 
-    if claims.role == UserRole::OrgAdmin { return Ok(()); }
+    if claims.role == UserRole::OrgAdmin {
+        return Ok(());
+    }
 
     let assigned: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)"
@@ -801,7 +840,8 @@ async fn require_branch_access(
     // both. The None guard keeps legacy/non-teller tokens working (V26).
     if claims.role == UserRole::Teller {
         if let Some(token_branch) = claims.branch_id()
-            && token_branch != branch_id {
+            && token_branch != branch_id
+        {
             return Err(AppError::Forbidden(
                 "This device is signed in to a different branch.".into(),
             ));

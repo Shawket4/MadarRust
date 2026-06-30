@@ -1,4 +1,4 @@
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -21,99 +21,99 @@ const MAX_SHIFTS_PER_PAGE: i64 = 200;
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct Shift {
-    pub id:                       Uuid,
-    pub branch_id:                Uuid,
-    pub teller_id:                Uuid,
-    pub teller_name:              String,
-    pub status:                   String,
-    pub opening_cash:             i32,
-    pub opening_cash_original:    Option<i32>,
-    pub opening_cash_was_edited:  bool,
+    pub id: Uuid,
+    pub branch_id: Uuid,
+    pub teller_id: Uuid,
+    pub teller_name: String,
+    pub status: String,
+    pub opening_cash: i32,
+    pub opening_cash_original: Option<i32>,
+    pub opening_cash_was_edited: bool,
     pub opening_cash_edit_reason: Option<String>,
-    pub closing_cash_declared:    Option<i32>,
-    pub closing_cash_system:      Option<i32>,
-    pub cash_discrepancy:         Option<i32>,
-    pub opened_at:                chrono::DateTime<chrono::Utc>,
-    pub closed_at:                Option<chrono::DateTime<chrono::Utc>>,
-    pub closed_by:                Option<Uuid>,
-    pub force_closed_by:          Option<Uuid>,
-    pub force_closed_at:          Option<chrono::DateTime<chrono::Utc>>,
-    pub force_close_reason:       Option<String>,
-    pub notes:                    Option<String>,
+    pub closing_cash_declared: Option<i32>,
+    pub closing_cash_system: Option<i32>,
+    pub cash_discrepancy: Option<i32>,
+    pub opened_at: chrono::DateTime<chrono::Utc>,
+    pub closed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub closed_by: Option<Uuid>,
+    pub force_closed_by: Option<Uuid>,
+    pub force_closed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub force_close_reason: Option<String>,
+    pub notes: Option<String>,
     /// Branch label — only populated by the shifts list (so the "All branches"
     /// view can show which branch each shift belongs to). Other shift endpoints
     /// leave it `null`.
     #[serde(default)]
     #[sqlx(default)]
-    pub branch_name:              Option<String>,
+    pub branch_name: Option<String>,
     /// The till (drawer) this shift is on. Populated by the read/list/open
     /// endpoints; mutation responses that build the row via RETURNING may leave
     /// `till_name` null (same convention as `branch_name`).
     #[serde(default)]
     #[sqlx(default)]
-    pub till_id:                  Option<Uuid>,
+    pub till_id: Option<Uuid>,
     #[serde(default)]
     #[sqlx(default)]
-    pub till_name:                Option<String>,
+    pub till_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct CashMovement {
-    pub id:            Uuid,
-    pub shift_id:      Uuid,
-    pub amount:        i32,
-    pub note:          String,
-    pub moved_by:      Uuid,
+    pub id: Uuid,
+    pub shift_id: Uuid,
+    pub amount: i32,
+    pub note: String,
+    pub moved_by: Uuid,
     pub moved_by_name: String,
-    pub created_at:    chrono::DateTime<chrono::Utc>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
     /// Client-minted idempotency / reconciliation key, echoed back so an
     /// offline client can map its queued movement to the server row. NULL for
     /// live online movements.
     #[serde(default)]
-    pub client_ref:    Option<Uuid>,
+    pub client_ref: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct ShiftPreFill {
-    pub has_open_shift:         bool,
-    pub open_shift:             Option<Shift>,
+    pub has_open_shift: bool,
+    pub open_shift: Option<Shift>,
     pub suggested_opening_cash: i32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct PaymentSummaryRow {
     pub payment_method: String,
-    pub is_cash:        bool,
-    pub total:          i64,
-    pub order_count:    i64,
+    pub is_cash: bool,
+    pub total: i64,
+    pub order_count: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct CashMovementSummaryRow {
-    pub amount:        i32,
-    pub note:          String,
+    pub amount: i32,
+    pub note: String,
     pub moved_by_name: String,
-    pub created_at:    chrono::DateTime<chrono::Utc>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct ShiftReportResponse {
-    pub shift:               Shift,
-    pub payment_summary:     Vec<PaymentSummaryRow>,
-    pub total_payments:      i64,
-    pub voided_amount:       i64,   // informational only — not subtracted from payments
-    pub net_payments:        i64,
-    pub cash_movements:      Vec<CashMovementSummaryRow>,
-    pub cash_movements_in:   i64,
-    pub cash_movements_out:  i64,
+    pub shift: Shift,
+    pub payment_summary: Vec<PaymentSummaryRow>,
+    pub total_payments: i64,
+    pub voided_amount: i64, // informational only — not subtracted from payments
+    pub net_payments: i64,
+    pub cash_movements: Vec<CashMovementSummaryRow>,
+    pub cash_movements_in: i64,
+    pub cash_movements_out: i64,
     /// Net of all cash movements (in - out) as a signed integer
-    pub cash_movements_net:  i64,
+    pub cash_movements_net: i64,
     /// Authoritative system (expected) cash in the drawer. For a closed shift
     /// this is the snapshot taken at close (`closing_cash_system`); for an open
     /// shift it is computed live via the same formula. Clients should display
     /// this directly instead of re-deriving it from the payment breakdown.
-    pub expected_cash:       i64,
-    pub printed_at:          chrono::DateTime<chrono::Utc>,
+    pub expected_cash: i64,
+    pub printed_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Paginated envelope for the shifts list. When the request omits `page`/`per_page`,
@@ -121,10 +121,10 @@ pub struct ShiftReportResponse {
 /// when they are present, `data` is one bounded page ordered newest-first.
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct PaginatedShifts {
-    pub data:        Vec<Shift>,
-    pub total:       i64,
-    pub page:        i64,
-    pub per_page:    i64,
+    pub data: Vec<Shift>,
+    pub total: i64,
+    pub page: i64,
+    pub per_page: i64,
     pub total_pages: i64,
 }
 
@@ -132,7 +132,7 @@ pub struct PaginatedShifts {
 #[into_params(parameter_in = Query)]
 pub struct ListShiftsQuery {
     /// 1-based page number. Omit (along with `per_page`) to fetch every shift.
-    pub page:     Option<i64>,
+    pub page: Option<i64>,
     /// Page size (clamped to [1, 200]). Omit to fetch every shift in one page.
     pub per_page: Option<i64>,
 }
@@ -141,24 +141,24 @@ pub struct ListShiftsQuery {
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct OpenShiftRequest {
-    pub id:                  Option<Uuid>,
+    pub id: Option<Uuid>,
     /// The till (drawer) this shift opens on. Optional for back-compat: when
     /// omitted the server falls back to the branch's default till. Newer
     /// device-bound clients send their configured till explicitly.
     #[serde(default)]
-    pub till_id:             Option<Uuid>,
-    pub opening_cash:        i32,
+    pub till_id: Option<Uuid>,
+    pub opening_cash: i32,
     /// Ignored by the server — the carryover edit is DERIVED from the previous
     /// shift's declared closing. Kept only for API/back-compat with clients.
     pub opening_cash_edited: Option<bool>,
-    pub edit_reason:         Option<String>,
-    pub opened_at:           Option<chrono::DateTime<chrono::Utc>>,
+    pub edit_reason: Option<String>,
+    pub opened_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CashMovementRequest {
     pub amount: i32,
-    pub note:   String,
+    pub note: String,
     /// When the movement actually happened. Omit for live (online) movements —
     /// the server stamps `now()`. The POS sends this for movements made OFFLINE
     /// so they keep their real time after syncing. Future values are rejected.
@@ -174,8 +174,8 @@ pub struct CashMovementRequest {
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CloseShiftRequest {
     pub closing_cash_declared: i32,
-    pub cash_note:             Option<String>,
-    pub closed_at:             Option<chrono::DateTime<chrono::Utc>>,
+    pub cash_note: Option<String>,
+    pub closed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -357,8 +357,6 @@ where
     .await
 }
 
-
-
 // ── GET /shifts/branches/:branch_id/current ───────────────────
 
 #[derive(Deserialize, IntoParams)]
@@ -383,10 +381,10 @@ pub struct CurrentShiftQuery {
     security(("bearer_jwt" = []))
 )]
 pub async fn get_current_shift(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
-    query:     web::Query<CurrentShiftQuery>,
+    query: web::Query<CurrentShiftQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "shifts", "read").await?;
@@ -434,8 +432,8 @@ pub async fn get_current_shift(
 
     if let Some(shift) = open_shift {
         return Ok(HttpResponse::Ok().json(ShiftPreFill {
-            has_open_shift:         true,
-            open_shift:             Some(shift),
+            has_open_shift: true,
+            open_shift: Some(shift),
             suggested_opening_cash: 0,
         }));
     }
@@ -443,23 +441,24 @@ pub async fn get_current_shift(
     // Suggest the carryover for THIS drawer: the requested till, else the
     // branch's default till. The opening-cash continuity is per-till, so the hint
     // must be too (a teller handover on a drawer keeps its float).
-    let suggest_till_id: Option<Uuid> = match query.till_id {
-        Some(t) => Some(t),
-        None => sqlx::query_scalar(
-            "SELECT id FROM tills WHERE branch_id = $1 AND is_default AND deleted_at IS NULL",
-        )
-        .bind(*branch_id)
-        .fetch_optional(pool.get_ref())
-        .await?,
-    };
+    let suggest_till_id: Option<Uuid> =
+        match query.till_id {
+            Some(t) => Some(t),
+            None => sqlx::query_scalar(
+                "SELECT id FROM tills WHERE branch_id = $1 AND is_default AND deleted_at IS NULL",
+            )
+            .bind(*branch_id)
+            .fetch_optional(pool.get_ref())
+            .await?,
+        };
     let suggested = match suggest_till_id {
         Some(t) => previous_declared_closing(pool.get_ref(), t).await?,
         None => None,
     };
 
     Ok(HttpResponse::Ok().json(ShiftPreFill {
-        has_open_shift:         false,
-        open_shift:             None,
+        has_open_shift: false,
+        open_shift: None,
         suggested_opening_cash: suggested.unwrap_or(0),
     }))
 }
@@ -476,15 +475,21 @@ pub async fn get_current_shift(
     security(("bearer_jwt" = []))
 )]
 pub async fn open_shift(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
-    body:      web::Json<OpenShiftRequest>,
+    body: web::Json<OpenShiftRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "shifts", "create").await?;
     require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
-    open_shift_inner(pool.clone(), branch_id.into_inner(), body, ActingContext::live(&claims)?).await
+    open_shift_inner(
+        pool.clone(),
+        branch_id.into_inner(),
+        body,
+        ActingContext::live(&claims)?,
+    )
+    .await
 }
 
 /// Open-shift core. LIVE callers come through `open_shift` (JWT-attributed);
@@ -495,10 +500,10 @@ pub async fn open_shift(
 /// partial indexes and the idempotent early-return still protect integrity. The
 /// shift attaches to a till (the drawer); `body.till_id` else the branch default.
 pub(crate) async fn open_shift_inner(
-    pool:      web::Data<PgPool>,
+    pool: web::Data<PgPool>,
     branch_id: Uuid,
-    body:      web::Json<OpenShiftRequest>,
-    actor:     ActingContext,
+    body: web::Json<OpenShiftRequest>,
+    actor: ActingContext,
 ) -> Result<HttpResponse, AppError> {
     let shift_id = body.id.unwrap_or_else(Uuid::new_v4);
 
@@ -551,7 +556,7 @@ pub(crate) async fn open_shift_inner(
         // now have several open shifts (one per till) — branch-level uniqueness is
         // intentionally gone; the per-till index below is the drawer guard.
         let other_open_branch: Option<Uuid> = sqlx::query_scalar(
-            "SELECT branch_id FROM shifts WHERE teller_id = $1 AND status = 'open'"
+            "SELECT branch_id FROM shifts WHERE teller_id = $1 AND status = 'open'",
         )
         .bind(actor.teller_id)
         .fetch_optional(&mut *tx)
@@ -566,7 +571,7 @@ pub(crate) async fn open_shift_inner(
 
         // And this till must not already have an open shift under anyone.
         let till_open: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM shifts WHERE till_id = $1 AND status = 'open')"
+            "SELECT EXISTS(SELECT 1 FROM shifts WHERE till_id = $1 AND status = 'open')",
         )
         .bind(till_id)
         .fetch_one(&mut *tx)
@@ -596,11 +601,16 @@ pub(crate) async fn open_shift_inner(
     if !actor.replay && was_edited && body.edit_reason.as_deref().unwrap_or("").trim().is_empty() {
         return Err(AppError::BadRequest(
             "Opening cash differs from the previous shift's declared closing cash; \
-             edit_reason is required to override the carryover.".into(),
+             edit_reason is required to override the carryover."
+                .into(),
         ));
     }
     // Only persist a reason when it actually overrides the carryover.
-    let edit_reason = if was_edited { body.edit_reason.as_deref() } else { None };
+    let edit_reason = if was_edited {
+        body.edit_reason.as_deref()
+    } else {
+        None
+    };
 
     let insert_result = sqlx::query_as::<_, Shift>(
         r#"
@@ -704,10 +714,10 @@ pub(crate) async fn open_shift_inner(
     security(("bearer_jwt" = []))
 )]
 pub async fn list_shifts(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
-    query:     web::Query<ListShiftsQuery>,
+    query: web::Query<ListShiftsQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "shifts", "read").await?;
@@ -750,7 +760,11 @@ pub async fn list_shifts(
         // One page holding everything; per_page mirrors the row count (>=1).
         (1, total.max(1))
     };
-    let total_pages = if per_page > 0 { (total + per_page - 1) / per_page } else { 0 };
+    let total_pages = if per_page > 0 {
+        (total + per_page - 1) / per_page
+    } else {
+        0
+    };
     let offset = (page - 1) * per_page;
 
     let sql = format!(
@@ -803,8 +817,8 @@ pub async fn list_shifts(
     security(("bearer_jwt" = []))
 )]
 pub async fn get_shift(
-    req:      HttpRequest,
-    pool:     web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     shift_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -831,8 +845,8 @@ pub async fn get_shift(
     security(("bearer_jwt" = []))
 )]
 pub async fn get_shift_report(
-    req:      HttpRequest,
-    pool:     web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     shift_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -898,12 +912,14 @@ pub async fn get_shift_report(
     .fetch_all(pool.get_ref())
     .await?;
 
-    let cash_movements_in: i64 = cash_movements.iter()
+    let cash_movements_in: i64 = cash_movements
+        .iter()
         .filter(|m| m.amount > 0)
         .map(|m| m.amount as i64)
         .sum();
 
-    let cash_movements_out: i64 = cash_movements.iter()
+    let cash_movements_out: i64 = cash_movements
+        .iter()
         .filter(|m| m.amount < 0)
         .map(|m| m.amount.unsigned_abs() as i64)
         .sum();
@@ -942,9 +958,9 @@ pub async fn get_shift_report(
 /// reconciliation key). Lets a replayed offline movement return the original
 /// row instead of double-applying.
 async fn fetch_cash_movement_by_client_ref(
-    pool:       &PgPool,
+    pool: &PgPool,
     client_ref: Uuid,
-    org_id:     Uuid,
+    org_id: Uuid,
 ) -> Result<Option<CashMovement>, AppError> {
     let m = sqlx::query_as::<_, CashMovement>(
         r#"
@@ -981,17 +997,23 @@ async fn fetch_cash_movement_by_client_ref(
     security(("bearer_jwt" = []))
 )]
 pub async fn add_cash_movement(
-    req:      HttpRequest,
-    pool:     web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     shift_id: web::Path<Uuid>,
-    body:     web::Json<CashMovementRequest>,
+    body: web::Json<CashMovementRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "shifts", "update").await?;
 
     let shift = fetch_shift_or_404(pool.get_ref(), *shift_id).await?;
     require_branch_access(pool.get_ref(), &claims, shift.branch_id).await?;
-    add_cash_movement_inner(pool.clone(), shift_id.into_inner(), body, ActingContext::live(&claims)?).await
+    add_cash_movement_inner(
+        pool.clone(),
+        shift_id.into_inner(),
+        body,
+        ActingContext::live(&claims)?,
+    )
+    .await
 }
 
 /// Cash-movement core. LIVE attributes `moved_by` to the JWT teller and enforces
@@ -1000,10 +1022,10 @@ pub async fn add_cash_movement(
 /// on `client_ref`; still requires the shift to be open (a movement on a closed
 /// shift would corrupt its already-settled cash reconciliation).
 pub(crate) async fn add_cash_movement_inner(
-    pool:     web::Data<PgPool>,
+    pool: web::Data<PgPool>,
     shift_id: Uuid,
-    body:     web::Json<CashMovementRequest>,
-    actor:    ActingContext,
+    body: web::Json<CashMovementRequest>,
+    actor: ActingContext,
 ) -> Result<HttpResponse, AppError> {
     let shift = fetch_shift_or_404(pool.get_ref(), shift_id).await?;
 
@@ -1030,7 +1052,8 @@ pub(crate) async fn add_cash_movement_inner(
     // Idempotent replay: a queued offline movement that already landed returns
     // the original instead of double-applying (which corrupts expected_cash).
     if let Some(cref) = body.client_ref
-        && let Some(existing) = fetch_cash_movement_by_client_ref(pool.get_ref(), cref, actor.org_id).await?
+        && let Some(existing) =
+            fetch_cash_movement_by_client_ref(pool.get_ref(), cref, actor.org_id).await?
     {
         return Ok(HttpResponse::Ok().json(existing));
     }
@@ -1046,12 +1069,11 @@ pub(crate) async fn add_cash_movement_inner(
         .execute(&mut *tx)
         .await?;
 
-    let still_open: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND status = 'open')"
-    )
-    .bind(shift_id)
-    .fetch_one(&mut *tx)
-    .await?;
+    let still_open: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND status = 'open')")
+            .bind(shift_id)
+            .fetch_one(&mut *tx)
+            .await?;
     if !still_open {
         return Err(AppError::BadRequest(
             "Cash movements can only be added to an open shift".into(),
@@ -1112,8 +1134,8 @@ pub(crate) async fn add_cash_movement_inner(
     security(("bearer_jwt" = []))
 )]
 pub async fn list_cash_movements(
-    req:      HttpRequest,
-    pool:     web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     shift_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1158,17 +1180,23 @@ pub struct CloseShiftResponse {
     security(("bearer_jwt" = []))
 )]
 pub async fn close_shift(
-    req:      HttpRequest,
-    pool:     web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     shift_id: web::Path<Uuid>,
-    body:     web::Json<CloseShiftRequest>,
+    body: web::Json<CloseShiftRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "shifts", "update").await?;
 
     let shift = fetch_shift_or_404(pool.get_ref(), *shift_id).await?;
     require_branch_access(pool.get_ref(), &claims, shift.branch_id).await?;
-    close_shift_inner(pool.clone(), shift_id.into_inner(), body, ActingContext::live(&claims)?).await
+    close_shift_inner(
+        pool.clone(),
+        shift_id.into_inner(),
+        body,
+        ActingContext::live(&claims)?,
+    )
+    .await
 }
 
 /// Close-shift core. LIVE attributes `closed_by` to the JWT teller and enforces
@@ -1176,10 +1204,10 @@ pub async fn close_shift(
 /// own-shift guard (the device flushing the backlog may be a different teller).
 /// Idempotent: an already-closed shift just returns it.
 pub(crate) async fn close_shift_inner(
-    pool:     web::Data<PgPool>,
+    pool: web::Data<PgPool>,
     shift_id: Uuid,
-    body:     web::Json<CloseShiftRequest>,
-    actor:    ActingContext,
+    body: web::Json<CloseShiftRequest>,
+    actor: ActingContext,
 ) -> Result<HttpResponse, AppError> {
     let shift = fetch_shift_or_404(pool.get_ref(), shift_id).await?;
 
@@ -1216,12 +1244,11 @@ pub(crate) async fn close_shift_inner(
         .bind(shift_id.to_string())
         .execute(&mut *tx)
         .await?;
-    let still_open: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND status = 'open')"
-    )
-    .bind(shift_id)
-    .fetch_one(&mut *tx)
-    .await?;
+    let still_open: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND status = 'open')")
+            .bind(shift_id)
+            .fetch_one(&mut *tx)
+            .await?;
     if !still_open {
         tx.rollback().await?;
         let current = fetch_shift_or_404(pool.get_ref(), shift_id).await?;
@@ -1266,7 +1293,9 @@ pub(crate) async fn close_shift_inner(
 
     tx.commit().await?;
 
-    Ok(HttpResponse::Ok().json(CloseShiftResponse { shift: closed_shift }))
+    Ok(HttpResponse::Ok().json(CloseShiftResponse {
+        shift: closed_shift,
+    }))
 }
 
 // ── POST /shifts/:shift_id/force-close ────────────────────────
@@ -1281,10 +1310,10 @@ pub(crate) async fn close_shift_inner(
     security(("bearer_jwt" = []))
 )]
 pub async fn force_close_shift(
-    req:      HttpRequest,
-    pool:     web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     shift_id: web::Path<Uuid>,
-    body:     web::Json<ForceCloseRequest>,
+    body: web::Json<ForceCloseRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "shifts", "update").await?;
@@ -1317,12 +1346,11 @@ pub async fn force_close_shift(
         .execute(&mut *tx)
         .await?;
 
-    let still_open: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND status = 'open')"
-    )
-    .bind(*shift_id)
-    .fetch_one(&mut *tx)
-    .await?;
+    let still_open: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND status = 'open')")
+            .bind(*shift_id)
+            .fetch_one(&mut *tx)
+            .await?;
     if !still_open {
         tx.rollback().await?;
         let current = fetch_shift_or_404(pool.get_ref(), *shift_id).await?;
@@ -1377,16 +1405,18 @@ pub async fn force_close_shift(
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_shift(
-    req:      HttpRequest,
-    pool:     web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     shift_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    
+
     // Only OrgAdmin and SuperAdmin can delete shifts
     use crate::models::UserRole;
     if claims.role != UserRole::OrgAdmin && claims.role != UserRole::SuperAdmin {
-        return Err(AppError::Forbidden("Only organization administrators can delete shifts".into()));
+        return Err(AppError::Forbidden(
+            "Only organization administrators can delete shifts".into(),
+        ));
     }
 
     // Verify shift exists and belongs to this organization
@@ -1406,7 +1436,7 @@ pub async fn delete_shift(
         ));
     }
     let has_real_orders: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM orders WHERE shift_id = $1 AND status <> 'voided')"
+        "SELECT EXISTS(SELECT 1 FROM orders WHERE shift_id = $1 AND status <> 'voided')",
     )
     .bind(*shift_id)
     .fetch_one(pool.get_ref())
@@ -1414,7 +1444,8 @@ pub async fn delete_shift(
     if has_real_orders {
         return Err(AppError::Conflict(
             "Cannot delete a shift that has recorded (non-voided) orders — its \
-             sales are part of the financial record.".into(),
+             sales are part of the financial record."
+                .into(),
         ));
     }
 
@@ -1488,33 +1519,39 @@ async fn fetch_shift_or_404(pool: &PgPool, shift_id: Uuid) -> Result<Shift, AppE
 }
 
 async fn require_branch_access(
-    pool:      &PgPool,
-    claims:    &Claims,
+    pool: &PgPool,
+    claims: &Claims,
     branch_id: Uuid,
 ) -> Result<(), AppError> {
-    if claims.role == UserRole::SuperAdmin { return Ok(()); }
-
-    let branch_org: Option<Uuid> = sqlx::query_scalar(
-        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(branch_id)
-    .fetch_optional(pool)
-    .await?
-    .flatten();
-
-    let branch_org = branch_org
-        .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
-
-    if claims.org_id() != Some(branch_org) {
-        return Err(AppError::Forbidden("Branch belongs to a different org".into()));
+    if claims.role == UserRole::SuperAdmin {
+        return Ok(());
     }
 
-    if claims.role == UserRole::OrgAdmin { return Ok(()); }
+    let branch_org: Option<Uuid> =
+        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
+            .bind(branch_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+
+    let branch_org = branch_org.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+
+    if claims.org_id() != Some(branch_org) {
+        return Err(AppError::Forbidden(
+            "Branch belongs to a different org".into(),
+        ));
+    }
+
+    if claims.role == UserRole::OrgAdmin {
+        return Ok(());
+    }
 
     // D13: tellers are ORG-scoped, not branch-scoped — any active teller in the
     // branch's org may operate here (the org check above is the boundary). The
     // device still stamps its own branch on the records it creates.
-    if claims.role == UserRole::Teller { return Ok(()); }
+    if claims.role == UserRole::Teller {
+        return Ok(());
+    }
 
     // Branch managers stay branch-scoped via their explicit assignments.
     let assigned: bool = sqlx::query_scalar(

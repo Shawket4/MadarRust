@@ -106,11 +106,10 @@ pub async fn backfill_cost_snapshots(
 ) -> Result<BackfillSummary, AppError> {
     let branch_ids: Vec<Uuid> = match scope {
         BackfillScope::Org(org_id) => {
-            let ids: Vec<Uuid> =
-                sqlx::query_scalar("SELECT id FROM branches WHERE org_id = $1")
-                    .bind(org_id)
-                    .fetch_all(pool)
-                    .await?;
+            let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM branches WHERE org_id = $1")
+                .bind(org_id)
+                .fetch_all(pool)
+                .await?;
             if ids.is_empty() {
                 return Err(AppError::NotFound(format!(
                     "No branches found for org {org_id} (does the org exist?)"
@@ -133,8 +132,7 @@ pub async fn backfill_cost_snapshots(
 
     let mut tx = pool.begin().await?;
 
-    let (lines_in_scope, total_before, missing_before) =
-        scope_stats(&mut tx, &branch_ids).await?;
+    let (lines_in_scope, total_before, missing_before) = scope_stats(&mut tx, &branch_ids).await?;
 
     // ── 1. Children first: addon / optional / bundle-component rows ─────
     // (their recomputed values also feed the parent line totals via the

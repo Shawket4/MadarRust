@@ -1,0 +1,30 @@
+# Public demo playground — fully isolated from production.
+#
+# Same image as prod, but: separate host port (8082 vs 8081), separate database
+# (madar_demo vs madar), and DEMO_MODE=1. No uploads volume (uploads are disabled
+# under DEMO_MODE) and no WhatsApp/OSRM/Shlink wiring (outbound is neutered).
+#
+# One-time VPS prereqs (see deploy/demo/SETUP.md):
+#   1. createdb madar_demo            (separate DB on the same Postgres)
+#   2. /opt/madar-demo/.env           (from deploy/demo/.env.example)
+#   3. /opt/madar-demo/docker-compose.demo.yml  (copied here by CI)
+#
+# Deployed by CI (deploy-demo job):
+#   BACKEND_IMAGE=<sha> docker compose -f docker-compose.demo.yml up -d \
+#     --no-deps --pull never madar-demo-backend
+
+services:
+  madar-demo-backend:
+    image: ${BACKEND_IMAGE:-ghcr.io/shawket4/madarrust:latest}
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:8082:8081"
+    env_file: .env
+    networks:
+      - madar-demo-net
+
+networks:
+  madar-demo-net:
+    driver: bridge

@@ -15,21 +15,21 @@ use crate::errors::AppError;
 /// (consumption negative, replenishment positive). `balance_after` is the
 /// resulting stock level; `below_zero` flags a movement that drove it negative.
 pub struct MovementParams<'a> {
-    pub branch_id:           Uuid,
-    pub org_ingredient_id:   Uuid,
+    pub branch_id: Uuid,
+    pub org_ingredient_id: Uuid,
     pub branch_inventory_id: Option<Uuid>,
     /// An `inventory_movement_type` enum value, e.g. "sale", "purchase_in".
-    pub movement_type:       &'a str,
-    pub quantity:            f64,
-    pub balance_after:       Option<f64>,
+    pub movement_type: &'a str,
+    pub quantity: f64,
+    pub balance_after: Option<f64>,
     /// Piastres per unit at movement time; `None` ⟺ unknown (never 0).
-    pub unit_cost:           Option<i64>,
-    pub reason:              Option<&'a str>,
-    pub below_zero:          bool,
-    pub source_type:         Option<&'a str>,
-    pub source_id:           Option<Uuid>,
-    pub note:                Option<&'a str>,
-    pub created_by:          Option<Uuid>,
+    pub unit_cost: Option<i64>,
+    pub reason: Option<&'a str>,
+    pub below_zero: bool,
+    pub source_type: Option<&'a str>,
+    pub source_id: Option<Uuid>,
+    pub note: Option<&'a str>,
+    pub created_by: Option<Uuid>,
 }
 
 /// Insert one movement row and return its id. Pass `&mut *tx` to enrol it in

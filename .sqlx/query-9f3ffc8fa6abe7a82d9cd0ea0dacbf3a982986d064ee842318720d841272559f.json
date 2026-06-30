@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO permissions (user_id, resource, action, granted)\n         VALUES ($1, 'orgs'::permission_resource, 'create'::permission_action, true)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9f3ffc8fa6abe7a82d9cd0ea0dacbf3a982986d064ee842318720d841272559f"
+}

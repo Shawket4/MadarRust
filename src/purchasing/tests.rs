@@ -1,28 +1,46 @@
 #![allow(unused_imports, unused_variables, dead_code)]
-use actix_web::{test, App, web};
+use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::auth::jwt::JwtSecret;
 use crate::models::UserRole;
+use crate::purchasing::handlers::{PurchaseOrder, PurchaseOrderFull, Supplier};
 use crate::purchasing::routes;
-use crate::purchasing::handlers::{Supplier, PurchaseOrderFull, PurchaseOrder};
 
-fn get_secret() -> JwtSecret { JwtSecret("secret".to_string()) }
+fn get_secret() -> JwtSecret {
+    JwtSecret("secret".to_string())
+}
 fn org_admin_token(user_id: Uuid, org_id: Uuid) -> String {
-    crate::auth::jwt::create_token(&get_secret(), user_id, Some(org_id), UserRole::OrgAdmin, None, 24).unwrap()
+    crate::auth::jwt::create_token(
+        &get_secret(),
+        user_id,
+        Some(org_id),
+        UserRole::OrgAdmin,
+        None,
+        24,
+    )
+    .unwrap()
 }
 
 async fn seed_org(pool: &PgPool) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Org', $2)")
-        .bind(id).bind(format!("org-{id}")).execute(pool).await.unwrap();
+        .bind(id)
+        .bind(format!("org-{id}"))
+        .execute(pool)
+        .await
+        .unwrap();
     id
 }
 async fn seed_branch(pool: &PgPool, org_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'Branch')")
-        .bind(id).bind(org_id).execute(pool).await.unwrap();
+        .bind(id)
+        .bind(org_id)
+        .execute(pool)
+        .await
+        .unwrap();
     id
 }
 async fn seed_user(pool: &PgPool, org_id: Uuid) -> Uuid {
@@ -50,28 +68,35 @@ async fn test_receive_purchase_updates_stock_cost_and_movement(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
             .configure(routes::configure),
-    ).await;
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id).await;
-    for a in ["create", "read", "update"] { grant(&pool, "purchase_orders", a).await; }
+    for a in ["create", "read", "update"] {
+        grant(&pool, "purchase_orders", a).await;
+    }
     let ing = seed_ingredient_g(&pool, org_id).await;
     let token = org_admin_token(user_id, org_id);
 
     // PO: buy 2 kg of a g-stocked ingredient at 5000 piastres/kg.
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/purchasing/branches/{branch_id}/orders"))
-        .insert_header(("Authorization", format!("Bearer {token}")))
-        .set_json(serde_json::json!({
-            "lines": [{
-                "org_ingredient_id": ing,
-                "purchase_unit": "kg",
-                "quantity_ordered": 2.0,
-                "unit_cost": 5000
-            }]
-        }))
-        .to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/purchasing/branches/{branch_id}/orders"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(serde_json::json!({
+                "lines": [{
+                    "org_ingredient_id": ing,
+                    "purchase_unit": "kg",
+                    "quantity_ordered": 2.0,
+                    "unit_cost": 5000
+                }]
+            }))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 201);
     let po: PurchaseOrderFull = test::read_body_json(resp).await;
     assert_eq!(po.lines.len(), 1);
@@ -80,11 +105,17 @@ async fn test_receive_purchase_updates_stock_cost_and_movement(pool: PgPool) {
     let line_id = po.lines[0].id;
 
     // Receive the 2 kg.
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/purchasing/orders/{}/receive", po.order.id))
-        .insert_header(("Authorization", format!("Bearer {token}")))
-        .set_json(serde_json::json!({"lines": [{"line_id": line_id, "quantity_received": 2.0}]}))
-        .to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/purchasing/orders/{}/receive", po.order.id))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(
+                serde_json::json!({"lines": [{"line_id": line_id, "quantity_received": 2.0}]}),
+            )
+            .to_request(),
+    )
+    .await;
     assert!(resp.status().is_success());
     let received: PurchaseOrderFull = test::read_body_json(resp).await;
     assert_eq!(received.order.status, "received");
@@ -116,36 +147,51 @@ async fn test_list_orders_all_branches(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
             .configure(routes::configure),
-    ).await;
+    )
+    .await;
 
-    let org_id   = seed_org(&pool).await;
+    let org_id = seed_org(&pool).await;
     let branch_a = seed_branch(&pool, org_id).await;
     let branch_b = {
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1,$2,'Branch B')")
-            .bind(id).bind(org_id).execute(&pool).await.unwrap();
+            .bind(id)
+            .bind(org_id)
+            .execute(&pool)
+            .await
+            .unwrap();
         id
     };
     let user_id = seed_user(&pool, org_id).await;
-    for a in ["create", "read"] { grant(&pool, "purchase_orders", a).await; }
+    for a in ["create", "read"] {
+        grant(&pool, "purchase_orders", a).await;
+    }
     let ing = seed_ingredient_g(&pool, org_id).await;
     let token = org_admin_token(user_id, org_id);
 
-    let mk_po = |branch: Uuid| test::TestRequest::post()
+    let mk_po = |branch: Uuid| {
+        test::TestRequest::post()
         .uri(&format!("/purchasing/branches/{branch}/orders"))
         .insert_header(("Authorization", format!("Bearer {token}")))
         .set_json(serde_json::json!({
             "lines": [{"org_ingredient_id": ing, "purchase_unit": "kg", "quantity_ordered": 1.0, "unit_cost": 5000}]
-        })).to_request();
-    assert_eq!(test::call_service(&app, mk_po(branch_a)).await.status(), 201);
-    assert_eq!(test::call_service(&app, mk_po(branch_b)).await.status(), 201);
+        })).to_request()
+    };
+    assert_eq!(
+        test::call_service(&app, mk_po(branch_a)).await.status(),
+        201
+    );
+    assert_eq!(
+        test::call_service(&app, mk_po(branch_b)).await.status(),
+        201
+    );
 
     // A different org's PO must never appear in this org's all-branches view.
-    let other_org    = seed_org(&pool).await;
+    let other_org = seed_org(&pool).await;
     let other_branch = seed_branch(&pool, other_org).await;
-    let other_user   = seed_user(&pool, other_org).await;
-    let other_ing    = seed_ingredient_g(&pool, other_org).await;
-    let other_token  = org_admin_token(other_user, other_org);
+    let other_user = seed_user(&pool, other_org).await;
+    let other_ing = seed_ingredient_g(&pool, other_org).await;
+    let other_token = org_admin_token(other_user, other_org);
     test::call_service(&app, test::TestRequest::post()
         .uri(&format!("/purchasing/branches/{other_branch}/orders"))
         .insert_header(("Authorization", format!("Bearer {other_token}")))
@@ -157,18 +203,37 @@ async fn test_list_orders_all_branches(pool: PgPool) {
 
     // All branches (nil UUID): both org branches' POs, branch-labelled, org-isolated.
     let nil = Uuid::nil();
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/purchasing/branches/{nil}/orders")).insert_header(auth.clone()).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/purchasing/branches/{nil}/orders"))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 200);
     let pos: Vec<PurchaseOrder> = test::read_body_json(resp).await;
-    assert_eq!(pos.len(), 2, "all-branches sees both org branches' purchase orders");
-    assert!(pos.iter().all(|p| p.branch_name.is_some()), "rows carry a branch label");
+    assert_eq!(
+        pos.len(),
+        2,
+        "all-branches sees both org branches' purchase orders"
+    );
+    assert!(
+        pos.iter().all(|p| p.branch_name.is_some()),
+        "rows carry a branch label"
+    );
     let seen: std::collections::HashSet<_> = pos.iter().map(|p| p.branch_id).collect();
     assert!(seen.contains(&branch_a) && seen.contains(&branch_b));
 
     // A specific branch still scopes to that one branch.
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/purchasing/branches/{branch_a}/orders")).insert_header(auth.clone()).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/purchasing/branches/{branch_a}/orders"))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 200);
     let just_a: Vec<PurchaseOrder> = test::read_body_json(resp).await;
     assert_eq!(just_a.len(), 1);
@@ -182,12 +247,15 @@ async fn test_partial_receive_then_complete(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
             .configure(routes::configure),
-    ).await;
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id).await;
-    for a in ["create", "read", "update"] { grant(&pool, "purchase_orders", a).await; }
+    for a in ["create", "read", "update"] {
+        grant(&pool, "purchase_orders", a).await;
+    }
     let ing = seed_ingredient_g(&pool, org_id).await;
     let token = org_admin_token(user_id, org_id);
 
@@ -202,11 +270,15 @@ async fn test_partial_receive_then_complete(pool: PgPool) {
     let line_id = po.lines[0].id;
     let po_id = po.order.id;
 
-    let receive = |qty: f64| test::TestRequest::post()
-        .uri(&format!("/purchasing/orders/{po_id}/receive"))
-        .insert_header(("Authorization", format!("Bearer {token}")))
-        .set_json(serde_json::json!({"lines": [{"line_id": line_id, "quantity_received": qty}]}))
-        .to_request();
+    let receive = |qty: f64| {
+        test::TestRequest::post()
+            .uri(&format!("/purchasing/orders/{po_id}/receive"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(
+                serde_json::json!({"lines": [{"line_id": line_id, "quantity_received": qty}]}),
+            )
+            .to_request()
+    };
 
     // First shipment: 1 of 2 kg → partially_received, 1000 g on hand.
     let resp = test::call_service(&app, receive(1.0)).await;
@@ -240,7 +312,8 @@ macro_rules! init_app {
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(get_secret()))
                 .configure(routes::configure),
-        ).await
+        )
+        .await
     };
 }
 
@@ -249,49 +322,84 @@ async fn test_supplier_crud_and_validation(pool: PgPool) {
     let app = init_app!(pool);
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id).await;
-    for a in ["create", "read", "update", "delete"] { grant(&pool, "suppliers", a).await; }
+    for a in ["create", "read", "update", "delete"] {
+        grant(&pool, "suppliers", a).await;
+    }
     let token = org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
 
     // Empty name → 400.
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/purchasing/orgs/{org_id}/suppliers")).insert_header(auth.clone())
-        .set_json(serde_json::json!({"name": "  "})).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/purchasing/orgs/{org_id}/suppliers"))
+            .insert_header(auth.clone())
+            .set_json(serde_json::json!({"name": "  "}))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 400);
 
     // Create OK.
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/purchasing/orgs/{org_id}/suppliers")).insert_header(auth.clone())
-        .set_json(serde_json::json!({"name": "Cairo Dairy", "phone": "0100"})).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/purchasing/orgs/{org_id}/suppliers"))
+            .insert_header(auth.clone())
+            .set_json(serde_json::json!({"name": "Cairo Dairy", "phone": "0100"}))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 201);
     let sup: Supplier = test::read_body_json(resp).await;
     assert_eq!(sup.name, "Cairo Dairy");
     assert!(sup.is_active);
 
     // List shows it.
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/purchasing/orgs/{org_id}/suppliers")).insert_header(auth.clone())
-        .to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/purchasing/orgs/{org_id}/suppliers"))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
     let list: Vec<Supplier> = test::read_body_json(resp).await;
     assert_eq!(list.len(), 1);
 
     // Update name + deactivate.
-    let resp = test::call_service(&app, test::TestRequest::patch()
-        .uri(&format!("/purchasing/suppliers/{}", sup.id)).insert_header(auth.clone())
-        .set_json(serde_json::json!({"name": "Cairo Dairy Co", "is_active": false})).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri(&format!("/purchasing/suppliers/{}", sup.id))
+            .insert_header(auth.clone())
+            .set_json(serde_json::json!({"name": "Cairo Dairy Co", "is_active": false}))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 200);
     let updated: Supplier = test::read_body_json(resp).await;
     assert_eq!(updated.name, "Cairo Dairy Co");
     assert!(!updated.is_active);
 
     // Delete (soft) → 204, then absent from list.
-    let resp = test::call_service(&app, test::TestRequest::delete()
-        .uri(&format!("/purchasing/suppliers/{}", sup.id)).insert_header(auth.clone())
-        .to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri(&format!("/purchasing/suppliers/{}", sup.id))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 204);
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/purchasing/orgs/{org_id}/suppliers")).insert_header(auth.clone())
-        .to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/purchasing/orgs/{org_id}/suppliers"))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
     let list: Vec<Supplier> = test::read_body_json(resp).await;
     assert_eq!(list.len(), 0);
 }
@@ -306,10 +414,15 @@ async fn test_supplier_cross_org_forbidden(pool: PgPool) {
     let token = org_admin_token(user_a, org_a);
 
     // Admin of org A cannot create a supplier under org B's path.
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/purchasing/orgs/{org_b}/suppliers"))
-        .insert_header(("Authorization", format!("Bearer {token}")))
-        .set_json(serde_json::json!({"name": "X"})).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/purchasing/orgs/{org_b}/suppliers"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(serde_json::json!({"name": "X"}))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 403);
 }
 
@@ -326,9 +439,14 @@ async fn test_supplier_permission_denied(pool: PgPool) {
     // org_admin is granted by the seed migration; a per-user deny override wins.
     deny_user(&pool, user_id, "suppliers", "read").await;
     let token = org_admin_token(user_id, org_id);
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/purchasing/orgs/{org_id}/suppliers"))
-        .insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/purchasing/orgs/{org_id}/suppliers"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 403);
 }
 
@@ -342,16 +460,24 @@ async fn test_po_create_validations(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id).await;
-    for a in ["create", "read", "update"] { grant(&pool, "purchase_orders", a).await; }
+    for a in ["create", "read", "update"] {
+        grant(&pool, "purchase_orders", a).await;
+    }
     let ing = seed_ingredient_g(&pool, org_id).await;
     let token = org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
     let url = format!("/purchasing/branches/{branch_id}/orders");
 
     // Empty lines → 400.
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&url).insert_header(auth.clone())
-        .set_json(serde_json::json!({"lines": []})).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&url)
+            .insert_header(auth.clone())
+            .set_json(serde_json::json!({"lines": []}))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 400);
 
     // quantity_ordered <= 0 → 400.
@@ -401,12 +527,18 @@ async fn test_po_create_supplier_wrong_org_rejected(pool: PgPool) {
     let org_b = seed_org(&pool).await;
     let branch_a = seed_branch(&pool, org_a).await;
     let user_a = seed_user(&pool, org_a).await;
-    for a in ["create", "read", "update"] { grant(&pool, "purchase_orders", a).await; }
+    for a in ["create", "read", "update"] {
+        grant(&pool, "purchase_orders", a).await;
+    }
     let ing = seed_ingredient_g(&pool, org_a).await;
     // Supplier belonging to org B.
     let sup_b = Uuid::new_v4();
     sqlx::query("INSERT INTO suppliers (id, org_id, name) VALUES ($1, $2, 'Other')")
-        .bind(sup_b).bind(org_b).execute(&pool).await.unwrap();
+        .bind(sup_b)
+        .bind(org_b)
+        .execute(&pool)
+        .await
+        .unwrap();
     let token = org_admin_token(user_a, org_a);
 
     let resp = test::call_service(&app, test::TestRequest::post()
@@ -426,46 +558,83 @@ async fn test_po_list_branch_org_and_filters(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id).await;
-    for a in ["create", "read", "update"] { grant(&pool, "purchase_orders", a).await; }
+    for a in ["create", "read", "update"] {
+        grant(&pool, "purchase_orders", a).await;
+    }
     let ing = seed_ingredient_g(&pool, org_id).await;
     let token = org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
 
-    let mk_po = || test::TestRequest::post()
+    let mk_po = || {
+        test::TestRequest::post()
         .uri(&format!("/purchasing/branches/{branch_id}/orders")).insert_header(auth.clone())
         .set_json(serde_json::json!({"lines": [{"org_ingredient_id": ing, "purchase_unit": "g", "quantity_ordered": 10.0, "unit_cost": 5}]}))
-        .to_request();
-    let po1: PurchaseOrderFull = test::read_body_json(test::call_service(&app, mk_po()).await).await;
-    let _po2: PurchaseOrderFull = test::read_body_json(test::call_service(&app, mk_po()).await).await;
+        .to_request()
+    };
+    let po1: PurchaseOrderFull =
+        test::read_body_json(test::call_service(&app, mk_po()).await).await;
+    let _po2: PurchaseOrderFull =
+        test::read_body_json(test::call_service(&app, mk_po()).await).await;
 
     // Cancel po1 → status cancelled.
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/purchasing/orders/{}/cancel", po1.order.id)).insert_header(auth.clone())
-        .to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/purchasing/orders/{}/cancel", po1.order.id))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 200);
 
     // Branch list → both.
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/purchasing/branches/{branch_id}/orders")).insert_header(auth.clone()).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/purchasing/branches/{branch_id}/orders"))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
     let all: Vec<PurchaseOrder> = test::read_body_json(resp).await;
     assert_eq!(all.len(), 2);
 
     // Org list → both.
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/purchasing/orgs/{org_id}/orders")).insert_header(auth.clone()).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/purchasing/orgs/{org_id}/orders"))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
     let org_all: Vec<PurchaseOrder> = test::read_body_json(resp).await;
     assert_eq!(org_all.len(), 2);
 
     // Org list filtered to cancelled → 1.
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/purchasing/orgs/{org_id}/orders?status=cancelled")).insert_header(auth.clone()).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!(
+                "/purchasing/orgs/{org_id}/orders?status=cancelled"
+            ))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
     let cancelled: Vec<PurchaseOrder> = test::read_body_json(resp).await;
     assert_eq!(cancelled.len(), 1);
     assert_eq!(cancelled[0].status, "cancelled");
 
     // Get not found → 404.
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/purchasing/orders/{}", Uuid::new_v4())).insert_header(auth.clone()).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/purchasing/orders/{}", Uuid::new_v4()))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 404);
 }
 
@@ -479,7 +648,9 @@ async fn test_receive_errors(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id).await;
-    for a in ["create", "read", "update"] { grant(&pool, "purchase_orders", a).await; }
+    for a in ["create", "read", "update"] {
+        grant(&pool, "purchase_orders", a).await;
+    }
     let ing = seed_ingredient_g(&pool, org_id).await;
     let token = org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
@@ -496,8 +667,14 @@ async fn test_receive_errors(pool: PgPool) {
     assert_eq!(resp.status(), 400);
 
     // Cancel then receive → 409.
-    test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/purchasing/orders/{}/cancel", po.order.id)).insert_header(auth.clone()).to_request()).await;
+    test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/purchasing/orders/{}/cancel", po.order.id))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
     let resp = test::call_service(&app, test::TestRequest::post()
         .uri(&format!("/purchasing/orders/{}/receive", po.order.id)).insert_header(auth.clone())
         .set_json(serde_json::json!({"lines": [{"line_id": po.lines[0].id, "quantity_received": 5.0}]})).to_request()).await;
@@ -512,10 +689,16 @@ async fn test_receive_weighted_average_cost_blends(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id).await;
-    for a in ["create", "read", "update"] { grant(&pool, "purchase_orders", a).await; }
+    for a in ["create", "read", "update"] {
+        grant(&pool, "purchase_orders", a).await;
+    }
     let ing = seed_ingredient_g(&pool, org_id).await;
     // Prior state: cost 10 piastres/g, 1000 g on hand.
-    sqlx::query("UPDATE org_ingredients SET cost_per_unit = 10 WHERE id = $1").bind(ing).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE org_ingredients SET cost_per_unit = 10 WHERE id = $1")
+        .bind(ing)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("INSERT INTO branch_inventory (branch_id, org_ingredient_id, current_stock, reorder_threshold) VALUES ($1, $2, 1000, 0)")
         .bind(branch_id).bind(ing).execute(&pool).await.unwrap();
     let token = org_admin_token(user_id, org_id);
@@ -546,7 +729,9 @@ async fn test_cancel_received_conflict(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id).await;
-    for a in ["create", "read", "update"] { grant(&pool, "purchase_orders", a).await; }
+    for a in ["create", "read", "update"] {
+        grant(&pool, "purchase_orders", a).await;
+    }
     let ing = seed_ingredient_g(&pool, org_id).await;
     let token = org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
@@ -562,8 +747,14 @@ async fn test_cancel_received_conflict(pool: PgPool) {
     let received: PurchaseOrderFull = test::read_body_json(resp).await;
     assert_eq!(received.order.status, "received");
     // Cancel a received PO → 409.
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/purchasing/orders/{}/cancel", po.order.id)).insert_header(auth.clone()).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/purchasing/orders/{}/cancel", po.order.id))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 409);
 }
 
@@ -576,9 +767,14 @@ async fn test_po_permission_denied(pool: PgPool) {
     // Per-user deny override beats the seeded org_admin default.
     deny_user(&pool, user_id, "purchase_orders", "read").await;
     let token = org_admin_token(user_id, org_id);
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/purchasing/branches/{branch_id}/orders"))
-        .insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/purchasing/branches/{branch_id}/orders"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 403);
 }
 
@@ -593,7 +789,9 @@ async fn test_receive_cheap_cost_not_rounded_to_zero(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id).await;
-    for a in ["create","read","update"] { grant(&pool, "purchase_orders", a).await; }
+    for a in ["create", "read", "update"] {
+        grant(&pool, "purchase_orders", a).await;
+    }
     // Ingredient stocked in grams, cost UNKNOWN.
     let ing = Uuid::new_v4();
     sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, category, cost_per_unit) VALUES ($1,$2,'Salt','g'::inventory_unit,'dry',NULL)")
@@ -606,13 +804,24 @@ async fn test_receive_cheap_cost_not_rounded_to_zero(pool: PgPool) {
         .uri(&format!("/purchasing/branches/{branch_id}/orders")).insert_header(auth.clone())
         .set_json(serde_json::json!({"lines":[{"org_ingredient_id":ing,"purchase_unit":"kg","quantity_ordered":1.0,"unit_cost":400}]}))
         .to_request()).await).await;
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/purchasing/orders/{}/receive", po.order.id)).insert_header(auth.clone())
-        .set_json(serde_json::json!({"lines":[{"line_id":po.lines[0].id,"quantity_received":1.0}]})).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/purchasing/orders/{}/receive", po.order.id))
+            .insert_header(auth.clone())
+            .set_json(
+                serde_json::json!({"lines":[{"line_id":po.lines[0].id,"quantity_received":1.0}]}),
+            )
+            .to_request(),
+    )
+    .await;
     assert!(resp.status().is_success());
 
     let cost: f64 = sqlx::query_scalar("SELECT cost_per_unit::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2").bind(branch_id).bind(ing).fetch_one(&pool).await.unwrap();
-    assert!((cost - 0.40).abs() < 1e-9, "cheap-per-gram cost must persist as 0.40, got {cost}");
+    assert!(
+        (cost - 0.40).abs() < 1e-9,
+        "cheap-per-gram cost must persist as 0.40, got {cost}"
+    );
 }
 
 /// V8: a receive request with the same line_id twice is rejected (would
@@ -623,7 +832,9 @@ async fn test_receive_rejects_duplicate_line_id(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id).await;
-    for a in ["create","read","update"] { grant(&pool, "purchase_orders", a).await; }
+    for a in ["create", "read", "update"] {
+        grant(&pool, "purchase_orders", a).await;
+    }
     let ing = seed_ingredient_g(&pool, org_id).await;
     let token = org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
@@ -636,7 +847,11 @@ async fn test_receive_rejects_duplicate_line_id(pool: PgPool) {
     let resp = test::call_service(&app, test::TestRequest::post()
         .uri(&format!("/purchasing/orders/{}/receive", po.order.id)).insert_header(auth.clone())
         .set_json(serde_json::json!({"lines":[{"line_id":lid,"quantity_received":5.0},{"line_id":lid,"quantity_received":5.0}]})).to_request()).await;
-    assert_eq!(resp.status(), 400, "duplicate line_id in one receive must be rejected");
+    assert_eq!(
+        resp.status(),
+        400,
+        "duplicate line_id in one receive must be rejected"
+    );
 }
 
 /// Over-receive guard: cumulative received can't exceed ordered.
@@ -646,7 +861,9 @@ async fn test_receive_over_ordered_rejected(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id).await;
-    for a in ["create","read","update"] { grant(&pool, "purchase_orders", a).await; }
+    for a in ["create", "read", "update"] {
+        grant(&pool, "purchase_orders", a).await;
+    }
     let ing = seed_ingredient_g(&pool, org_id).await;
     let token = org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
@@ -657,14 +874,30 @@ async fn test_receive_over_ordered_rejected(pool: PgPool) {
         .to_request()).await).await;
     let lid = po.lines[0].id;
     // Receive 6 (ok), then 6 more (cumulative 12 > 10 ordered) → rejected.
-    let ok = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/purchasing/orders/{}/receive", po.order.id)).insert_header(auth.clone())
-        .set_json(serde_json::json!({"lines":[{"line_id":lid,"quantity_received":6.0}]})).to_request()).await;
+    let ok = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/purchasing/orders/{}/receive", po.order.id))
+            .insert_header(auth.clone())
+            .set_json(serde_json::json!({"lines":[{"line_id":lid,"quantity_received":6.0}]}))
+            .to_request(),
+    )
+    .await;
     assert!(ok.status().is_success());
-    let over = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/purchasing/orders/{}/receive", po.order.id)).insert_header(auth.clone())
-        .set_json(serde_json::json!({"lines":[{"line_id":lid,"quantity_received":6.0}]})).to_request()).await;
-    assert_eq!(over.status(), 400, "over-receiving past the ordered quantity must be rejected");
+    let over = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/purchasing/orders/{}/receive", po.order.id))
+            .insert_header(auth.clone())
+            .set_json(serde_json::json!({"lines":[{"line_id":lid,"quantity_received":6.0}]}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        over.status(),
+        400,
+        "over-receiving past the ordered quantity must be rejected"
+    );
 }
 
 /// A partially-received PO cannot be cancelled (it would leave stock/cost
@@ -675,7 +908,9 @@ async fn test_cancel_partially_received_blocked(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id).await;
-    for a in ["create","read","update","delete"] { grant(&pool, "purchase_orders", a).await; }
+    for a in ["create", "read", "update", "delete"] {
+        grant(&pool, "purchase_orders", a).await;
+    }
     let ing = seed_ingredient_g(&pool, org_id).await;
     let token = org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
@@ -685,14 +920,29 @@ async fn test_cancel_partially_received_blocked(pool: PgPool) {
         .set_json(serde_json::json!({"lines":[{"org_ingredient_id":ing,"purchase_unit":"g","quantity_ordered":10.0,"unit_cost":5}]}))
         .to_request()).await).await;
     let lid = po.lines[0].id;
-    let recv = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/purchasing/orders/{}/receive", po.order.id)).insert_header(auth.clone())
-        .set_json(serde_json::json!({"lines":[{"line_id":lid,"quantity_received":4.0}]})).to_request()).await;
+    let recv = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/purchasing/orders/{}/receive", po.order.id))
+            .insert_header(auth.clone())
+            .set_json(serde_json::json!({"lines":[{"line_id":lid,"quantity_received":4.0}]}))
+            .to_request(),
+    )
+    .await;
     assert!(recv.status().is_success());
-    let cancel = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/purchasing/orders/{}/cancel", po.order.id)).insert_header(auth.clone())
-        .to_request()).await;
-    assert_eq!(cancel.status(), 409, "cancelling a partially-received PO must be blocked");
+    let cancel = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/purchasing/orders/{}/cancel", po.order.id))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        cancel.status(),
+        409,
+        "cancelling a partially-received PO must be blocked"
+    );
 }
 
 /// Goods receipts: receiving records a GRN with a line; a supplier return
@@ -703,7 +953,9 @@ async fn test_goods_receipt_and_return(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id).await;
-    for a in ["create","read","update"] { grant(&pool, "purchase_orders", a).await; }
+    for a in ["create", "read", "update"] {
+        grant(&pool, "purchase_orders", a).await;
+    }
     let ing = seed_ingredient_g(&pool, org_id).await;
     let token = org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
@@ -719,16 +971,34 @@ async fn test_goods_receipt_and_return(pool: PgPool) {
     assert!(recv.status().is_success());
 
     // A goods receipt was recorded for the delivery.
-    let receipts: serde_json::Value = test::read_body_json(test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/purchasing/orders/{}/receipts", po.order.id)).insert_header(auth.clone()).to_request()).await).await;
+    let receipts: serde_json::Value = test::read_body_json(
+        test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!("/purchasing/orders/{}/receipts", po.order.id))
+                .insert_header(auth.clone())
+                .to_request(),
+        )
+        .await,
+    )
+    .await;
     assert_eq!(receipts.as_array().unwrap().len(), 1);
     assert_eq!(receipts[0]["is_return"], serde_json::json!(false));
-    assert_eq!(receipts[0]["lines"][0]["quantity"], serde_json::json!(1000.0));
+    assert_eq!(
+        receipts[0]["lines"][0]["quantity"],
+        serde_json::json!(1000.0)
+    );
 
     // Return 200 g to the supplier.
-    let ret = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/purchasing/branches/{branch_id}/returns")).insert_header(auth.clone())
-        .set_json(serde_json::json!({"lines":[{"org_ingredient_id":ing,"quantity":200.0}]})).to_request()).await;
+    let ret = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/purchasing/branches/{branch_id}/returns"))
+            .insert_header(auth.clone())
+            .set_json(serde_json::json!({"lines":[{"org_ingredient_id":ing,"quantity":200.0}]}))
+            .to_request(),
+    )
+    .await;
     assert_eq!(ret.status(), 201);
 
     // Stock dropped to 800, and a purchase_return movement of -200 was posted.
@@ -748,7 +1018,9 @@ async fn test_receive_actual_cost_overrides_ordered(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id).await;
-    for a in ["create","read","update"] { grant(&pool, "purchase_orders", a).await; }
+    for a in ["create", "read", "update"] {
+        grant(&pool, "purchase_orders", a).await;
+    }
     let ing = seed_ingredient_g(&pool, org_id).await;
     let token = org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
@@ -765,7 +1037,10 @@ async fn test_receive_actual_cost_overrides_ordered(pool: PgPool) {
     assert!(resp.status().is_success());
     let cost: f64 = sqlx::query_scalar("SELECT cost_per_unit::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2")
         .bind(branch_id).bind(ing).fetch_one(&pool).await.unwrap();
-    assert_eq!(cost, 8.0, "WAC uses the actual invoice cost, not the ordered cost");
+    assert_eq!(
+        cost, 8.0,
+        "WAC uses the actual invoice cost, not the ordered cost"
+    );
 }
 
 /// Reorder suggestions: a below-par ingredient with a supplier is suggested with
@@ -776,28 +1051,49 @@ async fn test_reorder_suggestions(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id).await;
-    for a in ["create","read"] { grant(&pool, "purchase_orders", a).await; }
+    for a in ["create", "read"] {
+        grant(&pool, "purchase_orders", a).await;
+    }
     grant(&pool, "suppliers", "read").await;
     let token = org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
 
     // Supplier + ingredient with par_min 50 / par_max 200, stock 30 (below par).
     let sup = Uuid::new_v4();
-    sqlx::query("INSERT INTO suppliers (id, org_id, name) VALUES ($1,$2,'ACME')").bind(sup).bind(org_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO suppliers (id, org_id, name) VALUES ($1,$2,'ACME')")
+        .bind(sup)
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let ing = Uuid::new_v4();
     sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, category, cost_per_unit, supplier_id) VALUES ($1,$2,'Sugar','g'::inventory_unit,'dry',2,$3)")
         .bind(ing).bind(org_id).bind(sup).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO branch_inventory (branch_id, org_ingredient_id, current_stock, reorder_threshold, par_min, par_max) VALUES ($1,$2,30,0,50,200)")
         .bind(branch_id).bind(ing).execute(&pool).await.unwrap();
 
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/purchasing/branches/{branch_id}/reorder-suggestions")).insert_header(auth.clone()).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!(
+                "/purchasing/branches/{branch_id}/reorder-suggestions"
+            ))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 200);
     let groups: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(groups[0]["supplier_id"], serde_json::json!(sup.to_string()));
-    assert_eq!(groups[0]["lines"][0]["org_ingredient_id"], serde_json::json!(ing.to_string()));
+    assert_eq!(
+        groups[0]["lines"][0]["org_ingredient_id"],
+        serde_json::json!(ing.to_string())
+    );
     // par_max(200) - current(30) = 170 to order.
-    assert_eq!(groups[0]["lines"][0]["suggested_qty"], serde_json::json!(170.0));
+    assert_eq!(
+        groups[0]["lines"][0]["suggested_qty"],
+        serde_json::json!(170.0)
+    );
 }
 
 /// Catalog depth: buying in a named pack ("case") converts to base units via
@@ -808,7 +1104,9 @@ async fn test_receive_in_named_pack(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id).await;
-    for a in ["create","read","update"] { grant(&pool, "purchase_orders", a).await; }
+    for a in ["create", "read", "update"] {
+        grant(&pool, "purchase_orders", a).await;
+    }
     let ing = Uuid::new_v4();
     sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, category, cost_per_unit, pack_unit, pack_size) \
                  VALUES ($1,$2,'Cola can','pcs'::inventory_unit,'drinks',NULL,'case',24)")
@@ -823,9 +1121,17 @@ async fn test_receive_in_named_pack(pool: PgPool) {
         .to_request()).await).await;
     // Factor resolved from pack_size = 24 base units (pcs) per case.
     assert_eq!(po.lines[0].units_per_purchase_unit, 24.0);
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/purchasing/orders/{}/receive", po.order.id)).insert_header(auth.clone())
-        .set_json(serde_json::json!({"lines":[{"line_id":po.lines[0].id,"quantity_received":2.0}]})).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/purchasing/orders/{}/receive", po.order.id))
+            .insert_header(auth.clone())
+            .set_json(
+                serde_json::json!({"lines":[{"line_id":po.lines[0].id,"quantity_received":2.0}]}),
+            )
+            .to_request(),
+    )
+    .await;
     assert!(resp.status().is_success());
     // 2 cases × 24 = 48 cans in stock.
     let stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2")
@@ -840,7 +1146,9 @@ async fn test_submit_draft_to_ordered(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id).await;
-    for a in ["create","read","update"] { grant(&pool, "purchase_orders", a).await; }
+    for a in ["create", "read", "update"] {
+        grant(&pool, "purchase_orders", a).await;
+    }
     let ing = seed_ingredient_g(&pool, org_id).await;
     let token = org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
@@ -850,12 +1158,29 @@ async fn test_submit_draft_to_ordered(pool: PgPool) {
         .set_json(serde_json::json!({"lines":[{"org_ingredient_id":ing,"purchase_unit":"g","quantity_ordered":10.0,"unit_cost":5}]}))
         .to_request()).await).await;
     assert_eq!(po.order.status, "draft");
-    let placed: serde_json::Value = test::read_body_json(test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/purchasing/orders/{}/submit", po.order.id)).insert_header(auth.clone())
-        .to_request()).await).await;
+    let placed: serde_json::Value = test::read_body_json(
+        test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri(&format!("/purchasing/orders/{}/submit", po.order.id))
+                .insert_header(auth.clone())
+                .to_request(),
+        )
+        .await,
+    )
+    .await;
     assert_eq!(placed["status"], "ordered");
-    let again = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/purchasing/orders/{}/submit", po.order.id)).insert_header(auth.clone())
-        .to_request()).await;
-    assert_eq!(again.status(), 409, "placing an already-placed PO must be rejected");
+    let again = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/purchasing/orders/{}/submit", po.order.id))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        again.status(),
+        409,
+        "placing an already-placed PO must be rejected"
+    );
 }

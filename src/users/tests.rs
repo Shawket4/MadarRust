@@ -1,11 +1,11 @@
-use actix_web::{test, App, web};
+use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::auth::jwt::JwtSecret;
-use crate::models::{UserRole, UserPublic};
-use crate::users::routes;
+use crate::models::{UserPublic, UserRole};
 use crate::users::handlers::{CreateUserResponse, UserBranch};
+use crate::users::routes;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
@@ -13,10 +13,6 @@ fn get_secret() -> JwtSecret {
 
 fn generate_token(user_id: Uuid, org_id: Option<Uuid>, role: UserRole) -> String {
     crate::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
-}
-
-fn generate_super_admin_token(user_id: Uuid) -> String {
-    generate_token(user_id, None, UserRole::SuperAdmin)
 }
 
 fn generate_org_admin_token(user_id: Uuid, org_id: Uuid) -> String {
@@ -29,17 +25,26 @@ fn generate_branch_manager_token(user_id: Uuid, org_id: Uuid) -> String {
 
 async fn seed_org(pool: &PgPool) -> Uuid {
     let org_id = Uuid::new_v4();
-    sqlx::query!("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Test Org', 'test-org')", org_id)
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query!(
+        "INSERT INTO organizations (id, name, slug) VALUES ($1, 'Test Org', 'test-org')",
+        org_id
+    )
+    .execute(pool)
+    .await
+    .unwrap();
     org_id
 }
 
 async fn seed_branch(pool: &PgPool, org_id: Uuid) -> Uuid {
     let branch_id = Uuid::new_v4();
-    sqlx::query!("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'Test Branch')", branch_id, org_id)
-        .execute(pool).await.unwrap();
+    sqlx::query!(
+        "INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'Test Branch')",
+        branch_id,
+        org_id
+    )
+    .execute(pool)
+    .await
+    .unwrap();
     branch_id
 }
 
@@ -61,8 +66,9 @@ async fn test_create_user_success(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     grant_permission(&pool, "org_admin", "users", "create").await;
@@ -99,8 +105,9 @@ async fn test_create_user_forbidden_promotion(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     grant_permission(&pool, "org_admin", "users", "create").await;
@@ -129,8 +136,9 @@ async fn test_create_user_teller_requires_pin(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     grant_permission(&pool, "org_admin", "users", "create").await;
@@ -157,8 +165,9 @@ async fn test_list_users(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     grant_permission(&pool, "org_admin", "users", "read").await;
@@ -188,8 +197,9 @@ async fn test_get_user(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     grant_permission(&pool, "org_admin", "users", "read").await;
@@ -218,8 +228,9 @@ async fn test_update_user(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     grant_permission(&pool, "org_admin", "users", "update").await;
@@ -251,8 +262,9 @@ async fn test_delete_user(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     grant_permission(&pool, "org_admin", "users", "delete").await;
@@ -272,7 +284,10 @@ async fn test_delete_user(pool: PgPool) {
     assert!(resp.status().is_success());
 
     // verify
-    let deleted = sqlx::query!("SELECT deleted_at FROM users WHERE id = $1", user_id).fetch_one(&pool).await.unwrap();
+    let deleted = sqlx::query!("SELECT deleted_at FROM users WHERE id = $1", user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert!(deleted.deleted_at.is_some());
 }
 
@@ -282,8 +297,9 @@ async fn test_assign_unassign_branch(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     grant_permission(&pool, "org_admin", "users", "update").await;
@@ -351,7 +367,10 @@ async fn test_assign_branch_cross_org_forbidden(pool: PgPool) {
     let org_a = seed_org(&pool).await;
     let org_b = Uuid::new_v4();
     sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1,'Org B','org-b-xtenant')")
-        .bind(org_b).execute(&pool).await.unwrap();
+        .bind(org_b)
+        .execute(&pool)
+        .await
+        .unwrap();
     grant_permission(&pool, "org_admin", "users", "update").await;
 
     let admin_a = Uuid::new_v4();
@@ -365,14 +384,25 @@ async fn test_assign_branch_cross_org_forbidden(pool: PgPool) {
         .bind(target_b).bind(org_b).execute(&pool).await.unwrap();
     let branch_b = seed_branch(&pool, org_b).await;
 
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/users/{}/branches", target_b))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({"branch_id": branch_b})).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/users/{}/branches", target_b))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&serde_json::json!({"branch_id": branch_b}))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 403, "cross-org assign must be forbidden");
 
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id=$1 AND branch_id=$2)")
-        .bind(target_b).bind(branch_b).fetch_one(&pool).await.unwrap();
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id=$1 AND branch_id=$2)",
+    )
+    .bind(target_b)
+    .bind(branch_b)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert!(!exists, "no assignment row may be written");
 }
 
@@ -394,16 +424,33 @@ async fn test_branch_manager_cannot_reset_org_admin_password(pool: PgPool) {
         .bind(victim).bind(org_id).execute(&pool).await.unwrap();
     // Both assigned to the SAME branch (so the shared-branch gate would otherwise open).
     sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1,$3),($2,$3)")
-        .bind(attacker).bind(victim).bind(branch_id).execute(&pool).await.unwrap();
+        .bind(attacker)
+        .bind(victim)
+        .bind(branch_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let token = generate_branch_manager_token(attacker, org_id);
 
-    let resp = test::call_service(&app, test::TestRequest::patch()
-        .uri(&format!("/users/{}", victim))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({"password": "pwned"})).to_request()).await;
-    assert_eq!(resp.status(), 403, "branch_manager must not reset an org_admin's credentials");
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri(&format!("/users/{}", victim))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&serde_json::json!({"password": "pwned"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        403,
+        "branch_manager must not reset an org_admin's credentials"
+    );
 
     let pw: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id=$1")
-        .bind(victim).fetch_one(&pool).await.unwrap();
+        .bind(victim)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(pw, "origpw", "victim password must be unchanged");
 }

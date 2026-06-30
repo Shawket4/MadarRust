@@ -13,14 +13,14 @@ use uuid::Uuid;
 #[derive(Serialize, Clone)]
 pub struct InventoryDeduction {
     pub org_ingredient_id: Option<Uuid>,
-    pub ingredient_name:   String,
-    pub unit:              String,
-    pub quantity:          f64,
-    pub source:            String, // "drink_recipe" | "addon" | "addon_swap:<name>" | "optional" | "bundle_component:<name>"
-    pub category:          String,
+    pub ingredient_name: String,
+    pub unit: String,
+    pub quantity: f64,
+    pub source: String, // "drink_recipe" | "addon" | "addon_swap:<name>" | "optional" | "bundle_component:<name>"
+    pub category: String,
     /// Additive-addon attribution (None for recipe/swap/optional entries).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub addon_item_id:     Option<Uuid>,
+    pub addon_item_id: Option<Uuid>,
     /// Optional-field attribution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub optional_field_id: Option<Uuid>,
@@ -28,14 +28,14 @@ pub struct InventoryDeduction {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub component_item_id: Option<Uuid>,
     /// Piastre cost per ingredient unit at sale time. None ⟺ unknown.
-    pub cost_per_unit:     Option<f64>,
+    pub cost_per_unit: Option<f64>,
     /// quantity × cost_per_unit in piastres, rounded. None ⟺ unknown.
-    pub line_cost:         Option<i64>,
+    pub line_cost: Option<i64>,
 }
 
 pub struct LineCostSummary {
-    pub line_cost:    Option<i64>,
-    pub unit_cost:    Option<i64>,
+    pub line_cost: Option<i64>,
+    pub unit_cost: Option<i64>,
     pub cost_missing: bool,
 }
 
@@ -88,14 +88,23 @@ pub fn summarize_line_costs(
         cost_missing = true;
     }
 
-    LineCostSummary { line_cost, unit_cost, cost_missing }
+    LineCostSummary {
+        line_cost,
+        unit_cost,
+        cost_missing,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn ded(source: &str, quantity: f64, cost_per_unit: Option<f64>, line_cost: Option<i64>) -> InventoryDeduction {
+    fn ded(
+        source: &str,
+        quantity: f64,
+        cost_per_unit: Option<f64>,
+        line_cost: Option<i64>,
+    ) -> InventoryDeduction {
         InventoryDeduction {
             org_ingredient_id: None,
             ingredient_name: String::new(),

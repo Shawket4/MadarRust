@@ -1,4 +1,4 @@
-use actix_web::{web, HttpRequest, HttpResponse, HttpMessage};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -64,7 +64,9 @@ pub async fn list_payment_methods(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "payment_methods", "read").await?;
 
-    let org_id = claims.org_id().ok_or_else(|| AppError::Forbidden("No org id".into()))?;
+    let org_id = claims
+        .org_id()
+        .ok_or_else(|| AppError::Forbidden("No org id".into()))?;
 
     let rows = sqlx::query_as::<_, OrgPaymentMethod>(
         "SELECT id, org_id, name, label_translations, color, icon, is_cash, is_active, created_at, updated_at
@@ -96,14 +98,16 @@ pub async fn create_payment_method(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "payment_methods", "create").await?;
-    let org_id = claims.org_id().ok_or_else(|| AppError::Forbidden("No org id".into()))?;
+    let org_id = claims
+        .org_id()
+        .ok_or_else(|| AppError::Forbidden("No org id".into()))?;
 
     ensure_translations(&mut body.label_translations)
         .await
         .map_err(|_| AppError::Internal)?;
 
-    let translations_json = serde_json::to_value(&body.label_translations)
-        .map_err(|_| AppError::Internal)?;
+    let translations_json =
+        serde_json::to_value(&body.label_translations).map_err(|_| AppError::Internal)?;
 
     let method = sqlx::query_as::<_, OrgPaymentMethod>(
         r#"
@@ -153,11 +157,13 @@ pub async fn update_payment_method(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "payment_methods", "update").await?;
-    let org_id = claims.org_id().ok_or_else(|| AppError::Forbidden("No org id".into()))?;
+    let org_id = claims
+        .org_id()
+        .ok_or_else(|| AppError::Forbidden("No org id".into()))?;
 
     // Verify ownership
     let existing: Option<serde_json::Value> = sqlx::query_scalar(
-        "SELECT label_translations FROM org_payment_methods WHERE id = $1 AND org_id = $2"
+        "SELECT label_translations FROM org_payment_methods WHERE id = $1 AND org_id = $2",
     )
     .bind(*id)
     .bind(org_id)
@@ -170,7 +176,8 @@ pub async fn update_payment_method(
 
     let mut update_translations = None;
     if let Some(ref mut tr) = body.label_translations {
-        ensure_translations(tr).await
+        ensure_translations(tr)
+            .await
             .map_err(|_| AppError::Internal)?;
         update_translations = Some(serde_json::to_value(tr).unwrap());
     }
@@ -228,10 +235,12 @@ pub async fn activate_payment_method(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "payment_methods", "update").await?;
-    let org_id = claims.org_id().ok_or_else(|| AppError::Forbidden("No org id".into()))?;
+    let org_id = claims
+        .org_id()
+        .ok_or_else(|| AppError::Forbidden("No org id".into()))?;
 
     let method = sqlx::query_as::<_, OrgPaymentMethod>(
-        "UPDATE org_payment_methods SET is_active = true WHERE id = $1 AND org_id = $2 RETURNING *"
+        "UPDATE org_payment_methods SET is_active = true WHERE id = $1 AND org_id = $2 RETURNING *",
     )
     .bind(*id)
     .bind(org_id)
@@ -259,7 +268,9 @@ pub async fn deactivate_payment_method(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "payment_methods", "update").await?;
-    let org_id = claims.org_id().ok_or_else(|| AppError::Forbidden("No org id".into()))?;
+    let org_id = claims
+        .org_id()
+        .ok_or_else(|| AppError::Forbidden("No org id".into()))?;
 
     let method = sqlx::query_as::<_, OrgPaymentMethod>(
         "UPDATE org_payment_methods SET is_active = false WHERE id = $1 AND org_id = $2 RETURNING *"

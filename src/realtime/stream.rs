@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use actix_web::web::Bytes;
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 use futures::stream::StreamExt;
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -82,16 +82,38 @@ pub async fn stream(
         ));
     }
 
+    // Resume support: a reconnecting client sends `Last-Event-ID` (the last id it
+    // saw). Subscribe FIRST so no live event is missed while we read the buffer, then
+    // replay what it missed. Events in the overlap (published between subscribe and
+    // the buffer read) appear in BOTH the replay and the live stream — the live
+    // filter drops id <= max_replayed so each is delivered exactly once.
+    let last_event_id: Option<u64> = req
+        .headers()
+        .get("Last-Event-ID")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse().ok());
+
     let rx = hub.subscribe(query.branch_id);
 
-    // Broadcast events → SSE frames, dropping any topic the caller isn't subscribed
-    // to/permitted for. A lagged/closed receiver yields `Err`, surfaced as a body
-    // error so actix drops the connection; the client reconnects and re-seeds.
+    let replayed = match last_event_id {
+        Some(id) => hub.replay_since(query.branch_id, id),
+        None => Vec::new(), // a fresh connect seeds from the snapshot endpoint, not replay
+    };
+    let max_replayed = replayed.iter().map(|e| e.id).max().unwrap_or_else(|| last_event_id.unwrap_or(0));
+    let replay_frames: Vec<Result<Bytes, actix_web::Error>> = replayed
+        .into_iter()
+        .filter(|e| topics.contains(&e.topic))
+        .map(|e| Ok(Bytes::from(format!("id: {}\nevent: {}\ndata: {}\n\n", e.id, e.event_type, e.data))))
+        .collect();
+
+    // Broadcast events → SSE frames, dropping topics the caller isn't permitted for
+    // and any id already delivered via replay. A lagged/closed receiver yields `Err`,
+    // surfaced as a body error so actix drops the connection; the client reconnects.
     let events = BroadcastStream::new(rx).filter_map(move |res| {
         let out: Option<Result<Bytes, actix_web::Error>> = match res {
-            Ok(ev) if topics.contains(&ev.topic) => Some(Ok(Bytes::from(format!(
-                "event: {}\ndata: {}\n\n",
-                ev.event_type, ev.data
+            Ok(ev) if ev.id > max_replayed && topics.contains(&ev.topic) => Some(Ok(Bytes::from(format!(
+                "id: {}\nevent: {}\ndata: {}\n\n",
+                ev.id, ev.event_type, ev.data
             )))),
             Ok(_) => None,
             Err(_) => Some(Err(actix_web::error::ErrorInternalServerError(
@@ -104,7 +126,11 @@ pub async fn stream(
     let keepalive = IntervalStream::new(tokio::time::interval(Duration::from_secs(20)))
         .map(|_| Ok::<Bytes, actix_web::Error>(Bytes::from_static(b": ping\n\n")));
 
-    let body = futures::stream::select(events, keepalive);
+    // Replay buffered events first, then the live stream; keepalive interleaves.
+    let body = futures::stream::select(
+        futures::stream::iter(replay_frames).chain(events),
+        keepalive,
+    );
 
     Ok(HttpResponse::Ok()
         .content_type("text/event-stream")

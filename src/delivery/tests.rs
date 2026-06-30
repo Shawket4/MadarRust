@@ -45,10 +45,31 @@ fn channel_open_respects_master_and_shift() {
 #[test]
 fn channel_open_force_open_ignores_window() {
     // 'open' force-accepts even outside the window (shift still required).
-    assert!(channel_open(true, "open", Some(t(9, 0)), Some(t(17, 0)), t(23, 0), true));
+    assert!(channel_open(
+        true,
+        "open",
+        Some(t(9, 0)),
+        Some(t(17, 0)),
+        t(23, 0),
+        true
+    ));
     // 'auto' obeys the window.
-    assert!(!channel_open(true, "auto", Some(t(9, 0)), Some(t(17, 0)), t(23, 0), true));
-    assert!(channel_open(true, "auto", Some(t(9, 0)), Some(t(17, 0)), t(12, 0), true));
+    assert!(!channel_open(
+        true,
+        "auto",
+        Some(t(9, 0)),
+        Some(t(17, 0)),
+        t(23, 0),
+        true
+    ));
+    assert!(channel_open(
+        true,
+        "auto",
+        Some(t(9, 0)),
+        Some(t(17, 0)),
+        t(12, 0),
+        true
+    ));
 }
 
 #[test]
@@ -111,11 +132,16 @@ fn validate_field_helpers() {
 
 #[cfg(test)]
 mod zone_fee {
-    use crate::delivery::public::{select_zone_fee, FeeOutcome, ZoneRow};
+    use crate::delivery::public::{FeeOutcome, ZoneRow, select_zone_fee};
     use uuid::Uuid;
 
     fn zone(max: i32, fee: i32) -> ZoneRow {
-        ZoneRow { id: Uuid::new_v4(), name: format!("ring-{max}"), fee, max_road_distance_meters: max }
+        ZoneRow {
+            id: Uuid::new_v4(),
+            name: format!("ring-{max}"),
+            fee,
+            max_road_distance_meters: max,
+        }
     }
     fn fee_of(o: FeeOutcome) -> i32 {
         match o {
@@ -135,18 +161,27 @@ mod zone_fee {
     #[test]
     fn out_of_range_when_no_zone_covers() {
         let zones = [zone(500, 1000)];
-        assert!(matches!(select_zone_fee(600, None, &zones), FeeOutcome::OutOfRange));
+        assert!(matches!(
+            select_zone_fee(600, None, &zones),
+            FeeOutcome::OutOfRange
+        ));
     }
 
     #[test]
     fn branch_hard_cap_forces_out_of_range() {
         let zones = [zone(5000, 1000)];
-        assert!(matches!(select_zone_fee(700, Some(600), &zones), FeeOutcome::OutOfRange));
+        assert!(matches!(
+            select_zone_fee(700, Some(600), &zones),
+            FeeOutcome::OutOfRange
+        ));
     }
 
     #[test]
     fn no_zones_is_out_of_range() {
-        assert!(matches!(select_zone_fee(100, None, &[]), FeeOutcome::OutOfRange));
+        assert!(matches!(
+            select_zone_fee(100, None, &[]),
+            FeeOutcome::OutOfRange
+        ));
     }
 
     #[test]
@@ -206,13 +241,21 @@ mod hub_tests {
 
         hub.publish(branch_a, event(branch_a));
 
-        let ev = rx_a.try_recv().expect("branch A subscriber should receive its event");
+        let ev = rx_a
+            .try_recv()
+            .expect("branch A subscriber should receive its event");
         assert_eq!(ev.event_type, "delivery.created");
         assert_eq!(ev.topic, Topic::Delivery);
-        assert_eq!(ev.data["branch_id"], serde_json::Value::String(branch_a.to_string()));
+        assert_eq!(
+            ev.data["branch_id"],
+            serde_json::Value::String(branch_a.to_string())
+        );
 
         // Tenant isolation: branch B must NEVER see branch A's event.
-        assert!(matches!(rx_b.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+        assert!(matches!(
+            rx_b.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]
@@ -240,19 +283,27 @@ mod hub_tests {
 mod it {
     use actix_http::Request;
     use actix_web::dev::{Service, ServiceResponse};
-    use actix_web::{http::StatusCode, test, web, App};
-    use serde_json::{json, Value};
+    use actix_web::{App, http::StatusCode, test, web};
+    use serde_json::{Value, json};
     use sqlx::PgPool;
     use uuid::Uuid;
 
-    use crate::auth::jwt::{create_token, JwtSecret};
+    use crate::auth::jwt::{JwtSecret, create_token};
     use crate::models::UserRole;
 
     fn get_secret() -> JwtSecret {
         JwtSecret("secret".into())
     }
     fn teller_token(uid: Uuid, org: Uuid, branch: Uuid) -> String {
-        create_token(&get_secret(), uid, Some(org), UserRole::Teller, Some(branch), 24).unwrap()
+        create_token(
+            &get_secret(),
+            uid,
+            Some(org),
+            UserRole::Teller,
+            Some(branch),
+            24,
+        )
+        .unwrap()
     }
     fn admin_token(uid: Uuid, org: Uuid) -> String {
         create_token(&get_secret(), uid, Some(org), UserRole::OrgAdmin, None, 24).unwrap()
@@ -354,7 +405,13 @@ mod it {
             .unwrap();
         id
     }
-    async fn seed_settings(pool: &PgPool, branch: Uuid, in_mall: bool, outside: bool, in_mall_fee: i32) {
+    async fn seed_settings(
+        pool: &PgPool,
+        branch: Uuid,
+        in_mall: bool,
+        outside: bool,
+        in_mall_fee: i32,
+    ) {
         sqlx::query(
             "INSERT INTO branch_delivery_settings (branch_id, in_mall_enabled, outside_enabled, in_mall_fee) \
              VALUES ($1,$2,$3,$4)",
@@ -380,12 +437,14 @@ mod it {
         id
     }
     async fn set_in_mall_discount(pool: &PgPool, branch: Uuid, discount: Option<Uuid>) {
-        sqlx::query("UPDATE branch_delivery_settings SET in_mall_discount_id = $2 WHERE branch_id = $1")
-            .bind(branch)
-            .bind(discount)
-            .execute(pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE branch_delivery_settings SET in_mall_discount_id = $2 WHERE branch_id = $1",
+        )
+        .bind(branch)
+        .bind(discount)
+        .execute(pool)
+        .await
+        .unwrap();
     }
     async fn set_in_mall_require_location(pool: &PgPool, branch: Uuid, required: bool) {
         sqlx::query("UPDATE branch_delivery_settings SET in_mall_require_location = $2 WHERE branch_id = $1")
@@ -415,7 +474,14 @@ mod it {
             .unwrap();
         id
     }
-    async fn seed_recipe(pool: &PgPool, org: Uuid, branch: Uuid, item: Uuid, qty: f64, stock: f64) -> Uuid {
+    async fn seed_recipe(
+        pool: &PgPool,
+        org: Uuid,
+        branch: Uuid,
+        item: Uuid,
+        qty: f64,
+        stock: f64,
+    ) -> Uuid {
         let ing = Uuid::new_v4();
         sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,'Ing','g'::inventory_unit,100,'general')")
             .bind(ing)
@@ -448,7 +514,14 @@ mod it {
             .await
             .unwrap();
     }
-    async fn seed_channel_override(pool: &PgPool, branch: Uuid, item: Uuid, channel: &str, price: Option<i32>, available: Option<bool>) {
+    async fn seed_channel_override(
+        pool: &PgPool,
+        branch: Uuid,
+        item: Uuid,
+        channel: &str,
+        price: Option<i32>,
+        available: Option<bool>,
+    ) {
         sqlx::query("INSERT INTO branch_channel_menu_overrides (branch_id, menu_item_id, channel, price_override, is_available) VALUES ($1,$2,$3::delivery_channel,$4,$5)")
             .bind(branch)
             .bind(item)
@@ -460,7 +533,9 @@ mod it {
             .unwrap();
     }
     async fn perms(pool: &PgPool) {
-        crate::permissions::seeder::seed_role_permissions(pool).await.unwrap();
+        crate::permissions::seeder::seed_role_permissions(pool)
+            .await
+            .unwrap();
     }
 
     const PHONE: &str = "01000000000";
@@ -484,8 +559,18 @@ mod it {
 
     async fn place_in_mall_order(pool: &PgPool, branch: Uuid, item: Uuid, qty: i32) -> Uuid {
         let app = app!(pool);
-        let body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": qty }]));
-        let (st, b) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        let body = intake_body(
+            branch,
+            "in_mall",
+            json!([{ "menu_item_id": item, "quantity": qty }]),
+        );
+        let (st, b) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(st, StatusCode::CREATED, "intake failed: {b}");
         Uuid::parse_str(b["id"].as_str().unwrap()).unwrap()
     }
@@ -503,8 +588,18 @@ mod it {
         seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
 
         let app = app!(&pool);
-        let body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 2 }]));
-        let (st, b) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        let body = intake_body(
+            branch,
+            "in_mall",
+            json!([{ "menu_item_id": item, "quantity": 2 }]),
+        );
+        let (st, b) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(st, StatusCode::CREATED, "{b}");
         assert_eq!(b["status"], "received");
         assert_eq!(b["subtotal"], 1000);
@@ -526,10 +621,20 @@ mod it {
         seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
 
         let app = app!(&pool);
-        let mut body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 1 }]));
+        let mut body = intake_body(
+            branch,
+            "in_mall",
+            json!([{ "menu_item_id": item, "quantity": 1 }]),
+        );
         body["customer_lat"] = json!(null);
         body["customer_lng"] = json!(null);
-        let (st, b) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        let (st, b) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
     }
 
@@ -547,10 +652,20 @@ mod it {
         seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
 
         let app = app!(&pool);
-        let mut body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 1 }]));
+        let mut body = intake_body(
+            branch,
+            "in_mall",
+            json!([{ "menu_item_id": item, "quantity": 1 }]),
+        );
         body["customer_lat"] = json!(null);
         body["customer_lng"] = json!(null);
-        let (st, b) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        let (st, b) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(st, StatusCode::CREATED, "{b}");
         assert_eq!(b["status"], "received");
         assert_eq!(b["delivery_fee"], 300);
@@ -571,8 +686,18 @@ mod it {
         seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
 
         let app = app!(&pool);
-        let body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 1_000_000 }]));
-        let (st, _) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        let body = intake_body(
+            branch,
+            "in_mall",
+            json!([{ "menu_item_id": item, "quantity": 1_000_000 }]),
+        );
+        let (st, _) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
@@ -586,10 +711,18 @@ mod it {
         seed_shift(&pool, branch, teller).await;
         let item = seed_item(&pool, org, 500).await;
 
-        let lines: Vec<Value> = (0..101).map(|_| json!({ "menu_item_id": item, "quantity": 1 })).collect();
+        let lines: Vec<Value> = (0..101)
+            .map(|_| json!({ "menu_item_id": item, "quantity": 1 }))
+            .collect();
         let app = app!(&pool);
         let body = intake_body(branch, "in_mall", Value::Array(lines));
-        let (st, _) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        let (st, _) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
@@ -604,9 +737,19 @@ mod it {
         let item = seed_item(&pool, org, 500).await;
 
         let app = app!(&pool);
-        let mut body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 1 }]));
+        let mut body = intake_body(
+            branch,
+            "in_mall",
+            json!([{ "menu_item_id": item, "quantity": 1 }]),
+        );
         body["payment_method_hint"] = json!("bitcoin");
-        let (st, _) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        let (st, _) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
@@ -621,9 +764,19 @@ mod it {
         let item = seed_item(&pool, org, 500).await;
 
         let app = app!(&pool);
-        let mut body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 1 }]));
+        let mut body = intake_body(
+            branch,
+            "in_mall",
+            json!([{ "menu_item_id": item, "quantity": 1 }]),
+        );
         body["customer_name"] = json!("x".repeat(200));
-        let (st, _) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        let (st, _) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
@@ -644,7 +797,13 @@ mod it {
             "in_mall",
             json!([{ "menu_item_id": item, "quantity": 1, "size_label": "ginormous" }]),
         );
-        let (st, _) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        let (st, _) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
@@ -660,9 +819,19 @@ mod it {
         let item = seed_item(&pool, org, 500).await;
 
         let app = app!(&pool);
-        let mut body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 1 }]));
+        let mut body = intake_body(
+            branch,
+            "in_mall",
+            json!([{ "menu_item_id": item, "quantity": 1 }]),
+        );
         body["place_name"] = json!(null);
-        let (st, _) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        let (st, _) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
@@ -678,11 +847,21 @@ mod it {
         let item = seed_item(&pool, org, 500).await;
 
         let app = app!(&pool);
-        let mut body = intake_body(branch, "outside", json!([{ "menu_item_id": item, "quantity": 1 }]));
+        let mut body = intake_body(
+            branch,
+            "outside",
+            json!([{ "menu_item_id": item, "quantity": 1 }]),
+        );
         body["address_line"] = json!(null);
         body["customer_lat"] = json!(30.05);
         body["customer_lng"] = json!(31.23);
-        let (st, _) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        let (st, _) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
@@ -718,7 +897,13 @@ mod it {
             "in_mall",
             json!([{ "menu_item_id": chan_item, "quantity": 1 }, { "menu_item_id": branch_item, "quantity": 1 }]),
         );
-        let (st, b) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        let (st, b) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(st, StatusCode::CREATED, "{b}");
         // 300 (channel) + 400 (branch) = 700
         assert_eq!(b["subtotal"], 700);
@@ -735,8 +920,18 @@ mod it {
         seed_channel_override(&pool, branch, item, "in_mall", None, Some(false)).await;
 
         let app = app!(&pool);
-        let body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 1 }]));
-        let (st, _) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        let body = intake_body(
+            branch,
+            "in_mall",
+            json!([{ "menu_item_id": item, "quantity": 1 }]),
+        );
+        let (st, _) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
@@ -748,8 +943,18 @@ mod it {
         let item = seed_item(&pool, org, 500).await;
 
         let app = app!(&pool);
-        let body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 1 }]));
-        let (st, _) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        let body = intake_body(
+            branch,
+            "in_mall",
+            json!([{ "menu_item_id": item, "quantity": 1 }]),
+        );
+        let (st, _) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(st, StatusCode::CONFLICT);
     }
 
@@ -763,8 +968,18 @@ mod it {
         let item = seed_item(&pool, org, 500).await;
 
         let app = app!(&pool);
-        let body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 1 }]));
-        let (st, _) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        let body = intake_body(
+            branch,
+            "in_mall",
+            json!([{ "menu_item_id": item, "quantity": 1 }]),
+        );
+        let (st, _) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(st, StatusCode::CONFLICT);
     }
 
@@ -778,9 +993,19 @@ mod it {
         let item = seed_item(&pool, org, 500).await;
 
         let app = app!(&pool);
-        let mut body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 1 }]));
+        let mut body = intake_body(
+            branch,
+            "in_mall",
+            json!([{ "menu_item_id": item, "quantity": 1 }]),
+        );
         body["device_token"] = json!("not-a-real-token");
-        let (st, _) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        let (st, _) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(st, StatusCode::UNAUTHORIZED);
     }
 
@@ -796,10 +1021,22 @@ mod it {
             .unwrap();
 
         let app = app!(&pool);
-        let (st_bad, _) = send(&app, test::TestRequest::post().uri("/public/otp/verify").set_json(json!({"phone":PHONE,"code":"0000"}))).await;
+        let (st_bad, _) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/otp/verify")
+                .set_json(json!({"phone":PHONE,"code":"0000"})),
+        )
+        .await;
         assert_eq!(st_bad, StatusCode::BAD_REQUEST);
 
-        let (st_ok, b) = send(&app, test::TestRequest::post().uri("/public/otp/verify").set_json(json!({"phone":PHONE,"code":"1234"}))).await;
+        let (st_ok, b) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/otp/verify")
+                .set_json(json!({"phone":PHONE,"code":"1234"})),
+        )
+        .await;
         assert_eq!(st_ok, StatusCode::OK, "{b}");
         assert!(b["device_token"].as_str().unwrap().len() > 20);
     }
@@ -823,21 +1060,31 @@ mod it {
         for status in ["confirmed", "preparing", "ready", "out_for_delivery"] {
             let (st, b) = send(
                 &app,
-                auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/status")), &token)
-                    .set_json(json!({ "status": status })),
+                auth(
+                    test::TestRequest::post().uri(&format!("/delivery-orders/{id}/status")),
+                    &token,
+                )
+                .set_json(json!({ "status": status })),
             )
             .await;
             assert_eq!(st, StatusCode::OK, "status {status}: {b}");
         }
         // receipt printed once, at confirm
         let printed: Option<chrono::DateTime<chrono::Utc>> =
-            sqlx::query_scalar("SELECT receipt_printed_at FROM delivery_orders WHERE id=$1").bind(id).fetch_one(&pool).await.unwrap();
+            sqlx::query_scalar("SELECT receipt_printed_at FROM delivery_orders WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert!(printed.is_some());
 
         let (st, b) = send(
             &app,
-            auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/finalize")), &token)
-                .set_json(json!({ "shift_id": shift, "payment_method": "cash" })),
+            auth(
+                test::TestRequest::post().uri(&format!("/delivery-orders/{id}/finalize")),
+                &token,
+            )
+            .set_json(json!({ "shift_id": shift, "payment_method": "cash" })),
         )
         .await;
         assert_eq!(st, StatusCode::OK, "finalize: {b}");
@@ -845,7 +1092,11 @@ mod it {
 
         // delivery order linked + delivered
         let (status, linked): (String, Option<Uuid>) =
-            sqlx::query_as("SELECT status::text, order_id FROM delivery_orders WHERE id=$1").bind(id).fetch_one(&pool).await.unwrap();
+            sqlx::query_as("SELECT status::text, order_id FROM delivery_orders WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(status, "delivered");
         assert_eq!(linked, Some(order_id));
 
@@ -867,8 +1118,13 @@ mod it {
         let stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2")
             .bind(branch).bind(ing).fetch_one(&pool).await.unwrap();
         assert!((stock - 960.0).abs() < 1e-6, "stock={stock}");
-        let moves: i64 = sqlx::query_scalar("SELECT count(*) FROM inventory_movements WHERE source_id=$1 AND type='sale'")
-            .bind(order_id).fetch_one(&pool).await.unwrap();
+        let moves: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM inventory_movements WHERE source_id=$1 AND type='sale'",
+        )
+        .bind(order_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(moves, 1);
     }
 
@@ -896,8 +1152,11 @@ mod it {
             async move {
                 send(
                     app,
-                    auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/status")), token)
-                        .set_json(json!({ "status": status })),
+                    auth(
+                        test::TestRequest::post().uri(&format!("/delivery-orders/{id}/status")),
+                        token,
+                    )
+                    .set_json(json!({ "status": status })),
                 )
                 .await
             }
@@ -922,7 +1181,10 @@ mod it {
         .unwrap();
         assert_eq!(status, "out_for_delivery");
         assert!(o_at.is_some(), "landed step stamped");
-        assert!(c_at.is_none() && p_at.is_none() && r_at.is_none(), "skipped steps cleared");
+        assert!(
+            c_at.is_none() && p_at.is_none() && r_at.is_none(),
+            "skipped steps cleared"
+        );
 
         // Backward jump out_for_delivery → confirmed clears the later stamp.
         let (st, b) = set("confirmed").await;
@@ -944,7 +1206,11 @@ mod it {
 
         // Non-settable targets are rejected (delivered = finalize; received = intake).
         let (st, _) = set("delivered").await;
-        assert_eq!(st, StatusCode::BAD_REQUEST, "delivered is not settable here");
+        assert_eq!(
+            st,
+            StatusCode::BAD_REQUEST,
+            "delivered is not settable here"
+        );
         let (st, _) = set("received").await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "received is not settable here");
     }
@@ -984,8 +1250,11 @@ mod it {
         // Finalize the delivery order → a real completed sale.
         let (st, b) = send(
             &app,
-            auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/finalize")), &token)
-                .set_json(json!({ "shift_id": shift, "payment_method": "cash" })),
+            auth(
+                test::TestRequest::post().uri(&format!("/delivery-orders/{id}/finalize")),
+                &token,
+            )
+            .set_json(json!({ "shift_id": shift, "payment_method": "cash" })),
         )
         .await;
         assert_eq!(st, StatusCode::OK, "finalize: {b}");
@@ -994,7 +1263,10 @@ mod it {
         // ── Detail view (GET /orders/{id}) ──
         let (st, o) = send(
             &app,
-            auth(test::TestRequest::get().uri(&format!("/orders/{order_id}")), &token),
+            auth(
+                test::TestRequest::get().uri(&format!("/orders/{order_id}")),
+                &token,
+            ),
         )
         .await;
         assert_eq!(st, StatusCode::OK, "get order: {o}");
@@ -1020,7 +1292,10 @@ mod it {
         // ── List view (GET /orders?shift_id=…) summary breaks out fees ──
         let (st, list) = send(
             &app,
-            auth(test::TestRequest::get().uri(&format!("/orders?shift_id={shift}")), &token),
+            auth(
+                test::TestRequest::get().uri(&format!("/orders?shift_id={shift}")),
+                &token,
+            ),
         )
         .await;
         assert_eq!(st, StatusCode::OK, "list: {list}");
@@ -1064,8 +1339,13 @@ mod it {
              payment_method, subtotal, total_amount, status, order_ref) \
              VALUES ($1,$2,$3,$4,1,'cash',500,500,'completed','DT-000000-0001')",
         )
-        .bind(oid).bind(branch).bind(shift).bind(teller)
-        .execute(&pool).await.unwrap();
+        .bind(oid)
+        .bind(branch)
+        .bind(shift)
+        .bind(teller)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let app = test::init_service(
             App::new()
@@ -1077,15 +1357,24 @@ mod it {
 
         let (st, o) = send(
             &app,
-            auth(test::TestRequest::get().uri(&format!("/orders/{oid}")), &token),
+            auth(
+                test::TestRequest::get().uri(&format!("/orders/{oid}")),
+                &token,
+            ),
         )
         .await;
         assert_eq!(st, StatusCode::OK, "get order: {o}");
         assert_eq!(o["order_type"], "dine_in");
         assert_eq!(o["delivery_fee"], 0);
         assert!(o["delivery_order_id"].is_null());
-        assert!(o["delivery_channel"].is_null(), "dine-in must have no channel flag");
-        assert!(o.get("delivery").map_or(true, |v| v.is_null()), "dine-in must have no delivery block");
+        assert!(
+            o["delivery_channel"].is_null(),
+            "dine-in must have no channel flag"
+        );
+        assert!(
+            o.get("delivery").map_or(true, |v| v.is_null()),
+            "dine-in must have no delivery block"
+        );
     }
 
     // ── Per-channel discounts ─────────────────────────────────────
@@ -1103,8 +1392,18 @@ mod it {
         set_in_mall_discount(&pool, branch, Some(disc)).await;
 
         let app = app!(&pool);
-        let body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 2 }]));
-        let (st, b) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        let body = intake_body(
+            branch,
+            "in_mall",
+            json!([{ "menu_item_id": item, "quantity": 2 }]),
+        );
+        let (st, b) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(st, StatusCode::CREATED, "{b}");
         assert_eq!(b["subtotal"], 1000);
         assert_eq!(b["discount_amount"], 100); // 10% of 1000
@@ -1128,8 +1427,18 @@ mod it {
         set_in_mall_discount(&pool, branch, Some(disc)).await;
 
         let app = app!(&pool);
-        let body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 2 }]));
-        let (st, b) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        let body = intake_body(
+            branch,
+            "in_mall",
+            json!([{ "menu_item_id": item, "quantity": 2 }]),
+        );
+        let (st, b) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(st, StatusCode::CREATED, "{b}");
         assert_eq!(b["discount_amount"], 150);
         assert_eq!(b["total"], 1150); // 1000 - 150 + 300
@@ -1147,11 +1456,25 @@ mod it {
         let disc = seed_discount(&pool, org, "percentage", 10).await;
         set_in_mall_discount(&pool, branch, Some(disc)).await;
         // Deactivate AFTER configuring — intake must honor only active discounts.
-        sqlx::query("UPDATE discounts SET is_active=false WHERE id=$1").bind(disc).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE discounts SET is_active=false WHERE id=$1")
+            .bind(disc)
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let app = app!(&pool);
-        let body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 2 }]));
-        let (st, b) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        let body = intake_body(
+            branch,
+            "in_mall",
+            json!([{ "menu_item_id": item, "quantity": 2 }]),
+        );
+        let (st, b) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(st, StatusCode::CREATED, "{b}");
         assert_eq!(b["discount_amount"], 0);
         assert_eq!(b["total"], 1300); // no discount: 1000 + 300
@@ -1186,8 +1509,11 @@ mod it {
 
         let (st, b) = send(
             &app,
-            auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/finalize")), &token)
-                .set_json(json!({ "shift_id": shift, "payment_method": "cash" })),
+            auth(
+                test::TestRequest::post().uri(&format!("/delivery-orders/{id}/finalize")),
+                &token,
+            )
+            .set_json(json!({ "shift_id": shift, "payment_method": "cash" })),
         )
         .await;
         assert_eq!(st, StatusCode::OK, "finalize: {b}");
@@ -1208,7 +1534,14 @@ mod it {
         assert_eq!(dtype.as_deref(), Some("percentage"));
 
         // The orders API surfaces it too.
-        let (st, o) = send(&app, auth(test::TestRequest::get().uri(&format!("/orders/{order_id}")), &token)).await;
+        let (st, o) = send(
+            &app,
+            auth(
+                test::TestRequest::get().uri(&format!("/orders/{order_id}")),
+                &token,
+            ),
+        )
+        .await;
         assert_eq!(st, StatusCode::OK, "{o}");
         assert_eq!(o["discount_amount"], 100);
         assert_eq!(o["total_amount"], 1200);
@@ -1225,13 +1558,25 @@ mod it {
         let app = app!(&pool);
 
         let inactive = seed_discount(&pool, org, "percentage", 10).await;
-        sqlx::query("UPDATE discounts SET is_active=false WHERE id=$1").bind(inactive).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE discounts SET is_active=false WHERE id=$1")
+            .bind(inactive)
+            .execute(&pool)
+            .await
+            .unwrap();
         let body = json!({
             "branch_id": branch, "in_mall_enabled": true, "outside_enabled": false,
             "in_mall_fee": 0, "prep_time_minutes": 20, "in_mall_discount_id": inactive,
         });
-        let (st, _) = send(&app, auth(test::TestRequest::put().uri("/delivery/settings"), &token).set_json(&body)).await;
-        assert_eq!(st, StatusCode::BAD_REQUEST, "inactive discount must be rejected");
+        let (st, _) = send(
+            &app,
+            auth(test::TestRequest::put().uri("/delivery/settings"), &token).set_json(&body),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::BAD_REQUEST,
+            "inactive discount must be rejected"
+        );
 
         let org2 = seed_org(&pool).await;
         let foreign = seed_discount(&pool, org2, "fixed", 50).await;
@@ -1239,8 +1584,16 @@ mod it {
             "branch_id": branch, "in_mall_enabled": true, "outside_enabled": false,
             "in_mall_fee": 0, "prep_time_minutes": 20, "in_mall_discount_id": foreign,
         });
-        let (st2, _) = send(&app, auth(test::TestRequest::put().uri("/delivery/settings"), &token).set_json(&body2)).await;
-        assert_eq!(st2, StatusCode::BAD_REQUEST, "cross-org discount must be rejected");
+        let (st2, _) = send(
+            &app,
+            auth(test::TestRequest::put().uri("/delivery/settings"), &token).set_json(&body2),
+        )
+        .await;
+        assert_eq!(
+            st2,
+            StatusCode::BAD_REQUEST,
+            "cross-org discount must be rejected"
+        );
     }
 
     #[sqlx::test]
@@ -1255,7 +1608,12 @@ mod it {
         set_in_mall_discount(&pool, branch, Some(disc)).await;
 
         let app = app!(&pool);
-        let (st, b) = send(&app, test::TestRequest::get().uri(&format!("/public/branches/{branch}/menu?channel=in_mall"))).await;
+        let (st, b) = send(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!("/public/branches/{branch}/menu?channel=in_mall")),
+        )
+        .await;
         assert_eq!(st, StatusCode::OK, "{b}");
         assert_eq!(b["discount"]["dtype"], "percentage");
         assert_eq!(b["discount"]["value"], 15);
@@ -1277,22 +1635,37 @@ mod it {
         let id = place_in_mall_order(&pool, branch, item, 1).await;
 
         // Dashboard edits the price AFTER the order is placed — must NOT affect it.
-        sqlx::query("UPDATE menu_items SET base_price = 999 WHERE id=$1").bind(item).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE menu_items SET base_price = 999 WHERE id=$1")
+            .bind(item)
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let token = teller_token(teller, org, branch);
         let app = app!(&pool);
         let (st, b) = send(
             &app,
-            auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/finalize")), &token)
-                .set_json(json!({ "shift_id": shift, "payment_method": "cash" })),
+            auth(
+                test::TestRequest::post().uri(&format!("/delivery-orders/{id}/finalize")),
+                &token,
+            )
+            .set_json(json!({ "shift_id": shift, "payment_method": "cash" })),
         )
         .await;
         assert_eq!(st, StatusCode::OK, "{b}");
         let order_id = Uuid::parse_str(b["order_id"].as_str().unwrap()).unwrap();
 
-        let total: i32 = sqlx::query_scalar("SELECT total_amount FROM orders WHERE id=$1").bind(order_id).fetch_one(&pool).await.unwrap();
+        let total: i32 = sqlx::query_scalar("SELECT total_amount FROM orders WHERE id=$1")
+            .bind(order_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(total, 500, "must use the frozen price, not the edited 999");
-        let unit: i32 = sqlx::query_scalar("SELECT unit_price FROM order_items WHERE order_id=$1").bind(order_id).fetch_one(&pool).await.unwrap();
+        let unit: i32 = sqlx::query_scalar("SELECT unit_price FROM order_items WHERE order_id=$1")
+            .bind(order_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(unit, 500);
     }
 
@@ -1312,11 +1685,22 @@ mod it {
         let token = teller_token(teller, org, branch);
         let app = app!(&pool);
         // advance past received so cancel yields "cancelled" (received → "rejected")
-        send(&app, auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/status")), &token).set_json(json!({"status":"confirmed"}))).await;
+        send(
+            &app,
+            auth(
+                test::TestRequest::post().uri(&format!("/delivery-orders/{id}/status")),
+                &token,
+            )
+            .set_json(json!({"status":"confirmed"})),
+        )
+        .await;
         let (st, _) = send(
             &app,
-            auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/cancel")), &token)
-                .set_json(json!({ "reason": "test", "restore_inventory": true })),
+            auth(
+                test::TestRequest::post().uri(&format!("/delivery-orders/{id}/cancel")),
+                &token,
+            )
+            .set_json(json!({ "reason": "test", "restore_inventory": true })),
         )
         .await;
         assert_eq!(st, StatusCode::OK);
@@ -1324,9 +1708,20 @@ mod it {
         let stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2")
             .bind(branch).bind(ing).fetch_one(&pool).await.unwrap();
         assert!((stock - 1000.0).abs() < 1e-6);
-        let waste: i64 = sqlx::query_scalar("SELECT count(*) FROM inventory_movements WHERE source_id=$1 AND type='waste'").bind(id).fetch_one(&pool).await.unwrap();
+        let waste: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM inventory_movements WHERE source_id=$1 AND type='waste'",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(waste, 0);
-        let status: String = sqlx::query_scalar("SELECT status::text FROM delivery_orders WHERE id=$1").bind(id).fetch_one(&pool).await.unwrap();
+        let status: String =
+            sqlx::query_scalar("SELECT status::text FROM delivery_orders WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(status, "cancelled");
     }
 
@@ -1346,12 +1741,23 @@ mod it {
         let token = teller_token(teller, org, branch);
         let app = app!(&pool);
         // move past received so it's a cancel, not a reject
-        let (cst, _) = send(&app, auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/status")), &token).set_json(json!({"status":"confirmed"}))).await;
+        let (cst, _) = send(
+            &app,
+            auth(
+                test::TestRequest::post().uri(&format!("/delivery-orders/{id}/status")),
+                &token,
+            )
+            .set_json(json!({"status":"confirmed"})),
+        )
+        .await;
         assert_eq!(cst, StatusCode::OK);
         let (st, _) = send(
             &app,
-            auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/cancel")), &token)
-                .set_json(json!({ "reason": "no-show", "restore_inventory": false })),
+            auth(
+                test::TestRequest::post().uri(&format!("/delivery-orders/{id}/cancel")),
+                &token,
+            )
+            .set_json(json!({ "reason": "no-show", "restore_inventory": false })),
         )
         .await;
         assert_eq!(st, StatusCode::OK);
@@ -1359,7 +1765,13 @@ mod it {
         let stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2")
             .bind(branch).bind(ing).fetch_one(&pool).await.unwrap();
         assert!((stock - 980.0).abs() < 1e-6, "stock={stock}");
-        let waste: i64 = sqlx::query_scalar("SELECT count(*) FROM inventory_movements WHERE source_id=$1 AND type='waste'").bind(id).fetch_one(&pool).await.unwrap();
+        let waste: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM inventory_movements WHERE source_id=$1 AND type='waste'",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(waste, 1);
     }
 
@@ -1381,16 +1793,46 @@ mod it {
         let token = teller_token(teller, org, branch);
         let app = app!(&pool);
         // Move past received so it's a cancel (not a reject).
-        send(&app, auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/status")), &token).set_json(json!({"status":"confirmed"}))).await;
+        send(
+            &app,
+            auth(
+                test::TestRequest::post().uri(&format!("/delivery-orders/{id}/status")),
+                &token,
+            )
+            .set_json(json!({"status":"confirmed"})),
+        )
+        .await;
 
         let body = json!({ "reason": "no-show", "restore_inventory": false });
-        let (st1, _) = send(&app, auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/cancel")), &token).set_json(body.clone())).await;
+        let (st1, _) = send(
+            &app,
+            auth(
+                test::TestRequest::post().uri(&format!("/delivery-orders/{id}/cancel")),
+                &token,
+            )
+            .set_json(body.clone()),
+        )
+        .await;
         assert_eq!(st1, StatusCode::OK);
-        let (st2, _) = send(&app, auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/cancel")), &token).set_json(body)).await;
+        let (st2, _) = send(
+            &app,
+            auth(
+                test::TestRequest::post().uri(&format!("/delivery-orders/{id}/cancel")),
+                &token,
+            )
+            .set_json(body),
+        )
+        .await;
         assert_eq!(st2, StatusCode::CONFLICT, "second cancel must be rejected");
 
         // Waste posted exactly once; stock deducted exactly once (1000 − 20).
-        let waste: i64 = sqlx::query_scalar("SELECT count(*) FROM inventory_movements WHERE source_id=$1 AND type='waste'").bind(id).fetch_one(&pool).await.unwrap();
+        let waste: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM inventory_movements WHERE source_id=$1 AND type='waste'",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(waste, 1, "waste must not be double-deducted");
         let stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2").bind(branch).bind(ing).fetch_one(&pool).await.unwrap();
         assert!((stock - 980.0).abs() < 1e-6, "stock={stock}");
@@ -1413,12 +1855,20 @@ mod it {
         let app = app!(&pool);
         let (st, _) = send(
             &app,
-            auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/cancel")), &token)
-                .set_json(json!({ "reason": "spam" })),
+            auth(
+                test::TestRequest::post().uri(&format!("/delivery-orders/{id}/cancel")),
+                &token,
+            )
+            .set_json(json!({ "reason": "spam" })),
         )
         .await;
         assert_eq!(st, StatusCode::OK);
-        let status: String = sqlx::query_scalar("SELECT status::text FROM delivery_orders WHERE id=$1").bind(id).fetch_one(&pool).await.unwrap();
+        let status: String =
+            sqlx::query_scalar("SELECT status::text FROM delivery_orders WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(status, "rejected");
     }
 
@@ -1438,9 +1888,25 @@ mod it {
         let token = teller_token(teller, org, branch);
         let app = app!(&pool);
         let fin = json!({ "shift_id": shift, "payment_method": "cash" });
-        let (st1, _) = send(&app, auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/finalize")), &token).set_json(&fin)).await;
+        let (st1, _) = send(
+            &app,
+            auth(
+                test::TestRequest::post().uri(&format!("/delivery-orders/{id}/finalize")),
+                &token,
+            )
+            .set_json(&fin),
+        )
+        .await;
         assert_eq!(st1, StatusCode::OK);
-        let (st2, _) = send(&app, auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/finalize")), &token).set_json(&fin)).await;
+        let (st2, _) = send(
+            &app,
+            auth(
+                test::TestRequest::post().uri(&format!("/delivery-orders/{id}/finalize")),
+                &token,
+            )
+            .set_json(&fin),
+        )
+        .await;
         assert_eq!(st2, StatusCode::CONFLICT);
     }
 
@@ -1459,7 +1925,15 @@ mod it {
 
         let token = teller_token(teller, org, branch);
         let app = app!(&pool);
-        let (st, _) = send(&app, auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/status")), &token).set_json(json!({"status":"confirmed"}))).await;
+        let (st, _) = send(
+            &app,
+            auth(
+                test::TestRequest::post().uri(&format!("/delivery-orders/{id}/status")),
+                &token,
+            )
+            .set_json(json!({"status":"confirmed"})),
+        )
+        .await;
         assert_eq!(st, StatusCode::FORBIDDEN);
     }
 
@@ -1483,7 +1957,11 @@ mod it {
         assert_eq!(st, StatusCode::CONFLICT);
 
         // enable it, then the POS may pause/open
-        sqlx::query("UPDATE branch_delivery_settings SET in_mall_enabled=true WHERE branch_id=$1").bind(branch).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE branch_delivery_settings SET in_mall_enabled=true WHERE branch_id=$1")
+            .bind(branch)
+            .execute(&pool)
+            .await
+            .unwrap();
         let (st2, b) = send(
             &app,
             auth(test::TestRequest::post().uri("/delivery/accepting"), &token)
@@ -1539,12 +2017,27 @@ mod it {
         assert_eq!(bad, StatusCode::BAD_REQUEST);
 
         // list
-        let (lst, list) = send(&app, auth(test::TestRequest::get().uri(&format!("/delivery/zones?branch_id={branch}")), &token)).await;
+        let (lst, list) = send(
+            &app,
+            auth(
+                test::TestRequest::get().uri(&format!("/delivery/zones?branch_id={branch}")),
+                &token,
+            ),
+        )
+        .await;
         assert_eq!(lst, StatusCode::OK);
         assert_eq!(list.as_array().unwrap().len(), 1);
 
         // delete
-        let (del, _) = send(&app, auth(test::TestRequest::delete().uri(&format!("/delivery/zones/{zid}?branch_id={branch}")), &token)).await;
+        let (del, _) = send(
+            &app,
+            auth(
+                test::TestRequest::delete()
+                    .uri(&format!("/delivery/zones/{zid}?branch_id={branch}")),
+                &token,
+            ),
+        )
+        .await;
         assert_eq!(del, StatusCode::NO_CONTENT);
     }
 
@@ -1566,7 +2059,14 @@ mod it {
         )
         .await;
         assert_eq!(sst, StatusCode::OK);
-        let (_, s) = send(&app, auth(test::TestRequest::get().uri(&format!("/delivery/settings?branch_id={branch}")), &token)).await;
+        let (_, s) = send(
+            &app,
+            auth(
+                test::TestRequest::get().uri(&format!("/delivery/settings?branch_id={branch}")),
+                &token,
+            ),
+        )
+        .await;
         assert_eq!(s["in_mall_enabled"], true);
         assert_eq!(s["outside_enabled"], true);
         assert_eq!(s["in_mall_fee"], 250);
@@ -1584,7 +2084,14 @@ mod it {
         )
         .await;
         assert_eq!(sst2, StatusCode::OK);
-        let (_, s2) = send(&app, auth(test::TestRequest::get().uri(&format!("/delivery/settings?branch_id={branch}")), &token)).await;
+        let (_, s2) = send(
+            &app,
+            auth(
+                test::TestRequest::get().uri(&format!("/delivery/settings?branch_id={branch}")),
+                &token,
+            ),
+        )
+        .await;
         assert_eq!(s2["in_mall_require_location"], false);
     }
 
@@ -1647,10 +2154,17 @@ mod it {
 
         let (st, s) = send(
             &app,
-            auth(test::TestRequest::get().uri(&format!("/delivery/settings?branch_id={branch}")), &token),
+            auth(
+                test::TestRequest::get().uri(&format!("/delivery/settings?branch_id={branch}")),
+                &token,
+            ),
         )
         .await;
-        assert_eq!(st, StatusCode::OK, "teller with delivery_orders:read may read settings: {s}");
+        assert_eq!(
+            st,
+            StatusCode::OK,
+            "teller with delivery_orders:read may read settings: {s}"
+        );
         assert_eq!(s["in_mall_enabled"], true);
         assert_eq!(s["outside_enabled"], false);
         assert_eq!(s["in_mall_fee"], 250);
@@ -1667,13 +2181,36 @@ mod it {
         seed_recipe(&pool, org, branch, item, 5.0, 100.0).await;
 
         let key = Uuid::new_v4().to_string();
-        let body = intake_body(branch, "in_mall", json!([{ "menu_item_id": item, "quantity": 1 }]));
+        let body = intake_body(
+            branch,
+            "in_mall",
+            json!([{ "menu_item_id": item, "quantity": 1 }]),
+        );
         let app = app!(&pool);
-        let (s1, b1) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").insert_header(("Idempotency-Key", key.clone())).set_json(&body)).await;
+        let (s1, b1) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .insert_header(("Idempotency-Key", key.clone()))
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(s1, StatusCode::CREATED);
-        let (_s2, b2) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").insert_header(("Idempotency-Key", key)).set_json(&body)).await;
+        let (_s2, b2) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .insert_header(("Idempotency-Key", key))
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(b1["id"], b2["id"], "same key must replay the same order");
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM delivery_orders WHERE branch_id=$1").bind(branch).fetch_one(&pool).await.unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM delivery_orders WHERE branch_id=$1")
+                .bind(branch)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -1689,7 +2226,13 @@ mod it {
         id
     }
 
-    async fn seed_addon_typed(pool: &PgPool, org: Uuid, name: &str, addon_type: &str, price: i32) -> Uuid {
+    async fn seed_addon_typed(
+        pool: &PgPool,
+        org: Uuid,
+        name: &str,
+        addon_type: &str,
+        price: i32,
+    ) -> Uuid {
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price) VALUES ($1,$2,$3,$4,$5)")
             .bind(id)
@@ -1724,7 +2267,12 @@ mod it {
 
     /// Bind a milk_type addon to `ing` (addon_item_ingredients), making it the
     /// base/default milk for any item whose recipe uses `ing`.
-    async fn seed_milk_addon_for_ingredient(pool: &PgPool, org: Uuid, ing: Uuid, name: &str) -> Uuid {
+    async fn seed_milk_addon_for_ingredient(
+        pool: &PgPool,
+        org: Uuid,
+        ing: Uuid,
+        name: &str,
+    ) -> Uuid {
         let addon = seed_addon_typed(pool, org, name, "milk_type", 0).await;
         sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1,$2,200,'Milk','ml')")
             .bind(addon)
@@ -1735,11 +2283,17 @@ mod it {
         addon
     }
 
-    async fn seed_optional(pool: &PgPool, item: Uuid, name: &str, price: i32, size_label: Option<&str>) -> Uuid {
+    async fn seed_optional(
+        pool: &PgPool,
+        item: Uuid,
+        name: &str,
+        price: i32,
+        size_label: Option<&str>,
+    ) -> Uuid {
         let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO menu_item_optional_fields (id, menu_item_id, name, price, size_label, is_active) \
-             VALUES ($1,$2,$3,$4,$5::item_size,true)",
+             VALUES ($1,$2,$3,$4,$5,true)",
         )
         .bind(id)
         .bind(item)
@@ -1782,29 +2336,52 @@ mod it {
         seed_optional(&pool, item, "Extra Hot", 0, None).await;
 
         let app = app!(&pool);
-        let (st, b) = send(&app, test::TestRequest::get().uri(&format!("/public/branches/{branch}/menu?channel=in_mall"))).await;
+        let (st, b) = send(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!("/public/branches/{branch}/menu?channel=in_mall")),
+        )
+        .await;
         assert_eq!(st, StatusCode::OK, "{b}");
 
         // Top-level global addon catalog (one per request, applies to every item).
         let addons = b["addons"].as_array().unwrap();
-        assert_eq!(addons.len(), 3, "channel-disabled cream must be excluded: {b}");
+        assert_eq!(
+            addons.len(),
+            3,
+            "channel-disabled cream must be excluded: {b}"
+        );
 
-        let oat_opt = addons.iter().find(|o| o["addon_item_id"] == oat.to_string()).unwrap();
-        assert_eq!(oat_opt["price"], 130, "channel-effective price, not default 100");
+        let oat_opt = addons
+            .iter()
+            .find(|o| o["addon_item_id"] == oat.to_string())
+            .unwrap();
+        assert_eq!(
+            oat_opt["price"], 130,
+            "channel-effective price, not default 100"
+        );
         assert_eq!(oat_opt["type"], "milk_type");
         assert_eq!(oat_opt["is_available"], true);
 
-        let reg_opt = addons.iter().find(|o| o["addon_item_id"] == regular.to_string()).unwrap();
+        let reg_opt = addons
+            .iter()
+            .find(|o| o["addon_item_id"] == regular.to_string())
+            .unwrap();
         assert_eq!(reg_opt["price"], 0);
         assert_eq!(reg_opt["type"], "milk_type");
 
-        let shot_opt = addons.iter().find(|o| o["addon_item_id"] == shot.to_string()).unwrap();
+        let shot_opt = addons
+            .iter()
+            .find(|o| o["addon_item_id"] == shot.to_string())
+            .unwrap();
         assert_eq!(shot_opt["price"], 150);
         assert_eq!(shot_opt["type"], "extra");
 
         // Channel-disabled cream is absent entirely.
         assert!(
-            addons.iter().all(|o| o["addon_item_id"] != cream.to_string()),
+            addons
+                .iter()
+                .all(|o| o["addon_item_id"] != cream.to_string()),
             "channel-disabled cream must not appear: {b}"
         );
 
@@ -1812,7 +2389,10 @@ mod it {
         let items = b["items"].as_array().unwrap();
         assert_eq!(items.len(), 1);
         let it = &items[0];
-        assert!(it.get("addon_slots").is_none(), "per-item addon_slots must be gone: {it}");
+        assert!(
+            it.get("addon_slots").is_none(),
+            "per-item addon_slots must be gone: {it}"
+        );
         let opts = it["optionals"].as_array().unwrap();
         assert_eq!(opts.len(), 1);
         assert_eq!(opts[0]["name"], "Extra Hot");
@@ -1832,19 +2412,29 @@ mod it {
         // Without preview: a closed channel still 409s (unchanged behavior).
         let (st, _b) = send(
             &app,
-            test::TestRequest::get().uri(&format!("/public/branches/{branch}/menu?channel=in_mall")),
+            test::TestRequest::get()
+                .uri(&format!("/public/branches/{branch}/menu?channel=in_mall")),
         )
         .await;
-        assert_eq!(st, StatusCode::CONFLICT, "closed channel must 409 without preview");
+        assert_eq!(
+            st,
+            StatusCode::CONFLICT,
+            "closed channel must 409 without preview"
+        );
 
         // With preview=true: read-only browse returns the menu though it's closed.
         let (st, b) = send(
             &app,
-            test::TestRequest::get()
-                .uri(&format!("/public/branches/{branch}/menu?channel=in_mall&preview=true")),
+            test::TestRequest::get().uri(&format!(
+                "/public/branches/{branch}/menu?channel=in_mall&preview=true"
+            )),
         )
         .await;
-        assert_eq!(st, StatusCode::OK, "preview must return the menu for a closed channel: {b}");
+        assert_eq!(
+            st,
+            StatusCode::OK,
+            "preview must return the menu for a closed channel: {b}"
+        );
         let items = b["items"].as_array().unwrap();
         assert_eq!(items.len(), 1, "preview menu should list the item: {b}");
         assert_eq!(items[0]["id"], item.to_string());
@@ -1853,11 +2443,16 @@ mod it {
         // 404s even with preview.
         let (st, _b) = send(
             &app,
-            test::TestRequest::get()
-                .uri(&format!("/public/branches/{branch}/menu?channel=outside&preview=true")),
+            test::TestRequest::get().uri(&format!(
+                "/public/branches/{branch}/menu?channel=outside&preview=true"
+            )),
         )
         .await;
-        assert_eq!(st, StatusCode::NOT_FOUND, "preview must not bypass the channel-enabled check");
+        assert_eq!(
+            st,
+            StatusCode::NOT_FOUND,
+            "preview must not bypass the channel-enabled check"
+        );
     }
 
     #[sqlx::test]
@@ -1873,7 +2468,8 @@ mod it {
         // → that addon is the item's base/default milk.
         let latte = seed_item(&pool, org, 600).await;
         let milk_ing = seed_milk_recipe(&pool, org, latte).await;
-        let regular_milk = seed_milk_addon_for_ingredient(&pool, org, milk_ing, "Regular Milk").await;
+        let regular_milk =
+            seed_milk_addon_for_ingredient(&pool, org, milk_ing, "Regular Milk").await;
         // A second, unrelated milk addon (different ingredient) must NOT be picked.
         let other_milk_ing = Uuid::new_v4();
         sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,'OatMilk','ml'::inventory_unit,90,'milk')")
@@ -1885,17 +2481,29 @@ mod it {
         seed_recipe(&pool, org, branch, cookie, 1.0, 100.0).await;
 
         let app = app!(&pool);
-        let (st, b) = send(&app, test::TestRequest::get().uri(&format!("/public/branches/{branch}/menu?channel=in_mall"))).await;
+        let (st, b) = send(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!("/public/branches/{branch}/menu?channel=in_mall")),
+        )
+        .await;
         assert_eq!(st, StatusCode::OK, "{b}");
 
         let items = b["items"].as_array().unwrap();
-        let latte_item = items.iter().find(|it| it["id"] == latte.to_string()).unwrap();
+        let latte_item = items
+            .iter()
+            .find(|it| it["id"] == latte.to_string())
+            .unwrap();
         assert_eq!(
-            latte_item["default_milk_addon_id"], regular_milk.to_string(),
+            latte_item["default_milk_addon_id"],
+            regular_milk.to_string(),
             "default milk must be the milk_type addon matching the recipe milk ingredient: {latte_item}"
         );
 
-        let cookie_item = items.iter().find(|it| it["id"] == cookie.to_string()).unwrap();
+        let cookie_item = items
+            .iter()
+            .find(|it| it["id"] == cookie.to_string())
+            .unwrap();
         assert!(
             cookie_item["default_milk_addon_id"].is_null(),
             "non-milk item must have no default milk: {cookie_item}"
@@ -1923,7 +2531,13 @@ mod it {
             "in_mall",
             json!([{ "menu_item_id": item, "quantity": 1, "addons": [{ "addon_item_id": addon, "quantity": 1 }] }]),
         );
-        let (st, b) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        let (st, b) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(st, StatusCode::CREATED, "{b}");
         // 500 (item) + 300 (channel addon override, NOT the 100 default) = 800
         assert_eq!(b["subtotal"], 800);
@@ -1931,7 +2545,13 @@ mod it {
         // Mark the addon unavailable for the channel → intake rejects.
         sqlx::query("UPDATE branch_channel_addon_overrides SET is_available = false WHERE branch_id=$1 AND addon_item_id=$2")
             .bind(branch).bind(addon).execute(&pool).await.unwrap();
-        let (st2, _) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
+        let (st2, _) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
         assert_eq!(st2, StatusCode::BAD_REQUEST);
     }
 
@@ -1948,7 +2568,11 @@ mod it {
         // upsert
         let (st, o) = send(
             &app,
-            auth(test::TestRequest::put().uri("/delivery/channel-addon-overrides"), &token).set_json(json!({
+            auth(
+                test::TestRequest::put().uri("/delivery/channel-addon-overrides"),
+                &token,
+            )
+            .set_json(json!({
                 "branch_id": branch, "addon_item_id": addon, "channel": "outside",
                 "price_override": 250, "is_available": true
             })),
@@ -1958,14 +2582,32 @@ mod it {
         assert_eq!(o["price_override"], 250);
 
         // list
-        let (lst, list) = send(&app, auth(test::TestRequest::get().uri(&format!("/delivery/channel-addon-overrides?branch_id={branch}&channel=outside")), &token)).await;
+        let (lst, list) = send(
+            &app,
+            auth(
+                test::TestRequest::get().uri(&format!(
+                    "/delivery/channel-addon-overrides?branch_id={branch}&channel=outside"
+                )),
+                &token,
+            ),
+        )
+        .await;
         assert_eq!(lst, StatusCode::OK);
         assert_eq!(list.as_array().unwrap().len(), 1);
 
         // delete
         let (del, _) = send(&app, auth(test::TestRequest::delete().uri(&format!("/delivery/channel-addon-overrides?branch_id={branch}&addon_item_id={addon}&channel=outside")), &token)).await;
         assert_eq!(del, StatusCode::NO_CONTENT);
-        let (_, list2) = send(&app, auth(test::TestRequest::get().uri(&format!("/delivery/channel-addon-overrides?branch_id={branch}&channel=outside")), &token)).await;
+        let (_, list2) = send(
+            &app,
+            auth(
+                test::TestRequest::get().uri(&format!(
+                    "/delivery/channel-addon-overrides?branch_id={branch}&channel=outside"
+                )),
+                &token,
+            ),
+        )
+        .await;
         assert_eq!(list2.as_array().unwrap().len(), 0);
     }
 
@@ -1985,11 +2627,27 @@ mod it {
         let app = app!(&pool);
 
         // not a multiple of 5 → bad request
-        let (bad, _) = send(&app, auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/prep-time")), &token).set_json(json!({"extra_prep_minutes": 7}))).await;
+        let (bad, _) = send(
+            &app,
+            auth(
+                test::TestRequest::post().uri(&format!("/delivery-orders/{id}/prep-time")),
+                &token,
+            )
+            .set_json(json!({"extra_prep_minutes": 7})),
+        )
+        .await;
         assert_eq!(bad, StatusCode::BAD_REQUEST);
 
         // +15 ok
-        let (ok, b) = send(&app, auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/prep-time")), &token).set_json(json!({"extra_prep_minutes": 15}))).await;
+        let (ok, b) = send(
+            &app,
+            auth(
+                test::TestRequest::post().uri(&format!("/delivery-orders/{id}/prep-time")),
+                &token,
+            )
+            .set_json(json!({"extra_prep_minutes": 15})),
+        )
+        .await;
         assert_eq!(ok, StatusCode::OK, "{b}");
         assert_eq!(b["extra_prep_minutes"], 15);
     }
@@ -2015,8 +2673,9 @@ mod it {
         // Customer ~1.1 km north of the branch.
         let (st, b) = send(
             &app,
-            test::TestRequest::get()
-                .uri(&format!("/public/branches/{branch}/delivery-quote?lat=30.01&lng=31.0&channel=outside")),
+            test::TestRequest::get().uri(&format!(
+                "/public/branches/{branch}/delivery-quote?lat=30.01&lng=31.0&channel=outside"
+            )),
         )
         .await;
         assert_eq!(st, StatusCode::OK, "{b}");
@@ -2054,7 +2713,8 @@ mod it {
         let resp = test::call_service(
             &app,
             auth(
-                test::TestRequest::get().uri(&format!("/delivery-orders/stream?branch_id={branch}")),
+                test::TestRequest::get()
+                    .uri(&format!("/delivery-orders/stream?branch_id={branch}")),
                 &token,
             )
             .to_request(),
@@ -2077,14 +2737,18 @@ mod it {
         let resp = test::call_service(
             &app,
             auth(
-                test::TestRequest::get().uri(&format!("/delivery-orders/stream?branch_id={branch}")),
+                test::TestRequest::get()
+                    .uri(&format!("/delivery-orders/stream?branch_id={branch}")),
                 &token,
             )
             .to_request(),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(resp.headers().get("content-type").unwrap(), "text/event-stream");
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "text/event-stream"
+        );
         // Must opt out of compression so the Compress middleware can't buffer
         // SSE frames (it skips any response that already has Content-Encoding).
         assert_eq!(resp.headers().get("content-encoding").unwrap(), "identity");
@@ -2123,11 +2787,23 @@ mod it {
 
         // Teller and org-admin are rejected on EVERY relay route.
         for tok in [teller_token(teller, org, branch), admin_token(admin, org)] {
-            let (st, _) = send(&app, auth(test::TestRequest::get().uri("/whatsapp/status"), &tok)).await;
+            let (st, _) = send(
+                &app,
+                auth(test::TestRequest::get().uri("/whatsapp/status"), &tok),
+            )
+            .await;
             assert_eq!(st, StatusCode::FORBIDDEN);
-            let (st, _) = send(&app, auth(test::TestRequest::post().uri("/whatsapp/pair"), &tok)).await;
+            let (st, _) = send(
+                &app,
+                auth(test::TestRequest::post().uri("/whatsapp/pair"), &tok),
+            )
+            .await;
             assert_eq!(st, StatusCode::FORBIDDEN);
-            let (st, _) = send(&app, auth(test::TestRequest::post().uri("/whatsapp/logout"), &tok)).await;
+            let (st, _) = send(
+                &app,
+                auth(test::TestRequest::post().uri("/whatsapp/logout"), &tok),
+            )
+            .await;
             assert_eq!(st, StatusCode::FORBIDDEN);
             let (st, _) = send(
                 &app,
@@ -2140,8 +2816,14 @@ mod it {
 
         // Super-admin reaches status (gateway unconfigured in tests → safe,
         // no network call; just reports reachable=false).
-        let (st, body) =
-            send(&app, auth(test::TestRequest::get().uri("/whatsapp/status"), &super_admin_token(sa))).await;
+        let (st, body) = send(
+            &app,
+            auth(
+                test::TestRequest::get().uri("/whatsapp/status"),
+                &super_admin_token(sa),
+            ),
+        )
+        .await;
         assert_eq!(st, StatusCode::OK, "{body}");
         assert_eq!(body["paused"], false);
     }
@@ -2283,7 +2965,10 @@ mod it {
         assert_eq!(st, StatusCode::OK, "{body}");
         let list = body.as_array().expect("array");
         assert_eq!(list.len(), 1, "customer should see their own order");
-        assert_eq!(list[0]["branch_id"], branch.to_string().as_str().to_string());
+        assert_eq!(
+            list[0]["branch_id"],
+            branch.to_string().as_str().to_string()
+        );
         assert_eq!(list[0]["channel"], "in_mall");
     }
 
@@ -2378,11 +3063,25 @@ mod it {
         seed_recipe(&pool, org, branch, item, 10.0, 1000.0).await;
 
         let app = app!(&pool);
-        let mut body = intake_body(branch, "outside", json!([{ "menu_item_id": item, "quantity": 1 }]));
+        let mut body = intake_body(
+            branch,
+            "outside",
+            json!([{ "menu_item_id": item, "quantity": 1 }]),
+        );
         body["customer_lat"] = json!(null);
         body["customer_lng"] = json!(null);
-        let (st, b) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
-        assert_eq!(st, StatusCode::BAD_REQUEST, "outside without coords must be 400: {b}");
+        let (st, b) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::BAD_REQUEST,
+            "outside without coords must be 400: {b}"
+        );
     }
 
     /// Outside delivery with a zone covering the customer's location applies the
@@ -2393,7 +3092,7 @@ mod it {
         unsafe { std::env::remove_var("OSRM_URL") };
 
         let org = seed_org(&pool).await;
-        let branch = seed_branch(&pool, org).await;   // at (30.0, 31.0)
+        let branch = seed_branch(&pool, org).await; // at (30.0, 31.0)
         let teller = seed_user(&pool, org, "teller").await;
         seed_settings(&pool, branch, false, true, 0).await;
         seed_shift(&pool, branch, teller).await;
@@ -2418,11 +3117,25 @@ mod it {
         assert_eq!(st, StatusCode::CREATED, "zone seed failed");
 
         // Customer is ~160m from the branch — well within the 50 km zone.
-        let mut body = intake_body(branch, "outside", json!([{ "menu_item_id": item, "quantity": 1 }]));
+        let mut body = intake_body(
+            branch,
+            "outside",
+            json!([{ "menu_item_id": item, "quantity": 1 }]),
+        );
         body["customer_lat"] = json!(30.001);
         body["customer_lng"] = json!(31.001);
-        let (st, b) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
-        assert_eq!(st, StatusCode::CREATED, "outside order should be accepted: {b}");
+        let (st, b) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::CREATED,
+            "outside order should be accepted: {b}"
+        );
         assert_eq!(b["delivery_fee"], 750, "zone fee must be applied");
         assert_eq!(b["subtotal"], 500);
         assert_eq!(b["total"], 1250);
@@ -2434,7 +3147,7 @@ mod it {
         unsafe { std::env::remove_var("OSRM_URL") };
 
         let org = seed_org(&pool).await;
-        let branch = seed_branch(&pool, org).await;   // at (30.0, 31.0)
+        let branch = seed_branch(&pool, org).await; // at (30.0, 31.0)
         let teller = seed_user(&pool, org, "teller").await;
         seed_settings(&pool, branch, false, true, 0).await;
         seed_shift(&pool, branch, teller).await;
@@ -2459,10 +3172,24 @@ mod it {
         assert_eq!(st, StatusCode::CREATED);
 
         // Cairo to Alexandria is ~110 km — way outside the 1 km zone.
-        let mut body = intake_body(branch, "outside", json!([{ "menu_item_id": item, "quantity": 1 }]));
+        let mut body = intake_body(
+            branch,
+            "outside",
+            json!([{ "menu_item_id": item, "quantity": 1 }]),
+        );
         body["customer_lat"] = json!(31.2);
         body["customer_lng"] = json!(29.9);
-        let (st, b) = send(&app, test::TestRequest::post().uri("/public/delivery-orders").set_json(&body)).await;
-        assert_eq!(st, StatusCode::BAD_REQUEST, "out-of-range address must be 400: {b}");
+        let (st, b) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::BAD_REQUEST,
+            "out-of-range address must be 400: {b}"
+        );
     }
 }

@@ -87,9 +87,7 @@ impl ShortLinkProvider for ShlinkClient {
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()
-                .map_err(|_| {
-                    AppError::ServiceUnavailable("could not build HTTP client".into())
-                })?;
+                .map_err(|_| AppError::ServiceUnavailable("could not build HTTP client".into()))?;
 
             let resp = client
                 .post(&url)

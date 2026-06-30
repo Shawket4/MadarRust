@@ -18,7 +18,7 @@
 //! dashboard renders it with a plain `<img>` and never has a route to the
 //! gateway itself.
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -52,7 +52,9 @@ fn session_name() -> String {
 /// gateway only enforces it on `/send/message`, but we send it everywhere for
 /// consistency and future-proofing.
 fn auth_header() -> Option<String> {
-    std::env::var("WHATSAPP_AUTH_HEADER").ok().filter(|s| !s.is_empty())
+    std::env::var("WHATSAPP_AUTH_HEADER")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 // ── wire shapes ───────────────────────────────────────────────
@@ -117,7 +119,10 @@ async fn read_pause(pool: &PgPool) -> PauseState {
     .await
     {
         Ok(Some((paused, paused_at))) => PauseState { paused, paused_at },
-        _ => PauseState { paused: false, paused_at: None },
+        _ => PauseState {
+            paused: false,
+            paused_at: None,
+        },
     }
 }
 
@@ -138,7 +143,11 @@ async fn fetch_gateway_status(base: &str, session: &str) -> Result<GatewayStatus
     if let Some(h) = auth_header() {
         req = req.header("Authorization", h);
     }
-    req.send().await?.error_for_status()?.json::<GatewayStatus>().await
+    req.send()
+        .await?
+        .error_for_status()?
+        .json::<GatewayStatus>()
+        .await
 }
 
 /// Fetch the current QR PNG and inline it as a data-URL. Returns `None` if the
@@ -217,7 +226,9 @@ async fn build_status(pool: &PgPool) -> WhatsappStatus {
 /// Require a configured gateway, returning the base URL or a 503.
 fn require_gateway() -> Result<String, AppError> {
     gateway_base().ok_or_else(|| {
-        AppError::ServiceUnavailable("WhatsApp gateway is not configured (WHATSAPP_SERVICE_URL unset)".into())
+        AppError::ServiceUnavailable(
+            "WhatsApp gateway is not configured (WHATSAPP_SERVICE_URL unset)".into(),
+        )
     })
 }
 
@@ -262,7 +273,8 @@ pub async fn pair(req: HttpRequest, pool: web::Data<PgPool>) -> Result<HttpRespo
     match r.send().await {
         // 200 = pairing started; 409 = already linked. Both are fine — the
         // follow-up status poll reflects the real state either way.
-        Ok(resp) if resp.status().is_success() || resp.status() == reqwest::StatusCode::CONFLICT => {}
+        Ok(resp)
+            if resp.status().is_success() || resp.status() == reqwest::StatusCode::CONFLICT => {}
         Ok(resp) => {
             let code = resp.status();
             tracing::warn!(status = %code, "WhatsApp pair returned non-2xx");
@@ -272,7 +284,9 @@ pub async fn pair(req: HttpRequest, pool: web::Data<PgPool>) -> Result<HttpRespo
         }
         Err(e) => {
             tracing::warn!(error = %e, "WhatsApp pair request failed");
-            return Err(AppError::ServiceUnavailable("WhatsApp gateway is unreachable".into()));
+            return Err(AppError::ServiceUnavailable(
+                "WhatsApp gateway is unreachable".into(),
+            ));
         }
     }
 
@@ -303,7 +317,8 @@ pub async fn logout(req: HttpRequest, pool: web::Data<PgPool>) -> Result<HttpRes
     }
     match r.send().await {
         // 200 = logged out; 400 = unknown session (already gone). Both fine.
-        Ok(resp) if resp.status().is_success() || resp.status() == reqwest::StatusCode::BAD_REQUEST => {}
+        Ok(resp)
+            if resp.status().is_success() || resp.status() == reqwest::StatusCode::BAD_REQUEST => {}
         Ok(resp) => {
             let code = resp.status();
             tracing::warn!(status = %code, "WhatsApp logout returned non-2xx");
@@ -313,7 +328,9 @@ pub async fn logout(req: HttpRequest, pool: web::Data<PgPool>) -> Result<HttpRes
         }
         Err(e) => {
             tracing::warn!(error = %e, "WhatsApp logout request failed");
-            return Err(AppError::ServiceUnavailable("WhatsApp gateway is unreachable".into()));
+            return Err(AppError::ServiceUnavailable(
+                "WhatsApp gateway is unreachable".into(),
+            ));
         }
     }
 

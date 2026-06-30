@@ -1,6 +1,6 @@
 //! Cost endpoints — dashboard-facing views of the cost engine.
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 use serde::Deserialize;
 use sqlx::PgPool;
 use utoipa::IntoParams;

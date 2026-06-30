@@ -9,9 +9,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::menu_advisor::dto::{Classification, CmQuadrant, ItemKey, RevenueClass};
 use super::kpi::ItemKpi;
 use super::stats::{ratio_or, wilson_95_ci};
+use crate::menu_advisor::dto::{Classification, CmQuadrant, ItemKey, RevenueClass};
 
 /// Hold the previous quadrant side when within this relative distance of a
 /// threshold — stops classification flapping between runs on noise.
@@ -59,15 +59,13 @@ pub(crate) fn classify_items(
             )),
             _ => None,
         },
-        |high_pop, high_prof| {
-            Classification::Cm {
-                quadrant: match (high_pop, high_prof) {
-                    (true, true) => CmQuadrant::Star,
-                    (true, false) => CmQuadrant::Plowhorse,
-                    (false, true) => CmQuadrant::Puzzle,
-                    (false, false) => CmQuadrant::Dog,
-                },
-            }
+        |high_pop, high_prof| Classification::Cm {
+            quadrant: match (high_pop, high_prof) {
+                (true, true) => CmQuadrant::Star,
+                (true, false) => CmQuadrant::Plowhorse,
+                (false, true) => CmQuadrant::Puzzle,
+                (false, false) => CmQuadrant::Dog,
+            },
         },
         previous,
         &mut map,
@@ -85,15 +83,13 @@ pub(crate) fn classify_items(
             )),
             _ => None,
         },
-        |high_pop, high_price| {
-            Classification::Revenue {
-                class: match (high_pop, high_price) {
-                    (true, true) => RevenueClass::Hero,
-                    (true, false) => RevenueClass::Steady,
-                    (false, true) => RevenueClass::Slow,
-                    (false, false) => RevenueClass::Quiet,
-                },
-            }
+        |high_pop, high_price| Classification::Revenue {
+            class: match (high_pop, high_price) {
+                (true, true) => RevenueClass::Hero,
+                (true, false) => RevenueClass::Steady,
+                (false, true) => RevenueClass::Slow,
+                (false, false) => RevenueClass::Quiet,
+            },
         },
         previous,
         &mut map,
@@ -107,7 +103,11 @@ pub(crate) fn classify_items(
         }
     }
 
-    ClassificationOutcome { map, borderline, small_population }
+    ClassificationOutcome {
+        map,
+        borderline,
+        small_population,
+    }
 }
 
 /// Shared 2×2 classification over one population.
@@ -155,8 +155,7 @@ fn classify_population(
             && let Some((prev_pop, prev_prof)) = prev_sides(prev)
         {
             let pop_dist = (share - pop_threshold).abs() / pop_threshold.max(1e-9);
-            let prof_dist =
-                (profit - profit_threshold).abs() / profit_threshold.abs().max(1e-9);
+            let prof_dist = (profit - profit_threshold).abs() / profit_threshold.abs().max(1e-9);
             if pop_dist < HYSTERESIS_BAND {
                 high_pop = prev_pop;
             }
@@ -172,9 +171,8 @@ fn classify_population(
         let raw_share = ratio_or(kpi.raw_units_sold, total_raw_units, 0.0);
         let ci = wilson_95_ci(raw_share, total_raw_units);
         let pop_unsettled = ci.lo < pop_threshold && pop_threshold < ci.hi;
-        let prof_unsettled = (profit - profit_threshold).abs()
-            / profit_threshold.abs().max(1e-9)
-            < BORDERLINE_BAND;
+        let prof_unsettled =
+            (profit - profit_threshold).abs() / profit_threshold.abs().max(1e-9) < BORDERLINE_BAND;
         if pop_unsettled || prof_unsettled {
             borderline.insert(kpi.key.clone());
         }
@@ -185,14 +183,19 @@ fn classify_population(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
 mod tests {
     use chrono::{TimeZone, Utc};
 
-    use crate::menu_advisor::dto::AnalysisConfig;
     use super::super::kpi::compute_item_kpis;
     use super::super::{ItemSnapshot, SaleEvent};
     use super::*;
+    use crate::menu_advisor::dto::AnalysisConfig;
 
     fn key(id: u8) -> ItemKey {
         ItemKey {
@@ -255,19 +258,27 @@ mod tests {
         let out = classify(&snaps, &sales, None);
         assert_eq!(
             out.map[&key(1)],
-            Classification::Cm { quadrant: CmQuadrant::Star }
+            Classification::Cm {
+                quadrant: CmQuadrant::Star
+            }
         );
         assert_eq!(
             out.map[&key(2)],
-            Classification::Cm { quadrant: CmQuadrant::Dog }
+            Classification::Cm {
+                quadrant: CmQuadrant::Dog
+            }
         );
         assert_eq!(
             out.map[&key(3)],
-            Classification::Revenue { class: RevenueClass::Hero }
+            Classification::Revenue {
+                class: RevenueClass::Hero
+            }
         );
         assert_eq!(
             out.map[&key(4)],
-            Classification::Revenue { class: RevenueClass::Quiet }
+            Classification::Revenue {
+                class: RevenueClass::Quiet
+            }
         );
     }
 
@@ -278,11 +289,15 @@ mod tests {
         let out = classify(&snaps, &sales, None);
         assert_eq!(
             out.map[&key(1)],
-            Classification::Revenue { class: RevenueClass::Hero }
+            Classification::Revenue {
+                class: RevenueClass::Hero
+            }
         );
         assert_eq!(
             out.map[&key(2)],
-            Classification::Revenue { class: RevenueClass::Quiet }
+            Classification::Revenue {
+                class: RevenueClass::Quiet
+            }
         );
     }
 
@@ -313,15 +328,24 @@ mod tests {
         let fresh = classify(&snaps, &sales, None);
         assert_eq!(
             fresh.map[&key(1)],
-            Classification::Cm { quadrant: CmQuadrant::Star }
+            Classification::Cm {
+                quadrant: CmQuadrant::Star
+            }
         );
         // With previous = Puzzle (unpopular side held): within 5% band → hold.
         let mut prev = HashMap::new();
-        prev.insert(key(1), Classification::Cm { quadrant: CmQuadrant::Puzzle });
+        prev.insert(
+            key(1),
+            Classification::Cm {
+                quadrant: CmQuadrant::Puzzle,
+            },
+        );
         let held = classify(&snaps, &sales, Some(&prev));
         assert_eq!(
             held.map[&key(1)],
-            Classification::Cm { quadrant: CmQuadrant::Puzzle }
+            Classification::Cm {
+                quadrant: CmQuadrant::Puzzle
+            }
         );
     }
 
@@ -339,11 +363,18 @@ mod tests {
             sale(3, 200, 1000, Some(500)),
         ];
         let mut prev = HashMap::new();
-        prev.insert(key(1), Classification::Cm { quadrant: CmQuadrant::Puzzle });
+        prev.insert(
+            key(1),
+            Classification::Cm {
+                quadrant: CmQuadrant::Puzzle,
+            },
+        );
         let out = classify(&snaps, &sales, Some(&prev));
         assert_eq!(
             out.map[&key(1)],
-            Classification::Cm { quadrant: CmQuadrant::Star }
+            Classification::Cm {
+                quadrant: CmQuadrant::Star
+            }
         );
     }
 
@@ -354,7 +385,9 @@ mod tests {
         let out = classify(&snaps, &sales, None);
         assert_eq!(
             out.map[&key(1)],
-            Classification::Cm { quadrant: CmQuadrant::Star }
+            Classification::Cm {
+                quadrant: CmQuadrant::Star
+            }
         );
         assert!(out.small_population.contains(&key(1)));
     }

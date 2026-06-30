@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -29,8 +29,7 @@ use super::{
         PriceSuggestionRecord, PromoteBundleBody, RecordDecisionBody, RemovalScenarioFilter,
         RemovalScenarioRecord,
     },
-    engine,
-    persistence,
+    engine, persistence,
 };
 
 /// Runs in_progress longer than this are presumed dead (panicked task or
@@ -58,22 +57,22 @@ async fn require_branch_access(
     claims: &Claims,
     branch_id: Uuid,
 ) -> Result<Uuid, AppError> {
-    let branch_org: Option<Uuid> = sqlx::query_scalar(
-        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(branch_id)
-    .fetch_optional(pool)
-    .await?
-    .flatten();
+    let branch_org: Option<Uuid> =
+        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
+            .bind(branch_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
 
-    let branch_org =
-        branch_org.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    let branch_org = branch_org.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
 
     if claims.role == UserRole::SuperAdmin {
         return Ok(branch_org);
     }
     if claims.org_id() != Some(branch_org) {
-        return Err(AppError::Forbidden("Branch belongs to a different org".into()));
+        return Err(AppError::Forbidden(
+            "Branch belongs to a different org".into(),
+        ));
     }
     if claims.role == UserRole::OrgAdmin {
         return Ok(branch_org);
@@ -662,14 +661,15 @@ pub async fn set_bundle_promoted_handler(
         get_bundle_suggestion_checked(pool.get_ref(), &claims, suggestion_id).await?;
 
     // The linked bundle must exist in the same org as the suggestion.
-    let bundle_org: Option<Uuid> =
-        sqlx::query_scalar("SELECT org_id FROM bundles WHERE id = $1")
-            .bind(body.bundle_id)
-            .fetch_optional(pool.get_ref())
-            .await?;
+    let bundle_org: Option<Uuid> = sqlx::query_scalar("SELECT org_id FROM bundles WHERE id = $1")
+        .bind(body.bundle_id)
+        .fetch_optional(pool.get_ref())
+        .await?;
     let bundle_org = bundle_org.ok_or_else(|| AppError::NotFound("Bundle not found".into()))?;
     if bundle_org != suggestion_org {
-        return Err(AppError::Forbidden("Bundle belongs to a different org".into()));
+        return Err(AppError::Forbidden(
+            "Bundle belongs to a different org".into(),
+        ));
     }
 
     persistence::set_bundle_promoted(pool.get_ref(), suggestion_id, body.bundle_id).await?;

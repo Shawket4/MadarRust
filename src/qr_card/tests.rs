@@ -10,8 +10,8 @@ mod render {
     use image::GenericImageView;
 
     use crate::qr_card::{
-        render, render_qr_card_png, render_qr_card_svg, render_qr_receipt_png, QrCardOptions,
-        PAPER, TEAL, TEAL_LIGHT,
+        PAPER, QrCardOptions, TEAL, TEAL_LIGHT, render, render_qr_card_png, render_qr_card_svg,
+        render_qr_receipt_png,
     };
 
     const SHORT: &str = "https://sfx.link/Ab3xK";
@@ -33,17 +33,15 @@ mod render {
     }
 
     fn dims(png: &[u8]) -> (u32, u32) {
-        image::load_from_memory(png).expect("valid png").dimensions()
+        image::load_from_memory(png)
+            .expect("valid png")
+            .dimensions()
     }
 
     #[test]
     fn card_scans_at_300_and_600_dpi() {
         for dpi in [300u32, 600] {
-            let png = render_qr_card_png(&QrCardOptions {
-                dpi,
-                ..opts(SHORT)
-            })
-            .expect("render");
+            let png = render_qr_card_png(&QrCardOptions { dpi, ..opts(SHORT) }).expect("render");
             assert_eq!(decode_png(&png), SHORT, "dpi {dpi}");
         }
     }
@@ -90,10 +88,7 @@ mod render {
             ..opts(SHORT)
         })
         .expect("render");
-        assert_eq!(
-            dims(&png),
-            (render::px(111.0, 600), render::px(154.0, 600))
-        );
+        assert_eq!(dims(&png), (render::px(111.0, 600), render::px(154.0, 600)));
         assert_eq!(decode_png(&png), SHORT);
     }
 
@@ -186,7 +181,7 @@ mod render {
 mod http {
     use std::sync::Arc;
 
-    use actix_web::{test, web, App};
+    use actix_web::{App, test, web};
     use sqlx::PgPool;
     use uuid::Uuid;
 
@@ -194,8 +189,8 @@ mod http {
     use crate::models::UserRole;
     use crate::qr_card::db::BranchTable;
     use crate::qr_card::handlers::QrResponse;
-    use crate::qr_card::shlink::fake::FakeShortLinkProvider;
     use crate::qr_card::shlink::ShortLinkProvider;
+    use crate::qr_card::shlink::fake::FakeShortLinkProvider;
 
     fn get_secret() -> JwtSecret {
         JwtSecret("secret".to_string())
@@ -250,7 +245,10 @@ mod http {
         .unwrap();
     }
 
-    fn make_app(pool: PgPool, fake: Arc<dyn ShortLinkProvider>) -> actix_web::App<
+    fn make_app(
+        pool: PgPool,
+        fake: Arc<dyn ShortLinkProvider>,
+    ) -> actix_web::App<
         impl actix_web::dev::ServiceFactory<
             actix_web::dev::ServiceRequest,
             Config = (),
@@ -400,10 +398,8 @@ mod http {
                 .to_request()
         };
 
-        let r1: QrResponse =
-            test::read_body_json(test::call_service(&app, call()).await).await;
-        let r2: QrResponse =
-            test::read_body_json(test::call_service(&app, call()).await).await;
+        let r1: QrResponse = test::read_body_json(test::call_service(&app, call()).await).await;
+        let r2: QrResponse = test::read_body_json(test::call_service(&app, call()).await).await;
         assert_eq!(
             r1.short_code, r2.short_code,
             "dedup must return same short_code"
@@ -506,7 +502,10 @@ mod http {
         let qr: QrResponse = test::read_body_json(resp).await;
         assert_eq!(qr.kind, "org_order");
         // org_id must be in the path segment, not a query param
-        assert!(qr.long_url.contains(&format!("/order/{}", org_id)), "long_url must use /order/<org_id> path");
+        assert!(
+            qr.long_url.contains(&format!("/order/{}", org_id)),
+            "long_url must use /order/<org_id> path"
+        );
         assert!(!qr.short_url.is_empty());
         assert!(qr.qr_data_url.starts_with("data:image/"));
     }
@@ -527,11 +526,12 @@ mod http {
                 .insert_header(("Authorization", format!("Bearer {tok}")))
                 .to_request()
         };
-        let r1: QrResponse =
-            test::read_body_json(test::call_service(&app, call()).await).await;
-        let r2: QrResponse =
-            test::read_body_json(test::call_service(&app, call()).await).await;
-        assert_eq!(r1.short_code, r2.short_code, "org QR must be deduplicated across calls");
+        let r1: QrResponse = test::read_body_json(test::call_service(&app, call()).await).await;
+        let r2: QrResponse = test::read_body_json(test::call_service(&app, call()).await).await;
+        assert_eq!(
+            r1.short_code, r2.short_code,
+            "org QR must be deduplicated across calls"
+        );
     }
 
     #[sqlx::test]
@@ -618,8 +618,10 @@ mod http {
         .await;
         assert_eq!(resp.status(), 200);
         let qr: QrResponse = test::read_body_json(resp).await;
-        assert_eq!(qr.kind, "branch_order_in_mall",
-            "all three in-mall params must produce branch_order_in_mall kind");
+        assert_eq!(
+            qr.kind, "branch_order_in_mall",
+            "all three in-mall params must produce branch_order_in_mall kind"
+        );
     }
 
     #[sqlx::test]
@@ -647,11 +649,18 @@ mod http {
         let qr: QrResponse = test::read_body_json(resp).await;
         assert!(
             qr.long_url.contains("channel=in_mall"),
-            "long_url must lock channel to in_mall; got: {}", qr.long_url
+            "long_url must lock channel to in_mall; got: {}",
+            qr.long_url
         );
-        assert!(qr.long_url.contains("place_name="), "long_url must carry place_name");
+        assert!(
+            qr.long_url.contains("place_name="),
+            "long_url must carry place_name"
+        );
         assert!(qr.long_url.contains("floor="), "long_url must carry floor");
-        assert!(qr.long_url.contains("unit_number="), "long_url must carry unit_number");
+        assert!(
+            qr.long_url.contains("unit_number="),
+            "long_url must carry unit_number"
+        );
         assert!(
             qr.long_url.contains(&branch_id.to_string()),
             "long_url must include branch_id"
@@ -679,15 +688,19 @@ mod http {
             &app,
             test::TestRequest::get()
                 // only place_name, no floor or unit_number
-                .uri(&format!("/branches/{branch_id}/qr?card=false&place_name=Shop+5"))
+                .uri(&format!(
+                    "/branches/{branch_id}/qr?card=false&place_name=Shop+5"
+                ))
                 .insert_header(("Authorization", format!("Bearer {tok}")))
                 .to_request(),
         )
         .await;
         assert_eq!(resp.status(), 200);
         let qr: QrResponse = test::read_body_json(resp).await;
-        assert_eq!(qr.kind, "branch_order",
-            "incomplete in-mall params must fall back to standard branch_order kind");
+        assert_eq!(
+            qr.kind, "branch_order",
+            "incomplete in-mall params must fall back to standard branch_order kind"
+        );
         assert!(
             !qr.long_url.contains("channel=in_mall"),
             "standard URL must not contain channel=in_mall"
@@ -761,10 +774,8 @@ mod http {
                 .insert_header(("Authorization", format!("Bearer {tok}")))
                 .to_request()
         };
-        let r1: QrResponse =
-            test::read_body_json(test::call_service(&app, call()).await).await;
-        let r2: QrResponse =
-            test::read_body_json(test::call_service(&app, call()).await).await;
+        let r1: QrResponse = test::read_body_json(test::call_service(&app, call()).await).await;
+        let r2: QrResponse = test::read_body_json(test::call_service(&app, call()).await).await;
         assert_eq!(
             r1.short_code, r2.short_code,
             "same in-mall location must return the same short code"

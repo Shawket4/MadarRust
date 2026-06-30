@@ -83,8 +83,7 @@ pub async fn create_run(
     branch_id: Uuid,
     config: &AnalysisConfig,
 ) -> Result<Uuid, AppError> {
-    let config_json =
-        serde_json::to_value(config).map_err(|_| AppError::Internal)?;
+    let config_json = serde_json::to_value(config).map_err(|_| AppError::Internal)?;
     sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO menu_advisor_runs (branch_id, org_id, status, config, window_days)
@@ -247,7 +246,10 @@ pub async fn get_latest_run(
              ORDER BY completed_at DESC NULLS LAST LIMIT 1"
         )
     };
-    let row: Option<RunRow> = sqlx::query_as(&sql).bind(branch_id).fetch_optional(pool).await?;
+    let row: Option<RunRow> = sqlx::query_as(&sql)
+        .bind(branch_id)
+        .fetch_optional(pool)
+        .await?;
     Ok(row.map(row_to_run))
 }
 
@@ -287,8 +289,12 @@ struct SuggestionRow {
 
 impl SuggestionRow {
     fn decision_record(&self, kind: SuggestionKind) -> Result<Option<DecisionRecord>, AppError> {
-        match (self.decision_id, &self.decision, self.decision_decided_by, self.decision_decided_at)
-        {
+        match (
+            self.decision_id,
+            &self.decision,
+            self.decision_decided_by,
+            self.decision_decided_at,
+        ) {
             (Some(id), Some(decision), Some(decided_by), Some(decided_at)) => {
                 let decision = Decision::parse(decision).ok_or_else(|| {
                     tracing::error!(decision_id = %id, "Invalid decision value in DB");
@@ -412,7 +418,9 @@ pub async fn list_price_suggestions(
         .bind(&filter.search)
         .fetch_all(pool)
         .await?;
-    rows.into_iter().map(SuggestionRow::into_price_record).collect()
+    rows.into_iter()
+        .map(SuggestionRow::into_price_record)
+        .collect()
 }
 
 pub async fn get_price_suggestion(
@@ -463,7 +471,11 @@ pub async fn list_bundle_suggestions(
            AND ($3::uuid IS NULL OR s.focus_menu_item_id = $3) \
            AND {} \
          ORDER BY s.bundle_cm DESC NULLS LAST, s.bundle_discount_pct",
-        suggestion_select("menu_advisor_bundle_suggestions", "bundle", "s.promoted_bundle_id"),
+        suggestion_select(
+            "menu_advisor_bundle_suggestions",
+            "bundle",
+            "s.promoted_bundle_id"
+        ),
         decision_status_clause(4),
     );
     let rows: Vec<SuggestionRow> = sqlx::query_as(&sql)
@@ -473,7 +485,9 @@ pub async fn list_bundle_suggestions(
         .bind(&filter.decision_status)
         .fetch_all(pool)
         .await?;
-    rows.into_iter().map(SuggestionRow::into_bundle_record).collect()
+    rows.into_iter()
+        .map(SuggestionRow::into_bundle_record)
+        .collect()
 }
 
 pub async fn get_bundle_suggestion(
@@ -482,7 +496,11 @@ pub async fn get_bundle_suggestion(
 ) -> Result<Option<BundleSuggestionRecord>, AppError> {
     let sql = format!(
         "{} WHERE s.id = $1",
-        suggestion_select("menu_advisor_bundle_suggestions", "bundle", "s.promoted_bundle_id")
+        suggestion_select(
+            "menu_advisor_bundle_suggestions",
+            "bundle",
+            "s.promoted_bundle_id"
+        )
     );
     let row: Option<SuggestionRow> = sqlx::query_as(&sql).bind(id).fetch_optional(pool).await?;
     row.map(SuggestionRow::into_bundle_record).transpose()
@@ -527,7 +545,9 @@ pub async fn list_removal_scenarios(
         .bind(&filter.decision_status)
         .fetch_all(pool)
         .await?;
-    rows.into_iter().map(SuggestionRow::into_removal_record).collect()
+    rows.into_iter()
+        .map(SuggestionRow::into_removal_record)
+        .collect()
 }
 
 pub async fn get_removal_scenario(
@@ -636,8 +656,8 @@ pub async fn list_decisions(
         .map(|r| {
             // CHECK constraints make invalid values impossible; fail loudly
             // rather than guessing if one ever appears.
-            let suggestion_kind = SuggestionKind::parse(&r.suggestion_kind)
-                .ok_or(AppError::Internal)?;
+            let suggestion_kind =
+                SuggestionKind::parse(&r.suggestion_kind).ok_or(AppError::Internal)?;
             let decision = Decision::parse(&r.decision).ok_or(AppError::Internal)?;
             Ok(DecisionRecord {
                 id: r.id,
@@ -694,23 +714,42 @@ pub async fn load_latest_classifications(
     for r in rows {
         let classification = match r.classification_mode.as_str() {
             "cm" => match r.cm_quadrant.as_deref() {
-                Some("star") => Classification::Cm { quadrant: CmQuadrant::Star },
-                Some("plowhorse") => Classification::Cm { quadrant: CmQuadrant::Plowhorse },
-                Some("puzzle") => Classification::Cm { quadrant: CmQuadrant::Puzzle },
-                Some("dog") => Classification::Cm { quadrant: CmQuadrant::Dog },
+                Some("star") => Classification::Cm {
+                    quadrant: CmQuadrant::Star,
+                },
+                Some("plowhorse") => Classification::Cm {
+                    quadrant: CmQuadrant::Plowhorse,
+                },
+                Some("puzzle") => Classification::Cm {
+                    quadrant: CmQuadrant::Puzzle,
+                },
+                Some("dog") => Classification::Cm {
+                    quadrant: CmQuadrant::Dog,
+                },
                 _ => continue,
             },
             "revenue" => match r.revenue_class.as_deref() {
-                Some("hero") => Classification::Revenue { class: RevenueClass::Hero },
-                Some("steady") => Classification::Revenue { class: RevenueClass::Steady },
-                Some("slow") => Classification::Revenue { class: RevenueClass::Slow },
-                Some("quiet") => Classification::Revenue { class: RevenueClass::Quiet },
+                Some("hero") => Classification::Revenue {
+                    class: RevenueClass::Hero,
+                },
+                Some("steady") => Classification::Revenue {
+                    class: RevenueClass::Steady,
+                },
+                Some("slow") => Classification::Revenue {
+                    class: RevenueClass::Slow,
+                },
+                Some("quiet") => Classification::Revenue {
+                    class: RevenueClass::Quiet,
+                },
                 _ => continue,
             },
             _ => Classification::Insufficient,
         };
         map.insert(
-            ItemKey { menu_item_id: r.menu_item_id, size_label: r.size_label },
+            ItemKey {
+                menu_item_id: r.menu_item_id,
+                size_label: r.size_label,
+            },
             classification,
         );
     }
@@ -786,9 +825,12 @@ pub async fn get_calibration(
     let mut rev_in_range = (0u32, 0u32);
 
     for r in rows {
-        let (Some(suggested_price), Some(realized_price), Some(realized_at), Some(predicted_dp)) =
-            (r.suggested_price, r.realized_price, r.realized_at, r.suggested_delta_pct)
-        else {
+        let (Some(suggested_price), Some(realized_price), Some(realized_at), Some(predicted_dp)) = (
+            r.suggested_price,
+            r.realized_price,
+            r.realized_at,
+            r.suggested_delta_pct,
+        ) else {
             continue;
         };
         let realized_dp =

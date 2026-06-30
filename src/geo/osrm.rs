@@ -81,6 +81,56 @@ pub async fn road_distance_meters(from: LatLng, to: LatLng) -> Result<f64, OsrmE
         .ok_or(OsrmError::NoRoute)
 }
 
+/// Road **travel time** in seconds between two points via OSRM's `driving`
+/// profile. Free-flow only — OSRM models no live traffic. Same request as
+/// [`road_distance_meters`] but reads `duration` instead of `distance`. Used by
+/// the reservations waitlist "head out" nudge and the host-board ETA display;
+/// degrades to the typed error (never a 5xx) exactly like the distance lookup.
+pub async fn road_eta_seconds(from: LatLng, to: LatLng) -> Result<f64, OsrmError> {
+    let base = std::env::var("OSRM_URL").map_err(|_| OsrmError::NotConfigured)?;
+    let base = base.trim_end_matches('/');
+    if base.is_empty() {
+        return Err(OsrmError::NotConfigured);
+    }
+
+    let url = format!(
+        "{base}/route/v1/driving/{flng:.6},{flat:.6};{tlng:.6},{tlat:.6}\
+         ?overview=false&alternatives=false&steps=false",
+        flng = from.lng,
+        flat = from.lat,
+        tlng = to.lng,
+        tlat = to.lat,
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(4))
+        .build()
+        .map_err(|_| OsrmError::Unreachable)?;
+
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|_| OsrmError::Unreachable)?;
+
+    if !resp.status().is_success() {
+        return Err(OsrmError::Unreachable);
+    }
+
+    let body: serde_json::Value = resp.json().await.map_err(|_| OsrmError::BadResponse)?;
+
+    if body.get("code").and_then(|c| c.as_str()) != Some("Ok") {
+        return Err(OsrmError::NoRoute);
+    }
+
+    body.get("routes")
+        .and_then(|r| r.as_array())
+        .and_then(|a| a.first())
+        .and_then(|r| r.get("duration"))
+        .and_then(|d| d.as_f64())
+        .ok_or(OsrmError::NoRoute)
+}
+
 /// Great-circle (straight-line) distance in metres between two points — the
 /// fallback used when OSRM is unset or unreachable, so a delivery quote can
 /// still be produced from the configured zone rings. Underestimates real road
@@ -104,14 +154,23 @@ mod tests {
 
     #[test]
     fn same_point_is_zero() {
-        let p = LatLng { lat: 30.0444, lng: 31.2357 }; // Cairo
+        let p = LatLng {
+            lat: 30.0444,
+            lng: 31.2357,
+        }; // Cairo
         assert!(haversine_meters(p, p).abs() < 1e-6);
     }
 
     #[test]
     fn is_symmetric() {
-        let a = LatLng { lat: 30.0444, lng: 31.2357 };
-        let b = LatLng { lat: 31.2001, lng: 29.9187 }; // Alexandria
+        let a = LatLng {
+            lat: 30.0444,
+            lng: 31.2357,
+        };
+        let b = LatLng {
+            lat: 31.2001,
+            lng: 29.9187,
+        }; // Alexandria
         assert!((haversine_meters(a, b) - haversine_meters(b, a)).abs() < 1e-6);
     }
 
@@ -125,7 +184,13 @@ mod tests {
     #[test]
     fn antipodal_is_bounded_by_half_circumference() {
         // Points half the globe apart are the farthest possible.
-        let d = haversine_meters(LatLng { lat: 0.0, lng: 0.0 }, LatLng { lat: 0.0, lng: 180.0 });
+        let d = haversine_meters(
+            LatLng { lat: 0.0, lng: 0.0 },
+            LatLng {
+                lat: 0.0,
+                lng: 180.0,
+            },
+        );
         assert!(d <= HALF_CIRCUMFERENCE + 1.0, "got {d}");
         assert!(d > HALF_CIRCUMFERENCE - 1.0, "got {d}");
     }

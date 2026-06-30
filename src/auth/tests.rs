@@ -1,13 +1,15 @@
-use actix_web::{test, App, web};
+use actix_web::{App, test, web};
+use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
-use serde_json::json;
 
+use crate::auth::handlers::{
+    AuthPermissionsResponse, LoginResponse, MeResponse, ResolveBranchResponse,
+};
 use crate::auth::jwt::JwtSecret;
 use crate::auth::org_status::OrgStatusCache;
-use crate::models::UserRole;
 use crate::auth::routes;
-use crate::auth::handlers::{LoginResponse, MeResponse, AuthPermissionsResponse, ResolveBranchResponse};
+use crate::models::UserRole;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
@@ -99,7 +101,9 @@ async fn test_login_email_password_success(pool: PgPool) {
     sqlx::query!(
         "INSERT INTO users (id, org_id, name, role, email, password_hash)
          VALUES ($1, $2, 'Admin', 'org_admin'::user_role, 'admin@test.com', $3)",
-        user_id, org_id, hash
+        user_id,
+        org_id,
+        hash
     )
     .execute(&pool)
     .await
@@ -135,7 +139,9 @@ async fn test_login_email_wrong_password(pool: PgPool) {
     sqlx::query!(
         "INSERT INTO users (id, org_id, name, role, email, password_hash)
          VALUES ($1, $2, 'Admin', 'org_admin'::user_role, 'admin@test.com', $3)",
-        user_id, org_id, hash
+        user_id,
+        org_id,
+        hash
     )
     .execute(&pool)
     .await
@@ -167,7 +173,9 @@ async fn test_login_disabled_account(pool: PgPool) {
     sqlx::query!(
         "INSERT INTO users (id, org_id, name, role, email, password_hash, is_active)
          VALUES ($1, $2, 'Admin', 'org_admin'::user_role, 'dis@test.com', $3, false)",
-        user_id, org_id, hash
+        user_id,
+        org_id,
+        hash
     )
     .execute(&pool)
     .await
@@ -212,7 +220,9 @@ async fn seed_pin_login_setup(pool: &PgPool, pin: &str) -> (Uuid, Uuid, Uuid) {
     sqlx::query!(
         "INSERT INTO users (id, org_id, name, role, pin_hash)
          VALUES ($1, $2, 'Teller One', 'teller'::user_role, $3)",
-        user_id, org_id, hash
+        user_id,
+        org_id,
+        hash
     )
     .execute(pool)
     .await
@@ -243,12 +253,20 @@ async fn test_login_pin_success(pool: PgPool) {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 200, "PIN login with correct credentials should succeed");
+    assert_eq!(
+        resp.status(),
+        200,
+        "PIN login with correct credentials should succeed"
+    );
 
     let body: LoginResponse = test::read_body_json(resp).await;
     assert_eq!(body.user.name, "Teller One");
     assert!(!body.token.is_empty());
-    assert_eq!(body.user.branch_id, Some(branch_id), "branch_id should be echoed in response");
+    assert_eq!(
+        body.user.branch_id,
+        Some(branch_id),
+        "branch_id should be echoed in response"
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -292,7 +310,11 @@ async fn test_login_pin_missing_branch_id_returns_400(pool: PgPool) {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 400, "PIN login without branch_id must return 400");
+    assert_eq!(
+        resp.status(),
+        400,
+        "PIN login without branch_id must return 400"
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -338,7 +360,9 @@ async fn test_login_pin_unassigned_org_teller_allowed(pool: PgPool) {
     sqlx::query!(
         "INSERT INTO users (id, org_id, name, role, pin_hash)
          VALUES ($1, $2, 'Teller One', 'teller'::user_role, $3)",
-        user_id, org_id, hash
+        user_id,
+        org_id,
+        hash
     )
     .execute(&pool)
     .await
@@ -358,10 +382,19 @@ async fn test_login_pin_unassigned_org_teller_allowed(pool: PgPool) {
     let resp = test::call_service(&app, req).await;
     // D13: tellers are ORG-scoped — a valid teller in the branch's org may sign
     // in at ANY branch in that org, even one they're not explicitly assigned to.
-    assert_eq!(resp.status(), 200, "org teller should be allowed at any org branch");
+    assert_eq!(
+        resp.status(),
+        200,
+        "org teller should be allowed at any org branch"
+    );
     let body: serde_json::Value = test::read_body_json(resp).await;
-    assert!(body["token"].as_str().map(|t| !t.is_empty()).unwrap_or(false),
-        "successful login should return a token, got {body:?}");
+    assert!(
+        body["token"]
+            .as_str()
+            .map(|t| !t.is_empty())
+            .unwrap_or(false),
+        "successful login should return a token, got {body:?}"
+    );
 }
 
 // Layer 3: a successful PIN login silently derives + stores the teller's
@@ -383,7 +416,9 @@ async fn test_pin_login_derives_offline_pin_hash(pool: PgPool) {
     sqlx::query!(
         "INSERT INTO users (id, org_id, name, role, pin_hash)
          VALUES ($1, $2, 'Teller One', 'teller'::user_role, $3)",
-        user_id, org_id, hash
+        user_id,
+        org_id,
+        hash
     )
     .execute(&pool)
     .await
@@ -391,21 +426,37 @@ async fn test_pin_login_derives_offline_pin_hash(pool: PgPool) {
 
     let before: Option<String> =
         sqlx::query_scalar("SELECT offline_pin_hash FROM users WHERE id = $1")
-            .bind(user_id).fetch_one(&pool).await.unwrap();
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert!(before.is_none(), "no offline hash before first login");
 
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri("/auth/login")
-        .set_json(&json!({ "name": "Teller One", "pin": "1234", "branch_id": branch }))
-        .to_request()).await;
-    assert!(resp.status().is_success(), "login should succeed, got {:?}", resp.status());
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/auth/login")
+            .set_json(&json!({ "name": "Teller One", "pin": "1234", "branch_id": branch }))
+            .to_request(),
+    )
+    .await;
+    assert!(
+        resp.status().is_success(),
+        "login should succeed, got {:?}",
+        resp.status()
+    );
 
     let after: Option<String> =
         sqlx::query_scalar("SELECT offline_pin_hash FROM users WHERE id = $1")
-            .bind(user_id).fetch_one(&pool).await.unwrap();
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     let phc = after.expect("offline_pin_hash must be derived on PIN login");
-    assert!(crate::auth::offline::verify_offline_pin("1234", &phc),
-        "stored argon2id verifier must match the PIN");
+    assert!(
+        crate::auth::offline::verify_offline_pin("1234", &phc),
+        "stored argon2id verifier must match the PIN"
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -438,7 +489,9 @@ async fn test_login_pin_cross_org_isolation(pool: PgPool) {
     sqlx::query!(
         "INSERT INTO users (id, org_id, name, role, pin_hash)
          VALUES ($1, $2, 'Teller One', 'teller'::user_role, $3)",
-        user_id, org_a, hash
+        user_id,
+        org_a,
+        hash
     )
     .execute(&pool)
     .await
@@ -452,7 +505,9 @@ async fn test_login_pin_cross_org_isolation(pool: PgPool) {
     sqlx::query!(
         "INSERT INTO users (id, org_id, name, role, pin_hash)
          VALUES ($1, $2, 'Teller One', 'teller'::user_role, $3)",
-        user_b, org_b_id, hash_b
+        user_b,
+        org_b_id,
+        hash_b
     )
     .execute(&pool)
     .await
@@ -472,10 +527,20 @@ async fn test_login_pin_cross_org_isolation(pool: PgPool) {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 401, "cross-org PIN login must return 401 (invalid credentials)");
+    assert_eq!(
+        resp.status(),
+        401,
+        "cross-org PIN login must return 401 (invalid credentials)"
+    );
     let body: serde_json::Value = test::read_body_json(resp).await;
-    assert!(!body["error"].as_str().unwrap_or("").to_lowercase().contains("branch"),
-        "cross-org login must NOT leak the branch-access message, got {body:?}");
+    assert!(
+        !body["error"]
+            .as_str()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("branch"),
+        "cross-org login must NOT leak the branch-access message, got {body:?}"
+    );
 }
 
 // ── GET /auth/me ──────────────────────────────────────────────
@@ -495,7 +560,8 @@ async fn test_me_success(pool: PgPool) {
     sqlx::query!(
         "INSERT INTO users (id, org_id, name, role, email, password_hash)
          VALUES ($1, $2, 'Me User', 'org_admin'::user_role, 'me@test.com', 'h')",
-        user_id, org_id
+        user_id,
+        org_id
     )
     .execute(&pool)
     .await
@@ -536,7 +602,8 @@ async fn test_me_returns_token_branch_for_multi_branch_teller(pool: PgPool) {
     sqlx::query!(
         "INSERT INTO users (id, org_id, name, role, email, password_hash)
          VALUES ($1, $2, 'Multi Teller', 'teller'::user_role, 'mt@test.com', 'h')",
-        teller, org_id
+        teller,
+        org_id
     )
     .execute(&pool)
     .await
@@ -547,7 +614,12 @@ async fn test_me_returns_token_branch_for_multi_branch_teller(pool: PgPool) {
     assign_teller_to_branch(&pool, teller, branch_b).await;
 
     let token = crate::auth::jwt::create_token(
-        &get_secret(), teller, Some(org_id), UserRole::Teller, Some(branch_b), 24,
+        &get_secret(),
+        teller,
+        Some(org_id),
+        UserRole::Teller,
+        Some(branch_b),
+        24,
     )
     .unwrap();
 
@@ -635,7 +707,8 @@ async fn test_permissions_with_user_override(pool: PgPool) {
     sqlx::query!(
         "INSERT INTO users (id, org_id, name, role, pin_hash)
          VALUES ($1, $2, 'Teller Perm', 'teller'::user_role, 'h')",
-        user_id, org_id
+        user_id,
+        org_id
     )
     .execute(&pool)
     .await
@@ -677,7 +750,10 @@ async fn test_permissions_with_user_override(pool: PgPool) {
         .iter()
         .find(|p| p.resource == "orgs" && p.action == "create")
         .expect("orgs:create permission must be in the list");
-    assert!(perm.granted, "User-level override should make orgs:create granted");
+    assert!(
+        perm.granted,
+        "User-level override should make orgs:create granted"
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -690,7 +766,9 @@ async fn test_permissions_no_token_returns_401(pool: PgPool) {
     )
     .await;
 
-    let req = test::TestRequest::get().uri("/auth/permissions").to_request();
+    let req = test::TestRequest::get()
+        .uri("/auth/permissions")
+        .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 401);
 }
@@ -786,7 +864,11 @@ async fn test_resolve_branch_outside_radius_returns_404(pool: PgPool) {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 404, "device outside branch radius should return 404");
+    assert_eq!(
+        resp.status(),
+        404,
+        "device outside branch radius should return 404"
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -813,7 +895,11 @@ async fn test_resolve_branch_no_geo_branches_returns_404(pool: PgPool) {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 404, "branch without geo coordinates should not match");
+    assert_eq!(
+        resp.status(),
+        404,
+        "branch without geo coordinates should not match"
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -865,27 +951,46 @@ async fn test_pin_login_same_branch_allowed_different_branch_blocked(pool: PgPoo
     assign_teller_to_branch(&pool, user_id, branch_b).await;
     let shift_id = Uuid::new_v4();
     sqlx::query("INSERT INTO shifts (id, branch_id, teller_id, opening_cash) VALUES ($1,$2,$3,0)")
-        .bind(shift_id).bind(branch_a).bind(user_id).execute(&pool).await.unwrap();
+        .bind(shift_id)
+        .bind(branch_a)
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
-    let login = |branch: Uuid| test::TestRequest::post()
-        .uri("/auth/login")
-        .set_json(&json!({"name":"Teller One","pin":"1234","branch_id": branch}))
-        .to_request();
+    let login = |branch: Uuid| {
+        test::TestRequest::post()
+            .uri("/auth/login")
+            .set_json(&json!({"name":"Teller One","pin":"1234","branch_id": branch}))
+            .to_request()
+    };
 
     // Signing in at a DIFFERENT branch while the shift is open elsewhere is blocked.
-    assert_eq!(test::call_service(&app, login(branch_b)).await.status(), 409,
-        "login at a different branch while a shift is open must be blocked");
+    assert_eq!(
+        test::call_service(&app, login(branch_b)).await.status(),
+        409,
+        "login at a different branch while a shift is open must be blocked"
+    );
     // Re-signing in at the SAME branch as the open shift is ALLOWED — the teller
     // must be able to resume their own shift (e.g. after a token expiry),
     // otherwise an expired token locks them out of the shift they need to close.
-    assert_eq!(test::call_service(&app, login(branch_a)).await.status(), 200,
-        "login at the same branch as the open shift must be allowed (resume)");
+    assert_eq!(
+        test::call_service(&app, login(branch_a)).await.status(),
+        200,
+        "login at the same branch as the open shift must be allowed (resume)"
+    );
 
     // Once the shift is closed, any branch is available again.
     sqlx::query("UPDATE shifts SET status='closed', closed_at=now() WHERE id=$1")
-        .bind(shift_id).execute(&pool).await.unwrap();
-    assert_eq!(test::call_service(&app, login(branch_b)).await.status(), 200,
-        "login must succeed at any branch once the open shift is closed");
+        .bind(shift_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        test::call_service(&app, login(branch_b)).await.status(),
+        200,
+        "login must succeed at any branch once the open shift is closed"
+    );
 }
 
 /// /auth/me exposes the org tax_rate + currency so the POS can compute a
@@ -901,17 +1006,30 @@ async fn test_me_returns_org_tax_rate(pool: PgPool) {
     .await;
     let org_id = seed_org(&pool).await;
     sqlx::query("UPDATE organizations SET tax_rate = 0.14, currency_code = 'EGP' WHERE id = $1")
-        .bind(org_id).execute(&pool).await.unwrap();
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let user_id = Uuid::new_v4();
     sqlx::query("INSERT INTO users (id, org_id, name, role, email, password_hash) VALUES ($1,$2,'U','org_admin'::user_role,'tx@test.com','h')")
         .bind(user_id).bind(org_id).execute(&pool).await.unwrap();
     let token = generate_token(user_id, Some(org_id), UserRole::OrgAdmin);
 
-    let resp = test::call_service(&app, test::TestRequest::get().uri("/auth/me")
-        .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/auth/me")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 200);
     let body: MeResponse = test::read_body_json(resp).await;
-    assert!((body.tax_rate - 0.14).abs() < 1e-9, "me must expose org tax_rate, got {}", body.tax_rate);
+    assert!(
+        (body.tax_rate - 0.14).abs() < 1e-9,
+        "me must expose org tax_rate, got {}",
+        body.tax_rate
+    );
     assert_eq!(body.currency_code, "EGP");
 }
 
@@ -937,7 +1055,11 @@ async fn test_pin_login_allowed_when_branch_has_other_tellers_open_shift(pool: P
         .bind(alice).bind(org_id).bind(bcrypt::hash("1111", bcrypt::DEFAULT_COST).unwrap()).execute(&pool).await.unwrap();
     assign_teller_to_branch(&pool, alice, branch).await;
     sqlx::query("INSERT INTO shifts (branch_id, teller_id, opening_cash) VALUES ($1,$2,0)")
-        .bind(branch).bind(alice).execute(&pool).await.unwrap();
+        .bind(branch)
+        .bind(alice)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // Bob (no open shift) is assigned to both branches.
     let bob = Uuid::new_v4();
@@ -946,15 +1068,25 @@ async fn test_pin_login_allowed_when_branch_has_other_tellers_open_shift(pool: P
     assign_teller_to_branch(&pool, bob, branch).await;
     assign_teller_to_branch(&pool, bob, other_branch).await;
 
-    let login = |b: Uuid| test::TestRequest::post().uri("/auth/login")
-        .set_json(&json!({"name":"Bob","pin":"2222","branch_id": b})).to_request();
+    let login = |b: Uuid| {
+        test::TestRequest::post()
+            .uri("/auth/login")
+            .set_json(&json!({"name":"Bob","pin":"2222","branch_id": b}))
+            .to_request()
+    };
 
     // Bob at Alice's open-shift branch → now ALLOWED (his own till).
-    assert_eq!(test::call_service(&app, login(branch)).await.status(), 200,
-        "multi-teller: a fresh teller may sign in alongside another teller's open shift");
+    assert_eq!(
+        test::call_service(&app, login(branch)).await.status(),
+        200,
+        "multi-teller: a fresh teller may sign in alongside another teller's open shift"
+    );
     // Bob at a branch with no open shift → allowed.
-    assert_eq!(test::call_service(&app, login(other_branch)).await.status(), 200,
-        "a branch with no open shift accepts a fresh teller login");
+    assert_eq!(
+        test::call_service(&app, login(other_branch)).await.status(),
+        200,
+        "a branch with no open shift accepts a fresh teller login"
+    );
 }
 
 // ── Org-suspension kill-switch ────────────────────────────────
@@ -973,14 +1105,19 @@ async fn test_login_suspended_org_rejected(pool: PgPool) {
 
     let org_id = seed_org(&pool).await;
     sqlx::query("UPDATE organizations SET is_active = false WHERE id = $1")
-        .bind(org_id).execute(&pool).await.unwrap();
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let user_id = Uuid::new_v4();
     let hash = bcrypt::hash("password123", bcrypt::DEFAULT_COST).unwrap();
     sqlx::query!(
         "INSERT INTO users (id, org_id, name, role, email, password_hash)
          VALUES ($1, $2, 'Admin', 'org_admin'::user_role, 'sus@test.com', $3)",
-        user_id, org_id, hash
+        user_id,
+        org_id,
+        hash
     )
     .execute(&pool)
     .await
@@ -992,10 +1129,17 @@ async fn test_login_suspended_org_rejected(pool: PgPool) {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 403, "login into a suspended org must be rejected");
+    assert_eq!(
+        resp.status(),
+        403,
+        "login into a suspended org must be rejected"
+    );
     let body: serde_json::Value = test::read_body_json(resp).await;
-    assert_eq!(body["code"].as_str(), Some("ORG_SUSPENDED"),
-        "rejection must carry the ORG_SUSPENDED code, got {body:?}");
+    assert_eq!(
+        body["code"].as_str(),
+        Some("ORG_SUSPENDED"),
+        "rejection must carry the ORG_SUSPENDED code, got {body:?}"
+    );
 }
 
 /// A soft-deleted org (deleted_at set) is also refused at login.
@@ -1011,24 +1155,37 @@ async fn test_login_soft_deleted_org_rejected(pool: PgPool) {
 
     let org_id = seed_org(&pool).await;
     sqlx::query("UPDATE organizations SET deleted_at = NOW() WHERE id = $1")
-        .bind(org_id).execute(&pool).await.unwrap();
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let user_id = Uuid::new_v4();
     let hash = bcrypt::hash("password123", bcrypt::DEFAULT_COST).unwrap();
     sqlx::query!(
         "INSERT INTO users (id, org_id, name, role, email, password_hash)
          VALUES ($1, $2, 'Admin', 'org_admin'::user_role, 'del@test.com', $3)",
-        user_id, org_id, hash
+        user_id,
+        org_id,
+        hash
     )
     .execute(&pool)
     .await
     .unwrap();
 
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri("/auth/login")
-        .set_json(&json!({ "email": "del@test.com", "password": "password123" }))
-        .to_request()).await;
-    assert_eq!(resp.status(), 403, "login into a soft-deleted org must be rejected");
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/auth/login")
+            .set_json(&json!({ "email": "del@test.com", "password": "password123" }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        403,
+        "login into a soft-deleted org must be rejected"
+    );
 }
 
 /// With the cache registered (enforcement armed), an authenticated request
@@ -1050,7 +1207,8 @@ async fn test_middleware_blocks_request_for_suspended_org(pool: PgPool) {
     sqlx::query!(
         "INSERT INTO users (id, org_id, name, role, email, password_hash)
          VALUES ($1, $2, 'Admin', 'org_admin'::user_role, 'mw@test.com', 'h')",
-        user_id, org_id
+        user_id,
+        org_id
     )
     .execute(&pool)
     .await
@@ -1061,13 +1219,24 @@ async fn test_middleware_blocks_request_for_suspended_org(pool: PgPool) {
 
     // Suspend the org out from under the live token.
     sqlx::query("UPDATE organizations SET is_active = false WHERE id = $1")
-        .bind(org_id).execute(&pool).await.unwrap();
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri("/auth/me")
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .to_request()).await;
-    assert_eq!(resp.status(), 403, "a live token for a suspended org must be rejected");
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/auth/me")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        403,
+        "a live token for a suspended org must be rejected"
+    );
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(body["code"].as_str(), Some("ORG_SUSPENDED"));
 }
@@ -1089,18 +1258,27 @@ async fn test_middleware_allows_request_for_active_org(pool: PgPool) {
     sqlx::query!(
         "INSERT INTO users (id, org_id, name, role, email, password_hash)
          VALUES ($1, $2, 'Admin', 'org_admin'::user_role, 'ok@test.com', 'h')",
-        user_id, org_id
+        user_id,
+        org_id
     )
     .execute(&pool)
     .await
     .unwrap();
 
     let token = generate_token(user_id, Some(org_id), UserRole::OrgAdmin);
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri("/auth/me")
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .to_request()).await;
-    assert_eq!(resp.status(), 200, "an active org must pass the kill-switch");
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/auth/me")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "an active org must pass the kill-switch"
+    );
 }
 
 /// Super admins carry no org_id, so the kill-switch never applies to them —
@@ -1127,11 +1305,19 @@ async fn test_middleware_super_admin_bypasses_kill_switch(pool: PgPool) {
     .unwrap();
 
     let token = generate_token(user_id, None, UserRole::SuperAdmin);
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri("/auth/permissions")
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .to_request()).await;
-    assert_eq!(resp.status(), 200, "super admin (no org_id) must bypass the kill-switch");
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/auth/permissions")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "super admin (no org_id) must bypass the kill-switch"
+    );
 }
 
 /// The cache caches within its TTL, and `invalidate` forces an immediate
@@ -1141,25 +1327,36 @@ async fn test_org_status_cache_caches_and_invalidates(pool: PgPool) {
     let cache = OrgStatusCache::new();
     let org_id = seed_org(&pool).await;
 
-    assert!(cache.is_allowed(&pool, org_id).await.unwrap(),
-        "a fresh active org is allowed");
+    assert!(
+        cache.is_allowed(&pool, org_id).await.unwrap(),
+        "a fresh active org is allowed"
+    );
 
     // Suspend in the DB; the cached "allowed" verdict survives the TTL window.
     sqlx::query("UPDATE organizations SET is_active = false WHERE id = $1")
-        .bind(org_id).execute(&pool).await.unwrap();
-    assert!(cache.is_allowed(&pool, org_id).await.unwrap(),
-        "within the TTL the cached allow verdict is still served");
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        cache.is_allowed(&pool, org_id).await.unwrap(),
+        "within the TTL the cached allow verdict is still served"
+    );
 
     // Invalidation forces a re-read, which now sees the suspension.
     cache.invalidate(org_id);
-    assert!(!cache.is_allowed(&pool, org_id).await.unwrap(),
-        "after invalidation the suspension is observed");
+    assert!(
+        !cache.is_allowed(&pool, org_id).await.unwrap(),
+        "after invalidation the suspension is observed"
+    );
 }
 
 /// A token referencing an org that does not exist resolves to "not allowed".
 #[sqlx::test(migrations = "./migrations")]
 async fn test_org_status_unknown_org_not_allowed(pool: PgPool) {
     let cache = OrgStatusCache::new();
-    assert!(!cache.is_allowed(&pool, Uuid::new_v4()).await.unwrap(),
-        "an unknown org id must not be allowed");
+    assert!(
+        !cache.is_allowed(&pool, Uuid::new_v4()).await.unwrap(),
+        "an unknown org id must not be allowed"
+    );
 }

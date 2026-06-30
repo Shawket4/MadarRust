@@ -8,7 +8,7 @@
 //!   JWT_SECRET=... cargo run --bin fuzz-token -- super-admin   # org_id=NULL, needs X-Org-Id
 //!   JWT_SECRET=... cargo run --bin fuzz-token -- org-admin     # org-scoped
 
-use madar_rust::auth::jwt::{create_token, JwtSecret};
+use madar_rust::auth::jwt::{JwtSecret, create_token};
 use madar_rust::models::UserRole;
 use uuid::Uuid;
 
@@ -19,12 +19,22 @@ const ORG_ADMIN_ID: &str = "00000000-0000-0000-0000-000000000004";
 
 fn main() {
     let secret = std::env::var("JWT_SECRET").expect("JWT_SECRET must be set");
-    let role_arg = std::env::args().nth(1).unwrap_or_else(|| "org-admin".to_string());
+    let role_arg = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "org-admin".to_string());
 
     let org_id = Uuid::parse_str(ORG_ID).unwrap();
     let (mut user_id, mut org, role) = match role_arg.as_str() {
-        "super-admin" => (Uuid::parse_str(SUPER_ADMIN_ID).unwrap(), None, UserRole::SuperAdmin),
-        "org-admin" => (Uuid::parse_str(ORG_ADMIN_ID).unwrap(), Some(org_id), UserRole::OrgAdmin),
+        "super-admin" => (
+            Uuid::parse_str(SUPER_ADMIN_ID).unwrap(),
+            None,
+            UserRole::SuperAdmin,
+        ),
+        "org-admin" => (
+            Uuid::parse_str(ORG_ADMIN_ID).unwrap(),
+            Some(org_id),
+            UserRole::OrgAdmin,
+        ),
         other => {
             eprintln!("unknown role '{other}' (expected: super-admin | org-admin)");
             std::process::exit(2);

@@ -1,12 +1,12 @@
 #![allow(unused_imports, unused_variables, dead_code)]
-use actix_web::{test, App, web};
+use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::auth::jwt::JwtSecret;
-use crate::models::UserRole;
-use crate::menu::routes;
 use crate::menu::handlers::*;
+use crate::menu::routes;
+use crate::models::UserRole;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
@@ -39,15 +39,13 @@ async fn seed_org(pool: &PgPool) -> Uuid {
 async fn seed_branch(pool: &PgPool, org_id: Uuid) -> Uuid {
     let branch_id = Uuid::new_v4();
     let name = format!("Test Branch {}", branch_id);
-    sqlx::query(
-        "INSERT INTO branches (id, org_id, name) VALUES ($1, $2, $3)"
-    )
-    .bind(branch_id)
-    .bind(org_id)
-    .bind(name)
-    .execute(pool)
-    .await
-    .unwrap();
+    sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, $3)")
+        .bind(branch_id)
+        .bind(org_id)
+        .bind(name)
+        .execute(pool)
+        .await
+        .unwrap();
     branch_id
 }
 
@@ -90,7 +88,13 @@ async fn seed_category(pool: &PgPool, org_id: Uuid, name: &str) -> Uuid {
     id
 }
 
-async fn seed_menu_item(pool: &PgPool, org_id: Uuid, category_id: Uuid, name: &str, price: i32) -> Uuid {
+async fn seed_menu_item(
+    pool: &PgPool,
+    org_id: Uuid,
+    category_id: Uuid,
+    name: &str,
+    price: i32,
+) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price) VALUES ($1, $2, $3, $4, $5)")
         .bind(id)
@@ -104,7 +108,13 @@ async fn seed_menu_item(pool: &PgPool, org_id: Uuid, category_id: Uuid, name: &s
     id
 }
 
-async fn seed_addon_item(pool: &PgPool, org_id: Uuid, name: &str, addon_type: &str, price: i32) -> Uuid {
+async fn seed_addon_item(
+    pool: &PgPool,
+    org_id: Uuid,
+    name: &str,
+    addon_type: &str,
+    price: i32,
+) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price) VALUES ($1, $2, $3, $4, $5)")
         .bind(id)
@@ -144,8 +154,9 @@ async fn test_list_categories_success(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
@@ -173,8 +184,9 @@ async fn test_create_category_success(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
@@ -207,8 +219,9 @@ async fn test_update_category_success(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
@@ -243,8 +256,9 @@ async fn test_delete_category_success(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
@@ -272,8 +286,9 @@ async fn test_list_menu_items_success(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
@@ -304,8 +319,9 @@ async fn test_menu_catalog_paginated_with_costs(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
             .configure(routes::configure)
-            .configure(crate::costing::routes::configure)
-    ).await;
+            .configure(crate::costing::routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
@@ -317,7 +333,10 @@ async fn test_menu_catalog_paginated_with_costs(pool: PgPool) {
 
     let token = generate_org_admin_token(user_id, org_id);
     let req = test::TestRequest::get()
-        .uri(&format!("/costing/catalog?org_id={}&per_page=1&page=1", org_id))
+        .uri(&format!(
+            "/costing/catalog?org_id={}&per_page=1&page=1",
+            org_id
+        ))
         .insert_header(("Authorization", format!("Bearer {}", token)))
         .to_request();
 
@@ -338,8 +357,9 @@ async fn test_create_menu_item_success(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
@@ -368,19 +388,25 @@ async fn test_create_menu_item_success(pool: PgPool) {
     let resp = test::call_service(&app, req).await;
     let status = resp.status();
     let body = test::read_body(resp).await;
-    assert!(status.is_success(), "Status: {}, Response: {:?}", status, body);
-    
+    assert!(
+        status.is_success(),
+        "Status: {}, Response: {:?}",
+        status,
+        body
+    );
+
     // We can't read json from resp again, so we just parse the body bytes we read
     let item: MenuItem = serde_json::from_slice(&body).unwrap();
     assert_eq!(item.name, "New Item");
     assert_eq!(item.base_price, 1200);
 
     // Verify price epoch was created
-    let epoch_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM menu_item_price_epochs WHERE menu_item_id = $1")
-        .bind(item.id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let epoch_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM menu_item_price_epochs WHERE menu_item_id = $1")
+            .bind(item.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(epoch_count.0, 1);
 }
 
@@ -390,8 +416,9 @@ async fn test_update_menu_item_success(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
@@ -426,11 +453,12 @@ async fn test_update_menu_item_success(pool: PgPool) {
     assert_eq!(item.base_price, 1500);
 
     // Verify a new price epoch was created for the update
-    let epoch_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM menu_item_price_epochs WHERE menu_item_id = $1")
-        .bind(item_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let epoch_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM menu_item_price_epochs WHERE menu_item_id = $1")
+            .bind(item_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(epoch_count.0, 1);
 }
 
@@ -440,8 +468,9 @@ async fn test_delete_menu_item_success(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
@@ -470,8 +499,9 @@ async fn test_upsert_size_success(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
@@ -495,7 +525,12 @@ async fn test_upsert_size_success(pool: PgPool) {
     let resp = test::call_service(&app, req).await;
     let status = resp.status();
     let body = test::read_body(resp).await;
-    assert!(status.is_success(), "Status: {}, Response: {:?}", status, body);
+    assert!(
+        status.is_success(),
+        "Status: {}, Response: {:?}",
+        status,
+        body
+    );
     let size: ItemSize = serde_json::from_slice(&body).unwrap();
 
     // Verify it was added
@@ -503,12 +538,14 @@ async fn test_upsert_size_success(pool: PgPool) {
     assert_eq!(size.price_override, 700);
 
     // Verify a price epoch was created specifically for the size
-    let epoch_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM menu_item_price_epochs WHERE menu_item_id = $1 AND size_label = $2")
-        .bind(item_id)
-        .bind("large")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let epoch_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM menu_item_price_epochs WHERE menu_item_id = $1 AND size_label = $2",
+    )
+    .bind(item_id)
+    .bind("large")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(epoch_count.0, 1);
 }
 
@@ -518,8 +555,9 @@ async fn test_delete_size_success(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
@@ -561,8 +599,9 @@ async fn test_addon_slots_success(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
@@ -604,7 +643,12 @@ async fn test_addon_slots_success(pool: PgPool) {
     let resp_list = test::call_service(&app, req_list).await;
     let status = resp_list.status();
     let body = test::read_body(resp_list).await;
-    assert!(status.is_success(), "Status: {}, Response: {:?}", status, body);
+    assert!(
+        status.is_success(),
+        "Status: {}, Response: {:?}",
+        status,
+        body
+    );
     let slots: Vec<AddonSlot> = serde_json::from_slice(&body).unwrap();
     assert_eq!(slots.len(), 1);
 }
@@ -619,8 +663,9 @@ async fn test_addon_items_crud(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
@@ -638,7 +683,7 @@ async fn test_addon_items_crud(pool: PgPool) {
     };
 
     let token = generate_org_admin_token(user_id, org_id);
-    
+
     // Create
     let req = test::TestRequest::post()
         .uri("/addon-items")
@@ -649,7 +694,12 @@ async fn test_addon_items_crud(pool: PgPool) {
     let resp = test::call_service(&app, req).await;
     let status = resp.status();
     let body = test::read_body(resp).await;
-    assert!(status.is_success(), "Status: {}, Response: {:?}", status, body);
+    assert!(
+        status.is_success(),
+        "Status: {}, Response: {:?}",
+        status,
+        body
+    );
     let item: AddonItem = serde_json::from_slice(&body).unwrap();
     assert_eq!(item.name, "Extra Cheese");
 
@@ -701,8 +751,9 @@ async fn test_optional_fields_crud(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
@@ -724,7 +775,7 @@ async fn test_optional_fields_crud(pool: PgPool) {
     };
 
     let token = generate_org_admin_token(user_id, org_id);
-    
+
     // Create
     let req = test::TestRequest::post()
         .uri(&format!("/menu-items/{}/optionals", item_id))
@@ -745,7 +796,12 @@ async fn test_optional_fields_crud(pool: PgPool) {
     let resp_del = test::call_service(&app, req_del).await;
     let status = resp_del.status();
     let body = test::read_body(resp_del).await;
-    assert!(status.is_success(), "Status: {}, Response: {:?}", status, body);
+    assert!(
+        status.is_success(),
+        "Status: {}, Response: {:?}",
+        status,
+        body
+    );
 }
 
 /// V21: changing an optional field's linked ingredient without resupplying
@@ -757,8 +813,9 @@ async fn test_update_optional_field_swap_ingredient_requires_quantity(pool: PgPo
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
     grant_permission(&pool, "org_admin", "menu_items", "update").await;
@@ -770,30 +827,52 @@ async fn test_update_optional_field_swap_ingredient_requires_quantity(pool: PgPo
 
     // Optional field linked to flour, 100 g.
     let create = CreateOptionalFieldRequest {
-        name: "Extra".into(), name_translations: None, price: Some(0),
-        org_ingredient_id: Some(flour), ingredient_name: Some("Flour".into()),
-        ingredient_unit: Some("g".into()), quantity_used: Some(100.0), size_label: None,
+        name: "Extra".into(),
+        name_translations: None,
+        price: Some(0),
+        org_ingredient_id: Some(flour),
+        ingredient_name: Some("Flour".into()),
+        ingredient_unit: Some("g".into()),
+        quantity_used: Some(100.0),
+        size_label: None,
     };
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/menu-items/{}/optionals", item_id))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&create).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/menu-items/{}/optionals", item_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&create)
+            .to_request(),
+    )
+    .await;
     assert!(resp.status().is_success());
     let field: OptionalField = test::read_body_json(resp).await;
 
     // Swap the linked ingredient to sugar (kg) WITHOUT a fresh quantity → 400.
-    let resp = test::call_service(&app, test::TestRequest::patch()
-        .uri(&format!("/menu-items/{}/optionals/{}", item_id, field.id))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({"org_ingredient_id": sugar})).to_request()).await;
-    assert_eq!(resp.status(), 400, "swapping the linked ingredient requires a fresh quantity_used");
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri(&format!("/menu-items/{}/optionals/{}", item_id, field.id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&serde_json::json!({"org_ingredient_id": sugar}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        400,
+        "swapping the linked ingredient requires a fresh quantity_used"
+    );
 
     // Supplying a quantity makes the swap succeed.
     let resp = test::call_service(&app, test::TestRequest::patch()
         .uri(&format!("/menu-items/{}/optionals/{}", item_id, field.id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
         .set_json(&serde_json::json!({"org_ingredient_id": sugar, "ingredient_unit": "g", "quantity_used": 50.0})).to_request()).await;
-    assert!(resp.status().is_success(), "swap with a fresh quantity must succeed");
+    assert!(
+        resp.status().is_success(),
+        "swap with a fresh quantity must succeed"
+    );
 }
 
 // ── Branch menu overrides ─────────────────────────────────────
@@ -832,11 +911,22 @@ async fn test_branch_menu_overrides_crud_and_injection(pool: PgPool) {
     assert_eq!(items[0].base_price, 5000);
 
     // Upsert a branch price override.
-    let body = BranchMenuOverrideInput { branch_id, menu_item_id: item, price_override: Some(6000), is_available: true, sizes: None };
-    let resp = test::call_service(&app, test::TestRequest::put()
-        .uri("/branch-menu-overrides")
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&body).to_request()).await;
+    let body = BranchMenuOverrideInput {
+        branch_id,
+        menu_item_id: item,
+        price_override: Some(6000),
+        is_available: true,
+        sizes: None,
+    };
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::put()
+            .uri("/branch-menu-overrides")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&body)
+            .to_request(),
+    )
+    .await;
     assert!(resp.status().is_success());
     let ov: BranchMenuOverride = test::read_body_json(resp).await;
     assert_eq!(ov.price_override, Some(6000));
@@ -846,36 +936,69 @@ async fn test_branch_menu_overrides_crud_and_injection(pool: PgPool) {
     let items: Vec<MenuItem> = test::read_body_json(resp).await;
     assert_eq!(items[0].base_price, 6000);
 
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/menu-items?org_id={}", org_id))
-        .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/menu-items?org_id={}", org_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request(),
+    )
+    .await;
     let items: Vec<MenuItem> = test::read_body_json(resp).await;
     assert_eq!(items[0].base_price, 5000, "org catalog price unchanged");
 
     // Disable at this branch → excluded from the branch menu.
-    let body = BranchMenuOverrideInput { branch_id, menu_item_id: item, price_override: Some(6000), is_available: false, sizes: None };
-    let resp = test::call_service(&app, test::TestRequest::put()
-        .uri("/branch-menu-overrides")
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&body).to_request()).await;
+    let body = BranchMenuOverrideInput {
+        branch_id,
+        menu_item_id: item,
+        price_override: Some(6000),
+        is_available: false,
+        sizes: None,
+    };
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::put()
+            .uri("/branch-menu-overrides")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&body)
+            .to_request(),
+    )
+    .await;
     assert!(resp.status().is_success());
 
     let resp = test::call_service(&app, branch_menu(branch_id, &token)).await;
     let items: Vec<MenuItem> = test::read_body_json(resp).await;
-    assert_eq!(items.len(), 0, "branch-disabled item must be excluded from the branch menu");
+    assert_eq!(
+        items.len(),
+        0,
+        "branch-disabled item must be excluded from the branch menu"
+    );
 
     // List the branch's override rows.
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/branch-menu-overrides?branch_id={}", branch_id))
-        .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/branch-menu-overrides?branch_id={}", branch_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request(),
+    )
+    .await;
     let rows: Vec<BranchMenuOverride> = test::read_body_json(resp).await;
     assert_eq!(rows.len(), 1);
     assert!(!rows[0].is_available);
 
     // Delete → reverts to the org catalog.
-    let resp = test::call_service(&app, test::TestRequest::delete()
-        .uri(&format!("/branch-menu-overrides?branch_id={}&menu_item_id={}", branch_id, item))
-        .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri(&format!(
+                "/branch-menu-overrides?branch_id={}&menu_item_id={}",
+                branch_id, item
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 204);
 
     let resp = test::call_service(&app, branch_menu(branch_id, &token)).await;
@@ -905,11 +1028,22 @@ async fn test_branch_menu_override_rejects_cross_org(pool: PgPool) {
     grant_permission(&pool, "org_admin", "menu_items", "update").await;
     let token_b = generate_org_admin_token(admin_b, org_b);
 
-    let body = BranchMenuOverrideInput { branch_id: branch_a, menu_item_id: item, price_override: Some(1), is_available: true, sizes: None };
-    let resp = test::call_service(&app, test::TestRequest::put()
-        .uri("/branch-menu-overrides")
-        .insert_header(("Authorization", format!("Bearer {}", token_b)))
-        .set_json(&body).to_request()).await;
+    let body = BranchMenuOverrideInput {
+        branch_id: branch_a,
+        menu_item_id: item,
+        price_override: Some(1),
+        is_available: true,
+        sizes: None,
+    };
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::put()
+            .uri("/branch-menu-overrides")
+            .insert_header(("Authorization", format!("Bearer {}", token_b)))
+            .set_json(&body)
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 403, "cross-org override must be forbidden");
 }
 
@@ -917,17 +1051,27 @@ async fn test_branch_menu_override_rejects_cross_org(pool: PgPool) {
 
 macro_rules! auth_req {
     ($m:ident, $uri:expr, $tok:expr) => {
-        test::TestRequest::$m().uri(&$uri)
-            .insert_header(("Authorization", format!("Bearer {}", $tok))).to_request()
+        test::TestRequest::$m()
+            .uri(&$uri)
+            .insert_header(("Authorization", format!("Bearer {}", $tok)))
+            .to_request()
     };
     ($m:ident, $uri:expr, $tok:expr, $body:expr) => {
-        test::TestRequest::$m().uri(&$uri)
+        test::TestRequest::$m()
+            .uri(&$uri)
             .insert_header(("Authorization", format!("Bearer {}", $tok)))
-            .set_json(&$body).to_request()
+            .set_json(&$body)
+            .to_request()
     };
 }
 
-async fn override_app(pool: PgPool) -> impl actix_web::dev::Service<actix_http::Request, Response = actix_web::dev::ServiceResponse, Error = actix_web::Error> {
+async fn override_app(
+    pool: PgPool,
+) -> impl actix_web::dev::Service<
+    actix_http::Request,
+    Response = actix_web::dev::ServiceResponse,
+    Error = actix_web::Error,
+> {
     test::init_service(
         App::new()
             .app_data(web::Data::new(pool))
@@ -940,9 +1084,14 @@ async fn override_app(pool: PgPool) -> impl actix_web::dev::Service<actix_http::
 async fn add_item_size(pool: &PgPool, item: Uuid, label: &str, price: i32) {
     sqlx::query(
         "INSERT INTO item_sizes (id, menu_item_id, label, price_override, is_active)
-         VALUES (gen_random_uuid(), $1, $2::item_size, $3, true)",
+         VALUES (gen_random_uuid(), $1, $2, $3, true)",
     )
-    .bind(item).bind(label).bind(price).execute(pool).await.unwrap();
+    .bind(item)
+    .bind(label)
+    .bind(price)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 /// A null price_override inherits the catalog base, but is_available=false still hides it.
@@ -959,20 +1108,59 @@ async fn test_branch_override_null_price_inherits_but_can_disable(pool: PgPool) 
     let token = generate_org_admin_token(user, org);
 
     // price_override = null, available → branch menu inherits the base price.
-    let body = BranchMenuOverrideInput { branch_id: branch, menu_item_id: item, price_override: None, is_available: true, sizes: None };
-    let resp = test::call_service(&app, auth_req!(put, "/branch-menu-overrides".to_string(), token, body)).await;
+    let body = BranchMenuOverrideInput {
+        branch_id: branch,
+        menu_item_id: item,
+        price_override: None,
+        is_available: true,
+        sizes: None,
+    };
+    let resp = test::call_service(
+        &app,
+        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
+    )
+    .await;
     assert!(resp.status().is_success());
     let ov: BranchMenuOverride = test::read_body_json(resp).await;
     assert_eq!(ov.price_override, None);
 
-    let resp = test::call_service(&app, auth_req!(get, format!("/menu-items?org_id={}&branch_id={}", org, branch), token)).await;
+    let resp = test::call_service(
+        &app,
+        auth_req!(
+            get,
+            format!("/menu-items?org_id={}&branch_id={}", org, branch),
+            token
+        ),
+    )
+    .await;
     let items: Vec<MenuItem> = test::read_body_json(resp).await;
-    assert_eq!(items[0].base_price, 5000, "null override inherits the base price");
+    assert_eq!(
+        items[0].base_price, 5000,
+        "null override inherits the base price"
+    );
 
     // Disable with a null price → still excluded.
-    let body = BranchMenuOverrideInput { branch_id: branch, menu_item_id: item, price_override: None, is_available: false, sizes: None };
-    test::call_service(&app, auth_req!(put, "/branch-menu-overrides".to_string(), token, body)).await;
-    let resp = test::call_service(&app, auth_req!(get, format!("/menu-items?org_id={}&branch_id={}", org, branch), token)).await;
+    let body = BranchMenuOverrideInput {
+        branch_id: branch,
+        menu_item_id: item,
+        price_override: None,
+        is_available: false,
+        sizes: None,
+    };
+    test::call_service(
+        &app,
+        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
+    )
+    .await;
+    let resp = test::call_service(
+        &app,
+        auth_req!(
+            get,
+            format!("/menu-items?org_id={}&branch_id={}", org, branch),
+            token
+        ),
+    )
+    .await;
     let items: Vec<MenuItem> = test::read_body_json(resp).await;
     assert_eq!(items.len(), 0, "disabled-with-null-price item is excluded");
 }
@@ -991,11 +1179,29 @@ async fn test_branch_override_upsert_update_path(pool: PgPool) {
     let token = generate_org_admin_token(user, org);
 
     for price in [6000, 7000] {
-        let body = BranchMenuOverrideInput { branch_id: branch, menu_item_id: item, price_override: Some(price), is_available: true, sizes: None };
-        let resp = test::call_service(&app, auth_req!(put, "/branch-menu-overrides".to_string(), token, body)).await;
+        let body = BranchMenuOverrideInput {
+            branch_id: branch,
+            menu_item_id: item,
+            price_override: Some(price),
+            is_available: true,
+            sizes: None,
+        };
+        let resp = test::call_service(
+            &app,
+            auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
+        )
+        .await;
         assert!(resp.status().is_success());
     }
-    let resp = test::call_service(&app, auth_req!(get, format!("/branch-menu-overrides?branch_id={}", branch), token)).await;
+    let resp = test::call_service(
+        &app,
+        auth_req!(
+            get,
+            format!("/branch-menu-overrides?branch_id={}", branch),
+            token
+        ),
+    )
+    .await;
     let rows: Vec<BranchMenuOverride> = test::read_body_json(resp).await;
     assert_eq!(rows.len(), 1, "upsert must update, not duplicate");
     assert_eq!(rows[0].price_override, Some(7000));
@@ -1015,16 +1221,45 @@ async fn test_branch_override_isolated_per_branch(pool: PgPool) {
     let item = seed_menu_item(&pool, org, cat, "Latte", 5000).await;
     let token = generate_org_admin_token(user, org);
 
-    let body = BranchMenuOverrideInput { branch_id: branch_a, menu_item_id: item, price_override: Some(9000), is_available: true, sizes: None };
-    test::call_service(&app, auth_req!(put, "/branch-menu-overrides".to_string(), token, body)).await;
+    let body = BranchMenuOverrideInput {
+        branch_id: branch_a,
+        menu_item_id: item,
+        price_override: Some(9000),
+        is_available: true,
+        sizes: None,
+    };
+    test::call_service(
+        &app,
+        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
+    )
+    .await;
 
-    let resp = test::call_service(&app, auth_req!(get, format!("/menu-items?org_id={}&branch_id={}", org, branch_a), token)).await;
+    let resp = test::call_service(
+        &app,
+        auth_req!(
+            get,
+            format!("/menu-items?org_id={}&branch_id={}", org, branch_a),
+            token
+        ),
+    )
+    .await;
     let a: Vec<MenuItem> = test::read_body_json(resp).await;
     assert_eq!(a[0].base_price, 9000);
 
-    let resp = test::call_service(&app, auth_req!(get, format!("/menu-items?org_id={}&branch_id={}", org, branch_b), token)).await;
+    let resp = test::call_service(
+        &app,
+        auth_req!(
+            get,
+            format!("/menu-items?org_id={}&branch_id={}", org, branch_b),
+            token
+        ),
+    )
+    .await;
     let b: Vec<MenuItem> = test::read_body_json(resp).await;
-    assert_eq!(b[0].base_price, 5000, "branch B is unaffected by branch A's override");
+    assert_eq!(
+        b[0].base_price, 5000,
+        "branch B is unaffected by branch A's override"
+    );
 }
 
 /// price_override = 0 is allowed (free item); a negative price is rejected.
@@ -1039,12 +1274,32 @@ async fn test_branch_override_zero_allowed_negative_rejected(pool: PgPool) {
     let item = seed_menu_item(&pool, org, cat, "Latte", 5000).await;
     let token = generate_org_admin_token(user, org);
 
-    let body = BranchMenuOverrideInput { branch_id: branch, menu_item_id: item, price_override: Some(0), is_available: true, sizes: None };
-    let resp = test::call_service(&app, auth_req!(put, "/branch-menu-overrides".to_string(), token, body)).await;
+    let body = BranchMenuOverrideInput {
+        branch_id: branch,
+        menu_item_id: item,
+        price_override: Some(0),
+        is_available: true,
+        sizes: None,
+    };
+    let resp = test::call_service(
+        &app,
+        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
+    )
+    .await;
     assert!(resp.status().is_success(), "zero price (free) is allowed");
 
-    let body = BranchMenuOverrideInput { branch_id: branch, menu_item_id: item, price_override: Some(-1), is_available: true, sizes: None };
-    let resp = test::call_service(&app, auth_req!(put, "/branch-menu-overrides".to_string(), token, body)).await;
+    let body = BranchMenuOverrideInput {
+        branch_id: branch,
+        menu_item_id: item,
+        price_override: Some(-1),
+        is_available: true,
+        sizes: None,
+    };
+    let resp = test::call_service(
+        &app,
+        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
+    )
+    .await;
     assert_eq!(resp.status(), 400, "negative price is rejected");
 }
 
@@ -1062,9 +1317,23 @@ async fn test_branch_override_item_from_other_org_rejected(pool: PgPool) {
     let cat_b = seed_category(&pool, org_b, "Coffee").await;
     let item_b = seed_menu_item(&pool, org_b, cat_b, "Latte", 5000).await;
 
-    let body = BranchMenuOverrideInput { branch_id: branch_a, menu_item_id: item_b, price_override: Some(1), is_available: true, sizes: None };
-    let resp = test::call_service(&app, auth_req!(put, "/branch-menu-overrides".to_string(), token_a, body)).await;
-    assert_eq!(resp.status(), 404, "item from another org is not found for this branch");
+    let body = BranchMenuOverrideInput {
+        branch_id: branch_a,
+        menu_item_id: item_b,
+        price_override: Some(1),
+        is_available: true,
+        sizes: None,
+    };
+    let resp = test::call_service(
+        &app,
+        auth_req!(put, "/branch-menu-overrides".to_string(), token_a, body),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        404,
+        "item from another org is not found for this branch"
+    );
 }
 
 /// Read needs menu_items/read; write needs menu_items/update.
@@ -1080,20 +1349,57 @@ async fn test_branch_override_permissions_enforced(pool: PgPool) {
     let token = generate_org_admin_token(admin, org);
 
     // Has read → list works.
-    let resp = test::call_service(&app, auth_req!(get, format!("/branch-menu-overrides?branch_id={}", branch), token)).await;
+    let resp = test::call_service(
+        &app,
+        auth_req!(
+            get,
+            format!("/branch-menu-overrides?branch_id={}", branch),
+            token
+        ),
+    )
+    .await;
     assert!(resp.status().is_success());
 
     // Lacks update → upsert/delete forbidden.
-    let body = BranchMenuOverrideInput { branch_id: branch, menu_item_id: item, price_override: Some(1), is_available: true, sizes: None };
-    let resp = test::call_service(&app, auth_req!(put, "/branch-menu-overrides".to_string(), token, body)).await;
+    let body = BranchMenuOverrideInput {
+        branch_id: branch,
+        menu_item_id: item,
+        price_override: Some(1),
+        is_available: true,
+        sizes: None,
+    };
+    let resp = test::call_service(
+        &app,
+        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
+    )
+    .await;
     assert_eq!(resp.status(), 403, "upsert needs menu_items/update");
-    let resp = test::call_service(&app, auth_req!(delete, format!("/branch-menu-overrides?branch_id={}&menu_item_id={}", branch, item), token)).await;
+    let resp = test::call_service(
+        &app,
+        auth_req!(
+            delete,
+            format!(
+                "/branch-menu-overrides?branch_id={}&menu_item_id={}",
+                branch, item
+            ),
+            token
+        ),
+    )
+    .await;
     assert_eq!(resp.status(), 403, "delete needs menu_items/update");
 
     // A teller with no grants cannot even read.
     let teller = seed_user(&pool, org, "teller").await;
     let ttok = generate_teller_token(teller, org);
-    let resp = test::call_service(&app, auth_req!(get, format!("/branch-menu-overrides?branch_id={}", branch), ttok)).await;
+    let resp = test::call_service(
+        &app,
+        auth_req!(
+            get,
+            format!("/branch-menu-overrides?branch_id={}", branch),
+            ttok
+        ),
+    )
+    .await;
     assert_eq!(resp.status(), 403, "list needs menu_items/read");
 }
 
@@ -1112,9 +1418,28 @@ async fn test_branch_override_list_delete_cross_org_rejected(pool: PgPool) {
     grant_permission(&pool, "org_admin", "menu_items", "update").await;
     let token_b = generate_org_admin_token(admin_b, org_b);
 
-    let resp = test::call_service(&app, auth_req!(get, format!("/branch-menu-overrides?branch_id={}", branch_a), token_b)).await;
+    let resp = test::call_service(
+        &app,
+        auth_req!(
+            get,
+            format!("/branch-menu-overrides?branch_id={}", branch_a),
+            token_b
+        ),
+    )
+    .await;
     assert_eq!(resp.status(), 403, "cross-org list forbidden");
-    let resp = test::call_service(&app, auth_req!(delete, format!("/branch-menu-overrides?branch_id={}&menu_item_id={}", branch_a, item), token_b)).await;
+    let resp = test::call_service(
+        &app,
+        auth_req!(
+            delete,
+            format!(
+                "/branch-menu-overrides?branch_id={}&menu_item_id={}",
+                branch_a, item
+            ),
+            token_b
+        ),
+    )
+    .await;
     assert_eq!(resp.status(), 403, "cross-org delete forbidden");
 }
 
@@ -1127,8 +1452,18 @@ async fn test_branch_override_unknown_branch_404(pool: PgPool) {
     grant_permission(&pool, "org_admin", "menu_items", "update").await;
     let token = generate_org_admin_token(admin, org);
 
-    let body = BranchMenuOverrideInput { branch_id: Uuid::new_v4(), menu_item_id: Uuid::new_v4(), price_override: Some(1), is_available: true, sizes: None };
-    let resp = test::call_service(&app, auth_req!(put, "/branch-menu-overrides".to_string(), token, body)).await;
+    let body = BranchMenuOverrideInput {
+        branch_id: Uuid::new_v4(),
+        menu_item_id: Uuid::new_v4(),
+        price_override: Some(1),
+        is_available: true,
+        sizes: None,
+    };
+    let resp = test::call_service(
+        &app,
+        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
+    )
+    .await;
     assert_eq!(resp.status(), 404, "unknown branch is not found");
 }
 
@@ -1146,15 +1481,39 @@ async fn test_list_menu_items_full_with_branch_override(pool: PgPool) {
     add_item_size(&pool, item, "large", 8000).await;
     let token = generate_org_admin_token(user, org);
 
-    let body = BranchMenuOverrideInput { branch_id: branch, menu_item_id: item, price_override: Some(6000), is_available: true, sizes: None };
-    test::call_service(&app, auth_req!(put, "/branch-menu-overrides".to_string(), token, body)).await;
+    let body = BranchMenuOverrideInput {
+        branch_id: branch,
+        menu_item_id: item,
+        price_override: Some(6000),
+        is_available: true,
+        sizes: None,
+    };
+    test::call_service(
+        &app,
+        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
+    )
+    .await;
 
-    let resp = test::call_service(&app, auth_req!(get, format!("/menu-items?org_id={}&branch_id={}&full=true", org, branch), token)).await;
+    let resp = test::call_service(
+        &app,
+        auth_req!(
+            get,
+            format!("/menu-items?org_id={}&branch_id={}&full=true", org, branch),
+            token
+        ),
+    )
+    .await;
     let full: Vec<MenuItemFull> = test::read_body_json(resp).await;
     assert_eq!(full.len(), 1);
-    assert_eq!(full[0].item.base_price, 6000, "branch-effective base in the POS contract");
+    assert_eq!(
+        full[0].item.base_price, 6000,
+        "branch-effective base in the POS contract"
+    );
     assert_eq!(full[0].sizes.len(), 1, "sizes still embedded");
-    assert_eq!(full[0].sizes[0].price_override, 8000, "size price is its own absolute value");
+    assert_eq!(
+        full[0].sizes[0].price_override, 8000,
+        "size price is its own absolute value"
+    );
 }
 
 /// Category filter composes with branch overrides.
@@ -1172,15 +1531,47 @@ async fn test_branch_override_with_category_filter(pool: PgPool) {
     let _other = seed_menu_item(&pool, org, c2, "Croissant", 4000).await;
     let token = generate_org_admin_token(user, org);
 
-    let body = BranchMenuOverrideInput { branch_id: branch, menu_item_id: item, price_override: Some(6000), is_available: true, sizes: None };
-    test::call_service(&app, auth_req!(put, "/branch-menu-overrides".to_string(), token, body)).await;
+    let body = BranchMenuOverrideInput {
+        branch_id: branch,
+        menu_item_id: item,
+        price_override: Some(6000),
+        is_available: true,
+        sizes: None,
+    };
+    test::call_service(
+        &app,
+        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
+    )
+    .await;
 
-    let resp = test::call_service(&app, auth_req!(get, format!("/menu-items?org_id={}&branch_id={}&category_id={}", org, branch, c1), token)).await;
+    let resp = test::call_service(
+        &app,
+        auth_req!(
+            get,
+            format!(
+                "/menu-items?org_id={}&branch_id={}&category_id={}",
+                org, branch, c1
+            ),
+            token
+        ),
+    )
+    .await;
     let items: Vec<MenuItem> = test::read_body_json(resp).await;
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].base_price, 6000);
 
-    let resp = test::call_service(&app, auth_req!(get, format!("/menu-items?org_id={}&branch_id={}&category_id={}", org, branch, c2), token)).await;
+    let resp = test::call_service(
+        &app,
+        auth_req!(
+            get,
+            format!(
+                "/menu-items?org_id={}&branch_id={}&category_id={}",
+                org, branch, c2
+            ),
+            token
+        ),
+    )
+    .await;
     let items: Vec<MenuItem> = test::read_body_json(resp).await;
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].base_price, 4000, "other category unaffected");
@@ -1189,7 +1580,11 @@ async fn test_branch_override_with_category_filter(pool: PgPool) {
 // ── Per-size branch overrides ─────────────────────────────────
 
 fn size_price(full: &MenuItemFull, label: &str) -> i32 {
-    full.sizes.iter().find(|s| s.label == label).unwrap_or_else(|| panic!("size {label} missing")).price_override
+    full.sizes
+        .iter()
+        .find(|s| s.label == label)
+        .unwrap_or_else(|| panic!("size {label} missing"))
+        .price_override
 }
 
 /// Size overrides round-trip through CRUD and the POS branch menu, with replace/none semantics.
@@ -1207,44 +1602,106 @@ async fn test_branch_size_override_crud_and_menu_injection(pool: PgPool) {
     add_item_size(&pool, item, "large", 8000).await;
     let token = generate_org_admin_token(user, org);
 
-    let menu_full = |t: &str| test::TestRequest::get()
-        .uri(&format!("/menu-items?org_id={}&branch_id={}&full=true", org, branch))
-        .insert_header(("Authorization", format!("Bearer {}", t))).to_request();
+    let menu_full = |t: &str| {
+        test::TestRequest::get()
+            .uri(&format!(
+                "/menu-items?org_id={}&branch_id={}&full=true",
+                org, branch
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", t)))
+            .to_request()
+    };
 
     // (a) base override 6000 + a 'large' size override 9000.
     let body = BranchMenuOverrideInput {
-        branch_id: branch, menu_item_id: item, price_override: Some(6000), is_available: true,
-        sizes: Some(vec![BranchSizeOverrideInput { size_label: "large".into(), price_override: 9000 }]),
+        branch_id: branch,
+        menu_item_id: item,
+        price_override: Some(6000),
+        is_available: true,
+        sizes: Some(vec![BranchSizeOverrideInput {
+            size_label: "large".into(),
+            price_override: 9000,
+        }]),
     };
-    let resp = test::call_service(&app, auth_req!(put, "/branch-menu-overrides".to_string(), token, body)).await;
+    let resp = test::call_service(
+        &app,
+        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
+    )
+    .await;
     assert!(resp.status().is_success());
     let ov: BranchMenuOverride = test::read_body_json(resp).await;
-    assert_eq!(ov.sizes, vec![BranchSizeOverride { size_label: "large".into(), price_override: 9000 }]);
+    assert_eq!(
+        ov.sizes,
+        vec![BranchSizeOverride {
+            size_label: "large".into(),
+            price_override: 9000
+        }]
+    );
 
     let resp = test::call_service(&app, menu_full(&token)).await;
     let full: Vec<MenuItemFull> = test::read_body_json(resp).await;
     assert_eq!(full[0].item.base_price, 6000, "branch base override");
-    assert_eq!(size_price(&full[0], "large"), 9000, "branch size override applied");
-    assert_eq!(size_price(&full[0], "small"), 4000, "un-overridden size keeps its catalog price");
+    assert_eq!(
+        size_price(&full[0], "large"),
+        9000,
+        "branch size override applied"
+    );
+    assert_eq!(
+        size_price(&full[0], "small"),
+        4000,
+        "un-overridden size keeps its catalog price"
+    );
 
     // (b) sizes = None leaves size overrides untouched while updating the base.
     let body = BranchMenuOverrideInput {
-        branch_id: branch, menu_item_id: item, price_override: Some(6500), is_available: true, sizes: None,
+        branch_id: branch,
+        menu_item_id: item,
+        price_override: Some(6500),
+        is_available: true,
+        sizes: None,
     };
-    test::call_service(&app, auth_req!(put, "/branch-menu-overrides".to_string(), token, body)).await;
-    let resp = test::call_service(&app, auth_req!(get, format!("/branch-menu-overrides?branch_id={}", branch), token)).await;
+    test::call_service(
+        &app,
+        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
+    )
+    .await;
+    let resp = test::call_service(
+        &app,
+        auth_req!(
+            get,
+            format!("/branch-menu-overrides?branch_id={}", branch),
+            token
+        ),
+    )
+    .await;
     let rows: Vec<BranchMenuOverride> = test::read_body_json(resp).await;
     assert_eq!(rows[0].price_override, Some(6500));
-    assert_eq!(rows[0].sizes.len(), 1, "sizes:None must not wipe existing size overrides");
+    assert_eq!(
+        rows[0].sizes.len(),
+        1,
+        "sizes:None must not wipe existing size overrides"
+    );
 
     // (c) sizes = [] clears all size overrides; the size reverts to its catalog price.
     let body = BranchMenuOverrideInput {
-        branch_id: branch, menu_item_id: item, price_override: Some(6500), is_available: true, sizes: Some(vec![]),
+        branch_id: branch,
+        menu_item_id: item,
+        price_override: Some(6500),
+        is_available: true,
+        sizes: Some(vec![]),
     };
-    test::call_service(&app, auth_req!(put, "/branch-menu-overrides".to_string(), token, body)).await;
+    test::call_service(
+        &app,
+        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
+    )
+    .await;
     let resp = test::call_service(&app, menu_full(&token)).await;
     let full: Vec<MenuItemFull> = test::read_body_json(resp).await;
-    assert_eq!(size_price(&full[0], "large"), 8000, "cleared size override reverts to catalog");
+    assert_eq!(
+        size_price(&full[0], "large"),
+        8000,
+        "cleared size override reverts to catalog"
+    );
 }
 
 /// A size override for a size the item doesn't have, or a negative price, is rejected.
@@ -1262,18 +1719,42 @@ async fn test_branch_size_override_validation(pool: PgPool) {
 
     // 'small' is not a size of this item.
     let body = BranchMenuOverrideInput {
-        branch_id: branch, menu_item_id: item, price_override: None, is_available: true,
-        sizes: Some(vec![BranchSizeOverrideInput { size_label: "small".into(), price_override: 100 }]),
+        branch_id: branch,
+        menu_item_id: item,
+        price_override: None,
+        is_available: true,
+        sizes: Some(vec![BranchSizeOverrideInput {
+            size_label: "small".into(),
+            price_override: 100,
+        }]),
     };
-    let resp = test::call_service(&app, auth_req!(put, "/branch-menu-overrides".to_string(), token, body)).await;
-    assert_eq!(resp.status(), 400, "overriding a non-existent size is rejected");
+    let resp = test::call_service(
+        &app,
+        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        400,
+        "overriding a non-existent size is rejected"
+    );
 
     // Negative size price.
     let body = BranchMenuOverrideInput {
-        branch_id: branch, menu_item_id: item, price_override: None, is_available: true,
-        sizes: Some(vec![BranchSizeOverrideInput { size_label: "large".into(), price_override: -1 }]),
+        branch_id: branch,
+        menu_item_id: item,
+        price_override: None,
+        is_available: true,
+        sizes: Some(vec![BranchSizeOverrideInput {
+            size_label: "large".into(),
+            price_override: -1,
+        }]),
     };
-    let resp = test::call_service(&app, auth_req!(put, "/branch-menu-overrides".to_string(), token, body)).await;
+    let resp = test::call_service(
+        &app,
+        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
+    )
+    .await;
     assert_eq!(resp.status(), 400, "negative size price is rejected");
 }
 
@@ -1292,22 +1773,62 @@ async fn test_branch_size_overrides_cleared_on_delete(pool: PgPool) {
     let token = generate_org_admin_token(user, org);
 
     let body = BranchMenuOverrideInput {
-        branch_id: branch, menu_item_id: item, price_override: Some(6000), is_available: true,
-        sizes: Some(vec![BranchSizeOverrideInput { size_label: "large".into(), price_override: 9000 }]),
+        branch_id: branch,
+        menu_item_id: item,
+        price_override: Some(6000),
+        is_available: true,
+        sizes: Some(vec![BranchSizeOverrideInput {
+            size_label: "large".into(),
+            price_override: 9000,
+        }]),
     };
-    test::call_service(&app, auth_req!(put, "/branch-menu-overrides".to_string(), token, body)).await;
+    test::call_service(
+        &app,
+        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
+    )
+    .await;
 
-    let resp = test::call_service(&app, auth_req!(delete, format!("/branch-menu-overrides?branch_id={}&menu_item_id={}", branch, item), token)).await;
+    let resp = test::call_service(
+        &app,
+        auth_req!(
+            delete,
+            format!(
+                "/branch-menu-overrides?branch_id={}&menu_item_id={}",
+                branch, item
+            ),
+            token
+        ),
+    )
+    .await;
     assert_eq!(resp.status(), 204);
 
-    let resp = test::call_service(&app, auth_req!(get, format!("/branch-menu-overrides?branch_id={}", branch), token)).await;
+    let resp = test::call_service(
+        &app,
+        auth_req!(
+            get,
+            format!("/branch-menu-overrides?branch_id={}", branch),
+            token
+        ),
+    )
+    .await;
     let rows: Vec<BranchMenuOverride> = test::read_body_json(resp).await;
-    assert!(rows.is_empty(), "delete clears both the item override and its size overrides");
+    assert!(
+        rows.is_empty(),
+        "delete clears both the item override and its size overrides"
+    );
 
     // And the branch menu reverts the size to its catalog price.
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/menu-items?org_id={}&branch_id={}&full=true", org, branch))
-        .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!(
+                "/menu-items?org_id={}&branch_id={}&full=true",
+                org, branch
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request(),
+    )
+    .await;
     let full: Vec<MenuItemFull> = test::read_body_json(resp).await;
     assert_eq!(size_price(&full[0], "large"), 8000);
 }
@@ -1325,9 +1846,12 @@ async fn test_branch_addon_override_crud_and_injection(pool: PgPool) {
     let addon = seed_addon_item(&pool, org, "Extra shot", "extra", 1000).await;
     let token = generate_org_admin_token(user, org);
 
-    let branch_addons = |t: &str| test::TestRequest::get()
-        .uri(&format!("/addon-items?org_id={}&branch_id={}", org, branch))
-        .insert_header(("Authorization", format!("Bearer {}", t))).to_request();
+    let branch_addons = |t: &str| {
+        test::TestRequest::get()
+            .uri(&format!("/addon-items?org_id={}&branch_id={}", org, branch))
+            .insert_header(("Authorization", format!("Bearer {}", t)))
+            .to_request()
+    };
 
     // No override → branch list shows the org default price.
     let resp = test::call_service(&app, branch_addons(&token)).await;
@@ -1336,37 +1860,82 @@ async fn test_branch_addon_override_crud_and_injection(pool: PgPool) {
     assert_eq!(addons[0].default_price, 1000);
 
     // Upsert a branch addon price.
-    let body = BranchAddonOverrideInput { branch_id: branch, addon_item_id: addon, price_override: Some(1500), is_available: true };
-    let resp = test::call_service(&app, auth_req!(put, "/branch-addon-overrides".to_string(), token, body)).await;
+    let body = BranchAddonOverrideInput {
+        branch_id: branch,
+        addon_item_id: addon,
+        price_override: Some(1500),
+        is_available: true,
+    };
+    let resp = test::call_service(
+        &app,
+        auth_req!(put, "/branch-addon-overrides".to_string(), token, body),
+    )
+    .await;
     assert!(resp.status().is_success());
     let ov: BranchAddonOverride = test::read_body_json(resp).await;
     assert_eq!(ov.price_override, Some(1500));
 
     let resp = test::call_service(&app, branch_addons(&token)).await;
     let addons: Vec<AddonItem> = test::read_body_json(resp).await;
-    assert_eq!(addons[0].default_price, 1500, "branch-effective addon price");
+    assert_eq!(
+        addons[0].default_price, 1500,
+        "branch-effective addon price"
+    );
 
     // Org list (no branch) is unchanged.
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/addon-items?org_id={}", org))
-        .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/addon-items?org_id={}", org))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request(),
+    )
+    .await;
     let addons: Vec<AddonItem> = test::read_body_json(resp).await;
     assert_eq!(addons[0].default_price, 1000, "org default unchanged");
 
     // Disable at this branch → excluded from the branch addon list.
-    let body = BranchAddonOverrideInput { branch_id: branch, addon_item_id: addon, price_override: Some(1500), is_available: false };
-    test::call_service(&app, auth_req!(put, "/branch-addon-overrides".to_string(), token, body)).await;
+    let body = BranchAddonOverrideInput {
+        branch_id: branch,
+        addon_item_id: addon,
+        price_override: Some(1500),
+        is_available: false,
+    };
+    test::call_service(
+        &app,
+        auth_req!(put, "/branch-addon-overrides".to_string(), token, body),
+    )
+    .await;
     let resp = test::call_service(&app, branch_addons(&token)).await;
     let addons: Vec<AddonItem> = test::read_body_json(resp).await;
     assert_eq!(addons.len(), 0, "branch-disabled addon is excluded");
 
-    let resp = test::call_service(&app, auth_req!(get, format!("/branch-addon-overrides?branch_id={}", branch), token)).await;
+    let resp = test::call_service(
+        &app,
+        auth_req!(
+            get,
+            format!("/branch-addon-overrides?branch_id={}", branch),
+            token
+        ),
+    )
+    .await;
     let rows: Vec<BranchAddonOverride> = test::read_body_json(resp).await;
     assert_eq!(rows.len(), 1);
     assert!(!rows[0].is_available);
 
     // Delete → reverts to the org default.
-    let resp = test::call_service(&app, auth_req!(delete, format!("/branch-addon-overrides?branch_id={}&addon_item_id={}", branch, addon), token)).await;
+    let resp = test::call_service(
+        &app,
+        auth_req!(
+            delete,
+            format!(
+                "/branch-addon-overrides?branch_id={}&addon_item_id={}",
+                branch, addon
+            ),
+            token
+        ),
+    )
+    .await;
     assert_eq!(resp.status(), 204);
     let resp = test::call_service(&app, branch_addons(&token)).await;
     let addons: Vec<AddonItem> = test::read_body_json(resp).await;
@@ -1388,8 +1957,12 @@ async fn test_list_addon_catalog_paginate_search_filter_sort(pool: PgPool) {
     let _oat = seed_addon_item(&pool, org, "Oat Milk", "milk_type", 1500).await;
     let token = generate_org_admin_token(user, org);
 
-    let get = |uri: String| test::TestRequest::get().uri(&uri)
-        .insert_header(("Authorization", format!("Bearer {}", token))).to_request();
+    let get = |uri: String| {
+        test::TestRequest::get()
+            .uri(&uri)
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request()
+    };
 
     // All addons.
     let resp = test::call_service(&app, get(format!("/addon-items/catalog?org_id={}", org))).await;
@@ -1399,13 +1972,27 @@ async fn test_list_addon_catalog_paginate_search_filter_sort(pool: PgPool) {
     assert_eq!(page.data.len(), 3);
 
     // Search by name.
-    let resp = test::call_service(&app, get(format!("/addon-items/catalog?org_id={}&search=caramel", org))).await;
+    let resp = test::call_service(
+        &app,
+        get(format!(
+            "/addon-items/catalog?org_id={}&search=caramel",
+            org
+        )),
+    )
+    .await;
     let page: PaginatedAddonItems = test::read_body_json(resp).await;
     assert_eq!(page.total, 1);
     assert_eq!(page.data[0].name, "Caramel Syrup");
 
     // Pagination envelope.
-    let resp = test::call_service(&app, get(format!("/addon-items/catalog?org_id={}&per_page=2&page=1", org))).await;
+    let resp = test::call_service(
+        &app,
+        get(format!(
+            "/addon-items/catalog?org_id={}&per_page=2&page=1",
+            org
+        )),
+    )
+    .await;
     let page: PaginatedAddonItems = test::read_body_json(resp).await;
     assert_eq!(page.total, 3);
     assert_eq!(page.data.len(), 2);
@@ -1416,14 +2003,31 @@ async fn test_list_addon_catalog_paginate_search_filter_sort(pool: PgPool) {
         .bind(branch).bind(caramel).execute(&pool).await.unwrap();
 
     // Overridden-only filter.
-    let resp = test::call_service(&app, get(format!("/addon-items/catalog?org_id={}&branch_id={}&overridden=true", org, branch))).await;
+    let resp = test::call_service(
+        &app,
+        get(format!(
+            "/addon-items/catalog?org_id={}&branch_id={}&overridden=true",
+            org, branch
+        )),
+    )
+    .await;
     let page: PaginatedAddonItems = test::read_body_json(resp).await;
     assert_eq!(page.total, 1);
     assert_eq!(page.data[0].id, caramel);
-    assert_eq!(page.data[0].default_price, 500, "catalog returns the ORG price, not the branch override");
+    assert_eq!(
+        page.data[0].default_price, 500,
+        "catalog returns the ORG price, not the branch override"
+    );
 
     // Overridden-first sort.
-    let resp = test::call_service(&app, get(format!("/addon-items/catalog?org_id={}&branch_id={}&sort=overridden", org, branch))).await;
+    let resp = test::call_service(
+        &app,
+        get(format!(
+            "/addon-items/catalog?org_id={}&branch_id={}&sort=overridden",
+            org, branch
+        )),
+    )
+    .await;
     let page: PaginatedAddonItems = test::read_body_json(resp).await;
     assert_eq!(page.data[0].id, caramel, "overridden addon sorts first");
 }
@@ -1451,8 +2055,12 @@ async fn test_menu_catalog_overridden_filter_and_sort(pool: PgPool) {
     sqlx::query("INSERT INTO branch_menu_overrides (branch_id, menu_item_id, price_override, is_available) VALUES ($1,$2,5500,true)")
         .bind(branch).bind(latte).execute(&pool).await.unwrap();
 
-    let get = |uri: String| test::TestRequest::get().uri(&uri)
-        .insert_header(("Authorization", format!("Bearer {}", token))).to_request();
+    let get = |uri: String| {
+        test::TestRequest::get()
+            .uri(&uri)
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request()
+    };
 
     // No branch_id → full org catalog (backward compatible).
     let resp = test::call_service(&app, get(format!("/costing/catalog?org_id={}", org))).await;
@@ -1461,13 +2069,27 @@ async fn test_menu_catalog_overridden_filter_and_sort(pool: PgPool) {
     assert_eq!(page.total, 3);
 
     // Overridden-only.
-    let resp = test::call_service(&app, get(format!("/costing/catalog?org_id={}&branch_id={}&overridden=true", org, branch))).await;
+    let resp = test::call_service(
+        &app,
+        get(format!(
+            "/costing/catalog?org_id={}&branch_id={}&overridden=true",
+            org, branch
+        )),
+    )
+    .await;
     let page: PaginatedMenuItems = test::read_body_json(resp).await;
     assert_eq!(page.total, 1);
     assert_eq!(page.data[0].item.id, latte);
 
     // Overridden-first sort.
-    let resp = test::call_service(&app, get(format!("/costing/catalog?org_id={}&branch_id={}&sort=overridden", org, branch))).await;
+    let resp = test::call_service(
+        &app,
+        get(format!(
+            "/costing/catalog?org_id={}&branch_id={}&sort=overridden",
+            org, branch
+        )),
+    )
+    .await;
     let page: PaginatedMenuItems = test::read_body_json(resp).await;
     assert_eq!(page.data[0].item.id, latte, "overridden item sorts first");
 }

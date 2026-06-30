@@ -1,10 +1,10 @@
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::HttpMessage;
+use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use uuid::Uuid;
-use actix_web::HttpMessage;
 use utoipa::{IntoParams, ToSchema};
+use uuid::Uuid;
 
 use crate::{
     auth::{guards::require_same_org, jwt::Claims},
@@ -41,40 +41,40 @@ pub enum PrinterBrand {
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct Branch {
-    pub id:                Uuid,
-    pub org_id:            Uuid,
+    pub id: Uuid,
+    pub org_id: Uuid,
     /// Short org-unique branch prefix (A-Z0-9) embedded in every order_ref
     /// (`<CODE>-YYMMDD-…`). Exposed so an offline device can mint the same ref the
     /// server would, from first boot, without waiting for a synced order.
     #[schema(example = "RT1")]
-    pub code:              Option<String>,
+    pub code: Option<String>,
     #[schema(example = "Zamalek")]
-    pub name:              String,
+    pub name: String,
     #[schema(example = "26 July Corridor, Zamalek, Cairo")]
-    pub address:           Option<String>,
+    pub address: Option<String>,
     #[schema(example = "+201234567890")]
-    pub phone:             Option<String>,
+    pub phone: Option<String>,
     /// Effective IANA timezone name for this branch, resolved as
     /// `branch.timezone → org.timezone → Africa/Cairo`. Always present;
     /// clients should format all of this branch's timestamps in this zone.
     #[schema(example = "Africa/Cairo")]
-    pub timezone:          String,
-    pub printer_brand:     Option<PrinterBrand>,
+    pub timezone: String,
+    pub printer_brand: Option<PrinterBrand>,
     #[schema(example = "192.168.1.50")]
-    pub printer_ip:        Option<String>,
+    pub printer_ip: Option<String>,
     #[schema(example = 9100)]
-    pub printer_port:      Option<i32>,
-    pub is_active:         bool,
+    pub printer_port: Option<i32>,
+    pub is_active: bool,
     /// Convenience field — populated from the parent org's `logo_url`.
-    pub org_logo_url:      Option<String>,
+    pub org_logo_url: Option<String>,
     /// WGS-84 latitude for geofenced branch resolution.
-    pub latitude:          Option<f64>,
+    pub latitude: Option<f64>,
     /// WGS-84 longitude for geofenced branch resolution.
-    pub longitude:         Option<f64>,
+    pub longitude: Option<f64>,
     /// Radius in meters within which this branch is considered a match. Defaults to 200.
     pub geo_radius_meters: Option<i32>,
-    pub created_at:        DateTime<Utc>,
-    pub updated_at:        DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -86,21 +86,21 @@ pub struct ListBranchesQuery {
 
 #[derive(Deserialize, ToSchema)]
 pub struct CreateBranchRequest {
-    pub org_id:            Uuid,
+    pub org_id: Uuid,
     #[schema(example = "Zamalek")]
-    pub name:              String,
-    pub address:           Option<String>,
-    pub phone:             Option<String>,
+    pub name: String,
+    pub address: Option<String>,
+    pub phone: Option<String>,
     /// IANA timezone name. If absent, the branch inherits the org's timezone.
     #[schema(example = "Africa/Cairo")]
-    pub timezone:          Option<String>,
-    pub printer_brand:     Option<PrinterBrand>,
-    pub printer_ip:        Option<String>,
+    pub timezone: Option<String>,
+    pub printer_brand: Option<PrinterBrand>,
+    pub printer_ip: Option<String>,
     /// TCP port for the receipt printer. Defaults to `9100` if absent.
     #[schema(example = 9100)]
-    pub printer_port:      Option<i32>,
-    pub latitude:          Option<f64>,
-    pub longitude:         Option<f64>,
+    pub printer_port: Option<i32>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
     /// Geofence radius in meters. Defaults to 200.
     pub geo_radius_meters: Option<i32>,
 }
@@ -116,10 +116,10 @@ pub struct CreateBranchRequest {
 /// endpoint should send only the fields they want to change.
 #[derive(Deserialize, ToSchema)]
 pub struct UpdateBranchRequest {
-    pub name:      Option<String>,
-    pub address:   Option<String>,
-    pub phone:     Option<String>,
-    pub timezone:  Option<String>,
+    pub name: Option<String>,
+    pub address: Option<String>,
+    pub phone: Option<String>,
+    pub timezone: Option<String>,
     pub is_active: Option<bool>,
 
     // Nullable fields — use double-option pattern (see fn below).
@@ -131,11 +131,11 @@ pub struct UpdateBranchRequest {
 
     #[serde(default, deserialize_with = "double_option")]
     #[schema(nullable, value_type = Option<String>)]
-    pub printer_ip:    Option<Option<String>>,
+    pub printer_ip: Option<Option<String>>,
 
     #[serde(default, deserialize_with = "double_option")]
     #[schema(nullable, value_type = Option<i32>)]
-    pub printer_port:  Option<Option<i32>>,
+    pub printer_port: Option<Option<i32>>,
 
     // Clearable geo fields
     #[serde(default, deserialize_with = "double_option")]
@@ -173,15 +173,17 @@ where
     security(("bearer_jwt" = []))
 )]
 pub async fn list_branches(
-    req:   HttpRequest,
-    pool:  web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     query: web::Query<ListBranchesQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "branches", "read").await?;
     require_same_org(&claims, Some(query.org_id))?;
 
-    let branches = if claims.role == crate::models::UserRole::BranchManager || claims.role == crate::models::UserRole::Teller {
+    let branches = if claims.role == crate::models::UserRole::BranchManager
+        || claims.role == crate::models::UserRole::Teller
+    {
         sqlx::query_as::<_, Branch>(
             r#"
             SELECT b.id, b.org_id, b.code, b.name, b.address, b.phone,
@@ -238,9 +240,9 @@ pub async fn list_branches(
     security(("bearer_jwt" = []))
 )]
 pub async fn get_branch(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "branches", "read").await?;
@@ -263,7 +265,7 @@ pub async fn get_branch(
     security(("bearer_jwt" = []))
 )]
 pub async fn create_branch(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
     body: web::Json<CreateBranchRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -338,9 +340,9 @@ pub async fn create_branch(
     security(("bearer_jwt" = []))
 )]
 pub async fn update_branch(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
     body: web::Json<UpdateBranchRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -358,10 +360,10 @@ pub async fn update_branch(
     //   Some(None)    → explicit null (clear the field)
     //   None          → keep existing value
     let new_printer_brand: Option<Option<PrinterBrand>> = body.printer_brand.clone();
-    let new_printer_ip:    Option<Option<String>>       = body.printer_ip.clone();
-    let new_printer_port:  Option<Option<i32>>          = body.printer_port;
-    let new_latitude:      Option<Option<f64>>          = body.latitude;
-    let new_longitude:     Option<Option<f64>>          = body.longitude;
+    let new_printer_ip: Option<Option<String>> = body.printer_ip.clone();
+    let new_printer_port: Option<Option<i32>> = body.printer_port;
+    let new_latitude: Option<Option<f64>> = body.latitude;
+    let new_longitude: Option<Option<f64>> = body.longitude;
 
     let branch = sqlx::query_as::<_, Branch>(
         r#"
@@ -447,9 +449,9 @@ pub async fn update_branch(
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_branch(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "branches", "delete").await?;
@@ -457,12 +459,10 @@ pub async fn delete_branch(
     let existing = fetch_branch(pool.get_ref(), *id).await?;
     require_same_org(&claims, Some(existing.org_id))?;
 
-    sqlx::query(
-        "UPDATE branches SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(*id)
-    .execute(pool.get_ref())
-    .await?;
+    sqlx::query("UPDATE branches SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL")
+        .bind(*id)
+        .execute(pool.get_ref())
+        .await?;
 
     Ok(HttpResponse::NoContent().finish())
 }
@@ -481,9 +481,7 @@ pub async fn delete_branch(
     ),
     security(("bearer_jwt" = []))
 )]
-pub async fn list_timezones(
-    pool: web::Data<PgPool>,
-) -> Result<HttpResponse, AppError> {
+pub async fn list_timezones(pool: web::Data<PgPool>) -> Result<HttpResponse, AppError> {
     let names: Vec<String> = sqlx::query_scalar(
         "SELECT enumlabel::text FROM pg_enum WHERE enumtypid = 'timezone_name'::regtype ORDER BY enumlabel",
     )

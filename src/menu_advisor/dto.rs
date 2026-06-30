@@ -60,22 +60,22 @@ pub struct AnalysisConfig {
 impl Default for AnalysisConfig {
     fn default() -> Self {
         Self {
-            analysis_window_days:           30.0,
-            recency_half_life_days:         14.0,
-            target_food_cost_pct:           0.30,
-            min_gross_margin_pct:           0.55,
+            analysis_window_days: 30.0,
+            recency_half_life_days: 14.0,
+            target_food_cost_pct: 0.30,
+            min_gross_margin_pct: 0.55,
             max_price_change_pct_per_cycle: 0.15,
-            min_units_for_classification:   20.0,
-            min_cooccurrences_for_bundle:   8.0,
-            min_lift_for_bundle:            1.20,
-            bundle_discount_pct_range:      (0.10, 0.25),
-            price_rounding_rule:            PriceRoundingRule::EgyptianCafe,
-            bundle_top_k_partners:          5,
-            bundle_max_size:                3,
-            bundle_top_n_per_focus:         3,
-            halo_repeat_rate:               0.15,
-            promotion_lift_prior:           1.25,
-            revenue_mode_max_raise_pct:     0.05,
+            min_units_for_classification: 20.0,
+            min_cooccurrences_for_bundle: 8.0,
+            min_lift_for_bundle: 1.20,
+            bundle_discount_pct_range: (0.10, 0.25),
+            price_rounding_rule: PriceRoundingRule::EgyptianCafe,
+            bundle_top_k_partners: 5,
+            bundle_max_size: 3,
+            bundle_top_n_per_focus: 3,
+            halo_repeat_rate: 0.15,
+            promotion_lift_prior: 1.25,
+            revenue_mode_max_raise_pct: 0.05,
         }
     }
 }

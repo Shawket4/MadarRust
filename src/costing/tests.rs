@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-use actix_web::{test, web, App};
+use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -13,8 +13,15 @@ fn get_secret() -> JwtSecret {
 }
 
 fn admin_token(user_id: Uuid, org_id: Uuid) -> String {
-    crate::auth::jwt::create_token(&get_secret(), user_id, Some(org_id), UserRole::OrgAdmin, None, 24)
-        .unwrap()
+    crate::auth::jwt::create_token(
+        &get_secret(),
+        user_id,
+        Some(org_id),
+        UserRole::OrgAdmin,
+        None,
+        24,
+    )
+    .unwrap()
 }
 
 async fn seed_basics(pool: &PgPool) -> (Uuid, Uuid, String) {
@@ -61,7 +68,11 @@ async fn test_sku_costs_rollup_and_missing(pool: PgPool) {
 
     let cat_id = Uuid::new_v4();
     sqlx::query("INSERT INTO categories (id, org_id, name) VALUES ($1, $2, 'Drinks')")
-        .bind(cat_id).bind(org_id).execute(&pool).await.unwrap();
+        .bind(cat_id)
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // Costed item: 10 g @ 250 piastres/g → 2 500 piastres.
     let costed = Uuid::new_v4();
@@ -158,7 +169,7 @@ async fn test_addon_costs_rollup(pool: PgPool) {
 // ─────────────────────────────────────────────────────────────────────
 
 mod backfill_tests {
-    use super::super::backfill::{backfill_cost_snapshots, BackfillScope};
+    use super::super::backfill::{BackfillScope, backfill_cost_snapshots};
     use sqlx::PgPool;
     use uuid::Uuid;
 
@@ -245,7 +256,7 @@ mod backfill_tests {
         sqlx::query(
             "INSERT INTO menu_item_recipes (menu_item_id, size_label, quantity_used, \
                                             ingredient_name, ingredient_unit, org_ingredient_id) \
-             VALUES ($1, 'one_size'::item_size, $2, 'ing', 'g', $3)",
+             VALUES ($1, 'one_size', $2, 'ing', 'g', $3)",
         )
         .bind(id)
         .bind(rust_decimal::Decimal::try_from(qty).unwrap())
@@ -334,7 +345,17 @@ mod backfill_tests {
         .execute(&pool)
         .await
         .unwrap();
-        let l1 = insert_line(&pool, s.order, Some(m1), None, 2, Some(99_999), Some(99_999), false).await;
+        let l1 = insert_line(
+            &pool,
+            s.order,
+            Some(m1),
+            None,
+            2,
+            Some(99_999),
+            Some(99_999),
+            false,
+        )
+        .await;
         let addon_row: Uuid = sqlx::query_scalar(
             "INSERT INTO order_item_addons (order_item_id, addon_item_id, addon_name, \
                                             unit_price, quantity, line_total, line_cost) \
@@ -366,7 +387,17 @@ mod backfill_tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        let l2 = insert_line(&pool, s.order, None, Some(bundle), 1, Some(22_222), Some(5_555), false).await;
+        let l2 = insert_line(
+            &pool,
+            s.order,
+            None,
+            Some(bundle),
+            1,
+            Some(22_222),
+            Some(5_555),
+            false,
+        )
+        .await;
         sqlx::query(
             "INSERT INTO order_line_bundle_components (order_line_id, item_id, quantity, line_cost) \
              VALUES ($1, $2, 1, 11111)",
@@ -379,7 +410,17 @@ mod backfill_tests {
 
         // L3: item with NO recipe today → unknowable.
         let m3 = seed_bare_item(&pool, org).await;
-        let l3 = insert_line(&pool, s.order, Some(m3), None, 1, Some(4_444), Some(4_444), false).await;
+        let l3 = insert_line(
+            &pool,
+            s.order,
+            Some(m3),
+            None,
+            1,
+            Some(4_444),
+            Some(4_444),
+            false,
+        )
+        .await;
 
         // L4: costed recipe BUT an addon with no ingredient links → the
         // line's full cost is unknowable; recipe-scope unit_cost resolves.
@@ -420,7 +461,17 @@ mod backfill_tests {
 
         // Other org: must be untouched by a branch-scoped run.
         let (_org_b, sb) = seed_org_branch_order(&pool).await;
-        let lb = insert_line(&pool, sb.order, None, None, 1, Some(7_777), Some(7_777), false).await;
+        let lb = insert_line(
+            &pool,
+            sb.order,
+            None,
+            None,
+            1,
+            Some(7_777),
+            Some(7_777),
+            false,
+        )
+        .await;
 
         let summary = backfill_cost_snapshots(&pool, BackfillScope::Branch(s.branch), false)
             .await
@@ -439,13 +490,12 @@ mod backfill_tests {
                 .await
                 .unwrap();
         assert_eq!(addon_cost, Some(200)); // 100 × addon qty 1 × line qty 2
-        let opt_cost: Option<i64> = sqlx::query_scalar(
-            "SELECT cost FROM order_item_optionals WHERE order_item_id = $1",
-        )
-        .bind(l1)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let opt_cost: Option<i64> =
+            sqlx::query_scalar("SELECT cost FROM order_item_optionals WHERE order_item_id = $1")
+                .bind(l1)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(opt_cost, Some(50)); // 0.5 × 100, per parent unit
 
         // L2: bundle — component 3×100 = 300; unit_cost NULL by definition.
@@ -469,7 +519,10 @@ mod backfill_tests {
         assert_eq!(line_costs(&pool, l5).await, (Some(47), Some(47), false));
 
         // Other org untouched by the branch scope.
-        assert_eq!(line_costs(&pool, lb).await, (Some(7_777), Some(7_777), false));
+        assert_eq!(
+            line_costs(&pool, lb).await,
+            (Some(7_777), Some(7_777), false)
+        );
     }
 
     #[sqlx::test]
@@ -477,7 +530,17 @@ mod backfill_tests {
         let (org, s) = seed_org_branch_order(&pool).await;
         let ing = seed_ingredient_at_100(&pool, org).await;
         let m1 = seed_item_with_recipe(&pool, org, ing, 2.0).await;
-        let l1 = insert_line(&pool, s.order, Some(m1), None, 1, Some(9_999), Some(9_999), false).await;
+        let l1 = insert_line(
+            &pool,
+            s.order,
+            Some(m1),
+            None,
+            1,
+            Some(9_999),
+            Some(9_999),
+            false,
+        )
+        .await;
 
         // Dry run: summary reflects the would-be state, data unchanged.
         let dry = backfill_cost_snapshots(&pool, BackfillScope::Org(org), true)
@@ -486,7 +549,10 @@ mod backfill_tests {
         assert!(dry.dry_run);
         assert_eq!(dry.line_cost_total_before, 9_999);
         assert_eq!(dry.line_cost_total_after, 200); // 2 × 100 × qty 1
-        assert_eq!(line_costs(&pool, l1).await, (Some(9_999), Some(9_999), false));
+        assert_eq!(
+            line_costs(&pool, l1).await,
+            (Some(9_999), Some(9_999), false)
+        );
 
         // Live org-scoped run commits.
         let live = backfill_cost_snapshots(&pool, BackfillScope::Org(org), false)

@@ -2,7 +2,7 @@ use actix_governor::{Governor, GovernorConfigBuilder};
 use actix_web::{middleware::Condition, web};
 
 use crate::auth::{handlers, middleware::JwtMiddleware};
-use crate::rate_limit::{rate_limiting_enabled, PeerIpOrLocalhost};
+use crate::rate_limit::{PeerIpOrLocalhost, rate_limiting_enabled};
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     // 10 req/min per IP, burst of 10.
@@ -26,17 +26,17 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .service(
                 web::resource("/login")
                     .wrap(Condition::new(limited, Governor::new(&gov)))
-                    .route(web::post().to(handlers::login))
+                    .route(web::post().to(handlers::login)),
             )
             .service(
                 web::resource("/resolve-branch")
                     .wrap(Condition::new(limited, Governor::new(&gov)))
-                    .route(web::post().to(handlers::resolve_branch))
+                    .route(web::post().to(handlers::resolve_branch)),
             )
             .service(
                 web::scope("")
                     .wrap(JwtMiddleware)
-                    .route("/me",          web::get().to(handlers::me))
+                    .route("/me", web::get().to(handlers::me))
                     .route("/permissions", web::get().to(handlers::permissions)),
             ),
     );

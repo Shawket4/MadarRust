@@ -19,11 +19,18 @@ pub enum Topic {
     Tickets,
     Kitchen,
     Orders,
+    Reservations,
 }
 
 impl Topic {
     /// Every topic, for the "subscribe to all I'm allowed to read" default.
-    pub const ALL: [Topic; 4] = [Topic::Delivery, Topic::Tickets, Topic::Kitchen, Topic::Orders];
+    pub const ALL: [Topic; 5] = [
+        Topic::Delivery,
+        Topic::Tickets,
+        Topic::Kitchen,
+        Topic::Orders,
+        Topic::Reservations,
+    ];
 
     pub fn parse(s: &str) -> Option<Topic> {
         match s.trim() {
@@ -31,6 +38,7 @@ impl Topic {
             "tickets" => Some(Topic::Tickets),
             "kitchen" => Some(Topic::Kitchen),
             "orders" => Some(Topic::Orders),
+            "reservations" => Some(Topic::Reservations),
             _ => None,
         }
     }
@@ -41,6 +49,7 @@ impl Topic {
             Topic::Tickets => "tickets",
             Topic::Kitchen => "kitchen",
             Topic::Orders => "orders",
+            Topic::Reservations => "reservations",
         }
     }
 
@@ -51,6 +60,7 @@ impl Topic {
             Topic::Tickets => ("open_tickets", "read"),
             Topic::Kitchen => ("kitchen_orders", "read"),
             Topic::Orders => ("orders", "read"),
+            Topic::Reservations => ("reservations", "read"),
         }
     }
 }
@@ -64,6 +74,10 @@ pub struct BranchEvent {
     /// `"delivery.updated"`. The client switches on this.
     pub event_type: String,
     pub data: serde_json::Value,
+    /// Monotonic per-branch sequence, assigned by the hub at publish time (0 until
+    /// then). Emitted as the SSE `id:` field so a reconnecting client can request
+    /// replay via `Last-Event-ID`.
+    pub id: u64,
 }
 
 impl BranchEvent {
@@ -71,6 +85,11 @@ impl BranchEvent {
     /// degrades to `null` (the client re-seeds from the snapshot), never panics.
     pub fn new(topic: Topic, event_type: impl Into<String>, payload: &impl Serialize) -> Self {
         let data = serde_json::to_value(payload).unwrap_or(serde_json::Value::Null);
-        Self { topic, event_type: event_type.into(), data }
+        Self {
+            topic,
+            event_type: event_type.into(),
+            data,
+            id: 0, // assigned by the hub at publish
+        }
     }
 }

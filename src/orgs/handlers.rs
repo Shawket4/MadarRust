@@ -1,5 +1,5 @@
 use actix_multipart::Multipart;
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -7,7 +7,10 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
-    auth::{guards::{require_super_admin, require_same_org}, jwt::Claims},
+    auth::{
+        guards::{require_same_org, require_super_admin},
+        jwt::Claims,
+    },
     branches::handlers::validate_timezone,
     errors::{AppError, AppErrorResponse},
     permissions::checker::check_permission,
@@ -18,25 +21,25 @@ use crate::{
 
 #[derive(Debug, sqlx::FromRow, Serialize, Deserialize, ToSchema)]
 pub struct Org {
-    pub id:             Uuid,
+    pub id: Uuid,
     #[schema(example = "The Rue")]
-    pub name:           String,
+    pub name: String,
     #[schema(example = "the-rue")]
-    pub slug:           String,
+    pub slug: String,
     #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
-    pub logo_url:       Option<String>,
+    pub logo_url: Option<String>,
     #[schema(example = "EGP")]
-    pub currency_code:  String,
+    pub currency_code: String,
     /// Tax rate as a decimal (e.g. `0.14` for 14% VAT).
     /// Stored as `BigDecimal` internally; transmitted as a JSON number.
     #[schema(value_type = f64, example = 0.14)]
-    pub tax_rate:       sqlx::types::BigDecimal,
+    pub tax_rate: sqlx::types::BigDecimal,
     pub receipt_footer: Option<String>,
-    pub is_active:      bool,
+    pub is_active: bool,
     /// IANA timezone name. The org-level default that branches inherit when
     /// their own timezone is unset. Defaults to `Africa/Cairo`.
     #[schema(example = "Africa/Cairo")]
-    pub timezone:       String,
+    pub timezone: String,
 }
 
 // ── Request types ─────────────────────────────────────────────
@@ -45,34 +48,37 @@ pub struct Org {
 // We keep this struct for the non-file fields parsed out of the form.
 #[derive(Default)]
 struct CreateOrgFields {
-    name:           Option<String>,
-    slug:           Option<String>,
-    currency_code:  Option<String>,
-    tax_rate:       Option<f64>,
+    name: Option<String>,
+    slug: Option<String>,
+    currency_code: Option<String>,
+    tax_rate: Option<f64>,
     receipt_footer: Option<String>,
-    timezone:       Option<String>,
+    timezone: Option<String>,
 }
 
 #[derive(Deserialize, ToSchema)]
 pub struct UpdateOrgRequest {
-    pub name:           Option<String>,
-    pub slug:           Option<String>,
-    pub currency_code:  Option<String>,
+    pub name: Option<String>,
+    pub slug: Option<String>,
+    pub currency_code: Option<String>,
     #[schema(example = 0.14)]
-    pub tax_rate:       Option<f64>,
+    pub tax_rate: Option<f64>,
     pub receipt_footer: Option<String>,
-    pub is_active:      Option<bool>,
+    pub is_active: Option<bool>,
     /// IANA timezone name (e.g. `Africa/Cairo`). Validated against the
     /// PostgreSQL timezone database. Branches inherit this when their own
     /// timezone is unset.
     #[schema(example = "Africa/Cairo")]
-    pub timezone:       Option<String>,
+    pub timezone: Option<String>,
     /// `null` clears the logo; absent leaves it unchanged. To set a new
     /// logo, use `PUT /orgs/{id}/logo` (multipart) instead — JSON updates
     /// only accept the clear-to-null case here.
-    #[serde(default, deserialize_with = "crate::menu::handlers::deserialize_double_option")]
+    #[serde(
+        default,
+        deserialize_with = "crate::menu::handlers::deserialize_double_option"
+    )]
     #[schema(nullable, value_type = Option<String>)]
-    pub logo_url:       Option<Option<String>>,
+    pub logo_url: Option<Option<String>>,
 }
 
 // ── OpenAPI-only multipart schemas ────────────────────────────
@@ -134,31 +140,35 @@ pub struct UploadLogoMultipart {
     security(("bearer_jwt" = []))
 )]
 pub async fn create_org(
-    req:     HttpRequest,
-    pool:    web::Data<PgPool>,
-    mut mp:  Multipart,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
+    mut mp: Multipart,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orgs", "create").await?;
     require_super_admin(&claims)?;
 
     let uploads_dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
-    let base_url    = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
+    let base_url = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
 
-    let mut fields    = CreateOrgFields::default();
+    let mut fields = CreateOrgFields::default();
     let mut logo_url: Option<String> = None;
 
-    while let Some(mut field) = mp.try_next().await.map_err(|e| {
-        AppError::BadRequest(format!("Multipart error: {e}"))
-    })? {
+    while let Some(mut field) = mp
+        .try_next()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Multipart error: {e}")))?
+    {
         let name = field.name().unwrap_or("").to_string();
 
         match name.as_str() {
             "logo" => {
                 let mut bytes = Vec::new();
-                while let Some(chunk) = field.try_next().await.map_err(|e| {
-                    AppError::BadRequest(format!("Upload read error: {e}"))
-                })? {
+                while let Some(chunk) = field
+                    .try_next()
+                    .await
+                    .map_err(|e| AppError::BadRequest(format!("Upload read error: {e}")))?
+                {
                     bytes.extend_from_slice(chunk.as_ref());
                 }
                 if !bytes.is_empty() {
@@ -167,54 +177,71 @@ pub async fn create_org(
                         .map(|m| m.to_string())
                         .unwrap_or_default();
                     let ext = match ct.as_str() {
-                        "image/png"  => "png",
+                        "image/png" => "png",
                         "image/webp" => "webp",
-                        _            => "jpg",
+                        _ => "jpg",
                     };
-                    let filename  = format!("{}.{}", Uuid::new_v4(), ext);
+                    let filename = format!("{}.{}", Uuid::new_v4(), ext);
                     let file_path = format!("{}/logos/{}", uploads_dir, filename);
                     std::fs::create_dir_all(format!("{}/logos", uploads_dir))
                         .map_err(|_| AppError::Internal)?;
-                    std::fs::write(&file_path, &bytes)
-                        .map_err(|_| AppError::Internal)?;
-                    logo_url = Some(format!("{}/logos/{}", base_url.trim_end_matches('/'), filename));
+                    std::fs::write(&file_path, &bytes).map_err(|_| AppError::Internal)?;
+                    logo_url = Some(format!(
+                        "{}/logos/{}",
+                        base_url.trim_end_matches('/'),
+                        filename
+                    ));
                 }
             }
-            "name"           => fields.name           = text_field(&mut field).await?,
-            "slug"           => fields.slug           = text_field(&mut field).await?,
-            "currency_code"  => fields.currency_code  = text_field(&mut field).await?,
-            "tax_rate"       => {
+            "name" => fields.name = text_field(&mut field).await?,
+            "slug" => fields.slug = text_field(&mut field).await?,
+            "currency_code" => fields.currency_code = text_field(&mut field).await?,
+            "tax_rate" => {
                 if let Some(s) = text_field(&mut field).await? {
                     fields.tax_rate = s.parse::<f64>().ok();
                 }
             }
             "receipt_footer" => fields.receipt_footer = text_field(&mut field).await?,
-            "timezone"       => fields.timezone       = text_field(&mut field).await?,
-            _                => { drain_field(&mut field).await?; }
+            "timezone" => fields.timezone = text_field(&mut field).await?,
+            _ => {
+                drain_field(&mut field).await?;
+            }
         }
     }
 
-    let name = fields.name.ok_or_else(|| AppError::BadRequest("name is required".into()))?;
-    let slug = fields.slug.ok_or_else(|| AppError::BadRequest("slug is required".into()))?;
+    let name = fields
+        .name
+        .ok_or_else(|| AppError::BadRequest("name is required".into()))?;
+    let slug = fields
+        .slug
+        .ok_or_else(|| AppError::BadRequest("slug is required".into()))?;
 
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM organizations WHERE slug = $1)"
-    )
-    .bind(&slug)
-    .fetch_one(pool.get_ref())
-    .await?;
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM organizations WHERE slug = $1)")
+            .bind(&slug)
+            .fetch_one(pool.get_ref())
+            .await?;
 
     if exists {
-        return Err(AppError::Conflict(format!("Slug '{}' is already taken", slug)));
+        return Err(AppError::Conflict(format!(
+            "Slug '{}' is already taken",
+            slug
+        )));
     }
 
     let currency = fields.currency_code.as_deref().unwrap_or("EGP");
     let tax_rate = fields.tax_rate.unwrap_or(0.14);
     if !(0.0..=1.0).contains(&tax_rate) {
-        return Err(AppError::BadRequest("tax_rate must be between 0 and 1".into()));
+        return Err(AppError::BadRequest(
+            "tax_rate must be between 0 and 1".into(),
+        ));
     }
 
-    let timezone = fields.timezone.as_deref().filter(|s| !s.is_empty()).unwrap_or("Africa/Cairo");
+    let timezone = fields
+        .timezone
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Africa/Cairo");
     validate_timezone(pool.get_ref(), timezone).await?;
 
     let mut tx = pool.begin().await?;
@@ -270,7 +297,7 @@ pub async fn create_org(
     security(("bearer_jwt" = []))
 )]
 pub async fn list_orgs(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -307,8 +334,8 @@ pub async fn list_orgs(
     security(("bearer_jwt" = []))
 )]
 pub async fn get_org(
-    req:    HttpRequest,
-    pool:   web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     org_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -330,13 +357,13 @@ pub async fn get_org(
 
 #[derive(Debug, sqlx::FromRow, Serialize, ToSchema)]
 pub struct OfflineTellerCredential {
-    pub user_id:          Uuid,
-    pub name:             String,
+    pub user_id: Uuid,
+    pub name: String,
     /// PIN-login role: `teller`, `waiter`, or `kitchen`. The device uses this to
     /// route the offline session (a waiter lands on tickets, a kitchen device on
     /// the KDS) without re-querying the backend.
-    pub role:             String,
-    pub is_active:        bool,
+    pub role: String,
+    pub is_active: bool,
     /// argon2id verifier of the user's PIN (derived at online login). `null`
     /// until the user has logged in online at least once.
     pub offline_pin_hash: Option<String>,
@@ -344,16 +371,16 @@ pub struct OfflineTellerCredential {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct OfflineAuthBundle {
-    pub org_id:       Uuid,
+    pub org_id: Uuid,
     pub generated_at: chrono::DateTime<chrono::Utc>,
     /// All PIN-login credentials for the org (tellers, waiters, and kitchen
     /// devices). Field name kept as `tellers` for wire compatibility; it carries
     /// every offline-capable role, distinguished by `role`.
-    pub tellers:      Vec<OfflineTellerCredential>,
+    pub tellers: Vec<OfflineTellerCredential>,
     /// The org's stable LAN-relay secret, hex-encoded. Devices derive a per-branch
     /// HMAC-SHA256 subkey from it to sign every LAN message (Phase E), so only
     /// branch-provisioned devices are trusted on the shared Wi-Fi.
-    pub lan_secret:   String,
+    pub lan_secret: String,
 }
 
 #[utoipa::path(
@@ -368,8 +395,8 @@ pub struct OfflineAuthBundle {
     security(("bearer_jwt" = []))
 )]
 pub async fn offline_auth_bundle(
-    req:    HttpRequest,
-    pool:   web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     org_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -426,10 +453,10 @@ pub async fn offline_auth_bundle(
     security(("bearer_jwt" = []))
 )]
 pub async fn update_org(
-    req:    HttpRequest,
-    pool:   web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     org_id: web::Path<Uuid>,
-    body:   web::Json<UpdateOrgRequest>,
+    body: web::Json<UpdateOrgRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orgs", "update").await?;
@@ -439,7 +466,7 @@ pub async fn update_org(
 
     if let Some(slug) = &body.slug {
         let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM organizations WHERE slug = $1 AND id != $2)"
+            "SELECT EXISTS(SELECT 1 FROM organizations WHERE slug = $1 AND id != $2)",
         )
         .bind(slug)
         .bind(*org_id)
@@ -447,13 +474,18 @@ pub async fn update_org(
         .await?;
 
         if exists {
-            return Err(AppError::Conflict(format!("Slug '{}' is already taken", slug)));
+            return Err(AppError::Conflict(format!(
+                "Slug '{}' is already taken",
+                slug
+            )));
         }
     }
 
     if let Some(r) = body.tax_rate {
         if !(0.0..=1.0).contains(&r) {
-            return Err(AppError::BadRequest("tax_rate must be between 0 and 1".into()));
+            return Err(AppError::BadRequest(
+                "tax_rate must be between 0 and 1".into(),
+            ));
         }
     }
 
@@ -462,7 +494,7 @@ pub async fn update_org(
     }
 
     let logo_url_is_present = body.logo_url.is_some();
-    let logo_url_val        = body.logo_url.as_ref().and_then(|o| o.clone());
+    let logo_url_val = body.logo_url.as_ref().and_then(|o| o.clone());
 
     let org = sqlx::query_as::<_, Org>(
         r#"
@@ -495,19 +527,21 @@ pub async fn update_org(
     .ok_or_else(|| AppError::NotFound("Org not found".into()))?;
 
     if body.logo_url == Some(None)
-        && let Some(old_url) = existing.logo_url {
-            let uploads_dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
-            let base_url    = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
-            delete_old_image(&old_url, &base_url, &uploads_dir, None).await;
-        }
+        && let Some(old_url) = existing.logo_url
+    {
+        let uploads_dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
+        let base_url = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
+        delete_old_image(&old_url, &base_url, &uploads_dir, None).await;
+    }
 
     // If this update toggled the active flag, drop the cached org status so the
     // suspension (or reactivation) is enforced on the next request rather than
     // after the cache TTL elapses.
     if body.is_active.is_some()
-        && let Some(cache) = req.app_data::<web::Data<crate::auth::org_status::OrgStatusCache>>() {
-            cache.invalidate(*org_id);
-        }
+        && let Some(cache) = req.app_data::<web::Data<crate::auth::org_status::OrgStatusCache>>()
+    {
+        cache.invalidate(*org_id);
+    }
 
     Ok(HttpResponse::Ok().json(org))
 }
@@ -533,45 +567,57 @@ pub async fn update_org(
     security(("bearer_jwt" = []))
 )]
 pub async fn upload_org_logo(
-    req:    HttpRequest,
-    pool:   web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     org_id: web::Path<Uuid>,
     mut mp: Multipart,
 ) -> Result<HttpResponse, AppError> {
+    // Disabled in the public demo (uploaded files outlive the sweeper's DB-only GC).
+    if crate::demo::config::demo_mode() {
+        return Err(AppError::BadRequest(
+            "Image uploads are disabled in the demo.".into(),
+        ));
+    }
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orgs", "update").await?;
     require_super_admin(&claims)?;
 
-    let existing    = fetch_org(pool.get_ref(), *org_id).await?;
+    let existing = fetch_org(pool.get_ref(), *org_id).await?;
     let uploads_dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
-    let base_url    = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
+    let base_url = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
 
     let mut new_logo_url: Option<String> = None;
 
-    while let Some(mut field) = mp.try_next().await.map_err(|e| {
-        AppError::BadRequest(format!("Multipart error: {e}"))
-    })? {
+    while let Some(mut field) = mp
+        .try_next()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Multipart error: {e}")))?
+    {
         if field.name().unwrap_or("") != "logo" {
             drain_field(&mut field).await?;
             continue;
         }
         let mut bytes = Vec::new();
-        while let Some(chunk) = field.try_next().await.map_err(|e| {
-            AppError::BadRequest(format!("Upload read error: {e}"))
-        })? {
+        while let Some(chunk) = field
+            .try_next()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Upload read error: {e}")))?
+        {
             bytes.extend_from_slice(chunk.as_ref());
         }
         if !bytes.is_empty() {
-            let ct  = field.content_type().map(|m| m.to_string()).unwrap_or_default();
+            let ct = field
+                .content_type()
+                .map(|m| m.to_string())
+                .unwrap_or_default();
             let ext = match ct.as_str() {
-                "image/png"  => "png",
+                "image/png" => "png",
                 "image/webp" => "webp",
-                _            => "jpg",
+                _ => "jpg",
             };
-            let filename  = format!("{}.{}", Uuid::new_v4(), ext);
-            let dir       = format!("{}/logos", uploads_dir);
-            std::fs::create_dir_all(&dir)
-                .map_err(|_| AppError::Internal)?;
+            let filename = format!("{}.{}", Uuid::new_v4(), ext);
+            let dir = format!("{}/logos", uploads_dir);
+            std::fs::create_dir_all(&dir).map_err(|_| AppError::Internal)?;
             std::fs::write(format!("{}/{}", dir, filename), &bytes)
                 .map_err(|_| AppError::Internal)?;
             new_logo_url = Some(format!(
@@ -622,8 +668,8 @@ pub async fn upload_org_logo(
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_org(
-    req:    HttpRequest,
-    pool:   web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     org_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -672,19 +718,31 @@ async fn fetch_org(pool: &PgPool, id: Uuid) -> Result<Org, AppError> {
 }
 
 async fn drain_field(field: &mut actix_multipart::Field) -> Result<(), AppError> {
-    while field.try_next().await.map_err(|e| AppError::BadRequest(e.to_string()))?.is_some() {}
+    while field
+        .try_next()
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))?
+        .is_some()
+    {}
     Ok(())
 }
 
 async fn text_field(field: &mut actix_multipart::Field) -> Result<Option<String>, AppError> {
     let mut buf = Vec::new();
-    while let Some(chunk) = field.try_next().await.map_err(|e| AppError::BadRequest(e.to_string()))? {
+    while let Some(chunk) = field
+        .try_next()
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))?
+    {
         buf.extend_from_slice(chunk.as_ref());
     }
     Ok(if buf.is_empty() {
         None
     } else {
-        Some(String::from_utf8(buf).map_err(|_| AppError::BadRequest("Invalid UTF-8 in field".into()))?)
+        Some(
+            String::from_utf8(buf)
+                .map_err(|_| AppError::BadRequest("Invalid UTF-8 in field".into()))?,
+        )
     })
 }
 
@@ -694,7 +752,10 @@ async fn text_field(field: &mut actix_multipart::Field) -> Result<Option<String>
 pub struct PublicOrg {
     #[schema(example = "The Rue")]
     pub name: String,
-    #[schema(nullable, example = "https://madar-pos.cloud/api/uploads/logos/123.png")]
+    #[schema(
+        nullable,
+        example = "https://madar-pos.cloud/api/uploads/logos/123.png"
+    )]
     pub logo_url: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     #[schema(example = 5)]
@@ -712,9 +773,7 @@ pub struct PublicOrg {
         AppErrorResponse,
     )
 )]
-pub async fn list_public_orgs(
-    pool: web::Data<PgPool>,
-) -> Result<HttpResponse, AppError> {
+pub async fn list_public_orgs(pool: web::Data<PgPool>) -> Result<HttpResponse, AppError> {
     let orgs = sqlx::query_as::<_, PublicOrg>(
         r#"
         SELECT 

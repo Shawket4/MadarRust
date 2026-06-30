@@ -13,10 +13,19 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/stations/{id}", web::delete().to(stations::delete_station))
             // Routing config
             .route("/routes", web::get().to(stations::list_routes))
-            .route("/routes/category", web::put().to(stations::put_category_route))
-            .route("/routes/category", web::delete().to(stations::delete_category_route))
+            .route(
+                "/routes/category",
+                web::put().to(stations::put_category_route),
+            )
+            .route(
+                "/routes/category",
+                web::delete().to(stations::delete_category_route),
+            )
             .route("/routes/item", web::put().to(stations::put_item_route))
-            .route("/routes/item", web::delete().to(stations::delete_item_route))
+            .route(
+                "/routes/item",
+                web::delete().to(stations::delete_item_route),
+            )
             // Routing mode
             .route("/routing-mode", web::get().to(stations::get_routing_mode))
             .route("/routing-mode", web::put().to(stations::set_routing_mode))

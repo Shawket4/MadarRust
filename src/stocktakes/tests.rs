@@ -1,31 +1,47 @@
 #![allow(unused_imports, unused_variables, dead_code)]
-use actix_web::{test, App, web};
+use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::auth::jwt::JwtSecret;
 use crate::models::UserRole;
-use crate::stocktakes::routes;
 use crate::stocktakes::handlers::{Stocktake, StocktakeFull, VarianceReport};
+use crate::stocktakes::routes;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 
 fn org_admin_token(user_id: Uuid, org_id: Uuid) -> String {
-    crate::auth::jwt::create_token(&get_secret(), user_id, Some(org_id), UserRole::OrgAdmin, None, 24).unwrap()
+    crate::auth::jwt::create_token(
+        &get_secret(),
+        user_id,
+        Some(org_id),
+        UserRole::OrgAdmin,
+        None,
+        24,
+    )
+    .unwrap()
 }
 
 async fn seed_org(pool: &PgPool) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Org', $2)")
-        .bind(id).bind(format!("org-{id}")).execute(pool).await.unwrap();
+        .bind(id)
+        .bind(format!("org-{id}"))
+        .execute(pool)
+        .await
+        .unwrap();
     id
 }
 async fn seed_branch(pool: &PgPool, org_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'Branch')")
-        .bind(id).bind(org_id).execute(pool).await.unwrap();
+        .bind(id)
+        .bind(org_id)
+        .execute(pool)
+        .await
+        .unwrap();
     id
 }
 async fn seed_user(pool: &PgPool, org_id: Uuid) -> Uuid {
@@ -56,12 +72,17 @@ async fn test_stocktake_reconciles_stock_and_posts_variance(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
             .configure(routes::configure),
-    ).await;
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id).await;
-    for (r, a) in [("stocktakes", "create"), ("stocktakes", "read"), ("stocktakes", "update")] {
+    for (r, a) in [
+        ("stocktakes", "create"),
+        ("stocktakes", "read"),
+        ("stocktakes", "update"),
+    ] {
         grant(&pool, r, a).await;
     }
     let ing = seed_ingredient(&pool, org_id).await;
@@ -69,29 +90,43 @@ async fn test_stocktake_reconciles_stock_and_posts_variance(pool: PgPool) {
     let token = org_admin_token(user_id, org_id);
 
     // Create stocktake — snapshots expected_qty = 100.
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/stocktakes/branches/{branch_id}"))
-        .insert_header(("Authorization", format!("Bearer {token}")))
-        .set_json(serde_json::json!({"note": "monthly"}))
-        .to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/stocktakes/branches/{branch_id}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(serde_json::json!({"note": "monthly"}))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 201);
     let full: StocktakeFull = test::read_body_json(resp).await;
     assert_eq!(full.items.len(), 1);
     let stocktake_id = full.stocktake.id;
 
     // Count 92 (shrinkage of 8).
-    let resp = test::call_service(&app, test::TestRequest::put()
-        .uri(&format!("/stocktakes/{stocktake_id}/items"))
-        .insert_header(("Authorization", format!("Bearer {token}")))
-        .set_json(serde_json::json!({"items": [{"org_ingredient_id": ing, "counted_qty": 92.0}]}))
-        .to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::put()
+            .uri(&format!("/stocktakes/{stocktake_id}/items"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(
+                serde_json::json!({"items": [{"org_ingredient_id": ing, "counted_qty": 92.0}]}),
+            )
+            .to_request(),
+    )
+    .await;
     assert!(resp.status().is_success());
 
     // Finalize → reconcile stock to 92 + post a stock_count movement.
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/stocktakes/{stocktake_id}/finalize"))
-        .insert_header(("Authorization", format!("Bearer {token}")))
-        .to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/stocktakes/{stocktake_id}/finalize"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
     assert!(resp.status().is_success());
     let finalized: StocktakeFull = test::read_body_json(resp).await;
     assert_eq!(finalized.stocktake.status, "finalized");
@@ -108,10 +143,14 @@ async fn test_stocktake_reconciles_stock_and_posts_variance(pool: PgPool) {
     assert_eq!(mqty, -8.0);
 
     // Variance report values the shrinkage (8 × 300 piastres = 2400).
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/stocktakes/{stocktake_id}/variance-report"))
-        .insert_header(("Authorization", format!("Bearer {token}")))
-        .to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/stocktakes/{stocktake_id}/variance-report"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
     assert!(resp.status().is_success());
     let report: VarianceReport = test::read_body_json(resp).await;
     assert_eq!(report.total_shrinkage_value, 2400);
@@ -128,12 +167,17 @@ async fn test_finalize_reconciles_to_live_not_snapshot(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
             .configure(routes::configure),
-    ).await;
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id).await;
-    for (r, a) in [("stocktakes", "create"), ("stocktakes", "read"), ("stocktakes", "update")] {
+    for (r, a) in [
+        ("stocktakes", "create"),
+        ("stocktakes", "read"),
+        ("stocktakes", "update"),
+    ] {
         grant(&pool, r, a).await;
     }
     let ing = seed_ingredient(&pool, org_id).await;
@@ -141,10 +185,15 @@ async fn test_finalize_reconciles_to_live_not_snapshot(pool: PgPool) {
     let token = org_admin_token(user_id, org_id);
 
     // Open the count (snapshots expected_qty = 100).
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/stocktakes/branches/{branch_id}"))
-        .insert_header(("Authorization", format!("Bearer {token}")))
-        .set_json(serde_json::json!({})).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/stocktakes/branches/{branch_id}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(serde_json::json!({}))
+            .to_request(),
+    )
+    .await;
     let full: StocktakeFull = test::read_body_json(resp).await;
     let stocktake_id = full.stocktake.id;
 
@@ -153,17 +202,27 @@ async fn test_finalize_reconciles_to_live_not_snapshot(pool: PgPool) {
         .bind(branch_id).bind(ing).execute(&pool).await.unwrap();
 
     // Physical count finds 90 (2 genuinely missing on top of the 8 sold).
-    let resp = test::call_service(&app, test::TestRequest::put()
-        .uri(&format!("/stocktakes/{stocktake_id}/items"))
-        .insert_header(("Authorization", format!("Bearer {token}")))
-        .set_json(serde_json::json!({"items": [{"org_ingredient_id": ing, "counted_qty": 90.0}]}))
-        .to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::put()
+            .uri(&format!("/stocktakes/{stocktake_id}/items"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(
+                serde_json::json!({"items": [{"org_ingredient_id": ing, "counted_qty": 90.0}]}),
+            )
+            .to_request(),
+    )
+    .await;
     assert!(resp.status().is_success());
 
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/stocktakes/{stocktake_id}/finalize"))
-        .insert_header(("Authorization", format!("Bearer {token}")))
-        .to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/stocktakes/{stocktake_id}/finalize"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
     assert!(resp.status().is_success());
 
     // Stock settles at the counted value.
@@ -179,10 +238,14 @@ async fn test_finalize_reconciles_to_live_not_snapshot(pool: PgPool) {
 
     // Variance report attributes only the TRUE 2-unit shrinkage (2 × 300 = 600),
     // not the 8 sold units.
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/stocktakes/{stocktake_id}/variance-report"))
-        .insert_header(("Authorization", format!("Bearer {token}")))
-        .to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/stocktakes/{stocktake_id}/variance-report"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
     let report: VarianceReport = test::read_body_json(resp).await;
     assert_eq!(report.total_shrinkage_value, 600);
 }
@@ -194,7 +257,8 @@ async fn test_only_one_open_stocktake_per_branch(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
             .configure(routes::configure),
-    ).await;
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
@@ -202,11 +266,13 @@ async fn test_only_one_open_stocktake_per_branch(pool: PgPool) {
     grant(&pool, "stocktakes", "create").await;
     let token = org_admin_token(user_id, org_id);
 
-    let mk = || test::TestRequest::post()
-        .uri(&format!("/stocktakes/branches/{branch_id}"))
-        .insert_header(("Authorization", format!("Bearer {token}")))
-        .set_json(serde_json::json!({}))
-        .to_request();
+    let mk = || {
+        test::TestRequest::post()
+            .uri(&format!("/stocktakes/branches/{branch_id}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(serde_json::json!({}))
+            .to_request()
+    };
 
     assert_eq!(test::call_service(&app, mk()).await.status(), 201);
     // Second open stocktake on same branch is rejected.
@@ -220,12 +286,17 @@ async fn test_finalize_requires_reason_for_large_variance(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
             .configure(routes::configure),
-    ).await;
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id).await;
-    for (r, a) in [("stocktakes", "create"), ("stocktakes", "read"), ("stocktakes", "update")] {
+    for (r, a) in [
+        ("stocktakes", "create"),
+        ("stocktakes", "read"),
+        ("stocktakes", "update"),
+    ] {
         grant(&pool, r, a).await;
     }
     let ing = seed_ingredient(&pool, org_id).await;
@@ -233,10 +304,15 @@ async fn test_finalize_requires_reason_for_large_variance(pool: PgPool) {
     let token = org_admin_token(user_id, org_id);
 
     // Start — default org threshold is 10%.
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/stocktakes/branches/{branch_id}"))
-        .insert_header(("Authorization", format!("Bearer {token}")))
-        .set_json(serde_json::json!({})).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/stocktakes/branches/{branch_id}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(serde_json::json!({}))
+            .to_request(),
+    )
+    .await;
     let full: StocktakeFull = test::read_body_json(resp).await;
     assert_eq!(full.variance_threshold_pct, 10.0);
     let stocktake_id = full.stocktake.id;
@@ -244,36 +320,64 @@ async fn test_finalize_requires_reason_for_large_variance(pool: PgPool) {
     // Count 80 → 20% shrinkage = flagged, but no reason given.
     let count = |reason: Option<&'static str>| {
         let mut item = serde_json::json!({"org_ingredient_id": ing, "counted_qty": 80.0});
-        if let Some(r) = reason { item["variance_reason"] = serde_json::json!(r); }
+        if let Some(r) = reason {
+            item["variance_reason"] = serde_json::json!(r);
+        }
         test::TestRequest::put()
             .uri(&format!("/stocktakes/{stocktake_id}/items"))
             .insert_header(("Authorization", format!("Bearer {token}")))
-            .set_json(serde_json::json!({"items": [item]})).to_request()
+            .set_json(serde_json::json!({"items": [item]}))
+            .to_request()
     };
-    assert!(test::call_service(&app, count(None)).await.status().is_success());
+    assert!(
+        test::call_service(&app, count(None))
+            .await
+            .status()
+            .is_success()
+    );
 
     // Finalize is blocked (409) until the flagged row carries a reason.
-    let finalize = || test::TestRequest::post()
-        .uri(&format!("/stocktakes/{stocktake_id}/finalize"))
-        .insert_header(("Authorization", format!("Bearer {token}")))
-        .to_request();
+    let finalize = || {
+        test::TestRequest::post()
+            .uri(&format!("/stocktakes/{stocktake_id}/finalize"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request()
+    };
     assert_eq!(test::call_service(&app, finalize()).await.status(), 409);
 
     // Provide a reason, then finalize succeeds.
-    assert!(test::call_service(&app, count(Some("spoilage"))).await.status().is_success());
-    assert!(test::call_service(&app, finalize()).await.status().is_success());
+    assert!(
+        test::call_service(&app, count(Some("spoilage")))
+            .await
+            .status()
+            .is_success()
+    );
+    assert!(
+        test::call_service(&app, finalize())
+            .await
+            .status()
+            .is_success()
+    );
 
     // The reason is carried onto the stock_count movement.
     let reason: Option<String> = sqlx::query_scalar(
-        "SELECT reason FROM inventory_movements WHERE source_type = 'stocktake' AND source_id = $1")
-        .bind(stocktake_id).fetch_one(&pool).await.unwrap();
+        "SELECT reason FROM inventory_movements WHERE source_type = 'stocktake' AND source_id = $1",
+    )
+    .bind(stocktake_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(reason.as_deref(), Some("spoilage"));
 
     // Variance report flags the row and echoes the reason.
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/stocktakes/{stocktake_id}/variance-report"))
-        .insert_header(("Authorization", format!("Bearer {token}")))
-        .to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/stocktakes/{stocktake_id}/variance-report"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
     let report: VarianceReport = test::read_body_json(resp).await;
     assert!(report.rows[0].is_flagged);
     assert_eq!(report.rows[0].variance_reason.as_deref(), Some("spoilage"));
@@ -290,7 +394,8 @@ macro_rules! init_app {
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(get_secret()))
                 .configure(routes::configure),
-        ).await
+        )
+        .await
     };
 }
 
@@ -302,15 +407,22 @@ async fn seed_ing(pool: &PgPool, org_id: Uuid, name: &str, cost: Option<i64>) ->
 }
 
 async fn grant_all(pool: &PgPool) {
-    for a in ["create", "read", "update"] { grant(pool, "stocktakes", a).await; }
+    for a in ["create", "read", "update"] {
+        grant(pool, "stocktakes", a).await;
+    }
 }
 
 macro_rules! start_stocktake {
     ($app:expr, $branch:expr, $token:expr) => {{
-        let resp = test::call_service(&$app, test::TestRequest::post()
-            .uri(&format!("/stocktakes/branches/{}", $branch))
-            .insert_header(("Authorization", format!("Bearer {}", $token)))
-            .set_json(serde_json::json!({})).to_request()).await;
+        let resp = test::call_service(
+            &$app,
+            test::TestRequest::post()
+                .uri(&format!("/stocktakes/branches/{}", $branch))
+                .insert_header(("Authorization", format!("Bearer {}", $token)))
+                .set_json(serde_json::json!({}))
+                .to_request(),
+        )
+        .await;
         assert_eq!(resp.status(), 201);
         let full: StocktakeFull = test::read_body_json(resp).await;
         full
@@ -333,19 +445,36 @@ async fn test_list_and_get_stocktake(pool: PgPool) {
     let id = full.stocktake.id;
 
     // List → 1.
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/stocktakes/branches/{branch_id}"))
-        .insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/stocktakes/branches/{branch_id}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
     let list: Vec<Stocktake> = test::read_body_json(resp).await;
     assert_eq!(list.len(), 1);
 
     // Get → full with the snapshot item.
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/stocktakes/{id}"))
-        .insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/stocktakes/{id}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
     let got: StocktakeFull = test::read_body_json(resp).await;
     assert_eq!(got.items.len(), 1);
-    assert_eq!(got.items[0].expected_qty.to_string().parse::<f64>().unwrap(), 100.0);
+    assert_eq!(
+        got.items[0]
+            .expected_qty
+            .to_string()
+            .parse::<f64>()
+            .unwrap(),
+        100.0
+    );
 }
 
 #[sqlx::test]
@@ -359,20 +488,35 @@ async fn test_cancel_open_then_cancel_finalized_conflict(pool: PgPool) {
 
     // Cancel an open one → 200.
     let full = start_stocktake!(app, branch_id, token);
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/stocktakes/{}/cancel", full.stocktake.id))
-        .insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/stocktakes/{}/cancel", full.stocktake.id))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 200);
 
     // New one, finalize (no counts → ok), then cancel → 409.
     let full2 = start_stocktake!(app, branch_id, token);
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/stocktakes/{}/finalize", full2.stocktake.id))
-        .insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/stocktakes/{}/finalize", full2.stocktake.id))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
     assert!(resp.status().is_success());
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/stocktakes/{}/cancel", full2.stocktake.id))
-        .insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/stocktakes/{}/cancel", full2.stocktake.id))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 409);
 }
 
@@ -390,9 +534,17 @@ async fn test_upsert_negative_and_invalid_reason_rejected(pool: PgPool) {
     let id = full.stocktake.id;
 
     // Negative counted → 400.
-    let resp = test::call_service(&app, test::TestRequest::put()
-        .uri(&format!("/stocktakes/{id}/items")).insert_header(("Authorization", format!("Bearer {token}")))
-        .set_json(serde_json::json!({"items": [{"org_ingredient_id": ing, "counted_qty": -5.0}]})).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::put()
+            .uri(&format!("/stocktakes/{id}/items"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(
+                serde_json::json!({"items": [{"org_ingredient_id": ing, "counted_qty": -5.0}]}),
+            )
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 400);
 
     // Invalid variance reason → 400.
@@ -409,7 +561,7 @@ async fn test_partial_count_leaves_uncounted_untouched(pool: PgPool) {
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id).await;
     grant_all(&pool).await;
-    let milk = seed_ingredient(&pool, org_id).await;          // 'Milk'
+    let milk = seed_ingredient(&pool, org_id).await; // 'Milk'
     let sugar = seed_ing(&pool, org_id, "Sugar", Some(50)).await;
     seed_stock(&pool, branch_id, milk, 100.0).await;
     seed_stock(&pool, branch_id, sugar, 50.0).await;
@@ -418,14 +570,28 @@ async fn test_partial_count_leaves_uncounted_untouched(pool: PgPool) {
     let id = full.stocktake.id;
 
     // Count only Milk, 100 → 95 (5% < 10% threshold, not flagged).
-    let resp = test::call_service(&app, test::TestRequest::put()
-        .uri(&format!("/stocktakes/{id}/items")).insert_header(("Authorization", format!("Bearer {token}")))
-        .set_json(serde_json::json!({"items": [{"org_ingredient_id": milk, "counted_qty": 95.0}]})).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::put()
+            .uri(&format!("/stocktakes/{id}/items"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(
+                serde_json::json!({"items": [{"org_ingredient_id": milk, "counted_qty": 95.0}]}),
+            )
+            .to_request(),
+    )
+    .await;
     assert!(resp.status().is_success());
 
     // Finalize.
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/stocktakes/{id}/finalize")).insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/stocktakes/{id}/finalize"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
     assert!(resp.status().is_success());
 
     // Milk reconciled to 95; Sugar (uncounted) untouched at 50.
@@ -435,7 +601,13 @@ async fn test_partial_count_leaves_uncounted_untouched(pool: PgPool) {
     assert_eq!(sugar_stock, 50.0);
 
     // Exactly one stock_count movement (Milk only).
-    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM inventory_movements WHERE source_type='stocktake' AND source_id=$1").bind(id).fetch_one(&pool).await.unwrap();
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM inventory_movements WHERE source_type='stocktake' AND source_id=$1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(n, 1);
 }
 
@@ -446,8 +618,8 @@ async fn test_variance_report_overage_and_unknown_cost(pool: PgPool) {
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id).await;
     grant_all(&pool).await;
-    let known = seed_ing(&pool, org_id, "Known", Some(300)).await;   // cost 300
-    let unknown = seed_ing(&pool, org_id, "Unknown", None).await;    // NULL cost
+    let known = seed_ing(&pool, org_id, "Known", Some(300)).await; // cost 300
+    let unknown = seed_ing(&pool, org_id, "Unknown", None).await; // NULL cost
     seed_stock(&pool, branch_id, known, 100.0).await;
     seed_stock(&pool, branch_id, unknown, 100.0).await;
     let token = org_admin_token(user_id, org_id);
@@ -455,22 +627,38 @@ async fn test_variance_report_overage_and_unknown_cost(pool: PgPool) {
     let id = full.stocktake.id;
 
     // Known overage +10 (110); Unknown shrinkage -20 (80, but cost unknown).
-    let resp = test::call_service(&app, test::TestRequest::put()
-        .uri(&format!("/stocktakes/{id}/items")).insert_header(("Authorization", format!("Bearer {token}")))
-        .set_json(serde_json::json!({"items": [
-            {"org_ingredient_id": known, "counted_qty": 110.0},
-            {"org_ingredient_id": unknown, "counted_qty": 80.0}
-        ]})).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::put()
+            .uri(&format!("/stocktakes/{id}/items"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(serde_json::json!({"items": [
+                {"org_ingredient_id": known, "counted_qty": 110.0},
+                {"org_ingredient_id": unknown, "counted_qty": 80.0}
+            ]}))
+            .to_request(),
+    )
+    .await;
     assert!(resp.status().is_success());
 
     // Variance report (no finalize needed).
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/stocktakes/{id}/variance-report")).insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/stocktakes/{id}/variance-report"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
     let report: VarianceReport = test::read_body_json(resp).await;
-    assert_eq!(report.total_overage_value, 3000);     // +10 × 300
-    assert_eq!(report.total_shrinkage_value, 0);       // unknown cost excluded
+    assert_eq!(report.total_overage_value, 3000); // +10 × 300
+    assert_eq!(report.total_shrinkage_value, 0); // unknown cost excluded
     assert_eq!(report.unknown_cost_count, 1);
-    let unknown_row = report.rows.iter().find(|r| r.org_ingredient_id == unknown).unwrap();
+    let unknown_row = report
+        .rows
+        .iter()
+        .find(|r| r.org_ingredient_id == unknown)
+        .unwrap();
     assert!(unknown_row.variance_value.is_none());
 }
 
@@ -485,8 +673,12 @@ async fn test_finalize_already_finalized_conflict(pool: PgPool) {
     let full = start_stocktake!(app, branch_id, token);
     let id = full.stocktake.id;
 
-    let fin = || test::TestRequest::post()
-        .uri(&format!("/stocktakes/{id}/finalize")).insert_header(("Authorization", format!("Bearer {token}"))).to_request();
+    let fin = || {
+        test::TestRequest::post()
+            .uri(&format!("/stocktakes/{id}/finalize"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request()
+    };
     assert!(test::call_service(&app, fin()).await.status().is_success());
     assert_eq!(test::call_service(&app, fin()).await.status(), 409);
 }
@@ -508,20 +700,30 @@ async fn test_permission_denied_and_branch_isolation(pool: PgPool) {
     let denied_user = seed_user(&pool, org_a).await;
     deny_user(&pool, denied_user, "stocktakes", "create").await;
     let denied_token = org_admin_token(denied_user, org_a);
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/stocktakes/branches/{branch_a}"))
-        .insert_header(("Authorization", format!("Bearer {denied_token}")))
-        .set_json(serde_json::json!({})).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/stocktakes/branches/{branch_a}"))
+            .insert_header(("Authorization", format!("Bearer {denied_token}")))
+            .set_json(serde_json::json!({}))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 403);
 
     // (2) Branch isolation: an org-A admin (with permission) cannot start a
     // count on an org-B branch.
     let user_a = seed_user(&pool, org_a).await;
     let token = org_admin_token(user_a, org_a);
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/stocktakes/branches/{branch_b}"))
-        .insert_header(("Authorization", format!("Bearer {token}")))
-        .set_json(serde_json::json!({})).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/stocktakes/branches/{branch_b}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(serde_json::json!({}))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 403);
 }
 
@@ -533,7 +735,11 @@ async fn test_threshold_is_configurable(pool: PgPool) {
     let user_id = seed_user(&pool, org_id).await;
     grant_all(&pool).await;
     // Tighten tolerance to 5%.
-    sqlx::query("UPDATE organizations SET stocktake_variance_threshold_pct = 5 WHERE id=$1").bind(org_id).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE organizations SET stocktake_variance_threshold_pct = 5 WHERE id=$1")
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let ing = seed_ingredient(&pool, org_id).await;
     seed_stock(&pool, branch_id, ing, 100.0).await;
     let token = org_admin_token(user_id, org_id);
@@ -543,11 +749,25 @@ async fn test_threshold_is_configurable(pool: PgPool) {
     let id = full.stocktake.id;
 
     // 100 → 92 = 8% > 5% → flagged. No reason → finalize blocked (409).
-    test::call_service(&app, test::TestRequest::put()
-        .uri(&format!("/stocktakes/{id}/items")).insert_header(("Authorization", format!("Bearer {token}")))
-        .set_json(serde_json::json!({"items": [{"org_ingredient_id": ing, "counted_qty": 92.0}]})).to_request()).await;
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/stocktakes/{id}/finalize")).insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;
+    test::call_service(
+        &app,
+        test::TestRequest::put()
+            .uri(&format!("/stocktakes/{id}/items"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(
+                serde_json::json!({"items": [{"org_ingredient_id": ing, "counted_qty": 92.0}]}),
+            )
+            .to_request(),
+    )
+    .await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/stocktakes/{id}/finalize"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 409);
 }
 
@@ -558,7 +778,8 @@ async fn test_list_stocktakes_all_branches(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
             .configure(routes::configure),
-    ).await;
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     // Two branches in the SAME org. seed_branch hardcodes the name 'Branch', which
@@ -567,7 +788,12 @@ async fn test_list_stocktakes_all_branches(pool: PgPool) {
     let branch_b = Uuid::new_v4();
     for (id, name) in [(branch_a, "Branch A"), (branch_b, "Branch B")] {
         sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, $3)")
-            .bind(id).bind(org_id).bind(name).execute(&pool).await.unwrap();
+            .bind(id)
+            .bind(org_id)
+            .bind(name)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
     let admin = seed_user(&pool, org_id).await;
     grant(&pool, "stocktakes", "read").await;
@@ -581,9 +807,9 @@ async fn test_list_stocktakes_all_branches(pool: PgPool) {
             .bind(Uuid::new_v4()).bind(org_id).bind(branch).bind(admin).execute(&pool).await.unwrap();
     }
     // A different org's stocktake must never appear in this org's all-branches view.
-    let other_org    = seed_org(&pool).await;
+    let other_org = seed_org(&pool).await;
     let other_branch = seed_branch(&pool, other_org).await;
-    let other_admin  = seed_user(&pool, other_org).await;
+    let other_admin = seed_user(&pool, other_org).await;
     sqlx::query("INSERT INTO stocktakes (id, org_id, branch_id, status, started_by) VALUES ($1,$2,$3,'in_progress',$4)")
         .bind(Uuid::new_v4()).bind(other_org).bind(other_branch).bind(other_admin).execute(&pool).await.unwrap();
 
@@ -591,18 +817,37 @@ async fn test_list_stocktakes_all_branches(pool: PgPool) {
 
     // All branches (nil UUID): both org branches' stocktakes, branch-labelled, org-isolated.
     let nil = Uuid::nil();
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/stocktakes/branches/{nil}")).insert_header(auth.clone()).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/stocktakes/branches/{nil}"))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 200);
     let rows: Vec<Stocktake> = test::read_body_json(resp).await;
-    assert_eq!(rows.len(), 2, "all-branches sees both org branches' stocktakes");
-    assert!(rows.iter().all(|s| s.branch_name.is_some()), "rows carry a branch label");
+    assert_eq!(
+        rows.len(),
+        2,
+        "all-branches sees both org branches' stocktakes"
+    );
+    assert!(
+        rows.iter().all(|s| s.branch_name.is_some()),
+        "rows carry a branch label"
+    );
     let seen: std::collections::HashSet<_> = rows.iter().map(|s| s.branch_id).collect();
     assert!(seen.contains(&branch_a) && seen.contains(&branch_b));
 
     // A specific branch still scopes to that one branch.
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/stocktakes/branches/{branch_a}")).insert_header(auth.clone()).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/stocktakes/branches/{branch_a}"))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 200);
     let just_a: Vec<Stocktake> = test::read_body_json(resp).await;
     assert_eq!(just_a.len(), 1);
@@ -618,12 +863,19 @@ async fn test_cycle_count_scope_and_found_item(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
             .configure(routes::configure),
-    ).await;
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id).await;
-    for (r, a) in [("stocktakes","create"),("stocktakes","read"),("stocktakes","update")] { grant(&pool, r, a).await; }
+    for (r, a) in [
+        ("stocktakes", "create"),
+        ("stocktakes", "read"),
+        ("stocktakes", "update"),
+    ] {
+        grant(&pool, r, a).await;
+    }
     let token = org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
 
@@ -638,9 +890,15 @@ async fn test_cycle_count_scope_and_found_item(pool: PgPool) {
     seed_stock(&pool, branch_id, dry, 5000.0).await;
 
     // Scope the count to the 'dairy' category → only Milk is snapshotted.
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/stocktakes/branches/{branch_id}")).insert_header(auth.clone())
-        .set_json(serde_json::json!({"category": "dairy"})).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/stocktakes/branches/{branch_id}"))
+            .insert_header(auth.clone())
+            .set_json(serde_json::json!({"category": "dairy"}))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 201);
     let full: StocktakeFull = test::read_body_json(resp).await;
     assert_eq!(full.items.len(), 1, "only the dairy ingredient is in scope");
@@ -649,16 +907,32 @@ async fn test_cycle_count_scope_and_found_item(pool: PgPool) {
 
     // Count a FOUND item (Flour) that's outside the scope → it gets added with
     // its current stock (5000 g) as the expected baseline.
-    let resp = test::call_service(&app, test::TestRequest::put()
-        .uri(&format!("/stocktakes/{st_id}/items")).insert_header(auth.clone())
-        .set_json(serde_json::json!({"items": [{"org_ingredient_id": dry, "counted_qty": 4900.0}]})).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::put()
+            .uri(&format!("/stocktakes/{st_id}/items"))
+            .insert_header(auth.clone())
+            .set_json(
+                serde_json::json!({"items": [{"org_ingredient_id": dry, "counted_qty": 4900.0}]}),
+            )
+            .to_request(),
+    )
+    .await;
     assert!(resp.status().is_success());
     let updated: StocktakeFull = test::read_body_json(resp).await;
     assert_eq!(updated.items.len(), 2, "found item added to the count");
     let (exp, cnt): (f64, Option<f64>) = sqlx::query_as(
         "SELECT expected_qty::float8, counted_qty::float8 FROM stocktake_items \
-         WHERE stocktake_id=$1 AND org_ingredient_id=$2"
-    ).bind(st_id).bind(dry).fetch_one(&pool).await.unwrap();
-    assert_eq!(exp, 5000.0, "found item snapshots current stock as expected");
+         WHERE stocktake_id=$1 AND org_ingredient_id=$2",
+    )
+    .bind(st_id)
+    .bind(dry)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        exp, 5000.0,
+        "found item snapshots current stock as expected"
+    );
     assert_eq!(cnt, Some(4900.0));
 }

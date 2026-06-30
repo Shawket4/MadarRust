@@ -87,8 +87,7 @@ pub fn rasterize(
     };
     opt.fontdb = fontdb();
 
-    let tree =
-        usvg::Tree::from_str(svg, &opt).map_err(|e| QrCardError::SvgParse(e.to_string()))?;
+    let tree = usvg::Tree::from_str(svg, &opt).map_err(|e| QrCardError::SvgParse(e.to_string()))?;
 
     let pw = px(canvas_w_mm, dpi);
     let ph = px(canvas_h_mm, dpi);

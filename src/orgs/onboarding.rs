@@ -2,11 +2,12 @@
 //!
 //! Step progress is computed from data presence on every read instead of
 //! being stored, so the checklist can never disagree with the actual state
-//! of the org. Only the terminal `onboarding_completed` flag is persisted
-//! (on `organizations`), because "the owner said we're done / skip this"
-//! is a decision, not a derivable fact.
+//! of the org. Only the terminal completion is persisted, as a single
+//! nullable timestamp on `organizations` (`onboarding_completed_at`):
+//! "the owner said we're done / skip this" is a decision, not a derivable
+//! fact. `completed` in the response is derived from that timestamp.
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::PgPool;
@@ -36,8 +37,8 @@ pub struct OnboardingStep {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct OnboardingStatus {
     pub org_id: Uuid,
-    /// Persisted terminal flag — the dashboard routes into the wizard
-    /// when this is false.
+    /// Derived terminal flag (`completed_at IS NOT NULL`) — the dashboard
+    /// routes into the wizard while this is false.
     pub completed: bool,
     pub completed_at: Option<DateTime<Utc>>,
     /// True when every `required` step is done (the Finish button enabler).
@@ -50,8 +51,11 @@ pub struct OnboardingStatus {
 
 #[derive(sqlx::FromRow)]
 struct CountsRow {
-    onboarding_completed: bool,
     onboarding_completed_at: Option<DateTime<Utc>>,
+    /// The owner has personalized the café (uploaded a logo). Currency/tax
+    /// carry NOT-NULL defaults, so a logo is the only honest "they made it
+    /// theirs" signal for the optional identity step.
+    logo_set: bool,
     branches: i64,
     extra_users: i64,
     payment_methods: i64,
@@ -131,8 +135,7 @@ pub async fn complete_onboarding(
 
     let updated = sqlx::query(
         "UPDATE organizations
-         SET onboarding_completed = true,
-             onboarding_completed_at = COALESCE(onboarding_completed_at, now())
+         SET onboarding_completed_at = COALESCE(onboarding_completed_at, now())
          WHERE id = $1",
     )
     .bind(org_id)
@@ -150,8 +153,8 @@ async fn load_status(pool: &PgPool, org_id: Uuid) -> Result<OnboardingStatus, Ap
     let row: Option<CountsRow> = sqlx::query_as::<_, CountsRow>(
         r#"
         SELECT
-            o.onboarding_completed,
             o.onboarding_completed_at,
+            (o.logo_url IS NOT NULL)                                   AS logo_set,
             (SELECT COUNT(*) FROM branches b
               WHERE b.org_id = o.id)::bigint                          AS branches,
             (SELECT COUNT(*) FROM users u
@@ -199,9 +202,18 @@ async fn load_status(pool: &PgPool, org_id: Uuid) -> Result<OnboardingStatus, Ap
         required,
     };
 
+    // Order mirrors the wizard's dependency-ordered stages. `org_profile`
+    // is an optional opener (it never gates completion); the four required
+    // steps are branch → payment_methods → categories → menu_items.
     let steps = vec![
+        step("org_profile", row.logo_set, i64::from(row.logo_set), false),
         step("branch", row.branches > 0, row.branches, true),
-        step("payment_methods", row.payment_methods > 0, row.payment_methods, true),
+        step(
+            "payment_methods",
+            row.payment_methods > 0,
+            row.payment_methods,
+            true,
+        ),
         step("categories", row.categories > 0, row.categories, true),
         step("menu_items", row.menu_items > 0, row.menu_items, true),
         step("ingredients", row.ingredients > 0, row.ingredients, false),
@@ -213,14 +225,19 @@ async fn load_status(pool: &PgPool, org_id: Uuid) -> Result<OnboardingStatus, Ap
         ),
         step("addons", row.addon_items > 0, row.addon_items, false),
         step("team", row.extra_users > 0, row.extra_users, false),
-        step("first_order", row.orders_placed > 0, row.orders_placed, false),
+        step(
+            "first_order",
+            row.orders_placed > 0,
+            row.orders_placed,
+            false,
+        ),
     ];
 
     let can_complete = steps.iter().filter(|s| s.required).all(|s| s.done);
 
     Ok(OnboardingStatus {
         org_id,
-        completed: row.onboarding_completed,
+        completed: row.onboarding_completed_at.is_some(),
         completed_at: row.onboarding_completed_at,
         can_complete,
         recipe_coverage,

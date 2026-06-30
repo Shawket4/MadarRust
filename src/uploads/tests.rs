@@ -1,14 +1,14 @@
 #![allow(unused_imports, unused_variables, dead_code)]
-use actix_web::{test, App, web};
+use actix_web::{App, test, web};
 use sqlx::PgPool;
-use uuid::Uuid;
 use std::env;
 use std::path::PathBuf;
+use uuid::Uuid;
 
 use crate::auth::jwt::JwtSecret;
 use crate::models::UserRole;
-use crate::uploads::routes;
 use crate::uploads::handlers::UploadResponse;
+use crate::uploads::routes;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
@@ -99,7 +99,10 @@ const TINY_JPEG: &[u8] = &[
 ];
 
 fn setup_env_vars() -> tempfile::TempDir {
-    let tmp_dir = tempfile::Builder::new().prefix("madar-test-uploads").tempdir().unwrap();
+    let tmp_dir = tempfile::Builder::new()
+        .prefix("madar-test-uploads")
+        .tempdir()
+        .unwrap();
     unsafe {
         env::set_var("UPLOADS_DIR", tmp_dir.path().to_str().unwrap());
         env::set_var("UPLOADS_BASE_URL", "http://localhost:8080/uploads");
@@ -107,10 +110,22 @@ fn setup_env_vars() -> tempfile::TempDir {
     tmp_dir
 }
 
-fn create_multipart_body(boundary: &str, field_name: &str, file_name: &str, content_type: &str, data: &[u8]) -> Vec<u8> {
+fn create_multipart_body(
+    boundary: &str,
+    field_name: &str,
+    file_name: &str,
+    content_type: &str,
+    data: &[u8],
+) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
-    body.extend_from_slice(format!("Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\n", field_name, file_name).as_bytes());
+    body.extend_from_slice(
+        format!(
+            "Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\n",
+            field_name, file_name
+        )
+        .as_bytes(),
+    );
     body.extend_from_slice(format!("Content-Type: {}\r\n\r\n", content_type).as_bytes());
     body.extend_from_slice(data);
     body.extend_from_slice(format!("\r\n--{}--\r\n", boundary).as_bytes());
@@ -120,13 +135,14 @@ fn create_multipart_body(boundary: &str, field_name: &str, file_name: &str, cont
 #[sqlx::test]
 async fn test_upload_menu_item_image_success(pool: PgPool) {
     let _tmp_dir = setup_env_vars();
-    
+
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
@@ -142,23 +158,35 @@ async fn test_upload_menu_item_image_success(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri(&format!("/uploads/menu-items/{}", item_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .insert_header(("Content-Type", format!("multipart/form-data; boundary={}", boundary)))
+        .insert_header((
+            "Content-Type",
+            format!("multipart/form-data; boundary={}", boundary),
+        ))
         .set_payload(body)
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert!(resp.status().is_success(), "Expected success, got {:?}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "Expected success, got {:?}",
+        resp.status()
+    );
 
     let upload_resp: UploadResponse = test::read_body_json(resp).await;
-    assert!(upload_resp.image_url.starts_with("http://localhost:8080/uploads/"));
+    assert!(
+        upload_resp
+            .image_url
+            .starts_with("http://localhost:8080/uploads/")
+    );
 
     // Check DB
-    let db_url: Option<String> = sqlx::query_scalar("SELECT image_url FROM menu_items WHERE id = $1")
-        .bind(item_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    
+    let db_url: Option<String> =
+        sqlx::query_scalar("SELECT image_url FROM menu_items WHERE id = $1")
+            .bind(item_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
     assert!(db_url.is_some());
     let db_url = db_url.unwrap();
     assert_eq!(upload_resp.image_url, db_url);
@@ -167,13 +195,14 @@ async fn test_upload_menu_item_image_success(pool: PgPool) {
 #[sqlx::test]
 async fn test_upload_menu_item_image_wrong_org(pool: PgPool) {
     let _tmp_dir = setup_env_vars();
-    
+
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org1 = seed_org(&pool).await;
     let org2 = seed_org(&pool).await;
@@ -193,7 +222,10 @@ async fn test_upload_menu_item_image_wrong_org(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri(&format!("/uploads/menu-items/{}", item_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .insert_header(("Content-Type", format!("multipart/form-data; boundary={}", boundary)))
+        .insert_header((
+            "Content-Type",
+            format!("multipart/form-data; boundary={}", boundary),
+        ))
         .set_payload(body)
         .to_request();
 
@@ -204,13 +236,14 @@ async fn test_upload_menu_item_image_wrong_org(pool: PgPool) {
 #[sqlx::test]
 async fn test_upload_menu_item_image_invalid_mime(pool: PgPool) {
     let _tmp_dir = setup_env_vars();
-    
+
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
@@ -227,7 +260,10 @@ async fn test_upload_menu_item_image_invalid_mime(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri(&format!("/uploads/menu-items/{}", item_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .insert_header(("Content-Type", format!("multipart/form-data; boundary={}", boundary)))
+        .insert_header((
+            "Content-Type",
+            format!("multipart/form-data; boundary={}", boundary),
+        ))
         .set_payload(body)
         .to_request();
 
@@ -238,13 +274,14 @@ async fn test_upload_menu_item_image_invalid_mime(pool: PgPool) {
 #[sqlx::test]
 async fn test_upload_menu_item_image_invalid_image_data(pool: PgPool) {
     let _tmp_dir = setup_env_vars();
-    
+
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
@@ -256,12 +293,21 @@ async fn test_upload_menu_item_image_invalid_image_data(pool: PgPool) {
 
     let boundary = "boundary123";
     // Content-Type is valid image/jpeg, but data is garbage
-    let body = create_multipart_body(boundary, "image", "test.jpg", "image/jpeg", b"not an image really");
+    let body = create_multipart_body(
+        boundary,
+        "image",
+        "test.jpg",
+        "image/jpeg",
+        b"not an image really",
+    );
 
     let req = test::TestRequest::post()
         .uri(&format!("/uploads/menu-items/{}", item_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .insert_header(("Content-Type", format!("multipart/form-data; boundary={}", boundary)))
+        .insert_header((
+            "Content-Type",
+            format!("multipart/form-data; boundary={}", boundary),
+        ))
         .set_payload(body)
         .to_request();
 
@@ -310,8 +356,17 @@ async fn test_delete_old_image_blocks_escape() {
     fs::create_dir_all(&uploads).unwrap();
 
     // old_url resolves to ../secret.txt — must be blocked.
-    crate::uploads::handlers::delete_old_image("/uploads/../secret.txt", "", uploads.to_str().unwrap(), None).await;
-    assert!(secret.exists(), "path traversal out of uploads must be blocked");
+    crate::uploads::handlers::delete_old_image(
+        "/uploads/../secret.txt",
+        "",
+        uploads.to_str().unwrap(),
+        None,
+    )
+    .await;
+    assert!(
+        secret.exists(),
+        "path traversal out of uploads must be blocked"
+    );
 
     let _ = fs::remove_dir_all(&base);
 }

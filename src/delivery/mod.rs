@@ -21,8 +21,8 @@ use crate::models::UserRole;
 
 pub(crate) use crate::orgs::handlers::extract_claims;
 
-pub mod public;
 pub mod gateway;
+pub mod public;
 pub mod routes;
 pub mod settings;
 pub mod snapshot;
@@ -67,7 +67,11 @@ pub fn validate_required_text(field: &str, value: &str, max: usize) -> Result<()
 }
 
 /// An optional free-text field: when present, at most `max` chars.
-pub fn validate_optional_text(field: &str, value: Option<&str>, max: usize) -> Result<(), AppError> {
+pub fn validate_optional_text(
+    field: &str,
+    value: Option<&str>,
+    max: usize,
+) -> Result<(), AppError> {
     if let Some(v) = value
         && v.chars().count() > max
     {
@@ -194,15 +198,16 @@ pub(crate) async fn require_branch_access(
     if claims.role == UserRole::SuperAdmin {
         return Ok(());
     }
-    let branch_org: Option<Uuid> = sqlx::query_scalar(
-        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(branch_id)
-    .fetch_optional(pool)
-    .await?;
+    let branch_org: Option<Uuid> =
+        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
+            .bind(branch_id)
+            .fetch_optional(pool)
+            .await?;
     let branch_org = branch_org.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
     if claims.org_id() != Some(branch_org) {
-        return Err(AppError::Forbidden("Branch belongs to a different org".into()));
+        return Err(AppError::Forbidden(
+            "Branch belongs to a different org".into(),
+        ));
     }
     if claims.role == UserRole::OrgAdmin {
         return Ok(());
@@ -211,7 +216,10 @@ pub(crate) async fn require_branch_access(
     // boundary; any active org teller may act on this branch's deliveries.
     // Waiters and kitchen users are org-scoped the same way (device-bound, no
     // branch assignment).
-    if matches!(claims.role, UserRole::Teller | UserRole::Waiter | UserRole::Kitchen) {
+    if matches!(
+        claims.role,
+        UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
+    ) {
         return Ok(());
     }
     // Branch managers stay branch-scoped via their explicit assignments.

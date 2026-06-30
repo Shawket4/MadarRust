@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use actix_web::web;
 use crate::auth::middleware::JwtMiddleware;
-use crate::qr_card::shlink::{ShortLinkProvider, ShlinkClient};
+use crate::qr_card::shlink::{ShlinkClient, ShortLinkProvider};
+use actix_web::web;
 
 use super::handlers;
 
@@ -13,8 +13,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/qr")
             .wrap(JwtMiddleware)
-            .route("/links",  web::post().to(handlers::create_marketing_link))
-            .route("/links",  web::get().to(handlers::list_marketing_links)),
+            .route("/links", web::post().to(handlers::create_marketing_link))
+            .route("/links", web::get().to(handlers::list_marketing_links)),
     );
 }
 

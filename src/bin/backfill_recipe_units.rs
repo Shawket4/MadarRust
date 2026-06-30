@@ -16,7 +16,7 @@ use std::process::ExitCode;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
-use madar_rust::recipes::backfill::{backfill_recipe_units, BackfillScope};
+use madar_rust::recipes::backfill::{BackfillScope, backfill_recipe_units};
 
 const USAGE: &str = "\
 Normalizes existing recipe quantities to each ingredient's base stock unit.
@@ -48,7 +48,8 @@ fn parse_args() -> Result<(BackfillScope, bool), String> {
             }
             "--branch" => {
                 let v = args.next().ok_or("--branch requires a uuid")?;
-                branch = Some(Uuid::parse_str(&v).map_err(|_| format!("invalid branch uuid: {v}"))?);
+                branch =
+                    Some(Uuid::parse_str(&v).map_err(|_| format!("invalid branch uuid: {v}"))?);
             }
             "--dry-run" => dry_run = true,
             "--help" | "-h" => return Err(String::new()),
@@ -86,7 +87,11 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let pool = match PgPoolOptions::new().max_connections(5).connect(&db_url).await {
+    let pool = match PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url)
+        .await
+    {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: failed to connect to PostgreSQL: {e}");
@@ -98,7 +103,14 @@ async fn main() -> ExitCode {
         BackfillScope::Org(id) => println!("Scope:  org {id}"),
         BackfillScope::Branch(id) => println!("Scope:  branch {id}"),
     }
-    println!("Mode:   {}", if dry_run { "DRY RUN (rolls back)" } else { "LIVE (commits)" });
+    println!(
+        "Mode:   {}",
+        if dry_run {
+            "DRY RUN (rolls back)"
+        } else {
+            "LIVE (commits)"
+        }
+    );
 
     let summary = match backfill_recipe_units(&pool, scope, dry_run).await {
         Ok(s) => s,

@@ -1,17 +1,30 @@
+use crate::{
+    auth::jwt::Claims,
+    errors::{AppError, AppErrorResponse},
+    models::UserRole,
+    permissions::checker::check_permission,
+};
 use actix_multipart::Multipart;
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use futures::StreamExt;
 use image::ImageReader;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use std::{io::Cursor, path::{Path, PathBuf}};
-use uuid::Uuid;
-use crate::{auth::jwt::Claims, errors::{AppError, AppErrorResponse}, models::UserRole, permissions::checker::check_permission};
+use std::{
+    io::Cursor,
+    path::{Path, PathBuf},
+};
 use utoipa::ToSchema;
+use uuid::Uuid;
 
 const ALLOWED_MIME: &[&str] = &[
-    "image/jpeg","image/png","image/gif","image/webp",
-    "image/bmp","image/x-bmp","image/x-ms-bmp",
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "image/bmp",
+    "image/x-bmp",
+    "image/x-ms-bmp",
 ];
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 
@@ -48,11 +61,18 @@ pub struct UploadImageMultipart {
     security(("bearer_jwt" = []))
 )]
 pub async fn upload_menu_item_image(
-    req:          HttpRequest,
-    pool:         web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     menu_item_id: web::Path<Uuid>,
-    mut payload:  Multipart,
+    mut payload: Multipart,
 ) -> Result<HttpResponse, AppError> {
+    // Disabled in the public demo: uploaded files live on disk and the demo-org
+    // sweeper only reclaims DB rows, so allowing them would leak storage.
+    if crate::demo::config::demo_mode() {
+        return Err(AppError::BadRequest(
+            "Image uploads are disabled in the demo.".into(),
+        ));
+    }
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
 
@@ -63,31 +83,40 @@ pub async fn upload_menu_item_image(
     .fetch_optional(pool.get_ref())
     .await?;
 
-    let (org_id, old_image_url) = row
-        .ok_or_else(|| AppError::NotFound("Menu item not found".into()))?;
+    let (org_id, old_image_url) =
+        row.ok_or_else(|| AppError::NotFound("Menu item not found".into()))?;
 
-    if claims.role != UserRole::SuperAdmin
-        && claims.org_id() != Some(org_id) {
-            return Err(AppError::Forbidden("Menu item belongs to a different org".into()));
-        }
+    if claims.role != UserRole::SuperAdmin && claims.org_id() != Some(org_id) {
+        return Err(AppError::Forbidden(
+            "Menu item belongs to a different org".into(),
+        ));
+    }
 
     let uploads_dir = std::env::var("UPLOADS_DIR").map_err(|_| AppError::Internal)?;
-    let base_url    = std::env::var("UPLOADS_BASE_URL").map_err(|_| AppError::Internal)?;
+    let base_url = std::env::var("UPLOADS_BASE_URL").map_err(|_| AppError::Internal)?;
 
     let mut file_bytes: Option<Vec<u8>> = None;
 
     while let Some(item) = payload.next().await {
         let mut field = item.map_err(|_| AppError::BadRequest("Invalid multipart data".into()))?;
-        let content_type = field.content_type().map(|m| m.to_string()).unwrap_or_default();
-        let field_name   = field
+        let content_type = field
+            .content_type()
+            .map(|m| m.to_string())
+            .unwrap_or_default();
+        let field_name = field
             .content_disposition()
             .and_then(|cd| cd.get_name())
             .unwrap_or("")
             .to_string();
 
-        if field_name != "image" { continue; }
+        if field_name != "image" {
+            continue;
+        }
         if !ALLOWED_MIME.contains(&content_type.as_str()) {
-            return Err(AppError::BadRequest(format!("Unsupported image type: {}", content_type)));
+            return Err(AppError::BadRequest(format!(
+                "Unsupported image type: {}",
+                content_type
+            )));
         }
 
         let mut bytes = Vec::new();
@@ -95,31 +124,39 @@ pub async fn upload_menu_item_image(
             let chunk = chunk.map_err(|_| AppError::BadRequest("Failed reading upload".into()))?;
             bytes.extend_from_slice(&chunk);
             if bytes.len() > 20 * 1024 * 1024 {
-                return Err(AppError::BadRequest("File too large (max 20 MB raw)".into()));
+                return Err(AppError::BadRequest(
+                    "File too large (max 20 MB raw)".into(),
+                ));
             }
         }
         file_bytes = Some(bytes);
         break;
     }
 
-    let raw_bytes = file_bytes
-        .ok_or_else(|| AppError::BadRequest("No image field found in upload".into()))?;
+    let raw_bytes =
+        file_bytes.ok_or_else(|| AppError::BadRequest("No image field found in upload".into()))?;
 
     let jpeg_bytes = compress_to_jpeg(&raw_bytes)?;
 
-    let filename  = format!("{}.jpg", Uuid::new_v4());
-    let dir_path  = Path::new(&uploads_dir).join(org_id.to_string()).join("menu-items");
+    let filename = format!("{}.jpg", Uuid::new_v4());
+    let dir_path = Path::new(&uploads_dir)
+        .join(org_id.to_string())
+        .join("menu-items");
     tokio::fs::create_dir_all(&dir_path).await.map_err(|e| {
-        tracing::error!("Failed to create upload dir: {}", e); AppError::Internal
+        tracing::error!("Failed to create upload dir: {}", e);
+        AppError::Internal
     })?;
     let file_path: PathBuf = dir_path.join(&filename);
 
     // 1. Write new file to disk first
-    tokio::fs::write(&file_path, &jpeg_bytes).await.map_err(|e| {
-        tracing::error!("Failed to write image: {}", e); AppError::Internal
-    })?;
+    tokio::fs::write(&file_path, &jpeg_bytes)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to write image: {}", e);
+            AppError::Internal
+        })?;
 
-    let base      = base_url.trim_end_matches('/');
+    let base = base_url.trim_end_matches('/');
     let image_url = format!("{}/{}/menu-items/{}", base, org_id, filename);
 
     // 2. Update DB — if this fails, clean up the newly written file
@@ -139,8 +176,12 @@ pub async fn upload_menu_item_image(
         delete_old_image(&old_url, &base_url, &uploads_dir, Some(org_id)).await;
     }
 
-    tracing::info!("Uploaded image for menu_item {} → {} ({} KB)",
-        menu_item_id, image_url, jpeg_bytes.len() / 1024);
+    tracing::info!(
+        "Uploaded image for menu_item {} → {} ({} KB)",
+        menu_item_id,
+        image_url,
+        jpeg_bytes.len() / 1024
+    );
 
     Ok(HttpResponse::Ok().json(UploadResponse { image_url }))
 }
@@ -152,14 +193,20 @@ fn compress_to_jpeg(raw: &[u8]) -> Result<Vec<u8>, AppError> {
         .decode()
         .map_err(|e| AppError::BadRequest(format!("Invalid image: {}", e)))?;
 
-    let qualities: &[u8] = if raw.len() <= MAX_BYTES { &[85] } else { &[85, 75, 65, 50, 40] };
+    let qualities: &[u8] = if raw.len() <= MAX_BYTES {
+        &[85]
+    } else {
+        &[85, 75, 65, 50, 40]
+    };
     for &quality in qualities {
         let mut buf = Cursor::new(Vec::new());
         let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
         enc.encode_image(&img)
             .map_err(|e| AppError::BadRequest(format!("Encoding failed: {}", e)))?;
         let bytes = buf.into_inner();
-        if bytes.len() <= MAX_BYTES || quality == 40 { return Ok(bytes); }
+        if bytes.len() <= MAX_BYTES || quality == 40 {
+            return Ok(bytes);
+        }
     }
     Err(AppError::Internal)
 }
@@ -169,7 +216,12 @@ fn compress_to_jpeg(raw: &[u8]) -> Result<Vec<u8>, AppError> {
 /// another's file via a crafted image_url; `None` (org-logos, super-admin only)
 /// keeps the looser uploads-root check. Either way path traversal OUT of the
 /// uploads dir is blocked.
-pub async fn delete_old_image(old_url: &str, _base_url: &str, uploads_dir: &str, org_scope: Option<Uuid>) {
+pub async fn delete_old_image(
+    old_url: &str,
+    _base_url: &str,
+    uploads_dir: &str,
+    org_scope: Option<Uuid>,
+) {
     let rel = extract_relative_path(old_url);
     let uploads_root = match std::fs::canonicalize(uploads_dir) {
         Ok(p) => p,
@@ -186,7 +238,11 @@ pub async fn delete_old_image(old_url: &str, _base_url: &str, uploads_dir: &str,
         None => uploads_root.clone(),
     };
     if !canonical.starts_with(&allowed_root) {
-        tracing::warn!("Blocked out-of-scope image delete: {:?} not under {:?}", canonical, allowed_root);
+        tracing::warn!(
+            "Blocked out-of-scope image delete: {:?} not under {:?}",
+            canonical,
+            allowed_root
+        );
         return;
     }
     if let Err(e) = tokio::fs::remove_file(&canonical).await {
@@ -214,7 +270,8 @@ pub fn extract_relative_path(url: &str) -> &str {
 }
 
 pub fn normalize_upload_url(url: &str) -> String {
-    let base_url = std::env::var("UPLOADS_BASE_URL").unwrap_or_else(|_| "https://madar-pos.cloud/api/uploads".to_string());
+    let base_url = std::env::var("UPLOADS_BASE_URL")
+        .unwrap_or_else(|_| "https://madar-pos.cloud/api/uploads".to_string());
     let base = base_url.trim_end_matches('/');
     let rel = extract_relative_path(url);
     format!("{}/{}", base, rel)
@@ -242,7 +299,8 @@ where
 }
 
 fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
-    req.extensions().get::<Claims>().cloned()
+    req.extensions()
+        .get::<Claims>()
+        .cloned()
         .ok_or_else(|| AppError::Unauthorized("Missing claims".into()))
 }
-

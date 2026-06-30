@@ -24,38 +24,38 @@ pub enum BackfillScope {
 }
 
 pub struct Unconvertible {
-    pub table:           String,
-    pub row_id:          Uuid,
+    pub table: String,
+    pub row_id: Uuid,
     pub ingredient_name: String,
-    pub recipe_unit:     String,
-    pub base_unit:       String,
+    pub recipe_unit: String,
+    pub base_unit: String,
 }
 
 #[derive(Default)]
 pub struct RecipeUnitSummary {
-    pub scanned:       i64,
-    pub already_base:  i64,
-    pub converted:     i64,
+    pub scanned: i64,
+    pub already_base: i64,
+    pub converted: i64,
     pub unconvertible: Vec<Unconvertible>,
 }
 
 async fn resolve_org(pool: &PgPool, scope: BackfillScope) -> Result<Uuid, AppError> {
     match scope {
         BackfillScope::Org(o) => Ok(o),
-        BackfillScope::Branch(b) => sqlx::query_scalar(
-            "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL"
-        )
-        .bind(b)
-        .fetch_optional(pool)
-        .await?
-        .flatten()
-        .ok_or_else(|| AppError::NotFound("Branch not found".into())),
+        BackfillScope::Branch(b) => {
+            sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
+                .bind(b)
+                .fetch_optional(pool)
+                .await?
+                .flatten()
+                .ok_or_else(|| AppError::NotFound("Branch not found".into()))
+        }
     }
 }
 
 pub async fn backfill_recipe_units(
-    pool:    &PgPool,
-    scope:   BackfillScope,
+    pool: &PgPool,
+    scope: BackfillScope,
     dry_run: bool,
 ) -> Result<RecipeUnitSummary, AppError> {
     let org_id = resolve_org(pool, scope).await?;
@@ -111,8 +111,8 @@ pub async fn backfill_recipe_units(
                     summary.converted += 1;
                 }
                 Err(_) => summary.unconvertible.push(Unconvertible {
-                    table:           name.to_string(),
-                    row_id:          id,
+                    table: name.to_string(),
+                    row_id: id,
                     ingredient_name: ing_name,
                     recipe_unit,
                     base_unit,

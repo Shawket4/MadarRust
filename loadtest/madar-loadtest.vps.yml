@@ -1,0 +1,57 @@
+# THROWAWAY load-test stack for the prod VPS. Fully isolated from prod:
+#  - its own Postgres CONTAINER (DB `madar_loadtest`), ephemeral, NO host port,
+#    so there is no path to the host-resident prod Postgres / `madar` DB.
+#  - the backend points ONLY at loadtest-db (never host.docker.internal/5432).
+#  - tight mem_limits: if this stack overgrows it gets OOM-killed, not prod.
+#  - no published host ports: k6 + curl reach the backend over this private net.
+# Torn down with `docker compose -f madar-loadtest.vps.yml down -v`.
+
+name: madar-loadtest
+
+services:
+  loadtest-db:
+    image: postgres:15
+    mem_limit: 384m
+    environment:
+      POSTGRES_USER: madar
+      POSTGRES_PASSWORD: madar
+      POSTGRES_DB: madar_loadtest
+      POSTGRES_HOST_AUTH_METHOD: trust   # ephemeral, network-private, throwaway
+    command:
+      - postgres
+      - -c
+      - shared_buffers=96MB
+      - -c
+      - effective_cache_size=256MB
+      - -c
+      - max_connections=50
+    volumes:
+      - ./db-init:/docker-entrypoint-initdb.d:ro   # creates the legacy `sufrix` role
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U madar -d madar_loadtest"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    # NO ports: — reachable only on the private compose network.
+
+  loadtest-backend:
+    image: ${LT_IMAGE:?set LT_IMAGE to the prod GHCR image}
+    mem_limit: 512m
+    depends_on:
+      loadtest-db:
+        condition: service_healthy
+    environment:
+      # THROWAWAY DB ONLY. Never host.docker.internal, never :5432 on the host.
+      DATABASE_URL: postgres://madar:madar@loadtest-db:5432/madar_loadtest
+      READ_DATABASE_URL: ""                       # reuse primary (the throwaway)
+      JWT_SECRET: loadtest-secret-not-for-prod    # isolates tokens from prod
+      BIND_ADDR: 0.0.0.0:8081
+      RUST_LOG: warn
+      UPLOADS_DIR: /app/uploads
+      DB_MAX_CONNECTIONS: ${DB_MAX_CONNECTIONS:-12}
+      DB_STATEMENT_CACHE_CAPACITY: ${DB_STATEMENT_CACHE_CAPACITY:-100}
+      MENU_CACHE_TTL_SECS: ${MENU_CACHE_TTL_SECS:-0}
+      # Measure app capacity, not the limiter; no outbound translate. NEVER in prod.
+      MADAR_DISABLE_RATE_LIMIT: "1"
+      MADAR_DISABLE_AUTO_TRANSLATION: "1"
+    # NO ports: — k6 hits http://loadtest-backend:8081 over the private network.

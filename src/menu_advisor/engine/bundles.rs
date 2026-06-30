@@ -11,15 +11,15 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::menu_advisor::dto::{
-    AnalysisConfig, BundleAssociation, BundleForecast, BundleItemPair, BundleSuggestion,
-    Classification, CmQuadrant, GuardClip, ItemKey, RevenueClass, Triplet,
-};
+use super::ItemSnapshot;
 use super::classify::ClassificationOutcome;
 use super::explain;
 use super::kpi::ItemKpi;
 use super::stats::{apply_rounding, geometric_mean, ratio_or};
-use super::ItemSnapshot;
+use crate::menu_advisor::dto::{
+    AnalysisConfig, BundleAssociation, BundleForecast, BundleItemPair, BundleSuggestion,
+    Classification, CmQuadrant, GuardClip, ItemKey, RevenueClass, Triplet,
+};
 
 /// Share of inside-bundle buyers who are first-time triers of the focus item
 /// — a labeled prior, not a measurement.
@@ -43,7 +43,11 @@ impl Association {
     /// Directional confidence P(other | this): `from_first` selects whether
     /// "this" is the sorted-first element of the pair key.
     pub(crate) fn confidence_from(&self, from_first: bool) -> f64 {
-        let own_support = if from_first { self.support_a } else { self.support_b };
+        let own_support = if from_first {
+            self.support_a
+        } else {
+            self.support_b
+        };
         ratio_or(self.support_ab, own_support, 0.0)
     }
 }
@@ -268,16 +272,23 @@ pub(crate) fn suggest_bundles(
     let is_focus = |c: Classification| {
         matches!(
             c,
-            Classification::Cm { quadrant: CmQuadrant::Puzzle }
-                | Classification::Cm { quadrant: CmQuadrant::Dog }
-                | Classification::Revenue { class: RevenueClass::Slow }
-                | Classification::Revenue { class: RevenueClass::Quiet }
+            Classification::Cm {
+                quadrant: CmQuadrant::Puzzle
+            } | Classification::Cm {
+                quadrant: CmQuadrant::Dog
+            } | Classification::Revenue {
+                class: RevenueClass::Slow
+            } | Classification::Revenue {
+                class: RevenueClass::Quiet
+            }
         )
     };
 
     let eligible_partner = |k: &ItemKey| -> bool {
         let Some(kpi) = kpis.get(k) else { return false };
-        let Some(snap) = snap_map.get(k) else { return false };
+        let Some(snap) = snap_map.get(k) else {
+            return false;
+        };
         kpi.sufficient && !kpi.was_inactive && snap.is_active && !snap.bundle_only
     };
 
@@ -288,15 +299,21 @@ pub(crate) fn suggest_bundles(
     let mut all_out = Vec::new();
 
     for focus_key in focus_keys {
-        let Some(focus) = kpis.get(focus_key) else { continue };
+        let Some(focus) = kpis.get(focus_key) else {
+            continue;
+        };
         if !focus.sufficient || focus.was_inactive {
             continue;
         }
-        let Some(cls) = outcome.map.get(focus_key).copied() else { continue };
+        let Some(cls) = outcome.map.get(focus_key).copied() else {
+            continue;
+        };
         if !is_focus(cls) {
             continue;
         }
-        let Some(focus_snap) = snap_map.get(focus_key).copied() else { continue };
+        let Some(focus_snap) = snap_map.get(focus_key).copied() else {
+            continue;
+        };
         if !focus_snap.is_active || focus_snap.bundle_only {
             continue;
         }
@@ -347,12 +364,10 @@ pub(crate) fn suggest_bundles(
             if config.bundle_max_size >= 3 {
                 let p2 = partners.iter().skip(idx + 1).find(|p2| {
                     !are_size_siblings(&p1.key, &p2.key)
-                        && get_assoc(assoc, &p1.key, &p2.key)
-                            .is_some_and(|(a, _)| a.lift >= 1.0)
+                        && get_assoc(assoc, &p1.key, &p2.key).is_some_and(|(a, _)| a.lift >= 1.0)
                 });
                 if let Some(p2) = p2
-                    && let Some(s) =
-                        build_bundle(focus, focus_snap, &[p1, p2], &snap_map, config)
+                    && let Some(s) = build_bundle(focus, focus_snap, &[p1, p2], &snap_map, config)
                     && seen_sets.insert(sorted_items(&s.bundle_items))
                 {
                     focus_candidates.push(s);
@@ -366,17 +381,18 @@ pub(crate) fn suggest_bundles(
             let rank = |s: &BundleSuggestion| {
                 (
                     s.forecast.incremental_cm.is_some(),
-                    s.forecast
-                        .incremental_cm
-                        .map(|t| t.mid)
-                        .unwrap_or(s.forecast.total_units_uplift_x * s.bundle_suggested_price as f64),
+                    s.forecast.incremental_cm.map(|t| t.mid).unwrap_or(
+                        s.forecast.total_units_uplift_x * s.bundle_suggested_price as f64,
+                    ),
                 )
             };
             let (a_known, a_val) = rank(a);
             let (b_known, b_val) = rank(b);
-            b_known
-                .cmp(&a_known)
-                .then(b_val.partial_cmp(&a_val).unwrap_or(std::cmp::Ordering::Equal))
+            b_known.cmp(&a_known).then(
+                b_val
+                    .partial_cmp(&a_val)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
         });
         focus_candidates.truncate(config.bundle_top_n_per_focus);
         all_out.extend(focus_candidates);
@@ -403,8 +419,8 @@ fn build_bundle(
         .map(|p| snap_map.get(&p.key).copied())
         .collect::<Option<Vec<_>>>()?;
 
-    let bundle_list = focus_snap.current_price
-        + partner_snaps.iter().map(|s| s.current_price).sum::<i64>();
+    let bundle_list =
+        focus_snap.current_price + partner_snaps.iter().map(|s| s.current_price).sum::<i64>();
 
     let component_costs: Vec<Option<i64>> = std::iter::once(focus_snap.cost_per_serving)
         .chain(partner_snaps.iter().map(|s| s.cost_per_serving))
@@ -417,11 +433,14 @@ fn build_bundle(
 
     let pricing = price_bundle(bundle_cost, bundle_list, config)?;
     let bundle_cm = bundle_cost.map(|c| pricing.price - c);
-    let bundle_margin_pct =
-        bundle_cm.map(|cm| ratio_or(cm as f64, pricing.price as f64, 0.0));
+    let bundle_margin_pct = bundle_cm.map(|cm| ratio_or(cm as f64, pricing.price as f64, 0.0));
 
     // Forecast anchors to the WEAKEST focus-partner pair.
-    let pair_count = partners.iter().map(|p| p.assoc.pair_count).min().unwrap_or(0);
+    let pair_count = partners
+        .iter()
+        .map(|p| p.assoc.pair_count)
+        .min()
+        .unwrap_or(0);
     let forecast = forecast_bundle(&ForecastInputs {
         pair_count,
         focus_cm_per_unit: focus.cost_metrics.as_ref().map(|c| c.cm_per_unit),
@@ -444,8 +463,9 @@ fn build_bundle(
     let scores: Vec<f64> = partners.iter().map(|p| p.score.max(0.0)).collect();
     let composite_score = geometric_mean(&scores).unwrap_or(0.0);
 
-    let mut bundle_items: Vec<ItemKey> =
-        std::iter::once(focus.key.clone()).chain(partners.iter().map(|p| p.key.clone())).collect();
+    let mut bundle_items: Vec<ItemKey> = std::iter::once(focus.key.clone())
+        .chain(partners.iter().map(|p| p.key.clone()))
+        .collect();
     bundle_items.sort();
 
     let names: Vec<&str> = std::iter::once(focus_snap.name.as_str())
@@ -477,7 +497,10 @@ fn build_bundle(
         bundle_cost,
         bundle_cm,
         bundle_margin_pct,
-        association: BundleAssociation { pair_lifts, composite_score },
+        association: BundleAssociation {
+            pair_lifts,
+            composite_score,
+        },
         forecast,
         guard_clips: pricing.clips,
         explanation,
@@ -486,15 +509,20 @@ fn build_bundle(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
 mod tests {
     use chrono::{TimeZone, Utc};
 
-    use crate::menu_advisor::dto::AnalysisConfig;
+    use super::super::SaleEvent;
     use super::super::classify::classify_items;
     use super::super::kpi::compute_item_kpis;
-    use super::super::SaleEvent;
     use super::*;
+    use crate::menu_advisor::dto::AnalysisConfig;
 
     fn key(id: u8) -> ItemKey {
         ItemKey {
@@ -543,7 +571,14 @@ mod tests {
     /// Baskets: `pairs` baskets contain {focus, partner}; `focus_solo` and
     /// `partner_solo` are singleton baskets; plus `noise` two-item baskets of
     /// other items to keep lift meaningful.
-    fn baskets(focus: u8, partner: u8, pairs: usize, focus_solo: usize, partner_solo: usize, noise: usize) -> Vec<Vec<ItemKey>> {
+    fn baskets(
+        focus: u8,
+        partner: u8,
+        pairs: usize,
+        focus_solo: usize,
+        partner_solo: usize,
+        noise: usize,
+    ) -> Vec<Vec<ItemKey>> {
         let mut out = Vec::new();
         for _ in 0..pairs {
             out.push(vec![key(focus), key(partner)]);
@@ -620,9 +655,7 @@ mod tests {
         let pairs_per_day = 15.0 / config.analysis_window_days;
         assert!((s.forecast.expected_velocity.lo - pairs_per_day).abs() < 1e-9);
         assert!(
-            (s.forecast.expected_velocity.mid
-                - pairs_per_day * config.promotion_lift_prior)
-                .abs()
+            (s.forecast.expected_velocity.mid - pairs_per_day * config.promotion_lift_prior).abs()
                 < 1e-9
         );
         // Never negative, never anchored to focus standalone velocity.
@@ -711,7 +744,10 @@ mod tests {
 
         let mut seen = HashSet::new();
         for s in out.iter().filter(|s| s.focus_item == key(1)) {
-            assert!(seen.insert(sorted_items(&s.bundle_items)), "duplicate bundle set");
+            assert!(
+                seen.insert(sorted_items(&s.bundle_items)),
+                "duplicate bundle set"
+            );
             if s.bundle_items.len() == 3 {
                 panic!("3-bundle built from pairwise-incompatible partners");
             }
@@ -745,13 +781,22 @@ mod tests {
         ];
         let mut b: Vec<Vec<ItemKey>> = Vec::new();
         // Focus co-occurs heavily with its own size sibling AND with item 3.
-        b.extend(std::iter::repeat_n(vec![focus_small.clone(), focus_large.clone()], 20));
+        b.extend(std::iter::repeat_n(
+            vec![focus_small.clone(), focus_large.clone()],
+            20,
+        ));
         b.extend(std::iter::repeat_n(vec![focus_small.clone(), key(3)], 20));
         b.extend(std::iter::repeat_n(vec![key(2)], 60));
         let out = run_bundles(&snaps, &sales, &b, &AnalysisConfig::default());
         for s in &out {
-            assert!(!s.bundle_items.contains(&focus_large), "size sibling in bundle");
-            assert!(!s.bundle_items.contains(&key(3)), "bundle_only SKU in bundle");
+            assert!(
+                !s.bundle_items.contains(&focus_large),
+                "size sibling in bundle"
+            );
+            assert!(
+                !s.bundle_items.contains(&key(3)),
+                "bundle_only SKU in bundle"
+            );
         }
     }
 

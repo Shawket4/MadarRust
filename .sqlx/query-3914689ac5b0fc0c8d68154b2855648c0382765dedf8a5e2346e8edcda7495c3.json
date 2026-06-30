@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE organizations SET timezone = 'Asia/Riyadh' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3914689ac5b0fc0c8d68154b2855648c0382765dedf8a5e2346e8edcda7495c3"
+}

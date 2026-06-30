@@ -2,26 +2,26 @@
 //! channel-resolved menu, OSRM-proxied delivery quote, WhatsApp OTP, and order
 //! intake. Pricing is 100% server-side and frozen into the delivery_orders row.
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use crate::realtime::event::{BranchEvent, Topic};
-use crate::realtime::hub::BranchEventHub;
 use super::snapshot::{self, CartLineInput};
 use super::staff::DeliveryOrder;
 use super::whatsapp;
 use super::{
-    channel_open, normalize_phone, validate_channel, validate_coords, validate_optional_text,
-    validate_payment_hint, validate_required_text, CHANNEL_OUTSIDE, MAX_ADDRESS_LEN, MAX_NAME_LEN,
-    MAX_NOTES_LEN, MAX_OTP_CODE_LEN, MAX_SHORT_TEXT_LEN,
+    CHANNEL_OUTSIDE, MAX_ADDRESS_LEN, MAX_NAME_LEN, MAX_NOTES_LEN, MAX_OTP_CODE_LEN,
+    MAX_SHORT_TEXT_LEN, channel_open, normalize_phone, validate_channel, validate_coords,
+    validate_optional_text, validate_payment_hint, validate_required_text,
 };
 use crate::auth::jwt::JwtSecret;
 use crate::errors::{AppError, AppErrorResponse};
-use crate::geo::osrm::{haversine_meters, road_distance_meters, LatLng, OsrmError};
+use crate::geo::osrm::{LatLng, OsrmError, haversine_meters, road_distance_meters};
+use crate::realtime::event::{BranchEvent, Topic};
+use crate::realtime::hub::BranchEventHub;
 
 // ── Public branch selector ────────────────────────────────────
 
@@ -100,12 +100,20 @@ pub async fn public_branches(
         .into_iter()
         .map(|r| PublicBranch {
             in_mall_open_now: channel_open(
-                r.in_mall_enabled, &r.in_mall_override, r.in_mall_open_time,
-                r.in_mall_close_time, r.local_time, r.has_open_shift,
+                r.in_mall_enabled,
+                &r.in_mall_override,
+                r.in_mall_open_time,
+                r.in_mall_close_time,
+                r.local_time,
+                r.has_open_shift,
             ),
             outside_open_now: channel_open(
-                r.outside_enabled, &r.outside_override, r.outside_open_time,
-                r.outside_close_time, r.local_time, r.has_open_shift,
+                r.outside_enabled,
+                &r.outside_override,
+                r.outside_open_time,
+                r.outside_close_time,
+                r.local_time,
+                r.has_open_shift,
             ),
             id: r.id,
             name: r.name,
@@ -145,9 +153,23 @@ async fn channel_open_now(pool: &PgPool, branch_id: Uuid, channel: &str) -> Resu
     .await?;
     let Some(r) = row else { return Ok(false) };
     Ok(if channel == CHANNEL_OUTSIDE {
-        channel_open(r.outside_enabled, &r.outside_override, r.outside_open_time, r.outside_close_time, r.local_time, r.has_open_shift)
+        channel_open(
+            r.outside_enabled,
+            &r.outside_override,
+            r.outside_open_time,
+            r.outside_close_time,
+            r.local_time,
+            r.has_open_shift,
+        )
     } else {
-        channel_open(r.in_mall_enabled, &r.in_mall_override, r.in_mall_open_time, r.in_mall_close_time, r.local_time, r.has_open_shift)
+        channel_open(
+            r.in_mall_enabled,
+            &r.in_mall_override,
+            r.in_mall_open_time,
+            r.in_mall_close_time,
+            r.local_time,
+            r.has_open_shift,
+        )
     })
 }
 
@@ -285,7 +307,9 @@ pub async fn public_menu(
     .await?;
     let (org_id, enabled) = branch.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
     if !enabled {
-        return Err(AppError::NotFound("This branch does not offer this channel".into()));
+        return Err(AppError::NotFound(
+            "This branch does not offer this channel".into(),
+        ));
     }
     // Read-only browse preview skips the open-now gate (so a closed-but-enabled
     // channel can still show its menu). The enabled check above always stands,
@@ -293,11 +317,17 @@ pub async fn public_menu(
     if !query.preview.unwrap_or(false)
         && !channel_open_now(pool.get_ref(), branch_id, &query.channel).await?
     {
-        return Err(AppError::Conflict("This channel is closed right now.".into()));
+        return Err(AppError::Conflict(
+            "This channel is closed right now.".into(),
+        ));
     }
 
     // The channel's active discount (customer-facing), if any.
-    let discount_col = if query.channel == "outside" { "outside_discount_id" } else { "in_mall_discount_id" };
+    let discount_col = if query.channel == "outside" {
+        "outside_discount_id"
+    } else {
+        "in_mall_discount_id"
+    };
     let discount: Option<DeliveryMenuDiscount> =
         sqlx::query_as::<_, (Uuid, String, serde_json::Value, String, i32)>(&format!(
             "SELECT d.id, d.name, d.name_translations, d.type::text, d.value \
@@ -307,24 +337,34 @@ pub async fn public_menu(
         .bind(branch_id)
         .fetch_optional(pool.get_ref())
         .await?
-        .map(|(id, name, name_translations, dtype, value)| DeliveryMenuDiscount {
-            id,
-            name,
-            name_translations,
-            dtype,
-            value,
-        });
+        .map(
+            |(id, name, name_translations, dtype, value)| DeliveryMenuDiscount {
+                id,
+                name,
+                name_translations,
+                dtype,
+                value,
+            },
+        );
 
-    let categories: Vec<DeliveryMenuCategory> = sqlx::query_as::<_, (Uuid, String, serde_json::Value, Option<String>)>(
-        "SELECT id, name, name_translations, image_url FROM categories \
+    let categories: Vec<DeliveryMenuCategory> =
+        sqlx::query_as::<_, (Uuid, String, serde_json::Value, Option<String>)>(
+            "SELECT id, name, name_translations, image_url FROM categories \
          WHERE org_id = $1 AND is_active = true AND deleted_at IS NULL ORDER BY name",
-    )
-    .bind(org_id)
-    .fetch_all(pool.get_ref())
-    .await?
-    .into_iter()
-    .map(|(id, name, name_translations, image_url)| DeliveryMenuCategory { id, name, name_translations, image_url })
-    .collect();
+        )
+        .bind(org_id)
+        .fetch_all(pool.get_ref())
+        .await?
+        .into_iter()
+        .map(
+            |(id, name, name_translations, image_url)| DeliveryMenuCategory {
+                id,
+                name,
+                name_translations,
+                image_url,
+            },
+        )
+        .collect();
 
     #[allow(clippy::type_complexity)]
     let item_rows: Vec<(Uuid, Option<Uuid>, String, serde_json::Value, Option<String>, Option<String>, i32)> =
@@ -370,13 +410,17 @@ pub async fn public_menu(
         .map(|(id, label, price)| ((id, label), price))
         .collect();
 
-    let mut sizes_by_item: std::collections::HashMap<Uuid, Vec<DeliveryMenuSize>> = std::collections::HashMap::new();
+    let mut sizes_by_item: std::collections::HashMap<Uuid, Vec<DeliveryMenuSize>> =
+        std::collections::HashMap::new();
     for (item_id, label, catalog_price) in catalog_sizes {
         let price = branch_size_map
             .get(&(item_id, label.clone()))
             .copied()
             .unwrap_or(catalog_price);
-        sizes_by_item.entry(item_id).or_default().push(DeliveryMenuSize { label, price });
+        sizes_by_item
+            .entry(item_id)
+            .or_default()
+            .push(DeliveryMenuSize { label, price });
     }
 
     // Global org-wide addon catalog (channel-effective), loaded once per request.
@@ -386,27 +430,36 @@ pub async fn public_menu(
     let mut optionals_by_item = load_optional_fields(pool.get_ref(), &item_ids).await?;
 
     // Default/base milk per item (POS pre-select), batched over the item list.
-    let mut default_milk_by_item   = load_default_milk(pool.get_ref(), &item_ids).await?;
+    let mut default_milk_by_item = load_default_milk(pool.get_ref(), &item_ids).await?;
     let mut allowed_addons_by_item = load_allowed_addon_ids(pool.get_ref(), &item_ids).await?;
 
     let items: Vec<DeliveryMenuItem> = item_rows
         .into_iter()
-        .map(|(id, category_id, name, name_translations, description, image_url, price)| DeliveryMenuItem {
-            sizes:                sizes_by_item.remove(&id).unwrap_or_default(),
-            optionals:            optionals_by_item.remove(&id).unwrap_or_default(),
-            default_milk_addon_id: default_milk_by_item.remove(&id),
-            allowed_addon_ids:    allowed_addons_by_item.remove(&id).unwrap_or_default(),
-            id,
-            category_id,
-            name,
-            name_translations,
-            description,
-            image_url,
-            price,
-        })
+        .map(
+            |(id, category_id, name, name_translations, description, image_url, price)| {
+                DeliveryMenuItem {
+                    sizes: sizes_by_item.remove(&id).unwrap_or_default(),
+                    optionals: optionals_by_item.remove(&id).unwrap_or_default(),
+                    default_milk_addon_id: default_milk_by_item.remove(&id),
+                    allowed_addon_ids: allowed_addons_by_item.remove(&id).unwrap_or_default(),
+                    id,
+                    category_id,
+                    name,
+                    name_translations,
+                    description,
+                    image_url,
+                    price,
+                }
+            },
+        )
         .collect();
 
-    Ok(HttpResponse::Ok().json(DeliveryMenu { categories, items, addons, discount }))
+    Ok(HttpResponse::Ok().json(DeliveryMenu {
+        categories,
+        items,
+        addons,
+        discount,
+    }))
 }
 
 /// Load the org-wide global addon catalog (the POS model: one catalog for every
@@ -443,14 +496,18 @@ async fn load_addon_catalog(
     Ok(rows
         .into_iter()
         .filter(|(_, _, _, _, _, is_available)| *is_available) // channel-disabled — never offered
-        .map(|(addon_item_id, name, name_translations, atype, price, is_available)| DeliveryAddonOption {
-            addon_item_id,
-            name,
-            name_translations,
-            r#type: atype,
-            price,
-            is_available,
-        })
+        .map(
+            |(addon_item_id, name, name_translations, atype, price, is_available)| {
+                DeliveryAddonOption {
+                    addon_item_id,
+                    name,
+                    name_translations,
+                    r#type: atype,
+                    price,
+                    is_available,
+                }
+            },
+        )
         .collect())
 }
 
@@ -476,13 +533,16 @@ async fn load_optional_fields(
     .await?;
 
     for (id, menu_item_id, name, name_translations, price, size_label) in rows {
-        by_item.entry(menu_item_id).or_default().push(DeliveryOptionalField {
-            id,
-            name,
-            name_translations,
-            price,
-            size_label,
-        });
+        by_item
+            .entry(menu_item_id)
+            .or_default()
+            .push(DeliveryOptionalField {
+                id,
+                name,
+                name_translations,
+                price,
+                size_label,
+            });
     }
 
     Ok(by_item)
@@ -530,7 +590,7 @@ async fn load_default_milk(
 /// Batch-load per-item allowed addon IDs from `menu_item_allowed_addons`.
 /// Items with no rows → absent from map (empty Vec after the `.remove` default).
 async fn load_allowed_addon_ids(
-    pool:     &PgPool,
+    pool: &PgPool,
     item_ids: &[Uuid],
 ) -> Result<std::collections::HashMap<Uuid, Vec<Uuid>>, AppError> {
     let mut by_item: std::collections::HashMap<Uuid, Vec<Uuid>> = std::collections::HashMap::new();
@@ -572,7 +632,12 @@ pub struct QuoteQuery {
 }
 
 pub enum FeeOutcome {
-    Ok { fee: i32, zone_id: Uuid, zone_name: String, distance_meters: i32 },
+    Ok {
+        fee: i32,
+        zone_id: Uuid,
+        zone_name: String,
+        distance_meters: i32,
+    },
     OutOfRange,
     Unavailable,
 }
@@ -602,7 +667,10 @@ pub fn select_zone_fee(distance_i: i32, max_dist: Option<i32>, zones: &[ZoneRow]
     if max_dist.is_some_and(|m| distance_i > m) {
         return FeeOutcome::OutOfRange;
     }
-    match zones.iter().find(|z| z.max_road_distance_meters >= distance_i) {
+    match zones
+        .iter()
+        .find(|z| z.max_road_distance_meters >= distance_i)
+    {
         Some(zone) => FeeOutcome::Ok {
             fee: zone.fee,
             zone_id: zone.id,
@@ -635,12 +703,15 @@ async fn compute_outside_fee(
     // back to straight-line (haversine) so a quote can still be produced from the
     // zone rings. A genuine NoRoute (OSRM reachable but no driving path) stays
     // out-of-range; a branch with no coordinates stays unavailable.
-    let branch_pt = LatLng { lat: blat, lng: blng };
+    let branch_pt = LatLng {
+        lat: blat,
+        lng: blng,
+    };
     let distance = match road_distance_meters(branch_pt, cust).await {
         Ok(d) => d,
-        Err(OsrmError::NotConfigured) | Err(OsrmError::Unreachable) | Err(OsrmError::BadResponse) => {
-            haversine_meters(branch_pt, cust)
-        }
+        Err(OsrmError::NotConfigured)
+        | Err(OsrmError::Unreachable)
+        | Err(OsrmError::BadResponse) => haversine_meters(branch_pt, cust),
         Err(OsrmError::NoRoute) => return Ok(FeeOutcome::OutOfRange),
     };
     let distance_i = distance.round() as i32;
@@ -679,12 +750,17 @@ pub async fn delivery_quote(
     .bind(branch_id)
     .fetch_optional(pool.get_ref())
     .await?;
-    let (enabled, in_mall_fee) = row.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    let (enabled, in_mall_fee) =
+        row.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
     if !enabled {
-        return Err(AppError::NotFound("This branch does not offer this channel".into()));
+        return Err(AppError::NotFound(
+            "This branch does not offer this channel".into(),
+        ));
     }
     if !channel_open_now(pool.get_ref(), branch_id, &query.channel).await? {
-        return Err(AppError::Conflict("This channel is closed right now.".into()));
+        return Err(AppError::Conflict(
+            "This channel is closed right now.".into(),
+        ));
     }
 
     // In-mall: flat per-branch fee + the walking (haversine) distance from the
@@ -698,8 +774,17 @@ pub async fn delivery_quote(
                 .await?;
         let distance_meters = coords.and_then(|(blat, blng)| match (blat, blng) {
             (Some(blat), Some(blng)) => Some(
-                haversine_meters(LatLng { lat: blat, lng: blng }, LatLng { lat: query.lat, lng: query.lng })
-                    .round() as i32,
+                haversine_meters(
+                    LatLng {
+                        lat: blat,
+                        lng: blng,
+                    },
+                    LatLng {
+                        lat: query.lat,
+                        lng: query.lng,
+                    },
+                )
+                .round() as i32,
             ),
             _ => None,
         });
@@ -712,9 +797,22 @@ pub async fn delivery_quote(
         }));
     }
 
-    let outcome = compute_outside_fee(pool.get_ref(), branch_id, LatLng { lat: query.lat, lng: query.lng }).await?;
+    let outcome = compute_outside_fee(
+        pool.get_ref(),
+        branch_id,
+        LatLng {
+            lat: query.lat,
+            lng: query.lng,
+        },
+    )
+    .await?;
     let resp = match outcome {
-        FeeOutcome::Ok { fee, zone_id, zone_name, distance_meters } => QuoteResponse {
+        FeeOutcome::Ok {
+            fee,
+            zone_id,
+            zone_name,
+            distance_meters,
+        } => QuoteResponse {
             status: "ok".into(),
             zone_id: Some(zone_id),
             zone_name: Some(zone_name),
@@ -723,11 +821,17 @@ pub async fn delivery_quote(
         },
         FeeOutcome::OutOfRange => QuoteResponse {
             status: "out_of_range".into(),
-            zone_id: None, zone_name: None, distance_meters: None, fee: None,
+            zone_id: None,
+            zone_name: None,
+            distance_meters: None,
+            fee: None,
         },
         FeeOutcome::Unavailable => QuoteResponse {
             status: "unavailable".into(),
-            zone_id: None, zone_name: None, distance_meters: None, fee: None,
+            zone_id: None,
+            zone_name: None,
+            distance_meters: None,
+            fee: None,
         },
     };
     Ok(HttpResponse::Ok().json(resp))
@@ -774,7 +878,9 @@ pub async fn otp_request(
     .fetch_one(pool.get_ref())
     .await?;
     if recent {
-        return Err(AppError::Conflict("A code was just sent. Please wait a minute.".into()));
+        return Err(AppError::Conflict(
+            "A code was just sent. Please wait a minute.".into(),
+        ));
     }
 
     let code = generate_otp_code();
@@ -790,7 +896,11 @@ pub async fn otp_request(
     .execute(pool.get_ref())
     .await?;
 
-    whatsapp::send_message(pool.get_ref().clone(), phone, whatsapp::build_otp_message(&code));
+    whatsapp::send_message(
+        pool.get_ref().clone(),
+        phone,
+        whatsapp::build_otp_message(&code),
+    );
 
     Ok(HttpResponse::Ok().json(OtpRequestResponse { sent: true }))
 }
@@ -836,7 +946,9 @@ pub async fn otp_verify(
     let (id, code_hash, attempts) =
         row.ok_or_else(|| AppError::BadRequest("No active code — request a new one.".into()))?;
     if attempts >= OTP_MAX_ATTEMPTS {
-        return Err(AppError::BadRequest("Too many attempts — request a new code.".into()));
+        return Err(AppError::BadRequest(
+            "Too many attempts — request a new code.".into(),
+        ));
     }
 
     let ok = bcrypt::verify(&body.code, &code_hash).unwrap_or(false);
@@ -854,7 +966,9 @@ pub async fn otp_verify(
         .await?;
 
     let token = whatsapp::issue_device_token(&secret.0, &phone)?;
-    Ok(HttpResponse::Ok().json(OtpVerifyResponse { device_token: token }))
+    Ok(HttpResponse::Ok().json(OtpVerifyResponse {
+        device_token: token,
+    }))
 }
 
 // ── Order intake ──────────────────────────────────────────────
@@ -905,20 +1019,44 @@ pub async fn create_delivery_order(
     validate_payment_hint(&body.payment_method_hint)?;
     validate_required_text("Customer name", &body.customer_name, MAX_NAME_LEN)?;
     validate_optional_text("Landmark", body.landmark.as_deref(), MAX_SHORT_TEXT_LEN)?;
-    validate_optional_text("Delivery notes", body.delivery_notes.as_deref(), MAX_NOTES_LEN)?;
+    validate_optional_text(
+        "Delivery notes",
+        body.delivery_notes.as_deref(),
+        MAX_NOTES_LEN,
+    )?;
     // Channel-appropriate destination details. In a mall the runner finds the
     // customer by shop/company + floor + unit, so those are required and there is
     // no street address. For an outside (street) order the dropped pin sets the
     // route but a written address line finds the door, so the address is required.
     if body.channel == CHANNEL_OUTSIDE {
-        validate_required_text("Delivery address", body.address_line.as_deref().unwrap_or(""), MAX_ADDRESS_LEN)?;
+        validate_required_text(
+            "Delivery address",
+            body.address_line.as_deref().unwrap_or(""),
+            MAX_ADDRESS_LEN,
+        )?;
         validate_optional_text("Place name", body.place_name.as_deref(), MAX_SHORT_TEXT_LEN)?;
         validate_optional_text("Floor", body.floor.as_deref(), MAX_SHORT_TEXT_LEN)?;
-        validate_optional_text("Unit number", body.unit_number.as_deref(), MAX_SHORT_TEXT_LEN)?;
+        validate_optional_text(
+            "Unit number",
+            body.unit_number.as_deref(),
+            MAX_SHORT_TEXT_LEN,
+        )?;
     } else {
-        validate_required_text("Shop or company name", body.place_name.as_deref().unwrap_or(""), MAX_SHORT_TEXT_LEN)?;
-        validate_required_text("Floor", body.floor.as_deref().unwrap_or(""), MAX_SHORT_TEXT_LEN)?;
-        validate_required_text("Unit or office", body.unit_number.as_deref().unwrap_or(""), MAX_SHORT_TEXT_LEN)?;
+        validate_required_text(
+            "Shop or company name",
+            body.place_name.as_deref().unwrap_or(""),
+            MAX_SHORT_TEXT_LEN,
+        )?;
+        validate_required_text(
+            "Floor",
+            body.floor.as_deref().unwrap_or(""),
+            MAX_SHORT_TEXT_LEN,
+        )?;
+        validate_required_text(
+            "Unit or office",
+            body.unit_number.as_deref().unwrap_or(""),
+            MAX_SHORT_TEXT_LEN,
+        )?;
         validate_optional_text("Address", body.address_line.as_deref(), MAX_ADDRESS_LEN)?;
     }
     if let (Some(lat), Some(lng)) = (body.customer_lat, body.customer_lng) {
@@ -935,7 +1073,9 @@ pub async fn create_delivery_order(
     .await?
     .unwrap_or(true);
     if otp_required && !whatsapp::verify_device_token(&secret.0, &phone, &body.device_token) {
-        return Err(AppError::Unauthorized("Phone not verified on this device.".into()));
+        return Err(AppError::Unauthorized(
+            "Phone not verified on this device.".into(),
+        ));
     }
 
     // Idempotency replay.
@@ -945,7 +1085,8 @@ pub async fn create_delivery_order(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| Uuid::parse_str(s).ok());
     if let Some(key) = idem
-        && let Some(existing) = super::staff::fetch_delivery_order_by_idem(pool.get_ref(), key).await?
+        && let Some(existing) =
+            super::staff::fetch_delivery_order_by_idem(pool.get_ref(), key).await?
     {
         return Ok(HttpResponse::Ok().json(existing));
     }
@@ -957,27 +1098,53 @@ pub async fn create_delivery_order(
     .bind(body.branch_id)
     .fetch_optional(pool.get_ref())
     .await?;
-    let (org_id, branch_code) = branch.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    let (org_id, branch_code) =
+        branch.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
 
     if !channel_open_now(pool.get_ref(), body.branch_id, &body.channel).await? {
-        return Err(AppError::Conflict("This branch is not accepting orders for this channel right now.".into()));
+        return Err(AppError::Conflict(
+            "This branch is not accepting orders for this channel right now.".into(),
+        ));
     }
     let is_outside = body.channel == CHANNEL_OUTSIDE;
 
     let now = Utc::now();
 
     // Server-price + freeze the cart.
-    let resolved = snapshot::resolve_cart(pool.get_ref(), org_id, body.branch_id, Some(body.channel.as_str()), &body.items, now).await?;
+    let resolved = snapshot::resolve_cart(
+        pool.get_ref(),
+        org_id,
+        body.branch_id,
+        Some(body.channel.as_str()),
+        &body.items,
+        now,
+    )
+    .await?;
 
     // Server-authoritative delivery fee.
     let (delivery_fee, zone_id, road_distance): (i32, Option<Uuid>, Option<i32>) = if is_outside {
         let (Some(lat), Some(lng)) = (body.customer_lat, body.customer_lng) else {
-            return Err(AppError::BadRequest("A delivery location is required for outside delivery".into()));
+            return Err(AppError::BadRequest(
+                "A delivery location is required for outside delivery".into(),
+            ));
         };
         match compute_outside_fee(pool.get_ref(), body.branch_id, LatLng { lat, lng }).await? {
-            FeeOutcome::Ok { fee, zone_id, distance_meters, .. } => (fee, Some(zone_id), Some(distance_meters)),
-            FeeOutcome::OutOfRange => return Err(AppError::BadRequest("This location is outside the delivery range".into())),
-            FeeOutcome::Unavailable => return Err(AppError::Conflict("Delivery distance is temporarily unavailable. Please try again.".into())),
+            FeeOutcome::Ok {
+                fee,
+                zone_id,
+                distance_meters,
+                ..
+            } => (fee, Some(zone_id), Some(distance_meters)),
+            FeeOutcome::OutOfRange => {
+                return Err(AppError::BadRequest(
+                    "This location is outside the delivery range".into(),
+                ));
+            }
+            FeeOutcome::Unavailable => {
+                return Err(AppError::Conflict(
+                    "Delivery distance is temporarily unavailable. Please try again.".into(),
+                ));
+            }
         }
     } else {
         // In-mall: the customer confirms they're at the branch with device GPS
@@ -1012,8 +1179,14 @@ pub async fn create_delivery_order(
                     .await?;
             branch_coords.and_then(|(blat, blng)| match (blat, blng) {
                 (Some(blat), Some(blng)) => Some(
-                    haversine_meters(LatLng { lat: blat, lng: blng }, LatLng { lat, lng }).round()
-                        as i32,
+                    haversine_meters(
+                        LatLng {
+                            lat: blat,
+                            lng: blng,
+                        },
+                        LatLng { lat, lng },
+                    )
+                    .round() as i32,
                 ),
                 _ => None,
             })
@@ -1029,7 +1202,11 @@ pub async fn create_delivery_order(
     // item subtotal only (the delivery fee is always charged in full). The
     // discount id is configured per channel on branch_delivery_settings; only an
     // *active* discount is honored, otherwise it silently drops to none.
-    let discount_col = if is_outside { "outside_discount_id" } else { "in_mall_discount_id" };
+    let discount_col = if is_outside {
+        "outside_discount_id"
+    } else {
+        "in_mall_discount_id"
+    };
     let configured_discount: Option<Uuid> = sqlx::query_scalar(&format!(
         "SELECT {discount_col} FROM branch_delivery_settings WHERE branch_id = $1"
     ))
@@ -1053,7 +1230,8 @@ pub async fn create_delivery_order(
             .await?;
             match row {
                 Some((dtype, dvalue)) => {
-                    let amt = crate::discounts::handlers::calc_discount(Some(&dtype), dvalue, subtotal);
+                    let amt =
+                        crate::discounts::handlers::calc_discount(Some(&dtype), dvalue, subtotal);
                     (Some(did), Some(dtype), dvalue, amt)
                 }
                 None => (None, None, 0, 0),
@@ -1086,7 +1264,8 @@ pub async fn create_delivery_order(
     let delivery_ref = format!("D-{}-{}-{:04}", branch_code, biz_date.format("%y%m%d"), seq);
 
     let cart_json = serde_json::to_value(&resolved.snapshot).map_err(|_| AppError::Internal)?;
-    let deductions_json = serde_json::to_value(&resolved.deductions).map_err(|_| AppError::Internal)?;
+    let deductions_json =
+        serde_json::to_value(&resolved.deductions).map_err(|_| AppError::Internal)?;
 
     let id: Uuid = sqlx::query_scalar(
         r#"INSERT INTO delivery_orders

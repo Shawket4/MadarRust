@@ -13,18 +13,15 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::menu_advisor::dto::{
-    Action, AnalysisConfig, Classification, CmQuadrant, Confidence, GuardClip, ItemKey,
-    PeerComparison, PeerPosition, PriceAnchors, PriceRoundingRule, PriceSuggestion,
-    RevenueClass,
-};
+use super::ItemSnapshot;
 use super::classify::ClassificationOutcome;
 use super::explain;
 use super::kpi::{CostMetrics, ItemKpi};
-use super::stats::{
-    apply_rounding, below_no_change_threshold, median, ratio_or, rounding_step,
+use super::stats::{apply_rounding, below_no_change_threshold, median, ratio_or, rounding_step};
+use crate::menu_advisor::dto::{
+    Action, AnalysisConfig, Classification, CmQuadrant, Confidence, GuardClip, ItemKey,
+    PeerComparison, PeerPosition, PriceAnchors, PriceRoundingRule, PriceSuggestion, RevenueClass,
 };
-use super::ItemSnapshot;
 
 // ═══════════════════════════════════════════════════════════════════
 // Peers & anchors
@@ -63,8 +60,11 @@ fn compute_peer_anchor(
     }
 
     if let Some(focus_cm) = &focus.cost_metrics {
-        let cm_peers: Vec<&ItemKpi> =
-            peers.iter().filter(|k| k.cost_metrics.is_some()).copied().collect();
+        let cm_peers: Vec<&ItemKpi> = peers
+            .iter()
+            .filter(|k| k.cost_metrics.is_some())
+            .copied()
+            .collect();
         if !cm_peers.is_empty() {
             let total_w: f64 = cm_peers.iter().map(|k| k.weighted_units_sold).sum::<f64>()
                 + focus.weighted_units_sold;
@@ -188,7 +188,9 @@ fn cm_raw_candidate(
                             && snaps.get(&k.key).and_then(|s| s.category_id) == focus_cat
                             && matches!(
                                 classifications.get(&k.key),
-                                Some(Classification::Cm { quadrant: CmQuadrant::Star })
+                                Some(Classification::Cm {
+                                    quadrant: CmQuadrant::Star
+                                })
                             )
                     })
                     .filter_map(|k| k.cost_metrics.as_ref().map(|c| c.margin_pct))
@@ -215,13 +217,21 @@ fn cm_raw_candidate(
             let target_margin = cm.margin_pct + 0.04;
             let price_for_target = cm.effective_cost / (1.0 - target_margin).max(1e-9);
             let target = price_for_target.clamp(cur * 1.03, cur * 1.10);
-            (target, Action::RaisePrice, explain::plowhorse_raise(cm.margin_pct))
+            (
+                target,
+                Action::RaisePrice,
+                explain::plowhorse_raise(cm.margin_pct),
+            )
         }
 
         CmQuadrant::Puzzle => {
             if cur > anchors.peer_median * 1.15 {
                 let premium = ratio_or(cur, anchors.peer_median, 1.0) - 1.0;
-                (cur * 0.975, Action::LowerPrice, explain::puzzle_lower(premium))
+                (
+                    cur * 0.975,
+                    Action::LowerPrice,
+                    explain::puzzle_lower(premium),
+                )
             } else {
                 (cur, Action::Bundle, explain::puzzle_bundle())
             }
@@ -229,7 +239,11 @@ fn cm_raw_candidate(
 
         CmQuadrant::Dog => {
             if cm.food_cost_pct > 0.45 {
-                (cur, Action::Reformulate, explain::dog_reformulate(cm.food_cost_pct))
+                (
+                    cur,
+                    Action::Reformulate,
+                    explain::dog_reformulate(cm.food_cost_pct),
+                )
             } else {
                 (cur, Action::Remove, explain::dog_remove())
             }
@@ -372,7 +386,11 @@ fn assess_confidence(
         c = c.min(Confidence::Medium);
     }
     // Ingredient cost moved >25% inside the window — margins are a moving target.
-    if kpi.cost_metrics.as_ref().is_some_and(|m| m.cost_volatility_high) {
+    if kpi
+        .cost_metrics
+        .as_ref()
+        .is_some_and(|m| m.cost_volatility_high)
+    {
         c = c.min(Confidence::Medium);
     }
     c
@@ -443,9 +461,9 @@ pub(crate) fn suggest_prices(
         let peer_comparison = build_peer_comparison(kpi, kpis, &snap_map);
 
         let (raw, mut action, mut explanation) = match (classification, &kpi.cost_metrics) {
-            (Classification::Cm { quadrant }, Some(cm)) => cm_raw_candidate(
-                kpi, cm, quadrant, &anchors, kpis, &snap_map, &outcome.map,
-            ),
+            (Classification::Cm { quadrant }, Some(cm)) => {
+                cm_raw_candidate(kpi, cm, quadrant, &anchors, kpis, &snap_map, &outcome.map)
+            }
             (Classification::Revenue { class }, None) => {
                 revenue_raw_candidate(kpi, class, &anchors, config)
             }
@@ -485,8 +503,7 @@ pub(crate) fn suggest_prices(
 
         if matches!(action, Action::RaisePrice | Action::LowerPrice) {
             let raise = raw > cur;
-            let (guarded, mut clips) =
-                apply_guards(raw, cur, kpi.cost_metrics.as_ref(), config);
+            let (guarded, mut clips) = apply_guards(raw, cur, kpi.cost_metrics.as_ref(), config);
             let cap_abs = cur * change_cap_pct(kpi.cost_metrics.as_ref(), config);
             let direction_intact = if raise { guarded > cur } else { guarded < cur };
 
@@ -528,9 +545,12 @@ pub(crate) fn suggest_prices(
 
         // What-if cost-reduction for CM-tracked Plowhorses only.
         let cost_reduction_whatif_margin = match (classification, &kpi.cost_metrics) {
-            (Classification::Cm { quadrant: CmQuadrant::Plowhorse }, Some(cm)) => {
-                Some((cur - cm.effective_cost * 0.90) / cur.max(1e-9))
-            }
+            (
+                Classification::Cm {
+                    quadrant: CmQuadrant::Plowhorse,
+                },
+                Some(cm),
+            ) => Some((cur - cm.effective_cost * 0.90) / cur.max(1e-9)),
             _ => None,
         };
 
@@ -566,13 +586,18 @@ pub(crate) fn suggest_prices(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
 mod tests {
     use chrono::{TimeZone, Utc};
 
+    use super::super::SaleEvent;
     use super::super::classify::classify_items;
     use super::super::kpi::compute_item_kpis;
-    use super::super::SaleEvent;
     use super::*;
 
     fn key(id: u8) -> ItemKey {
@@ -658,8 +683,7 @@ mod tests {
             food_cost_pct: 0.1,
             cost_volatility_high: false,
         };
-        let (guarded, clips) =
-            apply_guards(1500.0, 1000.0, Some(&cmm), &AnalysisConfig::default());
+        let (guarded, clips) = apply_guards(1500.0, 1000.0, Some(&cmm), &AnalysisConfig::default());
         assert!(clips.contains(&GuardClip::ChangeCap));
         assert!((guarded - 1150.0).abs() < 1e-9); // +15% cap
     }
@@ -831,7 +855,9 @@ mod tests {
         let plow = find(&out, 1);
         assert!(matches!(
             plow.classification,
-            Classification::Cm { quadrant: CmQuadrant::Plowhorse }
+            Classification::Cm {
+                quadrant: CmQuadrant::Plowhorse
+            }
         ));
         let expected = (1000.0 - 600.0 * 0.9) / 1000.0;
         assert!((plow.cost_reduction_whatif_margin.unwrap() - expected).abs() < 1e-9);

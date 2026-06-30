@@ -1,4 +1,4 @@
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -6,7 +6,10 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
-    auth::{guards::{require_super_admin, require_same_org}, jwt::Claims},
+    auth::{
+        guards::{require_same_org, require_super_admin},
+        jwt::Claims,
+    },
     errors::{AppError, AppErrorResponse},
     models::UserRole,
     permissions::checker::check_permission,
@@ -16,24 +19,24 @@ use crate::{
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct Permission {
-    pub id:       Uuid,
-    pub user_id:  Uuid,
+    pub id: Uuid,
+    pub user_id: Uuid,
     #[schema(example = "menu_items")]
     pub resource: String,
     #[schema(example = "update")]
-    pub action:   String,
-    pub granted:  bool,
+    pub action: String,
+    pub granted: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct RolePermission {
     #[schema(example = "branch_manager")]
-    pub role:     String,
+    pub role: String,
     #[schema(example = "menu_items")]
     pub resource: String,
     #[schema(example = "update")]
-    pub action:   String,
-    pub granted:  bool,
+    pub action: String,
+    pub granted: bool,
 }
 
 // ── Request types ─────────────────────────────────────────────
@@ -43,30 +46,30 @@ pub struct UpsertPermissionRequest {
     #[schema(example = "menu_items")]
     pub resource: String,
     #[schema(example = "update")]
-    pub action:   String,
-    pub granted:  bool,
+    pub action: String,
+    pub granted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UpsertRolePermissionRequest {
     #[schema(example = "branch_manager")]
-    pub role:     String,
+    pub role: String,
     #[schema(example = "menu_items")]
     pub resource: String,
     #[schema(example = "update")]
-    pub action:   String,
-    pub granted:  bool,
+    pub action: String,
+    pub granted: bool,
 }
 
 /// One cell of the resolved permission matrix for a user.
 /// `effective` = `user_override` if present, else `role_default`, else false.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
 pub struct PermissionMatrix {
-    pub resource:      String,
-    pub action:        String,
-    pub role_default:  Option<bool>,
+    pub resource: String,
+    pub action: String,
+    pub role_default: Option<bool>,
     pub user_override: Option<bool>,
-    pub effective:     bool,
+    pub effective: bool,
 }
 
 // ── GET /permissions/user/:user_id ────────────────────────────
@@ -83,8 +86,8 @@ pub struct PermissionMatrix {
     security(("bearer_jwt" = []))
 )]
 pub async fn get_user_permissions(
-    req:     HttpRequest,
-    pool:    web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     user_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -116,21 +119,20 @@ pub async fn get_user_permissions(
     security(("bearer_jwt" = []))
 )]
 pub async fn get_permission_matrix(
-    req:     HttpRequest,
-    pool:    web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     user_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "permissions", "read").await?;
     require_same_org_as_target(pool.get_ref(), &claims, *user_id).await?;
 
-    let role: String = sqlx::query_scalar(
-        "SELECT role::text FROM users WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(*user_id)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+    let role: String =
+        sqlx::query_scalar("SELECT role::text FROM users WHERE id = $1 AND deleted_at IS NULL")
+            .bind(*user_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .ok_or_else(|| AppError::NotFound("User not found".into()))?;
 
     let role_defaults = sqlx::query_as::<_, RolePermission>(
         "SELECT role::text, resource::text, action::text, granted
@@ -149,7 +151,7 @@ pub async fn get_permission_matrix(
     .await?;
 
     let resources = crate::permissions::RESOURCES;
-    let actions   = crate::permissions::ACTIONS;
+    let actions = crate::permissions::ACTIONS;
 
     // Build O(1) lookup maps so the nested loop is O(n) not O(n²)
     let role_map: HashMap<(&str, &str), bool> = role_defaults
@@ -165,13 +167,13 @@ pub async fn get_permission_matrix(
 
     for resource in resources {
         for action in actions {
-            let role_default  = role_map.get(&(resource, action)).copied();
+            let role_default = role_map.get(&(resource, action)).copied();
             let user_override = override_map.get(&(resource, action)).copied();
-            let effective     = user_override.or(role_default).unwrap_or(false);
+            let effective = user_override.or(role_default).unwrap_or(false);
 
             matrix.push(PermissionMatrix {
                 resource: resource.to_string(),
-                action:   action.to_string(),
+                action: action.to_string(),
                 role_default,
                 user_override,
                 effective,
@@ -197,10 +199,10 @@ pub async fn get_permission_matrix(
     security(("bearer_jwt" = []))
 )]
 pub async fn upsert_user_permission(
-    req:     HttpRequest,
-    pool:    web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     user_id: web::Path<Uuid>,
-    body:    web::Json<UpsertPermissionRequest>,
+    body: web::Json<UpsertPermissionRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "permissions", "update").await?;
@@ -245,7 +247,7 @@ pub async fn upsert_user_permission(
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_user_permission(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
     path: web::Path<(Uuid, String, String)>,
 ) -> Result<HttpResponse, AppError> {
@@ -283,7 +285,7 @@ pub async fn delete_user_permission(
     security(("bearer_jwt" = []))
 )]
 pub async fn get_role_permissions(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -313,7 +315,7 @@ pub async fn get_role_permissions(
     security(("bearer_jwt" = []))
 )]
 pub async fn upsert_role_permission(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
     body: web::Json<UpsertRolePermissionRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -351,21 +353,20 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 }
 
 async fn require_same_org_as_target(
-    pool:    &PgPool,
-    claims:  &Claims,
+    pool: &PgPool,
+    claims: &Claims,
     user_id: Uuid,
 ) -> Result<(), AppError> {
     if claims.role == UserRole::SuperAdmin {
         return Ok(());
     }
 
-    let target_org: Option<Uuid> = sqlx::query_scalar(
-        "SELECT org_id FROM users WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?
-    .flatten();
+    let target_org: Option<Uuid> =
+        sqlx::query_scalar("SELECT org_id FROM users WHERE id = $1 AND deleted_at IS NULL")
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
 
     require_same_org(claims, target_org)
 }

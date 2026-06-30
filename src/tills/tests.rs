@@ -1,4 +1,4 @@
-use actix_web::{test, web, App};
+use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -12,8 +12,15 @@ fn get_secret() -> JwtSecret {
 }
 
 fn org_admin_token(user_id: Uuid, org_id: Uuid) -> String {
-    crate::auth::jwt::create_token(&get_secret(), user_id, Some(org_id), UserRole::OrgAdmin, None, 24)
-        .unwrap()
+    crate::auth::jwt::create_token(
+        &get_secret(),
+        user_id,
+        Some(org_id),
+        UserRole::OrgAdmin,
+        None,
+        24,
+    )
+    .unwrap()
 }
 
 async fn seed_org(pool: &PgPool) -> Uuid {
@@ -90,10 +97,16 @@ async fn create_and_list_tills(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/tills")
         .insert_header(("Authorization", format!("Bearer {token}")))
-        .set_json(&serde_json::json!({ "branch_id": branch_id, "name": "Front", "is_default": true }))
+        .set_json(
+            &serde_json::json!({ "branch_id": branch_id, "name": "Front", "is_default": true }),
+        )
         .to_request();
     let resp = test::call_service(&app, req).await;
-    assert!(resp.status().is_success(), "create failed: {:?}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "create failed: {:?}",
+        resp.status()
+    );
     let till: Till = test::read_body_json(resp).await;
     assert_eq!(till.name, "Front");
     assert!(till.is_default);
@@ -121,10 +134,16 @@ async fn only_one_default_till_per_branch(pool: PgPool) {
         let req = test::TestRequest::post()
             .uri("/tills")
             .insert_header(("Authorization", format!("Bearer {token}")))
-            .set_json(&serde_json::json!({ "branch_id": branch_id, "name": name, "is_default": true }))
+            .set_json(
+                &serde_json::json!({ "branch_id": branch_id, "name": name, "is_default": true }),
+            )
             .to_request();
         let resp = test::call_service(&app, req).await;
-        assert!(resp.status().is_success(), "create {name} failed: {:?}", resp.status());
+        assert!(
+            resp.status().is_success(),
+            "create {name} failed: {:?}",
+            resp.status()
+        );
     }
 
     // The second default must have demoted the first — exactly one default remains.
@@ -156,7 +175,11 @@ async fn duplicate_name_rejected(pool: PgPool) {
     };
     assert!(test::call_service(&app, mk()).await.status().is_success());
     let resp = test::call_service(&app, mk()).await;
-    assert!(resp.status().is_client_error(), "dup name should be 4xx, got {:?}", resp.status());
+    assert!(
+        resp.status().is_client_error(),
+        "dup name should be 4xx, got {:?}",
+        resp.status()
+    );
 }
 
 #[sqlx::test]
@@ -190,5 +213,9 @@ async fn cannot_delete_till_with_open_shift(pool: PgPool) {
         .insert_header(("Authorization", format!("Bearer {token}")))
         .to_request();
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status().as_u16(), 409, "delete with open shift should 409");
+    assert_eq!(
+        resp.status().as_u16(),
+        409,
+        "delete with open shift should 409"
+    );
 }

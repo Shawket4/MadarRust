@@ -1,4 +1,4 @@
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -8,7 +8,7 @@ use crate::{
     auth::jwt::Claims,
     costing::service::{apply_weighted_average_cost, round_piastres},
     errors::{AppError, AppErrorResponse},
-    inventory::movements::{record_movement, MovementParams},
+    inventory::movements::{MovementParams, record_movement},
     models::UserRole,
     permissions::checker::check_permission,
 };
@@ -18,54 +18,54 @@ use utoipa::{IntoParams, ToSchema};
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct Supplier {
-    pub id:           Uuid,
-    pub org_id:       Uuid,
-    pub name:         String,
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub name: String,
     pub contact_name: Option<String>,
-    pub phone:        Option<String>,
-    pub email:        Option<String>,
-    pub is_active:    bool,
-    pub created_at:   chrono::DateTime<chrono::Utc>,
-    pub updated_at:   chrono::DateTime<chrono::Utc>,
+    pub phone: Option<String>,
+    pub email: Option<String>,
+    pub is_active: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct PurchaseOrderLine {
-    pub id:                      Uuid,
-    pub purchase_order_id:       Uuid,
-    pub org_ingredient_id:       Uuid,
-    pub ingredient_name:         String,
+    pub id: Uuid,
+    pub purchase_order_id: Uuid,
+    pub org_ingredient_id: Uuid,
+    pub ingredient_name: String,
     /// Ingredient's base stock unit.
-    pub unit:                    String,
-    pub purchase_unit:           String,
+    pub unit: String,
+    pub purchase_unit: String,
     pub units_per_purchase_unit: f64,
-    pub quantity_ordered:        f64,
-    pub quantity_received:       f64,
+    pub quantity_ordered: f64,
+    pub quantity_received: f64,
     /// Piastres per PURCHASE unit.
-    pub unit_cost:               i64,
+    pub unit_cost: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct PurchaseOrder {
-    pub id:            Uuid,
-    pub org_id:        Uuid,
-    pub branch_id:     Uuid,
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub branch_id: Uuid,
     /// Branch label — populated by the order lists so the "All branches" view
     /// can show which branch each PO belongs to; other endpoints leave it null.
     #[serde(default)]
     #[sqlx(default)]
-    pub branch_name:   Option<String>,
-    pub supplier_id:   Option<Uuid>,
+    pub branch_name: Option<String>,
+    pub supplier_id: Option<Uuid>,
     pub supplier_name: Option<String>,
-    pub status:        String,
-    pub reference:     Option<String>,
-    pub note:          Option<String>,
-    pub expected_at:   Option<chrono::DateTime<chrono::Utc>>,
-    pub received_at:   Option<chrono::DateTime<chrono::Utc>>,
-    pub received_by:   Option<Uuid>,
-    pub created_by:    Uuid,
-    pub created_at:    chrono::DateTime<chrono::Utc>,
-    pub updated_at:    chrono::DateTime<chrono::Utc>,
+    pub status: String,
+    pub reference: Option<String>,
+    pub note: Option<String>,
+    pub expected_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub received_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub received_by: Option<Uuid>,
+    pub created_by: Uuid,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -79,50 +79,50 @@ pub struct PurchaseOrderFull {
 
 #[derive(Deserialize, ToSchema)]
 pub struct CreateSupplierRequest {
-    pub name:         String,
+    pub name: String,
     pub contact_name: Option<String>,
-    pub phone:        Option<String>,
-    pub email:        Option<String>,
+    pub phone: Option<String>,
+    pub email: Option<String>,
 }
 
 #[derive(Deserialize, ToSchema)]
 pub struct UpdateSupplierRequest {
-    pub name:         Option<String>,
+    pub name: Option<String>,
     pub contact_name: Option<String>,
-    pub phone:        Option<String>,
-    pub email:        Option<String>,
-    pub is_active:    Option<bool>,
+    pub phone: Option<String>,
+    pub email: Option<String>,
+    pub is_active: Option<bool>,
 }
 
 #[derive(Deserialize, ToSchema)]
 pub struct POLineInput {
-    pub org_ingredient_id:       Uuid,
-    pub purchase_unit:           String,
+    pub org_ingredient_id: Uuid,
+    pub purchase_unit: String,
     /// Stock units per purchase unit. Ignored when `purchase_unit` is a known
     /// inventory unit (the factor is derived from the ingredient's base unit).
     pub units_per_purchase_unit: Option<f64>,
-    pub quantity_ordered:        f64,
+    pub quantity_ordered: f64,
     /// Piastres per purchase unit.
-    pub unit_cost:               i64,
+    pub unit_cost: i64,
 }
 
 #[derive(Deserialize, ToSchema)]
 pub struct CreatePurchaseOrderRequest {
     pub supplier_id: Option<Uuid>,
-    pub reference:   Option<String>,
-    pub note:        Option<String>,
+    pub reference: Option<String>,
+    pub note: Option<String>,
     pub expected_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub lines:       Vec<POLineInput>,
+    pub lines: Vec<POLineInput>,
 }
 
 #[derive(Deserialize, ToSchema)]
 pub struct ReceiveLineInput {
-    pub line_id:           Uuid,
+    pub line_id: Uuid,
     pub quantity_received: f64,
     /// Optional ACTUAL invoice cost (piastres per purchase unit) for this
     /// delivery, when it differs from the ordered price. Drives weighted-average
     /// cost + the ledger; omitted ⟹ the PO line's ordered cost is used.
-    pub unit_cost:         Option<i64>,
+    pub unit_cost: Option<i64>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -151,10 +151,10 @@ pub struct ListOrdersQuery {
     security(("bearer_jwt" = []))
 )]
 pub async fn create_supplier(
-    req:    HttpRequest,
-    pool:   web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     org_id: web::Path<Uuid>,
-    body:   web::Json<CreateSupplierRequest>,
+    body: web::Json<CreateSupplierRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "suppliers", "create").await?;
@@ -190,8 +190,8 @@ pub async fn create_supplier(
     security(("bearer_jwt" = []))
 )]
 pub async fn list_suppliers(
-    req:    HttpRequest,
-    pool:   web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     org_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -200,7 +200,7 @@ pub async fn list_suppliers(
 
     let rows = sqlx::query_as::<_, Supplier>(
         "SELECT id, org_id, name, contact_name, phone, email, is_active, created_at, updated_at \
-         FROM suppliers WHERE org_id = $1 AND deleted_at IS NULL ORDER BY name ASC"
+         FROM suppliers WHERE org_id = $1 AND deleted_at IS NULL ORDER BY name ASC",
     )
     .bind(*org_id)
     .fetch_all(pool.get_ref())
@@ -219,20 +219,19 @@ pub async fn list_suppliers(
     security(("bearer_jwt" = []))
 )]
 pub async fn update_supplier(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
     body: web::Json<UpdateSupplierRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "suppliers", "update").await?;
 
-    let org_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT org_id FROM suppliers WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(*id)
-    .fetch_optional(pool.get_ref())
-    .await?;
+    let org_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT org_id FROM suppliers WHERE id = $1 AND deleted_at IS NULL")
+            .bind(*id)
+            .fetch_optional(pool.get_ref())
+            .await?;
     let org_id = org_id.ok_or_else(|| AppError::NotFound("Supplier not found".into()))?;
     require_org(&claims, org_id)?;
 
@@ -270,19 +269,18 @@ pub async fn update_supplier(
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_supplier(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "suppliers", "delete").await?;
 
-    let org_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT org_id FROM suppliers WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(*id)
-    .fetch_optional(pool.get_ref())
-    .await?;
+    let org_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT org_id FROM suppliers WHERE id = $1 AND deleted_at IS NULL")
+            .bind(*id)
+            .fetch_optional(pool.get_ref())
+            .await?;
     let org_id = org_id.ok_or_else(|| AppError::NotFound("Supplier not found".into()))?;
     require_org(&claims, org_id)?;
 
@@ -307,35 +305,39 @@ pub async fn delete_supplier(
     security(("bearer_jwt" = []))
 )]
 pub async fn create_order(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
-    body:      web::Json<CreatePurchaseOrderRequest>,
+    body: web::Json<CreatePurchaseOrderRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "purchase_orders", "create").await?;
     require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
 
     if body.lines.is_empty() {
-        return Err(AppError::BadRequest("a purchase order needs at least one line".into()));
+        return Err(AppError::BadRequest(
+            "a purchase order needs at least one line".into(),
+        ));
     }
 
-    let org_id: Uuid = sqlx::query_scalar(
-        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(*branch_id)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .flatten()
-    .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    let org_id: Uuid =
+        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
+            .bind(*branch_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .flatten()
+            .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
 
     if let Some(sup) = body.supplier_id {
-        let sup_org: Option<Uuid> = sqlx::query_scalar(
-            "SELECT org_id FROM suppliers WHERE id = $1 AND deleted_at IS NULL"
-        )
-        .bind(sup).fetch_optional(pool.get_ref()).await?;
+        let sup_org: Option<Uuid> =
+            sqlx::query_scalar("SELECT org_id FROM suppliers WHERE id = $1 AND deleted_at IS NULL")
+                .bind(sup)
+                .fetch_optional(pool.get_ref())
+                .await?;
         if sup_org != Some(org_id) {
-            return Err(AppError::BadRequest("Supplier does not belong to this organization".into()));
+            return Err(AppError::BadRequest(
+                "Supplier does not belong to this organization".into(),
+            ));
         }
     }
 
@@ -363,7 +365,9 @@ pub async fn create_order(
 
     for line in &body.lines {
         if line.quantity_ordered <= 0.0 {
-            return Err(AppError::BadRequest("quantity_ordered must be greater than 0".into()));
+            return Err(AppError::BadRequest(
+                "quantity_ordered must be greater than 0".into(),
+            ));
         }
         if line.unit_cost < 0 {
             return Err(AppError::BadRequest("unit_cost cannot be negative".into()));
@@ -372,20 +376,22 @@ pub async fn create_order(
         // Validate ingredient belongs to org + resolve its base unit and pack.
         let ing: Option<(String, Option<String>, Option<rust_decimal::Decimal>)> = sqlx::query_as(
             "SELECT unit::text, pack_unit, pack_size \
-             FROM org_ingredients WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL"
+             FROM org_ingredients WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL",
         )
         .bind(line.org_ingredient_id)
         .bind(org_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let (base_unit, pack_unit, pack_size) = ing
-            .ok_or_else(|| AppError::BadRequest("Ingredient not found in this organization".into()))?;
+        let (base_unit, pack_unit, pack_size) = ing.ok_or_else(|| {
+            AppError::BadRequest("Ingredient not found in this organization".into())
+        })?;
 
         // Factor = how many BASE STOCK units one purchase unit yields. Two paths,
         // both server-derived (the client's units_per_purchase_unit is ignored):
         //   * a named pack matching the ingredient's pack_unit → its pack_size;
         //   * otherwise a built-in measure unit (g/kg/ml/l/pcs) → unit conversion.
-        let is_named_pack = pack_unit.as_deref()
+        let is_named_pack = pack_unit
+            .as_deref()
             .map(|pu| !pu.is_empty() && line.purchase_unit.eq_ignore_ascii_case(pu))
             .unwrap_or(false);
         let factor: f64 = if is_named_pack {
@@ -400,7 +406,8 @@ pub async fn create_order(
             if !crate::units::is_valid_unit(&line.purchase_unit) {
                 return Err(AppError::BadRequest(format!(
                     "Purchase unit must be one of g, kg, ml, l, pcs{}.",
-                    pack_unit.as_deref()
+                    pack_unit
+                        .as_deref()
                         .filter(|p| !p.is_empty())
                         .map(|p| format!(" or the configured pack \"{p}\""))
                         .unwrap_or_default()
@@ -417,7 +424,7 @@ pub async fn create_order(
             "INSERT INTO purchase_order_lines \
                  (purchase_order_id, org_ingredient_id, purchase_unit, units_per_purchase_unit, \
                   quantity_ordered, unit_cost) \
-             VALUES ($1, $2, $3, $4, $5, $6)"
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(order.id)
         .bind(line.org_ingredient_id)
@@ -444,10 +451,10 @@ pub async fn create_order(
     security(("bearer_jwt" = []))
 )]
 pub async fn list_orders(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
-    query:     web::Query<ListOrdersQuery>,
+    query: web::Query<ListOrdersQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "purchase_orders", "read").await?;
@@ -502,10 +509,10 @@ pub async fn list_orders(
     security(("bearer_jwt" = []))
 )]
 pub async fn list_org_orders(
-    req:    HttpRequest,
-    pool:   web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     org_id: web::Path<Uuid>,
-    query:  web::Query<ListOrdersQuery>,
+    query: web::Query<ListOrdersQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "purchase_orders", "read").await?;
@@ -545,9 +552,9 @@ pub async fn list_org_orders(
     security(("bearer_jwt" = []))
 )]
 pub async fn get_order(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "purchase_orders", "read").await?;
@@ -569,9 +576,9 @@ pub async fn get_order(
     security(("bearer_jwt" = []))
 )]
 pub async fn receive_order(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
     body: web::Json<ReceivePurchaseOrderRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -580,7 +587,9 @@ pub async fn receive_order(
     require_branch_access(pool.get_ref(), &claims, order.branch_id).await?;
 
     if order.status == "received" || order.status == "cancelled" {
-        return Err(AppError::Conflict("Purchase order is already received or cancelled".into()));
+        return Err(AppError::Conflict(
+            "Purchase order is already received or cancelled".into(),
+        ));
     }
     if body.lines.is_empty() {
         return Err(AppError::BadRequest("no lines to receive".into()));
@@ -607,12 +616,11 @@ pub async fn receive_order(
 
     // Lock the PO row and re-check status INSIDE the tx: two concurrent receives
     // must not both pass the status gate and double-apply stock/WAC (V7).
-    let locked_status: String = sqlx::query_scalar(
-        "SELECT status::text FROM purchase_orders WHERE id = $1 FOR UPDATE"
-    )
-    .bind(*id)
-    .fetch_one(&mut *tx)
-    .await?;
+    let locked_status: String =
+        sqlx::query_scalar("SELECT status::text FROM purchase_orders WHERE id = $1 FOR UPDATE")
+            .bind(*id)
+            .fetch_one(&mut *tx)
+            .await?;
     if locked_status == "received" || locked_status == "cancelled" {
         return Err(AppError::Conflict(
             "Purchase order is already received or cancelled".into(),
@@ -628,14 +636,16 @@ pub async fn receive_order(
         let line: Option<(Uuid, f64, i64, f64, f64)> = sqlx::query_as(
             "SELECT org_ingredient_id, units_per_purchase_unit::float8, unit_cost, \
                     quantity_ordered::float8, quantity_received::float8 \
-             FROM purchase_order_lines WHERE id = $1 AND purchase_order_id = $2 FOR UPDATE"
+             FROM purchase_order_lines WHERE id = $1 AND purchase_order_id = $2 FOR UPDATE",
         )
         .bind(recv.line_id)
         .bind(*id)
         .fetch_optional(&mut *tx)
         .await?;
-        let (ing_id, factor, unit_cost, qty_ordered, qty_received_so_far) = line
-            .ok_or_else(|| AppError::BadRequest("Line does not belong to this purchase order".into()))?;
+        let (ing_id, factor, unit_cost, qty_ordered, qty_received_so_far) =
+            line.ok_or_else(|| {
+                AppError::BadRequest("Line does not belong to this purchase order".into())
+            })?;
 
         // Over-receive guard: cumulative received can't exceed ordered. Over-
         // receipt is almost always a data-entry slip; if a supplier genuinely
@@ -652,9 +662,10 @@ pub async fn receive_order(
         // Price variance: the ACTUAL invoice cost (if supplied on the receive)
         // overrides the ordered cost for WAC + the ledger. Negative is rejected.
         if let Some(actual) = recv.unit_cost
-            && actual < 0 {
-                return Err(AppError::BadRequest("unit_cost cannot be negative".into()));
-            }
+            && actual < 0
+        {
+            return Err(AppError::BadRequest("unit_cost cannot be negative".into()));
+        }
         let unit_cost = recv.unit_cost.unwrap_or(unit_cost);
 
         let stock_qty = recv.quantity_received * factor;
@@ -674,7 +685,15 @@ pub async fn receive_order(
         let cost_per_stock_unit = round_piastres(cost_per_stock_unit_dec);
 
         // Weighted-average cost must read PRIOR on-hand → before adding stock.
-        apply_weighted_average_cost(&mut *tx, order.branch_id, ing_id, stock_qty_dec, cost_per_stock_unit_dec, claims.user_id()).await?;
+        apply_weighted_average_cost(
+            &mut *tx,
+            order.branch_id,
+            ing_id,
+            stock_qty_dec,
+            cost_per_stock_unit_dec,
+            claims.user_id(),
+        )
+        .await?;
 
         // Upsert branch stock (+received).
         let (bi_id, balance): (Uuid, f64) = sqlx::query_as(
@@ -692,26 +711,29 @@ pub async fn receive_order(
         .fetch_one(&mut *tx)
         .await?;
 
-        record_movement(&mut *tx, MovementParams {
-            branch_id:           order.branch_id,
-            org_ingredient_id:   ing_id,
-            branch_inventory_id: Some(bi_id),
-            movement_type:       "purchase_in",
-            quantity:            stock_qty,
-            balance_after:       Some(balance),
-            unit_cost:           Some(cost_per_stock_unit),
-            reason:              None,
-            below_zero:          false,
-            source_type:         Some("purchase"),
-            source_id:           Some(*id),
-            note:                Some("Purchase received"),
-            created_by:          Some(claims.user_id()),
-        })
+        record_movement(
+            &mut *tx,
+            MovementParams {
+                branch_id: order.branch_id,
+                org_ingredient_id: ing_id,
+                branch_inventory_id: Some(bi_id),
+                movement_type: "purchase_in",
+                quantity: stock_qty,
+                balance_after: Some(balance),
+                unit_cost: Some(cost_per_stock_unit),
+                reason: None,
+                below_zero: false,
+                source_type: Some("purchase"),
+                source_id: Some(*id),
+                note: Some("Purchase received"),
+                created_by: Some(claims.user_id()),
+            },
+        )
         .await?;
 
         sqlx::query(
             "UPDATE purchase_order_lines \
-             SET quantity_received = quantity_received + $2 WHERE id = $1"
+             SET quantity_received = quantity_received + $2 WHERE id = $1",
         )
         .bind(recv.line_id)
         .bind(recv.quantity_received)
@@ -726,7 +748,7 @@ pub async fn receive_order(
     let (all_full, any_received): (Option<bool>, Option<bool>) = sqlx::query_as(
         "SELECT bool_and(quantity_received >= quantity_ordered), \
                 bool_or(quantity_received > 0) \
-         FROM purchase_order_lines WHERE purchase_order_id = $1"
+         FROM purchase_order_lines WHERE purchase_order_id = $1",
     )
     .bind(*id)
     .fetch_one(&mut *tx)
@@ -812,9 +834,9 @@ pub async fn receive_order(
     security(("bearer_jwt" = []))
 )]
 pub async fn submit_order(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "purchase_orders", "update").await?;
@@ -854,9 +876,9 @@ pub async fn submit_order(
     security(("bearer_jwt" = []))
 )]
 pub async fn cancel_order(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "purchase_orders", "update").await?;
@@ -893,20 +915,20 @@ pub async fn cancel_order(
 #[derive(serde::Serialize, ToSchema)]
 pub struct ReorderLine {
     pub org_ingredient_id: Uuid,
-    pub ingredient_name:   String,
-    pub unit:              String,
-    pub current_stock:     f64,
+    pub ingredient_name: String,
+    pub unit: String,
+    pub current_stock: f64,
     /// Quantity (in base units) to bring stock up to the order-up-to level.
-    pub suggested_qty:     f64,
+    pub suggested_qty: f64,
 }
 
 /// Reorder suggestions grouped by the ingredient's default supplier so the
 /// dashboard can raise one draft PO per supplier.
 #[derive(serde::Serialize, ToSchema)]
 pub struct ReorderSuggestion {
-    pub supplier_id:   Option<Uuid>,
+    pub supplier_id: Option<Uuid>,
     pub supplier_name: Option<String>,
-    pub lines:         Vec<ReorderLine>,
+    pub lines: Vec<ReorderLine>,
 }
 
 // ── GET /purchasing/branches/:branch_id/reorder-suggestions ───
@@ -923,8 +945,8 @@ pub struct ReorderSuggestion {
     security(("bearer_jwt" = []))
 )]
 pub async fn reorder_suggestions(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -954,11 +976,30 @@ pub async fn reorder_suggestions(
 
     // Group consecutive rows by supplier (query is ordered by supplier_id).
     let mut groups: Vec<ReorderSuggestion> = Vec::new();
-    for (supplier_id, supplier_name, org_ingredient_id, ingredient_name, unit, current_stock, suggested_qty) in rows {
-        let line = ReorderLine { org_ingredient_id, ingredient_name, unit, current_stock, suggested_qty };
+    for (
+        supplier_id,
+        supplier_name,
+        org_ingredient_id,
+        ingredient_name,
+        unit,
+        current_stock,
+        suggested_qty,
+    ) in rows
+    {
+        let line = ReorderLine {
+            org_ingredient_id,
+            ingredient_name,
+            unit,
+            current_stock,
+            suggested_qty,
+        };
         match groups.last_mut() {
             Some(g) if g.supplier_id == supplier_id => g.lines.push(line),
-            _ => groups.push(ReorderSuggestion { supplier_id, supplier_name, lines: vec![line] }),
+            _ => groups.push(ReorderSuggestion {
+                supplier_id,
+                supplier_name,
+                lines: vec![line],
+            }),
         }
     }
 
@@ -969,50 +1010,50 @@ pub async fn reorder_suggestions(
 
 #[derive(serde::Serialize, sqlx::FromRow, ToSchema)]
 pub struct GoodsReceiptLine {
-    pub id:                     Uuid,
+    pub id: Uuid,
     pub purchase_order_line_id: Option<Uuid>,
-    pub org_ingredient_id:      Uuid,
-    pub ingredient_name:        String,
+    pub org_ingredient_id: Uuid,
+    pub ingredient_name: String,
     /// Base stock units received (+) or returned (−).
     #[schema(value_type = f64)]
-    pub quantity:               f64,
+    pub quantity: f64,
     /// Piastres per base stock unit (actual).
-    pub unit_cost:              Option<i64>,
+    pub unit_cost: Option<i64>,
 }
 
 #[derive(serde::Serialize, ToSchema)]
 pub struct GoodsReceipt {
-    pub id:                Uuid,
-    pub branch_id:         Uuid,
+    pub id: Uuid,
+    pub branch_id: Uuid,
     pub purchase_order_id: Option<Uuid>,
-    pub supplier_id:       Option<Uuid>,
-    pub supplier_name:     Option<String>,
+    pub supplier_id: Option<Uuid>,
+    pub supplier_name: Option<String>,
     /// true ⟹ a return to supplier (negative stock effect).
-    pub is_return:         bool,
-    pub reference:         Option<String>,
-    pub note:              Option<String>,
-    pub received_by:       Uuid,
-    pub received_by_name:  Option<String>,
-    pub received_at:       chrono::DateTime<chrono::Utc>,
-    pub lines:             Vec<GoodsReceiptLine>,
+    pub is_return: bool,
+    pub reference: Option<String>,
+    pub note: Option<String>,
+    pub received_by: Uuid,
+    pub received_by_name: Option<String>,
+    pub received_at: chrono::DateTime<chrono::Utc>,
+    pub lines: Vec<GoodsReceiptLine>,
 }
 
 #[derive(Deserialize, ToSchema)]
 pub struct ReturnLineInput {
     pub org_ingredient_id: Uuid,
     /// Base stock units to return (must be ≤ on hand).
-    pub quantity:          f64,
+    pub quantity: f64,
     /// Piastres per base stock unit; defaults to the branch's actual cost.
-    pub unit_cost:         Option<i64>,
+    pub unit_cost: Option<i64>,
 }
 
 #[derive(Deserialize, ToSchema)]
 pub struct CreateReturnRequest {
-    pub supplier_id:       Option<Uuid>,
+    pub supplier_id: Option<Uuid>,
     pub purchase_order_id: Option<Uuid>,
-    pub reference:         Option<String>,
-    pub note:              Option<String>,
-    pub lines:             Vec<ReturnLineInput>,
+    pub reference: Option<String>,
+    pub note: Option<String>,
+    pub lines: Vec<ReturnLineInput>,
 }
 
 // ── GET /purchasing/orders/:id/receipts ───────────────────────
@@ -1028,9 +1069,9 @@ pub struct CreateReturnRequest {
     security(("bearer_jwt" = []))
 )]
 pub async fn list_po_receipts(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "purchase_orders", "read").await?;
@@ -1054,36 +1095,38 @@ pub async fn list_po_receipts(
     security(("bearer_jwt" = []))
 )]
 pub async fn create_return(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
-    body:      web::Json<CreateReturnRequest>,
+    body: web::Json<CreateReturnRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "purchase_orders", "update").await?;
     require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
 
     if body.lines.is_empty() {
-        return Err(AppError::BadRequest("a return needs at least one line".into()));
+        return Err(AppError::BadRequest(
+            "a return needs at least one line".into(),
+        ));
     }
-    let org_id: Uuid = sqlx::query_scalar(
-        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(*branch_id)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .flatten()
-    .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    let org_id: Uuid =
+        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
+            .bind(*branch_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .flatten()
+            .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
     if let Some(sup) = body.supplier_id {
-        let s_org: Option<Uuid> = sqlx::query_scalar(
-            "SELECT org_id FROM suppliers WHERE id = $1 AND deleted_at IS NULL"
-        )
-        .bind(sup)
-        .fetch_optional(pool.get_ref())
-        .await?
-        .flatten();
+        let s_org: Option<Uuid> =
+            sqlx::query_scalar("SELECT org_id FROM suppliers WHERE id = $1 AND deleted_at IS NULL")
+                .bind(sup)
+                .fetch_optional(pool.get_ref())
+                .await?
+                .flatten();
         if s_org != Some(org_id) {
-            return Err(AppError::BadRequest("Supplier does not belong to this organization".into()));
+            return Err(AppError::BadRequest(
+                "Supplier does not belong to this organization".into(),
+            ));
         }
     }
 
@@ -1106,7 +1149,9 @@ pub async fn create_return(
 
     for line in &body.lines {
         if line.quantity <= 0.0 {
-            return Err(AppError::BadRequest("return quantity must be greater than 0".into()));
+            return Err(AppError::BadRequest(
+                "return quantity must be greater than 0".into(),
+            ));
         }
         // Lock + validate stock; a return can't take more than is on hand, and
         // resolve the cost (caller-supplied actual, else the branch's cost).
@@ -1114,51 +1159,56 @@ pub async fn create_return(
             "SELECT bi.id, bi.current_stock::float8, \
                     round(COALESCE(bi.cost_per_unit, oi.cost_per_unit))::bigint \
              FROM branch_inventory bi JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id \
-             WHERE bi.branch_id = $1 AND bi.org_ingredient_id = $2 FOR UPDATE OF bi"
+             WHERE bi.branch_id = $1 AND bi.org_ingredient_id = $2 FOR UPDATE OF bi",
         )
         .bind(*branch_id)
         .bind(line.org_ingredient_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let (bi_id, current, branch_cost) = row
-            .ok_or_else(|| AppError::BadRequest("Ingredient is not tracked at this branch".into()))?;
+        let (bi_id, current, branch_cost) = row.ok_or_else(|| {
+            AppError::BadRequest("Ingredient is not tracked at this branch".into())
+        })?;
         if current < line.quantity {
             return Err(AppError::BadRequest(format!(
-                "Cannot return {} — only {} on hand.", line.quantity, current
+                "Cannot return {} — only {} on hand.",
+                line.quantity, current
             )));
         }
         let unit_cost = line.unit_cost.or(branch_cost);
 
         let balance: f64 = sqlx::query_scalar(
             "UPDATE branch_inventory SET current_stock = current_stock - $1, updated_at = now() \
-             WHERE id = $2 RETURNING current_stock::float8"
+             WHERE id = $2 RETURNING current_stock::float8",
         )
         .bind(line.quantity)
         .bind(bi_id)
         .fetch_one(&mut *tx)
         .await?;
 
-        record_movement(&mut *tx, crate::inventory::movements::MovementParams {
-            branch_id:           *branch_id,
-            org_ingredient_id:   line.org_ingredient_id,
-            branch_inventory_id: Some(bi_id),
-            movement_type:       "purchase_return",
-            quantity:            -line.quantity,
-            balance_after:       Some(balance),
-            unit_cost,
-            reason:              None,
-            below_zero:          balance < 0.0,
-            source_type:         Some("goods_receipt"),
-            source_id:           Some(receipt_id),
-            note:                Some("Return to supplier"),
-            created_by:          Some(claims.user_id()),
-        })
+        record_movement(
+            &mut *tx,
+            crate::inventory::movements::MovementParams {
+                branch_id: *branch_id,
+                org_ingredient_id: line.org_ingredient_id,
+                branch_inventory_id: Some(bi_id),
+                movement_type: "purchase_return",
+                quantity: -line.quantity,
+                balance_after: Some(balance),
+                unit_cost,
+                reason: None,
+                below_zero: balance < 0.0,
+                source_type: Some("goods_receipt"),
+                source_id: Some(receipt_id),
+                note: Some("Return to supplier"),
+                created_by: Some(claims.user_id()),
+            },
+        )
         .await?;
 
         sqlx::query(
             "INSERT INTO goods_receipt_lines \
                  (goods_receipt_id, org_ingredient_id, quantity, unit_cost) \
-             VALUES ($1, $2, $3, $4)"
+             VALUES ($1, $2, $3, $4)",
         )
         .bind(receipt_id)
         .bind(line.org_ingredient_id)
@@ -1244,7 +1294,11 @@ async fn fetch_receipt(pool: &PgPool, receipt_id: Uuid) -> Result<GoodsReceipt, 
         .ok_or_else(|| AppError::NotFound("Goods receipt not found".into()))
 }
 
-async fn fetch_receipts_where(pool: &PgPool, cond: &str, id: Uuid) -> Result<Vec<GoodsReceipt>, AppError> {
+async fn fetch_receipts_where(
+    pool: &PgPool,
+    cond: &str,
+    id: Uuid,
+) -> Result<Vec<GoodsReceipt>, AppError> {
     #[derive(sqlx::FromRow)]
     struct H {
         id: Uuid,
@@ -1272,40 +1326,72 @@ async fn fetch_receipts_where(pool: &PgPool, cond: &str, id: Uuid) -> Result<Vec
         return Ok(Vec::new());
     }
     let ids: Vec<Uuid> = headers.iter().map(|h| h.id).collect();
-    let line_rows: Vec<(Uuid, GoodsReceiptLine)> = sqlx::query_as::<_, (Uuid, Uuid, Option<Uuid>, Uuid, String, f64, Option<i64>)>(
+    let line_rows: Vec<(Uuid, GoodsReceiptLine)> = sqlx::query_as::<
+        _,
+        (Uuid, Uuid, Option<Uuid>, Uuid, String, f64, Option<i64>),
+    >(
         "SELECT grl.goods_receipt_id, grl.id, grl.purchase_order_line_id, grl.org_ingredient_id, \
                 oi.name AS ingredient_name, grl.quantity::float8, grl.unit_cost \
          FROM goods_receipt_lines grl \
          JOIN org_ingredients oi ON oi.id = grl.org_ingredient_id \
-         WHERE grl.goods_receipt_id = ANY($1) ORDER BY oi.name"
+         WHERE grl.goods_receipt_id = ANY($1) ORDER BY oi.name",
     )
     .bind(&ids)
     .fetch_all(pool)
     .await?
     .into_iter()
-    .map(|(rid, id, pol, ing, name, qty, cost)| (rid, GoodsReceiptLine {
-        id, purchase_order_line_id: pol, org_ingredient_id: ing,
-        ingredient_name: name, quantity: qty, unit_cost: cost,
-    }))
+    .map(|(rid, id, pol, ing, name, qty, cost)| {
+        (
+            rid,
+            GoodsReceiptLine {
+                id,
+                purchase_order_line_id: pol,
+                org_ingredient_id: ing,
+                ingredient_name: name,
+                quantity: qty,
+                unit_cost: cost,
+            },
+        )
+    })
     .collect();
 
-    Ok(headers.into_iter().map(|h| {
-        let lines = line_rows.iter().filter(|(rid, _)| *rid == h.id).map(|(_, l)| GoodsReceiptLine {
-            id: l.id, purchase_order_line_id: l.purchase_order_line_id,
-            org_ingredient_id: l.org_ingredient_id, ingredient_name: l.ingredient_name.clone(),
-            quantity: l.quantity, unit_cost: l.unit_cost,
-        }).collect();
-        GoodsReceipt {
-            id: h.id, branch_id: h.branch_id, purchase_order_id: h.purchase_order_id,
-            supplier_id: h.supplier_id, supplier_name: h.supplier_name, is_return: h.is_return,
-            reference: h.reference, note: h.note, received_by: h.received_by,
-            received_by_name: h.received_by_name, received_at: h.received_at, lines,
-        }
-    }).collect())
+    Ok(headers
+        .into_iter()
+        .map(|h| {
+            let lines = line_rows
+                .iter()
+                .filter(|(rid, _)| *rid == h.id)
+                .map(|(_, l)| GoodsReceiptLine {
+                    id: l.id,
+                    purchase_order_line_id: l.purchase_order_line_id,
+                    org_ingredient_id: l.org_ingredient_id,
+                    ingredient_name: l.ingredient_name.clone(),
+                    quantity: l.quantity,
+                    unit_cost: l.unit_cost,
+                })
+                .collect();
+            GoodsReceipt {
+                id: h.id,
+                branch_id: h.branch_id,
+                purchase_order_id: h.purchase_order_id,
+                supplier_id: h.supplier_id,
+                supplier_name: h.supplier_name,
+                is_return: h.is_return,
+                reference: h.reference,
+                note: h.note,
+                received_by: h.received_by,
+                received_by_name: h.received_by_name,
+                received_at: h.received_at,
+                lines,
+            }
+        })
+        .collect())
 }
 
 fn require_org(claims: &Claims, org_id: Uuid) -> Result<(), AppError> {
-    if claims.role == UserRole::SuperAdmin { return Ok(()); }
+    if claims.role == UserRole::SuperAdmin {
+        return Ok(());
+    }
     if claims.org_id() != Some(org_id) {
         return Err(AppError::Forbidden("Access denied to this org".into()));
     }
@@ -1313,27 +1399,32 @@ fn require_org(claims: &Claims, org_id: Uuid) -> Result<(), AppError> {
 }
 
 async fn require_branch_access(
-    pool:      &PgPool,
-    claims:    &Claims,
+    pool: &PgPool,
+    claims: &Claims,
     branch_id: Uuid,
 ) -> Result<(), AppError> {
-    if claims.role == UserRole::SuperAdmin { return Ok(()); }
+    if claims.role == UserRole::SuperAdmin {
+        return Ok(());
+    }
 
-    let branch_org: Option<Uuid> = sqlx::query_scalar(
-        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(branch_id)
-    .fetch_optional(pool)
-    .await?
-    .flatten();
+    let branch_org: Option<Uuid> =
+        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
+            .bind(branch_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
 
     let branch_org = branch_org.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
 
     if claims.org_id() != Some(branch_org) {
-        return Err(AppError::Forbidden("Branch belongs to a different org".into()));
+        return Err(AppError::Forbidden(
+            "Branch belongs to a different org".into(),
+        ));
     }
 
-    if claims.role == UserRole::OrgAdmin { return Ok(()); }
+    if claims.role == UserRole::OrgAdmin {
+        return Ok(());
+    }
 
     let assigned: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)"
@@ -1352,7 +1443,8 @@ async fn require_branch_access(
     // both. The None guard keeps legacy/non-teller tokens working (V26).
     if claims.role == UserRole::Teller {
         if let Some(token_branch) = claims.branch_id()
-            && token_branch != branch_id {
+            && token_branch != branch_id
+        {
             return Err(AppError::Forbidden(
                 "This device is signed in to a different branch.".into(),
             ));

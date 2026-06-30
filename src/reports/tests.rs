@@ -1,21 +1,20 @@
 #![allow(unused_imports, unused_variables, dead_code)]
-use actix_web::{test, App, web};
-use sqlx::PgPool;
-use uuid::Uuid;
+use actix_web::{App, test, web};
 use chrono::Utc;
 use rust_decimal::Decimal;
 use serde_json::json;
+use sqlx::PgPool;
+use uuid::Uuid;
 
 use crate::auth::jwt::JwtSecret;
 use crate::models::UserRole;
-use crate::reports::routes;
 use crate::reports::handlers::{
-    ShiftSummary, DeductionLogRow, CategorySales, ItemSales, BranchSalesReport,
-    StockRow, BranchStockReport, TimeseriesPoint, TellerStats, AddonSalesRow, BranchComparison, OrgComparisonReport,
-    BundleSalesRow, CombinedItemSalesRow,
-    InventoryValuationReport, LowStockRow, ConsumptionRow, WasteReportRow, ShrinkageRow,
-    PeakHourPoint,
+    AddonSalesRow, BranchComparison, BranchSalesReport, BranchStockReport, BundleSalesRow,
+    CategorySales, CombinedItemSalesRow, ConsumptionRow, DeductionLogRow, InventoryValuationReport,
+    ItemSales, LowStockRow, OrgComparisonReport, PeakHourPoint, ShiftSummary, ShrinkageRow,
+    StockRow, TellerStats, TimeseriesPoint, WasteReportRow,
 };
+use crate::reports::routes;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
@@ -30,7 +29,15 @@ fn generate_org_admin_token(user_id: Uuid, org_id: Uuid) -> String {
 }
 
 fn generate_teller_token(user_id: Uuid, org_id: Uuid, branch_id: Uuid) -> String {
-    crate::auth::jwt::create_token(&get_secret(), user_id, Some(org_id), UserRole::Teller, Some(branch_id), 24).unwrap()
+    crate::auth::jwt::create_token(
+        &get_secret(),
+        user_id,
+        Some(org_id),
+        UserRole::Teller,
+        Some(branch_id),
+        24,
+    )
+    .unwrap()
 }
 
 async fn seed_org(pool: &PgPool) -> Uuid {
@@ -193,15 +200,16 @@ async fn test_shift_summary(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
-    ).await;
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
     let token = generate_org_admin_token(user_id, org_id);
     let shift_id = seed_shift(&pool, branch_id, user_id).await;
-    
+
     grant_permission(&pool, "org_admin", "shifts", "read").await;
     grant_permission(&pool, "org_admin", "orders", "read").await;
 
@@ -228,8 +236,9 @@ async fn test_branch_sales(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
-    ).await;
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
@@ -265,8 +274,9 @@ async fn test_branch_stock(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
-    ).await;
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
@@ -296,8 +306,9 @@ async fn test_branch_sales_timeseries(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
-    ).await;
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
@@ -310,7 +321,10 @@ async fn test_branch_sales_timeseries(pool: PgPool) {
     seed_order(&pool, branch_id, user_id, shift_id).await;
 
     let req = test::TestRequest::get()
-        .uri(&format!("/reports/branches/{}/sales/timeseries?granularity=daily", branch_id))
+        .uri(&format!(
+            "/reports/branches/{}/sales/timeseries?granularity=daily",
+            branch_id
+        ))
         .insert_header(("Authorization", format!("Bearer {}", token)))
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -328,8 +342,9 @@ async fn test_branch_sales_peak_hours(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
-    ).await;
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
@@ -360,22 +375,44 @@ async fn test_branch_sales_peak_hours(pool: PgPool) {
 
     // The seeded order (revenue=570) must appear in exactly one bucket.
     let nonempty: Vec<&PeakHourPoint> = rows.iter().filter(|r| r.orders > 0).collect();
-    assert_eq!(nonempty.len(), 1, "exactly one hour bucket should have orders");
+    assert_eq!(
+        nonempty.len(),
+        1,
+        "exactly one hour bucket should have orders"
+    );
     let hot = nonempty[0];
     assert_eq!(hot.orders, 1);
     assert_eq!(hot.revenue, 570);
 
     // Per-day averages: 1 order over 1 distinct day → avg equals total.
-    assert_eq!(hot.avg_revenue_per_day, 570, "avg_revenue_per_day = total when days=1");
-    assert!((hot.avg_orders_per_day - 1.0).abs() < 0.001, "avg_orders_per_day should be 1.0");
+    assert_eq!(
+        hot.avg_revenue_per_day, 570,
+        "avg_revenue_per_day = total when days=1"
+    );
+    assert!(
+        (hot.avg_orders_per_day - 1.0).abs() < 0.001,
+        "avg_orders_per_day should be 1.0"
+    );
 
     // Percentages: sole active bucket gets 100% of both revenue and orders.
-    assert!((hot.revenue_pct - 100.0).abs() < 0.1, "revenue_pct should be 100.0");
-    assert!((hot.orders_pct - 100.0).abs() < 0.1, "orders_pct should be 100.0");
+    assert!(
+        (hot.revenue_pct - 100.0).abs() < 0.1,
+        "revenue_pct should be 100.0"
+    );
+    assert!(
+        (hot.orders_pct - 100.0).abs() < 0.1,
+        "orders_pct should be 100.0"
+    );
 
     // All empty-hour buckets should have zero averages and zero percentages.
-    let empty_nonzero_avg = rows.iter().filter(|r| r.orders == 0 && r.avg_revenue_per_day != 0).count();
-    assert_eq!(empty_nonzero_avg, 0, "empty hour buckets must not carry non-zero averages");
+    let empty_nonzero_avg = rows
+        .iter()
+        .filter(|r| r.orders == 0 && r.avg_revenue_per_day != 0)
+        .count();
+    assert_eq!(
+        empty_nonzero_avg, 0,
+        "empty hour buckets must not carry non-zero averages"
+    );
 
     // Voided orders must not count towards revenue.
     let total_voided: i64 = rows.iter().map(|r| r.voided).sum();
@@ -388,8 +425,9 @@ async fn test_branch_teller_stats(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
-    ).await;
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
@@ -420,8 +458,9 @@ async fn test_org_branch_comparison(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
-    ).await;
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
@@ -451,8 +490,9 @@ async fn test_shift_deductions(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
-    ).await;
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
@@ -479,8 +519,9 @@ async fn test_branch_addon_sales(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
-    ).await;
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
@@ -498,7 +539,11 @@ async fn test_branch_addon_sales(pool: PgPool) {
 
     let category_id = Uuid::new_v4();
     sqlx::query("INSERT INTO categories (id, org_id, name) VALUES ($1, $2, 'Burgers')")
-        .bind(category_id).bind(org_id).execute(&pool).await.unwrap();
+        .bind(category_id)
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let recipe_id = Uuid::new_v4();
     sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price) VALUES ($1, $2, $3, 'Burger', 500)")
@@ -531,8 +576,9 @@ async fn test_branch_bundle_sales(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
-    ).await;
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
@@ -571,8 +617,9 @@ async fn test_branch_combined_item_sales(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
-    ).await;
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
@@ -586,12 +633,16 @@ async fn test_branch_combined_item_sales(pool: PgPool) {
 
     let category_id = Uuid::new_v4();
     sqlx::query("INSERT INTO categories (id, org_id, name) VALUES ($1, $2, 'Burgers')")
-        .bind(category_id).bind(org_id).execute(&pool).await.unwrap();
+        .bind(category_id)
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let recipe_id = Uuid::new_v4();
     sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price) VALUES ($1, $2, $3, 'Burger', 500)")
         .bind(recipe_id).bind(org_id).bind(category_id).execute(&pool).await.unwrap();
-    
+
     sqlx::query("INSERT INTO menu_item_price_epochs (id, menu_item_id, price, effective_from) VALUES ($1, $2, 500, now())")
         .bind(Uuid::new_v4()).bind(recipe_id).execute(&pool).await.unwrap();
 
@@ -621,13 +672,12 @@ async fn test_branch_combined_item_sales(pool: PgPool) {
 
     let combined: Vec<CombinedItemSalesRow> = test::read_body_json(resp).await;
     assert_eq!(combined.len(), 1);
-    
+
     let recipe_sale = combined.iter().find(|c| c.item_name == "Burger").unwrap();
     assert_eq!(recipe_sale.standalone_qty, 2);
     assert_eq!(recipe_sale.bundle_qty, 1);
     assert_eq!(recipe_sale.total_qty, 3);
 }
-
 
 #[sqlx::test]
 async fn test_branch_menu_engineering_cost_basis(pool: PgPool) {
@@ -651,7 +701,7 @@ async fn test_branch_menu_engineering_cost_basis(pool: PgPool) {
     let beans = seed_ingredient(&pool, org_id, "Beans", "g").await;
     sqlx::query(
         "INSERT INTO menu_item_recipes (menu_item_id, size_label, quantity_used, ingredient_name, ingredient_unit, org_ingredient_id) \
-         VALUES ($1, 'one_size'::item_size, 1.0, 'Beans', 'g', $2)",
+         VALUES ($1, 'one_size', 1.0, 'Beans', 'g', $2)",
     )
     .bind(coffee)
     .bind(beans)
@@ -676,7 +726,7 @@ async fn test_branch_menu_engineering_cost_basis(pool: PgPool) {
     .unwrap();
     sqlx::query(
         "INSERT INTO menu_item_recipes (menu_item_id, size_label, quantity_used, ingredient_name, ingredient_unit, org_ingredient_id) \
-         VALUES ($1, 'one_size'::item_size, 1.0, 'Mystery Dust', 'g', $2)",
+         VALUES ($1, 'one_size', 1.0, 'Mystery Dust', 'g', $2)",
     )
     .bind(ghost)
     .bind(costless_ing)
@@ -738,9 +788,7 @@ async fn test_branch_menu_engineering_cost_basis(pool: PgPool) {
         let app = &app;
         let token = token.clone();
         let uri = match basis {
-            Some(b) => format!(
-                "/reports/branches/{branch_id}/menu-engineering?cost_basis={b}"
-            ),
+            Some(b) => format!("/reports/branches/{branch_id}/menu-engineering?cost_basis={b}"),
             None => format!("/reports/branches/{branch_id}/menu-engineering"),
         };
         async move {
@@ -778,10 +826,16 @@ async fn test_branch_menu_engineering_cost_basis(pool: PgPool) {
         assert_eq!(status, 200);
         assert_eq!(report["cost_basis"], "snapshot");
         assert_eq!(report["rows"].as_array().unwrap().len(), 2);
-        assert!(has_item(&report, ghost), "snapshot-costed ghost must be included");
+        assert!(
+            has_item(&report, ghost),
+            "snapshot-costed ghost must be included"
+        );
         assert_eq!(report["rows_cost_missing"], 1); // bare only
         assert_eq!(report["excluded_sales"], 500); // bare's revenue
-        assert!(!has_item(&report, bare), "cost-missing row leaked into the report");
+        assert!(
+            !has_item(&report, bare),
+            "cost-missing row leaked into the report"
+        );
         let row = coffee_row(&report);
         assert_eq!(row["total_cost"], 200);
         assert_eq!(row["total_profit"], 1800);
@@ -796,7 +850,10 @@ async fn test_branch_menu_engineering_cost_basis(pool: PgPool) {
     assert_eq!(status, 200);
     assert_eq!(report["cost_basis"], "current");
     assert_eq!(report["rows"].as_array().unwrap().len(), 1);
-    assert!(!has_item(&report, ghost), "unentered-cost item leaked under current basis");
+    assert!(
+        !has_item(&report, ghost),
+        "unentered-cost item leaked under current basis"
+    );
     assert!(!has_item(&report, bare));
     assert_eq!(report["rows_cost_missing"], 2); // bare + ghost
     assert_eq!(report["excluded_sales"], 1500); // bare 500 + ghost 1000
@@ -841,7 +898,7 @@ async fn test_menu_engineering_bases_match_after_backfill(pool: PgPool) {
     let item_a = seed_menu_item(&pool, org_id, cat_id).await;
     sqlx::query(
         "INSERT INTO menu_item_recipes (menu_item_id, size_label, quantity_used, ingredient_name, ingredient_unit, org_ingredient_id) \
-         VALUES ($1, 'one_size'::item_size, 2.0, 'Beans', 'g', $2)",
+         VALUES ($1, 'one_size', 2.0, 'Beans', 'g', $2)",
     )
     .bind(item_a)
     .bind(ing)
@@ -854,7 +911,7 @@ async fn test_menu_engineering_bases_match_after_backfill(pool: PgPool) {
     let item_b = seed_menu_item(&pool, org_id, cat_id).await;
     sqlx::query(
         "INSERT INTO menu_item_recipes (menu_item_id, size_label, quantity_used, ingredient_name, ingredient_unit, org_ingredient_id) \
-         VALUES ($1, 'one_size'::item_size, 1.0, 'Beans', 'g', $2)",
+         VALUES ($1, 'one_size', 1.0, 'Beans', 'g', $2)",
     )
     .bind(item_b)
     .bind(ing)
@@ -952,31 +1009,42 @@ async fn test_menu_engineering_bases_match_after_backfill(pool: PgPool) {
     let current = fetch("current").await;
 
     // Same totals, same exclusion count.
-    for key in ["total_sales", "total_cost", "total_profit", "rows_cost_missing", "excluded_sales"] {
+    for key in [
+        "total_sales",
+        "total_cost",
+        "total_profit",
+        "rows_cost_missing",
+        "excluded_sales",
+    ] {
         assert_eq!(snapshot[key], current[key], "{key} diverged between bases");
     }
 
     // Same rows, field by field (order-independent).
-    let row_map = |report: &serde_json::Value| -> std::collections::HashMap<String, serde_json::Value> {
-        report["rows"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|r| {
-                (
-                    format!("{}|{}", r["menu_item_id"], r["size_label"]),
-                    serde_json::json!({
-                        "total_cost": r["total_cost"],
-                        "item_profit": r["item_profit"],
-                        "total_profit": r["total_profit"],
-                        "popularity_pct": r["popularity_pct"],
-                        "class": r["class"],
-                    }),
-                )
-            })
-            .collect()
-    };
-    assert_eq!(row_map(&snapshot), row_map(&current), "rows diverged between bases");
+    let row_map =
+        |report: &serde_json::Value| -> std::collections::HashMap<String, serde_json::Value> {
+            report["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| {
+                    (
+                        format!("{}|{}", r["menu_item_id"], r["size_label"]),
+                        serde_json::json!({
+                            "total_cost": r["total_cost"],
+                            "item_profit": r["item_profit"],
+                            "total_profit": r["total_profit"],
+                            "popularity_pct": r["popularity_pct"],
+                            "class": r["class"],
+                        }),
+                    )
+                })
+                .collect()
+        };
+    assert_eq!(
+        row_map(&snapshot),
+        row_map(&current),
+        "rows diverged between bases"
+    );
 
     // Both bases include BOTH items — the uncosted addon must not exclude
     // item B — and cost is recipe-scope (addon costs not folded in).
@@ -1008,7 +1076,8 @@ macro_rules! init_app {
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(get_secret()))
                 .configure(|cfg| routes::configure(cfg, web::Data::new($pool.clone()))),
-        ).await
+        )
+        .await
     };
 }
 
@@ -1024,7 +1093,15 @@ async fn seed_stock_lvl(pool: &PgPool, branch_id: Uuid, ing: Uuid, stock: f64, r
         .bind(branch_id).bind(ing).bind(stock).bind(reorder).execute(pool).await.unwrap();
 }
 
-async fn ins_movement(pool: &PgPool, branch_id: Uuid, ing: Uuid, mtype: &str, qty: f64, unit_cost: Option<i64>, reason: Option<&str>) {
+async fn ins_movement(
+    pool: &PgPool,
+    branch_id: Uuid,
+    ing: Uuid,
+    mtype: &str,
+    qty: f64,
+    unit_cost: Option<i64>,
+    reason: Option<&str>,
+) {
     sqlx::query("INSERT INTO inventory_movements (branch_id, org_ingredient_id, type, quantity, unit_cost, reason) VALUES ($1,$2,$3::inventory_movement_type,$4,$5,$6)")
         .bind(branch_id).bind(ing).bind(mtype).bind(qty).bind(unit_cost).bind(reason).execute(pool).await.unwrap();
 }
@@ -1036,16 +1113,25 @@ async fn test_inventory_valuation_branch_and_org(pool: PgPool) {
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
     grant_permission(&pool, "org_admin", "inventory", "read").await;
-    let known = seed_ingredient(&pool, org_id, "Known", "g").await;     // cost 100
+    let known = seed_ingredient(&pool, org_id, "Known", "g").await; // cost 100
     let unknown = seed_ingredient_nullcost(&pool, org_id, "Unknown").await;
-    seed_branch_inventory(&pool, branch_id, known, 10.0).await;          // 10 × 100 = 1000
-    seed_branch_inventory(&pool, branch_id, unknown, 5.0).await;         // unknown → excluded
+    seed_branch_inventory(&pool, branch_id, known, 10.0).await; // 10 × 100 = 1000
+    seed_branch_inventory(&pool, branch_id, unknown, 5.0).await; // unknown → excluded
     let token = generate_org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
 
-    for url in [format!("/reports/branches/{branch_id}/inventory-valuation"),
-                format!("/reports/orgs/{org_id}/inventory-valuation")] {
-        let resp = test::call_service(&app, test::TestRequest::get().uri(&url).insert_header(auth.clone()).to_request()).await;
+    for url in [
+        format!("/reports/branches/{branch_id}/inventory-valuation"),
+        format!("/reports/orgs/{org_id}/inventory-valuation"),
+    ] {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&url)
+                .insert_header(auth.clone())
+                .to_request(),
+        )
+        .await;
         assert_eq!(resp.status(), 200);
         let report: InventoryValuationReport = test::read_body_json(resp).await;
         assert_eq!(report.total_value, 1000);
@@ -1063,18 +1149,33 @@ async fn test_org_low_stock_guard_and_supplier(pool: PgPool) {
     grant_permission(&pool, "org_admin", "inventory", "read").await;
     // Low item with a supplier.
     let sup = Uuid::new_v4();
-    sqlx::query("INSERT INTO suppliers (id, org_id, name) VALUES ($1,$2,'Beans Co')").bind(sup).bind(org_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO suppliers (id, org_id, name) VALUES ($1,$2,'Beans Co')")
+        .bind(sup)
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let low = seed_ingredient(&pool, org_id, "Low", "g").await;
-    sqlx::query("UPDATE org_ingredients SET supplier_id=$1 WHERE id=$2").bind(sup).bind(low).execute(&pool).await.unwrap();
-    seed_stock_lvl(&pool, branch_id, low, 5.0, 10.0).await;   // below → flagged
+    sqlx::query("UPDATE org_ingredients SET supplier_id=$1 WHERE id=$2")
+        .bind(sup)
+        .bind(low)
+        .execute(&pool)
+        .await
+        .unwrap();
+    seed_stock_lvl(&pool, branch_id, low, 5.0, 10.0).await; // below → flagged
     // Zero/zero item must be excluded (G3).
     let zero = seed_ingredient(&pool, org_id, "Zero", "g").await;
     seed_stock_lvl(&pool, branch_id, zero, 0.0, 0.0).await;
     let token = generate_org_admin_token(user_id, org_id);
 
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/reports/orgs/{org_id}/low-stock"))
-        .insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/reports/orgs/{org_id}/low-stock"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 200);
     let rows: Vec<LowStockRow> = test::read_body_json(resp).await;
     assert_eq!(rows.len(), 1);
@@ -1086,39 +1187,48 @@ async fn test_org_low_stock_guard_and_supplier(pool: PgPool) {
 #[sqlx::test]
 async fn test_branch_low_stock_scope_and_all_branches(pool: PgPool) {
     let app = init_app!(pool);
-    let org_id   = seed_org(&pool).await;
+    let org_id = seed_org(&pool).await;
     let branch_a = seed_branch(&pool, org_id).await;
     // Second branch in the SAME org — distinct name (branches are unique per
     // org name), so seed_branch's fixed name can't be reused here.
     let branch_b = {
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1,$2,'Test Branch 2')")
-            .bind(id).bind(org_id).execute(&pool).await.unwrap();
+            .bind(id)
+            .bind(org_id)
+            .execute(&pool)
+            .await
+            .unwrap();
         id
     };
-    let user_id  = seed_user(&pool, org_id, "org_admin").await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
     grant_permission(&pool, "org_admin", "inventory", "read").await;
 
     let beans = seed_ingredient(&pool, org_id, "Beans", "g").await;
-    let milk  = seed_ingredient(&pool, org_id, "Milk", "ml").await;
-    seed_stock_lvl(&pool, branch_a, beans, 2.0,  10.0).await; // A: below
-    seed_stock_lvl(&pool, branch_a, milk,  50.0, 10.0).await; // A: ok
-    seed_stock_lvl(&pool, branch_b, milk,  1.0,  5.0).await;  // B: below
+    let milk = seed_ingredient(&pool, org_id, "Milk", "ml").await;
+    seed_stock_lvl(&pool, branch_a, beans, 2.0, 10.0).await; // A: below
+    seed_stock_lvl(&pool, branch_a, milk, 50.0, 10.0).await; // A: ok
+    seed_stock_lvl(&pool, branch_b, milk, 1.0, 5.0).await; // B: below
     seed_stock_lvl(&pool, branch_b, beans, 99.0, 10.0).await; // B: ok
 
     // A second org with its own low item — must never leak into org_id's view.
-    let other_org    = seed_org(&pool).await;
+    let other_org = seed_org(&pool).await;
     let other_branch = seed_branch(&pool, other_org).await;
-    let other_ing    = seed_ingredient(&pool, other_org, "Sugar", "g").await;
+    let other_ing = seed_ingredient(&pool, other_org, "Sugar", "g").await;
     seed_stock_lvl(&pool, other_branch, other_ing, 0.5, 5.0).await;
 
     let token = generate_org_admin_token(user_id, org_id);
-    let auth  = ("Authorization", format!("Bearer {token}"));
+    let auth = ("Authorization", format!("Bearer {token}"));
 
     // Branch A only: exactly Beans@A.
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/reports/branches/{branch_a}/low-stock"))
-        .insert_header(auth.clone()).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/reports/branches/{branch_a}/low-stock"))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 200);
     let rows: Vec<LowStockRow> = test::read_body_json(resp).await;
     assert_eq!(rows.len(), 1, "branch A has exactly one below-reorder item");
@@ -1128,59 +1238,99 @@ async fn test_branch_low_stock_scope_and_all_branches(pool: PgPool) {
     // All branches (nil UUID): Beans@A + Milk@B, each attributed to its branch,
     // and the other org's Sugar excluded.
     let nil = Uuid::nil();
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/reports/branches/{nil}/low-stock"))
-        .insert_header(auth.clone()).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/reports/branches/{nil}/low-stock"))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 200);
     let rows: Vec<LowStockRow> = test::read_body_json(resp).await;
-    assert_eq!(rows.len(), 2, "all-branches sees both org branches' low items");
-    assert!(rows.iter().any(|r| r.branch_id == branch_a && r.org_ingredient_id == beans));
-    assert!(rows.iter().any(|r| r.branch_id == branch_b && r.org_ingredient_id == milk));
-    assert!(!rows.iter().any(|r| r.org_ingredient_id == other_ing),
-        "another org's low stock must never appear in all-branches scope");
+    assert_eq!(
+        rows.len(),
+        2,
+        "all-branches sees both org branches' low items"
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r.branch_id == branch_a && r.org_ingredient_id == beans)
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r.branch_id == branch_b && r.org_ingredient_id == milk)
+    );
+    assert!(
+        !rows.iter().any(|r| r.org_ingredient_id == other_ing),
+        "another org's low stock must never appear in all-branches scope"
+    );
 }
 
 #[sqlx::test]
 async fn test_all_branches_nil_aggregates_consumption(pool: PgPool) {
     let app = init_app!(pool);
-    let org_id   = seed_org(&pool).await;
+    let org_id = seed_org(&pool).await;
     let branch_a = seed_branch(&pool, org_id).await;
     // Second branch in the SAME org — distinct name (branches are unique per
     // org name), so seed_branch's fixed name can't be reused here.
     let branch_b = {
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1,$2,'Test Branch 2')")
-            .bind(id).bind(org_id).execute(&pool).await.unwrap();
+            .bind(id)
+            .bind(org_id)
+            .execute(&pool)
+            .await
+            .unwrap();
         id
     };
-    let user_id  = seed_user(&pool, org_id, "org_admin").await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
     grant_permission(&pool, "org_admin", "inventory", "read").await;
     let ing = seed_ingredient(&pool, org_id, "Beans", "g").await;
     ins_movement(&pool, branch_a, ing, "sale", -10.0, Some(100), None).await;
-    ins_movement(&pool, branch_b, ing, "sale", -6.0,  Some(100), None).await;
+    ins_movement(&pool, branch_b, ing, "sale", -6.0, Some(100), None).await;
 
     // Another org's consumption must not bleed into the all-branches roll-up.
-    let other_org    = seed_org(&pool).await;
+    let other_org = seed_org(&pool).await;
     let other_branch = seed_branch(&pool, other_org).await;
-    let other_ing    = seed_ingredient(&pool, other_org, "Beans", "g").await;
-    ins_movement(&pool, other_branch, other_ing, "sale", -99.0, Some(100), None).await;
+    let other_ing = seed_ingredient(&pool, other_org, "Beans", "g").await;
+    ins_movement(
+        &pool,
+        other_branch,
+        other_ing,
+        "sale",
+        -99.0,
+        Some(100),
+        None,
+    )
+    .await;
 
     let token = generate_org_admin_token(user_id, org_id);
-    let auth  = ("Authorization", format!("Bearer {token}"));
+    let auth = ("Authorization", format!("Bearer {token}"));
 
     // Single branch A: 10 consumed.
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/reports/branches/{branch_a}/consumption"))
-        .insert_header(auth.clone()).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/reports/branches/{branch_a}/consumption"))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
     let rows: Vec<ConsumptionRow> = test::read_body_json(resp).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].consumed_qty, 10.0);
 
     // All branches (nil): one summed row, 16 = A(10) + B(6); org-isolated.
     let nil = Uuid::nil();
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/reports/branches/{nil}/consumption"))
-        .insert_header(auth.clone()).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/reports/branches/{nil}/consumption"))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
     let rows: Vec<ConsumptionRow> = test::read_body_json(resp).await;
     assert_eq!(rows.len(), 1, "consumption rolls up to one ingredient row");
     assert_eq!(rows[0].consumed_qty, 16.0);
@@ -1190,7 +1340,7 @@ async fn test_all_branches_nil_aggregates_consumption(pool: PgPool) {
 #[sqlx::test]
 async fn test_all_branches_super_admin_uses_org_header(pool: PgPool) {
     let app = init_app!(pool);
-    let org_id   = seed_org(&pool).await;
+    let org_id = seed_org(&pool).await;
     let branch_a = seed_branch(&pool, org_id).await;
     let ing = seed_ingredient(&pool, org_id, "Beans", "g").await;
     seed_stock_lvl(&pool, branch_a, ing, 1.0, 10.0).await; // below reorder
@@ -1200,17 +1350,31 @@ async fn test_all_branches_super_admin_uses_org_header(pool: PgPool) {
     let nil = Uuid::nil();
 
     // Without X-Org-Id there is no org to roll up over → 403.
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/reports/branches/{nil}/low-stock"))
-        .insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;
-    assert_eq!(resp.status(), 403, "super-admin all-branches requires an org header");
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/reports/branches/{nil}/low-stock"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        403,
+        "super-admin all-branches requires an org header"
+    );
 
     // The dashboard pins the active org via X-Org-Id; a super admin may read any
     // org, so it is honoured and the roll-up is scoped to that org.
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/reports/branches/{nil}/low-stock"))
-        .insert_header(("Authorization", format!("Bearer {token}")))
-        .insert_header(("X-Org-Id", org_id.to_string())).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/reports/branches/{nil}/low-stock"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("X-Org-Id", org_id.to_string()))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 200);
     let rows: Vec<LowStockRow> = test::read_body_json(resp).await;
     assert_eq!(rows.len(), 1);
@@ -1227,13 +1391,31 @@ async fn test_consumption_branch_and_org(pool: PgPool) {
     let ing = seed_ingredient(&pool, org_id, "Beans", "g").await;
     // sale 10 + waste 5 consumed, at 100 piastres/unit.
     ins_movement(&pool, branch_id, ing, "sale", -10.0, Some(100), None).await;
-    ins_movement(&pool, branch_id, ing, "waste", -5.0, Some(100), Some("spoiled")).await;
+    ins_movement(
+        &pool,
+        branch_id,
+        ing,
+        "waste",
+        -5.0,
+        Some(100),
+        Some("spoiled"),
+    )
+    .await;
     let token = generate_org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
 
-    for url in [format!("/reports/branches/{branch_id}/consumption"),
-                format!("/reports/orgs/{org_id}/consumption")] {
-        let resp = test::call_service(&app, test::TestRequest::get().uri(&url).insert_header(auth.clone()).to_request()).await;
+    for url in [
+        format!("/reports/branches/{branch_id}/consumption"),
+        format!("/reports/orgs/{org_id}/consumption"),
+    ] {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&url)
+                .insert_header(auth.clone())
+                .to_request(),
+        )
+        .await;
         assert_eq!(resp.status(), 200);
         let rows: Vec<ConsumptionRow> = test::read_body_json(resp).await;
         assert_eq!(rows.len(), 1);
@@ -1250,14 +1432,41 @@ async fn test_waste_report_branch_and_org(pool: PgPool) {
     let user_id = seed_user(&pool, org_id, "org_admin").await;
     grant_permission(&pool, "org_admin", "inventory", "read").await;
     let ing = seed_ingredient(&pool, org_id, "Cream", "ml").await;
-    ins_movement(&pool, branch_id, ing, "waste", -5.0, Some(100), Some("spoiled")).await;
-    ins_movement(&pool, branch_id, ing, "waste", -3.0, Some(100), Some("expired")).await;
+    ins_movement(
+        &pool,
+        branch_id,
+        ing,
+        "waste",
+        -5.0,
+        Some(100),
+        Some("spoiled"),
+    )
+    .await;
+    ins_movement(
+        &pool,
+        branch_id,
+        ing,
+        "waste",
+        -3.0,
+        Some(100),
+        Some("expired"),
+    )
+    .await;
     let token = generate_org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
 
-    for url in [format!("/reports/branches/{branch_id}/waste-report"),
-                format!("/reports/orgs/{org_id}/waste-report")] {
-        let resp = test::call_service(&app, test::TestRequest::get().uri(&url).insert_header(auth.clone()).to_request()).await;
+    for url in [
+        format!("/reports/branches/{branch_id}/waste-report"),
+        format!("/reports/orgs/{org_id}/waste-report"),
+    ] {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&url)
+                .insert_header(auth.clone())
+                .to_request(),
+        )
+        .await;
         assert_eq!(resp.status(), 200);
         let rows: Vec<WasteReportRow> = test::read_body_json(resp).await;
         assert_eq!(rows.len(), 2);
@@ -1276,15 +1485,33 @@ async fn test_shrinkage_branch_and_org(pool: PgPool) {
     grant_permission(&pool, "org_admin", "inventory", "read").await;
     let ing = seed_ingredient(&pool, org_id, "Beans", "g").await;
     // stock_count negatives = shrinkage; a reason + an unexplained; one positive (overage, ignored).
-    ins_movement(&pool, branch_id, ing, "stock_count", -8.0, Some(100), Some("theft")).await;
+    ins_movement(
+        &pool,
+        branch_id,
+        ing,
+        "stock_count",
+        -8.0,
+        Some(100),
+        Some("theft"),
+    )
+    .await;
     ins_movement(&pool, branch_id, ing, "stock_count", -4.0, Some(100), None).await;
     ins_movement(&pool, branch_id, ing, "stock_count", 2.0, Some(100), None).await;
     let token = generate_org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
 
-    for url in [format!("/reports/branches/{branch_id}/shrinkage"),
-                format!("/reports/orgs/{org_id}/shrinkage")] {
-        let resp = test::call_service(&app, test::TestRequest::get().uri(&url).insert_header(auth.clone()).to_request()).await;
+    for url in [
+        format!("/reports/branches/{branch_id}/shrinkage"),
+        format!("/reports/orgs/{org_id}/shrinkage"),
+    ] {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&url)
+                .insert_header(auth.clone())
+                .to_request(),
+        )
+        .await;
         assert_eq!(resp.status(), 200);
         let rows: Vec<ShrinkageRow> = test::read_body_json(resp).await;
         // Two reason buckets: theft (8) + unexplained (4); the +2 overage is excluded.
@@ -1308,12 +1535,30 @@ async fn test_inventory_reports_require_inventory_read(pool: PgPool) {
     let auth = ("Authorization", format!("Bearer {token}"));
     let url = format!("/reports/branches/{branch_id}/inventory-valuation");
 
-    let resp = test::call_service(&app, test::TestRequest::get().uri(&url).insert_header(auth.clone()).to_request()).await;
-    assert_eq!(resp.status(), 403, "inventory reports must require inventory/read");
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&url)
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        403,
+        "inventory reports must require inventory/read"
+    );
 
     // Granting inventory/read unlocks it.
     grant_permission(&pool, "org_admin", "inventory", "read").await;
-    let resp = test::call_service(&app, test::TestRequest::get().uri(&url).insert_header(auth.clone()).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&url)
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 200);
 }
 
@@ -1343,13 +1588,24 @@ async fn test_shift_summary_split_payment_not_double_counted(pool: PgPool) {
     sqlx::query("INSERT INTO order_payments (order_id, method, amount) VALUES ($1,'cash',300),($1,'card',270)")
         .bind(order_id).execute(&pool).await.unwrap();
 
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/reports/shifts/{}/summary", shift_id))
-        .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/reports/shifts/{}/summary", shift_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 200);
     let s: ShiftSummary = test::read_body_json(resp).await;
-    assert_eq!(s.total_orders, 1, "split payment must not inflate order count");
-    assert_eq!(s.total_revenue, 570, "split payment must not double revenue");
+    assert_eq!(
+        s.total_orders, 1,
+        "split payment must not inflate order count"
+    );
+    assert_eq!(
+        s.total_revenue, 570,
+        "split payment must not double revenue"
+    );
     assert_eq!(s.total_tax, 70, "split payment must not double tax");
     assert_eq!(s.revenue_by_method["cash"], json!(300));
     assert_eq!(s.revenue_by_method["card"], json!(270));
@@ -1375,14 +1631,26 @@ async fn test_org_branch_comparison_split_payment_revenue(pool: PgPool) {
     sqlx::query("INSERT INTO order_payments (order_id, method, amount) VALUES ($1,'cash',300),($1,'card',270)")
         .bind(order_id).execute(&pool).await.unwrap();
 
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/reports/orgs/{}/comparison", org_id))
-        .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/reports/orgs/{}/comparison", org_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 200);
     let report: OrgComparisonReport = test::read_body_json(resp).await;
-    let b = report.branches.iter().find(|b| b.branch_id == branch_id).unwrap();
+    let b = report
+        .branches
+        .iter()
+        .find(|b| b.branch_id == branch_id)
+        .unwrap();
     assert_eq!(b.total_orders, 1);
-    assert_eq!(b.total_revenue, 570, "split payment must not double branch revenue");
+    assert_eq!(
+        b.total_revenue, 570,
+        "split payment must not double branch revenue"
+    );
 }
 
 /// V18: a voided-and-restocked sale must net to zero consumption (the
@@ -1401,13 +1669,29 @@ async fn test_consumption_nets_voided_restock(pool: PgPool) {
     let token = generate_org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
 
-    for url in [format!("/reports/branches/{branch_id}/consumption"),
-                format!("/reports/orgs/{org_id}/consumption")] {
-        let resp = test::call_service(&app, test::TestRequest::get().uri(&url).insert_header(auth.clone()).to_request()).await;
+    for url in [
+        format!("/reports/branches/{branch_id}/consumption"),
+        format!("/reports/orgs/{org_id}/consumption"),
+    ] {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&url)
+                .insert_header(auth.clone())
+                .to_request(),
+        )
+        .await;
         assert_eq!(resp.status(), 200);
         let rows: Vec<ConsumptionRow> = test::read_body_json(resp).await;
-        let consumed = rows.iter().find(|r| r.org_ingredient_id == ing).map(|r| r.consumed_qty).unwrap_or(0.0);
-        assert_eq!(consumed, 0.0, "voided+restocked sale must net to zero consumption ({url})");
+        let consumed = rows
+            .iter()
+            .find(|r| r.org_ingredient_id == ing)
+            .map(|r| r.consumed_qty)
+            .unwrap_or(0.0);
+        assert_eq!(
+            consumed, 0.0,
+            "voided+restocked sale must net to zero consumption ({url})"
+        );
     }
 }
 
@@ -1425,13 +1709,30 @@ async fn test_timeseries_timezone_is_bound(pool: PgPool) {
     let shift_id = seed_shift(&pool, branch_id, user_id).await;
     seed_order(&pool, branch_id, user_id, shift_id).await;
     let token = generate_org_admin_token(user_id, org_id);
-    let url = format!("/reports/branches/{}/sales/timeseries?granularity=daily", branch_id);
+    let url = format!(
+        "/reports/branches/{}/sales/timeseries?granularity=daily",
+        branch_id
+    );
 
     // A valid non-default IANA timezone is honored (proves the value flows as data).
-    sqlx::query("UPDATE branches SET timezone='America/New_York' WHERE id=$1").bind(branch_id).execute(&pool).await.unwrap();
-    let resp = test::call_service(&app, test::TestRequest::get().uri(&url)
-        .insert_header(("Authorization", format!("Bearer {}", token))).to_request()).await;
-    assert_eq!(resp.status(), 200, "valid timezone must still work after parameterization");
+    sqlx::query("UPDATE branches SET timezone='America/New_York' WHERE id=$1")
+        .bind(branch_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&url)
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "valid timezone must still work after parameterization"
+    );
 
     // An injection payload can't even be stored: the timezone_name enum rejects
     // any non-member value at write time (stronger than the bound-param defense —
@@ -1439,6 +1740,10 @@ async fn test_timeseries_timezone_is_bound(pool: PgPool) {
     let bad = sqlx::query("UPDATE branches SET timezone=$2::timezone_name WHERE id=$1")
         .bind(branch_id)
         .bind("Africa/Cairo' UNION SELECT version() --")
-        .execute(&pool).await;
-    assert!(bad.is_err(), "an invalid/injection timezone must be rejected by the timezone_name enum");
+        .execute(&pool)
+        .await;
+    assert!(
+        bad.is_err(),
+        "an invalid/injection timezone must be rejected by the timezone_name enum"
+    );
 }

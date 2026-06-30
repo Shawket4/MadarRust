@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use actix_web::web::Bytes;
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -12,13 +12,13 @@ use tokio_stream::wrappers::{BroadcastStream, IntervalStream};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use crate::realtime::event::{BranchEvent, Topic};
-use crate::realtime::hub::BranchEventHub;
 use super::snapshot::{self, CartSnapshot, FinalizeCtx, SnapshotDeduction};
 use super::whatsapp;
 use super::{extract_claims, require_branch_access};
 use crate::errors::{AppError, AppErrorResponse};
 use crate::permissions::checker::check_permission;
+use crate::realtime::event::{BranchEvent, Topic};
+use crate::realtime::hub::BranchEventHub;
 
 // ── Read model ────────────────────────────────────────────────
 
@@ -84,7 +84,10 @@ const DO_SELECT: &str = "SELECT id, org_id, branch_id, channel::text, status::te
     cancelled_at, rejected_at, cancel_reason, cancel_restocked, created_at, updated_at \
     FROM delivery_orders";
 
-pub async fn fetch_delivery_order(pool: &PgPool, id: Uuid) -> Result<Option<DeliveryOrder>, AppError> {
+pub async fn fetch_delivery_order(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<DeliveryOrder>, AppError> {
     Ok(sqlx::query_as(&format!("{DO_SELECT} WHERE id = $1"))
         .bind(id)
         .fetch_optional(pool)
@@ -95,10 +98,12 @@ pub async fn fetch_delivery_order_by_idem(
     pool: &PgPool,
     key: Uuid,
 ) -> Result<Option<DeliveryOrder>, AppError> {
-    Ok(sqlx::query_as(&format!("{DO_SELECT} WHERE idempotency_key = $1"))
-        .bind(key)
-        .fetch_optional(pool)
-        .await?)
+    Ok(
+        sqlx::query_as(&format!("{DO_SELECT} WHERE idempotency_key = $1"))
+            .bind(key)
+            .fetch_optional(pool)
+            .await?,
+    )
 }
 
 // ── List / get ────────────────────────────────────────────────
@@ -126,7 +131,10 @@ pub async fn list_delivery_orders(
     require_branch_access(pool.get_ref(), &claims, query.branch_id).await?;
 
     let statuses: Option<Vec<String>> = query.status.as_ref().map(|s| {
-        s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect()
+        s.split(',')
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect()
     });
     let limit = query.limit.unwrap_or(200).clamp(1, 1000);
 
@@ -208,7 +216,9 @@ pub async fn stream_delivery_orders(
                 ev.event_type, ev.data
             )))),
             Ok(_) => None,
-            Err(_) => Some(Err(actix_web::error::ErrorInternalServerError("delivery stream lagged"))),
+            Err(_) => Some(Err(actix_web::error::ErrorInternalServerError(
+                "delivery stream lagged",
+            ))),
         };
         futures::future::ready(out)
     });
@@ -246,7 +256,13 @@ pub struct StatusInput {
 /// The delivery line, in order. `received` is the intake default (not settable
 /// via this endpoint); `delivered` is reached only via finalize; `cancelled`/
 /// `rejected` via the cancel endpoint.
-const STEP_ORDER: [&str; 5] = ["received", "confirmed", "preparing", "ready", "out_for_delivery"];
+const STEP_ORDER: [&str; 5] = [
+    "received",
+    "confirmed",
+    "preparing",
+    "ready",
+    "out_for_delivery",
+];
 
 /// Position of a status on the forward line, or `None` for terminal states
 /// (delivered/cancelled/rejected) that have left it.
@@ -260,8 +276,14 @@ fn step_index(status: &str) -> Option<usize> {
 /// the jump logic needs to honour it.
 fn step_whatsapp_message(status: &str, delivery_ref: &str, order_id: Uuid) -> Option<String> {
     match status {
-        "confirmed" => Some(whatsapp::build_order_accepted_message(delivery_ref, order_id)),
-        "out_for_delivery" => Some(whatsapp::build_out_for_delivery_message(delivery_ref, order_id)),
+        "confirmed" => Some(whatsapp::build_order_accepted_message(
+            delivery_ref,
+            order_id,
+        )),
+        "out_for_delivery" => Some(whatsapp::build_out_for_delivery_message(
+            delivery_ref,
+            order_id,
+        )),
         _ => None,
     }
 }
@@ -348,7 +370,9 @@ pub async fn set_status(
         whatsapp::send_message(pool.get_ref().clone(), order.customer_phone.clone(), msg);
     }
 
-    let updated = fetch_delivery_order(pool.get_ref(), id).await?.ok_or(AppError::Internal)?;
+    let updated = fetch_delivery_order(pool.get_ref(), id)
+        .await?
+        .ok_or(AppError::Internal)?;
     hub.publish(
         updated.branch_id,
         BranchEvent::new(Topic::Delivery, "delivery.updated", &updated),
@@ -391,8 +415,14 @@ pub async fn cancel_delivery_order(
         .ok_or_else(|| AppError::NotFound("Delivery order not found".into()))?;
     require_branch_access(pool.get_ref(), &claims, order.branch_id).await?;
 
-    if matches!(order.status.as_str(), "delivered" | "cancelled" | "rejected") {
-        return Err(AppError::Conflict(format!("Order is already {}", order.status)));
+    if matches!(
+        order.status.as_str(),
+        "delivered" | "cancelled" | "rejected"
+    ) {
+        return Err(AppError::Conflict(format!(
+            "Order is already {}",
+            order.status
+        )));
     }
 
     let mut tx = pool.get_ref().begin().await?;
@@ -426,7 +456,10 @@ pub async fn cancel_delivery_order(
         let current = fetch_delivery_order(pool.get_ref(), id)
             .await?
             .ok_or(AppError::Internal)?;
-        return Err(AppError::Conflict(format!("Order is already {}", current.status)));
+        return Err(AppError::Conflict(format!(
+            "Order is already {}",
+            current.status
+        )));
     }
 
     // restore=false ⟹ the food was made → deduct the frozen plan and log waste.
@@ -444,7 +477,9 @@ pub async fn cancel_delivery_order(
 
     tx.commit().await?;
 
-    let updated = fetch_delivery_order(pool.get_ref(), id).await?.ok_or(AppError::Internal)?;
+    let updated = fetch_delivery_order(pool.get_ref(), id)
+        .await?
+        .ok_or(AppError::Internal)?;
     hub.publish(
         updated.branch_id,
         BranchEvent::new(Topic::Delivery, "delivery.updated", &updated),
@@ -489,8 +524,16 @@ pub async fn finalize_delivery_order(
         .ok_or_else(|| AppError::NotFound("Delivery order not found".into()))?;
     require_branch_access(pool.get_ref(), &claims, order.branch_id).await?;
 
-    if order.order_id.is_some() || matches!(order.status.as_str(), "delivered" | "cancelled" | "rejected") {
-        return Err(AppError::Conflict(format!("Cannot finalize from {}", order.status)));
+    if order.order_id.is_some()
+        || matches!(
+            order.status.as_str(),
+            "delivered" | "cancelled" | "rejected"
+        )
+    {
+        return Err(AppError::Conflict(format!(
+            "Cannot finalize from {}",
+            order.status
+        )));
     }
 
     // Validate payment method (and snapshot is_cash) against the org's methods.
@@ -525,12 +568,11 @@ pub async fn finalize_delivery_order(
     }
 
     // Load the frozen snapshot.
-    let (cart_json, deductions_json): (serde_json::Value, serde_json::Value) = sqlx::query_as(
-        "SELECT cart, deductions_snapshot FROM delivery_orders WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_one(pool.get_ref())
-    .await?;
+    let (cart_json, deductions_json): (serde_json::Value, serde_json::Value) =
+        sqlx::query_as("SELECT cart, deductions_snapshot FROM delivery_orders WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool.get_ref())
+            .await?;
     let cart: CartSnapshot = serde_json::from_value(cart_json).map_err(|_| AppError::Internal)?;
     let deductions: Vec<SnapshotDeduction> =
         serde_json::from_value(deductions_json).unwrap_or_default();
@@ -549,7 +591,9 @@ pub async fn finalize_delivery_order(
             .fetch_one(&mut *tx)
             .await?;
     if !still_open {
-        return Err(AppError::Conflict("Shift was closed before finalize".into()));
+        return Err(AppError::Conflict(
+            "Shift was closed before finalize".into(),
+        ));
     }
 
     // Guard against a concurrent finalize having already linked an order.
@@ -604,7 +648,9 @@ pub async fn finalize_delivery_order(
         );
     }
 
-    let delivery_order = fetch_delivery_order(pool.get_ref(), id).await?.ok_or(AppError::Internal)?;
+    let delivery_order = fetch_delivery_order(pool.get_ref(), id)
+        .await?
+        .ok_or(AppError::Internal)?;
     hub.publish(
         delivery_order.branch_id,
         BranchEvent::new(Topic::Delivery, "delivery.updated", &delivery_order),
@@ -652,13 +698,17 @@ pub async fn set_prep_time(
         ));
     }
 
-    sqlx::query("UPDATE delivery_orders SET extra_prep_minutes = $2, updated_at = now() WHERE id = $1")
-        .bind(id)
-        .bind(body.extra_prep_minutes)
-        .execute(pool.get_ref())
-        .await?;
+    sqlx::query(
+        "UPDATE delivery_orders SET extra_prep_minutes = $2, updated_at = now() WHERE id = $1",
+    )
+    .bind(id)
+    .bind(body.extra_prep_minutes)
+    .execute(pool.get_ref())
+    .await?;
 
-    let updated = fetch_delivery_order(pool.get_ref(), id).await?.ok_or(AppError::Internal)?;
+    let updated = fetch_delivery_order(pool.get_ref(), id)
+        .await?
+        .ok_or(AppError::Internal)?;
     hub.publish(
         updated.branch_id,
         BranchEvent::new(Topic::Delivery, "delivery.updated", &updated),
@@ -728,7 +778,13 @@ mod jump_logic_tests {
         // received → out_for_delivery: out_for_delivery is the highest crossed
         // event step and wins over the earlier confirmed message.
         assert_eq!(
-            bare(jump_whatsapp_message(i("received"), i("out_for_delivery"), "D-1", OID)).as_deref(),
+            bare(jump_whatsapp_message(
+                i("received"),
+                i("out_for_delivery"),
+                "D-1",
+                OID
+            ))
+            .as_deref(),
             Some("Your order D-1 is on the way!")
         );
     }
@@ -736,12 +792,21 @@ mod jump_logic_tests {
     #[test]
     fn jumping_only_through_silent_steps_sends_nothing() {
         // confirmed → ready crosses only silent steps (preparing/ready).
-        assert_eq!(jump_whatsapp_message(i("confirmed"), i("ready"), "D-1", OID), None);
+        assert_eq!(
+            jump_whatsapp_message(i("confirmed"), i("ready"), "D-1", OID),
+            None
+        );
     }
 
     #[test]
     fn backward_and_noop_jumps_notify_no_one() {
-        assert_eq!(jump_whatsapp_message(i("out_for_delivery"), i("confirmed"), "D-1", OID), None);
-        assert_eq!(jump_whatsapp_message(i("ready"), i("ready"), "D-1", OID), None);
+        assert_eq!(
+            jump_whatsapp_message(i("out_for_delivery"), i("confirmed"), "D-1", OID),
+            None
+        );
+        assert_eq!(
+            jump_whatsapp_message(i("ready"), i("ready"), "D-1", OID),
+            None
+        );
     }
 }

@@ -17,7 +17,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::errors::AppError;
-use crate::kitchen::{emit_kitchen_ticket, EmitKitchen, KitchenLine};
+use crate::kitchen::{EmitKitchen, KitchenLine, emit_kitchen_ticket};
 use crate::orders::handlers::OrderItemInput;
 use crate::realtime::event::{BranchEvent, Topic};
 use crate::realtime::hub::BranchEventHub;
@@ -66,17 +66,48 @@ pub(crate) async fn open_ticket_view<'e, E>(
 where
     E: PgExecutor<'e> + Copy,
 {
-    let row: Option<(Uuid, Uuid, Option<Uuid>, Option<String>, String, Uuid, Option<String>, Option<String>, Option<String>, Option<i32>, i32, Option<Uuid>, DateTime<Utc>, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> =
-        sqlx::query_as(
-            "SELECT ot.id, ot.branch_id, ot.table_id, ot.ticket_ref, ot.status::text, \
+    let row: Option<(
+        Uuid,
+        Uuid,
+        Option<Uuid>,
+        Option<String>,
+        String,
+        Uuid,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i32>,
+        i32,
+        Option<Uuid>,
+        DateTime<Utc>,
+        Option<DateTime<Utc>>,
+        Option<DateTime<Utc>>,
+    )> = sqlx::query_as(
+        "SELECT ot.id, ot.branch_id, ot.table_id, ot.ticket_ref, ot.status::text, \
                     ot.opened_by, u.name, ot.customer_name, ot.notes, ot.guest_count, \
                     ot.subtotal, ot.order_id, ot.opened_at, ot.ready_at, ot.settled_at \
              FROM open_tickets ot LEFT JOIN users u ON u.id = ot.opened_by WHERE ot.id = $1",
-        )
-        .bind(ticket_id)
-        .fetch_optional(executor)
-        .await?;
-    let Some((id, branch_id, table_id, ticket_ref, status, opened_by, opened_by_name, customer_name, notes, guest_count, subtotal, order_id, opened_at, ready_at, settled_at)) = row
+    )
+    .bind(ticket_id)
+    .fetch_optional(executor)
+    .await?;
+    let Some((
+        id,
+        branch_id,
+        table_id,
+        ticket_ref,
+        status,
+        opened_by,
+        opened_by_name,
+        customer_name,
+        notes,
+        guest_count,
+        subtotal,
+        order_id,
+        opened_at,
+        ready_at,
+        settled_at,
+    )) = row
     else {
         return Ok(None);
     };
@@ -91,14 +122,35 @@ where
     .fetch_all(executor)
     .await?
     .into_iter()
-    .map(|(id, round_number, menu_item_id, line, line_total, voided)| OpenTicketItemView {
-        id, round_number, menu_item_id, line, line_total, voided,
-    })
+    .map(
+        |(id, round_number, menu_item_id, line, line_total, voided)| OpenTicketItemView {
+            id,
+            round_number,
+            menu_item_id,
+            line,
+            line_total,
+            voided,
+        },
+    )
     .collect();
 
     Ok(Some(OpenTicketView {
-        id, branch_id, table_id, ticket_ref, status, opened_by, opened_by_name,
-        customer_name, notes, guest_count, subtotal, order_id, opened_at, ready_at, settled_at, items,
+        id,
+        branch_id,
+        table_id,
+        ticket_ref,
+        status,
+        opened_by,
+        opened_by_name,
+        customer_name,
+        notes,
+        guest_count,
+        subtotal,
+        order_id,
+        opened_at,
+        ready_at,
+        settled_at,
+        items,
     }))
 }
 
@@ -125,8 +177,16 @@ pub(crate) struct StoredTicketLine {
 }
 
 fn to_kitchen_line(l: &StoredTicketLine) -> KitchenLine {
-    let menu_item_id = l.input.get("menu_item_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok());
-    let notes = l.input.get("notes").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let menu_item_id = l
+        .input
+        .get("menu_item_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok());
+    let notes = l
+        .input
+        .get("notes")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     KitchenLine {
         menu_item_id,
         name: l.name.clone(),
@@ -147,7 +207,10 @@ async fn resolve_ticket_lines(
     items: &[OrderItemInput],
 ) -> Result<Vec<StoredTicketLine>, AppError> {
     let item_ids: Vec<Uuid> = items.iter().filter_map(|i| i.menu_item_id).collect();
-    let addon_ids: Vec<Uuid> = items.iter().flat_map(|i| i.addons.iter().map(|a| a.addon_item_id)).collect();
+    let addon_ids: Vec<Uuid> = items
+        .iter()
+        .flat_map(|i| i.addons.iter().map(|a| a.addon_item_id))
+        .collect();
 
     let item_map: std::collections::HashMap<Uuid, (String, i32)> = if item_ids.is_empty() {
         Default::default()
@@ -180,14 +243,22 @@ async fn resolve_ticket_lines(
             .and_then(|id| item_map.get(&id).cloned())
             .unwrap_or_else(|| ("Item".into(), 0));
         let unit_price = it.unit_price.unwrap_or(base);
-        let addon_total: i32 = it.addons.iter().map(|a| a.unit_price.unwrap_or(0) * a.quantity).sum();
+        let addon_total: i32 = it
+            .addons
+            .iter()
+            .map(|a| a.unit_price.unwrap_or(0) * a.quantity)
+            .sum();
         let line_total = (unit_price + addon_total) * it.quantity;
         let modifiers: Vec<String> = it
             .addons
             .iter()
             .filter_map(|a| {
                 addon_map.get(&a.addon_item_id).map(|n| {
-                    if a.quantity > 1 { format!("{}× {}", a.quantity, n) } else { n.clone() }
+                    if a.quantity > 1 {
+                        format!("{}× {}", a.quantity, n)
+                    } else {
+                        n.clone()
+                    }
                 })
             })
             .collect();
@@ -236,7 +307,11 @@ pub(crate) async fn fire_round(
 
     let mut round_subtotal: i32 = 0;
     for line in &lines {
-        let menu_item_id = line.input.get("menu_item_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok());
+        let menu_item_id = line
+            .input
+            .get("menu_item_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok());
         sqlx::query(
             "INSERT INTO open_ticket_items \
                 (open_ticket_id, round_id, menu_item_id, line, line_total) \
@@ -274,7 +349,16 @@ pub(crate) async fn fire_round(
     }
     let kt_id = emit_kitchen_ticket(
         tx,
-        &EmitKitchen { org_id, branch_id, source_type: "open_ticket", source_id: open_ticket_id, round_number, table_label, kitchen_ref: ticket_ref, kitchen_ticket_id },
+        &EmitKitchen {
+            org_id,
+            branch_id,
+            source_type: "open_ticket",
+            source_id: open_ticket_id,
+            round_number,
+            table_label,
+            kitchen_ref: ticket_ref,
+            kitchen_ticket_id,
+        },
         &klines,
     )
     .await?;
@@ -294,7 +378,10 @@ pub(crate) async fn publish_fired(
     event_type: &str,
 ) {
     if let Ok(Some(view)) = open_ticket_view(pool, open_ticket_id).await {
-        hub.publish(branch_id, BranchEvent::new(Topic::Tickets, event_type, &view));
+        hub.publish(
+            branch_id,
+            BranchEvent::new(Topic::Tickets, event_type, &view),
+        );
     }
     if let Some(kt_id) = kitchen_ticket_id {
         crate::kitchen::publish_kitchen(pool, hub, branch_id, "kitchen.fired", kt_id).await;
@@ -325,5 +412,10 @@ pub(crate) async fn mint_ticket_ref(
     .bind(biz_date)
     .fetch_one(&mut **tx)
     .await?;
-    Ok(format!("T-{}-{}-{:04}", branch_code, biz_date.format("%y%m%d"), seq))
+    Ok(format!(
+        "T-{}-{}-{:04}",
+        branch_code,
+        biz_date.format("%y%m%d"),
+        seq
+    ))
 }

@@ -41,9 +41,7 @@ pub fn auto_translation_disabled() -> bool {
 ///
 /// Tries the paid API first (if `GOOGLE_TRANSLATE_API_KEY` is set),
 /// then falls back to the free `translate.googleapis.com` endpoint.
-pub async fn ensure_translations(
-    translations: &mut HashMap<String, String>,
-) -> Result<(), String> {
+pub async fn ensure_translations(translations: &mut HashMap<String, String>) -> Result<(), String> {
     // Offline switch: when set, skip ALL outbound Google Translate calls and
     // leave translations as provided. Auto-translation is a convenience, not a
     // correctness requirement (entities are creatable without it). Used by the
@@ -70,7 +68,11 @@ pub async fn ensure_translations(
     let source_lang = if translations.contains_key("en") && !translations["en"].trim().is_empty() {
         "en".to_string()
     } else {
-        translations.keys().next().cloned().unwrap_or_else(|| "en".to_string())
+        translations
+            .keys()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| "en".to_string())
     };
 
     let source_text = match translations.get(&source_lang) {
@@ -93,7 +95,10 @@ pub async fn ensure_translations(
 
         // Attempt Paid API if key exists
         if !api_key.is_empty() && api_key != "your_api_key_here" {
-            let url = format!("https://translation.googleapis.com/language/translate/v2?key={}", api_key);
+            let url = format!(
+                "https://translation.googleapis.com/language/translate/v2?key={}",
+                api_key
+            );
             let req_body = GoogleTranslateRequest {
                 q: vec![&source_text],
                 target: target_lang,
@@ -106,7 +111,8 @@ pub async fn ensure_translations(
                     if let Ok(body) = resp.json::<GoogleTranslateResponse>().await {
                         if let Some(data) = body.data {
                             if let Some(t) = data.translations.first() {
-                                translations.insert(target_lang.to_string(), t.translated_text.clone());
+                                translations
+                                    .insert(target_lang.to_string(), t.translated_text.clone());
                                 success = true;
                             }
                         } else {
@@ -132,14 +138,25 @@ pub async fn ensure_translations(
                 Ok(resp) => {
                     let status = resp.status();
                     if let Ok(body) = resp.json::<serde_json::Value>().await {
-                        if let Some(text) = body.get(0).and_then(|v| v.get(0)).and_then(|v| v.get(0)).and_then(|v| v.as_str()) {
+                        if let Some(text) = body
+                            .get(0)
+                            .and_then(|v| v.get(0))
+                            .and_then(|v| v.get(0))
+                            .and_then(|v| v.as_str())
+                        {
                             translations.insert(target_lang.to_string(), text.to_string());
                             success = true;
                         } else {
-                            tracing::error!("Google Translate Free API Unexpected JSON structure: {}", body);
+                            tracing::error!(
+                                "Google Translate Free API Unexpected JSON structure: {}",
+                                body
+                            );
                         }
                     } else {
-                        tracing::error!("Google Translate Free API Failed to parse JSON, status: {}", status);
+                        tracing::error!(
+                            "Google Translate Free API Failed to parse JSON, status: {}",
+                            status
+                        );
                     }
                 }
                 Err(e) => tracing::error!("Google Translate Free API Request Error: {}", e),
@@ -147,7 +164,10 @@ pub async fn ensure_translations(
         }
 
         if !success {
-            tracing::warn!("All translation attempts failed for {}, falling back to source text", target_lang);
+            tracing::warn!(
+                "All translation attempts failed for {}, falling back to source text",
+                target_lang
+            );
             translations.insert(target_lang.to_string(), source_text.clone());
         }
     }

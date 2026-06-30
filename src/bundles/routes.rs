@@ -1,5 +1,5 @@
-use actix_web::web;
 use crate::{auth::middleware::JwtMiddleware, bundles::handlers::*};
+use actix_web::web;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
@@ -13,6 +13,6 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/{id}", web::delete().to(delete_bundle))
             .route("/{id}/activate", web::post().to(activate_bundle))
             .route("/{id}/archive", web::post().to(archive_bundle))
-            .route("/{id}/performance", web::get().to(bundle_performance))
+            .route("/{id}/performance", web::get().to(bundle_performance)),
     );
 }

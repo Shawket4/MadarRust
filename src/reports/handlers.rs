@@ -1,4 +1,4 @@
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -18,16 +18,16 @@ use utoipa::{IntoParams, ToSchema};
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct DateRangeQuery {
-    pub from:  Option<DateTime<Utc>>,
-    pub to:    Option<DateTime<Utc>>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
     pub limit: Option<i64>, // for top_items (default 20)
 }
 
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct TimeseriesQuery {
-    pub from:        Option<DateTime<Utc>>,
-    pub to:          Option<DateTime<Utc>>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
     pub granularity: Option<String>, // "hourly" | "daily" | "monthly"
 }
 
@@ -35,150 +35,150 @@ pub struct TimeseriesQuery {
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct ShiftSummary {
-    pub shift_id:               Uuid,
-    pub branch_id:              Uuid,
-    pub branch_name:            String,
-    pub teller_id:              Uuid,
-    pub teller_name:            String,
-    pub status:                 String,
-    pub opened_at:              DateTime<Utc>,
-    pub closed_at:              Option<DateTime<Utc>>,
-    pub opening_cash:           i64,
-    pub closing_cash_declared:  Option<i64>,
-    pub closing_cash_system:    Option<i64>,
-    pub cash_discrepancy:       Option<i64>,
-    pub total_orders:           i64,
-    pub voided_orders:          i64,
-    pub total_revenue:          i64,
-    pub revenue_by_method:      serde_json::Value,
-    pub total_discount:         i64,
-    pub total_tax:              i64,
+    pub shift_id: Uuid,
+    pub branch_id: Uuid,
+    pub branch_name: String,
+    pub teller_id: Uuid,
+    pub teller_name: String,
+    pub status: String,
+    pub opened_at: DateTime<Utc>,
+    pub closed_at: Option<DateTime<Utc>>,
+    pub opening_cash: i64,
+    pub closing_cash_declared: Option<i64>,
+    pub closing_cash_system: Option<i64>,
+    pub cash_discrepancy: Option<i64>,
+    pub total_orders: i64,
+    pub voided_orders: i64,
+    pub total_revenue: i64,
+    pub revenue_by_method: serde_json::Value,
+    pub total_discount: i64,
+    pub total_tax: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct DeductionLogRow {
-    pub id:                Uuid,
-    pub order_id:          Option<Uuid>,
-    pub order_item_id:     Option<Uuid>,
+    pub id: Uuid,
+    pub order_id: Option<Uuid>,
+    pub order_item_id: Option<Uuid>,
     pub inventory_item_id: Uuid,
-    pub item_name:         String,
-    pub unit:              String,
+    pub item_name: String,
+    pub unit: String,
     pub quantity_deducted: f64,
-    pub source:            String,
-    pub created_at:        DateTime<Utc>,
+    pub source: String,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CategorySales {
-    pub category_id:   Option<Uuid>,
+    pub category_id: Option<Uuid>,
     pub category_name: Option<String>,
     #[schema(value_type = Object)]
     pub category_name_translations: Option<serde_json::Value>,
-    pub item_count:    i64,
+    pub item_count: i64,
     pub quantity_sold: i64,
-    pub revenue:       i64,
-    pub items:         Vec<ItemSales>,
+    pub revenue: i64,
+    pub items: Vec<ItemSales>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct ItemSales {
-    pub menu_item_id:  Uuid,
-    pub item_name:     String,
+    pub menu_item_id: Uuid,
+    pub item_name: String,
     #[schema(value_type = Object)]
     pub item_name_translations: serde_json::Value,
     pub quantity_sold: i64,
-    pub revenue:       i64,
+    pub revenue: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct BranchSalesReport {
-    pub branch_id:              Uuid,
-    pub branch_name:            String,
-    pub from:                   Option<DateTime<Utc>>,
-    pub to:                     Option<DateTime<Utc>>,
-    pub total_orders:           i64,
-    pub voided_orders:          i64,
-    pub subtotal:               i64,
-    pub total_discount:         i64,
-    pub total_tax:              i64,
-    pub total_revenue:          i64,
-    pub revenue_by_method:      serde_json::Value,
-    pub top_items:              Vec<ItemSales>,
-    pub by_category:            Vec<CategorySales>,
+    pub branch_id: Uuid,
+    pub branch_name: String,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    pub total_orders: i64,
+    pub voided_orders: i64,
+    pub subtotal: i64,
+    pub total_discount: i64,
+    pub total_tax: i64,
+    pub total_revenue: i64,
+    pub revenue_by_method: serde_json::Value,
+    pub top_items: Vec<ItemSales>,
+    pub by_category: Vec<CategorySales>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct StockRow {
     pub branch_inventory_id: Uuid,
-    pub ingredient_name:     String,
-    pub unit:                String,
-    pub current_stock:       f64,
-    pub reorder_threshold:   f64,
+    pub ingredient_name: String,
+    pub unit: String,
+    pub current_stock: f64,
+    pub reorder_threshold: f64,
     /// Piastres per unit; `null` ⟺ cost never entered.
     #[serde(with = "rust_decimal::serde::float_option")]
     #[schema(value_type = Option<f64>)]
-    pub cost_per_unit:       Option<Decimal>,
-    pub below_reorder:       bool,
+    pub cost_per_unit: Option<Decimal>,
+    pub below_reorder: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct BranchStockReport {
-    pub branch_id:   Uuid,
+    pub branch_id: Uuid,
     pub branch_name: String,
-    pub items:       Vec<StockRow>,
+    pub items: Vec<StockRow>,
 }
 
 // Timeseries now includes per-payment-method breakdown
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct TimeseriesPoint {
-    pub period:                 String,
-    pub orders:                 i64,
-    pub revenue:                i64,
-    pub voided:                 i64,
-    pub discount:               i64,
-    pub tax:                    i64,
-    pub revenue_by_method:      serde_json::Value,
+    pub period: String,
+    pub orders: i64,
+    pub revenue: i64,
+    pub voided: i64,
+    pub discount: i64,
+    pub tax: i64,
+    pub revenue_by_method: serde_json::Value,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct TellerStats {
-    pub teller_id:       Uuid,
-    pub teller_name:     String,
-    pub orders:          i64,
-    pub revenue:         i64,
+    pub teller_id: Uuid,
+    pub teller_name: String,
+    pub orders: i64,
+    pub revenue: i64,
     pub avg_order_value: i64,
-    pub voided:          i64,
-    pub shifts:          i64,
+    pub voided: i64,
+    pub shifts: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct AddonSalesRow {
     pub addon_item_id: Uuid,
-    pub addon_name:    String,
+    pub addon_name: String,
     #[schema(value_type = Object)]
     pub addon_name_translations: serde_json::Value,
-    pub addon_type:    String,
+    pub addon_type: String,
     pub quantity_sold: i64,
-    pub revenue:       i64,
+    pub revenue: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct BranchComparison {
-    pub branch_id:              Uuid,
-    pub branch_name:            String,
-    pub total_orders:           i64,
-    pub voided_orders:          i64,
-    pub total_revenue:          i64,
-    pub revenue_by_method:      serde_json::Value,
-    pub avg_order_value:        i64,
-    pub void_rate_pct:          f64,
+    pub branch_id: Uuid,
+    pub branch_name: String,
+    pub total_orders: i64,
+    pub voided_orders: i64,
+    pub total_revenue: i64,
+    pub revenue_by_method: serde_json::Value,
+    pub avg_order_value: i64,
+    pub void_rate_pct: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct OrgComparisonReport {
-    pub org_id:   Uuid,
-    pub from:     Option<DateTime<Utc>>,
-    pub to:       Option<DateTime<Utc>>,
+    pub org_id: Uuid,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
     pub branches: Vec<BranchComparison>,
 }
 
@@ -193,8 +193,8 @@ pub struct OrgComparisonReport {
     security(("bearer_jwt" = []))
 )]
 pub async fn shift_summary(
-    req:      HttpRequest,
-    pool:     web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     shift_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -257,8 +257,8 @@ pub async fn shift_summary(
     security(("bearer_jwt" = []))
 )]
 pub async fn shift_deductions(
-    req:      HttpRequest,
-    pool:     web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     shift_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -283,14 +283,15 @@ pub async fn shift_deductions(
     security(("bearer_jwt" = []))
 )]
 pub async fn branch_sales(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
-    query:     web::Query<DateRangeQuery>,
+    query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+    let (branch_ids, _org) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
     let branch_name = branch_label(pool.get_ref(), *branch_id).await?;
 
     let totals: (i64, i64, i64, i64, i64, i64, serde_json::Value) = sqlx::query_as(
@@ -319,8 +320,11 @@ pub async fn branch_sales(
           AND ($3::timestamptz IS NULL OR created_at <= $3)
         "#,
     )
-    .bind(&branch_ids).bind(query.from).bind(query.to)
-    .fetch_one(pool.get_ref()).await?;
+    .bind(&branch_ids)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_one(pool.get_ref())
+    .await?;
 
     let item_limit = query.limit.unwrap_or(20).clamp(1, 100);
 
@@ -345,14 +349,14 @@ pub async fn branch_sales(
 
     #[derive(sqlx::FromRow)]
     struct CategoryItemRow {
-        category_id:   Option<Uuid>,
+        category_id: Option<Uuid>,
         category_name: Option<String>,
         category_name_translations: Option<serde_json::Value>,
-        menu_item_id:  Uuid,
-        item_name:     String,
+        menu_item_id: Uuid,
+        item_name: String,
         item_name_translations: serde_json::Value,
         quantity_sold: i64,
-        revenue:       i64,
+        revenue: i64,
     }
 
     let cat_rows = sqlx::query_as::<_, CategoryItemRow>(
@@ -393,45 +397,48 @@ pub async fn branch_sales(
     let mut by_category: Vec<CategorySales> = Vec::new();
     for row in cat_rows {
         let item = ItemSales {
-            menu_item_id:  row.menu_item_id,
-            item_name:     row.item_name,
+            menu_item_id: row.menu_item_id,
+            item_name: row.item_name,
             item_name_translations: row.item_name_translations,
             quantity_sold: row.quantity_sold,
-            revenue:       row.revenue,
+            revenue: row.revenue,
         };
-        match by_category.iter_mut().find(|c| c.category_id == row.category_id) {
+        match by_category
+            .iter_mut()
+            .find(|c| c.category_id == row.category_id)
+        {
             Some(cat) => {
-                cat.item_count    += 1;
+                cat.item_count += 1;
                 cat.quantity_sold += item.quantity_sold;
-                cat.revenue       += item.revenue;
+                cat.revenue += item.revenue;
                 cat.items.push(item);
             }
             None => {
                 by_category.push(CategorySales {
-                    category_id:   row.category_id,
+                    category_id: row.category_id,
                     category_name: row.category_name,
                     category_name_translations: row.category_name_translations,
-                    item_count:    1,
+                    item_count: 1,
                     quantity_sold: item.quantity_sold,
-                    revenue:       item.revenue,
-                    items:         vec![item],
+                    revenue: item.revenue,
+                    items: vec![item],
                 });
             }
         }
     }
 
     Ok(HttpResponse::Ok().json(BranchSalesReport {
-        branch_id:              *branch_id,
+        branch_id: *branch_id,
         branch_name,
-        from:                   query.from,
-        to:                     query.to,
-        total_orders:           totals.0,
-        voided_orders:          totals.1,
-        subtotal:               totals.2,
-        total_discount:         totals.3,
-        total_tax:              totals.4,
-        total_revenue:          totals.5,
-        revenue_by_method:      totals.6,
+        from: query.from,
+        to: query.to,
+        total_orders: totals.0,
+        voided_orders: totals.1,
+        subtotal: totals.2,
+        total_discount: totals.3,
+        total_tax: totals.4,
+        total_revenue: totals.5,
+        revenue_by_method: totals.6,
         top_items,
         by_category,
     }))
@@ -448,13 +455,14 @@ pub async fn branch_sales(
     security(("bearer_jwt" = []))
 )]
 pub async fn branch_stock(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+    let (branch_ids, _org) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
     let branch_name = branch_label(pool.get_ref(), *branch_id).await?;
 
     // For a single branch each branch_inventory row is kept (its id drives
@@ -502,7 +510,7 @@ pub async fn branch_stock(
     };
 
     Ok(HttpResponse::Ok().json(BranchStockReport {
-        branch_id:   *branch_id,
+        branch_id: *branch_id,
         branch_name,
         items,
     }))
@@ -520,14 +528,15 @@ pub async fn branch_stock(
     security(("bearer_jwt" = []))
 )]
 pub async fn branch_sales_timeseries(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
-    query:     web::Query<TimeseriesQuery>,
+    query: web::Query<TimeseriesQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    let (branch_ids, org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+    let (branch_ids, org) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     // Resolve the bucketing timezone as branch → org → Africa/Cairo. For a
     // specific branch this is its effective tz; for "all branches" (nil UUID)
@@ -538,7 +547,7 @@ pub async fn branch_sales_timeseries(
             (SELECT timezone::text FROM branches WHERE id = $1 AND deleted_at IS NULL),
             (SELECT timezone::text FROM organizations WHERE id = $2),
             'Africa/Cairo'
-         )"
+         )",
     )
     .bind(*branch_id)
     .bind(org)
@@ -546,9 +555,9 @@ pub async fn branch_sales_timeseries(
     .await?;
 
     let trunc = match query.granularity.as_deref().unwrap_or("daily") {
-        "hourly"  => "hour",
+        "hourly" => "hour",
         "monthly" => "month",
-        _         => "day",
+        _ => "day",
     };
 
     // `trunc` is an enum whitelist (closed match above) so it is safe to
@@ -613,20 +622,20 @@ pub async fn branch_sales_timeseries(
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct PeakHourPoint {
-    pub hour:                i32,
-    pub orders:              i64,
-    pub revenue:             i64,
-    pub voided:              i64,
-    pub discount:            i64,
-    pub tax:                 i64,
+    pub hour: i32,
+    pub orders: i64,
+    pub revenue: i64,
+    pub voided: i64,
+    pub discount: i64,
+    pub tax: i64,
     /// Revenue in piastres averaged over the number of calendar days in the queried range.
     pub avg_revenue_per_day: i64,
     /// Orders averaged over the number of calendar days (may be fractional).
-    pub avg_orders_per_day:  f64,
+    pub avg_orders_per_day: f64,
     /// This hour's revenue as a percentage of the period total (0–100, 1 dp).
-    pub revenue_pct:         f64,
+    pub revenue_pct: f64,
     /// This hour's orders as a percentage of the period total (0–100, 1 dp).
-    pub orders_pct:          f64,
+    pub orders_pct: f64,
 }
 
 #[utoipa::path(
@@ -639,21 +648,22 @@ pub struct PeakHourPoint {
     security(("bearer_jwt" = []))
 )]
 pub async fn branch_sales_peak_hours(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
-    query:     web::Query<DateRangeQuery>,
+    query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    let (branch_ids, org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+    let (branch_ids, org) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     let tz: String = sqlx::query_scalar(
         "SELECT COALESCE(
             (SELECT timezone::text FROM branches WHERE id = $1 AND deleted_at IS NULL),
             (SELECT timezone::text FROM organizations WHERE id = $2),
             'Africa/Cairo'
-         )"
+         )",
     )
     .bind(*branch_id)
     .bind(org)
@@ -749,14 +759,15 @@ pub async fn branch_sales_peak_hours(
     security(("bearer_jwt" = []))
 )]
 pub async fn branch_teller_stats(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
-    query:     web::Query<DateRangeQuery>,
+    query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+    let (branch_ids, _org) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     let rows = sqlx::query_as::<_, TellerStats>(
         r#"
@@ -804,14 +815,15 @@ pub async fn branch_teller_stats(
     security(("bearer_jwt" = []))
 )]
 pub async fn branch_addon_sales(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
-    query:     web::Query<DateRangeQuery>,
+    query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+    let (branch_ids, _org) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     let rows = sqlx::query_as::<_, AddonSalesRow>(
         r#"
@@ -855,27 +867,26 @@ pub async fn branch_addon_sales(
     security(("bearer_jwt" = []))
 )]
 pub async fn org_branch_comparison(
-    req:    HttpRequest,
-    pool:   web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     org_id: web::Path<Uuid>,
-    query:  web::Query<DateRangeQuery>,
+    query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
 
-    if claims.role != UserRole::SuperAdmin
-        && claims.org_id() != Some(*org_id) {
-            return Err(AppError::Forbidden("Not your org".into()));
-        }
+    if claims.role != UserRole::SuperAdmin && claims.org_id() != Some(*org_id) {
+        return Err(AppError::Forbidden("Not your org".into()));
+    }
 
     #[derive(sqlx::FromRow)]
     struct Row {
-        branch_id:              Uuid,
-        branch_name:            String,
-        total_orders:           i64,
-        voided_orders:          i64,
-        total_revenue:          i64,
-        revenue_by_method:      serde_json::Value,
+        branch_id: Uuid,
+        branch_name: String,
+        total_orders: i64,
+        voided_orders: i64,
+        total_revenue: i64,
+        revenue_by_method: serde_json::Value,
     }
 
     let rows = sqlx::query_as::<_, Row>(
@@ -912,25 +923,32 @@ pub async fn org_branch_comparison(
     .fetch_all(pool.get_ref())
     .await?;
 
-    let branches = rows.into_iter().map(|r| BranchComparison {
-        branch_id:              r.branch_id,
-        branch_name:            r.branch_name,
-        total_orders:           r.total_orders,
-        voided_orders:          r.voided_orders,
-        total_revenue:          r.total_revenue,
-        revenue_by_method:      r.revenue_by_method,
-        avg_order_value: if r.total_orders == 0 { 0 }
-                         else { r.total_revenue / r.total_orders },
-        void_rate_pct:   if (r.total_orders + r.voided_orders) == 0 { 0.0 }
-                         else { r.voided_orders as f64
-                                / (r.total_orders + r.voided_orders) as f64
-                                * 100.0 },
-    }).collect();
+    let branches = rows
+        .into_iter()
+        .map(|r| BranchComparison {
+            branch_id: r.branch_id,
+            branch_name: r.branch_name,
+            total_orders: r.total_orders,
+            voided_orders: r.voided_orders,
+            total_revenue: r.total_revenue,
+            revenue_by_method: r.revenue_by_method,
+            avg_order_value: if r.total_orders == 0 {
+                0
+            } else {
+                r.total_revenue / r.total_orders
+            },
+            void_rate_pct: if (r.total_orders + r.voided_orders) == 0 {
+                0.0
+            } else {
+                r.voided_orders as f64 / (r.total_orders + r.voided_orders) as f64 * 100.0
+            },
+        })
+        .collect();
 
     Ok(HttpResponse::Ok().json(OrgComparisonReport {
-        org_id:   *org_id,
-        from:     query.from,
-        to:       query.to,
+        org_id: *org_id,
+        from: query.from,
+        to: query.to,
         branches,
     }))
 }
@@ -943,13 +961,13 @@ pub async fn org_branch_comparison(
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct DeliveryChannelSales {
     /// Delivery channel: `in_mall` or `outside`.
-    pub channel:          String,
-    pub orders:           i64,
+    pub channel: String,
+    pub orders: i64,
     /// Sum of `total` (piastres) over delivered orders on this channel.
-    pub revenue:          i64,
+    pub revenue: i64,
     /// Sum of `delivery_fee` (piastres) over delivered orders.
-    pub delivery_fees:    i64,
-    pub avg_order_value:  i64,
+    pub delivery_fees: i64,
+    pub avg_order_value: i64,
     pub cancelled_orders: i64,
 }
 
@@ -958,14 +976,14 @@ pub struct DeliveryChannelSales {
 /// dashboard renders a stable shape.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct DeliverySalesReport {
-    pub from:                Option<DateTime<Utc>>,
-    pub to:                  Option<DateTime<Utc>>,
-    pub total_orders:        i64,
-    pub total_revenue:       i64,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    pub total_orders: i64,
+    pub total_revenue: i64,
     pub total_delivery_fees: i64,
-    pub cancelled_orders:    i64,
-    pub avg_order_value:     i64,
-    pub channels:            Vec<DeliveryChannelSales>,
+    pub cancelled_orders: i64,
+    pub avg_order_value: i64,
+    pub channels: Vec<DeliveryChannelSales>,
 }
 
 #[utoipa::path(
@@ -978,21 +996,22 @@ pub struct DeliverySalesReport {
     security(("bearer_jwt" = []))
 )]
 pub async fn branch_delivery_sales(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
-    query:     web::Query<DateRangeQuery>,
+    query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+    let (branch_ids, _org) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     #[derive(sqlx::FromRow)]
     struct Row {
-        channel:          String,
-        orders:           i64,
-        revenue:          i64,
-        delivery_fees:    i64,
+        channel: String,
+        orders: i64,
+        revenue: i64,
+        delivery_fees: i64,
         cancelled_orders: i64,
     }
 
@@ -1026,29 +1045,33 @@ pub async fn branch_delivery_sales(
             let orders = row.map(|r| r.orders).unwrap_or(0);
             let revenue = row.map(|r| r.revenue).unwrap_or(0);
             DeliveryChannelSales {
-                channel:          name.to_string(),
+                channel: name.to_string(),
                 orders,
                 revenue,
-                delivery_fees:    row.map(|r| r.delivery_fees).unwrap_or(0),
-                avg_order_value:  if orders == 0 { 0 } else { revenue / orders },
+                delivery_fees: row.map(|r| r.delivery_fees).unwrap_or(0),
+                avg_order_value: if orders == 0 { 0 } else { revenue / orders },
                 cancelled_orders: row.map(|r| r.cancelled_orders).unwrap_or(0),
             }
         })
         .collect();
 
-    let total_orders:        i64 = channels.iter().map(|c| c.orders).sum();
-    let total_revenue:       i64 = channels.iter().map(|c| c.revenue).sum();
+    let total_orders: i64 = channels.iter().map(|c| c.orders).sum();
+    let total_revenue: i64 = channels.iter().map(|c| c.revenue).sum();
     let total_delivery_fees: i64 = channels.iter().map(|c| c.delivery_fees).sum();
-    let cancelled_orders:    i64 = channels.iter().map(|c| c.cancelled_orders).sum();
+    let cancelled_orders: i64 = channels.iter().map(|c| c.cancelled_orders).sum();
 
     Ok(HttpResponse::Ok().json(DeliverySalesReport {
         from: query.from,
-        to:   query.to,
+        to: query.to,
         total_orders,
         total_revenue,
         total_delivery_fees,
         cancelled_orders,
-        avg_order_value: if total_orders == 0 { 0 } else { total_revenue / total_orders },
+        avg_order_value: if total_orders == 0 {
+            0
+        } else {
+            total_revenue / total_orders
+        },
         channels,
     }))
 }
@@ -1058,56 +1081,56 @@ pub async fn branch_delivery_sales(
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct ValuationRow {
     pub org_ingredient_id: Uuid,
-    pub ingredient_name:   String,
-    pub unit:              String,
-    pub current_stock:     f64,
+    pub ingredient_name: String,
+    pub unit: String,
+    pub current_stock: f64,
     /// Piastres per unit; `null` ⟺ unknown.
-    pub cost_per_unit:     Option<i64>,
+    pub cost_per_unit: Option<i64>,
     /// current_stock × cost_per_unit in piastres; `null` when cost unknown.
-    pub value:             Option<i64>,
+    pub value: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct InventoryValuationReport {
-    pub total_value:        i64,
+    pub total_value: i64,
     pub unknown_cost_count: i64,
-    pub items:              Vec<ValuationRow>,
+    pub items: Vec<ValuationRow>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct LowStockRow {
-    pub branch_id:         Uuid,
-    pub branch_name:       String,
+    pub branch_id: Uuid,
+    pub branch_name: String,
     pub org_ingredient_id: Uuid,
-    pub ingredient_name:   String,
-    pub unit:              String,
-    pub current_stock:     f64,
+    pub ingredient_name: String,
+    pub unit: String,
+    pub current_stock: f64,
     pub reorder_threshold: f64,
     /// reorder_threshold − current_stock: how much to order to reach par.
-    pub deficit:           f64,
+    pub deficit: f64,
     /// Default supplier for this ingredient (for one-click "create PO"); may be null.
-    pub supplier_id:       Option<Uuid>,
-    pub supplier_name:     Option<String>,
+    pub supplier_id: Option<Uuid>,
+    pub supplier_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct ConsumptionRow {
     pub org_ingredient_id: Uuid,
-    pub ingredient_name:   String,
-    pub unit:              String,
-    pub consumed_qty:      f64,
+    pub ingredient_name: String,
+    pub unit: String,
+    pub consumed_qty: f64,
     /// Consumption valued in piastres; `null` if any contributing cost unknown.
-    pub consumed_value:    Option<i64>,
+    pub consumed_value: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct WasteReportRow {
-    pub reason:            String,
+    pub reason: String,
     pub org_ingredient_id: Uuid,
-    pub ingredient_name:   String,
-    pub unit:              String,
-    pub waste_qty:         f64,
-    pub waste_value:       Option<i64>,
+    pub ingredient_name: String,
+    pub unit: String,
+    pub waste_qty: f64,
+    pub waste_value: Option<i64>,
 }
 
 // ── GET /reports/branches/:id/inventory-valuation ────────────
@@ -1121,13 +1144,14 @@ pub struct WasteReportRow {
     security(("bearer_jwt" = []))
 )]
 pub async fn branch_inventory_valuation(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+    let (branch_ids, _org) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     // Summed per ingredient over the selected branch(es): one branch has a
     // single row per ingredient so the SUM is a no-op; "all branches" (nil)
@@ -1171,8 +1195,8 @@ pub async fn branch_inventory_valuation(
     security(("bearer_jwt" = []))
 )]
 pub async fn org_inventory_valuation(
-    req:    HttpRequest,
-    pool:   web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     org_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1215,8 +1239,8 @@ pub async fn org_inventory_valuation(
     security(("bearer_jwt" = []))
 )]
 pub async fn org_low_stock(
-    req:    HttpRequest,
-    pool:   web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     org_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1256,13 +1280,14 @@ pub async fn org_low_stock(
     security(("bearer_jwt" = []))
 )]
 pub async fn branch_low_stock(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+    let (branch_ids, _org) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     // Each row carries its own branch_id/branch_name, so a single-branch call is
     // genuinely scoped to that branch and an "all branches" (nil) call still
@@ -1301,14 +1326,15 @@ pub async fn branch_low_stock(
     security(("bearer_jwt" = []))
 )]
 pub async fn branch_consumption(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
-    query:     web::Query<DateRangeQuery>,
+    query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+    let (branch_ids, _org) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     let rows = sqlx::query_as::<_, ConsumptionRow>(
         r#"
@@ -1348,14 +1374,15 @@ pub async fn branch_consumption(
     security(("bearer_jwt" = []))
 )]
 pub async fn branch_waste_report(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
-    query:     web::Query<DateRangeQuery>,
+    query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+    let (branch_ids, _org) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     let rows = sqlx::query_as::<_, WasteReportRow>(
         r#"
@@ -1394,10 +1421,10 @@ pub async fn branch_waste_report(
     security(("bearer_jwt" = []))
 )]
 pub async fn org_consumption(
-    req:    HttpRequest,
-    pool:   web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     org_id: web::Path<Uuid>,
-    query:  web::Query<DateRangeQuery>,
+    query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
@@ -1440,10 +1467,10 @@ pub async fn org_consumption(
     security(("bearer_jwt" = []))
 )]
 pub async fn org_waste_report(
-    req:    HttpRequest,
-    pool:   web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     org_id: web::Path<Uuid>,
-    query:  web::Query<DateRangeQuery>,
+    query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
@@ -1478,14 +1505,14 @@ pub async fn org_waste_report(
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct ShrinkageRow {
     /// The variance reason captured at finalize, or `unexplained` when none.
-    pub reason:            String,
+    pub reason: String,
     pub org_ingredient_id: Uuid,
-    pub ingredient_name:   String,
-    pub unit:              String,
+    pub ingredient_name: String,
+    pub unit: String,
     /// Quantity lost (positive number) from negative stock-count differences.
-    pub shrinkage_qty:     f64,
+    pub shrinkage_qty: f64,
     /// Valued shrinkage in piastres; `null` when any contributing cost unknown.
-    pub shrinkage_value:   Option<i64>,
+    pub shrinkage_value: Option<i64>,
 }
 
 // ── GET /reports/branches/:id/shrinkage ──────────────────────
@@ -1499,14 +1526,15 @@ pub struct ShrinkageRow {
     security(("bearer_jwt" = []))
 )]
 pub async fn branch_shrinkage(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
-    query:     web::Query<DateRangeQuery>,
+    query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+    let (branch_ids, _org) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     let rows = sqlx::query_as::<_, ShrinkageRow>(
         r#"
@@ -1544,10 +1572,10 @@ pub async fn branch_shrinkage(
     security(("bearer_jwt" = []))
 )]
 pub async fn org_shrinkage(
-    req:    HttpRequest,
-    pool:   web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     org_id: web::Path<Uuid>,
-    query:  web::Query<DateRangeQuery>,
+    query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
@@ -1585,10 +1613,14 @@ fn summarize_valuation(items: Vec<ValuationRow>) -> InventoryValuationReport {
     for it in &items {
         match it.value {
             Some(v) => total_value += v,
-            None    => unknown_cost_count += 1,
+            None => unknown_cost_count += 1,
         }
     }
-    InventoryValuationReport { total_value, unknown_cost_count, items }
+    InventoryValuationReport {
+        total_value,
+        unknown_cost_count,
+        items,
+    }
 }
 
 fn require_org(claims: &Claims, org_id: Uuid) -> Result<(), AppError> {
@@ -1608,47 +1640,48 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 }
 
 async fn require_shift_branch_access(
-    pool:     &PgPool,
-    claims:   &Claims,
+    pool: &PgPool,
+    claims: &Claims,
     shift_id: Uuid,
 ) -> Result<Uuid, AppError> {
-    let branch_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT branch_id FROM shifts WHERE id = $1"
-    )
-    .bind(shift_id)
-    .fetch_optional(pool)
-    .await?
-    .flatten();
+    let branch_id: Option<Uuid> = sqlx::query_scalar("SELECT branch_id FROM shifts WHERE id = $1")
+        .bind(shift_id)
+        .fetch_optional(pool)
+        .await?
+        .flatten();
 
-    let branch_id = branch_id
-        .ok_or_else(|| AppError::NotFound("Shift not found".into()))?;
+    let branch_id = branch_id.ok_or_else(|| AppError::NotFound("Shift not found".into()))?;
     require_branch_access(pool, claims, branch_id).await?;
     Ok(branch_id)
 }
 
 async fn require_branch_access(
-    pool:      &PgPool,
-    claims:    &Claims,
+    pool: &PgPool,
+    claims: &Claims,
     branch_id: Uuid,
 ) -> Result<(), AppError> {
-    if claims.role == UserRole::SuperAdmin { return Ok(()); }
-
-    let branch_org: Option<Uuid> = sqlx::query_scalar(
-        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(branch_id)
-    .fetch_optional(pool)
-    .await?
-    .flatten();
-
-    let branch_org = branch_org
-        .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
-
-    if claims.org_id() != Some(branch_org) {
-        return Err(AppError::Forbidden("Branch belongs to a different org".into()));
+    if claims.role == UserRole::SuperAdmin {
+        return Ok(());
     }
 
-    if claims.role == UserRole::OrgAdmin { return Ok(()); }
+    let branch_org: Option<Uuid> =
+        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
+            .bind(branch_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+
+    let branch_org = branch_org.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+
+    if claims.org_id() != Some(branch_org) {
+        return Err(AppError::Forbidden(
+            "Branch belongs to a different org".into(),
+        ));
+    }
+
+    if claims.role == UserRole::OrgAdmin {
+        return Ok(());
+    }
 
     let assigned: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)"
@@ -1667,7 +1700,8 @@ async fn require_branch_access(
     // both. The None guard keeps legacy/non-teller tokens working (V26).
     if claims.role == UserRole::Teller {
         if let Some(token_branch) = claims.branch_id()
-            && token_branch != branch_id {
+            && token_branch != branch_id
+        {
             return Err(AppError::Forbidden(
                 "This device is signed in to a different branch.".into(),
             ));
@@ -1684,32 +1718,30 @@ async fn require_branch_access(
 /// check. The per-resource `check_permission` gate in each handler still
 /// applies, so this does not widen who may read reports — only the scope.
 async fn resolve_report_branches(
-    pool:      &PgPool,
-    claims:    &Claims,
-    req:       &HttpRequest,
+    pool: &PgPool,
+    claims: &Claims,
+    req: &HttpRequest,
     branch_id: Uuid,
 ) -> Result<(Vec<Uuid>, Uuid), AppError> {
     if !branch_id.is_nil() {
         require_branch_access(pool, claims, branch_id).await?;
-        let org: Uuid = sqlx::query_scalar(
-            "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL",
-        )
-        .bind(branch_id)
-        .fetch_optional(pool)
-        .await?
-        .flatten()
-        .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+        let org: Uuid =
+            sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
+                .bind(branch_id)
+                .fetch_optional(pool)
+                .await?
+                .flatten()
+                .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
         return Ok((vec![branch_id], org));
     }
 
     let org = report_scope_org(claims, req)
         .ok_or_else(|| AppError::Forbidden("No organization in scope".into()))?;
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL",
-    )
-    .bind(org)
-    .fetch_all(pool)
-    .await?;
+    let ids: Vec<Uuid> =
+        sqlx::query_scalar("SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL")
+            .bind(org)
+            .fetch_all(pool)
+            .await?;
     Ok((ids, org))
 }
 
@@ -1737,21 +1769,21 @@ async fn branch_label(pool: &PgPool, branch_id: Uuid) -> Result<String, AppError
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct BundleSalesRow {
-    pub bundle_id:     Option<Uuid>,
-    pub bundle_name:   String,
+    pub bundle_id: Option<Uuid>,
+    pub bundle_name: String,
     pub quantity_sold: i64,
-    pub revenue:       i64,
+    pub revenue: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct CombinedItemSalesRow {
-    pub item_id:       Option<Uuid>,
-    pub item_name:     String,
+    pub item_id: Option<Uuid>,
+    pub item_name: String,
     #[schema(value_type = Object)]
     pub item_name_translations: serde_json::Value,
     pub standalone_qty: i64,
-    pub bundle_qty:    i64,
-    pub total_qty:     i64,
+    pub bundle_qty: i64,
+    pub total_qty: i64,
 }
 
 // GET /reports/branches/:id/bundles
@@ -1765,14 +1797,15 @@ pub struct CombinedItemSalesRow {
     security(("bearer_jwt" = []))
 )]
 pub async fn branch_bundle_sales(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
-    query:     web::Query<DateRangeQuery>,
+    query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+    let (branch_ids, _org) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     let rows = sqlx::query_as::<_, BundleSalesRow>(
         r#"
@@ -1812,14 +1845,15 @@ pub async fn branch_bundle_sales(
     security(("bearer_jwt" = []))
 )]
 pub async fn branch_combined_item_sales(
-    req:       HttpRequest,
-    pool:      web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
-    query:     web::Query<DateRangeQuery>,
+    query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    let (branch_ids, _org) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+    let (branch_ids, _org) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     let rows = sqlx::query_as::<_, CombinedItemSalesRow>(
         r#"
@@ -1909,27 +1943,27 @@ pub async fn branch_combined_item_sales(
 
 #[derive(Serialize, ToSchema)]
 pub struct MenuEngineeringRow {
-    pub menu_item_id:   Uuid,
+    pub menu_item_id: Uuid,
     /// `"one_size"` for items without sizes.
-    pub size_label:     String,
-    pub item_name:      String,
-    pub category_id:    Option<Uuid>,
-    pub category_name:  Option<String>,
+    pub size_label: String,
+    pub item_name: String,
+    pub category_id: Option<Uuid>,
+    pub category_name: Option<String>,
     /// Units sold (standalone lines only — bundle lines are excluded so the
     /// per-unit economics stay clean; bundle performance has its own report).
-    pub quantity_sold:  i64,
+    pub quantity_sold: i64,
     /// Revenue from those lines, piastres.
-    pub sales:          i64,
+    pub sales: i64,
     /// Recipe-scope COGS in piastres (additive addons excluded — they have
     /// their own revenue and their own report). Snapshot basis:
     /// `SUM(unit_cost × quantity)`; current basis: today's recipe rollup ×
     /// quantity. Rows where this is unresolvable are excluded from the
     /// report, so it is always present.
-    pub total_cost:     i64,
+    pub total_cost: i64,
     /// Average profit per unit, piastres (`(sales - cost) / qty`).
-    pub item_profit:    i64,
+    pub item_profit: i64,
     /// `sales - total_cost`, piastres.
-    pub total_profit:   i64,
+    pub total_profit: i64,
     /// Share of units among the rows in this report (cost-tracked only).
     pub popularity_pct: f64,
     /// Lines in the window whose sale-time cost could not be resolved.
@@ -1937,24 +1971,24 @@ pub struct MenuEngineeringRow {
     /// under `current`, an included row can still carry snapshot gaps.
     pub cost_missing_lines: i64,
     /// "high" | "low" — vs weighted-average per-unit profit.
-    pub profit_category:     String,
+    pub profit_category: String,
     /// "high" | "low" — Kasavana-Smith 70% rule (0.70 / n).
     pub popularity_category: String,
     /// star | workhorse | challenge | dog (Foodics names).
-    pub class:          String,
+    pub class: String,
 }
 
 #[derive(Serialize, ToSchema)]
 pub struct MenuEngineeringReport {
     pub branch_id: Uuid,
-    pub from:      Option<DateTime<Utc>>,
-    pub to:        Option<DateTime<Utc>>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
     /// Cost basis the report was computed with: "snapshot" | "current".
     pub cost_basis: String,
-    pub rows:      Vec<MenuEngineeringRow>,
+    pub rows: Vec<MenuEngineeringRow>,
     /// Totals over the returned rows.
-    pub total_sales:  i64,
-    pub total_cost:   i64,
+    pub total_sales: i64,
+    pub total_cost: i64,
     pub total_profit: i64,
     /// SKUs sold in the window but EXCLUDED from this report because their
     /// cost was unresolvable under the chosen basis.
@@ -2007,27 +2041,28 @@ impl CostBasis {
     security(("bearer_jwt" = []))
 )]
 pub async fn branch_menu_engineering(
-    req:         HttpRequest,
-    pool:        web::Data<PgPool>,
-    branch_id:   web::Path<Uuid>,
-    query:       web::Query<DateRangeQuery>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
+    branch_id: web::Path<Uuid>,
+    query: web::Query<DateRangeQuery>,
     basis_query: web::Query<CostBasisQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    let (branch_ids, org_id) = resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+    let (branch_ids, org_id) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
     let basis = CostBasis::parse(basis_query.cost_basis.as_deref())?;
 
     #[derive(sqlx::FromRow)]
     struct Row {
-        menu_item_id:       Uuid,
-        size_label:         String,
-        item_name:          String,
-        category_id:        Option<Uuid>,
-        category_name:      Option<String>,
-        quantity_sold:      i64,
-        sales:              i64,
-        total_cost:         Option<i64>,
+        menu_item_id: Uuid,
+        size_label: String,
+        item_name: String,
+        category_id: Option<Uuid>,
+        category_name: Option<String>,
+        quantity_sold: i64,
+        sales: i64,
+        total_cost: Option<i64>,
         cost_missing_lines: i64,
     }
 
@@ -2075,7 +2110,11 @@ pub async fn branch_menu_engineering(
         // Per-branch actual cost when scoped to a single branch; for "all
         // branches" (nil path id) there is no single branch, so fall back to the
         // org default (standard) cost.
-        let cost_branch = if branch_id.is_nil() { None } else { Some(*branch_id) };
+        let cost_branch = if branch_id.is_nil() {
+            None
+        } else {
+            Some(*branch_id)
+        };
         let current_costs: std::collections::HashMap<(Uuid, String), Option<i64>> =
             crate::costing::org_sku_costs(pool.get_ref(), org_id, cost_branch)
                 .await?
@@ -2139,13 +2178,16 @@ pub async fn branch_menu_engineering(
         let popularity_category = if high_pop { "high" } else { "low" }.to_string();
 
         let total_profit = r.sales - cost;
-        let item_profit =
-            if r.quantity_sold > 0 { total_profit / r.quantity_sold } else { 0 };
+        let item_profit = if r.quantity_sold > 0 {
+            total_profit / r.quantity_sold
+        } else {
+            0
+        };
         let high_profit = (item_profit as f64) >= avg_unit_profit;
         let class = match (high_pop, high_profit) {
-            (true, true)   => "star",
-            (true, false)  => "workhorse",
-            (false, true)  => "challenge",
+            (true, true) => "star",
+            (true, false) => "workhorse",
+            (false, true) => "challenge",
             (false, false) => "dog",
         }
         .to_string();

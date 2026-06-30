@@ -1,18 +1,18 @@
 //! Waiter open-ticket endpoints: fire (create), add round, list, get, void, and
 //! the cashier settle (materialize → paid order via the shared snapshot engine).
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use super::{
-    extract_claims, fire_round, mint_ticket_ref, open_ticket_view, publish_fired,
-    require_branch_access, OpenTicketView,
+    OpenTicketView, extract_claims, fire_round, mint_ticket_ref, open_ticket_view, publish_fired,
+    require_branch_access,
 };
 use crate::errors::{AppError, AppErrorResponse};
-use crate::orders::handlers::{create_order_inner, CreateOrderRequest, OrderItemInput};
+use crate::orders::handlers::{CreateOrderRequest, OrderItemInput, create_order_inner};
 use crate::permissions::checker::check_permission;
 use crate::realtime::event::{BranchEvent, Topic};
 use crate::realtime::hub::BranchEventHub;
@@ -97,20 +97,23 @@ async fn require_ticket_branch_access(
     claims: &crate::auth::jwt::Claims,
     ticket_id: Uuid,
 ) -> Result<(), AppError> {
-    let branch_id: Option<Uuid> = sqlx::query_scalar("SELECT branch_id FROM open_tickets WHERE id = $1")
-        .bind(ticket_id)
-        .fetch_optional(pool)
-        .await?;
+    let branch_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT branch_id FROM open_tickets WHERE id = $1")
+            .bind(ticket_id)
+            .fetch_optional(pool)
+            .await?;
     let branch_id = branch_id.ok_or_else(|| AppError::NotFound("Open ticket not found".into()))?;
     require_branch_access(pool, claims, branch_id).await
 }
 
 async fn table_label(pool: &PgPool, table_id: Option<Uuid>) -> Result<Option<String>, AppError> {
     match table_id {
-        Some(t) => Ok(sqlx::query_scalar("SELECT label FROM branch_tables WHERE id = $1")
-            .bind(t)
-            .fetch_optional(pool)
-            .await?),
+        Some(t) => Ok(
+            sqlx::query_scalar("SELECT label FROM branch_tables WHERE id = $1")
+                .bind(t)
+                .fetch_optional(pool)
+                .await?,
+        ),
         None => Ok(None),
     }
 }
@@ -128,7 +131,13 @@ pub async fn create_open_ticket(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "open_tickets", "create").await?;
     require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
-    create_open_ticket_inner(pool.clone(), body, ActingContext::live(&claims)?, Some(hub.get_ref())).await
+    create_open_ticket_inner(
+        pool.clone(),
+        body,
+        ActingContext::live(&claims)?,
+        Some(hub.get_ref()),
+    )
+    .await
 }
 
 /// Fire core. LIVE attributes the ticket to the JWT waiter and requires the
@@ -145,35 +154,37 @@ pub(crate) async fn create_open_ticket_inner(
     hub: Option<&BranchEventHub>,
 ) -> Result<HttpResponse, AppError> {
     if body.items.is_empty() {
-        return Err(AppError::BadRequest("A ticket must fire at least one item".into()));
+        return Err(AppError::BadRequest(
+            "A ticket must fire at least one item".into(),
+        ));
     }
     // The branch must be operating (any till open) to fire to the kitchen. Replay
     // is recorded history (the gate was answered LAN-first at fire time) → skip.
     if !actor.replay && !branch_has_open_shift(pool.get_ref(), body.branch_id).await? {
-        return Err(AppError::Conflict("No open shift at this branch — open a till first".into()));
+        return Err(AppError::Conflict(
+            "No open shift at this branch — open a till first".into(),
+        ));
     }
 
     // Idempotent re-fire: same ticket key → return the existing ticket.
     if let Some(key) = body.idempotency_key {
-        let existing: Option<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM open_tickets WHERE idempotency_key = $1",
-        )
-        .bind(key)
-        .fetch_optional(pool.get_ref())
-        .await?;
+        let existing: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM open_tickets WHERE idempotency_key = $1")
+                .bind(key)
+                .fetch_optional(pool.get_ref())
+                .await?;
         if let Some(id) = existing {
             let view = open_ticket_view(pool.get_ref(), id).await?;
             return Ok(HttpResponse::Ok().json(view));
         }
     }
 
-    let org_id: Uuid = sqlx::query_scalar(
-        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(body.branch_id)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    let org_id: Uuid =
+        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
+            .bind(body.branch_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
 
     let label = table_label(pool.get_ref(), body.table_id).await?;
     let now = chrono::Utc::now();
@@ -202,15 +213,31 @@ pub(crate) async fn create_open_ticket_inner(
     .await?;
 
     let kt_id = fire_round(
-        &mut tx, pool.get_ref(), org_id, body.branch_id, open_ticket_id, 1,
-        actor.teller_id, body.round_idempotency_key, &body.items,
-        label.as_deref(), Some(ticket_ref.as_str()),
+        &mut tx,
+        pool.get_ref(),
+        org_id,
+        body.branch_id,
+        open_ticket_id,
+        1,
+        actor.teller_id,
+        body.round_idempotency_key,
+        &body.items,
+        label.as_deref(),
+        Some(ticket_ref.as_str()),
     )
     .await?;
     tx.commit().await?;
 
     if let Some(hub) = hub {
-        publish_fired(pool.get_ref(), hub, body.branch_id, open_ticket_id, kt_id, "ticket.fired").await;
+        publish_fired(
+            pool.get_ref(),
+            hub,
+            body.branch_id,
+            open_ticket_id,
+            kt_id,
+            "ticket.fired",
+        )
+        .await;
     }
     let view = open_ticket_view(pool.get_ref(), open_ticket_id).await?;
     Ok(HttpResponse::Created().json(view))
@@ -231,7 +258,14 @@ pub async fn add_round(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "open_tickets", "update").await?;
     require_ticket_branch_access(pool.get_ref(), &claims, *id).await?;
-    add_round_inner(pool.clone(), id.into_inner(), body, ActingContext::live(&claims)?, Some(hub.get_ref())).await
+    add_round_inner(
+        pool.clone(),
+        id.into_inner(),
+        body,
+        ActingContext::live(&claims)?,
+        Some(hub.get_ref()),
+    )
+    .await
 }
 
 /// Add-round core. Fires the next round's client-priced items onto an existing
@@ -245,7 +279,9 @@ pub(crate) async fn add_round_inner(
     hub: Option<&BranchEventHub>,
 ) -> Result<HttpResponse, AppError> {
     if body.items.is_empty() {
-        return Err(AppError::BadRequest("A round must fire at least one item".into()));
+        return Err(AppError::BadRequest(
+            "A round must fire at least one item".into(),
+        ));
     }
 
     let ticket: Option<(Uuid, Uuid, String, Option<Uuid>, Option<String>)> = sqlx::query_as(
@@ -257,11 +293,10 @@ pub(crate) async fn add_round_inner(
     let Some((branch_id, org_id, status, table_id, ticket_ref)) = ticket else {
         return Err(AppError::NotFound("Open ticket not found".into()));
     };
-    if status == "settled" || status == "voided" {
-        return Err(AppError::Conflict(format!("Cannot add a round to a {status} ticket")));
-    }
-
-    // Idempotent round re-fire.
+    // Idempotent round re-fire — checked BEFORE the status gate so a retry of an
+    // ALREADY-APPLIED round dedups to 200 even if the ticket has since been settled
+    // (its ack may have been lost). Only a genuinely new round falls through to the
+    // conflict gate, so the client can safely treat that 409 as a real rejection.
     if let Some(key) = body.idempotency_key {
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM open_ticket_rounds WHERE idempotency_key = $1)",
@@ -275,6 +310,12 @@ pub(crate) async fn add_round_inner(
         }
     }
 
+    if status == "settled" || status == "voided" {
+        return Err(AppError::Conflict(format!(
+            "Cannot add a round to a {status} ticket"
+        )));
+    }
+
     let label = table_label(pool.get_ref(), table_id).await?;
     let mut tx = pool.get_ref().begin().await?;
     let next_round: i32 = sqlx::query_scalar(
@@ -284,15 +325,31 @@ pub(crate) async fn add_round_inner(
     .fetch_one(&mut *tx)
     .await?;
     let kt_id = fire_round(
-        &mut tx, pool.get_ref(), org_id, branch_id, id, next_round,
-        actor.teller_id, body.idempotency_key, &body.items,
-        label.as_deref(), ticket_ref.as_deref(),
+        &mut tx,
+        pool.get_ref(),
+        org_id,
+        branch_id,
+        id,
+        next_round,
+        actor.teller_id,
+        body.idempotency_key,
+        &body.items,
+        label.as_deref(),
+        ticket_ref.as_deref(),
     )
     .await?;
     tx.commit().await?;
 
     if let Some(hub) = hub {
-        publish_fired(pool.get_ref(), hub, branch_id, id, kt_id, "ticket.round_added").await;
+        publish_fired(
+            pool.get_ref(),
+            hub,
+            branch_id,
+            id,
+            kt_id,
+            "ticket.round_added",
+        )
+        .await;
     }
     let view = open_ticket_view(pool.get_ref(), id).await?;
     Ok(HttpResponse::Ok().json(view))
@@ -412,7 +469,114 @@ pub(crate) async fn void_open_ticket_inner(
     if let Some(hub) = hub
         && let Some(v) = &view
     {
-        hub.publish(v.branch_id, BranchEvent::new(Topic::Tickets, "ticket.voided", v));
+        hub.publish(
+            v.branch_id,
+            BranchEvent::new(Topic::Tickets, "ticket.voided", v),
+        );
+    }
+    Ok(HttpResponse::Ok().json(view))
+}
+
+// ── Move to another table ─────────────────────────────────────
+
+#[derive(Deserialize, Serialize, ToSchema)]
+pub struct MoveTicketTableRequest {
+    /// The table to move this ticket onto.
+    pub table_id: Uuid,
+}
+
+/// Switch an open ticket to a different table (the "move table" button). Works
+/// for any live ticket — walk-in dine-in or one auto-opened from a booking. The
+/// old table is flagged `dirty` (bus it), the new one `seated`; if the ticket
+/// came from a booking, the booking's assignment is kept in sync.
+#[utoipa::path(patch, path = "/open-tickets/{id}/table", tag = "open_tickets",
+    params(("id" = Uuid, Path, description = "Open ticket ID")),
+    request_body = MoveTicketTableRequest,
+    responses((status = 200, description = "Ticket moved", body = OpenTicketView), AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn move_ticket_table(
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
+    hub: web::Data<BranchEventHub>,
+    id: web::Path<Uuid>,
+    body: web::Json<MoveTicketTableRequest>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "open_tickets", "update").await?;
+    require_ticket_branch_access(pool.get_ref(), &claims, *id).await?;
+
+    let row: Option<(Uuid, Option<Uuid>, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT branch_id, table_id, status::text, booking_id FROM open_tickets WHERE id = $1",
+    )
+    .bind(*id)
+    .fetch_optional(pool.get_ref())
+    .await?;
+    let (branch_id, old_table, status, booking_id) =
+        row.ok_or_else(|| AppError::NotFound("Open ticket not found".into()))?;
+    if status == "settled" || status == "voided" {
+        return Err(AppError::Conflict(
+            "Cannot move a settled or voided ticket".into(),
+        ));
+    }
+    let target_ok: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM branch_tables WHERE id = $1 AND branch_id = $2)",
+    )
+    .bind(body.table_id)
+    .bind(branch_id)
+    .fetch_one(pool.get_ref())
+    .await?;
+    if !target_ok {
+        return Err(AppError::BadRequest(
+            "Target table is not in this branch".into(),
+        ));
+    }
+
+    let mut tx = pool.get_ref().begin().await?;
+    sqlx::query("UPDATE open_tickets SET table_id = $2, updated_at = now() WHERE id = $1")
+        .bind(*id)
+        .bind(body.table_id)
+        .execute(&mut *tx)
+        .await?;
+    if let Some(old) = old_table
+        && old != body.table_id
+    {
+        sqlx::query("UPDATE branch_tables SET status = 'dirty', updated_at = now() WHERE id = $1")
+            .bind(old)
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::query("UPDATE branch_tables SET status = 'seated', updated_at = now() WHERE id = $1")
+        .bind(body.table_id)
+        .execute(&mut *tx)
+        .await?;
+    if let Some(bid) = booking_id {
+        sqlx::query("DELETE FROM booking_tables WHERE booking_id = $1")
+            .bind(bid)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO booking_tables (booking_id, table_id) VALUES ($1, $2)")
+            .bind(bid)
+            .bind(body.table_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+
+    let view = open_ticket_view(pool.get_ref(), *id).await?;
+    if let Some(v) = &view {
+        hub.publish(
+            v.branch_id,
+            BranchEvent::new(Topic::Tickets, "ticket.moved", v),
+        );
+        // The floor changed too — let the reservations/floor view refresh.
+        hub.publish(
+            v.branch_id,
+            BranchEvent::new(
+                Topic::Reservations,
+                "table.status_changed",
+                &serde_json::json!({ "branch_id": branch_id, "table_id": body.table_id }),
+            ),
+        );
     }
     Ok(HttpResponse::Ok().json(view))
 }
@@ -435,7 +599,14 @@ pub async fn settle_open_ticket(
     check_permission(pool.get_ref(), &claims, "orders", "create").await?;
     check_permission(pool.get_ref(), &claims, "payments", "create").await?;
     require_ticket_branch_access(pool.get_ref(), &claims, *id).await?;
-    settle_open_ticket_inner(pool.clone(), id.into_inner(), body, ActingContext::live(&claims)?, Some(hub.get_ref())).await
+    settle_open_ticket_inner(
+        pool.clone(),
+        id.into_inner(),
+        body,
+        ActingContext::live(&claims)?,
+        Some(hub.get_ref()),
+    )
+    .await
 }
 
 /// Settle core. Materializes the ticket's stored client-priced lines into one
@@ -452,15 +623,34 @@ pub(crate) async fn settle_open_ticket_inner(
     hub: Option<&BranchEventHub>,
 ) -> Result<HttpResponse, AppError> {
     let id = &id;
-    let row: Option<(Uuid, Uuid, String, Option<Uuid>, Option<String>, Option<String>, Option<Uuid>, Option<String>, Option<i32>)> =
-        sqlx::query_as(
-            "SELECT branch_id, org_id, status::text, order_id, customer_name, notes, \
+    let row: Option<(
+        Uuid,
+        Uuid,
+        String,
+        Option<Uuid>,
+        Option<String>,
+        Option<String>,
+        Option<Uuid>,
+        Option<String>,
+        Option<i32>,
+    )> = sqlx::query_as(
+        "SELECT branch_id, org_id, status::text, order_id, customer_name, notes, \
                     discount_id, discount_type, discount_value FROM open_tickets WHERE id = $1",
-        )
-        .bind(*id)
-        .fetch_optional(pool.get_ref())
-        .await?;
-    let Some((branch_id, org_id, status, order_id, customer_name, notes, t_disc_id, t_disc_type, t_disc_value)) = row
+    )
+    .bind(*id)
+    .fetch_optional(pool.get_ref())
+    .await?;
+    let Some((
+        branch_id,
+        org_id,
+        status,
+        order_id,
+        customer_name,
+        notes,
+        t_disc_id,
+        t_disc_type,
+        t_disc_value,
+    )) = row
     else {
         return Err(AppError::NotFound("Open ticket not found".into()));
     };
@@ -473,7 +663,8 @@ pub(crate) async fn settle_open_ticket_inner(
         // double-settle (two cashiers racing the same ticket) is a clean conflict.
         if actor.replay
             && let Some(order) =
-                crate::orders::handlers::fetch_order_by_idempotency_key(pool.get_ref(), *id, org_id).await?
+                crate::orders::handlers::fetch_order_by_idempotency_key(pool.get_ref(), *id, org_id)
+                    .await?
         {
             return Ok(HttpResponse::Ok().json(order));
         }
@@ -491,7 +682,9 @@ pub(crate) async fn settle_open_ticket_inner(
     .fetch_all(pool.get_ref())
     .await?;
     if line_rows.is_empty() {
-        return Err(AppError::BadRequest("Nothing to settle — the ticket has no live items".into()));
+        return Err(AppError::BadRequest(
+            "Nothing to settle — the ticket has no live items".into(),
+        ));
     }
     let mut items: Vec<OrderItemInput> = Vec::with_capacity(line_rows.len());
     for (line_json,) in line_rows {
@@ -542,9 +735,10 @@ pub(crate) async fn settle_open_ticket_inner(
     // hub = None → don't re-fire the kitchen (the items already fired at order time).
     let _ = create_order_inner(pool.clone(), web::Json(request), actor, None).await?;
 
-    let created = crate::orders::handlers::fetch_order_by_idempotency_key(pool.get_ref(), *id, org_id)
-        .await?
-        .ok_or(AppError::Internal)?;
+    let created =
+        crate::orders::handlers::fetch_order_by_idempotency_key(pool.get_ref(), *id, org_id)
+            .await?
+            .ok_or(AppError::Internal)?;
 
     // Link ticket → order (idempotent; a concurrent settle that lost the race is a no-op).
     sqlx::query(
@@ -562,7 +756,10 @@ pub(crate) async fn settle_open_ticket_inner(
     if let Some(hub) = hub
         && let Ok(Some(view)) = open_ticket_view(pool.get_ref(), *id).await
     {
-        hub.publish(branch_id, BranchEvent::new(Topic::Tickets, "ticket.settled", &view));
+        hub.publish(
+            branch_id,
+            BranchEvent::new(Topic::Tickets, "ticket.settled", &view),
+        );
     }
     Ok(HttpResponse::Ok().json(created))
 }

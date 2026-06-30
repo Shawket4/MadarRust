@@ -8,9 +8,9 @@ mod tests {
         let mut tr = HashMap::new();
         tr.insert("en".to_string(), "Pacha Mama".to_string());
         tr.insert("ar".to_string(), "".to_string());
-        
+
         unsafe { std::env::set_var("GOOGLE_TRANSLATE_API_KEY", "your_api_key_here") }; //("GOOGLE_TRANSLATE_API_KEY", "your_api_key_here");
-        
+
         let res = ensure_translations(&mut tr).await;
         println!("Result: {:?}", res);
         println!("Map: {:?}", tr);

@@ -8,7 +8,7 @@ use actix_web::{middleware::Condition, web};
 use crate::auth::middleware::JwtMiddleware;
 use crate::delivery::{gateway, public, settings, staff};
 use crate::qr_card::handlers as qr_handlers;
-use crate::rate_limit::{rate_limiting_enabled, PeerIpOrLocalhost};
+use crate::rate_limit::{PeerIpOrLocalhost, rate_limiting_enabled};
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     // Browsing: ~60 req/min sustained, burst 30 (matches the public menu).
@@ -54,12 +54,30 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/zones", web::post().to(settings::create_zone))
                 .route("/zones/{id}", web::patch().to(settings::update_zone))
                 .route("/zones/{id}", web::delete().to(settings::delete_zone))
-                .route("/channel-overrides", web::get().to(settings::list_channel_overrides))
-                .route("/channel-overrides", web::put().to(settings::upsert_channel_override))
-                .route("/channel-overrides", web::delete().to(settings::delete_channel_override))
-                .route("/channel-addon-overrides", web::get().to(settings::list_channel_addon_overrides))
-                .route("/channel-addon-overrides", web::put().to(settings::upsert_channel_addon_override))
-                .route("/channel-addon-overrides", web::delete().to(settings::delete_channel_addon_override)),
+                .route(
+                    "/channel-overrides",
+                    web::get().to(settings::list_channel_overrides),
+                )
+                .route(
+                    "/channel-overrides",
+                    web::put().to(settings::upsert_channel_override),
+                )
+                .route(
+                    "/channel-overrides",
+                    web::delete().to(settings::delete_channel_override),
+                )
+                .route(
+                    "/channel-addon-overrides",
+                    web::get().to(settings::list_channel_addon_overrides),
+                )
+                .route(
+                    "/channel-addon-overrides",
+                    web::put().to(settings::upsert_channel_addon_override),
+                )
+                .route(
+                    "/channel-addon-overrides",
+                    web::delete().to(settings::delete_channel_addon_override),
+                ),
         )
         // ── WhatsApp gateway relay (SUPER-ADMIN ONLY; guarded per-handler) ─
         // QR pairing / status / logout / pause for the private Go gateway.
@@ -83,8 +101,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/{id}/status", web::post().to(staff::set_status))
                 .route("/{id}/prep-time", web::post().to(staff::set_prep_time))
                 .route("/{id}/cancel", web::post().to(staff::cancel_delivery_order))
-                .route("/{id}/finalize", web::post().to(staff::finalize_delivery_order))
-                .route("/{id}/qr",       web::get().to(qr_handlers::delivery_order_qr)),
+                .route(
+                    "/{id}/finalize",
+                    web::post().to(staff::finalize_delivery_order),
+                )
+                .route("/{id}/qr", web::get().to(qr_handlers::delivery_order_qr)),
         )
         // ── Public (unauthenticated, rate-limited) ──────────────────────
         .service(

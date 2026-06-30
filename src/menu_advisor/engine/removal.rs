@@ -10,14 +10,13 @@
 
 use std::collections::HashMap;
 
-use crate::menu_advisor::dto::{
-    AbsorbedBy, AnalysisConfig, ComplementaryLoss, ItemKey, RemovalRecommendation,
-    RemovalScenario,
-};
-use super::bundles::{get_assoc, AssociationIndex};
+use super::ItemSnapshot;
+use super::bundles::{AssociationIndex, get_assoc};
 use super::explain;
 use super::kpi::ItemKpi;
-use super::ItemSnapshot;
+use crate::menu_advisor::dto::{
+    AbsorbedBy, AnalysisConfig, ComplementaryLoss, ItemKey, RemovalRecommendation, RemovalScenario,
+};
 
 /// Share of the removed item's demand that shifts to substitutes at all —
 /// a labeled prior, not a measurement.
@@ -42,8 +41,7 @@ pub(crate) fn simulate_removal(
     let baseline_cm = target_cm.cm_per_unit * target_kpi.raw_units_sold;
 
     let is_strong_complement = |k: &ItemKey| {
-        get_assoc(assoc, target, k)
-            .is_some_and(|(a, _)| a.lift >= config.min_lift_for_bundle)
+        get_assoc(assoc, target, k).is_some_and(|(a, _)| a.lift >= config.min_lift_for_bundle)
     };
 
     // ── Substitutes: same-category, active, standalone, sufficient peers ──
@@ -54,9 +52,7 @@ pub(crate) fn simulate_removal(
                 && k.sufficient
                 && !k.was_inactive
                 && snaps.get(&k.key).is_some_and(|s| {
-                    s.is_active
-                        && !s.bundle_only
-                        && s.category_id == target_snap.category_id
+                    s.is_active && !s.bundle_only && s.category_id == target_snap.category_id
                 })
                 && !is_strong_complement(&k.key)
         })
@@ -97,8 +93,11 @@ pub(crate) fn simulate_removal(
             } else {
                 return None;
             };
-            (pair_assoc.lift >= config.min_lift_for_bundle)
-                .then_some((other, pair_assoc.pair_count, pair_assoc.lift))
+            (pair_assoc.lift >= config.min_lift_for_bundle).then_some((
+                other,
+                pair_assoc.pair_count,
+                pair_assoc.lift,
+            ))
         })
         .collect();
     complement_keys.sort_by(|a, b| a.0.cmp(b.0));
@@ -169,13 +168,18 @@ pub(crate) fn simulate_removal(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
 mod tests {
     use chrono::{TimeZone, Utc};
 
+    use super::super::SaleEvent;
     use super::super::bundles::compute_associations;
     use super::super::kpi::compute_item_kpis;
-    use super::super::SaleEvent;
     use super::*;
 
     fn key(id: u8) -> ItemKey {
@@ -295,7 +299,11 @@ mod tests {
         baskets.extend(std::iter::repeat_n(vec![key(99)], 50));
         // support_1 = 0.3, support_2 = 0.4, support_12 = 0.2 → lift = 1.667.
         let s = simulate(1, &snaps, &sales, &baskets).unwrap();
-        let loss = s.complementary_losses.iter().find(|l| l.key == key(2)).unwrap();
+        let loss = s
+            .complementary_losses
+            .iter()
+            .find(|l| l.key == key(2))
+            .unwrap();
         let expected_units = 20.0 * (1.0 - 1.0 / (0.2 / (0.3 * 0.4)));
         assert!((loss.lost_units - expected_units).abs() < 1e-6);
         assert!(loss.lost_units <= 20.0); // never exceeds actual co-purchases

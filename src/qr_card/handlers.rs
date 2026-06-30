@@ -7,8 +7,8 @@
 
 use std::sync::Arc;
 
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use utoipa::{IntoParams, ToSchema};
@@ -21,8 +21,9 @@ use crate::{
 };
 
 use super::{
+    QrCardOptions,
     db::{self, BranchTable, CreateTableRequest},
-    render_qr_card_png, render_qr_card_svg, render_qr_receipt_png, QrCardOptions,
+    render_qr_card_png, render_qr_card_svg, render_qr_receipt_png,
     shlink::ShortLinkProvider,
 };
 
@@ -114,9 +115,8 @@ fn render_data_url(short_url: &str, q: &QrRenderQuery) -> Result<String, AppErro
 /// Build `{PUBLIC_ORDER_BASE_URL}/order/{org_id}?branch={branch_id}`.
 /// The dashboard route is `/order/$orgId` — org lives in the path segment.
 fn branch_order_url(org_id: Uuid, branch_id: Uuid) -> Result<String, AppError> {
-    let base = std::env::var("PUBLIC_ORDER_BASE_URL").map_err(|_| {
-        AppError::ServiceUnavailable("PUBLIC_ORDER_BASE_URL not configured".into())
-    })?;
+    let base = std::env::var("PUBLIC_ORDER_BASE_URL")
+        .map_err(|_| AppError::ServiceUnavailable("PUBLIC_ORDER_BASE_URL not configured".into()))?;
     Ok(format!(
         "{}/order/{}?branch={}",
         base.trim_end_matches('/'),
@@ -127,9 +127,8 @@ fn branch_order_url(org_id: Uuid, branch_id: Uuid) -> Result<String, AppError> {
 
 /// Build `{PUBLIC_ORDER_BASE_URL}/order/{org_id}?branch={b}&table={t}`.
 fn table_order_url(org_id: Uuid, branch_id: Uuid, table_id: Uuid) -> Result<String, AppError> {
-    let base = std::env::var("PUBLIC_ORDER_BASE_URL").map_err(|_| {
-        AppError::ServiceUnavailable("PUBLIC_ORDER_BASE_URL not configured".into())
-    })?;
+    let base = std::env::var("PUBLIC_ORDER_BASE_URL")
+        .map_err(|_| AppError::ServiceUnavailable("PUBLIC_ORDER_BASE_URL not configured".into()))?;
     Ok(format!(
         "{}/order/{}?branch={}&table={}",
         base.trim_end_matches('/'),
@@ -162,32 +161,40 @@ fn validate_marketing_path(path: &str) -> Result<(), AppError> {
 
 fn marketing_url(path: &str) -> Result<String, AppError> {
     validate_marketing_path(path)?;
-    let base = std::env::var("PUBLIC_ORDER_BASE_URL").map_err(|_| {
-        AppError::ServiceUnavailable("PUBLIC_ORDER_BASE_URL not configured".into())
-    })?;
+    let base = std::env::var("PUBLIC_ORDER_BASE_URL")
+        .map_err(|_| AppError::ServiceUnavailable("PUBLIC_ORDER_BASE_URL not configured".into()))?;
     Ok(format!("{}{}", base.trim_end_matches('/'), path))
 }
 
 /// Build `{base}/order/{org_id}?branch={b}&channel=in_mall&place_name={p}&floor={f}&unit_number={u}`.
-fn in_mall_order_url(org_id: Uuid, branch_id: Uuid, place_name: &str, floor: &str, unit_number: &str) -> Result<String, AppError> {
-    let base = std::env::var("PUBLIC_ORDER_BASE_URL").map_err(|_| {
-        AppError::ServiceUnavailable("PUBLIC_ORDER_BASE_URL not configured".into())
-    })?;
+fn in_mall_order_url(
+    org_id: Uuid,
+    branch_id: Uuid,
+    place_name: &str,
+    floor: &str,
+    unit_number: &str,
+) -> Result<String, AppError> {
+    let base = std::env::var("PUBLIC_ORDER_BASE_URL")
+        .map_err(|_| AppError::ServiceUnavailable("PUBLIC_ORDER_BASE_URL not configured".into()))?;
     let p = urlencoding::encode(place_name);
     let f = urlencoding::encode(floor);
     let u = urlencoding::encode(unit_number);
     Ok(format!(
         "{}/order/{}?branch={}&channel=in_mall&place_name={}&floor={}&unit_number={}",
-        base.trim_end_matches('/'), org_id, branch_id, p, f, u
+        base.trim_end_matches('/'),
+        org_id,
+        branch_id,
+        p,
+        f,
+        u
     ))
 }
 
 /// Build `{base}/order/{org_id}` — org-wide branch picker.
 /// Org is the path segment; no branch pre-selection so the customer sees the picker.
 fn org_order_url(org_id: Uuid) -> Result<String, AppError> {
-    let base = std::env::var("PUBLIC_ORDER_BASE_URL").map_err(|_| {
-        AppError::ServiceUnavailable("PUBLIC_ORDER_BASE_URL not configured".into())
-    })?;
+    let base = std::env::var("PUBLIC_ORDER_BASE_URL")
+        .map_err(|_| AppError::ServiceUnavailable("PUBLIC_ORDER_BASE_URL not configured".into()))?;
     Ok(format!("{}/order/{}", base.trim_end_matches('/'), org_id))
 }
 
@@ -197,12 +204,11 @@ async fn load_branch_checked(
     claims: &Claims,
     branch_id: Uuid,
 ) -> Result<(Uuid, Uuid), AppError> {
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT id, org_id FROM branches WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(branch_id)
-    .fetch_optional(pool)
-    .await?;
+    let row: Option<(Uuid, Uuid)> =
+        sqlx::query_as("SELECT id, org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
+            .bind(branch_id)
+            .fetch_optional(pool)
+            .await?;
     let (id, org_id) = row.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
     require_same_org(claims, Some(org_id))?;
     Ok((id, org_id))
@@ -261,7 +267,11 @@ pub async fn branch_qr(
 
     // When all three in-mall location fields are provided, generate a pre-filled
     // in-mall URL and use a separate dedup key so each location gets its own code.
-    let in_mall = match (&in_mall_q.place_name, &in_mall_q.floor, &in_mall_q.unit_number) {
+    let in_mall = match (
+        &in_mall_q.place_name,
+        &in_mall_q.floor,
+        &in_mall_q.unit_number,
+    ) {
         (Some(p), Some(f), Some(u)) if !p.is_empty() && !f.is_empty() && !u.is_empty() => {
             Some((p.clone(), f.clone(), u.clone()))
         }
@@ -280,7 +290,10 @@ pub async fn branch_qr(
 
     let q_with_caption = if q.caption.is_none() {
         if let Some(cap) = auto_caption {
-            QrRenderQuery { caption: Some(cap), ..q.into_inner() }
+            QrRenderQuery {
+                caption: Some(cap),
+                ..q.into_inner()
+            }
         } else {
             q.into_inner()
         }
@@ -575,12 +588,11 @@ pub async fn delivery_order_qr(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "delivery_orders", "read").await?;
 
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT id, org_id FROM delivery_orders WHERE id = $1",
-    )
-    .bind(*id)
-    .fetch_optional(pool.get_ref())
-    .await?;
+    let row: Option<(Uuid, Uuid)> =
+        sqlx::query_as("SELECT id, org_id FROM delivery_orders WHERE id = $1")
+            .bind(*id)
+            .fetch_optional(pool.get_ref())
+            .await?;
     let (order_id, org_id) =
         row.ok_or_else(|| AppError::NotFound("Delivery order not found".into()))?;
     require_same_org(&claims, Some(org_id))?;

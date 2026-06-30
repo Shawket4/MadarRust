@@ -1,5 +1,5 @@
-use actix_web::web;
 use crate::{auth::middleware::JwtMiddleware, payment_methods::handlers::*};
+use actix_web::web;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
@@ -9,6 +9,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("", web::post().to(create_payment_method))
             .route("/{id}", web::put().to(update_payment_method))
             .route("/{id}/activate", web::post().to(activate_payment_method))
-            .route("/{id}/deactivate", web::post().to(deactivate_payment_method))
+            .route(
+                "/{id}/deactivate",
+                web::post().to(deactivate_payment_method),
+            ),
     );
 }

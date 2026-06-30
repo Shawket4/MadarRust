@@ -1,9 +1,9 @@
-use actix_web::{web, HttpRequest, HttpResponse};
-use chrono::{DateTime, Utc, NaiveTime, NaiveDate};
+use actix_web::HttpMessage;
+use actix_web::{HttpRequest, HttpResponse, web};
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
-use actix_web::HttpMessage;
 
 use crate::{
     auth::{guards::require_same_org, jwt::Claims},
@@ -229,7 +229,7 @@ pub async fn compute_item_cost(pool: &PgPool, item_id: Uuid) -> Result<Option<i3
         WHERE r.menu_item_id = $1
           AND r.size_label = COALESCE(
               (SELECT size_label FROM menu_item_recipes WHERE menu_item_id = $1 ORDER BY size_label LIMIT 1),
-              'one_size'::item_size
+              'one_size'
           )
         "#
     )
@@ -241,12 +241,15 @@ pub async fn compute_item_cost(pool: &PgPool, item_id: Uuid) -> Result<Option<i3
     Ok(cost.map(|c| c.round() as i32))
 }
 
-pub async fn fetch_bundle_full(pool: &PgPool, id: Uuid) -> Result<Option<BundleWithComponents>, AppError> {
+pub async fn fetch_bundle_full(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<BundleWithComponents>, AppError> {
     let bundle = sqlx::query_as::<_, Bundle>(
         "SELECT id, org_id, name, name_translations, description, description_translations, \
                 price, status, image_url, available_from_time, available_until_time, \
                 available_from_date, available_until_date, created_at, updated_at, created_by \
-         FROM bundles WHERE id = $1"
+         FROM bundles WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -264,7 +267,7 @@ pub async fn fetch_bundle_full(pool: &PgPool, id: Uuid) -> Result<Option<BundleW
         JOIN menu_items mi ON mi.id = bc.item_id
         WHERE bc.bundle_id = $1
         ORDER BY bc.position ASC, bc.id ASC
-        "#
+        "#,
     )
     .bind(id)
     .fetch_all(pool)
@@ -290,12 +293,11 @@ pub async fn fetch_bundle_full(pool: &PgPool, id: Uuid) -> Result<Option<BundleW
         });
     }
 
-    let branch_rows: Vec<(Uuid,)> = sqlx::query_as(
-        "SELECT branch_id FROM bundle_branch_availability WHERE bundle_id = $1"
-    )
-    .bind(id)
-    .fetch_all(pool)
-    .await?;
+    let branch_rows: Vec<(Uuid,)> =
+        sqlx::query_as("SELECT branch_id FROM bundle_branch_availability WHERE bundle_id = $1")
+            .bind(id)
+            .fetch_all(pool)
+            .await?;
 
     let branch_ids = branch_rows.into_iter().map(|r| r.0).collect();
 
@@ -315,7 +317,9 @@ async fn validate_bundle_rules(
 ) -> Result<(), AppError> {
     // 1. Components count: [2, 6]
     if components.len() < 2 || components.len() > 6 {
-        return Err(AppError::BadRequest("A bundle must contain between 2 and 6 components".into()));
+        return Err(AppError::BadRequest(
+            "A bundle must contain between 2 and 6 components".into(),
+        ));
     }
 
     let item_ids: Vec<Uuid> = components.iter().map(|c| c.item_id).collect();
@@ -324,7 +328,9 @@ async fn validate_bundle_rules(
     let mut unique_item_ids = std::collections::HashSet::new();
     for id in &item_ids {
         if !unique_item_ids.insert(*id) {
-            return Err(AppError::BadRequest("Duplicate components are not allowed".into()));
+            return Err(AppError::BadRequest(
+                "Duplicate components are not allowed".into(),
+            ));
         }
     }
 
@@ -337,7 +343,9 @@ async fn validate_bundle_rules(
     .await?;
 
     if active_items.len() != item_ids.len() {
-        return Err(AppError::BadRequest("One or more components do not exist or have been deleted".into()));
+        return Err(AppError::BadRequest(
+            "One or more components do not exist or have been deleted".into(),
+        ));
     }
 
     let mut sum_costs = 0;
@@ -346,10 +354,15 @@ async fn validate_bundle_rules(
     for c in components {
         let item_info = active_items.iter().find(|i| i.0 == c.item_id).unwrap();
         if item_info.1 != org_id {
-            return Err(AppError::BadRequest("All components must belong to the same organization".into()));
+            return Err(AppError::BadRequest(
+                "All components must belong to the same organization".into(),
+            ));
         }
         if !item_info.3 {
-            return Err(AppError::BadRequest(format!("Component {} is inactive", item_info.0)));
+            return Err(AppError::BadRequest(format!(
+                "Component {} is inactive",
+                item_info.0
+            )));
         }
 
         sum_list_prices += item_info.2 * c.quantity;
@@ -369,18 +382,20 @@ async fn validate_bundle_rules(
 
     // 4. Margin floor: Bundle Price >= 1.20 * Sum Costs
     if (price as f64) < (sum_costs as f64 * 1.20) {
-        return Err(AppError::BadRequest(
-            format!("Bundle price must be at least 20% above components cost (Min: {}, Given: {})",
-                    (sum_costs as f64 * 1.20).round() as i32, price)
-        ));
+        return Err(AppError::BadRequest(format!(
+            "Bundle price must be at least 20% above components cost (Min: {}, Given: {})",
+            (sum_costs as f64 * 1.20).round() as i32,
+            price
+        )));
     }
 
     // 5. Discount perceivability: Bundle Price <= 0.97 * Sum List Prices
     if (price as f64) > (sum_list_prices as f64 * 0.97) {
-        return Err(AppError::BadRequest(
-            format!("Bundle price must be at least 3% below sum of components list prices (Max: {}, Given: {})",
-                    (sum_list_prices as f64 * 0.97).round() as i32, price)
-        ));
+        return Err(AppError::BadRequest(format!(
+            "Bundle price must be at least 3% below sum of components list prices (Max: {}, Given: {})",
+            (sum_list_prices as f64 * 0.97).round() as i32,
+            price
+        )));
     }
 
     Ok(())
@@ -404,7 +419,10 @@ pub async fn list_bundles(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
 
-    let org_id = query.org_id.or_else(|| claims.org_id()).ok_or_else(|| AppError::BadRequest("org_id is required".into()))?;
+    let org_id = query
+        .org_id
+        .or_else(|| claims.org_id())
+        .ok_or_else(|| AppError::BadRequest("org_id is required".into()))?;
     require_same_org(&claims, Some(org_id))?;
 
     // Clamp so a negative/zero page or out-of-range per_page can't produce a
@@ -414,7 +432,10 @@ pub async fn list_bundles(
     let per_page = query.per_page.unwrap_or(20).clamp(1, 500);
     let offset = (page - 1) * per_page;
 
-    let search_pattern = query.search.as_ref().map(|s| format!("%{}%", s.to_lowercase()));
+    let search_pattern = query
+        .search
+        .as_ref()
+        .map(|s| format!("%{}%", s.to_lowercase()));
 
     // Total Count
     let total: i64 = sqlx::query_scalar(
@@ -439,12 +460,12 @@ pub async fn list_bundles(
 
     // Page items IDs
     let order_by = match query.sort.as_deref() {
-        Some("name_asc")    => "LOWER(b.name) ASC",
-        Some("name_desc")   => "LOWER(b.name) DESC",
-        Some("price_asc")   => "b.price ASC",
-        Some("price_desc")  => "b.price DESC",
+        Some("name_asc") => "LOWER(b.name) ASC",
+        Some("name_desc") => "LOWER(b.name) DESC",
+        Some("price_asc") => "b.price ASC",
+        Some("price_desc") => "b.price DESC",
         Some("created_asc") => "b.created_at ASC",
-        _                   => "b.created_at DESC",
+        _ => "b.created_at DESC",
     };
     let ids: Vec<Uuid> = sqlx::query_scalar(&format!(
         r#"
@@ -506,18 +527,26 @@ pub async fn create_bundle(
     require_same_org(&claims, Some(body.org_id))?;
 
     if body.components.is_empty() {
-        return Err(AppError::BadRequest("A bundle must contain components".into()));
+        return Err(AppError::BadRequest(
+            "A bundle must contain components".into(),
+        ));
     }
 
     let mut tx = pool.begin().await?;
 
     let mut_body = body.into_inner();
-    let mut name_translations = mut_body.name_translations.clone().unwrap_or_else(|| serde_json::json!({}));
+    let mut name_translations = mut_body
+        .name_translations
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({}));
     crate::translation::ensure_translations_json(&mut name_translations, Some(&mut_body.name))
         .await
         .map_err(|_| AppError::Internal)?;
 
-    let mut description_translations = mut_body.description_translations.clone().unwrap_or_else(|| serde_json::json!({}));
+    let mut description_translations = mut_body
+        .description_translations
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({}));
     if let Some(desc) = &mut_body.description {
         crate::translation::ensure_translations_json(&mut description_translations, Some(desc))
             .await
@@ -534,7 +563,7 @@ pub async fn create_bundle(
         )
         VALUES ($1, $2, $3, $4, $5, $6, 'draft'::public.bundle_status, $7, $8, $9, $10, $11, $12)
         RETURNING *
-        "#
+        "#,
     )
     .bind(mut_body.org_id)
     .bind(&mut_body.name)
@@ -557,7 +586,7 @@ pub async fn create_bundle(
             r#"
             INSERT INTO bundle_components (bundle_id, item_id, quantity, position)
             VALUES ($1, $2, $3, $4)
-            "#
+            "#,
         )
         .bind(bundle.id)
         .bind(c.item_id)
@@ -571,7 +600,7 @@ pub async fn create_bundle(
     if let Some(branch_ids) = &mut_body.branch_ids {
         for b_id in branch_ids {
             sqlx::query(
-                "INSERT INTO bundle_branch_availability (bundle_id, branch_id) VALUES ($1, $2)"
+                "INSERT INTO bundle_branch_availability (bundle_id, branch_id) VALUES ($1, $2)",
             )
             .bind(bundle.id)
             .bind(b_id)
@@ -584,7 +613,7 @@ pub async fn create_bundle(
     sqlx::query(
         "INSERT INTO bundle_price_epochs \
              (bundle_id, price, effective_from, changed_by) \
-         VALUES ($1, $2, now(), $3)"
+         VALUES ($1, $2, now(), $3)",
     )
     .bind(bundle.id)
     .bind(mut_body.price)
@@ -653,7 +682,9 @@ pub async fn update_bundle(
     require_same_org(&claims, Some(original.bundle.org_id))?;
 
     if original.bundle.status == BundleStatus::Archived {
-        return Err(AppError::BadRequest("Archived bundles cannot be modified".into()));
+        return Err(AppError::BadRequest(
+            "Archived bundles cannot be modified".into(),
+        ));
     }
 
     let mut_body = body.into_inner();
@@ -666,9 +697,12 @@ pub async fn update_bundle(
             .map_err(|_| AppError::Internal)?;
     } else if let Some(new_tr) = mut_body.name_translations {
         name_translations = new_tr;
-        crate::translation::ensure_translations_json(&mut name_translations, Some(&original.bundle.name))
-            .await
-            .map_err(|_| AppError::Internal)?;
+        crate::translation::ensure_translations_json(
+            &mut name_translations,
+            Some(&original.bundle.name),
+        )
+        .await
+        .map_err(|_| AppError::Internal)?;
     }
 
     let mut description_translations = original.bundle.description_translations.clone();
@@ -687,28 +721,34 @@ pub async fn update_bundle(
 
     // Prepare updated values
     let name = mut_body.name.as_ref().unwrap_or(&original.bundle.name);
-    let description = mut_body.description.as_ref().or(original.bundle.description.as_ref());
+    let description = mut_body
+        .description
+        .as_ref()
+        .or(original.bundle.description.as_ref());
     let price = mut_body.price.unwrap_or(original.bundle.price);
-    let image_url = mut_body.image_url.as_ref().or(original.bundle.image_url.as_ref());
+    let image_url = mut_body
+        .image_url
+        .as_ref()
+        .or(original.bundle.image_url.as_ref());
     // Option<Option<T>> semantics:
     //   None        → field was absent from the request → keep existing value
     //   Some(None)  → field was explicitly `null`       → clear (no restriction)
     //   Some(Some(v)) → field was set to a new value    → use new value
     let available_from_time = match mut_body.available_from_time {
-        Some(v) => v,                                    // Some(None) clears, Some(Some(t)) sets
-        None    => original.bundle.available_from_time,  // omitted → keep
+        Some(v) => v,                                // Some(None) clears, Some(Some(t)) sets
+        None => original.bundle.available_from_time, // omitted → keep
     };
     let available_until_time = match mut_body.available_until_time {
         Some(v) => v,
-        None    => original.bundle.available_until_time,
+        None => original.bundle.available_until_time,
     };
     let available_from_date = match mut_body.available_from_date {
         Some(v) => v,
-        None    => original.bundle.available_from_date,
+        None => original.bundle.available_from_date,
     };
     let available_until_date = match mut_body.available_until_date {
         Some(v) => v,
-        None    => original.bundle.available_until_date,
+        None => original.bundle.available_until_date,
     };
 
     // If components are being updated
@@ -725,7 +765,7 @@ pub async fn update_bundle(
                 r#"
                 INSERT INTO bundle_components (bundle_id, item_id, quantity, position)
                 VALUES ($1, $2, $3, $4)
-                "#
+                "#,
             )
             .bind(original.bundle.id)
             .bind(c.item_id)
@@ -759,7 +799,7 @@ pub async fn update_bundle(
 
         for b_id in branch_ids {
             sqlx::query(
-                "INSERT INTO bundle_branch_availability (bundle_id, branch_id) VALUES ($1, $2)"
+                "INSERT INTO bundle_branch_availability (bundle_id, branch_id) VALUES ($1, $2)",
             )
             .bind(original.bundle.id)
             .bind(b_id)
@@ -788,7 +828,7 @@ pub async fn update_bundle(
             available_until_time = $8, available_from_date = $9, available_until_date = $10,
             updated_at = NOW()
         WHERE id = $11
-        "#
+        "#,
     )
     .bind(name)
     .bind(&name_translations)
@@ -809,7 +849,7 @@ pub async fn update_bundle(
         sqlx::query(
             "UPDATE bundle_price_epochs \
              SET effective_until = now() \
-             WHERE bundle_id = $1 AND effective_until IS NULL"
+             WHERE bundle_id = $1 AND effective_until IS NULL",
         )
         .bind(original.bundle.id)
         .execute(&mut *tx)
@@ -818,7 +858,7 @@ pub async fn update_bundle(
         sqlx::query(
             "INSERT INTO bundle_price_epochs \
                  (bundle_id, price, effective_from, changed_by) \
-             VALUES ($1, $2, now(), $3)"
+             VALUES ($1, $2, now(), $3)",
         )
         .bind(original.bundle.id)
         .bind(price)
@@ -852,13 +892,11 @@ pub async fn delete_bundle(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "delete").await?;
 
-    let bundle_org: Option<Uuid> = sqlx::query_scalar(
-        "SELECT org_id FROM bundles WHERE id = $1"
-    )
-    .bind(*id)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .flatten();
+    let bundle_org: Option<Uuid> = sqlx::query_scalar("SELECT org_id FROM bundles WHERE id = $1")
+        .bind(*id)
+        .fetch_optional(pool.get_ref())
+        .await?
+        .flatten();
 
     let Some(org_id) = bundle_org else {
         return Err(AppError::NotFound("Bundle not found".into()));
@@ -867,15 +905,16 @@ pub async fn delete_bundle(
     require_same_org(&claims, Some(org_id))?;
 
     // Check if it has historical sales
-    let sales_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM order_items WHERE bundle_id = $1"
-    )
-    .bind(*id)
-    .fetch_one(pool.get_ref())
-    .await?;
+    let sales_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM order_items WHERE bundle_id = $1")
+            .bind(*id)
+            .fetch_one(pool.get_ref())
+            .await?;
 
     if sales_count > 0 {
-        return Err(AppError::Conflict("Cannot delete a bundle with historical sales. Please archive it instead.".into()));
+        return Err(AppError::Conflict(
+            "Cannot delete a bundle with historical sales. Please archive it instead.".into(),
+        ));
     }
 
     // Hard delete
@@ -921,11 +960,15 @@ pub async fn activate_bundle(
         return Err(AppError::BadRequest("Bundle is already active".into()));
     }
     if full.bundle.status == BundleStatus::Archived {
-        return Err(AppError::BadRequest("Archived bundles cannot be reactivated".into()));
+        return Err(AppError::BadRequest(
+            "Archived bundles cannot be reactivated".into(),
+        ));
     }
 
     // Translate hydrated components to validation format
-    let components: Vec<CreateBundleComponentInput> = full.components.iter()
+    let components: Vec<CreateBundleComponentInput> = full
+        .components
+        .iter()
         .map(|c| CreateBundleComponentInput {
             item_id: c.item_id,
             quantity: c.quantity,
@@ -973,13 +1016,12 @@ pub async fn archive_bundle(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
 
-    let bundle: (Uuid, String) = sqlx::query_as(
-        "SELECT org_id, status::text FROM bundles WHERE id = $1"
-    )
-    .bind(*id)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .ok_or_else(|| AppError::NotFound("Bundle not found".into()))?;
+    let bundle: (Uuid, String) =
+        sqlx::query_as("SELECT org_id, status::text FROM bundles WHERE id = $1")
+            .bind(*id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .ok_or_else(|| AppError::NotFound("Bundle not found".into()))?;
 
     require_same_org(&claims, Some(bundle.0))?;
 
@@ -994,9 +1036,7 @@ pub async fn archive_bundle(
     .execute(pool.get_ref())
     .await?;
 
-    let archived = fetch_bundle_full(pool.get_ref(), *id)
-        .await?
-        .unwrap();
+    let archived = fetch_bundle_full(pool.get_ref(), *id).await?.unwrap();
 
     Ok(HttpResponse::Ok().json(archived))
 }
@@ -1023,7 +1063,7 @@ pub async fn available_bundles(
     let branch: (Uuid, String) = sqlx::query_as(
         "SELECT b.org_id, COALESCE(b.timezone, o.timezone)::text
          FROM branches b JOIN organizations o ON o.id = b.org_id
-         WHERE b.id = $1 AND b.deleted_at IS NULL"
+         WHERE b.id = $1 AND b.deleted_at IS NULL",
     )
     .bind(query.branch_id)
     .fetch_optional(pool.get_ref())
@@ -1105,12 +1145,10 @@ pub async fn bundle_performance(
 
     let id = id.into_inner();
 
-    let bundle_org: Option<Uuid> = sqlx::query_scalar(
-        "SELECT org_id FROM bundles WHERE id = $1"
-    )
-    .bind(id)
-    .fetch_optional(pool.get_ref())
-    .await?;
+    let bundle_org: Option<Uuid> = sqlx::query_scalar("SELECT org_id FROM bundles WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool.get_ref())
+        .await?;
 
     let Some(org_id) = bundle_org else {
         return Err(AppError::NotFound("Bundle not found".into()));
@@ -1127,7 +1165,7 @@ pub async fn bundle_performance(
           AND o.status != 'voided'
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        "#
+        "#,
     )
     .bind(id)
     .bind(query.start_date)
@@ -1174,7 +1212,7 @@ pub async fn bundle_performance(
           AND oi.cost_missing = false
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        "#
+        "#,
     )
     .bind(id)
     .bind(query.start_date)

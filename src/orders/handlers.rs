@@ -1,10 +1,10 @@
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
+use chrono::Utc;
+use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
-use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
-use chrono::Utc;
 
 use crate::{
     auth::jwt::Claims,
@@ -61,95 +61,97 @@ const ORDER_SUMMARY_COLS: &str =
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct Order {
-    pub id:                 Uuid,
-    pub branch_id:          Uuid,
-    pub shift_id:           Uuid,
-    pub teller_id:          Uuid,
-    pub teller_name:        String,
-    pub order_number:       i32,
+    pub id: Uuid,
+    pub branch_id: Uuid,
+    pub shift_id: Uuid,
+    pub teller_id: Uuid,
+    pub teller_name: String,
+    pub order_number: i32,
     /// Human-readable, org-unique reference (e.g. "DT-260614-0042"). Additive
     /// alongside the per-shift order_number. Optional only during the rollout
     /// window before the historical backfill runs; never null afterwards.
-    pub order_ref:          Option<String>,
-    pub status:             String,
-    pub payment_method:     String,
-    pub subtotal:           i32,
-    pub discount_type:      Option<String>,
-    pub discount_value:     i32,
-    pub discount_amount:    i32,
-    pub tax_amount:         i32,
-    pub total_amount:       i32,
-    pub amount_tendered:    Option<i32>,
-    pub change_given:       Option<i32>,
-    pub tip_amount:         Option<i32>,
+    pub order_ref: Option<String>,
+    pub status: String,
+    pub payment_method: String,
+    pub subtotal: i32,
+    pub discount_type: Option<String>,
+    pub discount_value: i32,
+    pub discount_amount: i32,
+    pub tax_amount: i32,
+    pub total_amount: i32,
+    pub amount_tendered: Option<i32>,
+    pub change_given: Option<i32>,
+    pub tip_amount: Option<i32>,
     pub tip_payment_method: Option<String>,
-    pub discount_id:        Option<Uuid>,
-    pub customer_name:      Option<String>,
-    pub notes:              Option<String>,
+    pub discount_id: Option<Uuid>,
+    pub customer_name: Option<String>,
+    pub notes: Option<String>,
     /// Order origin: "dine_in" (POS sale) or "delivery" (finalized delivery
     /// order). Defaults to "dine_in" for every POS sale.
-    pub order_type:         String,
+    pub order_type: String,
     /// Delivery charge in piastres, shown separately from the item subtotal.
     /// Always 0 for dine-in orders; for delivery orders
     /// `total_amount == subtotal + tax_amount + delivery_fee` (minus discount).
-    pub delivery_fee:       i32,
+    pub delivery_fee: i32,
     /// Links a finalized delivery order back to its `delivery_orders` row
     /// (customer, address, channel, zone). `null` for dine-in orders.
-    pub delivery_order_id:  Option<Uuid>,
+    pub delivery_order_id: Option<Uuid>,
     /// Delivery channel ("in_mall" | "outside") of the linked delivery order,
     /// surfaced on the list so clients can flag + segment delivery orders
     /// without a per-order detail fetch. `null` for dine-in orders.
-    pub delivery_channel:   Option<String>,
+    pub delivery_channel: Option<String>,
     /// Customer location of the linked delivery order, so clients can link out
     /// to a map (e.g. Google Maps) without a per-order detail fetch. `null` for
     /// dine-in orders or delivery orders without captured coordinates.
-    pub delivery_lat:       Option<f64>,
-    pub delivery_lng:       Option<f64>,
-    pub voided_at:          Option<chrono::DateTime<chrono::Utc>>,
-    pub void_reason:        Option<String>,
-    pub void_note:          Option<String>,
-    pub voided_by:          Option<Uuid>,
-    pub created_at:         chrono::DateTime<chrono::Utc>,
+    pub delivery_lat: Option<f64>,
+    pub delivery_lng: Option<f64>,
+    pub voided_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub void_reason: Option<String>,
+    pub void_note: Option<String>,
+    pub voided_by: Option<Uuid>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct OrderItem {
-    pub id:                  Uuid,
-    pub order_id:            Uuid,
-    pub menu_item_id:        Option<Uuid>,
-    pub item_name:           String,
-    #[schema(value_type = Object)] pub name_translations: serde_json::Value,
-    pub size_label:          Option<String>,
-    pub unit_price:          i32,
-    pub quantity:            i32,
-    pub line_total:          i32,
-    pub notes:               Option<String>,
+    pub id: Uuid,
+    pub order_id: Uuid,
+    pub menu_item_id: Option<Uuid>,
+    pub item_name: String,
+    #[schema(value_type = Object)]
+    pub name_translations: serde_json::Value,
+    pub size_label: Option<String>,
+    pub unit_price: i32,
+    pub quantity: i32,
+    pub line_total: i32,
+    pub notes: Option<String>,
     pub deductions_snapshot: serde_json::Value,
-    pub bundle_id:           Option<Uuid>,
-    pub bundle_unit_price:   Option<i32>,
+    pub bundle_id: Option<Uuid>,
+    pub bundle_unit_price: Option<i32>,
     /// Full line COGS in piastres (recipe + addons + optionals + components).
     /// `null` ⟺ unknown.
-    pub line_cost:           Option<i64>,
+    pub line_cost: Option<i64>,
     /// Recipe-only cost per unit in piastres (incl. swaps). `null` ⟺ unknown
     /// or bundle line.
-    pub unit_cost:           Option<i64>,
+    pub unit_cost: Option<i64>,
     /// True when any cost component could not be resolved.
-    pub cost_missing:        bool,
+    pub cost_missing: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct OrderItemAddon {
-    pub id:            Uuid,
+    pub id: Uuid,
     pub order_item_id: Uuid,
     pub addon_item_id: Uuid,
-    pub addon_name:    String,
-    #[schema(value_type = Object)] pub name_translations: serde_json::Value,
-    pub unit_price:    i32,
-    pub quantity:      i32,
-    pub line_total:    i32,
+    pub addon_name: String,
+    #[schema(value_type = Object)]
+    pub name_translations: serde_json::Value,
+    pub unit_price: i32,
+    pub quantity: i32,
+    pub line_total: i32,
     /// Ingredient cost of this addon line in piastres. `null` ⟺ unknown, or
     /// a swap addon (its cost lives in the item's recipe cost).
-    pub line_cost:     Option<i64>,
+    pub line_cost: Option<i64>,
 }
 
 /// Serialize an `Option<BigDecimal>` as a JSON number (or null) instead of
@@ -170,15 +172,16 @@ where
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct OrderItemOptional {
-    pub id:               Uuid,
-    pub order_item_id:    Uuid,
+    pub id: Uuid,
+    pub order_item_id: Uuid,
     pub optional_field_id: Option<Uuid>,
-    pub field_name:       String,
-    #[schema(value_type = Object)] pub name_translations: serde_json::Value,
-    pub price:            i32,
+    pub field_name: String,
+    #[schema(value_type = Object)]
+    pub name_translations: serde_json::Value,
+    pub price: i32,
     pub org_ingredient_id: Option<Uuid>,
-    pub ingredient_name:  Option<String>,
-    pub ingredient_unit:  Option<String>,
+    pub ingredient_name: Option<String>,
+    pub ingredient_unit: Option<String>,
     // bigdecimal's Serialize emits a JSON STRING ("0.5"), but the OpenAPI schema
     // (and the generated client) advertise a `number`. Without this adapter the
     // POS can't decode the create-order response → the queued sale never acks and
@@ -188,7 +191,7 @@ pub struct OrderItemOptional {
     pub quantity_deducted: Option<sqlx::types::BigDecimal>,
     /// Ingredient cost per parent-item unit in piastres. `null` ⟺ unknown or
     /// no ingredient linked.
-    pub cost:             Option<i64>,
+    pub cost: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -215,74 +218,77 @@ pub struct OrderFull {
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct OrderDeliveryInfo {
     /// "in_mall" or "outside".
-    pub channel:              String,
-    pub customer_phone:       String,
-    pub place_name:           Option<String>,
-    pub floor:                Option<String>,
-    pub unit_number:          Option<String>,
-    pub landmark:             Option<String>,
-    pub address_line:         Option<String>,
-    pub delivery_notes:       Option<String>,
+    pub channel: String,
+    pub customer_phone: String,
+    pub place_name: Option<String>,
+    pub floor: Option<String>,
+    pub unit_number: Option<String>,
+    pub landmark: Option<String>,
+    pub address_line: Option<String>,
+    pub delivery_notes: Option<String>,
     /// Road distance (meters) used to price the delivery, when known.
     pub road_distance_meters: Option<i32>,
     /// Name of the matched delivery zone ring, when an outside order matched one.
-    pub zone_name:            Option<String>,
+    pub zone_name: Option<String>,
     /// Human-readable delivery reference (e.g. "D-DT-260614-0042").
-    pub delivery_ref:         Option<String>,
+    pub delivery_ref: Option<String>,
     /// Payment method the customer indicated at intake ("cash"/"card"); the
     /// teller confirms the actual method at finalize.
-    pub payment_method_hint:  Option<String>,
+    pub payment_method_hint: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct OrderBundleComponentAddon {
-    pub id:                Uuid,
-    pub order_line_id:     Uuid,
+    pub id: Uuid,
+    pub order_line_id: Uuid,
     pub component_item_id: Uuid,
-    pub addon_item_id:     Uuid,
-    pub addon_name:        String,
-    #[schema(value_type = Object)] pub name_translations: serde_json::Value,
-    pub unit_price:        i32,
-    pub quantity:          i32,
-    pub line_total:        i32,
+    pub addon_item_id: Uuid,
+    pub addon_name: String,
+    #[schema(value_type = Object)]
+    pub name_translations: serde_json::Value,
+    pub unit_price: i32,
+    pub quantity: i32,
+    pub line_total: i32,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct OrderBundleComponentOptional {
-    pub id:                Uuid,
-    pub order_line_id:     Uuid,
+    pub id: Uuid,
+    pub order_line_id: Uuid,
     pub component_item_id: Uuid,
     pub optional_field_id: Option<Uuid>,
-    pub field_name:        String,
-    #[schema(value_type = Object)] pub name_translations: serde_json::Value,
-    pub price:             i32,
+    pub field_name: String,
+    #[schema(value_type = Object)]
+    pub name_translations: serde_json::Value,
+    pub price: i32,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct OrderBundleComponentFull {
-    pub item_id:    Uuid,
-    pub item_name:  String,
-    #[schema(value_type = Object)] pub name_translations: serde_json::Value,
-    pub quantity:   i32,
+    pub item_id: Uuid,
+    pub item_name: String,
+    #[schema(value_type = Object)]
+    pub name_translations: serde_json::Value,
+    pub quantity: i32,
     pub size_label: Option<String>,
-    pub addons:     Vec<OrderBundleComponentAddon>,
-    pub optionals:  Vec<OrderBundleComponentOptional>,
+    pub addons: Vec<OrderBundleComponentAddon>,
+    pub optionals: Vec<OrderBundleComponentOptional>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct OrderItemFull {
     #[serde(flatten)]
-    pub item:              OrderItem,
-    pub addons:            Vec<OrderItemAddon>,
-    pub optionals:         Vec<OrderItemOptional>,
+    pub item: OrderItem,
+    pub addons: Vec<OrderItemAddon>,
+    pub optionals: Vec<OrderItemOptional>,
     #[serde(default)]
     pub bundle_components: Vec<OrderBundleComponentFull>,
 }
 
 #[derive(Deserialize, Serialize, ToSchema)]
 pub struct PaymentSplitInput {
-    pub method:    String,
-    pub amount:    i32,
+    pub method: String,
+    pub amount: i32,
     pub reference: Option<String>,
 }
 
@@ -291,114 +297,122 @@ pub use crate::orders::component_resolve::AddonInput;
 #[derive(Deserialize, Serialize, Default, ToSchema)]
 pub struct OrderItemInput {
     #[serde(default)]
-    pub menu_item_id:      Option<Uuid>,
+    pub menu_item_id: Option<Uuid>,
     #[serde(default)]
-    pub bundle_id:         Option<Uuid>,
+    pub bundle_id: Option<Uuid>,
     #[serde(default)]
-    pub size_label:        Option<String>,
-    pub quantity:          i32,
+    pub size_label: Option<String>,
+    pub quantity: i32,
     #[serde(default)]
-    pub addons:            Vec<AddonInput>,
+    pub addons: Vec<AddonInput>,
     #[serde(default)]
     pub optional_field_ids: Vec<Uuid>,
     #[serde(default)]
     pub bundle_components: Vec<crate::orders::component_resolve::BundleComponentInput>,
     #[serde(default)]
-    pub notes:             Option<String>,
+    pub notes: Option<String>,
     /// Charged unit price (piastres) the POS applied for this item/bundle line. When
     /// present it is RECORDED as the line's unit_price; absent → the server's expected
     /// (catalog + branch override) price is used. Recording what the customer was
     /// actually charged keeps the DB equal to the printed receipt even when the POS's
     /// synced menu/override prices are stale or it was offline at sale time.
     #[serde(default)]
-    pub unit_price:        Option<i32>,
+    pub unit_price: Option<i32>,
 }
 
 #[derive(Deserialize, Serialize, Default, ToSchema)]
 pub struct CreateOrderRequest {
-    pub branch_id:          Uuid,
-    pub shift_id:           Uuid,
-    pub payment_method:     String,
-    pub customer_name:      Option<String>,
-    pub notes:              Option<String>,
-    pub discount_type:      Option<String>,
-    pub discount_value:     Option<i32>,
-    pub discount_id:        Option<Uuid>,
-    pub amount_tendered:    Option<i32>,
-    pub tip_amount:         Option<i32>,
+    pub branch_id: Uuid,
+    pub shift_id: Uuid,
+    pub payment_method: String,
+    pub customer_name: Option<String>,
+    pub notes: Option<String>,
+    pub discount_type: Option<String>,
+    pub discount_value: Option<i32>,
+    pub discount_id: Option<Uuid>,
+    pub amount_tendered: Option<i32>,
+    pub tip_amount: Option<i32>,
     pub tip_payment_method: Option<String>,
-    pub payment_splits:     Option<Vec<PaymentSplitInput>>,
-    pub items:              Vec<OrderItemInput>,
-    pub created_at:         Option<chrono::DateTime<chrono::Utc>>,
+    pub payment_splits: Option<Vec<PaymentSplitInput>>,
+    pub items: Vec<OrderItemInput>,
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
     // ── Charged money breakdown (POS source of truth) ─────────────────────────
     // When supplied these are RECORDED VERBATIM as what the customer paid; the
     // server uses its catalog only to compute an expected total and flag
     // deviations (never reject). Omitted → the server computes them (legacy /
     // pre-update POS builds / tests).
-    #[serde(default)] pub subtotal:        Option<i32>,
-    #[serde(default)] pub discount_amount: Option<i32>,
-    #[serde(default)] pub tax_amount:      Option<i32>,
-    #[serde(default)] pub total_amount:    Option<i32>,
-    #[serde(default)] pub change_given:    Option<i32>,
+    #[serde(default)]
+    pub subtotal: Option<i32>,
+    #[serde(default)]
+    pub discount_amount: Option<i32>,
+    #[serde(default)]
+    pub tax_amount: Option<i32>,
+    #[serde(default)]
+    pub total_amount: Option<i32>,
+    #[serde(default)]
+    pub change_given: Option<i32>,
     // Exactly-once key. The canonical, in-body idempotency token (preferred over
     // the legacy `Idempotency-Key` header): a client mints it once per sale and
     // it rides inside the persisted offline payload, so a replay after a lost
     // response — even months later — dedups against `orders.idempotency_key`.
-    #[serde(default)] pub idempotency_key: Option<Uuid>,
+    #[serde(default)]
+    pub idempotency_key: Option<Uuid>,
     /// IGNORED by the server (accepted for backward compatibility only). The
     /// authoritative per-shift number is ALWAYS `MAX(order_number)+1` computed under
     /// the shift advisory lock — never the client value, which is used only on the
     /// device's local receipt. The byte-identical-at-reprint guarantee rides on
     /// `order_ref`, not this field. Two tills on one shift get distinct numbers
     /// (UNIQUE(shift_id, order_number) + the lock).
-    #[serde(default)] pub order_number: Option<i32>,
+    #[serde(default)]
+    pub order_number: Option<i32>,
     /// Client-minted order reference (`<BRANCH>-<YYMMDD>-<DEVICE>-<NNNN>`). Stored
     /// verbatim when present; absent → the server mints the deterministic
     /// shift-based ref. The global `UNIQUE(order_ref)` index keeps both paths
     /// collision-safe (a managed per-device code makes concurrent tills unique).
-    #[serde(default)] pub order_ref: Option<String>,
+    #[serde(default)]
+    pub order_ref: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, ToSchema)]
 pub struct VoidOrderRequest {
-    pub reason:            String,
+    pub reason: String,
     /// Free-text explanation. Required when `reason` is "other".
-    pub note:              Option<String>,
-    pub voided_at:         Option<chrono::DateTime<chrono::Utc>>,
+    pub note: Option<String>,
+    pub voided_at: Option<chrono::DateTime<chrono::Utc>>,
     pub restore_inventory: Option<bool>,
 }
 
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct ListOrdersQuery {
-    pub branch_id:      Option<Uuid>,
-    pub shift_id:       Option<Uuid>,
-    pub updated_after:  Option<chrono::DateTime<chrono::Utc>>,
-    pub page:           Option<i64>,
-    pub per_page:       Option<i64>,
-    pub teller_name:    Option<String>,
+    pub branch_id: Option<Uuid>,
+    pub shift_id: Option<Uuid>,
+    pub updated_after: Option<chrono::DateTime<chrono::Utc>>,
+    pub page: Option<i64>,
+    pub per_page: Option<i64>,
+    pub teller_name: Option<String>,
     pub payment_method: Option<String>,
-    pub status:         Option<String>,
-    pub from:           Option<chrono::DateTime<chrono::Utc>>,
-    pub to:             Option<chrono::DateTime<chrono::Utc>>,
+    pub status: Option<String>,
+    pub from: Option<chrono::DateTime<chrono::Utc>>,
+    pub to: Option<chrono::DateTime<chrono::Utc>>,
     /// Filter by order origin: "dine_in" or "delivery".
-    pub order_type:     Option<String>,
+    pub order_type: Option<String>,
     /// Filter delivery orders by channel: "in_mall" or "outside".
-    pub channel:        Option<String>,
+    pub channel: Option<String>,
     /// When true, each order in `data` embeds its full line items
     /// (addons/optionals/bundle components) — the response shape becomes
     /// [PaginatedOrdersFull]. Lets offline-first clients cache complete
     /// orders in one round trip instead of fetching each order separately.
-    pub include_items:  Option<bool>,
+    pub include_items: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct OrderSummary {
-    pub revenue:   i64,
+    pub revenue: i64,
     pub completed: i64,
-    pub voided:    i64,
+    pub voided: i64,
     pub discounts: i64,
-    pub tips:      i64,
+    pub tips: i64,
     /// Total delivery charges (piastres) across completed orders in scope.
     /// Lets the dashboard surface delivery revenue separately from item sales.
     #[serde(default)]
@@ -406,91 +420,91 @@ pub struct OrderSummary {
     // ── Delivery channel split (completed orders in scope) ──────────────
     /// Count of completed delivery orders.
     #[serde(default)]
-    pub delivery_orders:  i64,
+    pub delivery_orders: i64,
     /// Gross revenue (total_amount) of completed delivery orders.
     #[serde(default)]
     pub delivery_revenue: i64,
     /// In-mall channel: order count / gross revenue / delivery fees.
     #[serde(default)]
-    pub in_mall_orders:   i64,
+    pub in_mall_orders: i64,
     #[serde(default)]
-    pub in_mall_revenue:  i64,
+    pub in_mall_revenue: i64,
     #[serde(default)]
-    pub in_mall_fees:     i64,
+    pub in_mall_fees: i64,
     /// Outside channel: order count / gross revenue / delivery fees.
     #[serde(default)]
-    pub outside_orders:   i64,
+    pub outside_orders: i64,
     #[serde(default)]
-    pub outside_revenue:  i64,
+    pub outside_revenue: i64,
     #[serde(default)]
-    pub outside_fees:     i64,
+    pub outside_fees: i64,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct PaginatedOrders {
-    pub data:        Vec<Order>,
-    pub total:       i64,
-    pub page:        i64,
-    pub per_page:    i64,
+    pub data: Vec<Order>,
+    pub total: i64,
+    pub page: i64,
+    pub per_page: i64,
     pub total_pages: i64,
-    pub summary:     OrderSummary,   // ← add this
+    pub summary: OrderSummary, // ← add this
 }
 
 /// Same envelope as [PaginatedOrders] but each order carries its line items
 /// (returned when `include_items=true`).
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct PaginatedOrdersFull {
-    pub data:        Vec<OrderFull>,
-    pub total:       i64,
-    pub page:        i64,
-    pub per_page:    i64,
+    pub data: Vec<OrderFull>,
+    pub total: i64,
+    pub page: i64,
+    pub per_page: i64,
     pub total_pages: i64,
-    pub summary:     OrderSummary,
+    pub summary: OrderSummary,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
 pub struct OrderPayment {
-    pub id:        Uuid,
-    pub order_id:  Uuid,
-    pub method:    String,
-    pub amount:    i32,
+    pub id: Uuid,
+    pub order_id: Uuid,
+    pub method: String,
+    pub amount: i32,
     pub reference: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct OrderExport {
     #[serde(flatten)]
-    pub order:    Order,
-    pub items:    Vec<OrderItemFull>,
+    pub order: Order,
+    pub items: Vec<OrderItemFull>,
     pub payments: Vec<OrderPayment>,
 }
 
 #[derive(Serialize, ToSchema)]
 pub struct ExportResponse {
-    pub data:             Vec<OrderExport>,
-    pub total:            i64,
-    pub generated_at:     chrono::DateTime<chrono::Utc>,
-    pub summary:          OrderSummary,
-    pub ingredient_costs: std::collections::HashMap<Uuid, i32>,  // NEW: org_ingredient_id → cost_per_unit (piastres)
+    pub data: Vec<OrderExport>,
+    pub total: i64,
+    pub generated_at: chrono::DateTime<chrono::Utc>,
+    pub summary: OrderSummary,
+    pub ingredient_costs: std::collections::HashMap<Uuid, i32>, // NEW: org_ingredient_id → cost_per_unit (piastres)
 }
 
 #[derive(Deserialize, Serialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct ExportOrdersQuery {
-    pub branch_id:      Option<Uuid>,
-    pub shift_id:       Option<Uuid>,
-    pub teller_name:    Option<String>,
-    pub payment_method: Option<String>,   // same comma-separated semantics
-    pub status:         Option<String>,
-    pub from:           Option<chrono::DateTime<chrono::Utc>>,
-    pub to:             Option<chrono::DateTime<chrono::Utc>>,
+    pub branch_id: Option<Uuid>,
+    pub shift_id: Option<Uuid>,
+    pub teller_name: Option<String>,
+    pub payment_method: Option<String>, // same comma-separated semantics
+    pub status: Option<String>,
+    pub from: Option<chrono::DateTime<chrono::Utc>>,
+    pub to: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 // ── Deduction helper ──────────────────────────────────────────
 // The enriched `InventoryDeduction`, `LineCostSummary`, and the pure
 // `summarize_line_costs` rollup live in `cost_math` so they can be unit-tested
 // and fuzzed without a DB. Imported here so construction sites read unchanged.
-use crate::orders::cost_math::{summarize_line_costs, InventoryDeduction};
+use crate::orders::cost_math::{InventoryDeduction, summarize_line_costs};
 
 // ── POST /orders ──────────────────────────────────────────────
 
@@ -503,11 +517,11 @@ use crate::orders::cost_math::{summarize_line_costs, InventoryDeduction};
     security(("bearer_jwt" = []))
 )]
 pub async fn create_order(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
     // Optional so test apps (and any harness) that don't register the bus still
     // create orders — only the live KDS push is skipped when it's absent.
-    hub:  Option<web::Data<crate::realtime::hub::BranchEventHub>>,
+    hub: Option<web::Data<crate::realtime::hub::BranchEventHub>>,
     body: web::Json<CreateOrderRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -526,7 +540,13 @@ pub async fn create_order(
             .and_then(|v| v.to_str().ok())
             .and_then(|s| Uuid::parse_str(s).ok());
     }
-    create_order_inner(pool.clone(), body, ActingContext::live(&claims)?, hub.as_ref().map(|d| d.get_ref())).await
+    create_order_inner(
+        pool.clone(),
+        body,
+        ActingContext::live(&claims)?,
+        hub.as_ref().map(|d| d.get_ref()),
+    )
+    .await
 }
 
 /// Create-order core. LIVE attributes the order to the JWT teller and requires
@@ -537,21 +557,30 @@ pub async fn create_order(
 /// to land and must surface, not silently vanish — and dedup on the in-body
 /// idempotency key.
 pub(crate) async fn create_order_inner(
-    pool:  web::Data<PgPool>,
-    body:  web::Json<CreateOrderRequest>,
+    pool: web::Data<PgPool>,
+    body: web::Json<CreateOrderRequest>,
     actor: ActingContext,
     // The realtime bus, for firing a LIVE order to the KDS. `None` on replay (a
     // queued offline order is historical and must not re-appear on the kitchen).
-    hub:   Option<&crate::realtime::hub::BranchEventHub>,
+    hub: Option<&crate::realtime::hub::BranchEventHub>,
 ) -> Result<HttpResponse, AppError> {
     if let Some(key) = body.idempotency_key
-        && let Some(existing) = fetch_order_by_idempotency_key(pool.get_ref(), key, actor.org_id).await? {
-            let items = fetch_order_items_full(pool.get_ref(), existing.id).await?;
-            return Ok(HttpResponse::Ok().json(OrderFull { order: existing, items, warnings: Vec::new(), delivery: None }));
-        }
+        && let Some(existing) =
+            fetch_order_by_idempotency_key(pool.get_ref(), key, actor.org_id).await?
+    {
+        let items = fetch_order_items_full(pool.get_ref(), existing.id).await?;
+        return Ok(HttpResponse::Ok().json(OrderFull {
+            order: existing,
+            items,
+            warnings: Vec::new(),
+            delivery: None,
+        }));
+    }
 
     if body.items.is_empty() {
-        return Err(AppError::BadRequest("Order must have at least one item".into()));
+        return Err(AppError::BadRequest(
+            "Order must have at least one item".into(),
+        ));
     }
 
     // The order must attach to an OPEN shift at this branch — and, for a LIVE
@@ -565,7 +594,7 @@ pub(crate) async fn create_order_inner(
     let shift_ok: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM shifts \
          WHERE id = $1 AND branch_id = $2 AND status = 'open' \
-           AND ($3::uuid IS NULL OR teller_id = $3))"
+           AND ($3::uuid IS NULL OR teller_id = $3))",
     )
     .bind(body.shift_id)
     .bind(body.branch_id)
@@ -582,13 +611,17 @@ pub(crate) async fn create_order_inner(
     let org_id = actor.org_id;
 
     validate_payment_method(pool.get_ref(), org_id, &body.payment_method).await?;
-    if let Some(dt)  = &body.discount_type      { validate_discount_type(dt)?; }
-    if let Some(tpm) = &body.tip_payment_method { validate_payment_method(pool.get_ref(), org_id, tpm).await?; }
+    if let Some(dt) = &body.discount_type {
+        validate_discount_type(dt)?;
+    }
+    if let Some(tpm) = &body.tip_payment_method {
+        validate_payment_method(pool.get_ref(), org_id, tpm).await?;
+    }
 
     // Snapshot is_cash for every method now, so a later method rename / is_cash
     // flip can't rewrite this order's contribution to shift cash totals (V30).
     let pm_is_cash: std::collections::HashMap<String, bool> = sqlx::query_as::<_, (String, bool)>(
-        "SELECT name, is_cash FROM org_payment_methods WHERE org_id = $1"
+        "SELECT name, is_cash FROM org_payment_methods WHERE org_id = $1",
     )
     .bind(org_id)
     .fetch_all(pool.get_ref())
@@ -597,25 +630,29 @@ pub(crate) async fn create_order_inner(
     .collect();
     let is_cash_of = |m: &str| pm_is_cash.get(m).copied().unwrap_or(m == "cash");
 
-    let (resolved_discount_type, resolved_discount_value) =
-        if let Some(disc_id) = body.discount_id {
-            let row: Option<(String, i32)> = sqlx::query_as(
+    let (resolved_discount_type, resolved_discount_value) = if let Some(disc_id) = body.discount_id
+    {
+        let row: Option<(String, i32)> = sqlx::query_as(
                 "SELECT type::text, value FROM discounts WHERE id = $1 AND org_id = $2 AND is_active = true"
             )
             .bind(disc_id)
             .bind(org_id)
             .fetch_optional(pool.get_ref())
             .await?;
-            match row {
-                Some((dtype, dvalue)) => (Some(dtype), dvalue),
-                None => return Err(AppError::BadRequest("Discount not found or inactive".into())),
+        match row {
+            Some((dtype, dvalue)) => (Some(dtype), dvalue),
+            None => {
+                return Err(AppError::BadRequest(
+                    "Discount not found or inactive".into(),
+                ));
             }
-        } else {
-            (body.discount_type.clone(), body.discount_value.unwrap_or(0))
-        };
+        }
+    } else {
+        (body.discount_type.clone(), body.discount_value.unwrap_or(0))
+    };
 
     let tax_rate: sqlx::types::BigDecimal = sqlx::query_scalar(
-        "SELECT o.tax_rate FROM organizations o JOIN branches b ON b.org_id = o.id WHERE b.id = $1"
+        "SELECT o.tax_rate FROM organizations o JOIN branches b ON b.org_id = o.id WHERE b.id = $1",
     )
     .bind(body.branch_id)
     .fetch_one(pool.get_ref())
@@ -624,58 +661,58 @@ pub(crate) async fn create_order_inner(
     // ── Local types ───────────────────────────────────────────
     struct ResolvedOptional {
         optional_field_id: Uuid,
-        field_name:        String,
+        field_name: String,
         name_translations: serde_json::Value,
-        price:             i32,
+        price: i32,
         org_ingredient_id: Option<Uuid>,
-        ingredient_name:   Option<String>,
-        ingredient_unit:   Option<String>,
-        quantity_used:     Option<f64>,
+        ingredient_name: Option<String>,
+        ingredient_unit: Option<String>,
+        quantity_used: Option<f64>,
     }
 
     #[allow(dead_code)]
     struct ResolvedBundleComponent {
-        item_id:    Uuid,
-        item_name:  String,
+        item_id: Uuid,
+        item_name: String,
         name_translations: serde_json::Value,
-        quantity:   i32,
+        quantity: i32,
         size_label: Option<String>,
-        addons:     Vec<ResolvedAddon>,
-        optionals:  Vec<ResolvedOptional>,
+        addons: Vec<ResolvedAddon>,
+        optionals: Vec<ResolvedOptional>,
     }
 
     struct ResolvedItem {
-        menu_item_id:      Option<Uuid>,
-        item_name:         String,
+        menu_item_id: Option<Uuid>,
+        item_name: String,
         name_translations: serde_json::Value,
-        size_label:        Option<String>,
+        size_label: Option<String>,
         /// Charged unit price recorded on the line (client value, else expected).
-        unit_price:        i32,
+        unit_price: i32,
         /// True when this line's charged price/availability deviated from the catalog.
-        price_flagged:     bool,
-        quantity:          i32,
-        notes:             Option<String>,
-        addons:            Vec<ResolvedAddon>,
-        optionals:         Vec<ResolvedOptional>,
-        deductions:        Vec<InventoryDeduction>,
-        bundle_id:           Option<Uuid>,
-        bundle_unit_price:   Option<i32>,
-            bundle_components:   Vec<ResolvedBundleComponent>,
-        component_surcharge:   i32,
+        price_flagged: bool,
+        quantity: i32,
+        notes: Option<String>,
+        addons: Vec<ResolvedAddon>,
+        optionals: Vec<ResolvedOptional>,
+        deductions: Vec<InventoryDeduction>,
+        bundle_id: Option<Uuid>,
+        bundle_unit_price: Option<i32>,
+        bundle_components: Vec<ResolvedBundleComponent>,
+        component_surcharge: i32,
     }
 
     struct ResolvedAddon {
         addon_item_id: Uuid,
-        addon_name:    String,
+        addon_name: String,
         name_translations: serde_json::Value,
-        unit_price:    i32,
-        quantity:      i32,
+        unit_price: i32,
+        quantity: i32,
         /// False when the addon has no ingredient rows (additive addons only
         /// — swap addons fold into the recipe). No ingredients ⟹ cost-missing.
         has_ingredients: bool,
         /// True when this addon acted as a milk/coffee swap (cost lives in
         /// the recipe-scope deduction it replaced).
-        is_swap:       bool,
+        is_swap: bool,
     }
 
     let mut resolved_items: Vec<ResolvedItem> = Vec::new();
@@ -701,10 +738,19 @@ pub(crate) async fn create_order_inner(
         // `expected_addon_per_unit` is the catalog addon total per single item unit
         // (0 for bundles, whose surcharge is computed separately); `branch_disabled`
         // is true when this branch has the item turned off (flagged, not rejected).
-        let (resolved_menu_item_id, item_name, name_translations, unit_price, bundle_id, bundle_unit_price, expected_addon_per_unit, branch_disabled) = if let Some(b_id) = item_input.bundle_id {
+        let (
+            resolved_menu_item_id,
+            item_name,
+            name_translations,
+            unit_price,
+            bundle_id,
+            bundle_unit_price,
+            expected_addon_per_unit,
+            branch_disabled,
+        ) = if let Some(b_id) = item_input.bundle_id {
             // ── 1. Resolve Bundle ─────────────────────────────
             let bundle: (Uuid, String, i32, String) = sqlx::query_as(
-                "SELECT id, name, price, status::text FROM bundles WHERE id = $1 AND org_id = $2"
+                "SELECT id, name, price, status::text FROM bundles WHERE id = $1 AND org_id = $2",
             )
             .bind(b_id)
             .bind(org_id)
@@ -713,7 +759,10 @@ pub(crate) async fn create_order_inner(
             .ok_or_else(|| AppError::NotFound(format!("Bundle {} not found", b_id)))?;
 
             if bundle.3 != "active" {
-                return Err(AppError::BadRequest(format!("Bundle {} is not active", bundle.1)));
+                return Err(AppError::BadRequest(format!(
+                    "Bundle {} is not active",
+                    bundle.1
+                )));
             }
 
             // Branch availability
@@ -722,7 +771,7 @@ pub(crate) async fn create_order_inner(
                     SELECT 1 FROM bundle_branch_availability WHERE bundle_id = $1 AND branch_id = $2
                  ) OR NOT EXISTS(
                     SELECT 1 FROM bundle_branch_availability WHERE bundle_id = $1
-                 )"
+                 )",
             )
             .bind(bundle.0)
             .bind(body.branch_id)
@@ -730,14 +779,17 @@ pub(crate) async fn create_order_inner(
             .await?;
 
             if !available_in_branch {
-                return Err(AppError::BadRequest(format!("Bundle {} is not available in branch {}", bundle.1, body.branch_id)));
+                return Err(AppError::BadRequest(format!(
+                    "Bundle {} is not available in branch {}",
+                    bundle.1, body.branch_id
+                )));
             }
 
             // Date / Time window validation
             let order_time = body.created_at.unwrap_or_else(Utc::now);
             let branch_tz: String = sqlx::query_scalar(
                 "SELECT COALESCE(b.timezone, o.timezone)::text
-                 FROM branches b JOIN organizations o ON o.id = b.org_id WHERE b.id = $1"
+                 FROM branches b JOIN organizations o ON o.id = b.org_id WHERE b.id = $1",
             )
             .bind(body.branch_id)
             .fetch_one(pool.get_ref())
@@ -761,21 +813,37 @@ pub(crate) async fn create_order_inner(
                 .await?;
 
                 if let Some(from_d) = bundle_limits.0
-                    && local_date < from_d {
-                        return Err(AppError::BadRequest(format!("Bundle {} is not yet available", bundle.1)));
-                    }
+                    && local_date < from_d
+                {
+                    return Err(AppError::BadRequest(format!(
+                        "Bundle {} is not yet available",
+                        bundle.1
+                    )));
+                }
                 if let Some(until_d) = bundle_limits.1
-                    && local_date > until_d {
-                        return Err(AppError::BadRequest(format!("Bundle {} availability has expired", bundle.1)));
-                    }
+                    && local_date > until_d
+                {
+                    return Err(AppError::BadRequest(format!(
+                        "Bundle {} availability has expired",
+                        bundle.1
+                    )));
+                }
                 if let Some(from_t) = bundle_limits.2
-                    && local_time < from_t {
-                        return Err(AppError::BadRequest(format!("Bundle {} is not available at this hour", bundle.1)));
-                    }
+                    && local_time < from_t
+                {
+                    return Err(AppError::BadRequest(format!(
+                        "Bundle {} is not available at this hour",
+                        bundle.1
+                    )));
+                }
                 if let Some(until_t) = bundle_limits.3
-                    && local_time > until_t {
-                        return Err(AppError::BadRequest(format!("Bundle {} is not available at this hour", bundle.1)));
-                    }
+                    && local_time > until_t
+                {
+                    return Err(AppError::BadRequest(format!(
+                        "Bundle {} is not available at this hour",
+                        bundle.1
+                    )));
+                }
             }
 
             // Resolve components (client snapshot or catalog defaults)
@@ -791,24 +859,30 @@ pub(crate) async fn create_order_inner(
             .await?;
 
             if catalog.is_empty() {
-                return Err(AppError::BadRequest(format!("Bundle {} has no components", bundle.1)));
+                return Err(AppError::BadRequest(format!(
+                    "Bundle {} has no components",
+                    bundle.1
+                )));
             }
 
-            let catalog_map: std::collections::HashMap<Uuid, (i32, String, serde_json::Value)> = catalog
-                .iter()
-                .map(|(id, qty, name, tr)| (*id, (*qty, name.clone(), tr.clone())))
-                .collect();
+            let catalog_map: std::collections::HashMap<Uuid, (i32, String, serde_json::Value)> =
+                catalog
+                    .iter()
+                    .map(|(id, qty, name, tr)| (*id, (*qty, name.clone(), tr.clone())))
+                    .collect();
 
             let component_inputs: Vec<crate::orders::component_resolve::BundleComponentInput> =
                 if item_input.bundle_components.is_empty() {
                     catalog
                         .iter()
-                        .map(|(id, qty, _, _)| crate::orders::component_resolve::BundleComponentInput {
-                            item_id: *id,
-                            quantity: *qty,
-                            size_label: None,
-                            addons: vec![],
-                            optional_field_ids: vec![],
+                        .map(|(id, qty, _, _)| {
+                            crate::orders::component_resolve::BundleComponentInput {
+                                item_id: *id,
+                                quantity: *qty,
+                                size_label: None,
+                                addons: vec![],
+                                optional_field_ids: vec![],
+                            }
                         })
                         .collect()
                 } else {
@@ -816,7 +890,9 @@ pub(crate) async fn create_order_inner(
                 };
 
             for comp_in in component_inputs {
-                let Some((catalog_qty, item_name, name_translations)) = catalog_map.get(&comp_in.item_id) else {
+                let Some((catalog_qty, item_name, name_translations)) =
+                    catalog_map.get(&comp_in.item_id)
+                else {
                     return Err(AppError::BadRequest(format!(
                         "Item {} is not a component of bundle {}",
                         comp_in.item_id, bundle.1
@@ -841,21 +917,23 @@ pub(crate) async fn create_order_inner(
                 )
                 .await?;
 
-                component_surcharge += (config.addon_line + config.optional_line) * comp_in.quantity * item_input.quantity;
+                component_surcharge += (config.addon_line + config.optional_line)
+                    * comp_in.quantity
+                    * item_input.quantity;
 
                 for d in config.deductions {
                     deductions.push(InventoryDeduction {
                         org_ingredient_id: d.org_ingredient_id,
-                        ingredient_name:   d.ingredient_name,
-                        unit:              d.unit,
-                        quantity:          d.quantity,
-                        source:            format!("bundle_component:{}", item_name),
-                        category:          d.category,
-                        addon_item_id:     d.addon_item_id,
+                        ingredient_name: d.ingredient_name,
+                        unit: d.unit,
+                        quantity: d.quantity,
+                        source: format!("bundle_component:{}", item_name),
+                        category: d.category,
+                        addon_item_id: d.addon_item_id,
                         optional_field_id: d.optional_field_id,
                         component_item_id: Some(comp_in.item_id),
-                        cost_per_unit:     None,
-                        line_cost:         None,
+                        cost_per_unit: None,
+                        line_cost: None,
                     });
                 }
 
@@ -864,12 +942,12 @@ pub(crate) async fn create_order_inner(
                     .into_iter()
                     .map(|a| ResolvedAddon {
                         addon_item_id: a.addon_item_id,
-                        addon_name:    a.addon_name,
+                        addon_name: a.addon_name,
                         name_translations: a.name_translations,
-                        unit_price:    a.unit_price,
-                        quantity:      a.quantity,
+                        unit_price: a.unit_price,
+                        quantity: a.quantity,
                         has_ingredients: true, // component-level costing rolls up via deductions
-                        is_swap:       false,
+                        is_swap: false,
                     })
                     .collect();
 
@@ -878,28 +956,37 @@ pub(crate) async fn create_order_inner(
                     .into_iter()
                     .map(|o| ResolvedOptional {
                         optional_field_id: o.optional_field_id,
-                        field_name:        o.field_name,
+                        field_name: o.field_name,
                         name_translations: o.name_translations,
-                        price:             o.price,
+                        price: o.price,
                         org_ingredient_id: o.org_ingredient_id,
-                        ingredient_name:   o.ingredient_name,
-                        ingredient_unit:   o.ingredient_unit,
-                        quantity_used:     o.quantity_used,
+                        ingredient_name: o.ingredient_name,
+                        ingredient_unit: o.ingredient_unit,
+                        quantity_used: o.quantity_used,
                     })
                     .collect();
 
                 bundle_components.push(ResolvedBundleComponent {
-                    item_id:    comp_in.item_id,
-                    item_name:  item_name.clone(),
+                    item_id: comp_in.item_id,
+                    item_name: item_name.clone(),
                     name_translations: name_translations.clone(),
-                    quantity:   comp_in.quantity,
+                    quantity: comp_in.quantity,
                     size_label: comp_in.size_label.clone(),
-                    addons:     comp_addons,
-                    optionals:  comp_optionals,
+                    addons: comp_addons,
+                    optionals: comp_optionals,
                 });
             }
 
-            (None, bundle.1, serde_json::json!({}), bundle.2, Some(bundle.0), Some(bundle.2), 0, false)
+            (
+                None,
+                bundle.1,
+                serde_json::json!({}),
+                bundle.2,
+                Some(bundle.0),
+                Some(bundle.2),
+                0,
+                false,
+            )
         } else if let Some(m_item_id) = item_input.menu_item_id {
             // ── 2. Resolve Menu Item ──────────────────────────
             // Pull the branch override alongside the catalog row: the branch layer can
@@ -934,7 +1021,7 @@ pub(crate) async fn create_order_inner(
                     // override never silently changes an explicitly-priced size.)
                     let branch_size: Option<i32> = sqlx::query_scalar(
                         "SELECT price_override FROM branch_menu_size_overrides \
-                         WHERE branch_id = $1 AND menu_item_id = $2 AND size_label = $3::item_size"
+                         WHERE branch_id = $1 AND menu_item_id = $2 AND size_label = $3",
                     )
                     .bind(body.branch_id)
                     .bind(m_item_id)
@@ -947,7 +1034,7 @@ pub(crate) async fn create_order_inner(
                         None => {
                             let p: Option<i32> = sqlx::query_scalar(
                                 "SELECT price_override FROM item_sizes \
-                                 WHERE menu_item_id = $1 AND label = $2::item_size AND is_active = true"
+                                 WHERE menu_item_id = $1 AND label = $2 AND is_active = true",
                             )
                             .bind(m_item_id)
                             .bind(size)
@@ -978,56 +1065,69 @@ pub(crate) async fn create_order_inner(
             for d in config.deductions {
                 deductions.push(InventoryDeduction {
                     org_ingredient_id: d.org_ingredient_id,
-                    ingredient_name:   d.ingredient_name,
-                    unit:              d.unit,
-                    quantity:          d.quantity,
-                    source:            d.source,
-                    category:          d.category,
-                    addon_item_id:     d.addon_item_id,
+                    ingredient_name: d.ingredient_name,
+                    unit: d.unit,
+                    quantity: d.quantity,
+                    source: d.source,
+                    category: d.category,
+                    addon_item_id: d.addon_item_id,
                     optional_field_id: d.optional_field_id,
                     component_item_id: None,
-                    cost_per_unit:     None,
-                    line_cost:         None,
+                    cost_per_unit: None,
+                    line_cost: None,
                 });
             }
             for a in config.addons {
                 resolved_addons.push(ResolvedAddon {
-                    addon_item_id:     a.addon_item_id,
-                    addon_name:        a.addon_name,
+                    addon_item_id: a.addon_item_id,
+                    addon_name: a.addon_name,
                     name_translations: a.name_translations,
-                    unit_price:        a.unit_price,
-                    quantity:          a.quantity,
-                    has_ingredients:   a.has_ingredients,
-                    is_swap:           a.is_swap,
+                    unit_price: a.unit_price,
+                    quantity: a.quantity,
+                    has_ingredients: a.has_ingredients,
+                    is_swap: a.is_swap,
                 });
             }
             for o in config.optionals {
                 resolved_optionals.push(ResolvedOptional {
                     optional_field_id: o.optional_field_id,
-                    field_name:        o.field_name,
+                    field_name: o.field_name,
                     name_translations: o.name_translations,
-                    price:             o.price,
+                    price: o.price,
                     org_ingredient_id: o.org_ingredient_id,
-                    ingredient_name:   o.ingredient_name,
-                    ingredient_unit:   o.ingredient_unit,
-                    quantity_used:     o.quantity_used,
+                    ingredient_name: o.ingredient_name,
+                    ingredient_unit: o.ingredient_unit,
+                    quantity_used: o.quantity_used,
                 });
             }
 
             // Capture the catalog (expected) addon total per single item unit, then
             // overlay the POS's charged addon prices — recorded verbatim, with any
             // deviation surfaced via the line price flag below.
-            let expected_addon_per_unit: i32 =
-                resolved_addons.iter().map(|a| a.unit_price * a.quantity).sum();
+            let expected_addon_per_unit: i32 = resolved_addons
+                .iter()
+                .map(|a| a.unit_price * a.quantity)
+                .sum();
             for (i, a) in resolved_addons.iter_mut().enumerate() {
                 if let Some(p) = item_input.addons.get(i).and_then(|ai| ai.unit_price) {
                     a.unit_price = p;
                 }
             }
 
-            (Some(m_item_id), item_name, name_translations, unit_price, None, None, expected_addon_per_unit, branch_disabled)
+            (
+                Some(m_item_id),
+                item_name,
+                name_translations,
+                unit_price,
+                None,
+                None,
+                expected_addon_per_unit,
+                branch_disabled,
+            )
         } else {
-            return Err(AppError::BadRequest("Each line item must have either menu_item_id or bundle_id".into()));
+            return Err(AppError::BadRequest(
+                "Each line item must have either menu_item_id or bundle_id".into(),
+            ));
         };
 
         // `unit_price` from the resolution is the EXPECTED (catalog + branch override)
@@ -1040,7 +1140,10 @@ pub(crate) async fn create_order_inner(
         let charged_addon_per_unit: i32 = if bundle_id.is_some() {
             0
         } else {
-            resolved_addons.iter().map(|a| a.unit_price * a.quantity).sum()
+            resolved_addons
+                .iter()
+                .map(|a| a.unit_price * a.quantity)
+                .sum()
         };
         let optional_per_unit: i32 = if bundle_id.is_some() {
             0
@@ -1048,31 +1151,32 @@ pub(crate) async fn create_order_inner(
             resolved_optionals.iter().map(|o| o.price).sum()
         };
 
-        let charged_line_subtotal =
-            (unit_price + charged_addon_per_unit + optional_per_unit) * item_input.quantity
-                + component_surcharge;
+        let charged_line_subtotal = (unit_price + charged_addon_per_unit + optional_per_unit)
+            * item_input.quantity
+            + component_surcharge;
         let expected_line_subtotal =
-            (expected_unit_price + expected_addon_per_unit + optional_per_unit) * item_input.quantity
+            (expected_unit_price + expected_addon_per_unit + optional_per_unit)
+                * item_input.quantity
                 + component_surcharge;
 
         // Flag the line when the charged price deviated from the catalog, or the item
         // was disabled at this branch (a stale/offline sale — recorded, not rejected).
         let line_price_flagged = branch_disabled || charged_line_subtotal != expected_line_subtotal;
 
-        subtotal          += charged_line_subtotal;
+        subtotal += charged_line_subtotal;
         expected_subtotal += expected_line_subtotal;
 
         resolved_items.push(ResolvedItem {
-            menu_item_id:      resolved_menu_item_id,
+            menu_item_id: resolved_menu_item_id,
             item_name,
             name_translations,
-            size_label:        item_input.size_label.clone(),
+            size_label: item_input.size_label.clone(),
             unit_price,
-            price_flagged:     line_price_flagged,
-            quantity:          item_input.quantity,
-            notes:             item_input.notes.clone(),
-            addons:            resolved_addons,
-            optionals:         resolved_optionals,
+            price_flagged: line_price_flagged,
+            quantity: item_input.quantity,
+            notes: item_input.notes.clone(),
+            addons: resolved_addons,
+            optionals: resolved_optionals,
             deductions,
             bundle_id,
             bundle_unit_price,
@@ -1094,19 +1198,26 @@ pub(crate) async fn create_order_inner(
     // Server EXPECTED breakdown (catalog + branch override) — used only to detect and
     // flag deviations; it never overrides what the customer was actually charged.
     let expected_discount = calc_discount(expected_subtotal);
-    let expected_taxable  = expected_subtotal - expected_discount;
-    let expected_tax      = (expected_taxable as f64 * tax_rate_f64).round() as i32;
-    let expected_total    = expected_taxable + expected_tax;
+    let expected_taxable = expected_subtotal - expected_discount;
+    let expected_tax = (expected_taxable as f64 * tax_rate_f64).round() as i32;
+    let expected_total = expected_taxable + expected_tax;
 
     // RECORDED breakdown — the POS's charged numbers are the source of truth; any field
     // the POS omits falls back to a server computation over the charged subtotal
     // (legacy / pre-update POS builds / tests).
-    let subtotal        = body.subtotal.unwrap_or(subtotal);
-    let discount_amount = body.discount_amount.unwrap_or_else(|| calc_discount(subtotal)).clamp(0, subtotal);
-    let taxable         = subtotal - discount_amount;
-    let tax_amount      = body.tax_amount.unwrap_or_else(|| (taxable as f64 * tax_rate_f64).round() as i32);
-    let total_amount    = body.total_amount.unwrap_or(taxable + tax_amount);
-    let change_given    = body.change_given.or_else(|| body.amount_tendered.map(|t| (t - total_amount).max(0)));
+    let subtotal = body.subtotal.unwrap_or(subtotal);
+    let discount_amount = body
+        .discount_amount
+        .unwrap_or_else(|| calc_discount(subtotal))
+        .clamp(0, subtotal);
+    let taxable = subtotal - discount_amount;
+    let tax_amount = body
+        .tax_amount
+        .unwrap_or_else(|| (taxable as f64 * tax_rate_f64).round() as i32);
+    let total_amount = body.total_amount.unwrap_or(taxable + tax_amount);
+    let change_given = body
+        .change_given
+        .or_else(|| body.amount_tendered.map(|t| (t - total_amount).max(0)));
 
     // Split payments must reconcile to the order total. They are the SOLE source
     // of drawer cash in compute_system_cash, so a mismatch (POS bug / spoof) would
@@ -1127,7 +1238,7 @@ pub(crate) async fn create_order_inner(
         || subtotal != expected_subtotal
         || total_amount != expected_total;
 
-    let created_at   = body.created_at.unwrap_or_else(chrono::Utc::now);
+    let created_at = body.created_at.unwrap_or_else(chrono::Utc::now);
     // A future-dated order would mint its order_ref in a future business day and
     // hide the sale from "today" reports. An offline POS legitimately syncs PAST
     // timestamps, so reject only the future side (small clock-skew tolerance).
@@ -1144,9 +1255,13 @@ pub(crate) async fn create_order_inner(
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect();
-        let ingredient_costs =
-            crate::costing::ingredient_costs_at(pool.get_ref(), body.branch_id, &ingredient_ids, created_at)
-                .await?;
+        let ingredient_costs = crate::costing::ingredient_costs_at(
+            pool.get_ref(),
+            body.branch_id,
+            &ingredient_ids,
+            created_at,
+        )
+        .await?;
         for ri in &mut resolved_items {
             for d in &mut ri.deductions {
                 // Piastres per ingredient unit, straight from the catalog.
@@ -1176,12 +1291,11 @@ pub(crate) async fn create_order_inner(
     // branch (not the client-sent branch_id) and, for tellers, only onto their
     // own shift — so a sale can never be mis-registered onto the wrong shift or
     // branch.
-    let shift_row: Option<(Uuid, Uuid, String)> = sqlx::query_as(
-        "SELECT branch_id, teller_id, status::text FROM shifts WHERE id = $1"
-    )
-    .bind(body.shift_id)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let shift_row: Option<(Uuid, Uuid, String)> =
+        sqlx::query_as("SELECT branch_id, teller_id, status::text FROM shifts WHERE id = $1")
+            .bind(body.shift_id)
+            .fetch_optional(&mut *tx)
+            .await?;
     let (shift_branch_id, shift_teller_id, shift_status) = shift_row.ok_or_else(|| {
         AppError::Conflict("Shift was closed before the order could be recorded".into())
     })?;
@@ -1233,14 +1347,24 @@ pub(crate) async fn create_order_inner(
             .fetch_one(&mut *tx)
             .await?;
             let shift6 = body.shift_id.simple().to_string()[..6].to_uppercase();
-            format!("{}-{}-{}-{:03}", branch_code, biz_date.format("%y%m%d"), shift6, order_number)
+            format!(
+                "{}-{}-{}-{:03}",
+                branch_code,
+                biz_date.format("%y%m%d"),
+                shift6,
+                order_number
+            )
         }
     };
 
     // Snapshot whether the tip was paid in cash (V30) — only meaningful when a
     // tip exists; resolves the tip method now so a later rename can't change it.
     let tip_is_cash: Option<bool> = if body.tip_amount.unwrap_or(0) > 0 {
-        Some(is_cash_of(body.tip_payment_method.as_deref().unwrap_or(&body.payment_method)))
+        Some(is_cash_of(
+            body.tip_payment_method
+                .as_deref()
+                .unwrap_or(&body.payment_method),
+        ))
     } else {
         None
     };
@@ -1402,9 +1526,8 @@ pub(crate) async fn create_order_inner(
     };
 
     for resolved in resolved_items {
-        let line_total = resolved.unit_price * resolved.quantity
-            + resolved.component_surcharge;
-        let snapshot   = serde_json::to_value(&resolved.deductions)
+        let line_total = resolved.unit_price * resolved.quantity + resolved.component_surcharge;
+        let snapshot = serde_json::to_value(&resolved.deductions)
             .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
 
         let has_uncosted_addon = resolved
@@ -1485,7 +1608,8 @@ pub(crate) async fn create_order_inner(
                 .await?;
 
                 for addon in &comp.addons {
-                    let addon_line = addon.unit_price * addon.quantity * comp.quantity * resolved.quantity;
+                    let addon_line =
+                        addon.unit_price * addon.quantity * comp.quantity * resolved.quantity;
                     sqlx::query(
                         "INSERT INTO order_line_bundle_component_addons \
                             (order_line_id, component_item_id, addon_item_id, addon_name, name_translations, \
@@ -1540,9 +1664,7 @@ pub(crate) async fn create_order_inner(
                 let entries: Vec<&InventoryDeduction> = resolved
                     .deductions
                     .iter()
-                    .filter(|d| {
-                        d.source == "addon" && d.addon_item_id == Some(addon.addon_item_id)
-                    })
+                    .filter(|d| d.source == "addon" && d.addon_item_id == Some(addon.addon_item_id))
                     .collect();
                 if entries.is_empty() || entries.iter().any(|d| d.cost_per_unit.is_none()) {
                     None
@@ -1631,7 +1753,7 @@ pub(crate) async fn create_order_inner(
                 "UPDATE branch_inventory \
                  SET current_stock = current_stock - $1 \
                  WHERE branch_id = $2 AND org_ingredient_id = $3 \
-                 RETURNING id, current_stock::float8"
+                 RETURNING id, current_stock::float8",
             )
             .bind(deduction.quantity)
             .bind(body.branch_id)
@@ -1660,28 +1782,28 @@ pub(crate) async fn create_order_inner(
             crate::inventory::movements::record_movement(
                 &mut *tx,
                 crate::inventory::movements::MovementParams {
-                    branch_id:           body.branch_id,
-                    org_ingredient_id:   ing_id,
+                    branch_id: body.branch_id,
+                    org_ingredient_id: ing_id,
                     branch_inventory_id: Some(bi_id),
-                    movement_type:       "sale",
-                    quantity:            -deduction.quantity,
-                    balance_after:       Some(balance),
-                    unit_cost:           deduction.cost_per_unit.map(|c| c.round() as i64),
-                    reason:              None,
+                    movement_type: "sale",
+                    quantity: -deduction.quantity,
+                    balance_after: Some(balance),
+                    unit_cost: deduction.cost_per_unit.map(|c| c.round() as i64),
+                    reason: None,
                     below_zero,
-                    source_type:         Some("order"),
-                    source_id:           Some(order.id),
-                    note:                None,
-                    created_by:          Some(actor.teller_id),
+                    source_type: Some("order"),
+                    source_id: Some(order.id),
+                    note: None,
+                    created_by: Some(actor.teller_id),
                 },
             )
             .await?;
         }
 
         order_items_full.push(OrderItemFull {
-            item:              order_item,
-            addons:            addon_rows,
-            optionals:         optional_rows,
+            item: order_item,
+            addons: addon_rows,
+            optionals: optional_rows,
             bundle_components: vec![],
         });
     }
@@ -1711,9 +1833,21 @@ pub(crate) async fn create_order_inner(
     tx.commit().await?;
 
     if let (Some(hub), Some(kt_id)) = (hub, kitchen_ticket_id) {
-        crate::kitchen::publish_kitchen(pool.get_ref(), hub, body.branch_id, "kitchen.fired", kt_id).await;
+        crate::kitchen::publish_kitchen(
+            pool.get_ref(),
+            hub,
+            body.branch_id,
+            "kitchen.fired",
+            kt_id,
+        )
+        .await;
     }
-    Ok(HttpResponse::Created().json(OrderFull { order, items: order_items_full, warnings, delivery: None }))
+    Ok(HttpResponse::Created().json(OrderFull {
+        order,
+        items: order_items_full,
+        warnings,
+        delivery: None,
+    }))
 }
 
 // ── GET /orders ───────────────────────────────────────────────
@@ -1727,8 +1861,8 @@ pub(crate) async fn create_order_inner(
     security(("bearer_jwt" = []))
 )]
 pub async fn list_orders(
-    req:   HttpRequest,
-    pool:  web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     query: web::Query<ListOrdersQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1740,10 +1874,14 @@ pub async fn list_orders(
     } else {
         DEFAULT_PER_PAGE_BRANCH
     };
-    let per_page = query.per_page.unwrap_or(default_per_page).clamp(1, MAX_PER_PAGE);
-    let offset   = (page - 1) * per_page;
+    let per_page = query
+        .per_page
+        .unwrap_or(default_per_page)
+        .clamp(1, MAX_PER_PAGE);
+    let offset = (page - 1) * per_page;
 
-    let org_id = claims.org_id()
+    let org_id = claims
+        .org_id()
         .ok_or_else(|| AppError::Forbidden("No org in token".into()))?;
 
     let parsed_payment_methods = match &query.payment_method {
@@ -1762,17 +1900,14 @@ pub async fn list_orders(
     // branch_id is absent or the all-zeros (nil) UUID — every branch in the
     // caller's org (the "All branches" view). org_id was validated above, so
     // the org roll-up stays inside the caller's own org.
-    let all_branches = query.shift_id.is_none()
-        && query.branch_id.map_or(true, |b| b.is_nil());
+    let all_branches = query.shift_id.is_none() && query.branch_id.map_or(true, |b| b.is_nil());
 
     let (scope_condition, scope_id): (&str, Uuid) = if let Some(shift_id) = query.shift_id {
-        let bid: Option<Uuid> = sqlx::query_scalar(
-            "SELECT branch_id FROM shifts WHERE id = $1"
-        )
-        .bind(shift_id)
-        .fetch_optional(pool.get_ref())
-        .await?
-        .flatten();
+        let bid: Option<Uuid> = sqlx::query_scalar("SELECT branch_id FROM shifts WHERE id = $1")
+            .bind(shift_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .flatten();
         let bid = bid.ok_or_else(|| AppError::NotFound("Shift not found".into()))?;
         require_branch_access(pool.get_ref(), &claims, bid).await?;
         ("o.shift_id = $1", shift_id)
@@ -1782,44 +1917,56 @@ pub async fn list_orders(
             org_id,
         )
     } else {
-        let bid = query.branch_id.expect("branch_id present when not all_branches");
+        let bid = query
+            .branch_id
+            .expect("branch_id present when not all_branches");
         require_branch_access(pool.get_ref(), &claims, bid).await?;
         ("o.branch_id = $1", bid)
     };
 
-    let mut data_filter  = String::new();
+    let mut data_filter = String::new();
     let mut count_filter = String::new();
-    let mut data_idx  = 2i32;
+    let mut data_idx = 2i32;
     let mut count_idx = 2i32;
 
     macro_rules! push_filter {
         ($col:expr, $opt:expr) => {
             if $opt.is_some() {
-                data_filter.push_str( &format!(" AND {} ${}", $col, data_idx));
+                data_filter.push_str(&format!(" AND {} ${}", $col, data_idx));
                 count_filter.push_str(&format!(" AND {} ${}", $col, count_idx));
-                data_idx  += 1;
+                data_idx += 1;
                 count_idx += 1;
             }
         };
     }
 
-    push_filter!("u.name ILIKE",             query.teller_name);
+    push_filter!("u.name ILIKE", query.teller_name);
     if parsed_payment_methods.is_some() {
-        data_filter.push_str( &format!(" AND o.payment_method::text = ANY(${}::text[])", data_idx));
-        count_filter.push_str(&format!(" AND o.payment_method::text = ANY(${}::text[])", count_idx));
-        data_idx  += 1;
+        data_filter.push_str(&format!(
+            " AND o.payment_method::text = ANY(${}::text[])",
+            data_idx
+        ));
+        count_filter.push_str(&format!(
+            " AND o.payment_method::text = ANY(${}::text[])",
+            count_idx
+        ));
+        data_idx += 1;
         count_idx += 1;
     }
-    push_filter!("o.status::text =",         query.status);
-    push_filter!("o.created_at >=",          query.from);
-    push_filter!("o.created_at <=",          query.to);
-    push_filter!("o.updated_at >",           query.updated_after);
-    push_filter!("o.order_type =",           query.order_type);
-    push_filter!("d.channel::text =",        query.channel);
+    push_filter!("o.status::text =", query.status);
+    push_filter!("o.created_at >=", query.from);
+    push_filter!("o.created_at <=", query.to);
+    push_filter!("o.updated_at >", query.updated_after);
+    push_filter!("o.order_type =", query.order_type);
+    push_filter!("d.channel::text =", query.channel);
 
     let data_sql = format!(
         "{} WHERE {} {} ORDER BY o.created_at DESC LIMIT ${} OFFSET ${}",
-        ORDER_SELECT, scope_condition, data_filter, data_idx, data_idx + 1
+        ORDER_SELECT,
+        scope_condition,
+        data_filter,
+        data_idx,
+        data_idx + 1
     );
     let count_sql = format!(
         "SELECT COUNT(*) FROM orders o JOIN users u ON u.id = o.teller_id
@@ -1837,14 +1984,30 @@ pub async fn list_orders(
     macro_rules! bind_filters {
         ($q:expr) => {{
             let mut q = $q;
-            if let Some(ref v) = query.teller_name    { q = q.bind(format!("%{}%", v)); }
-            if let Some(v)     = &parsed_payment_methods { q = q.bind(v); }
-            if let Some(ref v) = query.status         { q = q.bind(v.clone()); }
-            if let Some(v)     = query.from            { q = q.bind(v); }
-            if let Some(v)     = query.to              { q = q.bind(v); }
-            if let Some(v)     = query.updated_after   { q = q.bind(v); }
-            if let Some(ref v) = query.order_type     { q = q.bind(v.clone()); }
-            if let Some(ref v) = query.channel        { q = q.bind(v.clone()); }
+            if let Some(ref v) = query.teller_name {
+                q = q.bind(format!("%{}%", v));
+            }
+            if let Some(v) = &parsed_payment_methods {
+                q = q.bind(v);
+            }
+            if let Some(ref v) = query.status {
+                q = q.bind(v.clone());
+            }
+            if let Some(v) = query.from {
+                q = q.bind(v);
+            }
+            if let Some(v) = query.to {
+                q = q.bind(v);
+            }
+            if let Some(v) = query.updated_after {
+                q = q.bind(v);
+            }
+            if let Some(ref v) = query.order_type {
+                q = q.bind(v.clone());
+            }
+            if let Some(ref v) = query.channel {
+                q = q.bind(v.clone());
+            }
             q
         }};
     }
@@ -1866,14 +2029,11 @@ pub async fn list_orders(
             .fetch_one(pool.get_ref())
             .await?;
 
-    let data: Vec<Order> = bind_filters!(
-        sqlx::query_as::<_, Order>(&data_sql)
-            .bind(scope_id)
-    )
-    .bind(per_page)
-    .bind(offset)
-    .fetch_all(pool.get_ref())
-    .await?;
+    let data: Vec<Order> = bind_filters!(sqlx::query_as::<_, Order>(&data_sql).bind(scope_id))
+        .bind(per_page)
+        .bind(offset)
+        .fetch_all(pool.get_ref())
+        .await?;
 
     let total_pages = (total as f64 / per_page as f64).ceil() as i64;
 
@@ -1884,15 +2044,32 @@ pub async fn list_orders(
             .into_iter()
             .map(|order| {
                 let items = items_map.remove(&order.id).unwrap_or_default();
-                OrderFull { order, items, warnings: Vec::new(), delivery: None }
+                OrderFull {
+                    order,
+                    items,
+                    warnings: Vec::new(),
+                    delivery: None,
+                }
             })
             .collect();
         return Ok(HttpResponse::Ok().json(PaginatedOrdersFull {
-            data, total, page, per_page, total_pages, summary,
+            data,
+            total,
+            page,
+            per_page,
+            total_pages,
+            summary,
         }));
     }
 
-    Ok(HttpResponse::Ok().json(PaginatedOrders { data, total, page, per_page, total_pages, summary }))
+    Ok(HttpResponse::Ok().json(PaginatedOrders {
+        data,
+        total,
+        page,
+        per_page,
+        total_pages,
+        summary,
+    }))
 }
 
 // ── GET /orders/:id ───────────────────────────────────────────
@@ -1906,8 +2083,8 @@ pub async fn list_orders(
     security(("bearer_jwt" = []))
 )]
 pub async fn get_order(
-    req:      HttpRequest,
-    pool:     web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     order_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1919,7 +2096,12 @@ pub async fn get_order(
         Some(did) => fetch_order_delivery_info(pool.get_ref(), did).await?,
         None => None,
     };
-    Ok(HttpResponse::Ok().json(OrderFull { order, items, warnings: Vec::new(), delivery }))
+    Ok(HttpResponse::Ok().json(OrderFull {
+        order,
+        items,
+        warnings: Vec::new(),
+        delivery,
+    }))
 }
 
 // ── POST /orders/:id/void ─────────────────────────────────────
@@ -1934,16 +2116,22 @@ pub async fn get_order(
     security(("bearer_jwt" = []))
 )]
 pub async fn void_order(
-    req:      HttpRequest,
-    pool:     web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     order_id: web::Path<Uuid>,
-    body:     web::Json<VoidOrderRequest>,
+    body: web::Json<VoidOrderRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "update").await?;
     let order = fetch_order_or_404(pool.get_ref(), *order_id).await?;
     require_branch_access(pool.get_ref(), &claims, order.branch_id).await?;
-    void_order_inner(pool.clone(), order_id.into_inner(), body, ActingContext::live(&claims)?).await
+    void_order_inner(
+        pool.clone(),
+        order_id.into_inner(),
+        body,
+        ActingContext::live(&claims)?,
+    )
+    .await
 }
 
 /// Void-order core. LIVE attributes `voided_by` to the JWT teller and blocks a
@@ -1951,13 +2139,15 @@ pub async fn void_order(
 /// queued op's teller and skips that guard — a queued void was rung while the
 /// shift was still open and is recorded history. Idempotent (guarded CAS).
 pub(crate) async fn void_order_inner(
-    pool:     web::Data<PgPool>,
+    pool: web::Data<PgPool>,
     order_id: Uuid,
-    body:     web::Json<VoidOrderRequest>,
-    actor:    ActingContext,
+    body: web::Json<VoidOrderRequest>,
+    actor: ActingContext,
 ) -> Result<HttpResponse, AppError> {
     let order = fetch_order_or_404(pool.get_ref(), order_id).await?;
-    if order.status == "voided" { return Ok(HttpResponse::Ok().json(order)); }
+    if order.status == "voided" {
+        return Ok(HttpResponse::Ok().json(order));
+    }
 
     // A teller may not rewrite the history of a SETTLED shift: once a shift is
     // closed / force-closed its cash is reconciled, so voiding one of its orders
@@ -1966,7 +2156,7 @@ pub(crate) async fn void_order_inner(
     // figure.) Replay bypasses this — the void happened while the shift was open.
     if !actor.replay && actor.role == UserRole::Teller {
         let shift_open: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND status = 'open')"
+            "SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND status = 'open')",
         )
         .bind(order.shift_id)
         .fetch_one(pool.get_ref())
@@ -1979,9 +2169,15 @@ pub(crate) async fn void_order_inner(
     }
 
     validate_void_reason(&body.reason)?;
-    let void_note = body.note.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let void_note = body
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     if body.reason == "other" && void_note.is_none() {
-        return Err(AppError::BadRequest("A note is required when void reason is 'other'".into()));
+        return Err(AppError::BadRequest(
+            "A note is required when void reason is 'other'".into(),
+        ));
     }
     let voided_at = body.voided_at.unwrap_or_else(chrono::Utc::now);
     // Offline voids carry their real time; reject only a future device clock.
@@ -2041,41 +2237,55 @@ pub(crate) async fn void_order_inner(
     // consistent with how a delivery cancel logs a made-but-not-restocked order,
     // instead of leaving an orphan `sale` deduction on a voided order.
     for item in items {
-        let Some(deductions) = item.item.deductions_snapshot.as_array() else { continue };
+        let Some(deductions) = item.item.deductions_snapshot.as_array() else {
+            continue;
+        };
         for d in deductions {
             let (Some(qty), Some(ing_id_str)) = (
                 d.get("quantity").and_then(|v| v.as_f64()),
                 d.get("org_ingredient_id").and_then(|v| v.as_str()),
-            ) else { continue };
-            let Ok(ing_id) = Uuid::parse_str(ing_id_str) else { continue };
-            let unit_cost = d.get("cost_per_unit").and_then(|v| v.as_f64()).map(|c| c.round() as i64);
+            ) else {
+                continue;
+            };
+            let Ok(ing_id) = Uuid::parse_str(ing_id_str) else {
+                continue;
+            };
+            let unit_cost = d
+                .get("cost_per_unit")
+                .and_then(|v| v.as_f64())
+                .map(|c| c.round() as i64);
 
             // Reverse the sale deduction (back into stock).
             let restored: Option<(Uuid, f64)> = sqlx::query_as(
                 "UPDATE branch_inventory SET current_stock = current_stock + $1 \
                  WHERE branch_id = $2 AND org_ingredient_id = $3 \
-                 RETURNING id, current_stock::float8"
+                 RETURNING id, current_stock::float8",
             )
-            .bind(qty).bind(order.branch_id).bind(ing_id)
-            .fetch_optional(&mut *tx).await?;
-            let Some((bi_id, balance)) = restored else { continue };
+            .bind(qty)
+            .bind(order.branch_id)
+            .bind(ing_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some((bi_id, balance)) = restored else {
+                continue;
+            };
 
             crate::inventory::movements::record_movement(
                 &mut *tx,
                 crate::inventory::movements::MovementParams {
-                    branch_id:           order.branch_id,
-                    org_ingredient_id:   ing_id,
+                    branch_id: order.branch_id,
+                    org_ingredient_id: ing_id,
                     branch_inventory_id: Some(bi_id),
-                    movement_type:       "void_restock",
-                    quantity:            qty,
-                    balance_after:       Some(balance),
+                    movement_type: "void_restock",
+                    quantity: qty,
+                    balance_after: Some(balance),
                     unit_cost,
-                    reason:              None,
-                    below_zero:          false,
-                    source_type:         Some("order"),
-                    source_id:           Some(order.id),
-                    note:                Some("Void restock"),
-                    created_by:          Some(actor.teller_id),
+                    reason: None,
+                    below_zero: false,
+                    source_type: Some("order"),
+                    source_id: Some(order.id),
+                    note: Some("Void restock"),
+                    created_by: Some(actor.teller_id),
                 },
             )
             .await?;
@@ -2085,27 +2295,30 @@ pub(crate) async fn void_order_inner(
                 let wasted: Option<(Uuid, f64)> = sqlx::query_as(
                     "UPDATE branch_inventory SET current_stock = current_stock - $1 \
                      WHERE branch_id = $2 AND org_ingredient_id = $3 \
-                     RETURNING id, current_stock::float8"
+                     RETURNING id, current_stock::float8",
                 )
-                .bind(qty).bind(order.branch_id).bind(ing_id)
-                .fetch_optional(&mut *tx).await?;
+                .bind(qty)
+                .bind(order.branch_id)
+                .bind(ing_id)
+                .fetch_optional(&mut *tx)
+                .await?;
                 if let Some((wbi, wbal)) = wasted {
                     crate::inventory::movements::record_movement(
                         &mut *tx,
                         crate::inventory::movements::MovementParams {
-                            branch_id:           order.branch_id,
-                            org_ingredient_id:   ing_id,
+                            branch_id: order.branch_id,
+                            org_ingredient_id: ing_id,
                             branch_inventory_id: Some(wbi),
-                            movement_type:       "waste",
-                            quantity:            -qty,
-                            balance_after:       Some(wbal),
+                            movement_type: "waste",
+                            quantity: -qty,
+                            balance_after: Some(wbal),
                             unit_cost,
-                            reason:              Some("order_cancelled"),
-                            below_zero:          wbal < 0.0,
-                            source_type:         Some("order"),
-                            source_id:           Some(order.id),
-                            note:                Some("Order voided — made, not restocked"),
-                            created_by:          Some(actor.teller_id),
+                            reason: Some("order_cancelled"),
+                            below_zero: wbal < 0.0,
+                            source_type: Some("order"),
+                            source_id: Some(order.id),
+                            note: Some("Order voided — made, not restocked"),
+                            created_by: Some(actor.teller_id),
                         },
                     )
                     .await?;
@@ -2129,9 +2342,9 @@ pub struct PreviewAddonInput {
 
 #[derive(Deserialize, Serialize, ToSchema)]
 pub struct PreviewRecipeRequest {
-    pub menu_item_id:      Uuid,
-    pub size_label:        Option<String>,
-    pub addons:            Vec<PreviewAddonInput>,
+    pub menu_item_id: Uuid,
+    pub size_label: Option<String>,
+    pub addons: Vec<PreviewAddonInput>,
     pub optional_field_ids: Vec<Uuid>,
 }
 
@@ -2139,10 +2352,10 @@ pub struct PreviewRecipeRequest {
 pub struct PreviewIngredient {
     pub org_ingredient_id: Option<Uuid>,
     pub ingredient_name: String,
-    pub unit:            String,
-    pub quantity:        f64,
-    pub source:          String,
-    pub category:        String,
+    pub unit: String,
+    pub quantity: f64,
+    pub source: String,
+    pub category: String,
 }
 
 #[utoipa::path(
@@ -2154,7 +2367,7 @@ pub struct PreviewIngredient {
     security(("bearer_jwt" = []))
 )]
 pub async fn preview_recipe(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
     body: web::Json<PreviewRecipeRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -2172,7 +2385,7 @@ pub async fn preview_recipe(
                           COALESCE(i.category, 'general') as category
                    FROM   menu_item_recipes r
                    LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id
-                   WHERE  r.menu_item_id = $1 AND r.size_label = $2::item_size"#,
+                   WHERE  r.menu_item_id = $1 AND r.size_label = $2"#,
             )
             .bind(body.menu_item_id)
             .bind(size)
@@ -2197,20 +2410,28 @@ pub async fn preview_recipe(
         };
 
     for (ing_id, qty, name, unit, category) in recipe_rows {
-        result.push(PreviewIngredient { org_ingredient_id: ing_id, ingredient_name: name, unit, quantity: qty, source: "drink_recipe".into(), category });
+        result.push(PreviewIngredient {
+            org_ingredient_id: ing_id,
+            ingredient_name: name,
+            unit,
+            quantity: qty,
+            source: "drink_recipe".into(),
+            category,
+        });
     }
 
     // Addons
     for addon in &body.addons {
         let addon_qty = addon.quantity.max(1) as f64;
-        
-        let (addon_name, addon_type): (String, String) = sqlx::query_as(
-            "SELECT name, type FROM addon_items WHERE id = $1"
-        )
-        .bind(addon.addon_item_id)
-        .fetch_optional(pool.get_ref())
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("Addon {} not found", addon.addon_item_id)))?;
+
+        let (addon_name, addon_type): (String, String) =
+            sqlx::query_as("SELECT name, type FROM addon_items WHERE id = $1")
+                .bind(addon.addon_item_id)
+                .fetch_optional(pool.get_ref())
+                .await?
+                .ok_or_else(|| {
+                    AppError::NotFound(format!("Addon {} not found", addon.addon_item_id))
+                })?;
 
         let rows: Vec<(Option<Uuid>, f64, String, String)> = sqlx::query_as(
             "SELECT org_ingredient_id, quantity_used::float8, ingredient_name, ingredient_unit
@@ -2228,29 +2449,27 @@ pub async fn preview_recipe(
 
         if let Some(cat) = target_category {
             // Find the base recipe's ingredient for this category
-            let base_ing_id = result.iter()
+            let base_ing_id = result
+                .iter()
                 .find(|r| r.source == "drink_recipe" && r.category == cat)
                 .and_then(|r| r.org_ingredient_id);
 
             // Find the addon's ingredient
-            let addon_ing_id = rows.first()
-                .and_then(|(id, _, _, _)| *id);
+            let addon_ing_id = rows.first().and_then(|(id, _, _, _)| *id);
 
             // If both match → this IS the base, not a swap — skip
-            let is_base = base_ing_id.is_some()
-                && addon_ing_id.is_some()
-                && base_ing_id == addon_ing_id;
+            let is_base =
+                base_ing_id.is_some() && addon_ing_id.is_some() && base_ing_id == addon_ing_id;
 
-            if !is_base
-                && let Some((_, _, repl_name, repl_unit)) = rows.first() {
-                    for r in result.iter_mut() {
-                        if r.source == "drink_recipe" && r.category == cat {
-                            r.ingredient_name = repl_name.clone();
-                            r.unit = repl_unit.clone();
-                            r.source = format!("addon_swap:{}", addon_name);
-                        }
+            if !is_base && let Some((_, _, repl_name, repl_unit)) = rows.first() {
+                for r in result.iter_mut() {
+                    if r.source == "drink_recipe" && r.category == cat {
+                        r.ingredient_name = repl_name.clone();
+                        r.unit = repl_unit.clone();
+                        r.source = format!("addon_swap:{}", addon_name);
                     }
                 }
+            }
             continue;
         }
 
@@ -2269,24 +2488,25 @@ pub async fn preview_recipe(
     // Optionals
     for &field_id in &body.optional_field_ids {
         // Explicit type annotation fixes the inference issue
-        let row_result = sqlx::query_as::<_, (String, Option<f64>, Option<String>, Option<String>)>(
-            "SELECT name, quantity_used::float8, ingredient_name, ingredient_unit
+        let row_result =
+            sqlx::query_as::<_, (String, Option<f64>, Option<String>, Option<String>)>(
+                "SELECT name, quantity_used::float8, ingredient_name, ingredient_unit
              FROM menu_item_optional_fields
              WHERE id = $1 AND menu_item_id = $2 AND is_active = true",
-        )
-        .bind(field_id)
-        .bind(body.menu_item_id)
-        .fetch_optional(pool.get_ref())
-        .await?;
-    
+            )
+            .bind(field_id)
+            .bind(body.menu_item_id)
+            .fetch_optional(pool.get_ref())
+            .await?;
+
         if let Some((fname, Some(qty), Some(ing_name), Some(ing_unit))) = row_result {
             result.push(PreviewIngredient {
                 org_ingredient_id: None,
                 ingredient_name: ing_name,
-                unit:            ing_unit,
-                quantity:        qty,
-                source:          format!("optional:{}", fname),
-                category:        "general".into(),
+                unit: ing_unit,
+                quantity: qty,
+                source: format!("optional:{}", fname),
+                category: "general".into(),
             });
         }
     }
@@ -2314,7 +2534,7 @@ async fn fetch_order_or_404(pool: &PgPool, order_id: Uuid) -> Result<Order, AppE
 /// Load the delivery context for a finalized delivery order's detail view.
 /// Returns `None` if the linked `delivery_orders` row no longer exists.
 async fn fetch_order_delivery_info(
-    pool:              &PgPool,
+    pool: &PgPool,
     delivery_order_id: Uuid,
 ) -> Result<Option<OrderDeliveryInfo>, AppError> {
     let info = sqlx::query_as::<_, OrderDeliveryInfo>(
@@ -2333,8 +2553,8 @@ async fn fetch_order_delivery_info(
 }
 
 pub(crate) async fn fetch_order_by_idempotency_key(
-    pool:   &PgPool,
-    key:    Uuid,
+    pool: &PgPool,
+    key: Uuid,
     org_id: Uuid,
 ) -> Result<Option<Order>, AppError> {
     // Org-scope the lookup: an idempotency key is only unique within an org, and
@@ -2359,9 +2579,9 @@ pub(crate) async fn fetch_order_by_idempotency_key(
 /// key does NOT match — idempotent (return the existing order) instead of a 409 the
 /// offline client would dead-letter into a lost sale.
 pub(crate) async fn fetch_order_by_order_ref(
-    pool:      &PgPool,
+    pool: &PgPool,
     order_ref: &str,
-    org_id:    Uuid,
+    org_id: Uuid,
 ) -> Result<Option<Order>, AppError> {
     let sql = format!(
         "{} WHERE o.order_ref = $1 \
@@ -2376,7 +2596,7 @@ pub(crate) async fn fetch_order_by_order_ref(
 }
 
 async fn fetch_order_items_full(
-    pool:     &PgPool,
+    pool: &PgPool,
     order_id: Uuid,
 ) -> Result<Vec<OrderItemFull>, AppError> {
     let items = sqlx::query_as::<_, OrderItem>(
@@ -2420,12 +2640,11 @@ async fn fetch_order_items_full(
 
             let mut out = Vec::new();
             for (comp_item_id, qty, size_label, name_translations) in comps {
-                let item_name: String = sqlx::query_scalar(
-                    "SELECT name FROM menu_items WHERE id = $1",
-                )
-                .bind(comp_item_id)
-                .fetch_one(pool)
-                .await?;
+                let item_name: String =
+                    sqlx::query_scalar("SELECT name FROM menu_items WHERE id = $1")
+                        .bind(comp_item_id)
+                        .fetch_one(pool)
+                        .await?;
 
                 let comp_addons = sqlx::query_as::<_, OrderBundleComponentAddon>(
                     "SELECT id, order_line_id, component_item_id, addon_item_id, addon_name, name_translations, \
@@ -2478,7 +2697,7 @@ async fn fetch_order_items_full(
 /// Batched variant of [fetch_order_items_full] for `include_items=true` list
 /// responses: one query per table (ANY($1)) instead of N+1 per order.
 async fn fetch_orders_items_full_batch(
-    pool:      &PgPool,
+    pool: &PgPool,
     order_ids: &[Uuid],
 ) -> Result<std::collections::HashMap<Uuid, Vec<OrderItemFull>>, AppError> {
     use std::collections::HashMap;
@@ -2523,7 +2742,10 @@ async fn fetch_orders_items_full_batch(
     .fetch_all(pool)
     .await?
     {
-        optionals_by_item.entry(o.order_item_id).or_default().push(o);
+        optionals_by_item
+            .entry(o.order_item_id)
+            .or_default()
+            .push(o);
     }
 
     // ── Bundle components (only for bundle lines) ────────────────────────────
@@ -2535,29 +2757,26 @@ async fn fetch_orders_items_full_batch(
 
     let mut comps_by_line: HashMap<Uuid, Vec<OrderBundleComponentFull>> = HashMap::new();
     if !bundle_line_ids.is_empty() {
-        let comp_rows: Vec<(Uuid, Uuid, i32, Option<String>, serde_json::Value)> =
-            sqlx::query_as(
-                "SELECT order_line_id, item_id, quantity, size_label, name_translations \
+        let comp_rows: Vec<(Uuid, Uuid, i32, Option<String>, serde_json::Value)> = sqlx::query_as(
+            "SELECT order_line_id, item_id, quantity, size_label, name_translations \
                  FROM order_line_bundle_components WHERE order_line_id = ANY($1)",
-            )
-            .bind(&bundle_line_ids)
-            .fetch_all(pool)
-            .await?;
+        )
+        .bind(&bundle_line_ids)
+        .fetch_all(pool)
+        .await?;
 
         let comp_item_ids: Vec<Uuid> = comp_rows.iter().map(|r| r.1).collect();
         let mut item_names: HashMap<Uuid, String> = HashMap::new();
         if !comp_item_ids.is_empty() {
-            let name_rows: Vec<(Uuid, String)> = sqlx::query_as(
-                "SELECT id, name FROM menu_items WHERE id = ANY($1)",
-            )
-            .bind(&comp_item_ids)
-            .fetch_all(pool)
-            .await?;
+            let name_rows: Vec<(Uuid, String)> =
+                sqlx::query_as("SELECT id, name FROM menu_items WHERE id = ANY($1)")
+                    .bind(&comp_item_ids)
+                    .fetch_all(pool)
+                    .await?;
             item_names.extend(name_rows);
         }
 
-        let mut comp_addons: HashMap<(Uuid, Uuid), Vec<OrderBundleComponentAddon>> =
-            HashMap::new();
+        let mut comp_addons: HashMap<(Uuid, Uuid), Vec<OrderBundleComponentAddon>> = HashMap::new();
         for a in sqlx::query_as::<_, OrderBundleComponentAddon>(
             "SELECT id, order_line_id, component_item_id, addon_item_id, addon_name, name_translations, \
                     unit_price, quantity, line_total \
@@ -2597,10 +2816,7 @@ async fn fetch_orders_items_full_batch(
                 .or_default()
                 .push(OrderBundleComponentFull {
                     item_id: comp_item_id,
-                    item_name: item_names
-                        .get(&comp_item_id)
-                        .cloned()
-                        .unwrap_or_default(),
+                    item_name: item_names.get(&comp_item_id).cloned().unwrap_or_default(),
                     name_translations,
                     quantity: qty,
                     size_label,
@@ -2628,38 +2844,44 @@ async fn fetch_orders_items_full_batch(
 }
 
 async fn require_branch_access(
-    pool:      &PgPool,
-    claims:    &Claims,
+    pool: &PgPool,
+    claims: &Claims,
     branch_id: Uuid,
 ) -> Result<(), AppError> {
-    if claims.role == UserRole::SuperAdmin { return Ok(()); }
+    if claims.role == UserRole::SuperAdmin {
+        return Ok(());
+    }
 
-    let branch_org: Option<Uuid> = sqlx::query_scalar(
-        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(branch_id)
-    .fetch_optional(pool)
-    .await?
-    .flatten();
+    let branch_org: Option<Uuid> =
+        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
+            .bind(branch_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
 
-    let branch_org = branch_org
-        .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    let branch_org = branch_org.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
 
     if claims.org_id() != Some(branch_org) {
-        return Err(AppError::Forbidden("Branch belongs to a different org".into()));
+        return Err(AppError::Forbidden(
+            "Branch belongs to a different org".into(),
+        ));
     }
-    if claims.role == UserRole::OrgAdmin { return Ok(()); }
+    if claims.role == UserRole::OrgAdmin {
+        return Ok(());
+    }
 
     // D13: tellers are ORG-scoped, not branch-scoped — any active teller in the
     // branch's org may ring up here (the org check above is the boundary). The
     // order still records this device's branch, so revenue stays attributed
     // correctly.
-    if claims.role == UserRole::Teller { return Ok(()); }
+    if claims.role == UserRole::Teller {
+        return Ok(());
+    }
 
     // Branch managers stay branch-scoped via their explicit assignments.
     let assigned: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM user_branch_assignments \
-         WHERE user_id = $1 AND branch_id = $2)"
+         WHERE user_id = $1 AND branch_id = $2)",
     )
     .bind(claims.user_id())
     .bind(branch_id)
@@ -2673,7 +2895,11 @@ async fn require_branch_access(
     Ok(())
 }
 
-async fn validate_payment_method(pool: &PgPool, org_id: Uuid, method: &str) -> Result<(), AppError> {
+async fn validate_payment_method(
+    pool: &PgPool,
+    org_id: Uuid,
+    method: &str,
+) -> Result<(), AppError> {
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM org_payment_methods WHERE org_id = $1 AND name = $2 AND is_active = true)"
     )
@@ -2685,11 +2911,18 @@ async fn validate_payment_method(pool: &PgPool, org_id: Uuid, method: &str) -> R
     if exists {
         Ok(())
     } else {
-        Err(AppError::BadRequest(format!("Invalid or inactive payment_method: {}", method)))
+        Err(AppError::BadRequest(format!(
+            "Invalid or inactive payment_method: {}",
+            method
+        )))
     }
 }
 
-async fn parse_payment_methods(pool: &PgPool, org_id: Uuid, raw: &str) -> Result<Vec<String>, AppError> {
+async fn parse_payment_methods(
+    pool: &PgPool,
+    org_id: Uuid,
+    raw: &str,
+) -> Result<Vec<String>, AppError> {
     let mut methods = Vec::new();
     for part in raw.split(',') {
         let trimmed = part.trim();
@@ -2702,12 +2935,13 @@ async fn parse_payment_methods(pool: &PgPool, org_id: Uuid, raw: &str) -> Result
 }
 
 #[allow(dead_code)]
-async fn fetch_order_payments(pool: &PgPool, order_id: Uuid)
-    -> Result<Vec<OrderPayment>, AppError>
-{
+async fn fetch_order_payments(
+    pool: &PgPool,
+    order_id: Uuid,
+) -> Result<Vec<OrderPayment>, AppError> {
     let rows = sqlx::query_as::<_, OrderPayment>(
         "SELECT id, order_id, method::text AS method, amount, reference \
-         FROM order_payments WHERE order_id = $1 ORDER BY id"
+         FROM order_payments WHERE order_id = $1 ORDER BY id",
     )
     .bind(order_id)
     .fetch_all(pool)
@@ -2718,7 +2952,9 @@ async fn fetch_order_payments(pool: &PgPool, order_id: Uuid)
 fn validate_discount_type(dt: &str) -> Result<(), AppError> {
     match dt {
         "percentage" | "fixed" => Ok(()),
-        _ => Err(AppError::BadRequest("discount_type must be 'percentage' or 'fixed'".into())),
+        _ => Err(AppError::BadRequest(
+            "discount_type must be 'percentage' or 'fixed'".into(),
+        )),
     }
 }
 
@@ -2739,29 +2975,27 @@ fn validate_void_reason(reason: &str) -> Result<(), AppError> {
     security(("bearer_jwt" = []))
 )]
 pub async fn export_orders(
-    req:   HttpRequest,
-    pool:  web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     query: web::Query<ExportOrdersQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
 
-    let org_id = claims.org_id()
+    let org_id = claims
+        .org_id()
         .ok_or_else(|| AppError::Forbidden("No org in token".into()))?;
 
     // Same scope rule as list_orders: shift, single branch, or every branch in
     // the org when no shift is given and branch_id is absent or the nil UUID.
-    let all_branches = query.shift_id.is_none()
-        && query.branch_id.map_or(true, |b| b.is_nil());
+    let all_branches = query.shift_id.is_none() && query.branch_id.map_or(true, |b| b.is_nil());
 
     let (scope_condition, scope_id): (&str, Uuid) = if let Some(shift_id) = query.shift_id {
-        let bid: Option<Uuid> = sqlx::query_scalar(
-            "SELECT branch_id FROM shifts WHERE id = $1"
-        )
-        .bind(shift_id)
-        .fetch_optional(pool.get_ref())
-        .await?
-        .flatten();
+        let bid: Option<Uuid> = sqlx::query_scalar("SELECT branch_id FROM shifts WHERE id = $1")
+            .bind(shift_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .flatten();
         let bid = bid.ok_or_else(|| AppError::NotFound("Shift not found".into()))?;
         require_branch_access(pool.get_ref(), &claims, bid).await?;
         ("o.shift_id = $1", shift_id)
@@ -2771,7 +3005,9 @@ pub async fn export_orders(
             org_id,
         )
     } else {
-        let bid = query.branch_id.expect("branch_id present when not all_branches");
+        let bid = query
+            .branch_id
+            .expect("branch_id present when not all_branches");
         require_branch_access(pool.get_ref(), &claims, bid).await?;
         ("o.branch_id = $1", bid)
     };
@@ -2788,9 +3024,9 @@ pub async fn export_orders(
         None => None,
     };
 
-    let mut filter  = String::new();
+    let mut filter = String::new();
     #[allow(unused_assignments)]
-    let mut idx  = 2i32;
+    let mut idx = 2i32;
 
     macro_rules! push_export_filter {
         ($col:expr, $opt:expr) => {
@@ -2801,23 +3037,36 @@ pub async fn export_orders(
         };
     }
 
-    push_export_filter!("u.name ILIKE",             query.teller_name);
+    push_export_filter!("u.name ILIKE", query.teller_name);
     if parsed_payment_methods.is_some() {
-        filter.push_str(&format!(" AND o.payment_method::text = ANY(${}::text[])", idx));
+        filter.push_str(&format!(
+            " AND o.payment_method::text = ANY(${}::text[])",
+            idx
+        ));
         idx += 1;
     }
-    push_export_filter!("o.status::text =",         query.status);
-    push_export_filter!("o.created_at >=",          query.from);
-    push_export_filter!("o.created_at <=",          query.to);
+    push_export_filter!("o.status::text =", query.status);
+    push_export_filter!("o.created_at >=", query.from);
+    push_export_filter!("o.created_at <=", query.to);
 
     macro_rules! bind_export_filters {
         ($q:expr) => {{
             let mut q = $q;
-            if let Some(ref v) = query.teller_name    { q = q.bind(format!("%{}%", v)); }
-            if let Some(v)     = &parsed_payment_methods { q = q.bind(v); }
-            if let Some(ref v) = query.status         { q = q.bind(v.clone()); }
-            if let Some(v)     = query.from            { q = q.bind(v); }
-            if let Some(v)     = query.to              { q = q.bind(v); }
+            if let Some(ref v) = query.teller_name {
+                q = q.bind(format!("%{}%", v));
+            }
+            if let Some(v) = &parsed_payment_methods {
+                q = q.bind(v);
+            }
+            if let Some(ref v) = query.status {
+                q = q.bind(v.clone());
+            }
+            if let Some(v) = query.from {
+                q = q.bind(v);
+            }
+            if let Some(v) = query.to {
+                q = q.bind(v);
+            }
             q
         }};
     }
@@ -2856,12 +3105,10 @@ pub async fn export_orders(
         ORDER_SELECT, scope_condition, filter
     );
 
-    let orders: Vec<Order> = bind_export_filters!(
-        sqlx::query_as::<_, Order>(&data_sql)
-            .bind(scope_id)
-    )
-    .fetch_all(pool.get_ref())
-    .await?;
+    let orders: Vec<Order> =
+        bind_export_filters!(sqlx::query_as::<_, Order>(&data_sql).bind(scope_id))
+            .fetch_all(pool.get_ref())
+            .await?;
 
     let order_ids: Vec<Uuid> = orders.iter().map(|o| o.id).collect();
     let payments_rows = if order_ids.is_empty() {
@@ -2869,7 +3116,7 @@ pub async fn export_orders(
     } else {
         sqlx::query_as::<_, OrderPayment>(
             "SELECT id, order_id, method::text AS method, amount, reference \
-             FROM order_payments WHERE order_id = ANY($1) ORDER BY id"
+             FROM order_payments WHERE order_id = ANY($1) ORDER BY id",
         )
         .bind(&order_ids)
         .fetch_all(pool.get_ref())
@@ -2887,21 +3134,30 @@ pub async fn export_orders(
         let order_id = order.id;
         let items = fetch_order_items_full(pool.get_ref(), order_id).await?;
         let payments = payments_by_order.remove(&order_id).unwrap_or_default();
-        data.push(OrderExport { order, items, payments });
+        data.push(OrderExport {
+            order,
+            items,
+            payments,
+        });
     }
 
     use std::collections::HashSet;
 
     // Collect every distinct org_ingredient_id from all deduction snapshots
-    let ingredient_ids: Vec<Uuid> = data.iter()
+    let ingredient_ids: Vec<Uuid> = data
+        .iter()
         .flat_map(|o| o.items.iter())
         .flat_map(|i| {
-            i.item.deductions_snapshot.as_array()
+            i.item
+                .deductions_snapshot
+                .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|d| d.get("org_ingredient_id")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| Uuid::parse_str(s).ok()))
+                .filter_map(|d| {
+                    d.get("org_ingredient_id")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| Uuid::parse_str(s).ok())
+                })
         })
         .collect::<HashSet<_>>()
         .into_iter()
@@ -2910,14 +3166,16 @@ pub async fn export_orders(
     let ingredient_costs: HashMap<Uuid, i32> = if ingredient_ids.is_empty() {
         HashMap::new()
     } else {
-        let decimal_costs: Vec<(Uuid, Option<Decimal>)> = sqlx::query_as::<_, (Uuid, Option<Decimal>)>(
-            "SELECT id, cost_per_unit FROM org_ingredients WHERE id = ANY($1)"
-        )
-        .bind(&ingredient_ids)
-        .fetch_all(pool.get_ref())
-        .await?;
+        let decimal_costs: Vec<(Uuid, Option<Decimal>)> =
+            sqlx::query_as::<_, (Uuid, Option<Decimal>)>(
+                "SELECT id, cost_per_unit FROM org_ingredients WHERE id = ANY($1)",
+            )
+            .bind(&ingredient_ids)
+            .fetch_all(pool.get_ref())
+            .await?;
 
-        decimal_costs.into_iter()
+        decimal_costs
+            .into_iter()
             // NULL cost ⟺ never entered (unknown, NOT free). Omit those rows
             // so the frontend can distinguish "unknown" from a genuine 0 —
             // mirrors the catalog's Option<Decimal> contract.
@@ -2969,7 +3227,10 @@ mod wire_tests {
         assert_eq!(v["quantity_deducted"].as_f64(), Some(0.5));
 
         // None serializes as null, never a string.
-        let opt_none = OrderItemOptional { quantity_deducted: None, ..opt };
+        let opt_none = OrderItemOptional {
+            quantity_deducted: None,
+            ..opt
+        };
         let vn = serde_json::to_value(&opt_none).unwrap();
         assert!(vn["quantity_deducted"].is_null());
     }

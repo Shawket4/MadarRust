@@ -1,14 +1,14 @@
-use actix_web::{test, App, web};
+use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::auth::jwt::JwtSecret;
 use crate::models::UserRole;
-use crate::permissions::routes;
 use crate::permissions::handlers::{
-    Permission, RolePermission, PermissionMatrix,
-    UpsertPermissionRequest, UpsertRolePermissionRequest,
+    Permission, PermissionMatrix, RolePermission, UpsertPermissionRequest,
+    UpsertRolePermissionRequest,
 };
+use crate::permissions::routes;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
@@ -22,15 +22,13 @@ async fn seed_org(pool: &PgPool) -> Uuid {
     let org_id = Uuid::new_v4();
     let name = format!("Test Org {}", org_id);
     let slug = format!("test-org-{}", org_id);
-    sqlx::query(
-        "INSERT INTO organizations (id, name, slug) VALUES ($1, $2, $3)"
-    )
-    .bind(org_id)
-    .bind(&name)
-    .bind(&slug)
-    .execute(pool)
-    .await
-    .unwrap();
+    sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, $2, $3)")
+        .bind(org_id)
+        .bind(&name)
+        .bind(&slug)
+        .execute(pool)
+        .await
+        .unwrap();
     org_id
 }
 
@@ -78,13 +76,23 @@ async fn test_get_role_permissions_success(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
 
     let org_id = seed_org(&pool).await;
-    let user_id = seed_user(&pool, org_id, "Admin User", UserRole::OrgAdmin, "admin@t.com").await;
+    let user_id = seed_user(
+        &pool,
+        org_id,
+        "Admin User",
+        UserRole::OrgAdmin,
+        "admin@t.com",
+    )
+    .await;
     let token = generate_token(user_id, Some(org_id), UserRole::OrgAdmin);
 
     let req = test::TestRequest::get()
@@ -98,7 +106,9 @@ async fn test_get_role_permissions_success(pool: PgPool) {
     let perms: Vec<RolePermission> = test::read_body_json(resp).await;
     assert!(!perms.is_empty());
     // org_admin should have full access, check that at least orgs-create is there
-    let has_orgs_create = perms.iter().any(|p| p.role == "org_admin" && p.resource == "orgs" && p.action == "create" && p.granted);
+    let has_orgs_create = perms.iter().any(|p| {
+        p.role == "org_admin" && p.resource == "orgs" && p.action == "create" && p.granted
+    });
     assert!(has_orgs_create);
 }
 
@@ -108,13 +118,23 @@ async fn test_get_role_permissions_forbidden(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
 
     let org_id = seed_org(&pool).await;
-    let user_id = seed_user(&pool, org_id, "Teller User", UserRole::Teller, "teller@t.com").await;
+    let user_id = seed_user(
+        &pool,
+        org_id,
+        "Teller User",
+        UserRole::Teller,
+        "teller@t.com",
+    )
+    .await;
     let token = generate_token(user_id, Some(org_id), UserRole::Teller);
 
     let req = test::TestRequest::get()
@@ -132,8 +152,9 @@ async fn test_upsert_role_permission_success(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let admin_id = seed_super_admin(&pool, "Super Admin", "super@t.com").await;
     let token = generate_token(admin_id, None, UserRole::SuperAdmin);
@@ -165,11 +186,19 @@ async fn test_upsert_role_permission_forbidden(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
-    let admin_id = seed_user(&pool, org_id, "Admin User", UserRole::OrgAdmin, "admin@t.com").await;
+    let admin_id = seed_user(
+        &pool,
+        org_id,
+        "Admin User",
+        UserRole::OrgAdmin,
+        "admin@t.com",
+    )
+    .await;
     let token = generate_token(admin_id, Some(org_id), UserRole::OrgAdmin);
 
     let req = test::TestRequest::put()
@@ -193,14 +222,31 @@ async fn test_get_permission_matrix_success(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
 
     let org_id = seed_org(&pool).await;
-    let admin_id = seed_user(&pool, org_id, "Admin User", UserRole::OrgAdmin, "admin@t.com").await;
-    let target_user_id = seed_user(&pool, org_id, "Teller User", UserRole::Teller, "teller@t.com").await;
+    let admin_id = seed_user(
+        &pool,
+        org_id,
+        "Admin User",
+        UserRole::OrgAdmin,
+        "admin@t.com",
+    )
+    .await;
+    let target_user_id = seed_user(
+        &pool,
+        org_id,
+        "Teller User",
+        UserRole::Teller,
+        "teller@t.com",
+    )
+    .await;
     let token = generate_token(admin_id, Some(org_id), UserRole::OrgAdmin);
 
     // Insert user override
@@ -224,12 +270,18 @@ async fn test_get_permission_matrix_success(pool: PgPool) {
     assert!(!matrix.is_empty());
 
     // Check custom override
-    let orders_delete = matrix.iter().find(|m| m.resource == "orders" && m.action == "delete").unwrap();
+    let orders_delete = matrix
+        .iter()
+        .find(|m| m.resource == "orders" && m.action == "delete")
+        .unwrap();
     assert_eq!(orders_delete.user_override, Some(true));
     assert!(orders_delete.effective);
 
     // Check standard default
-    let orders_create = matrix.iter().find(|m| m.resource == "orders" && m.action == "create").unwrap();
+    let orders_create = matrix
+        .iter()
+        .find(|m| m.resource == "orders" && m.action == "create")
+        .unwrap();
     assert_eq!(orders_create.role_default, Some(true));
     assert_eq!(orders_create.user_override, None);
     assert!(orders_create.effective);
@@ -241,10 +293,13 @@ async fn test_get_permission_matrix_different_org(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
 
     let org_a = seed_org(&pool).await;
     let org_b = seed_org(&pool).await;
@@ -268,10 +323,13 @@ async fn test_get_permission_matrix_user_not_found(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
 
     let admin_id = seed_super_admin(&pool, "Super Admin", "super@t.com").await;
     let token = generate_token(admin_id, None, UserRole::SuperAdmin);
@@ -293,14 +351,31 @@ async fn test_get_user_permissions_success(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
 
     let org_id = seed_org(&pool).await;
-    let admin_id = seed_user(&pool, org_id, "Admin User", UserRole::OrgAdmin, "admin@t.com").await;
-    let target_user_id = seed_user(&pool, org_id, "Teller User", UserRole::Teller, "teller@t.com").await;
+    let admin_id = seed_user(
+        &pool,
+        org_id,
+        "Admin User",
+        UserRole::OrgAdmin,
+        "admin@t.com",
+    )
+    .await;
+    let target_user_id = seed_user(
+        &pool,
+        org_id,
+        "Teller User",
+        UserRole::Teller,
+        "teller@t.com",
+    )
+    .await;
     let token = generate_token(admin_id, Some(org_id), UserRole::OrgAdmin);
 
     // Seed override
@@ -334,10 +409,13 @@ async fn test_get_user_permissions_different_org(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
 
     let org_a = seed_org(&pool).await;
     let org_b = seed_org(&pool).await;
@@ -361,14 +439,31 @@ async fn test_upsert_user_permission_success(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
 
     let org_id = seed_org(&pool).await;
-    let admin_id = seed_user(&pool, org_id, "Admin User", UserRole::OrgAdmin, "admin@t.com").await;
-    let target_user_id = seed_user(&pool, org_id, "Teller User", UserRole::Teller, "teller@t.com").await;
+    let admin_id = seed_user(
+        &pool,
+        org_id,
+        "Admin User",
+        UserRole::OrgAdmin,
+        "admin@t.com",
+    )
+    .await;
+    let target_user_id = seed_user(
+        &pool,
+        org_id,
+        "Teller User",
+        UserRole::Teller,
+        "teller@t.com",
+    )
+    .await;
     let token = generate_token(admin_id, Some(org_id), UserRole::OrgAdmin);
 
     let req = test::TestRequest::put()
@@ -405,10 +500,13 @@ async fn test_upsert_user_permission_different_org(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
 
     let org_a = seed_org(&pool).await;
     let org_b = seed_org(&pool).await;
@@ -437,14 +535,31 @@ async fn test_upsert_user_permission_invalid_enum(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
 
     let org_id = seed_org(&pool).await;
-    let admin_id = seed_user(&pool, org_id, "Admin User", UserRole::OrgAdmin, "admin@t.com").await;
-    let target_user_id = seed_user(&pool, org_id, "Teller User", UserRole::Teller, "teller@t.com").await;
+    let admin_id = seed_user(
+        &pool,
+        org_id,
+        "Admin User",
+        UserRole::OrgAdmin,
+        "admin@t.com",
+    )
+    .await;
+    let target_user_id = seed_user(
+        &pool,
+        org_id,
+        "Teller User",
+        UserRole::Teller,
+        "teller@t.com",
+    )
+    .await;
     let token = generate_token(admin_id, Some(org_id), UserRole::OrgAdmin);
 
     let req = test::TestRequest::put()
@@ -467,14 +582,31 @@ async fn test_delete_user_permission_success(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
 
     let org_id = seed_org(&pool).await;
-    let admin_id = seed_user(&pool, org_id, "Admin User", UserRole::OrgAdmin, "admin@t.com").await;
-    let target_user_id = seed_user(&pool, org_id, "Teller User", UserRole::Teller, "teller@t.com").await;
+    let admin_id = seed_user(
+        &pool,
+        org_id,
+        "Admin User",
+        UserRole::OrgAdmin,
+        "admin@t.com",
+    )
+    .await;
+    let target_user_id = seed_user(
+        &pool,
+        org_id,
+        "Teller User",
+        UserRole::Teller,
+        "teller@t.com",
+    )
+    .await;
     let token = generate_token(admin_id, Some(org_id), UserRole::OrgAdmin);
 
     // Seed override
@@ -487,7 +619,10 @@ async fn test_delete_user_permission_success(pool: PgPool) {
     .unwrap();
 
     let req = test::TestRequest::delete()
-        .uri(&format!("/permissions/user/{}/orders/delete", target_user_id))
+        .uri(&format!(
+            "/permissions/user/{}/orders/delete",
+            target_user_id
+        ))
         .insert_header(("Authorization", format!("Bearer {}", token)))
         .to_request();
 
@@ -509,10 +644,13 @@ async fn test_delete_user_permission_different_org(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
 
     let org_a = seed_org(&pool).await;
     let org_b = seed_org(&pool).await;
@@ -538,29 +676,57 @@ async fn test_disabled_user_token_is_rejected(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
-    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+            .configure(routes::configure),
+    )
+    .await;
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "Admin", UserRole::OrgAdmin, "dis@t.com").await;
     let token = generate_token(user_id, Some(org_id), UserRole::OrgAdmin);
 
     // Active → allowed.
-    let req = test::TestRequest::get().uri("/permissions/roles")
-        .insert_header(("Authorization", format!("Bearer {}", token))).to_request();
-    assert!(test::call_service(&app, req).await.status().is_success(), "active account should work");
+    let req = test::TestRequest::get()
+        .uri("/permissions/roles")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+    assert!(
+        test::call_service(&app, req).await.status().is_success(),
+        "active account should work"
+    );
 
     // Deactivated → same token rejected.
-    sqlx::query("UPDATE users SET is_active = false WHERE id = $1").bind(user_id).execute(&pool).await.unwrap();
-    let req = test::TestRequest::get().uri("/permissions/roles")
-        .insert_header(("Authorization", format!("Bearer {}", token))).to_request();
-    assert_eq!(test::call_service(&app, req).await.status(), 403, "deactivated account token must be rejected");
+    sqlx::query("UPDATE users SET is_active = false WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let req = test::TestRequest::get()
+        .uri("/permissions/roles")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        403,
+        "deactivated account token must be rejected"
+    );
 
     // Re-activated but soft-deleted → still rejected.
-    sqlx::query("UPDATE users SET is_active = true, deleted_at = now() WHERE id = $1").bind(user_id).execute(&pool).await.unwrap();
-    let req = test::TestRequest::get().uri("/permissions/roles")
-        .insert_header(("Authorization", format!("Bearer {}", token))).to_request();
-    assert_eq!(test::call_service(&app, req).await.status(), 403, "soft-deleted account token must be rejected");
+    sqlx::query("UPDATE users SET is_active = true, deleted_at = now() WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let req = test::TestRequest::get()
+        .uri("/permissions/roles")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        403,
+        "soft-deleted account token must be rejected"
+    );
 }
 
 /// The `kitchen` role's security boundary: it may read the KDS feed + bump lines
@@ -572,9 +738,18 @@ async fn kitchen_role_can_bump_but_not_touch_the_pos(pool: PgPool) {
     use crate::auth::jwt::Claims;
     use crate::permissions::checker::check_permission;
 
-    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
     let org_id = seed_org(&pool).await;
-    let user_id = seed_user(&pool, org_id, "Grill Screen", UserRole::Kitchen, "kds@t.com").await;
+    let user_id = seed_user(
+        &pool,
+        org_id,
+        "Grill Screen",
+        UserRole::Kitchen,
+        "kds@t.com",
+    )
+    .await;
 
     let claims = Claims {
         sub: user_id.to_string(),
@@ -586,7 +761,11 @@ async fn kitchen_role_can_bump_but_not_touch_the_pos(pool: PgPool) {
     };
 
     // GRANTED — the kitchen workflow.
-    for (res, act) in [("kitchen_orders", "read"), ("kitchen_orders", "update"), ("kitchen_stations", "read")] {
+    for (res, act) in [
+        ("kitchen_orders", "read"),
+        ("kitchen_orders", "update"),
+        ("kitchen_stations", "read"),
+    ] {
         assert!(
             check_permission(&pool, &claims, res, act).await.is_ok(),
             "kitchen should be allowed {res}:{act}"
@@ -594,8 +773,12 @@ async fn kitchen_role_can_bump_but_not_touch_the_pos(pool: PgPool) {
     }
     // DENIED — the POS / cash / ticket side a kitchen device must never reach.
     for (res, act) in [
-        ("orders", "create"), ("payments", "create"), ("open_tickets", "create"),
-        ("open_tickets", "update"), ("shifts", "create"), ("kitchen_stations", "create"),
+        ("orders", "create"),
+        ("payments", "create"),
+        ("open_tickets", "create"),
+        ("open_tickets", "update"),
+        ("shifts", "create"),
+        ("kitchen_stations", "create"),
     ] {
         assert!(
             check_permission(&pool, &claims, res, act).await.is_err(),

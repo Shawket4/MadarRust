@@ -2,7 +2,7 @@
 //! per-branch routing-mode override. Admin surface (permission resource
 //! `kitchen_stations`). Mirrors the branches/tills CRUD shape.
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -125,22 +125,23 @@ pub async fn create_station(
     if name.is_empty() {
         return Err(AppError::BadRequest("Station name is required".into()));
     }
-    let org_id: Uuid = sqlx::query_scalar(
-        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(body.branch_id)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    let org_id: Uuid =
+        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
+            .bind(body.branch_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
 
     let is_default = body.is_default.unwrap_or(false);
     let mut tx = pool.get_ref().begin().await?;
     if is_default {
-        sqlx::query("UPDATE kitchen_stations SET is_default = false, updated_at = now() \
-             WHERE branch_id = $1 AND is_default AND deleted_at IS NULL")
-            .bind(body.branch_id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE kitchen_stations SET is_default = false, updated_at = now() \
+             WHERE branch_id = $1 AND is_default AND deleted_at IS NULL",
+        )
+        .bind(body.branch_id)
+        .execute(&mut *tx)
+        .await?;
     }
     let station = sqlx::query_as::<_, KitchenStation>(&format!(
         "INSERT INTO kitchen_stations \
@@ -176,19 +177,25 @@ pub async fn update_station(
     let existing = fetch_station(pool.get_ref(), *id).await?;
     require_branch_access(pool.get_ref(), &claims, existing.branch_id).await?;
 
-    let new_name = body.name.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let new_name = body
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     if body.name.as_deref().is_some_and(|s| s.trim().is_empty()) {
         return Err(AppError::BadRequest("Station name cannot be empty".into()));
     }
 
     let mut tx = pool.get_ref().begin().await?;
     if body.is_default == Some(true) {
-        sqlx::query("UPDATE kitchen_stations SET is_default = false, updated_at = now() \
-             WHERE branch_id = $1 AND is_default AND deleted_at IS NULL AND id <> $2")
-            .bind(existing.branch_id)
-            .bind(*id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE kitchen_stations SET is_default = false, updated_at = now() \
+             WHERE branch_id = $1 AND is_default AND deleted_at IS NULL AND id <> $2",
+        )
+        .bind(existing.branch_id)
+        .bind(*id)
+        .execute(&mut *tx)
+        .await?;
     }
     let station = sqlx::query_as::<_, KitchenStation>(&format!(
         "UPDATE kitchen_stations SET \
@@ -231,10 +238,12 @@ pub async fn delete_station(
     check_permission(pool.get_ref(), &claims, "kitchen_stations", "delete").await?;
     let existing = fetch_station(pool.get_ref(), *id).await?;
     require_branch_access(pool.get_ref(), &claims, existing.branch_id).await?;
-    sqlx::query("UPDATE kitchen_stations SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL")
-        .bind(*id)
-        .execute(pool.get_ref())
-        .await?;
+    sqlx::query(
+        "UPDATE kitchen_stations SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(*id)
+    .execute(pool.get_ref())
+    .await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -395,7 +404,11 @@ pub async fn delete_item_route(
     Ok(HttpResponse::NoContent().finish())
 }
 
-async fn require_station_in_branch(pool: &PgPool, station_id: Uuid, branch_id: Uuid) -> Result<(), AppError> {
+async fn require_station_in_branch(
+    pool: &PgPool,
+    station_id: Uuid,
+    branch_id: Uuid,
+) -> Result<(), AppError> {
     let ok: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM kitchen_stations \
          WHERE id = $1 AND branch_id = $2 AND deleted_at IS NULL)",
@@ -407,7 +420,9 @@ async fn require_station_in_branch(pool: &PgPool, station_id: Uuid, branch_id: U
     if ok {
         Ok(())
     } else {
-        Err(AppError::BadRequest("Station does not belong to this branch".into()))
+        Err(AppError::BadRequest(
+            "Station does not belong to this branch".into(),
+        ))
     }
 }
 
@@ -431,13 +446,12 @@ pub async fn get_routing_mode(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "kitchen_stations", "read").await?;
     require_branch_access(pool.get_ref(), &claims, query.branch_id).await?;
-    let mode: Option<String> = sqlx::query_scalar(
-        "SELECT kitchen_routing_mode::text FROM branches WHERE id = $1",
-    )
-    .bind(query.branch_id)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .flatten();
+    let mode: Option<String> =
+        sqlx::query_scalar("SELECT kitchen_routing_mode::text FROM branches WHERE id = $1")
+            .bind(query.branch_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .flatten();
     let effective = super::effective_routing_mode(pool.get_ref(), query.branch_id).await?;
     Ok(HttpResponse::Ok().json(RoutingModeResponse { mode, effective }))
 }
@@ -463,13 +477,20 @@ pub async fn set_routing_mode(
     if let Some(m) = body.mode.as_deref()
         && !matches!(m, "kds" | "till" | "both" | "off")
     {
-        return Err(AppError::BadRequest("mode must be kds, till, both, or off".into()));
+        return Err(AppError::BadRequest(
+            "mode must be kds, till, both, or off".into(),
+        ));
     }
-    sqlx::query("UPDATE branches SET kitchen_routing_mode = $2::kitchen_routing_mode WHERE id = $1")
-        .bind(body.branch_id)
-        .bind(body.mode.as_deref())
-        .execute(pool.get_ref())
-        .await?;
+    sqlx::query(
+        "UPDATE branches SET kitchen_routing_mode = $2::kitchen_routing_mode WHERE id = $1",
+    )
+    .bind(body.branch_id)
+    .bind(body.mode.as_deref())
+    .execute(pool.get_ref())
+    .await?;
     let effective = super::effective_routing_mode(pool.get_ref(), body.branch_id).await?;
-    Ok(HttpResponse::Ok().json(RoutingModeResponse { mode: body.mode.clone(), effective }))
+    Ok(HttpResponse::Ok().json(RoutingModeResponse {
+        mode: body.mode.clone(),
+        effective,
+    }))
 }

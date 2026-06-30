@@ -8,7 +8,7 @@
 //! no org-level default and no multiplier — the outside fee is the matched
 //! ring's fee, the in-mall fee is the branch flat fee.
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::NaiveTime;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -116,7 +116,8 @@ pub async fn get_branch_settings(
         .fetch_optional(pool.get_ref())
         .await?;
 
-    Ok(HttpResponse::Ok().json(row.unwrap_or_else(|| BranchDeliverySettings::defaults(query.branch_id))))
+    Ok(HttpResponse::Ok()
+        .json(row.unwrap_or_else(|| BranchDeliverySettings::defaults(query.branch_id))))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -170,10 +171,14 @@ pub async fn put_branch_settings(
         return Err(AppError::BadRequest("in_mall_fee must be >= 0".into()));
     }
     if body.prep_time_minutes < 0 {
-        return Err(AppError::BadRequest("prep_time_minutes must be >= 0".into()));
+        return Err(AppError::BadRequest(
+            "prep_time_minutes must be >= 0".into(),
+        ));
     }
     if body.max_road_distance_meters.is_some_and(|d| d <= 0) {
-        return Err(AppError::BadRequest("max_road_distance_meters must be > 0".into()));
+        return Err(AppError::BadRequest(
+            "max_road_distance_meters must be > 0".into(),
+        ));
     }
 
     // Any channel discount must be an active discount in the caller's org.
@@ -192,7 +197,9 @@ pub async fn put_branch_settings(
         .fetch_one(pool.get_ref())
         .await?;
         if !ok {
-            return Err(AppError::BadRequest("Discount not found or inactive".into()));
+            return Err(AppError::BadRequest(
+                "Discount not found or inactive".into(),
+            ));
         }
     }
 
@@ -371,7 +378,9 @@ fn default_true() -> bool {
 
 fn validate_zone(input: &ZoneInput) -> Result<(), AppError> {
     if input.max_road_distance_meters <= 0 {
-        return Err(AppError::BadRequest("max_road_distance_meters must be > 0".into()));
+        return Err(AppError::BadRequest(
+            "max_road_distance_meters must be > 0".into(),
+        ));
     }
     if input.fee < 0 {
         return Err(AppError::BadRequest("fee must be >= 0".into()));

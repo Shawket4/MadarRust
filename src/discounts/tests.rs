@@ -1,11 +1,11 @@
-use actix_web::{test, App, web};
+use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::auth::jwt::JwtSecret;
-use crate::models::UserRole;
-use crate::discounts::routes;
 use crate::discounts::handlers::*;
+use crate::discounts::routes;
+use crate::models::UserRole;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
@@ -58,19 +58,18 @@ async fn grant_permission(pool: &PgPool, role: &str, resource: &str, action: &st
     .unwrap();
 }
 
-
-
 #[sqlx::test]
 async fn test_discounts_crud_success(pool: PgPool) {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
-    
+
     // Discounts use the 'menu_items' permission resource
     grant_permission(&pool, "org_admin", "menu_items", "create").await;
     grant_permission(&pool, "org_admin", "menu_items", "read").await;
@@ -154,8 +153,9 @@ async fn test_discounts_validation_failures(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
     grant_permission(&pool, "org_admin", "menu_items", "create").await;
@@ -217,12 +217,13 @@ async fn test_discounts_wrong_org(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
     let org_id_a = seed_org(&pool).await;
     let org_id_b = seed_org(&pool).await;
     let user_a = seed_user(&pool, org_id_a, "org_admin").await;
-    
+
     grant_permission(&pool, "org_admin", "menu_items", "create").await;
     grant_permission(&pool, "org_admin", "menu_items", "read").await;
 

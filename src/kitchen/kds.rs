@@ -1,13 +1,15 @@
 //! The KDS feed (outstanding work, optionally per station) and the per-line bump.
 //! Permission resource `kitchen_orders` (the kitchen-display / till devices).
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 use serde::Deserialize;
 use sqlx::PgPool;
 use utoipa::IntoParams;
 use uuid::Uuid;
 
-use super::{extract_claims, kitchen_ticket_view, publish_kitchen, require_branch_access, KitchenTicketView};
+use super::{
+    KitchenTicketView, extract_claims, kitchen_ticket_view, publish_kitchen, require_branch_access,
+};
 use crate::errors::{AppError, AppErrorResponse};
 use crate::permissions::checker::check_permission;
 use crate::realtime::event::{BranchEvent, Topic};
@@ -95,18 +97,22 @@ pub(crate) async fn set_bump_inner(
 
     let mut tx = pool.begin().await?;
     if bumped {
-        sqlx::query("UPDATE kitchen_ticket_items SET bumped_at = now(), bumped_by = $2 \
-             WHERE id = $1 AND bumped_at IS NULL AND voided_at IS NULL")
-            .bind(item_id)
-            .bind(actor.teller_id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE kitchen_ticket_items SET bumped_at = now(), bumped_by = $2 \
+             WHERE id = $1 AND bumped_at IS NULL AND voided_at IS NULL",
+        )
+        .bind(item_id)
+        .bind(actor.teller_id)
+        .execute(&mut *tx)
+        .await?;
     } else {
-        sqlx::query("UPDATE kitchen_ticket_items SET bumped_at = NULL, bumped_by = NULL \
-             WHERE id = $1 AND voided_at IS NULL")
-            .bind(item_id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE kitchen_ticket_items SET bumped_at = NULL, bumped_by = NULL \
+             WHERE id = $1 AND voided_at IS NULL",
+        )
+        .bind(item_id)
+        .execute(&mut *tx)
+        .await?;
     }
 
     // Recompute the kitchen ticket: ready ⇔ no non-voided line is un-bumped.
@@ -158,14 +164,30 @@ pub(crate) async fn set_bump_inner(
     // Publish after commit so subscribers read committed state. Replay skips this
     // (hub = None): the write is historical and consumers re-snapshot on reconnect.
     if let Some(hub) = hub {
-        publish_kitchen(pool, hub, branch_id,
-            if bumped { "kitchen.item_bumped" } else { "kitchen.item_unbumped" }, ticket_id).await;
+        publish_kitchen(
+            pool,
+            hub,
+            branch_id,
+            if bumped {
+                "kitchen.item_bumped"
+            } else {
+                "kitchen.item_unbumped"
+            },
+            ticket_id,
+        )
+        .await;
         if ticket_ready {
             publish_kitchen(pool, hub, branch_id, "kitchen.ticket_ready", ticket_id).await;
         }
         if source_type == "open_ticket" && open_ticket_ready {
-            hub.publish(branch_id, BranchEvent::new(
-                Topic::Tickets, "ticket.ready", &serde_json::json!({ "open_ticket_id": source_id })));
+            hub.publish(
+                branch_id,
+                BranchEvent::new(
+                    Topic::Tickets,
+                    "ticket.ready",
+                    &serde_json::json!({ "open_ticket_id": source_id }),
+                ),
+            );
         }
     }
 

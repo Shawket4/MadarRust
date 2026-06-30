@@ -1,11 +1,11 @@
-use actix_web::{test, App, web};
+use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::auth::jwt::JwtSecret;
-use crate::models::UserRole;
-use crate::branches::routes;
 use crate::branches::handlers::{Branch, PrinterBrand};
+use crate::branches::routes;
+use crate::models::UserRole;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
@@ -29,10 +29,13 @@ fn generate_branch_manager_token(user_id: Uuid, org_id: Uuid) -> String {
 
 async fn seed_org(pool: &PgPool) -> Uuid {
     let org_id = Uuid::new_v4();
-    sqlx::query!("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Test Org', 'test-org')", org_id)
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query!(
+        "INSERT INTO organizations (id, name, slug) VALUES ($1, 'Test Org', 'test-org')",
+        org_id
+    )
+    .execute(pool)
+    .await
+    .unwrap();
     org_id
 }
 
@@ -54,8 +57,9 @@ async fn test_create_branch_success(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     grant_permission(&pool, "org_admin", "branches", "create").await;
@@ -92,8 +96,9 @@ async fn test_create_branch_unauthorized(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let req = test::TestRequest::post()
         .uri("/branches")
@@ -113,8 +118,9 @@ async fn test_create_branch_foreign_key_missing(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let token = generate_super_admin_token();
     let missing_org_id = Uuid::new_v4();
@@ -141,14 +147,20 @@ async fn test_list_branches_org_admin(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     grant_permission(&pool, "org_admin", "branches", "read").await;
 
-    sqlx::query!("INSERT INTO branches (org_id, name) VALUES ($1, 'Branch A'), ($1, 'Branch B')", org_id)
-        .execute(&pool).await.unwrap();
+    sqlx::query!(
+        "INSERT INTO branches (org_id, name) VALUES ($1, 'Branch A'), ($1, 'Branch B')",
+        org_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let token = generate_org_admin_token(Uuid::new_v4(), org_id);
 
@@ -171,24 +183,45 @@ async fn test_list_branches_branch_manager(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     grant_permission(&pool, "branch_manager", "branches", "read").await;
 
     let branch1_id = Uuid::new_v4();
     let branch2_id = Uuid::new_v4();
-    
-    sqlx::query!("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'Assigned')", branch1_id, org_id).execute(&pool).await.unwrap();
-    sqlx::query!("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'Unassigned')", branch2_id, org_id).execute(&pool).await.unwrap();
+
+    sqlx::query!(
+        "INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'Assigned')",
+        branch1_id,
+        org_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query!(
+        "INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'Unassigned')",
+        branch2_id,
+        org_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let user_id = Uuid::new_v4();
     sqlx::query!("INSERT INTO users (id, org_id, name, role, password_hash) VALUES ($1, $2, 'Test Manager', 'branch_manager'::user_role, 'hash')", user_id, org_id)
         .execute(&pool).await.unwrap();
     // Insert user assignment
-    sqlx::query!("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)", user_id, branch1_id)
-        .execute(&pool).await.unwrap();
+    sqlx::query!(
+        "INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)",
+        user_id,
+        branch1_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let token = generate_branch_manager_token(user_id, org_id);
 
@@ -211,15 +244,22 @@ async fn test_get_branch(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     grant_permission(&pool, "org_admin", "branches", "read").await;
 
     let branch_id = Uuid::new_v4();
-    sqlx::query!("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'Get Me')", branch_id, org_id)
-        .execute(&pool).await.unwrap();
+    sqlx::query!(
+        "INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'Get Me')",
+        branch_id,
+        org_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let token = generate_org_admin_token(Uuid::new_v4(), org_id);
 
@@ -241,8 +281,9 @@ async fn test_update_branch(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     grant_permission(&pool, "org_admin", "branches", "update").await;
@@ -276,15 +317,22 @@ async fn test_delete_branch(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     grant_permission(&pool, "org_admin", "branches", "delete").await;
 
     let branch_id = Uuid::new_v4();
-    sqlx::query!("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'Delete Me')", branch_id, org_id)
-        .execute(&pool).await.unwrap();
+    sqlx::query!(
+        "INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'Delete Me')",
+        branch_id,
+        org_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let token = generate_org_admin_token(Uuid::new_v4(), org_id);
 
@@ -312,8 +360,9 @@ async fn test_delete_branch_not_found(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let token = generate_super_admin_token();
 
@@ -334,33 +383,48 @@ async fn test_create_branch_rejects_invalid_timezone(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
     let org_id = seed_org(&pool).await;
     grant_permission(&pool, "org_admin", "branches", "create").await;
     let token = generate_org_admin_token(Uuid::new_v4(), org_id);
 
     // An injection-style / non-IANA timezone is rejected.
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri("/branches")
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
-            "org_id": org_id,
-            "name": "Bad TZ Branch",
-            "timezone": "Africa/Cairo' UNION SELECT version() --"
-        })).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/branches")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&serde_json::json!({
+                "org_id": org_id,
+                "name": "Bad TZ Branch",
+                "timezone": "Africa/Cairo' UNION SELECT version() --"
+            }))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 400, "invalid timezone must be rejected");
 
     // A valid IANA timezone is accepted.
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri("/branches")
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
-            "org_id": org_id,
-            "name": "Good TZ Branch",
-            "timezone": "America/New_York"
-        })).to_request()).await;
-    assert!(resp.status().is_success(), "valid timezone must be accepted: {:?}", resp.status());
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/branches")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&serde_json::json!({
+                "org_id": org_id,
+                "name": "Good TZ Branch",
+                "timezone": "America/New_York"
+            }))
+            .to_request(),
+    )
+    .await;
+    assert!(
+        resp.status().is_success(),
+        "valid timezone must be accepted: {:?}",
+        resp.status()
+    );
 }
 
 /// A branch with no timezone of its own INHERITS the org's timezone (the
@@ -372,35 +436,56 @@ async fn test_branch_inherits_org_timezone(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
     let org_id = seed_org(&pool).await;
     // Give the org a non-default timezone.
-    sqlx::query!("UPDATE organizations SET timezone = 'Asia/Riyadh' WHERE id = $1", org_id)
-        .execute(&pool).await.unwrap();
+    sqlx::query!(
+        "UPDATE organizations SET timezone = 'Asia/Riyadh' WHERE id = $1",
+        org_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     grant_permission(&pool, "org_admin", "branches", "create").await;
     let token = generate_org_admin_token(Uuid::new_v4(), org_id);
 
     // No branch timezone → inherits the org's.
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri("/branches")
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({ "org_id": org_id, "name": "Inheriting Branch" }))
-        .to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/branches")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&serde_json::json!({ "org_id": org_id, "name": "Inheriting Branch" }))
+            .to_request(),
+    )
+    .await;
     assert!(resp.status().is_success());
     let branch: Branch = test::read_body_json(resp).await;
-    assert_eq!(branch.timezone, "Asia/Riyadh", "branch with no tz must inherit org tz");
+    assert_eq!(
+        branch.timezone, "Asia/Riyadh",
+        "branch with no tz must inherit org tz"
+    );
 
     // Explicit branch timezone overrides the org default.
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri("/branches")
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
-            "org_id": org_id, "name": "Explicit Branch", "timezone": "America/New_York"
-        })).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/branches")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&serde_json::json!({
+                "org_id": org_id, "name": "Explicit Branch", "timezone": "America/New_York"
+            }))
+            .to_request(),
+    )
+    .await;
     assert!(resp.status().is_success());
     let branch: Branch = test::read_body_json(resp).await;
-    assert_eq!(branch.timezone, "America/New_York", "explicit branch tz must override org tz");
+    assert_eq!(
+        branch.timezone, "America/New_York",
+        "explicit branch tz must override org tz"
+    );
 }
 
 /// GET /timezones returns the controlled vocabulary (the timezone_name enum
@@ -411,19 +496,31 @@ async fn test_list_timezones(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
     let org_id = seed_org(&pool).await;
     let token = generate_org_admin_token(Uuid::new_v4(), org_id);
 
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri("/timezones")
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/timezones")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), 200);
     let zones: Vec<String> = test::read_body_json(resp).await;
-    assert!(zones.len() > 100, "expected the full IANA list, got {}", zones.len());
+    assert!(
+        zones.len() > 100,
+        "expected the full IANA list, got {}",
+        zones.len()
+    );
     assert!(zones.contains(&"Africa/Cairo".to_string()));
     assert!(zones.contains(&"America/New_York".to_string()));
-    assert!(!zones.iter().any(|z| z.starts_with("posix/")), "posix aliases must be filtered out");
+    assert!(
+        !zones.iter().any(|z| z.starts_with("posix/")),
+        "posix aliases must be filtered out"
+    );
 }

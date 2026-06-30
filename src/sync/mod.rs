@@ -69,6 +69,11 @@ impl ActingContext {
     /// through this so the ownership/state guards keyed on `role` behave the
     /// same as the live action that originally produced the op.
     pub fn replay_with_role(teller_id: Uuid, org_id: Uuid, role: UserRole) -> Self {
-        Self { teller_id, org_id, role, replay: true }
+        Self {
+            teller_id,
+            org_id,
+            role,
+            replay: true,
+        }
     }
 }

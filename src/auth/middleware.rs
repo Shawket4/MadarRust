@@ -1,16 +1,20 @@
 use actix_web::{
+    Error, HttpMessage, HttpRequest, ResponseError,
     body::{BoxBody, EitherBody},
-    dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform},
-    web, Error, HttpMessage, HttpRequest, ResponseError,
+    dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready},
+    web,
 };
-use futures::future::{ready, LocalBoxFuture, Ready};
+use futures::future::{LocalBoxFuture, Ready, ready};
 use std::rc::Rc;
 use uuid::Uuid;
 
 use sqlx::PgPool;
 
 use crate::{
-    auth::{jwt::{verify_token, JwtSecret}, org_status::OrgStatusCache},
+    auth::{
+        jwt::{JwtSecret, verify_token},
+        org_status::OrgStatusCache,
+    },
     errors::AppError,
 };
 
@@ -34,14 +38,16 @@ where
     S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
     B: 'static,
 {
-    type Response  = ServiceResponse<EitherBody<B, BoxBody>>;
-    type Error     = Error;
+    type Response = ServiceResponse<EitherBody<B, BoxBody>>;
+    type Error = Error;
     type Transform = JwtMiddlewareService<S>;
     type InitError = ();
-    type Future    = Ready<Result<Self::Transform, Self::InitError>>;
+    type Future = Ready<Result<Self::Transform, Self::InitError>>;
 
     fn new_transform(&self, service: S) -> Self::Future {
-        ready(Ok(JwtMiddlewareService { service: Rc::new(service) }))
+        ready(Ok(JwtMiddlewareService {
+            service: Rc::new(service),
+        }))
     }
 }
 
@@ -55,8 +61,8 @@ where
     B: 'static,
 {
     type Response = ServiceResponse<EitherBody<B, BoxBody>>;
-    type Error    = Error;
-    type Future   = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
+    type Error = Error;
+    type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
 
     forward_ready!(service);
 

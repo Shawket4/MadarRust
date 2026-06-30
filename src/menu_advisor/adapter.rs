@@ -36,9 +36,9 @@ use rust_decimal::prelude::ToPrimitive;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use super::engine::{Basket, ItemSnapshot, SaleEvent};
 use crate::errors::AppError;
 use crate::menu_advisor::dto::{AnalysisConfig, ItemKey};
-use super::engine::{Basket, ItemSnapshot, SaleEvent};
 
 // ─────────────────────────────────────────────────────────────────────
 // Row types
@@ -110,8 +110,9 @@ pub async fn load_inputs(
     // Sales for SKUs with no snapshot (item hard-deleted since) are dropped —
     // observably, not silently.
     let snapshot_keys: HashSet<&ItemKey> = snapshots.iter().map(|s| &s.key).collect();
-    let (sales, orphaned): (Vec<_>, Vec<_>) =
-        sales.into_iter().partition(|s| snapshot_keys.contains(&s.key));
+    let (sales, orphaned): (Vec<_>, Vec<_>) = sales
+        .into_iter()
+        .partition(|s| snapshot_keys.contains(&s.key));
     for s in &orphaned {
         tracing::warn!(
             menu_item_id = %s.key.menu_item_id,
@@ -120,7 +121,12 @@ pub async fn load_inputs(
         );
     }
 
-    Ok(AdapterInputs { snapshots, sales, baskets, price_changed_keys })
+    Ok(AdapterInputs {
+        snapshots,
+        sales,
+        baskets,
+        price_changed_keys,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -239,10 +245,12 @@ async fn load_snapshots(
         .into_iter()
         .map(|r| {
             let cost = r.cost_per_serving.and_then(|d| d.to_i64());
-            let bundle_only =
-                bundle_only_set.contains(&(r.menu_item_id, r.size_label.clone()));
+            let bundle_only = bundle_only_set.contains(&(r.menu_item_id, r.size_label.clone()));
             ItemSnapshot {
-                key: ItemKey { menu_item_id: r.menu_item_id, size_label: r.size_label },
+                key: ItemKey {
+                    menu_item_id: r.menu_item_id,
+                    size_label: r.size_label,
+                },
                 category_id: r.category_id,
                 name: r.item_name,
                 current_price: r.current_price,
@@ -332,7 +340,10 @@ async fn load_sales(
     Ok(rows
         .into_iter()
         .map(|r| SaleEvent {
-            key: ItemKey { menu_item_id: r.menu_item_id, size_label: r.size_label },
+            key: ItemKey {
+                menu_item_id: r.menu_item_id,
+                size_label: r.size_label,
+            },
             quantity_sold: r.quantity_sold,
             unit_price_paid: r.unit_price_paid,
             unit_cost_at_sale: r.unit_cost_at_sale.and_then(|d| d.to_i64()),
@@ -449,6 +460,9 @@ async fn load_price_changed(
 
     Ok(rows
         .into_iter()
-        .map(|r| ItemKey { menu_item_id: r.menu_item_id, size_label: r.size_label })
+        .map(|r| ItemKey {
+            menu_item_id: r.menu_item_id,
+            size_label: r.size_label,
+        })
         .collect())
 }

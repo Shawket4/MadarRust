@@ -9,11 +9,12 @@
 
 pub mod auth;
 pub mod branches;
+pub mod bundles;
 pub mod cache;
 pub mod clock;
 pub mod costing;
-pub mod bundles;
 pub mod delivery;
+pub mod demo;
 pub mod discounts;
 pub mod errors;
 pub mod geo;
@@ -27,12 +28,13 @@ pub mod orders;
 pub mod orgs;
 pub mod payment_methods;
 pub mod permissions;
+pub mod purchasing;
 pub mod qr_card;
 pub mod rate_limit;
 pub mod realtime;
 pub mod recipes;
-pub mod purchasing;
 pub mod reports;
+pub mod reservations;
 pub mod shifts;
 pub mod stocktakes;
 pub mod sync;

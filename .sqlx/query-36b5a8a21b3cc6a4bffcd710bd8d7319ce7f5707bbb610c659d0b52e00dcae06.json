@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'Assigned')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "36b5a8a21b3cc6a4bffcd710bd8d7319ce7f5707bbb610c659d0b52e00dcae06"
+}

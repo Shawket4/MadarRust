@@ -5,7 +5,7 @@
 //! manage both). A device binds to a till and is reconfigurable; `is_default`
 //! marks the catch-all till a shift opens against when no till_id is supplied.
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -23,12 +23,12 @@ use crate::{
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct Till {
-    pub id:         Uuid,
-    pub org_id:     Uuid,
-    pub branch_id:  Uuid,
-    pub name:       String,
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub branch_id: Uuid,
+    pub name: String,
     pub is_default: bool,
-    pub is_active:  bool,
+    pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -41,22 +41,22 @@ pub struct ListTillsQuery {
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CreateTillRequest {
-    pub branch_id:  Uuid,
-    pub name:       String,
+    pub branch_id: Uuid,
+    pub name: String,
     #[serde(default)]
     pub is_default: Option<bool>,
     #[serde(default)]
-    pub is_active:  Option<bool>,
+    pub is_active: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpdateTillRequest {
     #[serde(default)]
-    pub name:       Option<String>,
+    pub name: Option<String>,
     #[serde(default)]
     pub is_default: Option<bool>,
     #[serde(default)]
-    pub is_active:  Option<bool>,
+    pub is_active: Option<bool>,
 }
 
 const TILL_COLS: &str =
@@ -86,8 +86,8 @@ async fn fetch_till(pool: &PgPool, id: Uuid) -> Result<Till, AppError> {
     security(("bearer_jwt" = []))
 )]
 pub async fn list_tills(
-    req:   HttpRequest,
-    pool:  web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     query: web::Query<ListTillsQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -120,7 +120,7 @@ pub async fn list_tills(
     security(("bearer_jwt" = []))
 )]
 pub async fn create_till(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
     body: web::Json<CreateTillRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -134,13 +134,12 @@ pub async fn create_till(
     }
 
     // Resolve the branch's org (and confirm it exists / is live).
-    let org_id: Uuid = sqlx::query_scalar(
-        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(body.branch_id)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    let org_id: Uuid =
+        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
+            .bind(body.branch_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
 
     let is_default = body.is_default.unwrap_or(false);
 
@@ -187,9 +186,9 @@ pub async fn create_till(
     security(("bearer_jwt" = []))
 )]
 pub async fn update_till(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
     body: web::Json<UpdateTillRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -198,7 +197,11 @@ pub async fn update_till(
     let existing = fetch_till(pool.get_ref(), *id).await?;
     require_branch_access(pool.get_ref(), &claims, existing.branch_id).await?;
 
-    let new_name = body.name.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let new_name = body
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     if body.name.as_deref().is_some_and(|s| s.trim().is_empty()) {
         return Err(AppError::BadRequest("Till name cannot be empty".into()));
     }
@@ -249,9 +252,9 @@ pub async fn update_till(
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_till(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "branches", "delete").await?;

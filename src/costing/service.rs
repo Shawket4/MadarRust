@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -48,9 +48,10 @@ pub fn blend_weighted_cost(
     received_unit_cost: Decimal,
 ) -> Decimal {
     match current_cost {
-        Some(cur) if prior_on_hand > Decimal::ZERO =>
+        Some(cur) if prior_on_hand > Decimal::ZERO => {
             (prior_on_hand * cur + received_qty * received_unit_cost)
-                / (prior_on_hand + received_qty),
+                / (prior_on_hand + received_qty)
+        }
         _ => received_unit_cost,
     }
     .round_dp(2)
@@ -74,12 +75,12 @@ pub fn blend_weighted_cost(
 /// The org default (`org_ingredients.cost_per_unit`, the standard cost) is NOT
 /// touched by receipts. Returns the new per-unit cost in piastres.
 pub async fn apply_weighted_average_cost(
-    conn:               &mut sqlx::PgConnection,
-    branch_id:          Uuid,
-    org_ingredient_id:  Uuid,
-    received_qty:       Decimal,
+    conn: &mut sqlx::PgConnection,
+    branch_id: Uuid,
+    org_ingredient_id: Uuid,
+    received_qty: Decimal,
     received_unit_cost: Decimal,
-    changed_by:         Uuid,
+    changed_by: Uuid,
 ) -> Result<Decimal, AppError> {
     // Prior actual cost + on-hand for THIS branch; org default cost as fallback.
     let (branch_cost, branch_stock, org_cost): (Option<Decimal>, Option<Decimal>, Option<Decimal>) =
@@ -120,21 +121,31 @@ pub async fn apply_weighted_average_cost(
              ON CONFLICT (branch_id, org_ingredient_id) \
              DO UPDATE SET cost_per_unit = EXCLUDED.cost_per_unit, updated_at = now()",
         )
-        .bind(branch_id).bind(org_ingredient_id).bind(new_cost)
-        .execute(&mut *conn).await?;
+        .bind(branch_id)
+        .bind(org_ingredient_id)
+        .bind(new_cost)
+        .execute(&mut *conn)
+        .await?;
 
         sqlx::query(
             "UPDATE ingredient_cost_history SET effective_until = now() \
              WHERE org_ingredient_id = $1 AND branch_id = $2 AND effective_until IS NULL",
         )
-        .bind(org_ingredient_id).bind(branch_id).execute(&mut *conn).await?;
+        .bind(org_ingredient_id)
+        .bind(branch_id)
+        .execute(&mut *conn)
+        .await?;
         sqlx::query(
             "INSERT INTO ingredient_cost_history \
                  (org_ingredient_id, branch_id, cost_per_unit, effective_from, changed_by, note) \
              VALUES ($1, $2, $3, now(), $4, 'Weighted average from purchase')",
         )
-        .bind(org_ingredient_id).bind(branch_id).bind(new_cost).bind(changed_by)
-        .execute(&mut *conn).await?;
+        .bind(org_ingredient_id)
+        .bind(branch_id)
+        .bind(new_cost)
+        .bind(changed_by)
+        .execute(&mut *conn)
+        .await?;
     }
 
     Ok(new_cost)
@@ -438,7 +449,9 @@ pub async fn org_addon_costs(
             let cost = r.cost_piastres.map(round_piastres);
             let incomplete = r.cost_incomplete.unwrap_or(false);
             let margin_pct = match cost {
-                Some(c) if !incomplete && r.price > 0 => Some((r.price - c) as f64 / r.price as f64),
+                Some(c) if !incomplete && r.price > 0 => {
+                    Some((r.price - c) as f64 / r.price as f64)
+                }
                 _ => None,
             };
             AddonCost {
@@ -470,37 +483,55 @@ mod unit_tests {
     #[test]
     fn blend_no_prior_stock_takes_received_cost() {
         // prior_on_hand == 0 → the division branch is skipped.
-        assert_eq!(blend_weighted_cost(dec!(0), Some(dec!(500)), dec!(10), dec!(700)), dec!(700));
+        assert_eq!(
+            blend_weighted_cost(dec!(0), Some(dec!(500)), dec!(10), dec!(700)),
+            dec!(700)
+        );
     }
 
     #[test]
     fn blend_unknown_current_cost_takes_received_cost() {
-        assert_eq!(blend_weighted_cost(dec!(100), None, dec!(10), dec!(700)), dec!(700));
+        assert_eq!(
+            blend_weighted_cost(dec!(100), None, dec!(10), dec!(700)),
+            dec!(700)
+        );
     }
 
     #[test]
     fn blend_weights_by_quantity() {
         // 100 @ 500 + 100 @ 700 = (50000 + 70000) / 200 = 600.
-        assert_eq!(blend_weighted_cost(dec!(100), Some(dec!(500)), dec!(100), dec!(700)), dec!(600));
+        assert_eq!(
+            blend_weighted_cost(dec!(100), Some(dec!(500)), dec!(100), dec!(700)),
+            dec!(600)
+        );
     }
 
     #[test]
     fn blend_preserves_sub_piastre_precision() {
         // 1000 @ 0.40 + 1000 @ 0.60 = 1000 / 2000 = 0.50 — must NOT collapse to 0.
-        assert_eq!(blend_weighted_cost(dec!(1000), Some(dec!(0.40)), dec!(1000), dec!(0.60)), dec!(0.50));
+        assert_eq!(
+            blend_weighted_cost(dec!(1000), Some(dec!(0.40)), dec!(1000), dec!(0.60)),
+            dec!(0.50)
+        );
     }
 
     #[test]
     fn blend_rounds_to_two_dp() {
         // 1 @ 1 + 2 @ 2 = 5/3 = 1.6666… → 1.67.
-        assert_eq!(blend_weighted_cost(dec!(1), Some(dec!(1)), dec!(2), dec!(2)), dec!(1.67));
+        assert_eq!(
+            blend_weighted_cost(dec!(1), Some(dec!(1)), dec!(2), dec!(2)),
+            dec!(1.67)
+        );
     }
 
     #[test]
     fn blend_result_is_a_convex_combination() {
         // The blended cost always lies within [min, max] of the two costs.
         let r = blend_weighted_cost(dec!(3), Some(dec!(120)), dec!(7), dec!(260));
-        assert!(r >= dec!(120) && r <= dec!(260), "blend {r} escaped [120, 260]");
+        assert!(
+            r >= dec!(120) && r <= dec!(260),
+            "blend {r} escaped [120, 260]"
+        );
     }
 
     #[test]
@@ -509,8 +540,14 @@ mod unit_tests {
         // routes prior==0 to the received-cost branch. Mutating that guard (to
         // `true` or `>=`) divides 0/0 here — flagged by mutation testing at
         // costing/service.rs:51.
-        assert_eq!(blend_weighted_cost(Decimal::ZERO, Some(dec!(500)), Decimal::ZERO, dec!(700)), dec!(700));
+        assert_eq!(
+            blend_weighted_cost(Decimal::ZERO, Some(dec!(500)), Decimal::ZERO, dec!(700)),
+            dec!(700)
+        );
         // With prior stock and no receipt, the existing cost is unchanged.
-        assert_eq!(blend_weighted_cost(dec!(10), Some(dec!(500)), Decimal::ZERO, dec!(700)), dec!(500));
+        assert_eq!(
+            blend_weighted_cost(dec!(10), Some(dec!(500)), Decimal::ZERO, dec!(700)),
+            dec!(500)
+        );
     }
 }

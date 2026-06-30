@@ -1,4 +1,4 @@
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -14,14 +14,14 @@ use utoipa::{IntoParams, ToSchema};
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct Discount {
-    pub id:         Uuid,
-    pub org_id:     Uuid,
-    pub name:       String,
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub name: String,
     #[schema(value_type = Object)]
     pub name_translations: serde_json::Value,
-    pub dtype:      String,
-    pub value:      i32,
-    pub is_active:  bool,
+    pub dtype: String,
+    pub value: i32,
+    pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -34,22 +34,22 @@ pub struct ListQuery {
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CreateDiscountRequest {
-    pub org_id:    Uuid,
-    pub name:      String,
+    pub org_id: Uuid,
+    pub name: String,
     #[schema(value_type = Option<Object>)]
     pub name_translations: Option<serde_json::Value>,
-    pub dtype:     String,
-    pub value:     i32,
+    pub dtype: String,
+    pub value: i32,
     pub is_active: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpdateDiscountRequest {
-    pub name:      Option<String>,
+    pub name: Option<String>,
     #[schema(value_type = Option<Object>)]
     pub name_translations: Option<serde_json::Value>,
-    pub dtype:     Option<String>,
-    pub value:     Option<i32>,
+    pub dtype: Option<String>,
+    pub value: Option<i32>,
     pub is_active: Option<bool>,
 }
 
@@ -62,8 +62,8 @@ pub struct UpdateDiscountRequest {
     security(("bearer_jwt" = []))
 )]
 pub async fn list_discounts(
-    req:   HttpRequest,
-    pool:  web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     query: web::Query<ListQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -94,7 +94,7 @@ pub async fn list_discounts(
     security(("bearer_jwt" = []))
 )]
 pub async fn create_discount(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
     body: web::Json<CreateDiscountRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -105,7 +105,9 @@ pub async fn create_discount(
     validate_value(body.value, &body.dtype)?;
 
     let mut_body = body.into_inner();
-    let mut name_translations = mut_body.name_translations.unwrap_or_else(|| serde_json::json!({}));
+    let mut name_translations = mut_body
+        .name_translations
+        .unwrap_or_else(|| serde_json::json!({}));
     crate::translation::ensure_translations_json(&mut name_translations, Some(&mut_body.name))
         .await
         .map_err(|_| AppError::Internal)?;
@@ -139,9 +141,9 @@ pub async fn create_discount(
     security(("bearer_jwt" = []))
 )]
 pub async fn update_discount(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
     body: web::Json<UpdateDiscountRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -151,8 +153,12 @@ pub async fn update_discount(
 
     let mut_body = body.into_inner();
 
-    if let Some(ref dt) = mut_body.dtype { validate_dtype(dt)?; }
-    if let (Some(v), Some(dt)) = (mut_body.value, &mut_body.dtype) { validate_value(v, dt)?; }
+    if let Some(ref dt) = mut_body.dtype {
+        validate_dtype(dt)?;
+    }
+    if let (Some(v), Some(dt)) = (mut_body.value, &mut_body.dtype) {
+        validate_value(v, dt)?;
+    }
 
     let mut name_translations = existing.name_translations;
     if let Some(new_name) = &mut_body.name {
@@ -201,9 +207,9 @@ pub async fn update_discount(
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_discount(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "discounts", "delete").await?;
@@ -237,7 +243,9 @@ async fn fetch_or_404(pool: &PgPool, id: Uuid) -> Result<Discount, AppError> {
 }
 
 fn require_org_access(claims: &Claims, org_id: Uuid) -> Result<(), AppError> {
-    if claims.role == UserRole::SuperAdmin { return Ok(()); }
+    if claims.role == UserRole::SuperAdmin {
+        return Ok(());
+    }
     if claims.org_id() != Some(org_id) {
         return Err(AppError::Forbidden("Not your org".into()));
     }
@@ -247,7 +255,9 @@ fn require_org_access(claims: &Claims, org_id: Uuid) -> Result<(), AppError> {
 fn validate_dtype(dt: &str) -> Result<(), AppError> {
     match dt {
         "percentage" | "fixed" => Ok(()),
-        _ => Err(AppError::BadRequest("type must be 'percentage' or 'fixed'".into())),
+        _ => Err(AppError::BadRequest(
+            "type must be 'percentage' or 'fixed'".into(),
+        )),
     }
 }
 
@@ -256,7 +266,9 @@ fn validate_value(value: i32, dtype: &str) -> Result<(), AppError> {
         return Err(AppError::BadRequest("value must be >= 0".into()));
     }
     if dtype == "percentage" && value > 100 {
-        return Err(AppError::BadRequest("percentage value must be 0-100".into()));
+        return Err(AppError::BadRequest(
+            "percentage value must be 0-100".into(),
+        ));
     }
     Ok(())
 }

@@ -4,25 +4,29 @@
 //! every test also exercises the payload-JSONB storage and the generated
 //! filter columns. The IDOR suite is the heart of the rebuild: every route
 //! must refuse another org's resources.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
 
-use actix_web::{test, web, App};
+use actix_web::{App, test, web};
 use chrono::{Duration, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    auth::jwt::{create_token, JwtSecret},
+    auth::jwt::{JwtSecret, create_token},
     menu_advisor::{
         adapter,
         dto::{
             Action, AdvisorReport, AnalysisConfig, BundleAssociation, BundleForecast,
-            BundleItemPair, BundleSuggestion, BundleSuggestionRecord, Classification,
-            CmQuadrant, Confidence, CreateRunBody, DecisionRecord, GuardClip, ItemKey,
-            ModeSummary, PeerComparison, PeerPosition, PersistedRun, PriceAnchors,
-            PriceSuggestion, PriceSuggestionRecord, PromoteBundleBody, RecordDecisionBody,
-            RemovalRecommendation, RemovalScenario, RemovalScenarioRecord, RunStatus,
-            SuggestionKind, Triplet,
+            BundleItemPair, BundleSuggestion, BundleSuggestionRecord, Classification, CmQuadrant,
+            Confidence, CreateRunBody, DecisionRecord, GuardClip, ItemKey, ModeSummary,
+            PeerComparison, PeerPosition, PersistedRun, PriceAnchors, PriceSuggestion,
+            PriceSuggestionRecord, PromoteBundleBody, RecordDecisionBody, RemovalRecommendation,
+            RemovalScenario, RemovalScenarioRecord, RunStatus, SuggestionKind, Triplet,
         },
         persistence, routes,
     },
@@ -216,14 +220,19 @@ async fn post_json(
 // ─────────────────────────────────────────────────────────────────────
 
 fn item_key(id: Uuid) -> ItemKey {
-    ItemKey { menu_item_id: id, size_label: "one_size".into() }
+    ItemKey {
+        menu_item_id: id,
+        size_label: "one_size".into(),
+    }
 }
 
 fn sample_report(latte: Uuid, croissant: Uuid) -> AdvisorReport {
     let price_cm = PriceSuggestion {
         key: item_key(latte),
         item_name: "Latte".into(),
-        classification: Classification::Cm { quadrant: CmQuadrant::Star },
+        classification: Classification::Cm {
+            quadrant: CmQuadrant::Star,
+        },
         current_price: 10_000,
         units_sold_raw: 120.0,
         effective_price: 9_900.0,
@@ -267,7 +276,11 @@ fn sample_report(latte: Uuid, croissant: Uuid) -> AdvisorReport {
         cm_per_unit: None,
         margin_pct: None,
         food_cost_pct: None,
-        anchors: PriceAnchors { cost_plus: None, peer_median: 4_500.0, status_quo: 4_000.0 },
+        anchors: PriceAnchors {
+            cost_plus: None,
+            peer_median: 4_500.0,
+            status_quo: 4_000.0,
+        },
         suggested_price: None,
         suggested_delta_abs: None,
         suggested_delta_pct: None,
@@ -300,11 +313,19 @@ fn sample_report(latte: Uuid, croissant: Uuid) -> AdvisorReport {
             composite_score: 0.28,
         },
         forecast: BundleForecast {
-            expected_velocity: Triplet { lo: 0.4, mid: 0.5, hi: 0.75 },
+            expected_velocity: Triplet {
+                lo: 0.4,
+                mid: 0.5,
+                hi: 0.75,
+            },
             inside_bundle_units_x: 15.0,
             halo_units_x: 1.9,
             total_units_uplift_x: 16.9,
-            incremental_cm: Some(Triplet { lo: -500.0, mid: 900.0, hi: 2_100.0 }),
+            incremental_cm: Some(Triplet {
+                lo: -500.0,
+                mid: 900.0,
+                hi: 2_100.0,
+            }),
         },
         guard_clips: vec![GuardClip::CulturalRounding],
         explanation: "Croissant + Latte combo.".into(),
@@ -347,7 +368,7 @@ fn sample_report(latte: Uuid, croissant: Uuid) -> AdvisorReport {
 
 struct SeededRun {
     run_id: Uuid,
-    price_id: Uuid,   // the Latte (cm/star) suggestion
+    price_id: Uuid, // the Latte (cm/star) suggestion
     bundle_id: Uuid,
     removal_id: Uuid,
     latte: Uuid,
@@ -360,10 +381,9 @@ async fn seed_completed_run(pool: &PgPool, org_id: Uuid, branch_id: Uuid) -> See
     let latte = seed_menu_item(pool, org_id, "Latte", 10_000).await;
     let croissant = seed_menu_item(pool, org_id, "Croissant", 4_000).await;
 
-    let run_id =
-        persistence::create_run(pool, org_id, branch_id, &AnalysisConfig::default())
-            .await
-            .unwrap();
+    let run_id = persistence::create_run(pool, org_id, branch_id, &AnalysisConfig::default())
+        .await
+        .unwrap();
     let report = sample_report(latte, croissant);
     let mut category_by_key = std::collections::HashMap::new();
     category_by_key.insert(item_key(latte), Some(category_id));
@@ -392,7 +412,14 @@ async fn seed_completed_run(pool: &PgPool, org_id: Uuid, branch_id: Uuid) -> See
             .await
             .unwrap();
 
-    SeededRun { run_id, price_id, bundle_id, removal_id, latte, category_id }
+    SeededRun {
+        run_id,
+        price_id,
+        bundle_id,
+        removal_id,
+        latte,
+        category_id,
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -432,19 +459,25 @@ async fn stale_run_takeover(pool: PgPool) {
     let user = seed_user(&pool, org, "org_admin").await;
     let tok = token(user, Some(org), UserRole::OrgAdmin);
 
-    let stale_id =
-        persistence::create_run(&pool, org, branch, &AnalysisConfig::default()).await.unwrap();
-    sqlx::query("UPDATE menu_advisor_runs SET started_at = now() - interval '20 minutes' WHERE id = $1")
-        .bind(stale_id)
-        .execute(&pool)
+    let stale_id = persistence::create_run(&pool, org, branch, &AnalysisConfig::default())
         .await
         .unwrap();
+    sqlx::query(
+        "UPDATE menu_advisor_runs SET started_at = now() - interval '20 minutes' WHERE id = $1",
+    )
+    .bind(stale_id)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let uri = format!("/menu-advisor/branches/{branch}/runs");
     let (status, _) = post_json(&app, &uri, &tok, &CreateRunBody { config: None }).await;
     assert_eq!(status, 202, "stale run must be taken over");
 
-    let stale = persistence::get_run(&pool, stale_id).await.unwrap().unwrap();
+    let stale = persistence::get_run(&pool, stale_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(stale.status, RunStatus::Failed);
     assert!(stale.error_message.unwrap().contains("abandoned"));
 }
@@ -454,7 +487,9 @@ async fn concurrent_create_run_blocked_by_unique_index(pool: PgPool) {
     let org = seed_org(&pool).await;
     let branch = seed_branch(&pool, org).await;
     let cfg = AnalysisConfig::default();
-    persistence::create_run(&pool, org, branch, &cfg).await.unwrap();
+    persistence::create_run(&pool, org, branch, &cfg)
+        .await
+        .unwrap();
     // Bypasses the handler's pre-check entirely — the DB must still refuse.
     let second = persistence::create_run(&pool, org, branch, &cfg).await;
     match second {
@@ -472,13 +507,19 @@ async fn run_reads_pagination_latest_active_and_404(pool: PgPool) {
     let tok = token(user, Some(org), UserRole::OrgAdmin);
 
     // Three runs: completed (old), failed (newer), in_progress (newest).
-    let r1 = persistence::create_run(&pool, org, branch, &AnalysisConfig::default()).await.unwrap();
+    let r1 = persistence::create_run(&pool, org, branch, &AnalysisConfig::default())
+        .await
+        .unwrap();
     sqlx::query("UPDATE menu_advisor_runs SET status='completed', completed_at = now() - interval '2 hours', started_at = now() - interval '3 hours' WHERE id = $1")
         .bind(r1).execute(&pool).await.unwrap();
-    let r2 = persistence::create_run(&pool, org, branch, &AnalysisConfig::default()).await.unwrap();
+    let r2 = persistence::create_run(&pool, org, branch, &AnalysisConfig::default())
+        .await
+        .unwrap();
     sqlx::query("UPDATE menu_advisor_runs SET status='failed', error_message='boom', completed_at = now() - interval '1 hour', started_at = now() - interval '90 minutes' WHERE id = $1")
         .bind(r2).execute(&pool).await.unwrap();
-    let r3 = persistence::create_run(&pool, org, branch, &AnalysisConfig::default()).await.unwrap();
+    let r3 = persistence::create_run(&pool, org, branch, &AnalysisConfig::default())
+        .await
+        .unwrap();
 
     // List: newest first.
     let (status, runs) =
@@ -530,8 +571,12 @@ async fn run_reads_pagination_latest_active_and_404(pool: PgPool) {
     assert_eq!(active.unwrap().unwrap().id, r3);
 
     // get by id 404.
-    let status =
-        get_status(&app, &format!("/menu-advisor/runs/{}", Uuid::new_v4()), &tok).await;
+    let status = get_status(
+        &app,
+        &format!("/menu-advisor/runs/{}", Uuid::new_v4()),
+        &tok,
+    )
+    .await;
     assert_eq!(status, 404);
 }
 
@@ -590,7 +635,10 @@ async fn round_trip_preserves_flattened_wire_shape(pool: PgPool) {
     assert_eq!(latte["item_name"], "Latte");
     // Flattened: suggestion fields are TOP-LEVEL, next to id/run_id.
     assert_eq!(latte["id"], serde_json::json!(seeded.price_id.to_string()));
-    assert_eq!(latte["run_id"], serde_json::json!(seeded.run_id.to_string()));
+    assert_eq!(
+        latte["run_id"],
+        serde_json::json!(seeded.run_id.to_string())
+    );
     assert_eq!(latte["classification"]["mode"], "cm");
     assert_eq!(latte["classification"]["quadrant"], "star");
     assert_eq!(latte["action"], "raise_price");
@@ -612,7 +660,10 @@ async fn round_trip_preserves_flattened_wire_shape(pool: PgPool) {
     let bundles = bundles.unwrap();
     assert_eq!(bundles.len(), 1);
     assert_eq!(bundles[0].suggestion.bundle_suggested_price, 12_500);
-    assert_eq!(bundles[0].suggestion.forecast.incremental_cm.unwrap().mid, 900.0);
+    assert_eq!(
+        bundles[0].suggestion.forecast.incremental_cm.unwrap().mid,
+        900.0
+    );
 
     let (_, removals) = get_json::<Vec<RemovalScenarioRecord>>(
         &app,
@@ -622,14 +673,29 @@ async fn round_trip_preserves_flattened_wire_shape(pool: PgPool) {
     .await;
     let removals = removals.unwrap();
     assert_eq!(removals.len(), 1);
-    assert_eq!(removals[0].scenario.recommendation, RemovalRecommendation::Remove);
+    assert_eq!(
+        removals[0].scenario.recommendation,
+        RemovalRecommendation::Remove
+    );
 
     // Single getters.
     for (uri, expect) in [
-        (format!("/menu-advisor/price-suggestions/{}", seeded.price_id), 200),
-        (format!("/menu-advisor/bundle-suggestions/{}", seeded.bundle_id), 200),
-        (format!("/menu-advisor/removal-scenarios/{}", seeded.removal_id), 200),
-        (format!("/menu-advisor/price-suggestions/{}", Uuid::new_v4()), 404),
+        (
+            format!("/menu-advisor/price-suggestions/{}", seeded.price_id),
+            200,
+        ),
+        (
+            format!("/menu-advisor/bundle-suggestions/{}", seeded.bundle_id),
+            200,
+        ),
+        (
+            format!("/menu-advisor/removal-scenarios/{}", seeded.removal_id),
+            200,
+        ),
+        (
+            format!("/menu-advisor/price-suggestions/{}", Uuid::new_v4()),
+            404,
+        ),
     ] {
         assert_eq!(get_status(&app, &uri, &tok).await, expect, "{uri}");
     }
@@ -702,7 +768,11 @@ async fn price_suggestion_filter_matrix(pool: PgPool) {
         &tok,
     )
     .await;
-    assert_eq!(b2.unwrap().len(), 0, "focus is the croissant, not the latte");
+    assert_eq!(
+        b2.unwrap().len(),
+        0,
+        "focus is the croissant, not the latte"
+    );
     let (_, r) = get_json::<Vec<serde_json::Value>>(
         &app,
         &format!("/menu-advisor/runs/{run}/removal-scenarios?recommendation=remove"),
@@ -831,7 +901,10 @@ async fn decision_flow_latest_wins_history_retained(pool: PgPool) {
     let future = (Utc::now() + Duration::hours(1)).to_rfc3339();
     let (_, none) = get_json::<Vec<DecisionRecord>>(
         &app,
-        &format!("/menu-advisor/branches/{branch}/decisions?since={}", urlencoding(&future)),
+        &format!(
+            "/menu-advisor/branches/{branch}/decisions?since={}",
+            urlencoding(&future)
+        ),
         &tok,
     )
     .await;
@@ -902,18 +975,35 @@ async fn promote_validates_bundle_org(pool: PgPool) {
     let user = seed_user(&pool, org, "org_admin").await;
     let tok = token(user, Some(org), UserRole::OrgAdmin);
     let seeded = seed_completed_run(&pool, org, branch).await;
-    let uri = format!("/menu-advisor/bundle-suggestions/{}/promote", seeded.bundle_id);
+    let uri = format!(
+        "/menu-advisor/bundle-suggestions/{}/promote",
+        seeded.bundle_id
+    );
 
     // Nonexistent bundle → 404.
-    let (status, _) =
-        post_json(&app, &uri, &tok, &PromoteBundleBody { bundle_id: Uuid::new_v4() }).await;
+    let (status, _) = post_json(
+        &app,
+        &uri,
+        &tok,
+        &PromoteBundleBody {
+            bundle_id: Uuid::new_v4(),
+        },
+    )
+    .await;
     assert_eq!(status, 404);
 
     // Bundle from another org → 403.
     let other_org = seed_org(&pool).await;
     let foreign_bundle = seed_bundle(&pool, other_org).await;
-    let (status, _) =
-        post_json(&app, &uri, &tok, &PromoteBundleBody { bundle_id: foreign_bundle }).await;
+    let (status, _) = post_json(
+        &app,
+        &uri,
+        &tok,
+        &PromoteBundleBody {
+            bundle_id: foreign_bundle,
+        },
+    )
+    .await;
     assert_eq!(status, 403);
 
     // Same-org bundle → 200 and the link is stored.
@@ -1038,9 +1128,14 @@ async fn cross_org_access_is_refused_on_every_route(pool: PgPool) {
     let bundle_b = seed_bundle(&pool, org_b).await;
     let (status, _) = post_json(
         &app,
-        &format!("/menu-advisor/bundle-suggestions/{}/promote", seeded.bundle_id),
+        &format!(
+            "/menu-advisor/bundle-suggestions/{}/promote",
+            seeded.bundle_id
+        ),
         &tok_b,
-        &PromoteBundleBody { bundle_id: bundle_b },
+        &PromoteBundleBody {
+            bundle_id: bundle_b,
+        },
     )
     .await;
     assert_eq!(status, 403, "promote another org's suggestion");
@@ -1092,7 +1187,12 @@ impl OrderSeeder {
         .fetch_one(pool)
         .await
         .unwrap();
-        Self { branch, shift, teller, counter: 0 }
+        Self {
+            branch,
+            shift,
+            teller,
+            counter: 0,
+        }
     }
 
     async fn order(&mut self, pool: &PgPool, days_ago: i32) -> Uuid {
@@ -1191,7 +1291,7 @@ async fn seed_recipe_with_cost(pool: &PgPool, org: Uuid, item: Uuid, qty: f64, p
     sqlx::query(
         "INSERT INTO menu_item_recipes (menu_item_id, size_label, quantity_used, \
                                         ingredient_name, ingredient_unit, org_ingredient_id) \
-         VALUES ($1, 'one_size'::item_size, $2, 'ing', 'g', $3)",
+         VALUES ($1, 'one_size', $2, 'ing', 'g', $3)",
     )
     .bind(item)
     .bind(rust_decimal::Decimal::try_from(qty).unwrap())
@@ -1216,13 +1316,20 @@ async fn adapter_costs_in_piastres_with_snapshot_priority(pool: PgPool) {
     let o2 = seeder.order(&pool, 2).await;
     seeder.line(&pool, o2, item, 1, 10_000, None).await; // reconstructed
 
-    let inputs =
-        adapter::load_inputs(&pool, org, branch, Utc::now(), &AnalysisConfig::default())
-            .await
-            .unwrap();
+    let inputs = adapter::load_inputs(&pool, org, branch, Utc::now(), &AnalysisConfig::default())
+        .await
+        .unwrap();
 
-    let snap = inputs.snapshots.iter().find(|s| s.key.menu_item_id == item).unwrap();
-    assert_eq!(snap.cost_per_serving, Some(600), "current rollup must be piastres");
+    let snap = inputs
+        .snapshots
+        .iter()
+        .find(|s| s.key.menu_item_id == item)
+        .unwrap();
+    assert_eq!(
+        snap.cost_per_serving,
+        Some(600),
+        "current rollup must be piastres"
+    );
     assert_eq!(snap.current_price, 10_000);
 
     let mut costs: Vec<Option<i64>> = inputs
@@ -1232,7 +1339,11 @@ async fn adapter_costs_in_piastres_with_snapshot_priority(pool: PgPool) {
         .map(|s| s.unit_cost_at_sale)
         .collect();
     costs.sort();
-    assert_eq!(costs, vec![Some(555), Some(600)], "snapshot first, rollup fallback");
+    assert_eq!(
+        costs,
+        vec![Some(555), Some(600)],
+        "snapshot first, rollup fallback"
+    );
 }
 
 #[sqlx::test]
@@ -1248,21 +1359,31 @@ async fn adapter_baskets_include_bundle_components_and_detect_bundle_only(pool: 
     seeder.line(&pool, o, latte, 1, 10_000, None).await; // standalone latte
     seeder.bundle_line(&pool, o, bundle, &[cookie]).await; // cookie only via bundle
 
-    let inputs =
-        adapter::load_inputs(&pool, org, branch, Utc::now(), &AnalysisConfig::default())
-            .await
-            .unwrap();
+    let inputs = adapter::load_inputs(&pool, org, branch, Utc::now(), &AnalysisConfig::default())
+        .await
+        .unwrap();
 
     // Basket contains BOTH the standalone latte and the bundle's cookie.
     assert_eq!(inputs.baskets.len(), 1);
     let basket = &inputs.baskets[0];
     assert!(basket.iter().any(|k| k.menu_item_id == latte));
-    assert!(basket.iter().any(|k| k.menu_item_id == cookie), "components count in baskets");
+    assert!(
+        basket.iter().any(|k| k.menu_item_id == cookie),
+        "components count in baskets"
+    );
 
     // Cookie is bundle_only; latte is not. Sales contain only the latte.
-    let cookie_snap = inputs.snapshots.iter().find(|s| s.key.menu_item_id == cookie).unwrap();
+    let cookie_snap = inputs
+        .snapshots
+        .iter()
+        .find(|s| s.key.menu_item_id == cookie)
+        .unwrap();
     assert!(cookie_snap.bundle_only);
-    let latte_snap = inputs.snapshots.iter().find(|s| s.key.menu_item_id == latte).unwrap();
+    let latte_snap = inputs
+        .snapshots
+        .iter()
+        .find(|s| s.key.menu_item_id == latte)
+        .unwrap();
     assert!(!latte_snap.bundle_only);
     assert!(inputs.sales.iter().all(|s| s.key.menu_item_id != cookie));
 }
@@ -1283,10 +1404,9 @@ async fn adapter_first_price_epoch_is_not_a_change(pool: PgPool) {
     .await
     .unwrap();
 
-    let inputs =
-        adapter::load_inputs(&pool, org, branch, Utc::now(), &AnalysisConfig::default())
-            .await
-            .unwrap();
+    let inputs = adapter::load_inputs(&pool, org, branch, Utc::now(), &AnalysisConfig::default())
+        .await
+        .unwrap();
     assert!(
         inputs.price_changed_keys.is_empty(),
         "item creation must not count as a price change"
@@ -1301,10 +1421,9 @@ async fn adapter_first_price_epoch_is_not_a_change(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    let inputs =
-        adapter::load_inputs(&pool, org, branch, Utc::now(), &AnalysisConfig::default())
-            .await
-            .unwrap();
+    let inputs = adapter::load_inputs(&pool, org, branch, Utc::now(), &AnalysisConfig::default())
+        .await
+        .unwrap();
     assert!(inputs.price_changed_keys.contains(&item_key(item)));
 }
 
@@ -1316,7 +1435,7 @@ async fn adapter_size_epoch_flags_only_that_size(pool: PgPool) {
     for (label, price) in [("small", 8_000), ("large", 12_000)] {
         sqlx::query(
             "INSERT INTO item_sizes (menu_item_id, label, price_override) \
-             VALUES ($1, $2::item_size, $3)",
+             VALUES ($1, $2, $3)",
         )
         .bind(item)
         .bind(label)
@@ -1336,14 +1455,22 @@ async fn adapter_size_epoch_flags_only_that_size(pool: PgPool) {
     .await
     .unwrap();
 
-    let inputs =
-        adapter::load_inputs(&pool, org, branch, Utc::now(), &AnalysisConfig::default())
-            .await
-            .unwrap();
-    let small = ItemKey { menu_item_id: item, size_label: "small".into() };
-    let large = ItemKey { menu_item_id: item, size_label: "large".into() };
+    let inputs = adapter::load_inputs(&pool, org, branch, Utc::now(), &AnalysisConfig::default())
+        .await
+        .unwrap();
+    let small = ItemKey {
+        menu_item_id: item,
+        size_label: "small".into(),
+    };
+    let large = ItemKey {
+        menu_item_id: item,
+        size_label: "large".into(),
+    };
     assert!(inputs.price_changed_keys.contains(&small));
-    assert!(!inputs.price_changed_keys.contains(&large), "no fan-out across sizes");
+    assert!(
+        !inputs.price_changed_keys.contains(&large),
+        "no fan-out across sizes"
+    );
 
     // Both sizes exist as snapshots with their override prices.
     let small_snap = inputs.snapshots.iter().find(|s| s.key == small).unwrap();

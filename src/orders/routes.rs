@@ -1,5 +1,5 @@
-use actix_web::web;
 use crate::{auth::middleware::JwtMiddleware, orders::handlers};
+use actix_web::web;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(

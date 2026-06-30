@@ -192,13 +192,12 @@ pub(crate) async fn emit_kitchen_ticket(
     lines: &[KitchenLine],
 ) -> Result<Option<Uuid>, AppError> {
     // Effective routing mode (inline; `effective_routing_mode` needs a Copy executor).
-    let stored: Option<String> = sqlx::query_scalar(
-        "SELECT kitchen_routing_mode::text FROM branches WHERE id = $1",
-    )
-    .bind(ctx.branch_id)
-    .fetch_optional(&mut **tx)
-    .await?
-    .flatten();
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT kitchen_routing_mode::text FROM branches WHERE id = $1")
+            .bind(ctx.branch_id)
+            .fetch_optional(&mut **tx)
+            .await?
+            .flatten();
     let mode = match stored {
         Some(m) => m,
         None => {
@@ -209,7 +208,11 @@ pub(crate) async fn emit_kitchen_ticket(
             .bind(ctx.branch_id)
             .fetch_one(&mut **tx)
             .await?;
-            if has_station { "kds".into() } else { "till".into() }
+            if has_station {
+                "kds".into()
+            } else {
+                "till".into()
+            }
         }
     };
     if mode == "off" {
@@ -314,16 +317,35 @@ pub(crate) async fn kitchen_ticket_view<'e, E>(
 where
     E: PgExecutor<'e> + Copy,
 {
-    let row: Option<(Uuid, Uuid, String, Uuid, Option<String>, Option<String>, i32, String, chrono::DateTime<chrono::Utc>)> =
-        sqlx::query_as(
-            "SELECT id, branch_id, source_type, source_id, table_label, kitchen_ref, \
+    let row: Option<(
+        Uuid,
+        Uuid,
+        String,
+        Uuid,
+        Option<String>,
+        Option<String>,
+        i32,
+        String,
+        chrono::DateTime<chrono::Utc>,
+    )> = sqlx::query_as(
+        "SELECT id, branch_id, source_type, source_id, table_label, kitchen_ref, \
                     round_number, status::text, created_at \
              FROM kitchen_tickets WHERE id = $1",
-        )
-        .bind(ticket_id)
-        .fetch_optional(executor)
-        .await?;
-    let Some((id, branch_id, source_type, source_id, table_label, kitchen_ref, round_number, status, created_at)) = row
+    )
+    .bind(ticket_id)
+    .fetch_optional(executor)
+    .await?;
+    let Some((
+        id,
+        branch_id,
+        source_type,
+        source_id,
+        table_label,
+        kitchen_ref,
+        round_number,
+        status,
+        created_at,
+    )) = row
     else {
         return Ok(None);
     };
@@ -365,7 +387,10 @@ pub(crate) async fn publish_kitchen<'e, E>(
     E: PgExecutor<'e> + Copy,
 {
     if let Ok(Some(view)) = kitchen_ticket_view(executor, ticket_id).await {
-        hub.publish(branch_id, BranchEvent::new(Topic::Kitchen, event_type, &view));
+        hub.publish(
+            branch_id,
+            BranchEvent::new(Topic::Kitchen, event_type, &view),
+        );
     }
 }
 
@@ -378,13 +403,12 @@ pub(crate) async fn effective_routing_mode<'e, E>(
 where
     E: PgExecutor<'e> + Copy,
 {
-    let stored: Option<String> = sqlx::query_scalar(
-        "SELECT kitchen_routing_mode::text FROM branches WHERE id = $1",
-    )
-    .bind(branch_id)
-    .fetch_optional(executor)
-    .await?
-    .flatten();
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT kitchen_routing_mode::text FROM branches WHERE id = $1")
+            .bind(branch_id)
+            .fetch_optional(executor)
+            .await?
+            .flatten();
     if let Some(mode) = stored {
         return Ok(mode);
     }
@@ -395,5 +419,9 @@ where
     .bind(branch_id)
     .fetch_one(executor)
     .await?;
-    Ok(if has_station { "kds".into() } else { "till".into() })
+    Ok(if has_station {
+        "kds".into()
+    } else {
+        "till".into()
+    })
 }

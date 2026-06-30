@@ -1,4 +1,4 @@
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -6,7 +6,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
-    auth::jwt::{create_token, Claims, JwtSecret},
+    auth::jwt::{Claims, JwtSecret, create_token},
     errors::{AppError, AppErrorResponse},
     models::{User, UserPublic, UserRole},
 };
@@ -23,15 +23,20 @@ use crate::{
 ///   derived server-side from the branch — never trusted from the client.
 #[derive(Deserialize, ToSchema)]
 pub struct LoginRequest {
-    pub org_id:    Option<Uuid>,
+    pub org_id: Option<Uuid>,
     #[schema(format = Email, example = "ahmed@therue.cafe")]
-    pub email:     Option<String>,
-    pub password:  Option<String>,
-    #[schema(pattern = "^[0-9]{4,6}$", min_length = 4, max_length = 6, example = "1234")]
-    pub pin:       Option<String>,
+    pub email: Option<String>,
+    pub password: Option<String>,
+    #[schema(
+        pattern = "^[0-9]{4,6}$",
+        min_length = 4,
+        max_length = 6,
+        example = "1234"
+    )]
+    pub pin: Option<String>,
     /// Teller's display name (required for PIN login, unused otherwise).
     #[schema(example = "Mariam")]
-    pub name:      Option<String>,
+    pub name: Option<String>,
     /// Required for PIN login. The org is derived from this branch server-side.
     pub branch_id: Option<Uuid>,
 }
@@ -39,17 +44,17 @@ pub struct LoginRequest {
 #[derive(Deserialize, ToSchema)]
 pub struct ResolveBranchRequest {
     /// Organization to search within.
-    pub org_id:    Uuid,
+    pub org_id: Uuid,
     /// Device GPS latitude (WGS-84).
-    pub latitude:  f64,
+    pub latitude: f64,
     /// Device GPS longitude (WGS-84).
     pub longitude: f64,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct ResolveBranchResponse {
-    pub branch_id:       Uuid,
-    pub branch_name:     String,
+    pub branch_id: Uuid,
+    pub branch_name: String,
     /// Straight-line distance from the supplied coordinates to the branch, in metres.
     pub distance_meters: f64,
 }
@@ -58,7 +63,7 @@ pub struct ResolveBranchResponse {
 pub struct LoginResponse {
     /// JWT to send as `Authorization: Bearer <token>` on subsequent requests.
     pub token: String,
-    pub user:  UserPublic,
+    pub user: UserPublic,
     /// Org tax rate as a decimal (e.g. 0.14 = 14% VAT); 0.0 when no org. Mirrors
     /// /auth/me so the POS has it immediately after login.
     #[schema(example = 0.14)]
@@ -84,8 +89,8 @@ pub struct UserPermissionItem {
     #[schema(example = "menu_items")]
     pub resource: String,
     #[schema(example = "read")]
-    pub action:   String,
-    pub granted:  bool,
+    pub action: String,
+    pub granted: bool,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -96,8 +101,8 @@ pub struct AuthPermissionsResponse {
 #[derive(sqlx::FromRow)]
 struct DbPermission {
     pub resource: String,
-    pub action:   String,
-    pub granted:  bool,
+    pub action: String,
+    pub granted: bool,
 }
 
 // ── POST /auth/login ─────────────────────────────────────────
@@ -113,14 +118,12 @@ struct DbPermission {
     )
 )]
 pub async fn login(
-    _req:   HttpRequest,
-    pool:   web::Data<PgPool>,
+    _req: HttpRequest,
+    pool: web::Data<PgPool>,
     secret: web::Data<JwtSecret>,
-    body:   web::Json<LoginRequest>,
+    body: web::Json<LoginRequest>,
 ) -> Result<HttpResponse, AppError> {
-
     let user: User = match (&body.email, &body.pin) {
-
         (Some(email), None) => {
             let password = body.password.as_deref().ok_or_else(|| {
                 AppError::BadRequest("password is required for email login".into())
@@ -144,9 +147,10 @@ pub async fn login(
             .await?
             .ok_or_else(|| AppError::Unauthorized("Invalid credentials".into()))?;
 
-            let hash = u.password_hash.as_deref().ok_or_else(|| {
-                AppError::Unauthorized("No password set for this account".into())
-            })?;
+            let hash = u
+                .password_hash
+                .as_deref()
+                .ok_or_else(|| AppError::Unauthorized("No password set for this account".into()))?;
             if !bcrypt::verify(password, hash).unwrap_or(false) {
                 return Err(AppError::Unauthorized("Invalid credentials".into()));
             }
@@ -154,9 +158,10 @@ pub async fn login(
         }
 
         (None, Some(pin)) => {
-            let name = body.name.as_deref().ok_or_else(|| {
-                AppError::BadRequest("name is required for PIN login".into())
-            })?;
+            let name = body
+                .name
+                .as_deref()
+                .ok_or_else(|| AppError::BadRequest("name is required for PIN login".into()))?;
 
             let branch_id = body.branch_id.ok_or_else(|| {
                 AppError::BadRequest("branch_id is required for PIN login".into())
@@ -227,9 +232,11 @@ pub async fn login(
             matched
         }
 
-        _ => return Err(AppError::BadRequest(
-            "Provide either (email + password) or pin".into()
-        )),
+        _ => {
+            return Err(AppError::BadRequest(
+                "Provide either (email + password) or pin".into(),
+            ));
+        }
     };
 
     if !user.is_active {
@@ -256,14 +263,14 @@ pub async fn login(
     //     prevents two people sharing one drawer.
     //
     // (1) This teller's own open shift must be at the branch they're signing into.
-    let open_shift_branch: Option<Uuid> = sqlx::query_scalar(
-        "SELECT branch_id FROM shifts WHERE teller_id = $1 AND status = 'open'"
-    )
-    .bind(user.id)
-    .fetch_optional(pool.get_ref())
-    .await?;
+    let open_shift_branch: Option<Uuid> =
+        sqlx::query_scalar("SELECT branch_id FROM shifts WHERE teller_id = $1 AND status = 'open'")
+            .bind(user.id)
+            .fetch_optional(pool.get_ref())
+            .await?;
     if let Some(open_branch) = open_shift_branch
-        && body.branch_id != Some(open_branch) {
+        && body.branch_id != Some(open_branch)
+    {
         tracing::warn!(
             target: "auth.login.blocked_open_shift",
             user_id = %user.id, role = ?user.role,
@@ -271,7 +278,8 @@ pub async fn login(
             "login blocked: user has an open shift at a different branch"
         );
         return Err(AppError::Conflict(
-            "You already have an open shift at another branch. Close it before signing in here.".into(),
+            "You already have an open shift at another branch. Close it before signing in here."
+                .into(),
         ));
     }
 
@@ -282,13 +290,23 @@ pub async fn login(
 
     // Tellers, waiters AND kitchen users are device-bound (PIN) and branch-bound;
     // waiters/kitchen just never hold a shift. All get the short device TTL.
-    let token_branch_id = if matches!(user.role, UserRole::Teller | UserRole::Waiter | UserRole::Kitchen) {
+    let token_branch_id = if matches!(
+        user.role,
+        UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
+    ) {
         body.branch_id
     } else {
         None
     };
 
-    let hours = if matches!(user.role, UserRole::Teller | UserRole::Waiter | UserRole::Kitchen) { 12 } else { 24 };
+    let hours = if matches!(
+        user.role,
+        UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
+    ) {
+        12
+    } else {
+        24
+    };
 
     let token = create_token(
         &secret,
@@ -307,11 +325,14 @@ pub async fn login(
 
     // For tellers/waiters, branch_id is the device branch (from body.branch_id).
     // For other roles, fall back to looking up the first assignment.
-    let branch_id_for_response: Option<Uuid> = if matches!(user.role, UserRole::Teller | UserRole::Waiter | UserRole::Kitchen) {
+    let branch_id_for_response: Option<Uuid> = if matches!(
+        user.role,
+        UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
+    ) {
         body.branch_id
     } else {
         sqlx::query_scalar(
-            "SELECT branch_id FROM user_branch_assignments WHERE user_id = $1 LIMIT 1"
+            "SELECT branch_id FROM user_branch_assignments WHERE user_id = $1 LIMIT 1",
         )
         .bind(user.id)
         .fetch_optional(pool.get_ref())
@@ -321,7 +342,7 @@ pub async fn login(
 
     let (tax_rate, currency_code): (f64, String) = match user.org_id {
         Some(org_id) => sqlx::query_as(
-            "SELECT COALESCE(tax_rate, 0)::float8, currency_code FROM organizations WHERE id = $1"
+            "SELECT COALESCE(tax_rate, 0)::float8, currency_code FROM organizations WHERE id = $1",
         )
         .bind(org_id)
         .fetch_optional(pool.get_ref())
@@ -353,10 +374,7 @@ pub async fn login(
     ),
     security(("bearer_jwt" = []))
 )]
-pub async fn me(
-    req:  HttpRequest,
-    pool: web::Data<PgPool>,
-) -> Result<HttpResponse, AppError> {
+pub async fn me(req: HttpRequest, pool: web::Data<PgPool>) -> Result<HttpResponse, AppError> {
     let claims = req
         .extensions()
         .get::<Claims>()
@@ -387,18 +405,20 @@ pub async fn me(
     // have no token branch, so they fall back to an assignment lookup.
     let branch_id: Option<Uuid> = match claims.branch_id() {
         Some(b) => Some(b),
-        None => sqlx::query_scalar(
-            "SELECT branch_id FROM user_branch_assignments WHERE user_id = $1 LIMIT 1"
-        )
-        .bind(user.id)
-        .fetch_optional(pool.get_ref())
-        .await?,
+        None => {
+            sqlx::query_scalar(
+                "SELECT branch_id FROM user_branch_assignments WHERE user_id = $1 LIMIT 1",
+            )
+            .bind(user.id)
+            .fetch_optional(pool.get_ref())
+            .await?
+        }
     };
 
     // Org-level config the POS needs for a tax-inclusive cart total.
     let (tax_rate, currency_code): (f64, String) = match user.org_id {
         Some(org_id) => sqlx::query_as(
-            "SELECT COALESCE(tax_rate, 0)::float8, currency_code FROM organizations WHERE id = $1"
+            "SELECT COALESCE(tax_rate, 0)::float8, currency_code FROM organizations WHERE id = $1",
         )
         .bind(org_id)
         .fetch_optional(pool.get_ref())
@@ -410,7 +430,11 @@ pub async fn me(
     let mut user_public = UserPublic::from(user);
     user_public.branch_id = branch_id;
 
-    Ok(HttpResponse::Ok().json(MeResponse { user: user_public, tax_rate, currency_code }))
+    Ok(HttpResponse::Ok().json(MeResponse {
+        user: user_public,
+        tax_rate,
+        currency_code,
+    }))
 }
 
 // ── POST /auth/resolve-branch ────────────────────────────────
@@ -431,8 +455,8 @@ pub async fn resolve_branch(
 ) -> Result<HttpResponse, AppError> {
     #[derive(sqlx::FromRow)]
     struct Row {
-        id:              Uuid,
-        name:            String,
+        id: Uuid,
+        name: String,
         distance_meters: f64,
     }
 
@@ -467,8 +491,8 @@ pub async fn resolve_branch(
 
     match row {
         Some(r) => Ok(HttpResponse::Ok().json(ResolveBranchResponse {
-            branch_id:       r.id,
-            branch_name:     r.name,
+            branch_id: r.id,
+            branch_name: r.name,
             distance_meters: r.distance_meters,
         })),
         None => Err(AppError::NotFound("No branch found within range".into())),
@@ -492,7 +516,7 @@ pub async fn resolve_branch(
     security(("bearer_jwt" = []))
 )]
 pub async fn permissions(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
 ) -> Result<HttpResponse, AppError> {
     let claims = req
@@ -501,13 +525,12 @@ pub async fn permissions(
         .cloned()
         .ok_or_else(|| AppError::Unauthorized("Missing claims".into()))?;
 
-    let role: String = sqlx::query_scalar(
-        "SELECT role::text FROM users WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(claims.user_id())
-    .fetch_optional(pool.get_ref())
-    .await?
-    .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+    let role: String =
+        sqlx::query_scalar("SELECT role::text FROM users WHERE id = $1 AND deleted_at IS NULL")
+            .bind(claims.user_id())
+            .fetch_optional(pool.get_ref())
+            .await?
+            .ok_or_else(|| AppError::NotFound("User not found".into()))?;
 
     let role_defaults = sqlx::query_as::<_, DbPermission>(
         "SELECT resource::text as resource, action::text as action, granted
@@ -526,7 +549,7 @@ pub async fn permissions(
     .await?;
 
     let resources = crate::permissions::RESOURCES;
-    let actions   = crate::permissions::ACTIONS;
+    let actions = crate::permissions::ACTIONS;
 
     // Build O(1) lookup maps so the nested loop is O(n) not O(n²)
     let role_map: HashMap<(&str, &str), bool> = role_defaults
@@ -542,7 +565,7 @@ pub async fn permissions(
 
     for resource in resources {
         for action in actions {
-            let role_default  = role_map.get(&(resource, action)).copied();
+            let role_default = role_map.get(&(resource, action)).copied();
             let user_override = override_map.get(&(resource, action)).copied();
 
             let effective = if role == "super_admin" {
@@ -553,8 +576,8 @@ pub async fn permissions(
 
             permissions.push(UserPermissionItem {
                 resource: resource.to_string(),
-                action:   action.to_string(),
-                granted:  effective,
+                action: action.to_string(),
+                granted: effective,
             });
         }
     }

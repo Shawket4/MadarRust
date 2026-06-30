@@ -1,9 +1,9 @@
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::HttpMessage;
+use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
-use actix_web::HttpMessage;
 
 use crate::{
     auth::{guards::require_same_org, jwt::Claims},
@@ -17,123 +17,123 @@ use utoipa::{IntoParams, ToSchema};
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct Category {
-    pub id:            Uuid,
-    pub org_id:        Uuid,
-    pub name:          String,
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub name: String,
     #[schema(value_type = Object)]
     pub name_translations: serde_json::Value,
     #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
-    pub image_url:     Option<String>,
-    pub is_active:     bool,
-    pub created_at:    DateTime<Utc>,
-    pub updated_at:    DateTime<Utc>,
-    pub deleted_at:    Option<DateTime<Utc>>,
+    pub image_url: Option<String>,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct MenuItem {
-    pub id:            Uuid,
-    pub org_id:        Uuid,
-    pub category_id:   Option<Uuid>,
-    pub name:          String,
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub category_id: Option<Uuid>,
+    pub name: String,
     #[schema(value_type = Object)]
     pub name_translations: serde_json::Value,
-    pub description:   Option<String>,
+    pub description: Option<String>,
     #[schema(value_type = Object)]
     pub description_translations: serde_json::Value,
     #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
-    pub image_url:     Option<String>,
-    pub base_price:    i32,
-    pub is_active:     bool,
-    pub created_at:    DateTime<Utc>,
-    pub updated_at:    DateTime<Utc>,
-    pub deleted_at:    Option<DateTime<Utc>>,
+    pub image_url: Option<String>,
+    pub base_price: i32,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
     pub default_milk_addon_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct ItemSize {
-    pub id:             Uuid,
-    pub menu_item_id:   Uuid,
-    pub label:          String,
+    pub id: Uuid,
+    pub menu_item_id: Uuid,
+    pub label: String,
     pub price_override: i32,
-    pub is_active:      bool,
+    pub is_active: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct AddonItem {
-    pub id:            Uuid,
-    pub org_id:        Uuid,
-    pub name:          String,
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub name: String,
     #[schema(value_type = Object)]
     pub name_translations: serde_json::Value,
-    pub addon_type:    String,
+    pub addon_type: String,
     pub default_price: i32,
-    pub is_active:     bool,
-    pub created_at:    DateTime<Utc>,
-    pub updated_at:    DateTime<Utc>,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
     pub primary_ingredient_id: Option<Uuid>,
     #[serde(default)]
     #[sqlx(skip)]
-    pub ingredients:   Vec<AddonItemIngredient>,
+    pub ingredients: Vec<AddonItemIngredient>,
 }
 
 // ── Addon Slot models ─────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct AddonSlot {
-    pub id:             Uuid,
-    pub menu_item_id:   Uuid,
-    pub addon_type:     String,
-    pub label:          Option<String>,
+    pub id: Uuid,
+    pub menu_item_id: Uuid,
+    pub addon_type: String,
+    pub label: Option<String>,
     #[schema(value_type = Object)]
     pub label_translations: serde_json::Value,
-    pub is_required:    bool,
+    pub is_required: bool,
     pub min_selections: i32,
     pub max_selections: Option<i32>,
-    pub created_at:     DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
 }
 
 // ── Addon Override models ─────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct AddonOverride {
-    pub id:                         Uuid,
-    pub menu_item_id:               Uuid,
-    pub addon_item_id:              Uuid,
-    pub addon_item_name:            String,
-    pub size_label:                 Option<String>,
-    pub ingredient_name:            String,
-    pub org_ingredient_id:          Option<Uuid>,
-    pub ingredient_unit:            String,
+    pub id: Uuid,
+    pub menu_item_id: Uuid,
+    pub addon_item_id: Uuid,
+    pub addon_item_name: String,
+    pub size_label: Option<String>,
+    pub ingredient_name: String,
+    pub org_ingredient_id: Option<Uuid>,
+    pub ingredient_unit: String,
     #[schema(value_type = f64)]
-    pub quantity_used:              sqlx::types::BigDecimal,
+    pub quantity_used: sqlx::types::BigDecimal,
     pub replaces_org_ingredient_id: Option<Uuid>,
-    pub replaces_ingredient_name:   Option<String>,
-    pub combo_addon_item_id:        Option<Uuid>,
-    pub combo_addon_item_name:      Option<String>,
-    pub created_at:                 DateTime<Utc>,
-    pub updated_at:                 DateTime<Utc>,
+    pub replaces_ingredient_name: Option<String>,
+    pub combo_addon_item_id: Option<Uuid>,
+    pub combo_addon_item_name: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct MenuItemRecipe {
     pub org_ingredient_id: Option<Uuid>,
     #[schema(value_type = f64)]
-    pub quantity_used:     sqlx::types::BigDecimal,
-    pub ingredient_name:   String,
-    pub ingredient_unit:   String,
-    pub category:          String,
-    pub size_label:        String,
+    pub quantity_used: sqlx::types::BigDecimal,
+    pub ingredient_name: String,
+    pub ingredient_unit: String,
+    pub category: String,
+    pub size_label: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct AddonItemIngredient {
     pub org_ingredient_id: Option<Uuid>,
     #[schema(value_type = f64)]
-    pub quantity_used:     sqlx::types::BigDecimal,
-    pub ingredient_name:   String,
-    pub ingredient_unit:   String,
+    pub quantity_used: sqlx::types::BigDecimal,
+    pub ingredient_name: String,
+    pub ingredient_unit: String,
 }
 
 // ── MenuItemFull — slots embedded instead of option_groups ────
@@ -141,13 +141,13 @@ pub struct AddonItemIngredient {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
 pub struct MenuItemFull {
     #[serde(flatten)]
-    pub item:               MenuItem,
-    pub sizes:              Vec<ItemSize>,
-    pub addon_slots:        Vec<AddonSlot>,
-    pub optional_fields:    Vec<OptionalField>,
-    pub recipes:            Vec<MenuItemRecipe>,
+    pub item: MenuItem,
+    pub sizes: Vec<ItemSize>,
+    pub addon_slots: Vec<AddonSlot>,
+    pub optional_fields: Vec<OptionalField>,
+    pub recipes: Vec<MenuItemRecipe>,
     /// Explicit per-item addon allowlist. Empty = no restriction (use org catalog).
-    pub allowed_addon_ids:  Vec<Uuid>,
+    pub allowed_addon_ids: Vec<Uuid>,
 }
 
 // ── Request types ─────────────────────────────────────────────
@@ -161,16 +161,16 @@ pub struct OrgQuery {
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct MenuItemQuery {
-    pub org_id:      Uuid,
+    pub org_id: Uuid,
     pub category_id: Option<Uuid>,
     /// When true, embed sizes + addon slots + optionals + recipes per item
     /// (the shape the POS/teller consumes). Always returns a plain, unpaginated
     /// array — the POS depends on this contract.
-    pub full:        Option<bool>,
+    pub full: Option<bool>,
     /// When set, prices are branch-effective (branch override replaces base_price)
     /// and items disabled at this branch are excluded — the per-branch menu the POS
     /// consumes. Omitted → the plain org catalog (legacy behaviour).
-    pub branch_id:   Option<Uuid>,
+    pub branch_id: Option<Uuid>,
 }
 
 /// Query for the dashboard catalog endpoint: paginated menu items with embedded
@@ -179,22 +179,22 @@ pub struct MenuItemQuery {
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct MenuCatalogQuery {
-    pub org_id:      Uuid,
+    pub org_id: Uuid,
     pub category_id: Option<Uuid>,
     /// Case-insensitive filter on the item name.
-    pub search:      Option<String>,
+    pub search: Option<String>,
     /// 1-based page number (default 1).
-    pub page:        Option<i64>,
+    pub page: Option<i64>,
     /// Page size (default 50, max 500).
-    pub per_page:    Option<i64>,
+    pub per_page: Option<i64>,
     /// When set, enables the per-branch override filter/sort (LEFT JOINs the
     /// branch's overrides). Prices in the response stay org-level.
-    pub branch_id:   Option<Uuid>,
+    pub branch_id: Option<Uuid>,
     /// With `branch_id`: true → only items overridden at the branch; false →
     /// only un-overridden; null → all.
-    pub overridden:  Option<bool>,
+    pub overridden: Option<bool>,
     /// `"overridden"` → overridden items first (needs `branch_id`); otherwise A–Z.
-    pub sort:        Option<String>,
+    pub sort: Option<String>,
 }
 
 // ── Branch menu overrides (per-branch price + availability layer) ─────────────
@@ -206,22 +206,22 @@ pub struct MenuCatalogQuery {
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct BranchMenuOverride {
-    pub branch_id:      Uuid,
-    pub menu_item_id:   Uuid,
+    pub branch_id: Uuid,
+    pub menu_item_id: Uuid,
     /// Branch price in piastres; null inherits the org catalog base_price.
     pub price_override: Option<i32>,
     /// False disables the item at this branch (excluded from the branch menu).
-    pub is_available:   bool,
-    pub updated_at:     DateTime<Utc>,
+    pub is_available: bool,
+    pub updated_at: DateTime<Utc>,
     /// Per-size branch prices for this item (empty when none). Availability is item-level.
     #[serde(default)]
     #[sqlx(skip)]
-    pub sizes:          Vec<BranchSizeOverride>,
+    pub sizes: Vec<BranchSizeOverride>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct BranchSizeOverride {
-    pub size_label:     String,
+    pub size_label: String,
     /// Branch price for this size in piastres.
     pub price_override: i32,
 }
@@ -235,31 +235,33 @@ pub struct BranchOverridesQuery {
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct BranchOverrideKeyQuery {
-    pub branch_id:    Uuid,
+    pub branch_id: Uuid,
     pub menu_item_id: Uuid,
 }
 
-fn override_default_available() -> bool { true }
+fn override_default_available() -> bool {
+    true
+}
 
 #[derive(Deserialize, Serialize, Clone, ToSchema)]
 pub struct BranchSizeOverrideInput {
-    pub size_label:     String,
+    pub size_label: String,
     pub price_override: i32,
 }
 
 #[derive(Deserialize, Serialize, ToSchema)]
 pub struct BranchMenuOverrideInput {
-    pub branch_id:    Uuid,
+    pub branch_id: Uuid,
     pub menu_item_id: Uuid,
     /// Branch price in piastres; null inherits the org catalog base_price.
     #[serde(default)]
     pub price_override: Option<i32>,
     #[serde(default = "override_default_available")]
-    pub is_available:   bool,
+    pub is_available: bool,
     /// Per-size branch prices. `null`/omitted → leave existing size overrides untouched;
     /// a list → REPLACE the item's size overrides with exactly that set (empty clears them).
     #[serde(default)]
-    pub sizes:          Option<Vec<BranchSizeOverrideInput>>,
+    pub sizes: Option<Vec<BranchSizeOverrideInput>>,
 }
 
 // ── Branch addon overrides (per-branch addon price + availability) ────────────
@@ -267,31 +269,31 @@ pub struct BranchMenuOverrideInput {
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct BranchAddonOverride {
-    pub branch_id:      Uuid,
-    pub addon_item_id:  Uuid,
+    pub branch_id: Uuid,
+    pub addon_item_id: Uuid,
     /// Branch price in piastres; null inherits the org default_price.
     pub price_override: Option<i32>,
     /// False disables the addon at this branch (excluded from the branch addon list).
-    pub is_available:   bool,
-    pub updated_at:     DateTime<Utc>,
+    pub is_available: bool,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct BranchAddonOverrideKeyQuery {
-    pub branch_id:     Uuid,
+    pub branch_id: Uuid,
     pub addon_item_id: Uuid,
 }
 
 #[derive(Deserialize, Serialize, ToSchema)]
 pub struct BranchAddonOverrideInput {
-    pub branch_id:     Uuid,
+    pub branch_id: Uuid,
     pub addon_item_id: Uuid,
     /// Branch price in piastres; null inherits the org default_price.
     #[serde(default)]
     pub price_override: Option<i32>,
     #[serde(default = "override_default_available")]
-    pub is_available:   bool,
+    pub is_available: bool,
 }
 
 /// A menu item with its per-SKU recipe-cost rollup embedded, so the catalog
@@ -317,119 +319,119 @@ pub struct PaginatedMenuItems {
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct AddonItemQuery {
-    pub org_id:     Uuid,
+    pub org_id: Uuid,
     pub addon_type: Option<String>,
     /// When set, prices are branch-effective (override replaces default_price) and
     /// addons disabled at this branch are excluded — the per-branch addon list the
     /// POS consumes. Omitted → the plain org list (legacy behaviour).
-    pub branch_id:  Option<Uuid>,
+    pub branch_id: Option<Uuid>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CreateCategoryRequest {
-    pub org_id:        Uuid,
-    pub name:          String,
+    pub org_id: Uuid,
+    pub name: String,
     #[schema(value_type = Option<Object>)]
     pub name_translations: Option<serde_json::Value>,
-    pub image_url:     Option<String>,
+    pub image_url: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpdateCategoryRequest {
-    pub name:          Option<String>,
+    pub name: Option<String>,
     #[schema(value_type = Option<Object>)]
     pub name_translations: Option<serde_json::Value>,
     #[serde(default, deserialize_with = "deserialize_double_option")]
-    pub image_url:     Option<Option<String>>,
-    pub is_active:     Option<bool>,
+    pub image_url: Option<Option<String>>,
+    pub is_active: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CreateMenuItemRequest {
-    pub org_id:        Uuid,
-    pub category_id:   Uuid,
-    pub name:          String,
+    pub org_id: Uuid,
+    pub category_id: Uuid,
+    pub name: String,
     #[schema(value_type = Option<Object>)]
     pub name_translations: Option<serde_json::Value>,
-    pub description:   Option<String>,
+    pub description: Option<String>,
     #[schema(value_type = Option<Object>)]
     pub description_translations: Option<serde_json::Value>,
-    pub image_url:     Option<String>,
-    pub base_price:    i32,
+    pub image_url: Option<String>,
+    pub base_price: i32,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpdateMenuItemRequest {
-    pub category_id:   Option<Uuid>,
-    pub name:          Option<String>,
+    pub category_id: Option<Uuid>,
+    pub name: Option<String>,
     #[schema(value_type = Option<Object>)]
     pub name_translations: Option<serde_json::Value>,
-    pub description:   Option<String>,
+    pub description: Option<String>,
     #[schema(value_type = Option<Object>)]
     pub description_translations: Option<serde_json::Value>,
     #[serde(default, deserialize_with = "deserialize_double_option")]
-    pub image_url:     Option<Option<String>>,
-    pub base_price:    Option<i32>,
-    pub is_active:     Option<bool>,
+    pub image_url: Option<Option<String>>,
+    pub base_price: Option<i32>,
+    pub is_active: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CreateAddonItemRequest {
-    pub org_id:        Uuid,
-    pub name:          String,
+    pub org_id: Uuid,
+    pub name: String,
     #[schema(value_type = Option<Object>)]
     pub name_translations: Option<serde_json::Value>,
-    pub addon_type:    String,
+    pub addon_type: String,
     pub default_price: i32,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpdateAddonItemRequest {
-    pub name:          Option<String>,
+    pub name: Option<String>,
     #[schema(value_type = Option<Object>)]
     pub name_translations: Option<serde_json::Value>,
-    pub addon_type:    Option<String>,
+    pub addon_type: Option<String>,
     pub default_price: Option<i32>,
-    pub is_active:     Option<bool>,
+    pub is_active: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpsertSizeRequest {
-    pub label:          String,
+    pub label: String,
     pub price_override: i32,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CreateAddonSlotRequest {
-    pub addon_type:     Option<String>,
-    pub label:          Option<String>,
+    pub addon_type: Option<String>,
+    pub label: Option<String>,
     #[schema(value_type = Option<Object>)]
     pub label_translations: Option<serde_json::Value>,
-    pub is_required:    Option<bool>,
+    pub is_required: Option<bool>,
     pub min_selections: Option<i32>,
     pub max_selections: Option<i32>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpdateAddonSlotRequest {
-    pub label:          Option<String>,
+    pub label: Option<String>,
     #[schema(value_type = Option<Object>)]
     pub label_translations: Option<serde_json::Value>,
-    pub is_required:    Option<bool>,
+    pub is_required: Option<bool>,
     pub min_selections: Option<i32>,
     pub max_selections: Option<i32>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpsertAddonOverrideRequest {
-    pub addon_item_id:              Uuid,
-    pub size_label:                 Option<String>,
-    pub ingredient_name:            String,
-    pub org_ingredient_id:          Option<Uuid>,
-    pub ingredient_unit:            String,
-    pub quantity_used:              f64,
+    pub addon_item_id: Uuid,
+    pub size_label: Option<String>,
+    pub ingredient_name: String,
+    pub org_ingredient_id: Option<Uuid>,
+    pub ingredient_unit: String,
+    pub quantity_used: f64,
     pub replaces_org_ingredient_id: Option<Uuid>,
-    pub combo_addon_item_id:        Option<Uuid>,
+    pub combo_addon_item_id: Option<Uuid>,
 }
 
 // ── Categories ────────────────────────────────────────────────
@@ -443,8 +445,8 @@ pub struct UpsertAddonOverrideRequest {
     security(("bearer_jwt" = []))
 )]
 pub async fn list_categories(
-    req:   HttpRequest,
-    pool:  web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     query: web::Query<OrgQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -474,7 +476,7 @@ pub async fn list_categories(
     security(("bearer_jwt" = []))
 )]
 pub async fn create_category(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
     body: web::Json<CreateCategoryRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -483,7 +485,9 @@ pub async fn create_category(
     require_same_org(&claims, Some(body.org_id))?;
 
     let mut_body = body.into_inner();
-    let mut name_translations = mut_body.name_translations.unwrap_or_else(|| serde_json::json!({}));
+    let mut name_translations = mut_body
+        .name_translations
+        .unwrap_or_else(|| serde_json::json!({}));
     crate::translation::ensure_translations_json(&mut name_translations, Some(&mut_body.name))
         .await
         .map_err(|_| AppError::Internal)?;
@@ -514,9 +518,9 @@ pub async fn create_category(
     security(("bearer_jwt" = []))
 )]
 pub async fn update_category(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
     body: web::Json<UpdateCategoryRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -563,11 +567,12 @@ pub async fn update_category(
 
     // If explicit null, cleanup old image from storage
     if mut_body.image_url == Some(None)
-        && let Some(old_url) = existing.image_url {
-            let uploads_dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
-            let base_url    = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
-            delete_old_image(&old_url, &base_url, &uploads_dir, Some(existing.org_id)).await;
-        }
+        && let Some(old_url) = existing.image_url
+    {
+        let uploads_dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
+        let base_url = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
+        delete_old_image(&old_url, &base_url, &uploads_dir, Some(existing.org_id)).await;
+    }
 
     Ok(HttpResponse::Ok().json(row))
 }
@@ -581,9 +586,9 @@ pub async fn update_category(
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_category(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "categories", "delete").await?;
@@ -591,12 +596,10 @@ pub async fn delete_category(
     let existing = fetch_category(pool.get_ref(), *id).await?;
     require_same_org(&claims, Some(existing.org_id))?;
 
-    sqlx::query(
-        "UPDATE categories SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(*id)
-    .execute(pool.get_ref())
-    .await?;
+    sqlx::query("UPDATE categories SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL")
+        .bind(*id)
+        .execute(pool.get_ref())
+        .await?;
 
     Ok(HttpResponse::NoContent().finish())
 }
@@ -613,8 +616,8 @@ pub async fn delete_category(
     security(("bearer_jwt" = []))
 )]
 pub async fn list_menu_items(
-    req:   HttpRequest,
-    pool:  web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     cache: Option<web::Data<crate::menu::cache::MenuCache>>,
     query: web::Query<MenuItemQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -633,7 +636,9 @@ pub async fn list_menu_items(
     );
     if let Some(c) = &cache {
         if let Some(body) = c.get(query.org_id, &variant).await {
-            return Ok(HttpResponse::Ok().content_type("application/json").body(body));
+            return Ok(HttpResponse::Ok()
+                .content_type("application/json")
+                .body(body));
         }
     }
 
@@ -680,24 +685,35 @@ pub async fn list_menu_items(
             if let Some(branch_id) = query.branch_id {
                 apply_branch_size_overrides(pool.get_ref(), branch_id, item.id, &mut sizes).await?;
             }
-            let addon_slots        = fetch_addon_slots(pool.get_ref(), item.id).await?;
-            let optional_fields    = fetch_optional_fields(pool.get_ref(), item.id).await?;
-            let recipes            = fetch_item_recipes(pool.get_ref(), item.id).await?;
-            let allowed_addon_ids  = fetch_allowed_addon_ids(pool.get_ref(), item.id).await?;
-            result.push(MenuItemFull { item, sizes, addon_slots, optional_fields, recipes, allowed_addon_ids });
+            let addon_slots = fetch_addon_slots(pool.get_ref(), item.id).await?;
+            let optional_fields = fetch_optional_fields(pool.get_ref(), item.id).await?;
+            let recipes = fetch_item_recipes(pool.get_ref(), item.id).await?;
+            let allowed_addon_ids = fetch_allowed_addon_ids(pool.get_ref(), item.id).await?;
+            result.push(MenuItemFull {
+                item,
+                sizes,
+                addon_slots,
+                optional_fields,
+                recipes,
+                allowed_addon_ids,
+            });
         }
         let body = web::Bytes::from(serde_json::to_vec(&result).map_err(|_| AppError::Internal)?);
         if let Some(c) = &cache {
             c.put(query.org_id, &variant, body.clone()).await;
         }
-        return Ok(HttpResponse::Ok().content_type("application/json").body(body));
+        return Ok(HttpResponse::Ok()
+            .content_type("application/json")
+            .body(body));
     }
 
     let body = web::Bytes::from(serde_json::to_vec(&items).map_err(|_| AppError::Internal)?);
     if let Some(c) = &cache {
         c.put(query.org_id, &variant, body.clone()).await;
     }
-    Ok(HttpResponse::Ok().content_type("application/json").body(body))
+    Ok(HttpResponse::Ok()
+        .content_type("application/json")
+        .body(body))
 }
 
 #[utoipa::path(
@@ -710,8 +726,8 @@ pub async fn list_menu_items(
     security(("bearer_jwt" = []))
 )]
 pub async fn list_menu_catalog(
-    req:   HttpRequest,
-    pool:  web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     query: web::Query<MenuCatalogQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -784,12 +800,18 @@ pub async fn list_menu_catalog(
     .fetch_all(pool.get_ref())
     .await?;
 
-    let total_pages = if total == 0 { 0 } else { ((total as f64) / (per_page as f64)).ceil() as i64 };
+    let total_pages = if total == 0 {
+        0
+    } else {
+        ((total as f64) / (per_page as f64)).ceil() as i64
+    };
 
     // Embed per-SKU costs for just this page so the dashboard catalog renders
     // food-cost chips in the same round trip.
     let ids: Vec<Uuid> = rows.iter().map(|m| m.id).collect();
-    let costs = crate::costing::sku_costs_for_items(pool.get_ref(), query.org_id, &ids, query.branch_id).await?;
+    let costs =
+        crate::costing::sku_costs_for_items(pool.get_ref(), query.org_id, &ids, query.branch_id)
+            .await?;
     let mut by_item: std::collections::HashMap<Uuid, Vec<crate::costing::SkuCost>> =
         std::collections::HashMap::new();
     for c in costs {
@@ -821,9 +843,9 @@ pub async fn list_menu_catalog(
     security(("bearer_jwt" = []))
 )]
 pub async fn get_menu_item(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
@@ -831,13 +853,20 @@ pub async fn get_menu_item(
     let item = fetch_menu_item(pool.get_ref(), *id).await?;
     require_same_org(&claims, Some(item.org_id))?;
 
-    let sizes             = fetch_sizes(pool.get_ref(), *id).await?;
-    let addon_slots       = fetch_addon_slots(pool.get_ref(), *id).await?;
-    let optional_fields   = fetch_optional_fields(pool.get_ref(), *id).await?;
-    let recipes           = fetch_item_recipes(pool.get_ref(), *id).await?;
+    let sizes = fetch_sizes(pool.get_ref(), *id).await?;
+    let addon_slots = fetch_addon_slots(pool.get_ref(), *id).await?;
+    let optional_fields = fetch_optional_fields(pool.get_ref(), *id).await?;
+    let recipes = fetch_item_recipes(pool.get_ref(), *id).await?;
     let allowed_addon_ids = fetch_allowed_addon_ids(pool.get_ref(), *id).await?;
 
-    Ok(HttpResponse::Ok().json(MenuItemFull { item, sizes, addon_slots, optional_fields, recipes, allowed_addon_ids }))
+    Ok(HttpResponse::Ok().json(MenuItemFull {
+        item,
+        sizes,
+        addon_slots,
+        optional_fields,
+        recipes,
+        allowed_addon_ids,
+    }))
 }
 
 #[utoipa::path(
@@ -849,7 +878,7 @@ pub async fn get_menu_item(
     security(("bearer_jwt" = []))
 )]
 pub async fn create_menu_item(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
     body: web::Json<CreateMenuItemRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -858,12 +887,18 @@ pub async fn create_menu_item(
     require_same_org(&claims, Some(body.org_id))?;
 
     let mut_body = body.into_inner();
-    let mut name_translations = mut_body.name_translations.clone().unwrap_or_else(|| serde_json::json!({}));
+    let mut name_translations = mut_body
+        .name_translations
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({}));
     crate::translation::ensure_translations_json(&mut name_translations, Some(&mut_body.name))
         .await
         .map_err(|_| AppError::Internal)?;
-        
-    let mut description_translations = mut_body.description_translations.clone().unwrap_or_else(|| serde_json::json!({}));
+
+    let mut description_translations = mut_body
+        .description_translations
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({}));
     if let Some(desc) = &mut_body.description {
         crate::translation::ensure_translations_json(&mut description_translations, Some(desc))
             .await
@@ -896,7 +931,7 @@ pub async fn create_menu_item(
     sqlx::query(
         "INSERT INTO menu_item_price_epochs \
              (menu_item_id, size_label, price, effective_from, changed_by) \
-         VALUES ($1, NULL, $2, now(), $3)"
+         VALUES ($1, NULL, $2, now(), $3)",
     )
     .bind(item.id)
     .bind(mut_body.base_price)
@@ -908,10 +943,10 @@ pub async fn create_menu_item(
 
     Ok(HttpResponse::Created().json(MenuItemFull {
         item,
-        sizes:             vec![],
-        addon_slots:       vec![],
-        optional_fields:   vec![],
-        recipes:           vec![],
+        sizes: vec![],
+        addon_slots: vec![],
+        optional_fields: vec![],
+        recipes: vec![],
         allowed_addon_ids: vec![],
     }))
 }
@@ -926,9 +961,9 @@ pub async fn create_menu_item(
     security(("bearer_jwt" = []))
 )]
 pub async fn update_menu_item(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
     body: web::Json<UpdateMenuItemRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -952,7 +987,7 @@ pub async fn update_menu_item(
             .await
             .map_err(|_| AppError::Internal)?;
     }
-    
+
     let mut description_translations = existing.description_translations;
     if let Some(new_desc) = &mut_body.description {
         crate::translation::ensure_translations_json(&mut description_translations, Some(new_desc))
@@ -1009,37 +1044,39 @@ pub async fn update_menu_item(
 
     // Maintain price epoch whenever base_price actually changed.
     if let Some(new_price) = mut_body.base_price
-        && new_price != existing.base_price {
-            sqlx::query(
-                "UPDATE menu_item_price_epochs \
+        && new_price != existing.base_price
+    {
+        sqlx::query(
+            "UPDATE menu_item_price_epochs \
                  SET effective_until = now() \
-                 WHERE menu_item_id = $1 AND size_label IS NULL AND effective_until IS NULL"
-            )
-            .bind(*id)
-            .execute(&mut *tx)
-            .await?;
+                 WHERE menu_item_id = $1 AND size_label IS NULL AND effective_until IS NULL",
+        )
+        .bind(*id)
+        .execute(&mut *tx)
+        .await?;
 
-            sqlx::query(
-                "INSERT INTO menu_item_price_epochs \
+        sqlx::query(
+            "INSERT INTO menu_item_price_epochs \
                      (menu_item_id, size_label, price, effective_from, changed_by) \
-                 VALUES ($1, NULL, $2, now(), $3)"
-            )
-            .bind(*id)
-            .bind(new_price)
-            .bind(claims.user_id())
-            .execute(&mut *tx)
-            .await?;
-        }
+                 VALUES ($1, NULL, $2, now(), $3)",
+        )
+        .bind(*id)
+        .bind(new_price)
+        .bind(claims.user_id())
+        .execute(&mut *tx)
+        .await?;
+    }
 
     tx.commit().await?;
 
     // If explicit null, cleanup old image from storage
     if mut_body.image_url == Some(None)
-        && let Some(old_url) = existing.image_url {
-            let uploads_dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
-            let base_url    = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
-            delete_old_image(&old_url, &base_url, &uploads_dir, Some(existing.org_id)).await;
-        }
+        && let Some(old_url) = existing.image_url
+    {
+        let uploads_dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
+        let base_url = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
+        delete_old_image(&old_url, &base_url, &uploads_dir, Some(existing.org_id)).await;
+    }
 
     Ok(HttpResponse::Ok().json(item))
 }
@@ -1053,9 +1090,9 @@ pub async fn update_menu_item(
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_menu_item(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "delete").await?;
@@ -1066,7 +1103,7 @@ pub async fn delete_menu_item(
     sqlx::query(
         "UPDATE menu_item_price_epochs \
          SET effective_until = now() \
-         WHERE menu_item_id = $1 AND effective_until IS NULL"
+         WHERE menu_item_id = $1 AND effective_until IS NULL",
     )
     .bind(*id)
     .execute(&mut *tx)
@@ -1093,9 +1130,9 @@ pub async fn delete_menu_item(
     security(("bearer_jwt" = []))
 )]
 pub async fn upsert_size(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
     body: web::Json<UpsertSizeRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1107,7 +1144,7 @@ pub async fn upsert_size(
     // Capture old price (if exists) before the upsert.
     let old_price: Option<i32> = sqlx::query_scalar(
         "SELECT price_override FROM item_sizes \
-         WHERE menu_item_id = $1 AND label = $2::item_size"
+         WHERE menu_item_id = $1 AND label = $2",
     )
     .bind(*id)
     .bind(&body.label)
@@ -1119,7 +1156,7 @@ pub async fn upsert_size(
 
     let row = sqlx::query_as::<_, ItemSize>(
         "INSERT INTO item_sizes (menu_item_id, label, price_override)
-         VALUES ($1, $2::item_size, $3)
+         VALUES ($1, $2, $3)
          ON CONFLICT (menu_item_id, label) DO UPDATE SET
              price_override = EXCLUDED.price_override,
              is_active      = TRUE
@@ -1132,32 +1169,32 @@ pub async fn upsert_size(
     .await?;
 
     // Write price epoch if this is new or the price changed.
-// Write price epoch if this is new or the price changed.
-if old_price.is_none_or(|p| p != body.price_override) {
-    // Always close any open epoch first. Idempotent when there's nothing
-    // open; correct when an orphan epoch was left behind by a prior delete.
-    sqlx::query(
-        "UPDATE menu_item_price_epochs \
+    // Write price epoch if this is new or the price changed.
+    if old_price.is_none_or(|p| p != body.price_override) {
+        // Always close any open epoch first. Idempotent when there's nothing
+        // open; correct when an orphan epoch was left behind by a prior delete.
+        sqlx::query(
+            "UPDATE menu_item_price_epochs \
          SET effective_until = now() \
-         WHERE menu_item_id = $1 AND size_label = $2 AND effective_until IS NULL"
-    )
-    .bind(*id)
-    .bind(&body.label)
-    .execute(&mut *tx)
-    .await?;
+         WHERE menu_item_id = $1 AND size_label = $2 AND effective_until IS NULL",
+        )
+        .bind(*id)
+        .bind(&body.label)
+        .execute(&mut *tx)
+        .await?;
 
-    sqlx::query(
-        "INSERT INTO menu_item_price_epochs \
+        sqlx::query(
+            "INSERT INTO menu_item_price_epochs \
              (menu_item_id, size_label, price, effective_from, changed_by) \
-         VALUES ($1, $2, $3, now(), $4)"
-    )
-    .bind(*id)
-    .bind(&body.label)
-    .bind(body.price_override)
-    .bind(claims.user_id())
-    .execute(&mut *tx)
-    .await?;
-}
+         VALUES ($1, $2, $3, now(), $4)",
+        )
+        .bind(*id)
+        .bind(&body.label)
+        .bind(body.price_override)
+        .bind(claims.user_id())
+        .execute(&mut *tx)
+        .await?;
+    }
 
     tx.commit().await?;
 
@@ -1176,11 +1213,11 @@ if old_price.is_none_or(|p| p != body.price_override) {
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_size(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
     path: web::Path<(Uuid, Uuid)>,
 ) -> Result<HttpResponse, AppError> {
-    let claims         = extract_claims(&req)?;
+    let claims = extract_claims(&req)?;
     let (item_id, sid) = path.into_inner();
     check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
 
@@ -1191,7 +1228,7 @@ pub async fn delete_size(
 
     // Capture the label before we delete the row so we can close the epoch.
     let label: Option<String> = sqlx::query_scalar(
-        "SELECT label::text FROM item_sizes WHERE id = $1 AND menu_item_id = $2"
+        "SELECT label::text FROM item_sizes WHERE id = $1 AND menu_item_id = $2",
     )
     .bind(sid)
     .bind(item_id)
@@ -1202,7 +1239,7 @@ pub async fn delete_size(
         sqlx::query(
             "UPDATE menu_item_price_epochs \
              SET effective_until = now() \
-             WHERE menu_item_id = $1 AND size_label = $2 AND effective_until IS NULL"
+             WHERE menu_item_id = $1 AND size_label = $2 AND effective_until IS NULL",
         )
         .bind(item_id)
         .bind(lbl)
@@ -1231,8 +1268,8 @@ pub async fn delete_size(
     security(("bearer_jwt" = []))
 )]
 pub async fn list_addon_items(
-    req:   HttpRequest,
-    pool:  web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     query: web::Query<AddonItemQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1285,19 +1322,19 @@ pub struct PaginatedAddonItems {
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct AddonCatalogQuery {
-    pub org_id:     Uuid,
+    pub org_id: Uuid,
     pub addon_type: Option<String>,
     /// Case-insensitive filter on the addon name.
-    pub search:     Option<String>,
-    pub page:       Option<i64>,
-    pub per_page:   Option<i64>,
+    pub search: Option<String>,
+    pub page: Option<i64>,
+    pub per_page: Option<i64>,
     /// Enables the per-branch override filter/sort (LEFT JOINs the branch's overrides).
-    pub branch_id:  Option<Uuid>,
+    pub branch_id: Option<Uuid>,
     /// With `branch_id`: true → only addons overridden at the branch; false → only
     /// un-overridden; null → all.
     pub overridden: Option<bool>,
     /// `"overridden"` → overridden addons first (needs `branch_id`); otherwise by type/name.
-    pub sort:       Option<String>,
+    pub sort: Option<String>,
 }
 
 #[utoipa::path(
@@ -1310,8 +1347,8 @@ pub struct AddonCatalogQuery {
     security(("bearer_jwt" = []))
 )]
 pub async fn list_addon_catalog(
-    req:   HttpRequest,
-    pool:  web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     query: web::Query<AddonCatalogQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1321,7 +1358,11 @@ pub async fn list_addon_catalog(
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(50).clamp(1, 500);
     let offset = (page - 1) * per_page;
-    let search = query.search.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let search = query
+        .search
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     let total: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM addon_items a
@@ -1366,9 +1407,19 @@ pub async fn list_addon_catalog(
     .fetch_all(pool.get_ref())
     .await?;
 
-    let total_pages = if total == 0 { 0 } else { ((total as f64) / (per_page as f64)).ceil() as i64 };
+    let total_pages = if total == 0 {
+        0
+    } else {
+        ((total as f64) / (per_page as f64)).ceil() as i64
+    };
 
-    Ok(HttpResponse::Ok().json(PaginatedAddonItems { data, total, page, per_page, total_pages }))
+    Ok(HttpResponse::Ok().json(PaginatedAddonItems {
+        data,
+        total,
+        page,
+        per_page,
+        total_pages,
+    }))
 }
 
 #[utoipa::path(
@@ -1380,7 +1431,7 @@ pub async fn list_addon_catalog(
     security(("bearer_jwt" = []))
 )]
 pub async fn create_addon_item(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
     body: web::Json<CreateAddonItemRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -1389,7 +1440,9 @@ pub async fn create_addon_item(
     require_same_org(&claims, Some(body.org_id))?;
 
     let mut_body = body.into_inner();
-    let mut name_translations = mut_body.name_translations.unwrap_or_else(|| serde_json::json!({}));
+    let mut name_translations = mut_body
+        .name_translations
+        .unwrap_or_else(|| serde_json::json!({}));
     crate::translation::ensure_translations_json(&mut name_translations, Some(&mut_body.name))
         .await
         .map_err(|_| AppError::Internal)?;
@@ -1424,9 +1477,9 @@ pub async fn create_addon_item(
     security(("bearer_jwt" = []))
 )]
 pub async fn update_addon_item(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
     body: web::Json<UpdateAddonItemRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1485,9 +1538,9 @@ pub async fn update_addon_item(
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_addon_item(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "delete").await?;
@@ -1514,9 +1567,9 @@ pub async fn delete_addon_item(
     security(("bearer_jwt" = []))
 )]
 pub async fn list_addon_slots(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
@@ -1538,9 +1591,9 @@ pub async fn list_addon_slots(
     security(("bearer_jwt" = []))
 )]
 pub async fn create_addon_slot(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
     body: web::Json<CreateAddonSlotRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1550,7 +1603,10 @@ pub async fn create_addon_slot(
     require_same_org(&claims, Some(item.org_id))?;
 
     let mut_body = body.into_inner();
-    let mut label_translations = mut_body.label_translations.clone().unwrap_or_else(|| serde_json::json!({}));
+    let mut label_translations = mut_body
+        .label_translations
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({}));
     if let Some(lbl) = &mut_body.label {
         crate::translation::ensure_translations_json(&mut label_translations, Some(lbl))
             .await
@@ -1597,13 +1653,13 @@ pub async fn create_addon_slot(
     security(("bearer_jwt" = []))
 )]
 pub async fn update_addon_slot(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
     path: web::Path<(Uuid, Uuid)>,
     body: web::Json<UpdateAddonSlotRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims              = extract_claims(&req)?;
-    let (item_id, slot_id)  = path.into_inner();
+    let claims = extract_claims(&req)?;
+    let (item_id, slot_id) = path.into_inner();
     check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
 
     let item = fetch_menu_item(pool.get_ref(), item_id).await?;
@@ -1669,24 +1725,22 @@ pub async fn update_addon_slot(
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_addon_slot(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
     path: web::Path<(Uuid, Uuid)>,
 ) -> Result<HttpResponse, AppError> {
-    let claims             = extract_claims(&req)?;
+    let claims = extract_claims(&req)?;
     let (item_id, slot_id) = path.into_inner();
     check_permission(pool.get_ref(), &claims, "menu_items", "delete").await?;
 
     let item = fetch_menu_item(pool.get_ref(), item_id).await?;
     require_same_org(&claims, Some(item.org_id))?;
 
-    sqlx::query(
-        "DELETE FROM menu_item_addon_slots WHERE id = $1 AND menu_item_id = $2",
-    )
-    .bind(slot_id)
-    .bind(item_id)
-    .execute(pool.get_ref())
-    .await?;
+    sqlx::query("DELETE FROM menu_item_addon_slots WHERE id = $1 AND menu_item_id = $2")
+        .bind(slot_id)
+        .bind(item_id)
+        .execute(pool.get_ref())
+        .await?;
 
     Ok(HttpResponse::NoContent().finish())
 }
@@ -1702,9 +1756,9 @@ pub async fn delete_addon_slot(
     security(("bearer_jwt" = []))
 )]
 pub async fn list_addon_overrides(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
@@ -1756,9 +1810,9 @@ pub async fn list_addon_overrides(
     security(("bearer_jwt" = []))
 )]
 pub async fn upsert_addon_override(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
     body: web::Json<UpsertAddonOverrideRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1772,60 +1826,88 @@ pub async fn upsert_addon_override(
     require_same_org(&claims, Some(addon.org_id))?;
 
     if body.quantity_used <= 0.0 {
-        return Err(AppError::BadRequest("quantity_used must be greater than 0".into()));
+        return Err(AppError::BadRequest(
+            "quantity_used must be greater than 0".into(),
+        ));
     }
     // Normalize the deduction to the replacement ingredient's base unit.
     let (norm_unit, norm_qty) = crate::recipes::handlers::normalize_recipe_unit(
-        pool.get_ref(), addon.org_id, body.org_ingredient_id, &body.ingredient_unit, body.quantity_used,
-    ).await?;
+        pool.get_ref(),
+        addon.org_id,
+        body.org_ingredient_id,
+        &body.ingredient_unit,
+        body.quantity_used,
+    )
+    .await?;
 
     // Upsert using the appropriate partial unique index path.
     // Because size_label and combo_addon_item_id are nullable we can't use
     // a single ON CONFLICT clause — instead we do a manual upsert:
     // try UPDATE first, INSERT if no row matched.
     let existing_id: Option<Uuid> = match (body.size_label.as_deref(), body.combo_addon_item_id) {
-        (Some(size), Some(combo)) => sqlx::query_scalar(
-            "SELECT id FROM menu_item_addon_overrides
+        (Some(size), Some(combo)) => {
+            sqlx::query_scalar(
+                "SELECT id FROM menu_item_addon_overrides
              WHERE menu_item_id = $1 AND addon_item_id = $2
                AND ingredient_name = $3
-               AND size_label = $4::item_size
+               AND size_label = $4
                AND combo_addon_item_id = $5",
-        )
-        .bind(*id).bind(body.addon_item_id).bind(&body.ingredient_name)
-        .bind(size).bind(combo)
-        .fetch_optional(pool.get_ref()).await?,
+            )
+            .bind(*id)
+            .bind(body.addon_item_id)
+            .bind(&body.ingredient_name)
+            .bind(size)
+            .bind(combo)
+            .fetch_optional(pool.get_ref())
+            .await?
+        }
 
-        (Some(size), None) => sqlx::query_scalar(
-            "SELECT id FROM menu_item_addon_overrides
+        (Some(size), None) => {
+            sqlx::query_scalar(
+                "SELECT id FROM menu_item_addon_overrides
              WHERE menu_item_id = $1 AND addon_item_id = $2
                AND ingredient_name = $3
-               AND size_label = $4::item_size
+               AND size_label = $4
                AND combo_addon_item_id IS NULL",
-        )
-        .bind(*id).bind(body.addon_item_id).bind(&body.ingredient_name)
-        .bind(size)
-        .fetch_optional(pool.get_ref()).await?,
+            )
+            .bind(*id)
+            .bind(body.addon_item_id)
+            .bind(&body.ingredient_name)
+            .bind(size)
+            .fetch_optional(pool.get_ref())
+            .await?
+        }
 
-        (None, Some(combo)) => sqlx::query_scalar(
-            "SELECT id FROM menu_item_addon_overrides
+        (None, Some(combo)) => {
+            sqlx::query_scalar(
+                "SELECT id FROM menu_item_addon_overrides
              WHERE menu_item_id = $1 AND addon_item_id = $2
                AND ingredient_name = $3
                AND size_label IS NULL
                AND combo_addon_item_id = $4",
-        )
-        .bind(*id).bind(body.addon_item_id).bind(&body.ingredient_name)
-        .bind(combo)
-        .fetch_optional(pool.get_ref()).await?,
+            )
+            .bind(*id)
+            .bind(body.addon_item_id)
+            .bind(&body.ingredient_name)
+            .bind(combo)
+            .fetch_optional(pool.get_ref())
+            .await?
+        }
 
-        (None, None) => sqlx::query_scalar(
-            "SELECT id FROM menu_item_addon_overrides
+        (None, None) => {
+            sqlx::query_scalar(
+                "SELECT id FROM menu_item_addon_overrides
              WHERE menu_item_id = $1 AND addon_item_id = $2
                AND ingredient_name = $3
                AND size_label IS NULL
                AND combo_addon_item_id IS NULL",
-        )
-        .bind(*id).bind(body.addon_item_id).bind(&body.ingredient_name)
-        .fetch_optional(pool.get_ref()).await?,
+            )
+            .bind(*id)
+            .bind(body.addon_item_id)
+            .bind(&body.ingredient_name)
+            .fetch_optional(pool.get_ref())
+            .await?
+        }
     }
     .flatten();
 
@@ -1867,7 +1949,7 @@ pub async fn upsert_addon_override(
                 (menu_item_id, addon_item_id, size_label, ingredient_name,
                  org_ingredient_id, ingredient_unit, quantity_used,
                  replaces_org_ingredient_id, combo_addon_item_id)
-            VALUES ($1, $2, $3::item_size, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING
                 id, menu_item_id, addon_item_id,
                 (SELECT name FROM addon_items WHERE id = $2) AS addon_item_name,
@@ -1910,24 +1992,22 @@ pub async fn upsert_addon_override(
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_addon_override(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
     path: web::Path<(Uuid, Uuid)>,
 ) -> Result<HttpResponse, AppError> {
-    let claims                  = extract_claims(&req)?;
-    let (item_id, override_id)  = path.into_inner();
+    let claims = extract_claims(&req)?;
+    let (item_id, override_id) = path.into_inner();
     check_permission(pool.get_ref(), &claims, "menu_items", "delete").await?;
 
     let item = fetch_menu_item(pool.get_ref(), item_id).await?;
     require_same_org(&claims, Some(item.org_id))?;
 
-    sqlx::query(
-        "DELETE FROM menu_item_addon_overrides WHERE id = $1 AND menu_item_id = $2",
-    )
-    .bind(override_id)
-    .bind(item_id)
-    .execute(pool.get_ref())
-    .await?;
+    sqlx::query("DELETE FROM menu_item_addon_overrides WHERE id = $1 AND menu_item_id = $2")
+        .bind(override_id)
+        .bind(item_id)
+        .execute(pool.get_ref())
+        .await?;
 
     Ok(HttpResponse::NoContent().finish())
 }
@@ -1953,9 +2033,9 @@ pub struct PutAllowedAddonsRequest {
     security(("bearer_jwt" = []))
 )]
 pub async fn put_allowed_addons(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
     body: web::Json<PutAllowedAddonsRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1998,48 +2078,48 @@ pub async fn put_allowed_addons(
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct OptionalField {
-    pub id:                Uuid,
-    pub menu_item_id:      Uuid,
-    pub name:              String,
+    pub id: Uuid,
+    pub menu_item_id: Uuid,
+    pub name: String,
     #[schema(value_type = Object)]
     pub name_translations: serde_json::Value,
-    pub price:             i32,
+    pub price: i32,
     pub org_ingredient_id: Option<Uuid>,
-    pub ingredient_name:   Option<String>,
-    pub ingredient_unit:   Option<String>,
+    pub ingredient_name: Option<String>,
+    pub ingredient_unit: Option<String>,
     #[schema(value_type = Option<f64>)]
-    pub quantity_used:     Option<sqlx::types::BigDecimal>,
-    pub size_label:        Option<String>,
-    pub is_active:         bool,
-    pub created_at:        DateTime<Utc>,
-    pub updated_at:        DateTime<Utc>,
+    pub quantity_used: Option<sqlx::types::BigDecimal>,
+    pub size_label: Option<String>,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CreateOptionalFieldRequest {
-    pub name:              String,
+    pub name: String,
     #[schema(value_type = Option<Object>)]
     pub name_translations: Option<serde_json::Value>,
-    pub price:             Option<i32>,
+    pub price: Option<i32>,
     pub org_ingredient_id: Option<Uuid>,
-    pub ingredient_name:   Option<String>,
-    pub ingredient_unit:   Option<String>,
-    pub quantity_used:     Option<f64>,
-    pub size_label:        Option<String>,
+    pub ingredient_name: Option<String>,
+    pub ingredient_unit: Option<String>,
+    pub quantity_used: Option<f64>,
+    pub size_label: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpdateOptionalFieldRequest {
-    pub name:              Option<String>,
+    pub name: Option<String>,
     #[schema(value_type = Option<Object>)]
     pub name_translations: Option<serde_json::Value>,
-    pub price:             Option<i32>,
+    pub price: Option<i32>,
     pub org_ingredient_id: Option<Uuid>,
-    pub ingredient_name:   Option<String>,
-    pub ingredient_unit:   Option<String>,
-    pub quantity_used:     Option<f64>,
-    pub size_label:        Option<String>,
-    pub is_active:         Option<bool>,
+    pub ingredient_name: Option<String>,
+    pub ingredient_unit: Option<String>,
+    pub quantity_used: Option<f64>,
+    pub size_label: Option<String>,
+    pub is_active: Option<bool>,
 }
 
 #[utoipa::path(
@@ -2051,9 +2131,9 @@ pub struct UpdateOptionalFieldRequest {
     security(("bearer_jwt" = []))
 )]
 pub async fn list_optional_fields(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
@@ -2088,9 +2168,9 @@ pub async fn list_optional_fields(
     security(("bearer_jwt" = []))
 )]
 pub async fn create_optional_field(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
-    id:   web::Path<Uuid>,
+    id: web::Path<Uuid>,
     body: web::Json<CreateOptionalFieldRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -2109,30 +2189,43 @@ pub async fn create_optional_field(
         || body.quantity_used.is_some();
 
     if has_ingredient {
-        if body.ingredient_name.is_none() || body.ingredient_unit.is_none() || body.quantity_used.is_none() {
+        if body.ingredient_name.is_none()
+            || body.ingredient_unit.is_none()
+            || body.quantity_used.is_none()
+        {
             return Err(AppError::BadRequest(
                 "ingredient_name, ingredient_unit, and quantity_used are all required when configuring an ingredient deduction".into()
             ));
         }
         if let Some(qty) = body.quantity_used
-            && qty <= 0.0 {
-                return Err(AppError::BadRequest("quantity_used must be greater than 0".into()));
-            }
+            && qty <= 0.0
+        {
+            return Err(AppError::BadRequest(
+                "quantity_used must be greater than 0".into(),
+            ));
+        }
     }
 
     let mut mut_body = body.into_inner();
     // Normalize the deduction quantity to the linked ingredient's base unit.
     if has_ingredient {
         let unit = mut_body.ingredient_unit.clone().unwrap_or_default();
-        let qty  = mut_body.quantity_used.unwrap_or(0.0);
+        let qty = mut_body.quantity_used.unwrap_or(0.0);
         let (nu, nq) = crate::recipes::handlers::normalize_recipe_unit(
-            pool.get_ref(), item.org_id, mut_body.org_ingredient_id, &unit, qty,
-        ).await?;
+            pool.get_ref(),
+            item.org_id,
+            mut_body.org_ingredient_id,
+            &unit,
+            qty,
+        )
+        .await?;
         mut_body.ingredient_unit = Some(nu);
-        mut_body.quantity_used   = Some(nq);
+        mut_body.quantity_used = Some(nq);
     }
     let trimmed_name = mut_body.name.trim().to_string();
-    let mut name_translations = mut_body.name_translations.unwrap_or_else(|| serde_json::json!({}));
+    let mut name_translations = mut_body
+        .name_translations
+        .unwrap_or_else(|| serde_json::json!({}));
     crate::translation::ensure_translations_json(&mut name_translations, Some(&trimmed_name))
         .await
         .map_err(|_| AppError::Internal)?;
@@ -2142,7 +2235,7 @@ pub async fn create_optional_field(
         INSERT INTO menu_item_optional_fields
             (menu_item_id, name, name_translations, price, org_ingredient_id, ingredient_name,
              ingredient_unit, quantity_used, size_label)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::item_size)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         RETURNING id, menu_item_id, name, name_translations, price,
                   org_ingredient_id, ingredient_name, ingredient_unit,
                   quantity_used, size_label::text,
@@ -2177,7 +2270,7 @@ pub async fn create_optional_field(
     security(("bearer_jwt" = []))
 )]
 pub async fn update_optional_field(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
     path: web::Path<(Uuid, Uuid)>,
     body: web::Json<UpdateOptionalFieldRequest>,
@@ -2189,9 +2282,12 @@ pub async fn update_optional_field(
     require_same_org(&claims, Some(item.org_id))?;
 
     if let Some(qty) = body.quantity_used
-        && qty <= 0.0 {
-            return Err(AppError::BadRequest("quantity_used must be greater than 0".into()));
-        }
+        && qty <= 0.0
+    {
+        return Err(AppError::BadRequest(
+            "quantity_used must be greater than 0".into(),
+        ));
+    }
 
     let existing: OptionalField = sqlx::query_as(
         r#"SELECT id, menu_item_id, name, name_translations, price, org_ingredient_id, ingredient_name, ingredient_unit, quantity_used, size_label::text, is_active, created_at, updated_at FROM menu_item_optional_fields WHERE id = $1 AND menu_item_id = $2"#
@@ -2219,14 +2315,21 @@ pub async fn update_optional_field(
     // Normalize a newly-supplied quantity to the linked ingredient's base unit.
     if let Some(qty) = mut_body.quantity_used {
         let effective_id = mut_body.org_ingredient_id.or(existing.org_ingredient_id);
-        let unit = mut_body.ingredient_unit.clone()
+        let unit = mut_body
+            .ingredient_unit
+            .clone()
             .or_else(|| existing.ingredient_unit.clone())
             .unwrap_or_default();
         let (nu, nq) = crate::recipes::handlers::normalize_recipe_unit(
-            pool.get_ref(), item.org_id, effective_id, &unit, qty,
-        ).await?;
+            pool.get_ref(),
+            item.org_id,
+            effective_id,
+            &unit,
+            qty,
+        )
+        .await?;
         mut_body.ingredient_unit = Some(nu);
-        mut_body.quantity_used   = Some(nq);
+        mut_body.quantity_used = Some(nq);
     }
     let mut name_translations = existing.name_translations;
     if let Some(new_name) = &mut_body.name {
@@ -2250,7 +2353,7 @@ pub async fn update_optional_field(
             ingredient_name   = COALESCE($7, ingredient_name),
             ingredient_unit   = COALESCE($8, ingredient_unit),
             quantity_used     = COALESCE($9, quantity_used),
-            size_label        = COALESCE($10::item_size, size_label),
+            size_label        = COALESCE($10, size_label),
             is_active         = COALESCE($11, is_active)
         WHERE id = $1 AND menu_item_id = $2
         RETURNING id, menu_item_id, name, name_translations, price,
@@ -2288,7 +2391,7 @@ pub async fn update_optional_field(
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_optional_field(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
     path: web::Path<(Uuid, Uuid)>,
 ) -> Result<HttpResponse, AppError> {
@@ -2298,13 +2401,11 @@ pub async fn delete_optional_field(
     let item = fetch_menu_item(pool.get_ref(), item_id).await?;
     require_same_org(&claims, Some(item.org_id))?;
 
-    sqlx::query(
-        "DELETE FROM menu_item_optional_fields WHERE id = $1 AND menu_item_id = $2"
-    )
-    .bind(field_id)
-    .bind(item_id)
-    .execute(pool.get_ref())
-    .await?;
+    sqlx::query("DELETE FROM menu_item_optional_fields WHERE id = $1 AND menu_item_id = $2")
+        .bind(field_id)
+        .bind(item_id)
+        .execute(pool.get_ref())
+        .await?;
 
     Ok(HttpResponse::NoContent().finish())
 }
@@ -2312,14 +2413,17 @@ pub async fn delete_optional_field(
 // ── Branch menu override handlers ─────────────────────────────
 
 /// Resolve a branch's org and assert the caller is scoped to it. Returns the org_id.
-async fn branch_in_scope(pool: &PgPool, claims: &Claims, branch_id: Uuid) -> Result<Uuid, AppError> {
-    let org_id: Uuid = sqlx::query_scalar(
-        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(branch_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+async fn branch_in_scope(
+    pool: &PgPool,
+    claims: &Claims,
+    branch_id: Uuid,
+) -> Result<Uuid, AppError> {
+    let org_id: Uuid =
+        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
+            .bind(branch_id)
+            .fetch_optional(pool)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
     require_same_org(claims, Some(org_id))?;
     Ok(org_id)
 }
@@ -2356,8 +2460,10 @@ async fn apply_branch_size_overrides(
     if overrides.is_empty() {
         return Ok(());
     }
-    let map: std::collections::HashMap<String, i32> =
-        overrides.into_iter().map(|o| (o.size_label, o.price_override)).collect();
+    let map: std::collections::HashMap<String, i32> = overrides
+        .into_iter()
+        .map(|o| (o.size_label, o.price_override))
+        .collect();
     for s in sizes.iter_mut() {
         if let Some(p) = map.get(&s.label) {
             s.price_override = *p;
@@ -2376,8 +2482,8 @@ async fn apply_branch_size_overrides(
     security(("bearer_jwt" = []))
 )]
 pub async fn list_branch_menu_overrides(
-    req:   HttpRequest,
-    pool:  web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     query: web::Query<BranchOverridesQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -2403,7 +2509,13 @@ pub async fn list_branch_menu_overrides(
     let mut by_item: std::collections::HashMap<Uuid, Vec<BranchSizeOverride>> =
         std::collections::HashMap::new();
     for (item_id, size_label, price_override) in size_rows {
-        by_item.entry(item_id).or_default().push(BranchSizeOverride { size_label, price_override });
+        by_item
+            .entry(item_id)
+            .or_default()
+            .push(BranchSizeOverride {
+                size_label,
+                price_override,
+            });
     }
     for row in rows.iter_mut() {
         row.sizes = by_item.remove(&row.menu_item_id).unwrap_or_default();
@@ -2422,7 +2534,7 @@ pub async fn list_branch_menu_overrides(
     security(("bearer_jwt" = []))
 )]
 pub async fn upsert_branch_menu_override(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
     body: web::Json<BranchMenuOverrideInput>,
 ) -> Result<HttpResponse, AppError> {
@@ -2431,14 +2543,15 @@ pub async fn upsert_branch_menu_override(
     let org_id = branch_in_scope(pool.get_ref(), &claims, body.branch_id).await?;
 
     // The item must belong to the same org as the branch.
-    let item_org: Option<Uuid> = sqlx::query_scalar(
-        "SELECT org_id FROM menu_items WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(body.menu_item_id)
-    .fetch_optional(pool.get_ref())
-    .await?;
+    let item_org: Option<Uuid> =
+        sqlx::query_scalar("SELECT org_id FROM menu_items WHERE id = $1 AND deleted_at IS NULL")
+            .bind(body.menu_item_id)
+            .fetch_optional(pool.get_ref())
+            .await?;
     if item_org != Some(org_id) {
-        return Err(AppError::NotFound("Menu item not found in this organization".into()));
+        return Err(AppError::NotFound(
+            "Menu item not found in this organization".into(),
+        ));
     }
     if let Some(p) = body.price_override
         && p < 0
@@ -2452,7 +2565,9 @@ pub async fn upsert_branch_menu_override(
     {
         for s in sizes {
             if s.price_override < 0 {
-                return Err(AppError::BadRequest("size price_override must be ≥ 0".into()));
+                return Err(AppError::BadRequest(
+                    "size price_override must be ≥ 0".into(),
+                ));
             }
         }
         let valid: Vec<String> = sqlx::query_scalar(
@@ -2491,15 +2606,17 @@ pub async fn upsert_branch_menu_override(
 
     // `sizes` is a full-replacement of this item's size overrides (None leaves them as-is).
     if let Some(ref sizes) = body.sizes {
-        sqlx::query("DELETE FROM branch_menu_size_overrides WHERE branch_id = $1 AND menu_item_id = $2")
-            .bind(body.branch_id)
-            .bind(body.menu_item_id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "DELETE FROM branch_menu_size_overrides WHERE branch_id = $1 AND menu_item_id = $2",
+        )
+        .bind(body.branch_id)
+        .bind(body.menu_item_id)
+        .execute(&mut *tx)
+        .await?;
         for s in sizes {
             sqlx::query(
                 "INSERT INTO branch_menu_size_overrides (branch_id, menu_item_id, size_label, price_override, updated_at)
-                 VALUES ($1, $2, $3::item_size, $4, now())",
+                 VALUES ($1, $2, $3, $4, now())",
             )
             .bind(body.branch_id)
             .bind(body.menu_item_id)
@@ -2512,7 +2629,8 @@ pub async fn upsert_branch_menu_override(
 
     tx.commit().await?;
 
-    row.sizes = fetch_branch_size_overrides(pool.get_ref(), body.branch_id, body.menu_item_id).await?;
+    row.sizes =
+        fetch_branch_size_overrides(pool.get_ref(), body.branch_id, body.menu_item_id).await?;
     Ok(HttpResponse::Ok().json(row))
 }
 
@@ -2526,8 +2644,8 @@ pub async fn upsert_branch_menu_override(
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_branch_menu_override(
-    req:   HttpRequest,
-    pool:  web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     query: web::Query<BranchOverrideKeyQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -2535,11 +2653,13 @@ pub async fn delete_branch_menu_override(
     branch_in_scope(pool.get_ref(), &claims, query.branch_id).await?;
 
     let mut tx = pool.get_ref().begin().await?;
-    sqlx::query("DELETE FROM branch_menu_size_overrides WHERE branch_id = $1 AND menu_item_id = $2")
-        .bind(query.branch_id)
-        .bind(query.menu_item_id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "DELETE FROM branch_menu_size_overrides WHERE branch_id = $1 AND menu_item_id = $2",
+    )
+    .bind(query.branch_id)
+    .bind(query.menu_item_id)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query("DELETE FROM branch_menu_overrides WHERE branch_id = $1 AND menu_item_id = $2")
         .bind(query.branch_id)
         .bind(query.menu_item_id)
@@ -2562,8 +2682,8 @@ pub async fn delete_branch_menu_override(
     security(("bearer_jwt" = []))
 )]
 pub async fn list_branch_addon_overrides(
-    req:   HttpRequest,
-    pool:  web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     query: web::Query<BranchOverridesQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -2591,7 +2711,7 @@ pub async fn list_branch_addon_overrides(
     security(("bearer_jwt" = []))
 )]
 pub async fn upsert_branch_addon_override(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
     body: web::Json<BranchAddonOverrideInput>,
 ) -> Result<HttpResponse, AppError> {
@@ -2600,14 +2720,15 @@ pub async fn upsert_branch_addon_override(
     let org_id = branch_in_scope(pool.get_ref(), &claims, body.branch_id).await?;
 
     // The addon must belong to the same org as the branch.
-    let addon_org: Option<Uuid> = sqlx::query_scalar(
-        "SELECT org_id FROM addon_items WHERE id = $1",
-    )
-    .bind(body.addon_item_id)
-    .fetch_optional(pool.get_ref())
-    .await?;
+    let addon_org: Option<Uuid> =
+        sqlx::query_scalar("SELECT org_id FROM addon_items WHERE id = $1")
+            .bind(body.addon_item_id)
+            .fetch_optional(pool.get_ref())
+            .await?;
     if addon_org != Some(org_id) {
-        return Err(AppError::NotFound("Addon not found in this organization".into()));
+        return Err(AppError::NotFound(
+            "Addon not found in this organization".into(),
+        ));
     }
     if let Some(p) = body.price_override
         && p < 0
@@ -2644,8 +2765,8 @@ pub async fn upsert_branch_addon_override(
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_branch_addon_override(
-    req:   HttpRequest,
-    pool:  web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     query: web::Query<BranchAddonOverrideKeyQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -2735,10 +2856,7 @@ async fn fetch_sizes(pool: &PgPool, item_id: Uuid) -> Result<Vec<ItemSize>, AppE
     .await?)
 }
 
-async fn fetch_addon_slots(
-    pool:    &PgPool,
-    item_id: Uuid,
-) -> Result<Vec<AddonSlot>, AppError> {
+async fn fetch_addon_slots(pool: &PgPool, item_id: Uuid) -> Result<Vec<AddonSlot>, AppError> {
     Ok(sqlx::query_as::<_, AddonSlot>(
         "SELECT id, menu_item_id, addon_type, label, label_translations, is_required,
                 min_selections, max_selections, created_at
@@ -2751,10 +2869,7 @@ async fn fetch_addon_slots(
     .await?)
 }
 
-async fn fetch_allowed_addon_ids(
-    pool:    &PgPool,
-    item_id: Uuid,
-) -> Result<Vec<Uuid>, AppError> {
+async fn fetch_allowed_addon_ids(pool: &PgPool, item_id: Uuid) -> Result<Vec<Uuid>, AppError> {
     let rows: Vec<(Uuid,)> = sqlx::query_as(
         "SELECT addon_item_id FROM menu_item_allowed_addons
          WHERE menu_item_id = $1
@@ -2767,7 +2882,7 @@ async fn fetch_allowed_addon_ids(
 }
 
 async fn fetch_optional_fields(
-    pool:    &PgPool,
+    pool: &PgPool,
     item_id: Uuid,
 ) -> Result<Vec<OptionalField>, AppError> {
     Ok(sqlx::query_as::<_, OptionalField>(
@@ -2784,10 +2899,7 @@ async fn fetch_optional_fields(
     .await?)
 }
 
-async fn fetch_item_recipes(
-    pool:    &PgPool,
-    item_id: Uuid,
-) -> Result<Vec<MenuItemRecipe>, AppError> {
+async fn fetch_item_recipes(pool: &PgPool, item_id: Uuid) -> Result<Vec<MenuItemRecipe>, AppError> {
     Ok(sqlx::query_as::<_, MenuItemRecipe>(
         r#"SELECT r.org_ingredient_id, r.quantity_used,
                   r.ingredient_name, r.ingredient_unit,
@@ -2803,7 +2915,7 @@ async fn fetch_item_recipes(
 }
 
 async fn fetch_addon_ingredients(
-    pool:          &PgPool,
+    pool: &PgPool,
     addon_item_id: Uuid,
 ) -> Result<Vec<AddonItemIngredient>, AppError> {
     Ok(sqlx::query_as::<_, AddonItemIngredient>(
@@ -2816,7 +2928,9 @@ async fn fetch_addon_ingredients(
     .await?)
 }
 
-pub (crate) fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn deserialize_double_option<'de, T, D>(
+    deserializer: D,
+) -> Result<Option<Option<T>>, D::Error>
 where
     T: Deserialize<'de>,
     D: Deserializer<'de>,

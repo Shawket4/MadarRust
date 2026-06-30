@@ -1,5 +1,5 @@
-use crate::{errors::AppError, models::UserRole};
 use crate::auth::jwt::Claims;
+use crate::{errors::AppError, models::UserRole};
 
 /// Ensure the caller is a super_admin
 pub fn require_super_admin(claims: &Claims) -> Result<(), AppError> {
@@ -34,6 +34,8 @@ pub fn require_same_org(claims: &Claims, org_id: Option<uuid::Uuid>) -> Result<(
     }
     match (claims.org_id(), org_id) {
         (Some(claims_org), Some(target_org)) if claims_org == target_org => Ok(()),
-        _ => Err(AppError::Forbidden("Access to this org is not allowed".into())),
+        _ => Err(AppError::Forbidden(
+            "Access to this org is not allowed".into(),
+        )),
     }
 }

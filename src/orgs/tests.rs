@@ -1,11 +1,11 @@
-use actix_web::{test, App, web};
+use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::auth::jwt::JwtSecret;
 use crate::models::UserRole;
-use crate::orgs::routes;
 use crate::orgs::handlers::Org;
+use crate::orgs::routes;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
@@ -27,7 +27,10 @@ fn multipart_body(fields: &[(&str, &str)]) -> String {
     let mut body = String::new();
     for (name, val) in fields {
         body.push_str("--boundary\r\n");
-        body.push_str(&format!("Content-Disposition: form-data; name=\"{}\"\r\n\r\n", name));
+        body.push_str(&format!(
+            "Content-Disposition: form-data; name=\"{}\"\r\n\r\n",
+            name
+        ));
         body.push_str(val);
         body.push_str("\r\n");
     }
@@ -41,8 +44,9 @@ async fn test_create_org_success(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let token = generate_super_admin_token();
     let body = multipart_body(&[
@@ -60,7 +64,11 @@ async fn test_create_org_success(pool: PgPool) {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert!(resp.status().is_success(), "Response was {:?}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "Response was {:?}",
+        resp.status()
+    );
 
     let org: Org = test::read_body_json(resp).await;
     assert_eq!(org.name, "Test Organization");
@@ -75,8 +83,9 @@ async fn test_create_org_conflict(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let token = generate_super_admin_token();
 
@@ -109,8 +118,9 @@ async fn test_create_org_unauthorized(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let body = multipart_body(&[("name", "Org"), ("slug", "slug")]);
     let req = test::TestRequest::post()
@@ -129,8 +139,9 @@ async fn test_list_orgs(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     // Seed orgs
     sqlx::query!("INSERT INTO organizations (name, slug) VALUES ('A', 'a'), ('B', 'b')")
@@ -160,14 +171,18 @@ async fn test_get_org(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = Uuid::new_v4();
-    sqlx::query!("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Test Org', 'test')", org_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query!(
+        "INSERT INTO organizations (id, name, slug) VALUES ($1, 'Test Org', 'test')",
+        org_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     // SuperAdmin
     let token = generate_super_admin_token();
@@ -216,11 +231,16 @@ async fn test_offline_auth_bundle_returns_org_tellers(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
             .configure(routes::configure),
-    ).await;
+    )
+    .await;
 
     let org_id = Uuid::new_v4();
     sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Org', $2)")
-        .bind(org_id).bind(format!("org-{org_id}")).execute(&pool).await.unwrap();
+        .bind(org_id)
+        .bind(format!("org-{org_id}"))
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // Teller WITH an offline hash (has logged in online before).
     let off_hash = crate::auth::offline::hash_offline_pin("1234").unwrap();
@@ -242,9 +262,14 @@ async fn test_offline_auth_bundle_returns_org_tellers(pool: PgPool) {
         .bind(Uuid::new_v4()).bind(org_id).bind(format!("m-{org_id}@t.com")).execute(&pool).await.unwrap();
 
     let token = generate_org_admin_token(org_id);
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/orgs/{org_id}/offline-auth-bundle"))
-        .insert_header(("Authorization", format!("Bearer {token}"))).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/orgs/{org_id}/offline-auth-bundle"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
     assert!(resp.status().is_success(), "got {:?}", resp.status());
     let body: serde_json::Value = test::read_body_json(resp).await;
     let tellers = body["tellers"].as_array().unwrap();
@@ -252,14 +277,20 @@ async fn test_offline_auth_bundle_returns_org_tellers(pool: PgPool) {
     let alice = tellers.iter().find(|t| t["name"] == "Alice").unwrap();
     assert_eq!(alice["offline_pin_hash"].as_str().unwrap(), off_hash);
     let bob = tellers.iter().find(|t| t["name"] == "Bob").unwrap();
-    assert!(bob["offline_pin_hash"].is_null(), "Bob never logged in online → null");
+    assert!(
+        bob["offline_pin_hash"].is_null(),
+        "Bob never logged in online → null"
+    );
     let wendy = tellers.iter().find(|t| t["name"] == "Wendy").unwrap();
     assert_eq!(wendy["role"], "waiter");
     assert_eq!(wendy["offline_pin_hash"].as_str().unwrap(), waiter_hash);
     let kds = tellers.iter().find(|t| t["name"] == "Kds1").unwrap();
     assert_eq!(kds["role"], "kitchen");
     assert_eq!(kds["offline_pin_hash"].as_str().unwrap(), kitchen_hash);
-    assert!(tellers.iter().all(|t| t["name"] != "Mgr"), "org_admin excluded");
+    assert!(
+        tellers.iter().all(|t| t["name"] != "Mgr"),
+        "org_admin excluded"
+    );
 
     // The bundle ships the org's stable LAN secret (32 bytes → 64 hex chars).
     let lan_secret = body["lan_secret"].as_str().expect("lan_secret present");
@@ -275,15 +306,25 @@ async fn test_offline_auth_bundle_cross_org_forbidden(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
             .configure(routes::configure),
-    ).await;
+    )
+    .await;
     let org_id = Uuid::new_v4();
     sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Org', $2)")
-        .bind(org_id).bind(format!("org-{org_id}")).execute(&pool).await.unwrap();
+        .bind(org_id)
+        .bind(format!("org-{org_id}"))
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let other_token = generate_org_admin_token(Uuid::new_v4());
-    let resp = test::call_service(&app, test::TestRequest::get()
-        .uri(&format!("/orgs/{org_id}/offline-auth-bundle"))
-        .insert_header(("Authorization", format!("Bearer {other_token}"))).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/orgs/{org_id}/offline-auth-bundle"))
+            .insert_header(("Authorization", format!("Bearer {other_token}")))
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), actix_web::http::StatusCode::FORBIDDEN);
 }
 
@@ -293,14 +334,18 @@ async fn test_update_org(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = Uuid::new_v4();
-    sqlx::query!("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Original Name', 'orig-slug')", org_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query!(
+        "INSERT INTO organizations (id, name, slug) VALUES ($1, 'Original Name', 'orig-slug')",
+        org_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let token = generate_super_admin_token();
     let req = test::TestRequest::patch()
@@ -326,15 +371,26 @@ async fn test_update_org_conflict(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org1_id = Uuid::new_v4();
     let org2_id = Uuid::new_v4();
-    sqlx::query!("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Org 1', 'slug-1')", org1_id)
-        .execute(&pool).await.unwrap();
-    sqlx::query!("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Org 2', 'slug-2')", org2_id)
-        .execute(&pool).await.unwrap();
+    sqlx::query!(
+        "INSERT INTO organizations (id, name, slug) VALUES ($1, 'Org 1', 'slug-1')",
+        org1_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query!(
+        "INSERT INTO organizations (id, name, slug) VALUES ($1, 'Org 2', 'slug-2')",
+        org2_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let token = generate_super_admin_token();
     let req = test::TestRequest::patch()
@@ -355,14 +411,18 @@ async fn test_delete_org(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = Uuid::new_v4();
-    sqlx::query!("INSERT INTO organizations (id, name, slug) VALUES ($1, 'To Delete', 'to-del')", org_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query!(
+        "INSERT INTO organizations (id, name, slug) VALUES ($1, 'To Delete', 'to-del')",
+        org_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let token = generate_super_admin_token();
     let req = test::TestRequest::delete()
@@ -388,8 +448,9 @@ async fn test_delete_org_not_found(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let token = generate_super_admin_token();
     let req = test::TestRequest::delete()
@@ -407,17 +468,21 @@ async fn test_upload_org_logo(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = Uuid::new_v4();
-    sqlx::query!("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Logo Org', 'logo-org')", org_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query!(
+        "INSERT INTO organizations (id, name, slug) VALUES ($1, 'Logo Org', 'logo-org')",
+        org_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let token = generate_super_admin_token();
-    
+
     // Simulate image upload
     let mut body = String::new();
     body.push_str("--boundary\r\n");
@@ -496,12 +561,20 @@ async fn test_onboarding_checklist_and_complete(pool: PgPool) {
 
     // Satisfy the required steps: branch + payment method + category + item.
     sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'B')")
-        .bind(Uuid::new_v4()).bind(org_id).execute(&pool).await.unwrap();
+        .bind(Uuid::new_v4())
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_active) VALUES ($1, 'cash', '{}'::jsonb, '#000', 'cash', true)")
         .bind(org_id).execute(&pool).await.unwrap();
     let cat = Uuid::new_v4();
     sqlx::query("INSERT INTO categories (id, org_id, name) VALUES ($1, $2, 'C')")
-        .bind(cat).bind(org_id).execute(&pool).await.unwrap();
+        .bind(cat)
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price, is_active) VALUES ($1, $2, $3, 'Latte', 7000, true)")
         .bind(Uuid::new_v4()).bind(org_id).bind(cat).execute(&pool).await.unwrap();
 
@@ -509,8 +582,7 @@ async fn test_onboarding_checklist_and_complete(pool: PgPool) {
         .uri(&format!("/orgs/{org_id}/onboarding"))
         .insert_header(("Authorization", format!("Bearer {token}")))
         .to_request();
-    let body: serde_json::Value =
-        test::read_body_json(test::call_service(&app, req).await).await;
+    let body: serde_json::Value = test::read_body_json(test::call_service(&app, req).await).await;
     assert_eq!(body["can_complete"], true);
     assert_eq!(body["completed"], false);
 
@@ -528,6 +600,61 @@ async fn test_onboarding_checklist_and_complete(pool: PgPool) {
     }
 }
 
+/// The optional `org_profile` step flips to done once the org has a logo
+/// (currency/tax carry NOT-NULL defaults, so a logo is the only honest
+/// "they personalized it" signal). It is never required, so it must not
+/// gate `can_complete`.
+#[sqlx::test]
+async fn test_onboarding_org_profile_step(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org_row(&pool).await;
+    grant_org_permission(&pool, "read").await;
+    let token = generate_org_admin_token(org_id);
+
+    let fetch = |token: String| {
+        let app = &app;
+        async move {
+            let req = test::TestRequest::get()
+                .uri(&format!("/orgs/{org_id}/onboarding"))
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .to_request();
+            test::read_body_json::<serde_json::Value, _>(test::call_service(app, req).await).await
+        }
+    };
+
+    let body = fetch(token.clone()).await;
+    let profile = body["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["key"] == "org_profile")
+        .expect("org_profile step present");
+    assert_eq!(profile["done"], false);
+    assert_eq!(profile["required"], false);
+
+    sqlx::query("UPDATE organizations SET logo_url = 'logo.png' WHERE id = $1")
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let body = fetch(token).await;
+    let profile = body["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["key"] == "org_profile")
+        .unwrap();
+    assert_eq!(profile["done"], true);
+}
+
 /// V16: tax_rate outside [0, 1] must be rejected (negative or >100%).
 #[sqlx::test]
 async fn test_update_org_rejects_out_of_range_tax_rate(pool: PgPool) {
@@ -535,30 +662,50 @@ async fn test_update_org_rejects_out_of_range_tax_rate(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
     let org_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO organizations (id, name, slug, tax_rate) VALUES ($1,'O','o-tax-16',0.14)")
-        .bind(org_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO organizations (id, name, slug, tax_rate) VALUES ($1,'O','o-tax-16',0.14)",
+    )
+    .bind(org_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let token = generate_super_admin_token();
 
     for bad in [-0.5_f64, 5.0_f64] {
-        let resp = test::call_service(&app, test::TestRequest::patch()
-            .uri(&format!("/orgs/{}", org_id))
-            .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&serde_json::json!({"tax_rate": bad})).to_request()).await;
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::patch()
+                .uri(&format!("/orgs/{}", org_id))
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .set_json(&serde_json::json!({"tax_rate": bad}))
+                .to_request(),
+        )
+        .await;
         assert_eq!(resp.status(), 400, "tax_rate {bad} must be rejected");
     }
 
     // The persisted value is unchanged by the rejected calls.
-    let tr: sqlx::types::BigDecimal = sqlx::query_scalar("SELECT tax_rate FROM organizations WHERE id=$1")
-        .bind(org_id).fetch_one(&pool).await.unwrap();
+    let tr: sqlx::types::BigDecimal =
+        sqlx::query_scalar("SELECT tax_rate FROM organizations WHERE id=$1")
+            .bind(org_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(tr.to_string().parse::<f64>().unwrap(), 0.14);
 
     // A valid rate is accepted.
-    let resp = test::call_service(&app, test::TestRequest::patch()
-        .uri(&format!("/orgs/{}", org_id))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({"tax_rate": 0.2})).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri(&format!("/orgs/{}", org_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&serde_json::json!({"tax_rate": 0.2}))
+            .to_request(),
+    )
+    .await;
     assert!(resp.status().is_success());
 }

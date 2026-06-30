@@ -18,7 +18,7 @@ use std::process::ExitCode;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
-use madar_rust::costing::backfill::{backfill_cost_snapshots, BackfillScope};
+use madar_rust::costing::backfill::{BackfillScope, backfill_cost_snapshots};
 
 const USAGE: &str = "\
 Reprices historical order cost snapshots at CURRENT ingredient costs.
@@ -89,7 +89,11 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let pool = match PgPoolOptions::new().max_connections(5).connect(&db_url).await {
+    let pool = match PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url)
+        .await
+    {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: failed to connect to PostgreSQL: {e}");
@@ -101,7 +105,14 @@ async fn main() -> ExitCode {
         BackfillScope::Org(id) => println!("Scope:  org {id}"),
         BackfillScope::Branch(id) => println!("Scope:  branch {id}"),
     }
-    println!("Mode:   {}", if dry_run { "DRY RUN (rolls back)" } else { "LIVE (commits)" });
+    println!(
+        "Mode:   {}",
+        if dry_run {
+            "DRY RUN (rolls back)"
+        } else {
+            "LIVE (commits)"
+        }
+    );
 
     let summary = match backfill_cost_snapshots(&pool, scope, dry_run).await {
         Ok(s) => s,
@@ -117,8 +128,14 @@ async fn main() -> ExitCode {
     println!("Order lines in scope:     {}", summary.order_lines_in_scope);
     println!("Order lines updated:      {}", summary.order_lines_updated);
     println!("Addon rows updated:       {}", summary.addon_rows_updated);
-    println!("Optional rows updated:    {}", summary.optional_rows_updated);
-    println!("Bundle components updated:{}", summary.bundle_component_rows_updated);
+    println!(
+        "Optional rows updated:    {}",
+        summary.optional_rows_updated
+    );
+    println!(
+        "Bundle components updated:{}",
+        summary.bundle_component_rows_updated
+    );
     println!(
         "Σ line_cost:              {} -> {}",
         fmt_egp(summary.line_cost_total_before),

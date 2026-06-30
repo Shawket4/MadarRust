@@ -1,11 +1,11 @@
-use actix_web::{test, App, web};
+use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::auth::jwt::JwtSecret;
 use crate::models::UserRole;
-use crate::recipes::routes;
 use crate::recipes::handlers::*;
+use crate::recipes::routes;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
@@ -70,7 +70,13 @@ async fn seed_category(pool: &PgPool, org_id: Uuid, name: &str) -> Uuid {
     id
 }
 
-async fn seed_menu_item(pool: &PgPool, org_id: Uuid, category_id: Uuid, name: &str, price: i32) -> Uuid {
+async fn seed_menu_item(
+    pool: &PgPool,
+    org_id: Uuid,
+    category_id: Uuid,
+    name: &str,
+    price: i32,
+) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price) VALUES ($1, $2, $3, $4, $5)")
         .bind(id)
@@ -84,7 +90,13 @@ async fn seed_menu_item(pool: &PgPool, org_id: Uuid, category_id: Uuid, name: &s
     id
 }
 
-async fn seed_addon_item(pool: &PgPool, org_id: Uuid, name: &str, addon_type: &str, price: i32) -> Uuid {
+async fn seed_addon_item(
+    pool: &PgPool,
+    org_id: Uuid,
+    name: &str,
+    addon_type: &str,
+    price: i32,
+) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price) VALUES ($1, $2, $3, $4, $5)")
         .bind(id)
@@ -124,8 +136,9 @@ async fn test_drink_recipes_crud(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
@@ -158,7 +171,12 @@ async fn test_drink_recipes_crud(pool: PgPool) {
     let resp = test::call_service(&app, req).await;
     let status = resp.status();
     let body = test::read_body(resp).await;
-    assert!(status.is_success(), "Status: {}, Response: {:?}", status, body);
+    assert!(
+        status.is_success(),
+        "Status: {}, Response: {:?}",
+        status,
+        body
+    );
 
     // 2. List Drink Recipes
     let req_list = test::TestRequest::get()
@@ -176,7 +194,10 @@ async fn test_drink_recipes_crud(pool: PgPool) {
 
     // 3. Delete Drink Recipe
     let req_del = test::TestRequest::delete()
-        .uri(&format!("/recipes/drinks/{}/large?ingredient_name=Milk", item_id))
+        .uri(&format!(
+            "/recipes/drinks/{}/large?ingredient_name=Milk",
+            item_id
+        ))
         .insert_header(("Authorization", format!("Bearer {}", token)))
         .to_request();
 
@@ -190,8 +211,9 @@ async fn test_drink_recipes_negative_quantity(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
@@ -226,8 +248,9 @@ async fn test_drink_recipes_wrong_org(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let org2_id = seed_org(&pool).await;
@@ -258,8 +281,9 @@ async fn test_addon_ingredients_crud(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
@@ -290,7 +314,12 @@ async fn test_addon_ingredients_crud(pool: PgPool) {
     let resp = test::call_service(&app, req).await;
     let status = resp.status();
     let body = test::read_body(resp).await;
-    assert!(status.is_success(), "Status: {}, Response: {:?}", status, body);
+    assert!(
+        status.is_success(),
+        "Status: {}, Response: {:?}",
+        status,
+        body
+    );
 
     // 2. List Addon Ingredients
     let req_list = test::TestRequest::get()
@@ -308,7 +337,10 @@ async fn test_addon_ingredients_crud(pool: PgPool) {
 
     // 3. Delete Addon Ingredient
     let req_del = test::TestRequest::delete()
-        .uri(&format!("/recipes/addons/{}?ingredient_name=Syrup", addon_id))
+        .uri(&format!(
+            "/recipes/addons/{}?ingredient_name=Syrup",
+            addon_id
+        ))
         .insert_header(("Authorization", format!("Bearer {}", token)))
         .to_request();
 
@@ -322,8 +354,9 @@ async fn test_addon_ingredients_wrong_org(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let org2_id = seed_org(&pool).await;
@@ -352,8 +385,9 @@ async fn test_drink_recipe_subunit_rounding_to_zero_rejected(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
@@ -373,16 +407,32 @@ async fn test_drink_recipe_subunit_rounding_to_zero_rejected(pool: PgPool) {
         ingredient_unit: "g".to_string(),
         quantity_used: 0.4,
     };
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/recipes/drinks/{}", item_id))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&req_body).to_request()).await;
-    assert_eq!(resp.status().as_u16(), 400, "sub-unit quantity rounding to 0 must be rejected");
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/recipes/drinks/{}", item_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&req_body)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status().as_u16(),
+        400,
+        "sub-unit quantity rounding to 0 must be rejected"
+    );
 
     let stored: Option<sqlx::types::BigDecimal> = sqlx::query_scalar(
-        "SELECT quantity_used FROM menu_item_recipes WHERE org_ingredient_id=$1"
-    ).bind(ing).fetch_optional(&pool).await.unwrap();
-    assert!(stored.is_none(), "no recipe row should be stored for a rounds-to-zero quantity");
+        "SELECT quantity_used FROM menu_item_recipes WHERE org_ingredient_id=$1",
+    )
+    .bind(ing)
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
+    assert!(
+        stored.is_none(),
+        "no recipe row should be stored for a rounds-to-zero quantity"
+    );
 }
 
 /// Recipe depth: an ml recipe line against a gram-based ingredient converts via
@@ -393,8 +443,9 @@ async fn test_recipe_density_and_yield_applied_at_save(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure)
-    ).await;
+            .configure(routes::configure),
+    )
+    .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
@@ -417,10 +468,15 @@ async fn test_recipe_density_and_yield_applied_at_save(pool: PgPool) {
         ingredient_unit: "ml".to_string(),
         quantity_used: 1000.0, // 1000 ml
     };
-    let resp = test::call_service(&app, test::TestRequest::post()
-        .uri(&format!("/recipes/drinks/{}", item_id))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&req_body).to_request()).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/recipes/drinks/{}", item_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&req_body)
+            .to_request(),
+    )
+    .await;
     assert!(resp.status().is_success());
 
     // 1000 ml × 0.92 = 920 g usable; grossed up by 50% yield → 1840 g stored.
@@ -428,5 +484,8 @@ async fn test_recipe_density_and_yield_applied_at_save(pool: PgPool) {
         "SELECT ingredient_unit, quantity_used::float8 FROM menu_item_recipes WHERE org_ingredient_id=$1"
     ).bind(ing).fetch_one(&pool).await.unwrap();
     assert_eq!(unit, "g", "stored in the ingredient's base unit");
-    assert_eq!(qty, 1840.0, "density bridge + yield gross-up applied at save");
+    assert_eq!(
+        qty, 1840.0,
+        "density bridge + yield gross-up applied at save"
+    );
 }

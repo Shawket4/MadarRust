@@ -100,7 +100,9 @@ pub enum EngineError {
     NoItems,
     /// A non-finite float reached the report boundary — a bug upstream, but
     /// failing the run loudly beats serializing `null` into a number field.
-    NonFiniteOutput { context: String },
+    NonFiniteOutput {
+        context: String,
+    },
 }
 
 impl std::fmt::Display for EngineError {
@@ -145,7 +147,12 @@ pub fn run_advisor(
         .map
         .iter()
         .filter(|(_, c)| {
-            matches!(c, Classification::Cm { quadrant: CmQuadrant::Dog })
+            matches!(
+                c,
+                Classification::Cm {
+                    quadrant: CmQuadrant::Dog
+                }
+            )
         })
         .filter_map(|(k, _)| simulate_removal(k, &kpis, &assoc, &snap_map, config))
         .collect();
@@ -165,7 +172,10 @@ pub fn run_advisor(
     });
 
     let mode_summary = {
-        let mut s = ModeSummary { items_total: kpis.len(), ..Default::default() };
+        let mut s = ModeSummary {
+            items_total: kpis.len(),
+            ..Default::default()
+        };
         for c in outcome.map.values() {
             match c {
                 Classification::Cm { .. } => s.items_cm_tracked += 1,
@@ -198,7 +208,9 @@ fn validate_report(report: &AdvisorReport) -> Result<(), EngineError> {
         if v.is_finite() {
             Ok(())
         } else {
-            Err(EngineError::NonFiniteOutput { context: context.to_string() })
+            Err(EngineError::NonFiniteOutput {
+                context: context.to_string(),
+            })
         }
     }
     fn check_opt(v: Option<f64>, context: &str) -> Result<(), EngineError> {

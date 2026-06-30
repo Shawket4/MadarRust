@@ -1,4 +1,4 @@
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use utoipa::{IntoParams, ToSchema};
@@ -18,21 +18,26 @@ use crate::{
 
 #[derive(Deserialize, ToSchema)]
 pub struct CreateUserRequest {
-    pub org_id:     Uuid,
+    pub org_id: Uuid,
     #[schema(example = "Ahmed Hassan")]
-    pub name:       String,
+    pub name: String,
     /// Required for admins and managers; ignored for tellers.
     #[schema(format = Email, example = "ahmed@therue.cafe")]
-    pub email:      Option<String>,
+    pub email: Option<String>,
     #[schema(example = "+201234567890")]
-    pub phone:      Option<String>,
-    pub role:       UserRole,
+    pub phone: Option<String>,
+    pub role: UserRole,
     /// Required when `role` is anything other than `teller`. Plain text;
     /// hashed server-side with bcrypt before storage.
-    pub password:   Option<String>,
+    pub password: Option<String>,
     /// Required when `role = teller`. 4–6 ASCII digits.
-    #[schema(pattern = "^[0-9]{4,6}$", min_length = 4, max_length = 6, example = "1234")]
-    pub pin:        Option<String>,
+    #[schema(
+        pattern = "^[0-9]{4,6}$",
+        min_length = 4,
+        max_length = 6,
+        example = "1234"
+    )]
+    pub pin: Option<String>,
     /// Branches to assign the new user to immediately. Branch managers
     /// can only assign to branches they themselves are assigned to.
     pub branch_ids: Option<Vec<Uuid>>,
@@ -59,23 +64,23 @@ pub struct ListUsersQuery {
 
 #[derive(Deserialize, ToSchema)]
 pub struct UpdateUserRequest {
-    pub name:      Option<String>,
+    pub name: Option<String>,
     #[schema(format = Email)]
-    pub email:     Option<String>,
-    pub phone:     Option<String>,
+    pub email: Option<String>,
+    pub phone: Option<String>,
     /// Plain-text new password. Server-side bcrypt-hashed.
-    pub password:  Option<String>,
+    pub password: Option<String>,
     #[schema(pattern = "^[0-9]{4,6}$", min_length = 4, max_length = 6)]
-    pub pin:       Option<String>,
+    pub pin: Option<String>,
     /// Only org-admins and above can change roles. Promoting to
     /// `super_admin` requires the caller to be a super-admin.
-    pub role:      Option<UserRole>,
+    pub role: Option<UserRole>,
     pub is_active: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct UserBranch {
-    pub branch_id:   Uuid,
+    pub branch_id: Uuid,
     #[schema(example = "Zamalek")]
     pub branch_name: String,
 }
@@ -94,7 +99,7 @@ pub struct UserBranch {
     security(("bearer_jwt" = []))
 )]
 pub async fn create_user(
-    req:  HttpRequest,
+    req: HttpRequest,
     pool: web::Data<PgPool>,
     body: web::Json<CreateUserRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -104,7 +109,10 @@ pub async fn create_user(
     require_same_org(&claims, Some(body.org_id))?;
 
     if claims.role == UserRole::BranchManager {
-        if !matches!(body.role, UserRole::Teller | UserRole::Waiter | UserRole::Kitchen) {
+        if !matches!(
+            body.role,
+            UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
+        ) {
             return Err(AppError::Forbidden(
                 "Branch managers can only create teller, waiter and kitchen accounts".into(),
             ));
@@ -138,7 +146,9 @@ pub async fn create_user(
     match body.role {
         UserRole::Teller | UserRole::Waiter | UserRole::Kitchen => {
             if body.pin.is_none() {
-                return Err(AppError::BadRequest("Tellers, waiters and kitchen users require a PIN".into()));
+                return Err(AppError::BadRequest(
+                    "Tellers, waiters and kitchen users require a PIN".into(),
+                ));
             }
             let pin = body.pin.as_deref().unwrap();
             if pin.len() < 4 || pin.len() > 6 || !pin.chars().all(|c| c.is_ascii_digit()) {
@@ -161,7 +171,7 @@ pub async fn create_user(
 
     if let Some(email) = &body.email {
         let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM users WHERE email = $1 AND deleted_at IS NULL)"
+            "SELECT EXISTS(SELECT 1 FROM users WHERE email = $1 AND deleted_at IS NULL)",
         )
         .bind(email)
         .fetch_one(pool.get_ref())
@@ -172,13 +182,16 @@ pub async fn create_user(
         }
     }
 
-    if matches!(body.role, UserRole::Teller | UserRole::Waiter | UserRole::Kitchen) {
+    if matches!(
+        body.role,
+        UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
+    ) {
         // PIN login matches by name across the teller+waiter+kitchen namespace, so
         // names must be unique within it (not just among tellers).
         let name_taken: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM users
              WHERE org_id = $1 AND LOWER(name) = LOWER($2)
-               AND role IN ('teller', 'waiter', 'kitchen') AND deleted_at IS NULL)"
+               AND role IN ('teller', 'waiter', 'kitchen') AND deleted_at IS NULL)",
         )
         .bind(body.org_id)
         .bind(&body.name)
@@ -260,8 +273,8 @@ pub async fn create_user(
     security(("bearer_jwt" = []))
 )]
 pub async fn list_users(
-    req:   HttpRequest,
-    pool:  web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     query: web::Query<ListUsersQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -270,7 +283,8 @@ pub async fn list_users(
     let org_id = if claims.role == UserRole::SuperAdmin {
         query.org_id
     } else {
-        let own = claims.org_id()
+        let own = claims
+            .org_id()
             .ok_or_else(|| AppError::Forbidden("No org assigned".into()))?;
         Some(own)
     };
@@ -319,8 +333,9 @@ pub async fn list_users(
             }
         }
 
-        None => sqlx::query_as::<_, User>(
-            r#"
+        None => {
+            sqlx::query_as::<_, User>(
+                r#"
             SELECT id, org_id, name, email, phone,
                    password_hash, pin_hash, role,
                    is_active, last_login_at,
@@ -329,9 +344,10 @@ pub async fn list_users(
             WHERE deleted_at IS NULL
             ORDER BY name
             "#,
-        )
-        .fetch_all(pool.get_ref())
-        .await?,
+            )
+            .fetch_all(pool.get_ref())
+            .await?
+        }
     };
 
     let public: Vec<UserPublic> = users.into_iter().map(Into::into).collect();
@@ -352,8 +368,8 @@ pub async fn list_users(
     security(("bearer_jwt" = []))
 )]
 pub async fn get_user(
-    req:     HttpRequest,
-    pool:    web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     user_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -392,7 +408,9 @@ pub async fn get_user(
         .await?;
 
         if !same_branch {
-            return Err(AppError::Forbidden("You do not have access to this user".into()));
+            return Err(AppError::Forbidden(
+                "You do not have access to this user".into(),
+            ));
         }
     }
 
@@ -414,10 +432,10 @@ pub async fn get_user(
     security(("bearer_jwt" = []))
 )]
 pub async fn update_user(
-    req:     HttpRequest,
-    pool:    web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     user_id: web::Path<Uuid>,
-    body:    web::Json<UpdateUserRequest>,
+    body: web::Json<UpdateUserRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "users", "update").await?;
@@ -446,8 +464,10 @@ pub async fn update_user(
         UserRole::Waiter => 0,
         UserRole::Kitchen => 0,
     };
-    let sensitive = body.password.is_some() || body.pin.is_some()
-        || body.is_active.is_some() || body.role.is_some();
+    let sensitive = body.password.is_some()
+        || body.pin.is_some()
+        || body.is_active.is_some()
+        || body.role.is_some();
     if sensitive && *user_id != claims.user_id() && rank(&existing.role) > rank(&claims.role) {
         return Err(AppError::Forbidden(
             "You cannot modify a user with higher privileges".into(),
@@ -470,7 +490,9 @@ pub async fn update_user(
         .await?;
 
         if !same_branch {
-            return Err(AppError::Forbidden("You do not have access to this user".into()));
+            return Err(AppError::Forbidden(
+                "You do not have access to this user".into(),
+            ));
         }
     }
 
@@ -482,12 +504,16 @@ pub async fn update_user(
         require_super_admin(&claims)?;
     }
 
-    let password_hash = body.password.as_deref()
+    let password_hash = body
+        .password
+        .as_deref()
         .map(|p| bcrypt::hash(p, bcrypt::DEFAULT_COST))
         .transpose()
         .map_err(|_| AppError::Internal)?;
 
-    let pin_hash = body.pin.as_deref()
+    let pin_hash = body
+        .pin
+        .as_deref()
         .map(|p| bcrypt::hash(p, bcrypt::DEFAULT_COST))
         .transpose()
         .map_err(|_| AppError::Internal)?;
@@ -539,8 +565,8 @@ pub async fn update_user(
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_user(
-    req:     HttpRequest,
-    pool:    web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     user_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -578,7 +604,9 @@ pub async fn delete_user(
         .await?;
 
         if !same_branch {
-            return Err(AppError::Forbidden("You can only delete users assigned to your branches".into()));
+            return Err(AppError::Forbidden(
+                "You can only delete users assigned to your branches".into(),
+            ));
         }
     }
 
@@ -605,39 +633,39 @@ pub async fn delete_user(
     security(("bearer_jwt" = []))
 )]
 pub async fn assign_branch(
-    req:     HttpRequest,
-    pool:    web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     user_id: web::Path<Uuid>,
-    body:    web::Json<AssignBranchRequest>,
+    body: web::Json<AssignBranchRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "users", "update").await?;
 
     // Org-scope the assignment (V3): both the target user and the branch must be
     // in the caller's org. require_same_org early-returns Ok for super_admin.
-    let (target_org, target_role): (Option<Uuid>, UserRole) = sqlx::query_as(
-        "SELECT org_id, role FROM users WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(*user_id)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+    let (target_org, target_role): (Option<Uuid>, UserRole) =
+        sqlx::query_as("SELECT org_id, role FROM users WHERE id = $1 AND deleted_at IS NULL")
+            .bind(*user_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .ok_or_else(|| AppError::NotFound("User not found".into()))?;
     require_same_org(&claims, target_org)?;
 
-    let branch_org: Uuid = sqlx::query_scalar(
-        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(body.branch_id)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    let branch_org: Uuid =
+        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
+            .bind(body.branch_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
     require_same_org(&claims, Some(branch_org))?;
 
     if claims.role == UserRole::BranchManager {
         // A branch_manager must not attach an admin to a branch — that step opens
         // the shared-branch gate that would let them reset the admin's creds (V4).
         if matches!(target_role, UserRole::OrgAdmin | UserRole::SuperAdmin) {
-            return Err(AppError::Forbidden("You cannot assign an admin user to a branch".into()));
+            return Err(AppError::Forbidden(
+                "You cannot assign an admin user to a branch".into(),
+            ));
         }
         let is_assigned: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)"
@@ -647,7 +675,9 @@ pub async fn assign_branch(
         .fetch_one(pool.get_ref())
         .await?;
         if !is_assigned {
-            return Err(AppError::Forbidden("You cannot assign a user to a branch you are not assigned to".into()));
+            return Err(AppError::Forbidden(
+                "You cannot assign a user to a branch you are not assigned to".into(),
+            ));
         }
     }
 
@@ -684,9 +714,9 @@ pub async fn assign_branch(
     security(("bearer_jwt" = []))
 )]
 pub async fn unassign_branch(
-    req:      HttpRequest,
-    pool:     web::Data<PgPool>,
-    path:     web::Path<(Uuid, Uuid)>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
+    path: web::Path<(Uuid, Uuid)>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "users", "update").await?;
@@ -694,22 +724,20 @@ pub async fn unassign_branch(
     let (user_id, branch_id) = path.into_inner();
 
     // Org-scope (V3): the target user and branch must both be in the caller's org.
-    let target_org: Option<Uuid> = sqlx::query_scalar(
-        "SELECT org_id FROM users WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(user_id)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+    let target_org: Option<Uuid> =
+        sqlx::query_scalar("SELECT org_id FROM users WHERE id = $1 AND deleted_at IS NULL")
+            .bind(user_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .ok_or_else(|| AppError::NotFound("User not found".into()))?;
     require_same_org(&claims, target_org)?;
 
-    let branch_org: Uuid = sqlx::query_scalar(
-        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(branch_id)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    let branch_org: Uuid =
+        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
+            .bind(branch_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
     require_same_org(&claims, Some(branch_org))?;
 
     if claims.role == UserRole::BranchManager {
@@ -721,17 +749,17 @@ pub async fn unassign_branch(
         .fetch_one(pool.get_ref())
         .await?;
         if !is_assigned {
-            return Err(AppError::Forbidden("You cannot unassign a user from a branch you are not assigned to".into()));
+            return Err(AppError::Forbidden(
+                "You cannot unassign a user from a branch you are not assigned to".into(),
+            ));
         }
     }
 
-    sqlx::query(
-        "DELETE FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2"
-    )
-    .bind(user_id)
-    .bind(branch_id)
-    .execute(pool.get_ref())
-    .await?;
+    sqlx::query("DELETE FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2")
+        .bind(user_id)
+        .bind(branch_id)
+        .execute(pool.get_ref())
+        .await?;
 
     Ok(HttpResponse::NoContent().finish())
 }
@@ -750,8 +778,8 @@ pub async fn unassign_branch(
     security(("bearer_jwt" = []))
 )]
 pub async fn list_user_branches(
-    req:     HttpRequest,
-    pool:    web::Data<PgPool>,
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
     user_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -773,7 +801,9 @@ pub async fn list_user_branches(
         .await?;
 
         if !same_branch {
-            return Err(AppError::Forbidden("You do not have access to this user".into()));
+            return Err(AppError::Forbidden(
+                "You do not have access to this user".into(),
+            ));
         }
     }
 

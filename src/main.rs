@@ -4,7 +4,7 @@
 use actix_cors::Cors;
 use actix_files::Files;
 use actix_web::middleware::Compress;
-use actix_web::{web, App, HttpServer};
+use actix_web::{App, HttpServer, web};
 
 use dotenvy::dotenv;
 use sqlx::postgres::PgPoolOptions;
@@ -13,9 +13,9 @@ use tracing_subscriber::EnvFilter;
 
 use madar_rust::openapi::ApiDoc;
 use madar_rust::{
-    auth, branches, bundles, costing, delivery, discounts, inventory, kitchen, menu, menu_advisor,
+    auth, branches, bundles, costing, delivery, demo, discounts, inventory, kitchen, menu, menu_advisor,
     orders, orgs, payment_methods, permissions, purchasing, qr_card, realtime, recipes, reports,
-    shifts, stocktakes, sync, tickets, tills, uploads, users,
+    reservations, shifts, stocktakes, sync, tickets, tills, uploads, users,
 };
 
 use utoipa::OpenApi;
@@ -29,8 +29,8 @@ async fn main() -> std::io::Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    let db_url      = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let jwt_secret  = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let jwt_secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
     let uploads_dir = env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
 
     fs::create_dir_all(&uploads_dir).expect("Failed to create uploads directory");
@@ -71,24 +71,45 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("Failed to seed default role permissions");
 
-    let pool          = web::Data::new(pool);
+    let pool = web::Data::new(pool);
     // Read pool handed to the /reports scope only (see configure call below).
-    let read_pool     = web::Data::new(read_pool);
+    let read_pool = web::Data::new(read_pool);
     // Optional per-org menu cache; a no-op unless MENU_CACHE_TTL_SECS>0.
-    let menu_cache    = web::Data::new(menu::cache::MenuCache::from_env());
-    let jwt_secret    = web::Data::new(auth::jwt::JwtSecret(jwt_secret));
+    let menu_cache = web::Data::new(menu::cache::MenuCache::from_env());
+    let jwt_secret = web::Data::new(auth::jwt::JwtSecret(jwt_secret));
     // Per-process org-suspension cache, consulted by JwtMiddleware on every
     // authenticated request. Registering it is what arms the kill-switch.
-    let org_status    = web::Data::new(auth::org_status::OrgStatusCache::new());
+    let org_status = web::Data::new(auth::org_status::OrgStatusCache::new());
     // The unified per-branch realtime bus — delivery, kitchen, waiter tickets, and
     // order events all ride one connection. Shared across all workers.
-    let realtime_bus  = web::Data::new(realtime::hub::BranchEventHub::new());
+    let realtime_bus = web::Data::new(realtime::hub::BranchEventHub::new());
+
+    // The reservations nudge scheduler — flat departure nudges, no-show warns,
+    // table holds, and the OSRM waitlist head-out. Spawned ONCE here (not in the
+    // per-worker closure below) so there's a single instance; idempotent via
+    // booking_nudges. No-op when RESERVATION_NUDGES_ENABLED is falsy.
+    reservations::nudge::spawn(pool.get_ref().clone(), realtime_bus.get_ref().clone());
+
+    // Public demo playground (DEMO_MODE). Throwaway per-visitor orgs with a TTL;
+    // the sweeper GCs expired ones. Spawned ONCE (single instance). Off by
+    // default — and meant to run on a SEPARATE backend + DB from production.
+    let demo_settings = demo::config::DemoConfig::from_env();
+    if demo_settings.enabled {
+        tracing::warn!(
+            "⚠️  DEMO_MODE ENABLED — public throwaway orgs (TTL {}h, max {}). Run on a non-prod DB.",
+            demo_settings.ttl_hours,
+            demo_settings.max_orgs,
+        );
+        demo::sweeper::spawn(pool.get_ref().clone(), demo_settings.sweep_secs);
+    }
+    let demo_enabled = demo_settings.enabled;
+    let demo_cfg = web::Data::new(demo_settings);
     // Shlink short-URL provider (reads env vars on each call; degrade-safe).
-    let qr_provider   = qr_card::routes::make_provider();
+    let qr_provider = qr_card::routes::make_provider();
     let uploads_clone = uploads_dir.clone();
-    let bind_addr     = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
-    let https_port    = env::var("HTTPS_PORT").unwrap_or_else(|_| "8443".to_string());
-    let https_addr    = format!("0.0.0.0:{}", https_port);
+    let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+    let https_port = env::var("HTTPS_PORT").unwrap_or_else(|_| "8443".to_string());
+    let https_addr = format!("0.0.0.0:{}", https_port);
 
     // Swagger UI is dev/staging only. In production leave the env var
     // unset (or set to a falsy value) and front the spec endpoint with
@@ -105,7 +126,9 @@ async fn main() -> std::io::Result<()> {
         tracing::warn!("⚠️  Swagger UI ENABLED — exposes full API surface unauthenticated.");
         tracing::warn!("    Do NOT run with MADAR_ENABLE_SWAGGER_UI=true in production");
         tracing::warn!("    without nginx basic-auth in front of /api-docs/.");
-        tracing::info!("Swagger UI at /api-docs/swagger-ui/  |  OpenAPI JSON at /api-docs/openapi.json");
+        tracing::info!(
+            "Swagger UI at /api-docs/swagger-ui/  |  OpenAPI JSON at /api-docs/openapi.json"
+        );
     } else {
         tracing::info!("Swagger UI disabled (set MADAR_ENABLE_SWAGGER_UI=true to enable in dev)");
     }
@@ -139,6 +162,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(org_status.clone())
             .app_data(realtime_bus.clone())
             .app_data(qr_provider.clone())
+            .app_data(demo_cfg.clone())
             // Render actix's built-in extractor parse errors (bad path UUID, bad
             // query param, malformed JSON body) as our JSON ErrorBody with a 400,
             // instead of the default text/plain — so the wire contract is uniform.
@@ -152,7 +176,10 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::JsonConfig::default().error_handler(|err, _req| {
                 madar_rust::errors::AppError::BadRequest(err.to_string()).into()
             }))
-            .route("/health", web::get().to(|| async { actix_web::HttpResponse::Ok().finish() }))
+            .route(
+                "/health",
+                web::get().to(|| async { actix_web::HttpResponse::Ok().finish() }),
+            )
             .configure(auth::routes::configure)
             .configure(orgs::routes::configure)
             .configure(users::routes::configure)
@@ -163,6 +190,7 @@ async fn main() -> std::io::Result<()> {
             .configure(recipes::routes::configure)
             .configure(shifts::routes::configure)
             .configure(tills::routes::configure)
+            .configure(reservations::routes::configure)
             .configure(realtime::routes::configure)
             .configure(kitchen::routes::configure)
             .configure(tickets::routes::configure)
@@ -179,6 +207,11 @@ async fn main() -> std::io::Result<()> {
             .configure(costing::routes::configure)
             .configure(delivery::routes::configure)
             .configure(qr_card::routes::configure);
+
+        // Public demo endpoints only when DEMO_MODE is on.
+        if demo_enabled {
+            app = app.configure(demo::routes::configure);
+        }
 
         if enable_swagger_ui {
             app = app.service(
@@ -229,8 +262,10 @@ async fn build_pool(url: &str, max_conns: u32) -> sqlx::Pool<sqlx::Postgres> {
 
 fn build_tls_config() -> Option<rustls::ServerConfig> {
     let cert_file = env::var("SSL_CERT_FILE").ok()?;
-    let key_file  = env::var("SSL_KEY_FILE").ok()?;
-    if cert_file.is_empty() || key_file.is_empty() { return None; }
+    let key_file = env::var("SSL_KEY_FILE").ok()?;
+    if cert_file.is_empty() || key_file.is_empty() {
+        return None;
+    }
 
     // Once env vars are set, failure to load them is a hard error — do not
     // silently fall back to HTTP, which would expose production traffic unencrypted.
@@ -241,7 +276,8 @@ fn build_tls_config() -> Option<rustls::ServerConfig> {
 
     let certs: Vec<rustls::pki_types::CertificateDer> =
         rustls_pemfile::certs(&mut cert_pem.as_slice())
-            .filter_map(|c| c.ok()).collect();
+            .filter_map(|c| c.ok())
+            .collect();
 
     let mut keys: Vec<rustls::pki_types::PrivateKeyDer> =
         rustls_pemfile::pkcs8_private_keys(&mut key_pem.as_slice())
@@ -255,13 +291,15 @@ fn build_tls_config() -> Option<rustls::ServerConfig> {
     }
 
     if certs.is_empty() || keys.is_empty() {
-        panic!("SSL_CERT_FILE/SSL_KEY_FILE are set but contain no parseable certs/keys — refusing to start without TLS");
+        panic!(
+            "SSL_CERT_FILE/SSL_KEY_FILE are set but contain no parseable certs/keys — refusing to start without TLS"
+        );
     }
 
     Some(
         rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certs, keys.remove(0))
-            .unwrap_or_else(|e| panic!("TLS configuration error: {}", e))
+            .unwrap_or_else(|e| panic!("TLS configuration error: {}", e)),
     )
 }

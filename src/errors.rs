@@ -96,7 +96,7 @@ impl AppError {
 fn status_for_sqlstate(code: Option<&str>) -> actix_web::http::StatusCode {
     use actix_web::http::StatusCode;
     match code {
-        Some("23505") | Some("23503") => StatusCode::CONFLICT,    // unique / foreign-key violation
+        Some("23505") | Some("23503") => StatusCode::CONFLICT, // unique / foreign-key violation
         Some("23514") | Some("23502") => StatusCode::BAD_REQUEST, // check / not-null violation
         Some(c) if c.starts_with("22") => StatusCode::BAD_REQUEST, // data exception (overflow, bad enum/uuid/encoding, offset range)
         Some(c) if c.starts_with("23") => StatusCode::CONFLICT,    // other integrity violations
@@ -106,9 +106,9 @@ fn status_for_sqlstate(code: Option<&str>) -> actix_web::http::StatusCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{status_for_sqlstate, AppError};
-    use actix_web::http::StatusCode;
+    use super::{AppError, status_for_sqlstate};
     use actix_web::ResponseError;
+    use actix_web::http::StatusCode;
 
     #[test]
     fn row_not_found_maps_to_404() {
@@ -127,25 +127,34 @@ mod tests {
         assert_eq!(status_for_sqlstate(Some("22P02")), StatusCode::BAD_REQUEST); // invalid text/enum
         assert_eq!(status_for_sqlstate(Some("22021")), StatusCode::BAD_REQUEST); // bad encoding / NUL
         assert_eq!(status_for_sqlstate(Some("2201X")), StatusCode::BAD_REQUEST); // offset out of range
-        assert_eq!(status_for_sqlstate(Some("40P01")), StatusCode::INTERNAL_SERVER_ERROR); // deadlock
-        assert_eq!(status_for_sqlstate(Some("08006")), StatusCode::INTERNAL_SERVER_ERROR); // connection failure
+        assert_eq!(
+            status_for_sqlstate(Some("40P01")),
+            StatusCode::INTERNAL_SERVER_ERROR
+        ); // deadlock
+        assert_eq!(
+            status_for_sqlstate(Some("08006")),
+            StatusCode::INTERNAL_SERVER_ERROR
+        ); // connection failure
         assert_eq!(status_for_sqlstate(None), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }
 
 impl actix_web::ResponseError for AppError {
     fn error_response(&self) -> HttpResponse {
-        let body = ErrorBody { error: self.to_string(), code: self.code() };
+        let body = ErrorBody {
+            error: self.to_string(),
+            code: self.code(),
+        };
         match self {
             AppError::Unauthorized(_) => HttpResponse::Unauthorized().json(body),
-            AppError::Forbidden(_)    => HttpResponse::Forbidden().json(body),
-            AppError::OrgSuspended    => HttpResponse::Forbidden().json(body),
-            AppError::NotFound(_)     => HttpResponse::NotFound().json(body),
-            AppError::BadRequest(_)   => HttpResponse::BadRequest().json(body),
-            AppError::Conflict(_)     => HttpResponse::Conflict().json(body),
-            AppError::Db(e)           => HttpResponse::build(Self::db_status(e)).json(body),
+            AppError::Forbidden(_) => HttpResponse::Forbidden().json(body),
+            AppError::OrgSuspended => HttpResponse::Forbidden().json(body),
+            AppError::NotFound(_) => HttpResponse::NotFound().json(body),
+            AppError::BadRequest(_) => HttpResponse::BadRequest().json(body),
+            AppError::Conflict(_) => HttpResponse::Conflict().json(body),
+            AppError::Db(e) => HttpResponse::build(Self::db_status(e)).json(body),
             AppError::ServiceUnavailable(_) => HttpResponse::ServiceUnavailable().json(body),
-            AppError::Internal        => HttpResponse::InternalServerError().json(body),
+            AppError::Internal => HttpResponse::InternalServerError().json(body),
         }
     }
 }
@@ -178,11 +187,23 @@ impl IntoResponses for AppErrorResponse {
         }
 
         BTreeMap::from([
-            ("400".to_string(), err("Bad request — validation failed or malformed input")),
-            ("401".to_string(), err("Unauthorized — missing or invalid bearer token")),
-            ("403".to_string(), err("Forbidden — insufficient permission or wrong org")),
+            (
+                "400".to_string(),
+                err("Bad request — validation failed or malformed input"),
+            ),
+            (
+                "401".to_string(),
+                err("Unauthorized — missing or invalid bearer token"),
+            ),
+            (
+                "403".to_string(),
+                err("Forbidden — insufficient permission or wrong org"),
+            ),
             ("404".to_string(), err("Not found")),
-            ("409".to_string(), err("Conflict — FK or domain invariant violation")),
+            (
+                "409".to_string(),
+                err("Conflict — FK or domain invariant violation"),
+            ),
             ("500".to_string(), err("Internal server error")),
         ])
     }

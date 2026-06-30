@@ -1,4 +1,4 @@
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use serde::Deserialize;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -24,22 +24,62 @@ use crate::tickets::handlers::{
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ReplayOp {
-    OpenShift { teller_id: Uuid, branch_id: Uuid, request: OpenShiftRequest },
-    CloseShift { teller_id: Uuid, shift_id: Uuid, request: CloseShiftRequest },
-    CreateOrder { teller_id: Uuid, request: CreateOrderRequest },
-    VoidOrder { teller_id: Uuid, order_id: Uuid, request: VoidOrderRequest },
-    CashMovement { teller_id: Uuid, shift_id: Uuid, request: CashMovementRequest },
+    OpenShift {
+        teller_id: Uuid,
+        branch_id: Uuid,
+        request: OpenShiftRequest,
+    },
+    CloseShift {
+        teller_id: Uuid,
+        shift_id: Uuid,
+        request: CloseShiftRequest,
+    },
+    CreateOrder {
+        teller_id: Uuid,
+        request: CreateOrderRequest,
+    },
+    VoidOrder {
+        teller_id: Uuid,
+        order_id: Uuid,
+        request: VoidOrderRequest,
+    },
+    CashMovement {
+        teller_id: Uuid,
+        shift_id: Uuid,
+        request: CashMovementRequest,
+    },
     // Waiter open-ticket ops (fire + rounds are fired by a WAITER; the cashier
     // settle is a TELLER; either may void). `teller_id` carries the acting user.
-    FireOpenTicket { teller_id: Uuid, request: CreateOpenTicketRequest },
-    AddTicketRound { teller_id: Uuid, ticket_id: Uuid, request: AddRoundRequest },
-    SettleOpenTicket { teller_id: Uuid, ticket_id: Uuid, request: SettleOpenTicketRequest },
-    VoidOpenTicket { teller_id: Uuid, ticket_id: Uuid, request: VoidOpenTicketRequest },
+    FireOpenTicket {
+        teller_id: Uuid,
+        request: CreateOpenTicketRequest,
+    },
+    AddTicketRound {
+        teller_id: Uuid,
+        ticket_id: Uuid,
+        request: AddRoundRequest,
+    },
+    SettleOpenTicket {
+        teller_id: Uuid,
+        ticket_id: Uuid,
+        request: SettleOpenTicketRequest,
+    },
+    VoidOpenTicket {
+        teller_id: Uuid,
+        ticket_id: Uuid,
+        request: VoidOpenTicketRequest,
+    },
     // KDS bump/unbump (kitchen device, or a teller on the till queue). `item_id`
     // is the kitchen line; it doubles as the idempotency key (re-bumping a bumped
     // line is a no-op, and a bump for a gone line replays as a clean no-op).
-    BumpKitchenItem { teller_id: Uuid, item_id: Uuid },
-    UnbumpKitchenItem { teller_id: Uuid, item_id: Uuid },
+    BumpKitchenItem {
+        teller_id: Uuid,
+        item_id: Uuid,
+    },
+    UnbumpKitchenItem {
+        teller_id: Uuid,
+        item_id: Uuid,
+    },
 }
 
 impl ReplayOp {
@@ -78,6 +118,30 @@ impl ReplayOp {
             // A kitchen device bumps; a teller may bump the till queue too.
             ReplayOp::BumpKitchenItem { .. } | ReplayOp::UnbumpKitchenItem { .. } => {
                 matches!(role, Kitchen | Teller)
+            }
+        }
+    }
+
+    /// The `(resource, action)` permission(s) the LIVE endpoint enforces for this op.
+    /// Replay must check the SAME ones against the op's actor, so a per-user override
+    /// (e.g. a teller whose `void` was revoked) can't be bypassed by queueing the
+    /// write offline. Kept in lock-step with the per-endpoint `check_permission`
+    /// calls (open=shifts/create, close+cash=shifts/update, order create/void=orders
+    /// create/update, ticket fire=create / round+settle+void=update, settle also
+    /// orders/create, bump=kitchen_orders/update).
+    fn required_permissions(&self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            ReplayOp::OpenShift { .. } => &[("shifts", "create")],
+            ReplayOp::CloseShift { .. } => &[("shifts", "update")],
+            ReplayOp::CashMovement { .. } => &[("shifts", "update")],
+            ReplayOp::CreateOrder { .. } => &[("orders", "create")],
+            ReplayOp::VoidOrder { .. } => &[("orders", "update")],
+            ReplayOp::FireOpenTicket { .. } => &[("open_tickets", "create")],
+            ReplayOp::AddTicketRound { .. } => &[("open_tickets", "update")],
+            ReplayOp::SettleOpenTicket { .. } => &[("open_tickets", "update"), ("orders", "create")],
+            ReplayOp::VoidOpenTicket { .. } => &[("open_tickets", "update")],
+            ReplayOp::BumpKitchenItem { .. } | ReplayOp::UnbumpKitchenItem { .. } => {
+                &[("kitchen_orders", "update")]
             }
         }
     }
@@ -132,12 +196,15 @@ pub async fn replay(
         _ => {
             return Err(AppError::Forbidden(
                 "Replay actor is not a member of this organization".into(),
-            ))
+            ));
         }
     };
     if actor_org != token_org
         || !is_active
-        || !matches!(actor_role, UserRole::Teller | UserRole::Waiter | UserRole::Kitchen)
+        || !matches!(
+            actor_role,
+            UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
+        )
         || !op.actor_role_allowed(&actor_role)
     {
         return Err(AppError::Forbidden(
@@ -145,26 +212,79 @@ pub async fn replay(
         ));
     }
 
+    // Enforce the SAME per-user permissions the LIVE endpoint checks, against the
+    // ACTOR (the op's embedded author) — NOT just the coarse role above. Without
+    // this, a teller whose `void` (or any action) was revoked by a per-user override
+    // could still perform it by queueing it offline and letting it replay.
+    for &(resource, action) in op.required_permissions() {
+        crate::permissions::checker::check_permission_for(
+            pool.get_ref(),
+            teller_id,
+            &actor_role,
+            resource,
+            action,
+        )
+        .await?;
+    }
+
     // The target must belong to the bearer's org — block any cross-org replay.
     op_branch_must_be_in_org(pool.get_ref(), &op, token_org).await?;
 
     let actor = ActingContext::replay_with_role(teller_id, token_org, actor_role);
     match op {
-        ReplayOp::OpenShift { branch_id, request, .. } => {
-            crate::shifts::handlers::open_shift_inner(pool.clone(), branch_id, web::Json(request), actor).await
+        ReplayOp::OpenShift {
+            branch_id, request, ..
+        } => {
+            crate::shifts::handlers::open_shift_inner(
+                pool.clone(),
+                branch_id,
+                web::Json(request),
+                actor,
+            )
+            .await
         }
-        ReplayOp::CloseShift { shift_id, request, .. } => {
-            crate::shifts::handlers::close_shift_inner(pool.clone(), shift_id, web::Json(request), actor).await
+        ReplayOp::CloseShift {
+            shift_id, request, ..
+        } => {
+            crate::shifts::handlers::close_shift_inner(
+                pool.clone(),
+                shift_id,
+                web::Json(request),
+                actor,
+            )
+            .await
         }
         ReplayOp::CreateOrder { request, .. } => {
             // Replay never fires to the KDS (the order is historical) → hub = None.
-            crate::orders::handlers::create_order_inner(pool.clone(), web::Json(request), actor, None).await
+            crate::orders::handlers::create_order_inner(
+                pool.clone(),
+                web::Json(request),
+                actor,
+                None,
+            )
+            .await
         }
-        ReplayOp::VoidOrder { order_id, request, .. } => {
-            crate::orders::handlers::void_order_inner(pool.clone(), order_id, web::Json(request), actor).await
+        ReplayOp::VoidOrder {
+            order_id, request, ..
+        } => {
+            crate::orders::handlers::void_order_inner(
+                pool.clone(),
+                order_id,
+                web::Json(request),
+                actor,
+            )
+            .await
         }
-        ReplayOp::CashMovement { shift_id, request, .. } => {
-            crate::shifts::handlers::add_cash_movement_inner(pool.clone(), shift_id, web::Json(request), actor).await
+        ReplayOp::CashMovement {
+            shift_id, request, ..
+        } => {
+            crate::shifts::handlers::add_cash_movement_inner(
+                pool.clone(),
+                shift_id,
+                web::Json(request),
+                actor,
+            )
+            .await
         }
         // Ticket ops: publish to the realtime bus (hub = Some). Waiter devices fire
         // offline-first — the fire/round/settle/void ALWAYS arrives here via the
@@ -175,23 +295,69 @@ pub async fn replay(
         // first apply fires the event. A consumer that was offline still re-seeds
         // via the realtime snapshot on reconnect.
         ReplayOp::FireOpenTicket { request, .. } => {
-            crate::tickets::handlers::create_open_ticket_inner(pool.clone(), web::Json(request), actor, Some(hub.get_ref())).await
+            crate::tickets::handlers::create_open_ticket_inner(
+                pool.clone(),
+                web::Json(request),
+                actor,
+                Some(hub.get_ref()),
+            )
+            .await
         }
-        ReplayOp::AddTicketRound { ticket_id, request, .. } => {
-            crate::tickets::handlers::add_round_inner(pool.clone(), ticket_id, web::Json(request), actor, Some(hub.get_ref())).await
+        ReplayOp::AddTicketRound {
+            ticket_id, request, ..
+        } => {
+            crate::tickets::handlers::add_round_inner(
+                pool.clone(),
+                ticket_id,
+                web::Json(request),
+                actor,
+                Some(hub.get_ref()),
+            )
+            .await
         }
-        ReplayOp::SettleOpenTicket { ticket_id, request, .. } => {
-            crate::tickets::handlers::settle_open_ticket_inner(pool.clone(), ticket_id, web::Json(request), actor, Some(hub.get_ref())).await
+        ReplayOp::SettleOpenTicket {
+            ticket_id, request, ..
+        } => {
+            crate::tickets::handlers::settle_open_ticket_inner(
+                pool.clone(),
+                ticket_id,
+                web::Json(request),
+                actor,
+                Some(hub.get_ref()),
+            )
+            .await
         }
-        ReplayOp::VoidOpenTicket { ticket_id, request, .. } => {
-            crate::tickets::handlers::void_open_ticket_inner(pool.clone(), ticket_id, web::Json(request), Some(hub.get_ref())).await
+        ReplayOp::VoidOpenTicket {
+            ticket_id, request, ..
+        } => {
+            crate::tickets::handlers::void_open_ticket_inner(
+                pool.clone(),
+                ticket_id,
+                web::Json(request),
+                Some(hub.get_ref()),
+            )
+            .await
         }
         // Bump/unbump: publish so other KDS/till devices reflect the bump live.
         ReplayOp::BumpKitchenItem { item_id, .. } => {
-            crate::kitchen::kds::set_bump_inner(pool.get_ref(), Some(hub.get_ref()), &actor, item_id, true).await
+            crate::kitchen::kds::set_bump_inner(
+                pool.get_ref(),
+                Some(hub.get_ref()),
+                &actor,
+                item_id,
+                true,
+            )
+            .await
         }
         ReplayOp::UnbumpKitchenItem { item_id, .. } => {
-            crate::kitchen::kds::set_bump_inner(pool.get_ref(), Some(hub.get_ref()), &actor, item_id, false).await
+            crate::kitchen::kds::set_bump_inner(
+                pool.get_ref(),
+                Some(hub.get_ref()),
+                &actor,
+                item_id,
+                false,
+            )
+            .await
         }
     }
 }
@@ -199,11 +365,7 @@ pub async fn replay(
 /// Verify the op's effective branch belongs to `org` (resolving shift / order to
 /// their branch first). A missing target is left to the inner handler (it will
 /// 404/409 idempotently) — we only reject a target that exists in a DIFFERENT org.
-async fn op_branch_must_be_in_org(
-    pool: &PgPool,
-    op: &ReplayOp,
-    org: Uuid,
-) -> Result<(), AppError> {
+async fn op_branch_must_be_in_org(pool: &PgPool, op: &ReplayOp, org: Uuid) -> Result<(), AppError> {
     let branch_org: Option<Uuid> = match op {
         ReplayOp::OpenShift { branch_id, .. } => {
             sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1")

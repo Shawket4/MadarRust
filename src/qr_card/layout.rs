@@ -13,7 +13,7 @@
 use std::fmt::Write as _;
 
 use super::render::Matrix;
-use super::{QrCardError, QrCardOptions, PAPER, TEAL, TEAL_LIGHT};
+use super::{PAPER, QrCardError, QrCardOptions, TEAL, TEAL_LIGHT};
 
 // ── A6 geometry (trim-relative mm) ──────────────────────────────────────────
 const TRIM_W: f32 = 105.0;
@@ -287,7 +287,7 @@ fn is_arabic(c: char) -> bool {
         '\u{0750}'..='\u{077F}' | // Arabic Supplement
         '\u{08A0}'..='\u{08FF}' | // Arabic Extended-A
         '\u{FB50}'..='\u{FDFF}' | // Arabic Presentation Forms-A
-        '\u{FE70}'..='\u{FEFF}')  // Arabic Presentation Forms-B
+        '\u{FE70}'..='\u{FEFF}') // Arabic Presentation Forms-B
 }
 
 fn xml_escape(s: &str) -> String {

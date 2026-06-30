@@ -102,3 +102,62 @@ jobs:
             exit 1
           }
           SCRIPT
+
+  # ── Deploy demo playground (isolated: port 8082, madar_demo DB, DEMO_MODE) ────
+  # Runs alongside the prod deploy and never touches prod services. Requires the
+  # one-time VPS prereqs in deploy/demo/SETUP.md (madar_demo DB + /opt/madar-demo/.env).
+  deploy-demo:
+    name: deploy demo to VPS
+    needs: build-push
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "${{ secrets.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+
+      - name: Copy demo compose file
+        run: |
+          ssh -i ~/.ssh/deploy_key -p ${{ secrets.SSH_PORT }} \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} 'mkdir -p /opt/madar-demo'
+          scp -i ~/.ssh/deploy_key -P ${{ secrets.SSH_PORT }} \
+            docker-compose.demo.yml \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/opt/madar-demo/docker-compose.demo.yml
+
+      - name: Pull image and (re)start demo backend
+        env:
+          DEPLOY_IMAGE: ${{ env.IMAGE }}:sha-${{ github.sha }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -p ${{ secrets.SSH_PORT }} \
+              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+              "GHCR_TOKEN='${GHCR_TOKEN}' GH_ACTOR='${GH_ACTOR}' DEPLOY_IMAGE='${DEPLOY_IMAGE}' bash -s" << 'SCRIPT'
+          set -e
+
+          if [ ! -f /opt/madar-demo/.env ]; then
+            echo "::error::/opt/madar-demo/.env missing — run the one-time setup in deploy/demo/SETUP.md"
+            exit 1
+          fi
+
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
+          docker pull "$DEPLOY_IMAGE"
+
+          # Start ONLY the demo backend — prod services are in a different compose
+          # file and are never referenced here.
+          BACKEND_IMAGE="$DEPLOY_IMAGE" \
+            docker compose -f /opt/madar-demo/docker-compose.demo.yml \
+            up -d --no-deps --pull never madar-demo-backend
+
+          sleep 4
+          curl -sf http://127.0.0.1:8082/health && echo "✅ demo healthy" || {
+            docker compose -f /opt/madar-demo/docker-compose.demo.yml logs madar-demo-backend --tail 50
+            exit 1
+          }
+          SCRIPT

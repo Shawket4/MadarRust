@@ -24,8 +24,8 @@
 use std::env;
 use std::process::ExitCode;
 
-use sqlx::postgres::PgPoolOptions;
 use sqlx::Row;
+use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
 const USAGE: &str = "\
@@ -98,7 +98,11 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let pool = match PgPoolOptions::new().max_connections(5).connect(&db_url).await {
+    let pool = match PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url)
+        .await
+    {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: failed to connect to PostgreSQL: {e}");
@@ -111,7 +115,14 @@ async fn main() -> ExitCode {
         (_, Some(b)) => println!("Scope:  branch {b}"),
         _ => println!("Scope:  ALL organizations"),
     }
-    println!("Mode:   {}", if dry_run { "DRY RUN (rolls back)" } else { "LIVE (commits)" });
+    println!(
+        "Mode:   {}",
+        if dry_run {
+            "DRY RUN (rolls back)"
+        } else {
+            "LIVE (commits)"
+        }
+    );
 
     match run(&pool, org, branch, dry_run).await {
         Ok(()) => ExitCode::SUCCESS,

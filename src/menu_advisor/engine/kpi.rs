@@ -11,9 +11,9 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 
-use crate::menu_advisor::dto::{AnalysisConfig, ItemKey};
 use super::stats::{ratio_or, recency_weight};
 use super::{EngineError, ItemSnapshot, SaleEvent};
+use crate::menu_advisor::dto::{AnalysisConfig, ItemKey};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ItemKpi {
@@ -161,7 +161,12 @@ pub(crate) fn compute_item_kpis(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
 mod tests {
     use chrono::{Duration, TimeZone};
 
@@ -274,6 +279,12 @@ mod tests {
             sale(1, 1, 1000, Some(520), 1), // +30% swing
         ];
         let kpis = compute_item_kpis(&snaps, &sales, now(), &AnalysisConfig::default()).unwrap();
-        assert!(kpis[&key(1)].cost_metrics.as_ref().unwrap().cost_volatility_high);
+        assert!(
+            kpis[&key(1)]
+                .cost_metrics
+                .as_ref()
+                .unwrap()
+                .cost_volatility_high
+        );
     }
 }

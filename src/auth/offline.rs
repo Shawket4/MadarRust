@@ -3,7 +3,7 @@
 //! shipped to devices (via `GET /orgs/{id}/offline-auth-bundle`), so it is
 //! memory-hard and a leak is never the login credential. The device verifies a
 //! typed PIN against it OFFLINE; the server only ever DERIVES it.
-use argon2::password_hash::{rand_core::OsRng, PasswordHash, SaltString};
+use argon2::password_hash::{PasswordHash, SaltString, rand_core::OsRng};
 use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 
 /// Derive an argon2id PHC string for a teller's offline PIN.
@@ -20,7 +20,11 @@ pub fn hash_offline_pin(pin: &str) -> Result<String, argon2::password_hash::Erro
 #[allow(dead_code)]
 pub fn verify_offline_pin(pin: &str, phc: &str) -> bool {
     PasswordHash::new(phc)
-        .map(|h| Argon2::default().verify_password(pin.as_bytes(), &h).is_ok())
+        .map(|h| {
+            Argon2::default()
+                .verify_password(pin.as_bytes(), &h)
+                .is_ok()
+        })
         .unwrap_or(false)
 }
 
@@ -31,13 +35,19 @@ mod tests {
     #[test]
     fn hash_then_verify_roundtrip() {
         let phc = hash_offline_pin("1234").unwrap();
-        assert!(phc.starts_with("$argon2id$"), "should be argon2id PHC, got {phc}");
+        assert!(
+            phc.starts_with("$argon2id$"),
+            "should be argon2id PHC, got {phc}"
+        );
         assert!(verify_offline_pin("1234", &phc));
         assert!(!verify_offline_pin("9999", &phc));
     }
 
     #[test]
     fn distinct_salts_per_hash() {
-        assert_ne!(hash_offline_pin("1234").unwrap(), hash_offline_pin("1234").unwrap());
+        assert_ne!(
+            hash_offline_pin("1234").unwrap(),
+            hash_offline_pin("1234").unwrap()
+        );
     }
 }

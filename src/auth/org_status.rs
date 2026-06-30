@@ -25,7 +25,7 @@ use uuid::Uuid;
 const TTL: Duration = Duration::from_secs(30);
 
 struct Entry {
-    allowed:    bool,
+    allowed: bool,
     fetched_at: Instant,
 }
 
@@ -51,7 +51,13 @@ impl OrgStatusCache {
         }
         let allowed = org_is_allowed(pool, org_id).await?;
         let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        map.insert(org_id, Entry { allowed, fetched_at: Instant::now() });
+        map.insert(
+            org_id,
+            Entry {
+                allowed,
+                fetched_at: Instant::now(),
+            },
+        );
         Ok(allowed)
     }
 
