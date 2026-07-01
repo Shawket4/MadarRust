@@ -213,6 +213,18 @@ async fn waiter_fire_bump_settle_end_to_end(pool: PgPool) {
         "lands in the settling cashier's shift"
     );
     assert_eq!(order.teller_id, teller);
+    // The paid order is stamped with the WAITER who opened the ticket (not the
+    // settling cashier) — this is what the dashboard segments/exports by. Direct
+    // POS sales leave it null; here it must resolve to the ticket's opener.
+    assert_eq!(
+        order.waiter_id,
+        Some(waiter),
+        "settled order carries the ticket's waiter (opened_by)"
+    );
+    assert!(
+        order.waiter_name.is_some(),
+        "waiter_name is joined from users for the dashboard"
+    );
 
     let (st, oid): (String, Option<Uuid>) =
         sqlx::query_as("SELECT status::text, order_id FROM open_tickets WHERE id=$1")

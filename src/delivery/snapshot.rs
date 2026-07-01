@@ -601,6 +601,8 @@ pub async fn apply_snapshot(
         RETURNING
             id, branch_id, shift_id, teller_id,
             (SELECT name FROM users WHERE id = $3) AS teller_name,
+            -- Delivery orders never pass through a waiter's ticket → always null.
+            waiter_id, (SELECT name FROM users WHERE id = waiter_id) AS waiter_name,
             order_number, order_ref, status::text, payment_method::text,
             subtotal, discount_type::text, discount_value,
             discount_amount, tax_amount, total_amount,

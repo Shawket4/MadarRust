@@ -27,6 +27,7 @@ const MAX_PER_PAGE: i64 = 1000;
 // ── Shared SELECT fragment ────────────────────────────────────
 const ORDER_SELECT: &str =
     "SELECT o.id, o.branch_id, o.shift_id, o.teller_id, u.name AS teller_name,
+     o.waiter_id, w.name AS waiter_name,
      o.order_number, o.order_ref, o.status::text, o.payment_method::text,
      o.subtotal, o.discount_type::text, o.discount_value,
      o.discount_amount, o.tax_amount, o.total_amount,
@@ -35,6 +36,7 @@ const ORDER_SELECT: &str =
      d.channel::text AS delivery_channel, d.customer_lat AS delivery_lat, d.customer_lng AS delivery_lng,
      o.voided_at, o.void_reason::text, o.void_note, o.voided_by, o.created_at
      FROM orders o JOIN users u ON u.id = o.teller_id
+     LEFT JOIN users w ON w.id = o.waiter_id
      LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id ";
 
 // ── Shared summary aggregate columns ──────────────────────────
@@ -66,6 +68,11 @@ pub struct Order {
     pub shift_id: Uuid,
     pub teller_id: Uuid,
     pub teller_name: String,
+    /// The WAITER who opened this order's ticket (`open_tickets.opened_by`),
+    /// stamped server-side at settle time. `null` for direct teller sales and
+    /// delivery orders (they never pass through a waiter's ticket).
+    pub waiter_id: Option<Uuid>,
+    pub waiter_name: Option<String>,
     pub order_number: i32,
     /// Human-readable, org-unique reference (e.g. "DT-260614-0042"). Additive
     /// alongside the per-shift order_number. Optional only during the rollout
@@ -391,6 +398,9 @@ pub struct ListOrdersQuery {
     pub page: Option<i64>,
     pub per_page: Option<i64>,
     pub teller_name: Option<String>,
+    /// Filter by the WAITER who opened the ticket (ILIKE, partial match). Matches
+    /// only orders that carry a waiter (dine-in settled from a waiter's ticket).
+    pub waiter_name: Option<String>,
     pub payment_method: Option<String>,
     pub status: Option<String>,
     pub from: Option<chrono::DateTime<chrono::Utc>>,
@@ -494,6 +504,8 @@ pub struct ExportOrdersQuery {
     pub branch_id: Option<Uuid>,
     pub shift_id: Option<Uuid>,
     pub teller_name: Option<String>,
+    /// Filter by the WAITER who opened the ticket (ILIKE, partial match).
+    pub waiter_name: Option<String>,
     pub payment_method: Option<String>, // same comma-separated semantics
     pub status: Option<String>,
     pub from: Option<chrono::DateTime<chrono::Utc>>,
@@ -545,6 +557,7 @@ pub async fn create_order(
         body,
         ActingContext::live(&claims)?,
         hub.as_ref().map(|d| d.get_ref()),
+        None, // a direct POS sale has no waiter — only ticket settles do
     )
     .await
 }
@@ -563,6 +576,11 @@ pub(crate) async fn create_order_inner(
     // The realtime bus, for firing a LIVE order to the KDS. `None` on replay (a
     // queued offline order is historical and must not re-appear on the kitchen).
     hub: Option<&crate::realtime::hub::BranchEventHub>,
+    // The WAITER who opened the settled ticket (`open_tickets.opened_by`). Only the
+    // ticket-settle path supplies it; direct POS sales and delivery pass `None`.
+    // Kept as an internal param (not on `CreateOrderRequest`) so a POS client can't
+    // spoof the attribution — it's derived server-side from the ticket.
+    waiter_id: Option<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     if let Some(key) = body.idempotency_key
         && let Some(existing) =
@@ -1378,13 +1396,14 @@ pub(crate) async fn create_order_inner(
              amount_tendered, change_given, tip_amount, tip_payment_method,
              discount_id, customer_name, notes, status,
              idempotency_key, created_at, tip_is_cash, order_ref,
-             price_flagged, price_expected_total)
+             price_flagged, price_expected_total, waiter_id)
         VALUES ($1, $2, $3, $4, $5, $6, $7::discount_type, $8,
                 $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'completed', $19, $20, $21, $22,
-                $23, $24)
+                $23, $24, $25)
         RETURNING
             id, branch_id, shift_id, teller_id,
             (SELECT name FROM users WHERE id = $3) AS teller_name,
+            waiter_id, (SELECT name FROM users WHERE id = $25) AS waiter_name,
             order_number, order_ref, status::text, payment_method::text,
             subtotal, discount_type::text, discount_value,
             discount_amount, tax_amount, total_amount,
@@ -1420,6 +1439,7 @@ pub(crate) async fn create_order_inner(
     .bind(&order_ref)
     .bind(price_flagged)
     .bind(expected_total)
+    .bind(waiter_id)
     .fetch_one(&mut *tx)
     .await
     {
@@ -1941,6 +1961,7 @@ pub async fn list_orders(
     }
 
     push_filter!("u.name ILIKE", query.teller_name);
+    push_filter!("w.name ILIKE", query.waiter_name);
     if parsed_payment_methods.is_some() {
         data_filter.push_str(&format!(
             " AND o.payment_method::text = ANY(${}::text[])",
@@ -1970,6 +1991,7 @@ pub async fn list_orders(
     );
     let count_sql = format!(
         "SELECT COUNT(*) FROM orders o JOIN users u ON u.id = o.teller_id
+         LEFT JOIN users w ON w.id = o.waiter_id
          LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id
          WHERE {} {}",
         scope_condition, count_filter
@@ -1985,6 +2007,9 @@ pub async fn list_orders(
         ($q:expr) => {{
             let mut q = $q;
             if let Some(ref v) = query.teller_name {
+                q = q.bind(format!("%{}%", v));
+            }
+            if let Some(ref v) = query.waiter_name {
                 q = q.bind(format!("%{}%", v));
             }
             if let Some(v) = &parsed_payment_methods {
@@ -2019,6 +2044,7 @@ pub async fn list_orders(
     let summary_sql = format!(
         "SELECT {} \
          FROM orders o JOIN users u ON u.id = o.teller_id \
+         LEFT JOIN users w ON w.id = o.waiter_id \
          LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id \
          WHERE {} {}",
         ORDER_SUMMARY_COLS, scope_condition, count_filter
@@ -2202,6 +2228,7 @@ pub(crate) async fn void_order_inner(
            RETURNING
                id, branch_id, shift_id, teller_id,
                (SELECT name FROM users WHERE id = teller_id) AS teller_name,
+               waiter_id, (SELECT name FROM users WHERE id = waiter_id) AS waiter_name,
                order_number, order_ref, status::text, payment_method::text,
                subtotal, discount_type::text, discount_value,
                discount_amount, tax_amount, total_amount,
@@ -3038,6 +3065,7 @@ pub async fn export_orders(
     }
 
     push_export_filter!("u.name ILIKE", query.teller_name);
+    push_export_filter!("w.name ILIKE", query.waiter_name);
     if parsed_payment_methods.is_some() {
         filter.push_str(&format!(
             " AND o.payment_method::text = ANY(${}::text[])",
@@ -3053,6 +3081,9 @@ pub async fn export_orders(
         ($q:expr) => {{
             let mut q = $q;
             if let Some(ref v) = query.teller_name {
+                q = q.bind(format!("%{}%", v));
+            }
+            if let Some(ref v) = query.waiter_name {
                 q = q.bind(format!("%{}%", v));
             }
             if let Some(v) = &parsed_payment_methods {
@@ -3072,7 +3103,8 @@ pub async fn export_orders(
     }
 
     let count_sql = format!(
-        "SELECT COUNT(*) FROM orders o JOIN users u ON u.id = o.teller_id WHERE {} {}",
+        "SELECT COUNT(*) FROM orders o JOIN users u ON u.id = o.teller_id \
+         LEFT JOIN users w ON w.id = o.waiter_id WHERE {} {}",
         scope_condition, filter
     );
 
@@ -3090,6 +3122,7 @@ pub async fn export_orders(
     let summary_sql = format!(
         "SELECT {} \
          FROM orders o JOIN users u ON u.id = o.teller_id \
+         LEFT JOIN users w ON w.id = o.waiter_id \
          LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id \
          WHERE {} {}",
         ORDER_SUMMARY_COLS, scope_condition, filter

@@ -15828,6 +15828,15 @@
             }
           },
           {
+            "name": "waiter_name",
+            "in": "query",
+            "description": "Filter by the WAITER who opened the ticket (ILIKE, partial match). Matches\nonly orders that carry a waiter (dine-in settled from a waiter's ticket).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "payment_method",
             "in": "query",
             "required": false,
@@ -16089,6 +16098,15 @@
           {
             "name": "teller_name",
             "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "waiter_name",
+            "in": "query",
+            "description": "Filter by the WAITER who opened the ticket (ILIKE, partial match).",
             "required": false,
             "schema": {
               "type": "string"
@@ -36547,6 +36565,20 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "waiter_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The WAITER who opened this order's ticket (`open_tickets.opened_by`),\nstamped server-side at settle time. `null` for direct teller sales and\ndelivery orders (they never pass through a waiter's ticket)."
+          },
+          "waiter_name": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

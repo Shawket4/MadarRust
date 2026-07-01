@@ -633,9 +633,11 @@ pub(crate) async fn settle_open_ticket_inner(
         Option<Uuid>,
         Option<String>,
         Option<i32>,
+        Uuid,
     )> = sqlx::query_as(
         "SELECT branch_id, org_id, status::text, order_id, customer_name, notes, \
-                    discount_id, discount_type, discount_value FROM open_tickets WHERE id = $1",
+                    discount_id, discount_type, discount_value, opened_by \
+             FROM open_tickets WHERE id = $1",
     )
     .bind(*id)
     .fetch_optional(pool.get_ref())
@@ -650,6 +652,7 @@ pub(crate) async fn settle_open_ticket_inner(
         t_disc_id,
         t_disc_type,
         t_disc_value,
+        opened_by,
     )) = row
     else {
         return Err(AppError::NotFound("Open ticket not found".into()));
@@ -733,7 +736,16 @@ pub(crate) async fn settle_open_ticket_inner(
     // the id before `create_order_inner` consumes the context.
     let settled_by = actor.teller_id;
     // hub = None → don't re-fire the kitchen (the items already fired at order time).
-    let _ = create_order_inner(pool.clone(), web::Json(request), actor, None).await?;
+    // Stamp the order with the ticket's WAITER (opened_by) so the dashboard can
+    // segment/export sales by the waiter who took the table.
+    let _ = create_order_inner(
+        pool.clone(),
+        web::Json(request),
+        actor,
+        None,
+        Some(opened_by),
+    )
+    .await?;
 
     let created =
         crate::orders::handlers::fetch_order_by_idempotency_key(pool.get_ref(), *id, org_id)

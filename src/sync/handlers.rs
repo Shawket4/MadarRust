@@ -256,10 +256,12 @@ pub async fn replay(
         }
         ReplayOp::CreateOrder { request, .. } => {
             // Replay never fires to the KDS (the order is historical) → hub = None.
+            // A replayed direct sale has no waiter (only ticket settles do) → None.
             crate::orders::handlers::create_order_inner(
                 pool.clone(),
                 web::Json(request),
                 actor,
+                None,
                 None,
             )
             .await
