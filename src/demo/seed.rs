@@ -69,11 +69,11 @@ pub async fn seed_full(
             r#"{"en":"InstaPay","ar":"إنستا باي"}"#,
         ),
     ];
-    for (i, (name, color, icon, is_cash, labels)) in pms.iter().enumerate() {
+    for (name, color, icon, is_cash, labels) in pms.iter() {
         sqlx::query(
             "INSERT INTO org_payment_methods \
-             (id, org_id, name, label_translations, color, icon, is_cash, display_order) \
-             VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8)",
+             (id, org_id, name, label_translations, color, icon, is_cash) \
+             VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)",
         )
         .bind(Uuid::new_v4())
         .bind(org_id)
@@ -82,7 +82,6 @@ pub async fn seed_full(
         .bind(color)
         .bind(icon)
         .bind(is_cash)
-        .bind(i as i32)
         .execute(&mut *conn)
         .await?;
     }
@@ -90,17 +89,14 @@ pub async fn seed_full(
     // ── Categories ──────────────────────────────────────────────────────────
     let cat_names = ["Hot Drinks", "Cold Drinks", "Pastries"];
     let mut cat_ids = Vec::with_capacity(cat_names.len());
-    for (i, name) in cat_names.iter().enumerate() {
+    for name in cat_names.iter() {
         let id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO categories (id, org_id, name, display_order) VALUES ($1, $2, $3, $4)",
-        )
-        .bind(id)
-        .bind(org_id)
-        .bind(name)
-        .bind(i as i32)
-        .execute(&mut *conn)
-        .await?;
+        sqlx::query("INSERT INTO categories (id, org_id, name) VALUES ($1, $2, $3)")
+            .bind(id)
+            .bind(org_id)
+            .bind(name)
+            .execute(&mut *conn)
+            .await?;
         cat_ids.push(id);
     }
 
@@ -144,30 +140,28 @@ pub async fn seed_full(
         },
     ];
     let mut item_ids = Vec::with_capacity(items.len());
-    for (idx, it) in items.iter().enumerate() {
+    for it in items.iter() {
         let id = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO menu_items (id, org_id, category_id, name, base_price, display_order) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO menu_items (id, org_id, category_id, name, base_price) \
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(id)
         .bind(org_id)
         .bind(cat_ids[it.cat])
         .bind(it.name)
         .bind(it.base)
-        .bind(idx as i32)
         .execute(&mut *conn)
         .await?;
-        for (so, (label, price)) in it.sizes.iter().enumerate() {
+        for (label, price) in it.sizes.iter() {
             sqlx::query(
-                "INSERT INTO item_sizes (id, menu_item_id, label, price_override, display_order) \
-                 VALUES ($1, $2, $3, $4, $5)",
+                "INSERT INTO item_sizes (id, menu_item_id, label, price_override) \
+                 VALUES ($1, $2, $3, $4)",
             )
             .bind(Uuid::new_v4())
             .bind(id)
             .bind(label)
             .bind(price)
-            .bind(so as i32)
             .execute(&mut *conn)
             .await?;
         }
@@ -234,17 +228,16 @@ pub async fn seed_full(
         ("Extra Shot", "extras", 1500i32),
         ("Oat Milk", "extras", 1000),
     ];
-    for (i, (name, ty, price)) in addons.iter().enumerate() {
+    for (name, ty, price) in addons.iter() {
         sqlx::query(
-            "INSERT INTO addon_items (id, org_id, name, \"type\", default_price, display_order) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO addon_items (id, org_id, name, \"type\", default_price) \
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(Uuid::new_v4())
         .bind(org_id)
         .bind(name)
         .bind(ty)
         .bind(price)
-        .bind(i as i32)
         .execute(&mut *conn)
         .await?;
     }
@@ -278,11 +271,15 @@ pub async fn seed_full(
         let tax = (subtotal as f64 * 0.14).round() as i32;
         let total = subtotal + tax;
         let created = Utc::now() - Duration::days((n as i64) % 10);
+        // order_ref is NOT NULL with a global UNIQUE index and no generator trigger
+        // (the POS mints it from order_ref_counters). Derive a unique one from the
+        // per-order UUID so concurrent demo orgs never collide.
+        let order_ref = format!("DMO-{}", order_id.simple());
         sqlx::query(
             "INSERT INTO orders \
              (id, branch_id, shift_id, teller_id, order_number, status, payment_method, \
-              subtotal, tax_amount, total_amount, created_at) \
-             VALUES ($1, $2, $3, $4, $5, 'completed'::order_status, 'Cash', $6, $7, $8, $9)",
+              subtotal, tax_amount, total_amount, created_at, order_ref) \
+             VALUES ($1, $2, $3, $4, $5, 'completed'::order_status, 'Cash', $6, $7, $8, $9, $10)",
         )
         .bind(order_id)
         .bind(branch_id)
@@ -293,6 +290,7 @@ pub async fn seed_full(
         .bind(tax)
         .bind(total)
         .bind(created)
+        .bind(order_ref)
         .execute(&mut *conn)
         .await?;
         sqlx::query(
