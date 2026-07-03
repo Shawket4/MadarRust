@@ -7,7 +7,7 @@ default-run = "madar-rust"
 [dependencies]
 actix-web = { version = "4", features = ["compress-brotli", "compress-gzip", "compress-zstd", "rustls-0_23"] }
 actix-cors         = "0.7"
-actix-multipart    = "0.7"
+actix-multipart    = "0.8"
 actix-files        = "0.6"
 tokio              = { version = "1", features = ["full", "macros", "rt-multi-thread"] }
 tokio-stream       = { version = "0.1", features = ["sync", "time"] }
@@ -15,11 +15,11 @@ serde              = { version = "1", features = ["derive"] }
 serde_json         = "1"
 uuid               = { version = "1", features = ["v4", "v5", "serde"] }
 chrono             = { version = "0.4", features = ["serde"] }
-jsonwebtoken       = "9"
-bcrypt             = "0.15"
+jsonwebtoken       = { version = "10", features = ["rust_crypto"] }
+bcrypt             = "0.19"
 argon2             = "0.5"
 dotenvy            = "0.15"
-thiserror          = "1"
+thiserror          = "2"
 tracing            = "0.1"
 tracing-actix-web  = "0.7"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -27,6 +27,9 @@ futures            = "0.3"
 image              = { version = "0.25", features = ["jpeg", "png", "gif", "webp", "bmp"] }
 rustls             = "0.23"
 rustls-pemfile     = "2"
+# sqlx HELD at 0.8: 0.9 gates every dynamic SQL string behind AssertSqlSafe
+# (~71 call sites here) — a wide mechanical migration deferred so it does not
+# collide with the in-flight modifier-redesign handler edits.
 sqlx               = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "macros", "bigdecimal", "rust_decimal"] }
 bigdecimal         = { version = "0.4", features = ["serde"] }
 rust_decimal       = { version = "1", features = ["serde-float", "maths"] }
@@ -36,7 +39,7 @@ utoipa-swagger-ui = { version = "9.0.2", features = ["actix-web"] }
 reqwest = { version = "0.13.4", features = ["json"] }
 base64 = "0.22"
 urlencoding = "2.1.3"
-actix-governor = "0.6"
+actix-governor = "0.10"
 moka               = { version = "0.12", features = ["future"] }
 # QR card generation. `resvg` re-exports `usvg` and `tiny-skia` from the same
 # release, so depending on it alone keeps the SVG/raster stack version-locked
@@ -80,6 +83,14 @@ path = "src/bin/backfill_recipe_units.rs"
 [[bin]]
 name = "backfill-order-ref"
 path = "src/bin/backfill_order_ref.rs"
+
+[[bin]]
+name = "backfill-menu-unification"
+path = "src/bin/backfill_menu_unification.rs"
+
+[[bin]]
+name = "bundle-margin-flip"
+path = "src/bin/bundle_margin_flip.rs"
 
 [[bin]]
 name = "fuzz-token"
