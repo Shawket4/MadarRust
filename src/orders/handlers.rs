@@ -601,9 +601,13 @@ pub(crate) async fn create_order_inner(
         ));
     }
 
-    // The order must attach to an OPEN shift at this branch — and, for a LIVE
-    // teller action, one that belongs to them. Replay drops the teller filter
-    // (recorded history) but keeps the open-at-branch requirement.
+    // The order must attach to a shift at this branch — and, for a LIVE teller
+    // action, an OPEN one that belongs to them. A REPLAY drops the teller filter
+    // (recorded history) AND the open requirement: a sale queued offline is
+    // filed onto the shift it was placed under even if another till has since
+    // closed that shift (the cross-device close race). The embedded shift_id —
+    // stamped by the core when the shift was open on that device — is the proof
+    // of attribution; the closed shift's cash total is reconciled after insert.
     let teller_match = if !actor.replay && actor.role == UserRole::Teller {
         Some(actor.teller_id)
     } else {
@@ -611,12 +615,13 @@ pub(crate) async fn create_order_inner(
     };
     let shift_ok: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM shifts \
-         WHERE id = $1 AND branch_id = $2 AND status = 'open' \
+         WHERE id = $1 AND branch_id = $2 AND (status = 'open' OR $4) \
            AND ($3::uuid IS NULL OR teller_id = $3))",
     )
     .bind(body.shift_id)
     .bind(body.branch_id)
     .bind(teller_match)
+    .bind(actor.replay)
     .fetch_one(pool.get_ref())
     .await?;
 
@@ -1317,7 +1322,10 @@ pub(crate) async fn create_order_inner(
     let (shift_branch_id, shift_teller_id, shift_status) = shift_row.ok_or_else(|| {
         AppError::Conflict("Shift was closed before the order could be recorded".into())
     })?;
-    if shift_status != "open" {
+    // Live actions require the shift still open (TOCTOU vs a concurrent close).
+    // A REPLAY is allowed onto a since-closed shift — the sale already happened;
+    // its cash is reconciled onto the closed shift below.
+    if shift_status != "open" && !actor.replay {
         return Err(AppError::Conflict(
             "Shift was closed before the order could be recorded".into(),
         ));
@@ -1505,6 +1513,26 @@ pub(crate) async fn create_order_inner(
         .bind(&body.payment_method)
         .bind(total_amount)
         .bind(is_cash_of(&body.payment_method))
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    // Late replay onto an already-closed shift: reconcile its cash snapshot.
+    // The physical cash for this sale was already in the drawer when the teller
+    // counted it at close, so `closing_cash_declared` already reflects it — but
+    // `closing_cash_system`, snapshotted at close, did not (the order hadn't
+    // synced). Recompute the snapshot from the SAME formula close_shift uses
+    // (over the now-inserted payments, visible within this tx) so `expected_cash`
+    // and the generated `cash_discrepancy` reconcile. A no-op for card sales
+    // (cash-only sum) and, guarded by the WHERE, for shifts still open.
+    if actor.replay && shift_status != "open" {
+        let system_cash =
+            crate::shifts::handlers::compute_system_cash(&mut *tx, body.shift_id).await?;
+        sqlx::query(
+            "UPDATE shifts SET closing_cash_system = $1 WHERE id = $2 AND status <> 'open'",
+        )
+        .bind(system_cash as i32)
+        .bind(body.shift_id)
         .execute(&mut *tx)
         .await?;
     }

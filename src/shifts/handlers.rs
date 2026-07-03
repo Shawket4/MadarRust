@@ -323,7 +323,10 @@ async fn resolve_open_till(
 /// `closing_cash_system`) and the live shift report's `expected_cash`, so the
 /// teller's pre-close preview can never drift from the value recorded at close.
 /// Reads `opening_cash` from the row, so the caller does not pass it in.
-async fn compute_system_cash<'e, E>(executor: E, shift_id: Uuid) -> Result<i64, sqlx::Error>
+pub(crate) async fn compute_system_cash<'e, E>(
+    executor: E,
+    shift_id: Uuid,
+) -> Result<i64, sqlx::Error>
 where
     E: sqlx::PgExecutor<'e>,
 {
