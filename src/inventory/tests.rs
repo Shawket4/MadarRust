@@ -1695,6 +1695,13 @@ async fn test_catalog_unit_change_rebases_all_references(pool: PgPool) {
     let mi = Uuid::new_v4();
     sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price, is_active) VALUES ($1,$2,$3,'Bread',100,true)")
         .bind(mi).bind(org_id).bind(cat).execute(&pool).await.unwrap();
+    let size = Uuid::new_v4();
+    sqlx::query("INSERT INTO menu_item_sizes (id, menu_item_id, label, price, sort) VALUES ($1,$2,'one_size',100,0)")
+        .bind(size).bind(mi).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO recipe_lines (owner_type, owner_id, ingredient_id, quantity, unit) VALUES ('item_size',$1,$2,18,'g')")
+        .bind(size).bind(ing).execute(&pool).await.unwrap();
+    // TRANSITION (menu unification): pre-flip the legacy recipe row is still
+    // what costing/orders read — it must rebase in lockstep with recipe_lines.
     sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, size_label, ingredient_name, ingredient_unit, quantity_used, org_ingredient_id) VALUES ($1,'one_size','Flour','g',18,$2)")
         .bind(mi).bind(ing).execute(&pool).await.unwrap();
     let token = generate_org_admin_token(user_id, org_id);
@@ -1733,9 +1740,24 @@ async fn test_catalog_unit_change_rebases_all_references(pool: PgPool) {
     let (stock, reorder): (f64, f64) = sqlx::query_as("SELECT current_stock::float8, reorder_threshold::float8 FROM branch_inventory WHERE org_ingredient_id=$1").bind(ing).fetch_one(&pool).await.unwrap();
     assert_eq!(stock, 5.0);
     assert_eq!(reorder, 1.0);
-    let (rqty, runit): (f64, String) = sqlx::query_as("SELECT quantity_used::float8, ingredient_unit FROM menu_item_recipes WHERE org_ingredient_id=$1").bind(ing).fetch_one(&pool).await.unwrap();
+    let (rqty, runit): (f64, String) =
+        sqlx::query_as("SELECT quantity::float8, unit FROM recipe_lines WHERE ingredient_id=$1")
+            .bind(ing)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(rqty, 0.018); // 18 g → 0.018 kg
     assert_eq!(runit, "kg");
+    // Pre-flip dual-write: the legacy row rebased identically.
+    let (lqty, lunit): (f64, String) = sqlx::query_as(
+        "SELECT quantity_used::float8, ingredient_unit FROM menu_item_recipes WHERE org_ingredient_id=$1",
+    )
+    .bind(ing)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(lqty, 0.018);
+    assert_eq!(lunit, "kg");
 
     // Cross-measure changes are rejected (kg → l, kg → pcs).
     for bad in ["l", "pcs"] {
@@ -1940,8 +1962,13 @@ async fn test_yield_change_rebases_recipe_quantities(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, size_label, org_ingredient_id, ingredient_name, ingredient_unit, quantity_used) \
-                 VALUES ($1,'one_size',$2,'Chicken','g',200)")
+    let size = Uuid::new_v4();
+    sqlx::query("INSERT INTO menu_item_sizes (id, menu_item_id, label, price, sort) VALUES ($1,$2,'one_size',1000,0)")
+        .bind(size).bind(item).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO recipe_lines (owner_type, owner_id, ingredient_id, quantity, unit) VALUES ('item_size',$1,$2,200,'g')")
+        .bind(size).bind(ing).execute(&pool).await.unwrap();
+    // TRANSITION (menu unification): the legacy row must rebase in lockstep.
+    sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, size_label, ingredient_name, ingredient_unit, quantity_used, org_ingredient_id) VALUES ($1,'one_size','Chicken','g',200,$2)")
         .bind(item).bind(ing).execute(&pool).await.unwrap();
 
     // Drop yield to 25% → consumption doubles → stored qty 200 → 400.
@@ -1956,17 +1983,25 @@ async fn test_yield_change_rebases_recipe_quantities(pool: PgPool) {
     .await;
     assert!(resp.status().is_success(), "yield change must succeed");
 
-    let qty: f64 = sqlx::query_scalar(
+    let qty: f64 =
+        sqlx::query_scalar("SELECT quantity::float8 FROM recipe_lines WHERE ingredient_id=$1")
+            .bind(ing)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        qty, 400.0,
+        "recipe quantity rebased by old/new yield (0.5/0.25 = 2×)"
+    );
+    // Pre-flip dual-write: the legacy row rebased identically.
+    let lqty: f64 = sqlx::query_scalar(
         "SELECT quantity_used::float8 FROM menu_item_recipes WHERE org_ingredient_id=$1",
     )
     .bind(ing)
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(
-        qty, 400.0,
-        "recipe quantity rebased by old/new yield (0.5/0.25 = 2×)"
-    );
+    assert_eq!(lqty, 400.0);
 }
 
 /// A transfer blends the source branch's cost into the destination's WAC (cost

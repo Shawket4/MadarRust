@@ -53,6 +53,14 @@ pub struct BundleComponent {
     pub position: i32,
 }
 
+// WIRE COMPAT (menu unification): the deployed POS parses bundles through the
+// STRICT generated client, whose old model types these costs as required
+// non-nullable ints — so the wire keeps them as numbers (unknown parts counted
+// as 0, exactly what the retired engine emitted) and the truth about
+// completeness rides in the `*_missing` flags. The flags are ALWAYS sent but
+// schema-OPTIONAL, so a NEW client's regenerated model also parses an OLD
+// backend that never sends them. New consumers (dashboard/Studio) must key on
+// the flags, never trust a 0 with `missing = true`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct BundleComponentHydrated {
     pub id: Uuid,
@@ -62,7 +70,13 @@ pub struct BundleComponentHydrated {
     pub position: i32,
     pub item_name: String,
     pub item_price: i32,
-    pub item_cost: i32,
+    /// Cost of the component (at its base size) in piastres. When
+    /// `item_cost_missing` is true this is a PARTIAL figure (unknown = 0 on the
+    /// wire for old-client compat) — display it as unknown, not as money.
+    pub item_cost: i64,
+    /// True when the component's cost could not be fully resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_cost_missing: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -71,7 +85,13 @@ pub struct BundleWithComponents {
     pub bundle: Bundle,
     pub components: Vec<BundleComponentHydrated>,
     pub branch_ids: Vec<Uuid>,
-    pub computed_cost: i32,
+    /// Sum of the KNOWN component costs × quantity, in piastres. When
+    /// `cost_missing` is true this is a partial rollup (old-wire semantics) —
+    /// render it as unknown, never as 0.
+    pub computed_cost: i64,
+    /// True when at least one component's cost is unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_missing: Option<bool>,
 }
 
 // ── Payloads & Queries ────────────────────────────────────────
@@ -208,14 +228,15 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
         .ok_or_else(|| AppError::Unauthorized("Missing claims".into()))
 }
 
+/// RETIRED from production — superseded by [`component_cost`], which delegates to the
+/// canonical `costing::service`. Kept ONLY so the `bundle-margin-flip` diff bin can
+/// compute the legacy cost side (arbitrary single size, `f64`, org-only, recipe-less =
+/// free). Remove at SHIM_TEARDOWN. Do NOT call from handlers.
+///
 /// Roll up a menu item's ingredient cost in piastres. Returns:
 ///   * `Some(0)`   — the item has no recipe lines (no tracked ingredient cost),
 ///   * `Some(sum)` — every recipe line is linked to a costed ingredient,
 ///   * `None`      — UNKNOWN: at least one recipe line is unlinked or uncosted.
-///
-/// A LEFT JOIN keeps unlinked recipe rows visible so they flip the result to
-/// unknown instead of being silently dropped (which undercounted cost and let
-/// an under-priced bundle slip past the activation margin floor).
 pub async fn compute_item_cost(pool: &PgPool, item_id: Uuid) -> Result<Option<i32>, sqlx::Error> {
     let cost: Option<f64> = sqlx::query_scalar(
         r#"
@@ -239,6 +260,37 @@ pub async fn compute_item_cost(pool: &PgPool, item_id: Uuid) -> Result<Option<i3
     .flatten();
 
     Ok(cost.map(|c| c.round() as i32))
+}
+
+/// Cost (piastres) of a menu item at its base size, via the canonical cost engine
+/// (`costing::service`) — the production replacement for [`compute_item_cost`].
+///
+///   * `Some(c)` — the base size's recipe is complete (every line linked & costed),
+///   * `None`    — UNKNOWN: the item has no priced recipe, or the rollup is incomplete.
+///                 Callers MUST treat `None` as unknown, never 0.
+///
+/// Base size = `one_size` for size-less items, else the lexicographically-first size
+/// (`bundle_components` carry no size). Unlike the retired engine this costs the recipe
+/// matched to that size, uses `Decimal`, is branch-aware, and never treats a recipe-less
+/// item as free — so an unknown-cost component now correctly blocks the margin floor.
+pub async fn component_cost(
+    pool: &PgPool,
+    org_id: Uuid,
+    item_id: Uuid,
+    branch_id: Option<Uuid>,
+) -> Result<Option<i64>, AppError> {
+    let skus = crate::costing::sku_costs_for_items(pool, org_id, &[item_id], branch_id).await?;
+    // Pick the base size: `one_size` first, then the lexicographically-first label.
+    let base = skus.iter().min_by(|a, b| {
+        (a.size_label != "one_size", &a.size_label)
+            .cmp(&(b.size_label != "one_size", &b.size_label))
+    });
+    Ok(match base {
+        // A complete rollup: `cost` may still be None (no recipe) → unknown.
+        Some(s) if !s.cost_missing => s.cost,
+        // No SKU row, or an incomplete rollup → unknown.
+        _ => None,
+    })
 }
 
 pub async fn fetch_bundle_full(
@@ -274,12 +326,19 @@ pub async fn fetch_bundle_full(
     .await?;
 
     let mut components = Vec::new();
-    let mut computed_cost = 0;
+    let mut computed_cost: i64 = 0;
+    let mut cost_missing = false;
 
     for row in component_rows {
-        // Display rollup: an unknown component cost shows as 0 here.
-        let item_cost = compute_item_cost(pool, row.2).await?.unwrap_or(0);
-        computed_cost += item_cost * row.3;
+        // Canonical cost at the component's base size. An unknown cost counts as
+        // 0 on the WIRE (old-client parse compat) but flips the missing flags so
+        // new consumers never mistake the partial figure for real money.
+        let item_cost = component_cost(pool, bundle.org_id, row.2, None).await?;
+        if let Some(c) = item_cost {
+            computed_cost += c * row.3 as i64;
+        } else {
+            cost_missing = true;
+        }
 
         components.push(BundleComponentHydrated {
             id: row.0,
@@ -289,7 +348,8 @@ pub async fn fetch_bundle_full(
             position: row.4,
             item_name: row.5,
             item_price: row.6,
-            item_cost,
+            item_cost: item_cost.unwrap_or(0),
+            item_cost_missing: Some(item_cost.is_none()),
         });
     }
 
@@ -306,6 +366,7 @@ pub async fn fetch_bundle_full(
         components,
         branch_ids,
         computed_cost,
+        cost_missing: Some(cost_missing),
     }))
 }
 
@@ -348,7 +409,7 @@ async fn validate_bundle_rules(
         ));
     }
 
-    let mut sum_costs = 0;
+    let mut sum_costs: i64 = 0;
     let mut sum_list_prices = 0;
 
     for c in components {
@@ -370,14 +431,15 @@ async fn validate_bundle_rules(
         // Block activation when a component's cost is UNKNOWN — otherwise an
         // undercounted/zeroed cost lets an under-priced bundle pass the margin
         // floor (V24). Drafts can still be created; link all recipe ingredients
-        // before activating.
-        let Some(item_cost) = compute_item_cost(pool, c.item_id).await? else {
+        // before activating. Via the canonical engine a recipe-less component is
+        // now UNKNOWN (not free), so it too blocks activation.
+        let Some(item_cost) = component_cost(pool, org_id, c.item_id, None).await? else {
             return Err(AppError::BadRequest(format!(
                 "Component {} has an unknown ingredient cost — link all recipe ingredients before activating the bundle",
                 item_info.0
             )));
         };
-        sum_costs += item_cost * c.quantity;
+        sum_costs += item_cost * c.quantity as i64;
     }
 
     // 4. Margin floor: Bundle Price >= 1.20 * Sum Costs

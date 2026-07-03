@@ -13,9 +13,9 @@ use tracing_subscriber::EnvFilter;
 
 use madar_rust::openapi::ApiDoc;
 use madar_rust::{
-    auth, branches, bundles, costing, delivery, demo, discounts, inventory, kitchen, menu, menu_advisor,
-    orders, orgs, payment_methods, permissions, purchasing, qr_card, realtime, recipes, reports,
-    reservations, shifts, stocktakes, sync, tickets, tills, uploads, users,
+    auth, branches, bundles, costing, delivery, demo, discounts, inventory, kitchen, menu,
+    menu_advisor, orders, orgs, payment_methods, permissions, purchasing, qr_card, realtime,
+    recipes, reports, reservations, shifts, stocktakes, sync, tickets, tills, uploads, users,
 };
 
 use utoipa::OpenApi;

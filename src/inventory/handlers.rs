@@ -464,18 +464,41 @@ pub async fn update_catalog_item(
             )
         })?;
 
-        // Quantities are stored in the base unit → rebase old→new is ÷ F.
-        for q in [
-            "UPDATE menu_item_recipes        SET quantity_used = round((quantity_used / $2)::numeric, 3), ingredient_unit = $3 WHERE org_ingredient_id = $1",
-            "UPDATE addon_item_ingredients   SET quantity_used = round((quantity_used / $2)::numeric, 3), ingredient_unit = $3 WHERE org_ingredient_id = $1",
-            "UPDATE menu_item_optional_fields SET quantity_used = round((quantity_used / $2)::numeric, 3), ingredient_unit = $3 WHERE org_ingredient_id = $1 AND quantity_used IS NOT NULL",
-        ] {
-            sqlx::query(q)
-                .bind(id)
-                .bind(f)
-                .bind(new_unit)
-                .execute(&mut *tx)
-                .await?;
+        // Recipe quantities now live in the unified `recipe_lines` (owner item_size
+        // or modifier_option), keyed by ingredient_id — one rebase covers item
+        // recipes, addon recipes and optional recipes. Base→new base unit is ÷ F.
+        sqlx::query(
+            "UPDATE recipe_lines SET quantity = round((quantity / $2)::numeric, 3), unit = $3 WHERE ingredient_id = $1",
+        )
+        .bind(id)
+        .bind(f)
+        .bind(new_unit)
+        .execute(&mut *tx)
+        .await?;
+        // TRANSITION (menu-unification): until the shim flip, the LEGACY recipe
+        // tables are still what costing/orders read — rebase them in lockstep or
+        // COGS/deductions would be off by F in the deploy→flip window. Post-flip
+        // they are shim VIEWS (relkind 'v', not updatable) and this self-disables.
+        // Remove at SHIM_TEARDOWN.
+        let legacy_live: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = 'public' AND c.relname = 'menu_item_recipes' AND c.relkind = 'r')",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if legacy_live {
+            for q in [
+                "UPDATE menu_item_recipes        SET quantity_used = round((quantity_used / $2)::numeric, 3), ingredient_unit = $3 WHERE org_ingredient_id = $1",
+                "UPDATE addon_item_ingredients   SET quantity_used = round((quantity_used / $2)::numeric, 3), ingredient_unit = $3 WHERE org_ingredient_id = $1",
+                "UPDATE menu_item_optional_fields SET quantity_used = round((quantity_used / $2)::numeric, 3), ingredient_unit = $3 WHERE org_ingredient_id = $1 AND quantity_used IS NOT NULL",
+            ] {
+                sqlx::query(q)
+                    .bind(id)
+                    .bind(f)
+                    .bind(new_unit)
+                    .execute(&mut *tx)
+                    .await?;
+            }
         }
         // Branch stock + reorder levels are in the base unit too → ÷ F. The
         // per-branch actual cost is piastres per OLD unit → per NEW unit is × F.
@@ -522,16 +545,33 @@ pub async fn update_catalog_item(
         let new_yf = new_yield.to_f64().map(yf).unwrap_or(1.0);
         let factor = old_yf / new_yf; // stored_new = stored_old * (old_yf/new_yf)
         if (factor - 1.0).abs() > 1e-9 {
-            for q in [
-                "UPDATE menu_item_recipes         SET quantity_used = round((quantity_used * $2)::numeric, 3) WHERE org_ingredient_id = $1",
-                "UPDATE addon_item_ingredients    SET quantity_used = round((quantity_used * $2)::numeric, 3) WHERE org_ingredient_id = $1",
-                "UPDATE menu_item_optional_fields SET quantity_used = round((quantity_used * $2)::numeric, 3) WHERE org_ingredient_id = $1 AND quantity_used IS NOT NULL",
-            ] {
-                sqlx::query(q)
-                    .bind(id)
-                    .bind(factor)
-                    .execute(&mut *tx)
-                    .await?;
+            sqlx::query(
+                "UPDATE recipe_lines SET quantity = round((quantity * $2)::numeric, 3) WHERE ingredient_id = $1",
+            )
+            .bind(id)
+            .bind(factor)
+            .execute(&mut *tx)
+            .await?;
+            // TRANSITION: keep the legacy tables (still live pre-flip) in lockstep;
+            // self-disables once they become shim views. Remove at SHIM_TEARDOWN.
+            let legacy_live: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = 'public' AND c.relname = 'menu_item_recipes' AND c.relkind = 'r')",
+            )
+            .fetch_one(&mut *tx)
+            .await?;
+            if legacy_live {
+                for q in [
+                    "UPDATE menu_item_recipes         SET quantity_used = round((quantity_used * $2)::numeric, 3) WHERE org_ingredient_id = $1",
+                    "UPDATE addon_item_ingredients    SET quantity_used = round((quantity_used * $2)::numeric, 3) WHERE org_ingredient_id = $1",
+                    "UPDATE menu_item_optional_fields SET quantity_used = round((quantity_used * $2)::numeric, 3) WHERE org_ingredient_id = $1 AND quantity_used IS NOT NULL",
+                ] {
+                    sqlx::query(q)
+                        .bind(id)
+                        .bind(factor)
+                        .execute(&mut *tx)
+                        .await?;
+                }
             }
         }
     }

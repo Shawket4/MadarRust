@@ -25,18 +25,27 @@ const PURGE_STMTS: &[&str] = &[
     // Branch-scoped transactional data (orders cascade to order_items).
     "DELETE FROM orders WHERE branch_id IN (SELECT id FROM branches WHERE org_id = $1)",
     "DELETE FROM shifts WHERE branch_id IN (SELECT id FROM branches WHERE org_id = $1)",
-    // Menu graph (menu_items cascade to item_sizes + menu_item_recipes). Must
-    // precede org_ingredients because recipe→ingredient FK is ON DELETE RESTRICT.
+    // Unified menu model (menu unification): recipe_lines and
+    // menu_price_overrides have NO FK to their polymorphic owners/targets, so
+    // they are removed explicitly. recipe_lines MUST precede org_ingredients
+    // (ingredient FK is ON DELETE RESTRICT); one delete by ingredient covers
+    // both owner kinds (item sizes + modifier options).
+    "DELETE FROM recipe_lines WHERE ingredient_id IN (SELECT id FROM org_ingredients WHERE org_id = $1)",
+    "DELETE FROM menu_price_overrides WHERE \
+         target_id IN (SELECT s.id FROM menu_item_sizes s JOIN menu_items m ON m.id = s.menu_item_id WHERE m.org_id = $1) \
+      OR target_id IN (SELECT o.id FROM modifier_options o JOIN modifier_groups g ON g.id = o.group_id WHERE g.org_id = $1)",
+    // Menu graph (menu_items cascade to menu_item_sizes + attachment rows;
+    // modifier_groups/options + catalog_revision cascade with the org row).
     "DELETE FROM menu_items WHERE org_id = $1",
     "DELETE FROM categories WHERE org_id = $1",
-    "DELETE FROM addon_items WHERE org_id = $1",
     "DELETE FROM org_ingredients WHERE org_id = $1",
     // People + branches.
     "DELETE FROM user_branch_assignments WHERE branch_id IN (SELECT id FROM branches WHERE org_id = $1)",
     "DELETE FROM branches WHERE org_id = $1",
     "DELETE FROM users WHERE org_id = $1",
-    // Finally the org (cascades org_payment_methods, bundles). Guarded so a
-    // non-demo org can never be removed here even if mis-called.
+    // Finally the org (cascades org_payment_methods, bundles, modifier_groups →
+    // modifier_options, catalog_revision). Guarded so a non-demo org can never
+    // be removed here even if mis-called.
     "DELETE FROM organizations WHERE id = $1 AND is_demo",
 ];
 

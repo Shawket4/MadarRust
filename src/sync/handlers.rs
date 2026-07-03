@@ -138,7 +138,9 @@ impl ReplayOp {
             ReplayOp::VoidOrder { .. } => &[("orders", "update")],
             ReplayOp::FireOpenTicket { .. } => &[("open_tickets", "create")],
             ReplayOp::AddTicketRound { .. } => &[("open_tickets", "update")],
-            ReplayOp::SettleOpenTicket { .. } => &[("open_tickets", "update"), ("orders", "create")],
+            ReplayOp::SettleOpenTicket { .. } => {
+                &[("open_tickets", "update"), ("orders", "create")]
+            }
             ReplayOp::VoidOpenTicket { .. } => &[("open_tickets", "update")],
             ReplayOp::BumpKitchenItem { .. } | ReplayOp::UnbumpKitchenItem { .. } => {
                 &[("kitchen_orders", "update")]

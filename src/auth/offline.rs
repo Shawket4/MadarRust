@@ -3,12 +3,16 @@
 //! shipped to devices (via `GET /orgs/{id}/offline-auth-bundle`), so it is
 //! memory-hard and a leak is never the login credential. The device verifies a
 //! typed PIN against it OFFLINE; the server only ever DERIVES it.
-use argon2::password_hash::{PasswordHash, SaltString, rand_core::OsRng};
+use argon2::password_hash::{PasswordHash, SaltString};
 use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 
 /// Derive an argon2id PHC string for a teller's offline PIN.
 pub fn hash_offline_pin(pin: &str) -> Result<String, argon2::password_hash::Error> {
-    let salt = SaltString::generate(&mut OsRng);
+    // rand_core 0.6.4 gates OsRng behind a feature the lock no longer
+    // enables — mint the 16 random salt bytes from the OS RNG via a v4
+    // uuid instead (uuid pulls getrandom itself; no new dependency).
+    let salt =
+        SaltString::encode_b64(uuid::Uuid::new_v4().as_bytes()).expect("16 bytes fit a b64 salt");
     Ok(Argon2::default()
         .hash_password(pin.as_bytes(), &salt)?
         .to_string())

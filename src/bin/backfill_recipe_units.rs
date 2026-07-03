@@ -99,6 +99,26 @@ async fn main() -> ExitCode {
         }
     };
 
+    // OBSOLETE POST-FLIP (menu unification): once the shim is applied the
+    // legacy recipe tables are read-only VIEWS and recipe quantities live in
+    // `recipe_lines` (normalized on write by the Studio endpoints). Refuse to
+    // run rather than fail mid-way on a view UPDATE.
+    let legacy_is_table: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'public' AND c.relname = 'menu_item_recipes' AND c.relkind = 'r')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(true);
+    if !legacy_is_table {
+        eprintln!(
+            "backfill-recipe-units is obsolete after the menu-unification flip: the legacy \
+             recipe tables are now shim views and quantities live in recipe_lines (already \
+             normalized on write). Nothing to do."
+        );
+        return ExitCode::SUCCESS;
+    }
+
     match scope {
         BackfillScope::Org(id) => println!("Scope:  org {id}"),
         BackfillScope::Branch(id) => println!("Scope:  branch {id}"),

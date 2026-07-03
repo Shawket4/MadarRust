@@ -107,7 +107,14 @@ impl BranchOpenRow {
                 self.in_mall_close_time,
             ),
         };
-        channel_open(enabled, ov, open, close, self.local_time, self.has_open_shift)
+        channel_open(
+            enabled,
+            ov,
+            open,
+            close,
+            self.local_time,
+            self.has_open_shift,
+        )
     }
 }
 
@@ -231,6 +238,45 @@ pub struct DeliveryOptionalField {
     pub size_label: Option<String>,
 }
 
+/// One option inside a per-item modifier group. `option_id` is the STABLE id —
+/// it equals the legacy `addon_item_id`, so order intake accepts it unchanged in
+/// `addons[].addon_item_id` (menu-unification stable-id rule).
+#[derive(Serialize, ToSchema, Clone)]
+pub struct DeliveryModifierOption {
+    pub option_id: Uuid,
+    pub name: String,
+    #[schema(value_type = Object)]
+    pub name_translations: serde_json::Value,
+    /// Channel-effective surcharge (piastres): branch_channel → branch →
+    /// channel → catalog default. Unavailable options are excluded entirely.
+    pub price: i32,
+}
+
+/// A per-item modifier group from the unified model (`menu_item_modifier_groups`
+/// → `modifier_groups`/`modifier_options`), constraints resolved (attachment
+/// overrides beat group defaults) and options already filtered to the
+/// attachment's `included_option_ids`. Only addon-sourced options appear here —
+/// the item's priced optionals stay in `optionals`. Empty until the org's
+/// catalog is backfilled onto the unified tables; the customizer falls back to
+/// the flat `addons` catalog + `allowed_addon_ids` in that case.
+#[derive(Serialize, ToSchema)]
+pub struct DeliveryModifierGroup {
+    pub group_id: Uuid,
+    pub name: String,
+    #[schema(value_type = Object)]
+    pub name_translations: serde_json::Value,
+    /// "single" | "multi".
+    pub selection_type: String,
+    pub min_selections: i32,
+    pub max_selections: Option<i32>,
+    pub is_required: bool,
+    /// The group's legacy addon type (`milk_type` / `coffee_type` / `extra` /
+    /// custom) — the swap-family hint the customizer keys its delta-price
+    /// estimate on. `None` for groups with no legacy lineage.
+    pub addon_type: Option<String>,
+    pub options: Vec<DeliveryModifierOption>,
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct DeliveryMenuItem {
     pub id: Uuid,
@@ -253,6 +299,9 @@ pub struct DeliveryMenuItem {
     /// When non-empty the customizer filters the global catalog to these IDs by
     /// default, with a "show all" escape hatch. Empty = no restriction.
     pub allowed_addon_ids: Vec<Uuid>,
+    /// The item's modifier groups (unified model), channel-effective. Empty ⇒
+    /// the customizer falls back to `addons` + `allowed_addon_ids`.
+    pub modifier_groups: Vec<DeliveryModifierGroup>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -447,6 +496,10 @@ pub async fn public_menu(
     // Default/base milk per item (POS pre-select), batched over the item list.
     let mut default_milk_by_item = load_default_milk(pool.get_ref(), &item_ids).await?;
     let mut allowed_addons_by_item = load_allowed_addon_ids(pool.get_ref(), &item_ids).await?;
+    // Per-item modifier groups (unified model), channel-effective — empty until
+    // the org's catalog is backfilled onto the unified tables.
+    let mut modifier_groups_by_item =
+        load_modifier_groups(pool.get_ref(), &item_ids, branch_id, &query.channel).await?;
 
     let items: Vec<DeliveryMenuItem> = item_rows
         .into_iter()
@@ -457,6 +510,7 @@ pub async fn public_menu(
                     optionals: optionals_by_item.remove(&id).unwrap_or_default(),
                     default_milk_addon_id: default_milk_by_item.remove(&id),
                     allowed_addon_ids: allowed_addons_by_item.remove(&id).unwrap_or_default(),
+                    modifier_groups: modifier_groups_by_item.remove(&id).unwrap_or_default(),
                     id,
                     category_id,
                     name,
@@ -599,6 +653,126 @@ async fn load_default_milk(
         by_item.entry(menu_item_id).or_insert(addon_id);
     }
 
+    Ok(by_item)
+}
+
+/// Batch-load per-item modifier groups from the unified tables
+/// (`menu_item_modifier_groups` → `modifier_groups`/`modifier_options`),
+/// channel-effective (branch_channel → branch → channel → catalog default, per
+/// CONTRACT §3). Addon-sourced options only; `included_option_ids` honoured;
+/// effectively-unavailable options excluded (same convention as the flat addon
+/// catalog); groups left with no options are dropped. Returns an empty map for
+/// orgs not yet backfilled — callers treat that as "no unified groups".
+async fn load_modifier_groups(
+    pool: &PgPool,
+    item_ids: &[Uuid],
+    branch_id: Uuid,
+    channel: &str,
+) -> Result<std::collections::HashMap<Uuid, Vec<DeliveryModifierGroup>>, AppError> {
+    if item_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(
+        Uuid,              // menu_item_id
+        Uuid,              // group_id
+        String,            // group name
+        serde_json::Value, // group name_translations
+        String,            // selection_type
+        i32,               // effective min
+        Option<i32>,       // effective max
+        bool,              // effective required
+        Option<String>,    // legacy_addon_type
+        Uuid,              // option id
+        String,            // option name
+        serde_json::Value, // option name_translations
+        i32,               // effective price
+        bool,              // effective availability
+    )> = sqlx::query_as(
+        "SELECT mimg.menu_item_id, mimg.group_id, g.name, g.name_translations, \
+                g.selection_type, \
+                COALESCE(mimg.min_override, g.min_selections)      AS min_selections, \
+                COALESCE(mimg.max_override, g.max_selections)      AS max_selections, \
+                COALESCE(mimg.is_required_override, g.is_required) AS is_required, \
+                g.legacy_addon_type, \
+                o.id, o.name, o.name_translations, \
+                COALESCE(bc.price, b.price, c.price, o.price)                    AS price, \
+                COALESCE(bc.is_available, b.is_available, c.is_available, true)  AS is_available \
+         FROM menu_item_modifier_groups mimg \
+         JOIN modifier_groups g  ON g.id = mimg.group_id AND g.is_active = true \
+         JOIN modifier_options o ON o.group_id = g.id AND o.is_active = true \
+                                AND o.legacy_source = 'addon' \
+         LEFT JOIN menu_price_overrides bc \
+                ON bc.target_type = 'modifier_option' AND bc.target_id = o.id \
+               AND bc.scope = 'branch_channel' AND bc.branch_id = $2 \
+               AND bc.channel = $3::delivery_channel \
+         LEFT JOIN menu_price_overrides b \
+                ON b.target_type = 'modifier_option' AND b.target_id = o.id \
+               AND b.scope = 'branch' AND b.branch_id = $2 \
+         LEFT JOIN menu_price_overrides c \
+                ON c.target_type = 'modifier_option' AND c.target_id = o.id \
+               AND c.scope = 'channel' AND c.channel = $3::delivery_channel \
+         WHERE mimg.menu_item_id = ANY($1) \
+           AND (mimg.included_option_ids IS NULL OR o.id = ANY(mimg.included_option_ids)) \
+         ORDER BY mimg.menu_item_id, mimg.sort, g.name, o.sort, o.name",
+    )
+    .bind(item_ids)
+    .bind(branch_id)
+    .bind(channel)
+    .fetch_all(pool)
+    .await?;
+
+    let mut by_item: std::collections::HashMap<Uuid, Vec<DeliveryModifierGroup>> =
+        std::collections::HashMap::new();
+    for (
+        item_id,
+        group_id,
+        gname,
+        gtrans,
+        seltype,
+        min,
+        max,
+        required,
+        addon_type,
+        oid,
+        oname,
+        otrans,
+        price,
+        avail,
+    ) in rows
+    {
+        if !avail {
+            continue; // customer-facing: unavailable options are excluded entirely
+        }
+        let groups = by_item.entry(item_id).or_default();
+        let group = match groups.last_mut() {
+            Some(g) if g.group_id == group_id => g,
+            _ => {
+                groups.push(DeliveryModifierGroup {
+                    group_id,
+                    name: gname,
+                    name_translations: gtrans,
+                    selection_type: seltype,
+                    min_selections: min,
+                    max_selections: max,
+                    is_required: required,
+                    addon_type,
+                    options: Vec::new(),
+                });
+                groups.last_mut().expect("just pushed")
+            }
+        };
+        group.options.push(DeliveryModifierOption {
+            option_id: oid,
+            name: oname,
+            name_translations: otrans,
+            price,
+        });
+    }
+    // Drop groups whose options all resolved unavailable.
+    for groups in by_item.values_mut() {
+        groups.retain(|g| !g.options.is_empty());
+    }
     Ok(by_item)
 }
 
@@ -793,8 +967,14 @@ pub async fn delivery_quote(
             coords.and_then(|(blat, blng)| match (blat, blng) {
                 (Some(blat), Some(blng)) => Some(
                     haversine_meters(
-                        LatLng { lat: blat, lng: blng },
-                        LatLng { lat: query.lat, lng: query.lng },
+                        LatLng {
+                            lat: blat,
+                            lng: blng,
+                        },
+                        LatLng {
+                            lat: query.lat,
+                            lng: query.lng,
+                        },
                     )
                     .round() as i32,
                 ),
@@ -1052,7 +1232,11 @@ pub async fn create_delivery_order(
             )?;
             validate_optional_text("Place name", body.place_name.as_deref(), MAX_SHORT_TEXT_LEN)?;
             validate_optional_text("Floor", body.floor.as_deref(), MAX_SHORT_TEXT_LEN)?;
-            validate_optional_text("Unit number", body.unit_number.as_deref(), MAX_SHORT_TEXT_LEN)?;
+            validate_optional_text(
+                "Unit number",
+                body.unit_number.as_deref(),
+                MAX_SHORT_TEXT_LEN,
+            )?;
         }
         CHANNEL_UMBRELLA => {
             // Umbrella/sunbed: the runner finds the customer by umbrella number
@@ -1075,7 +1259,11 @@ pub async fn create_delivery_order(
                 body.place_name.as_deref().unwrap_or(""),
                 MAX_SHORT_TEXT_LEN,
             )?;
-            validate_required_text("Floor", body.floor.as_deref().unwrap_or(""), MAX_SHORT_TEXT_LEN)?;
+            validate_required_text(
+                "Floor",
+                body.floor.as_deref().unwrap_or(""),
+                MAX_SHORT_TEXT_LEN,
+            )?;
             validate_required_text(
                 "Unit or office",
                 body.unit_number.as_deref().unwrap_or(""),

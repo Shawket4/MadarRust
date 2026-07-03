@@ -99,11 +99,20 @@ pub async fn stream(
         Some(id) => hub.replay_since(query.branch_id, id),
         None => Vec::new(), // a fresh connect seeds from the snapshot endpoint, not replay
     };
-    let max_replayed = replayed.iter().map(|e| e.id).max().unwrap_or_else(|| last_event_id.unwrap_or(0));
+    let max_replayed = replayed
+        .iter()
+        .map(|e| e.id)
+        .max()
+        .unwrap_or_else(|| last_event_id.unwrap_or(0));
     let replay_frames: Vec<Result<Bytes, actix_web::Error>> = replayed
         .into_iter()
         .filter(|e| topics.contains(&e.topic))
-        .map(|e| Ok(Bytes::from(format!("id: {}\nevent: {}\ndata: {}\n\n", e.id, e.event_type, e.data))))
+        .map(|e| {
+            Ok(Bytes::from(format!(
+                "id: {}\nevent: {}\ndata: {}\n\n",
+                e.id, e.event_type, e.data
+            )))
+        })
         .collect();
 
     // Broadcast events → SSE frames, dropping topics the caller isn't permitted for
@@ -111,10 +120,12 @@ pub async fn stream(
     // surfaced as a body error so actix drops the connection; the client reconnects.
     let events = BroadcastStream::new(rx).filter_map(move |res| {
         let out: Option<Result<Bytes, actix_web::Error>> = match res {
-            Ok(ev) if ev.id > max_replayed && topics.contains(&ev.topic) => Some(Ok(Bytes::from(format!(
-                "id: {}\nevent: {}\ndata: {}\n\n",
-                ev.id, ev.event_type, ev.data
-            )))),
+            Ok(ev) if ev.id > max_replayed && topics.contains(&ev.topic) => {
+                Some(Ok(Bytes::from(format!(
+                    "id: {}\nevent: {}\ndata: {}\n\n",
+                    ev.id, ev.event_type, ev.data
+                ))))
+            }
             Ok(_) => None,
             Err(_) => Some(Err(actix_web::error::ErrorInternalServerError(
                 "realtime stream lagged",

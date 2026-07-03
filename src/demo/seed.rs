@@ -140,6 +140,9 @@ pub async fn seed_full(
         },
     ];
     let mut item_ids = Vec::with_capacity(items.len());
+    // (item index, size label) → menu_item_sizes.id, for the recipe_lines below.
+    let mut size_ids: std::collections::HashMap<(usize, String), Uuid> =
+        std::collections::HashMap::new();
     for it in items.iter() {
         let id = Uuid::new_v4();
         sqlx::query(
@@ -153,17 +156,20 @@ pub async fn seed_full(
         .bind(it.base)
         .execute(&mut *conn)
         .await?;
-        for (label, price) in it.sizes.iter() {
+        for (sort, (label, price)) in it.sizes.iter().enumerate() {
+            let size_id = Uuid::new_v4();
             sqlx::query(
-                "INSERT INTO item_sizes (id, menu_item_id, label, price_override) \
-                 VALUES ($1, $2, $3, $4)",
+                "INSERT INTO menu_item_sizes (id, menu_item_id, label, price, sort) \
+                 VALUES ($1, $2, $3, $4, $5)",
             )
-            .bind(Uuid::new_v4())
+            .bind(size_id)
             .bind(id)
             .bind(label)
             .bind(price)
+            .bind(sort as i32)
             .execute(&mut *conn)
             .await?;
+            size_ids.insert((item_ids.len(), (*label).to_string()), size_id);
         }
         item_ids.push(id);
     }
@@ -206,41 +212,70 @@ pub async fn seed_full(
         (3, "one_size", 3, 0.030),
     ];
     for (it, size, ing, qty) in recipes.iter() {
-        let (ing_id, ing_name, ing_unit) = ing_ids[*ing];
+        let (ing_id, _ing_name, ing_unit) = ing_ids[*ing];
+        // Unified model: id-keyed recipe lines owned by the size row.
+        let size_id = size_ids
+            .get(&(*it, (*size).to_string()))
+            .copied()
+            .expect("demo recipe references a seeded size");
         sqlx::query(
-            "INSERT INTO menu_item_recipes \
-             (id, menu_item_id, size_label, quantity_used, ingredient_name, ingredient_unit, org_ingredient_id) \
-             VALUES ($1, $2, $3, $4::numeric, $5, $6, $7)",
+            "INSERT INTO recipe_lines (owner_type, owner_id, ingredient_id, quantity, unit) \
+             VALUES ('item_size', $1, $2, $3::numeric, $4)",
         )
-        .bind(Uuid::new_v4())
-        .bind(item_ids[*it])
-        .bind(size)
-        .bind(qty)
-        .bind(ing_name)
-        .bind(ing_unit)
+        .bind(size_id)
         .bind(ing_id)
+        .bind(qty)
+        .bind(ing_unit)
         .execute(&mut *conn)
         .await?;
     }
 
-    // ── Add-ons ─────────────────────────────────────────────────────────────
-    let addons = [
-        ("Extra Shot", "extras", 1500i32),
-        ("Oat Milk", "extras", 1000),
-    ];
-    for (name, ty, price) in addons.iter() {
+    // ── Add-ons (unified model: one reusable group + its options) ───────────
+    let group_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO modifier_groups \
+             (id, org_id, name, selection_type, min_selections, is_required, legacy_addon_type) \
+         VALUES ($1, $2, 'Extras', 'multi', 0, false, 'extras')",
+    )
+    .bind(group_id)
+    .bind(org_id)
+    .execute(&mut *conn)
+    .await?;
+    let addons = [("Extra Shot", 1500i32, 0i32), ("Oat Milk", 1000, 1)];
+    for (name, price, sort) in addons.iter() {
         sqlx::query(
-            "INSERT INTO addon_items (id, org_id, name, \"type\", default_price) \
-             VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO modifier_options (id, group_id, name, price, sort, legacy_source) \
+             VALUES ($1, $2, $3, $4, $5, 'addon')",
         )
         .bind(Uuid::new_v4())
-        .bind(org_id)
+        .bind(group_id)
         .bind(name)
-        .bind(ty)
         .bind(price)
+        .bind(sort)
         .execute(&mut *conn)
         .await?;
     }
+    // Offer the group on the drink items (0..=3) so the demo shows grouped
+    // modifiers in the new clients; old clients see the same options through
+    // the shim's flat addon catalog.
+    for item_id in item_ids.iter().take(4) {
+        sqlx::query(
+            "INSERT INTO menu_item_modifier_groups (menu_item_id, group_id, sort) \
+             VALUES ($1, $2, 0)",
+        )
+        .bind(item_id)
+        .bind(group_id)
+        .execute(&mut *conn)
+        .await?;
+    }
+    // Seed the org's catalog revision so new clients can revision-gate syncs.
+    sqlx::query(
+        "INSERT INTO catalog_revision (org_id, revision) VALUES ($1, 1) \
+         ON CONFLICT (org_id) DO NOTHING",
+    )
+    .bind(org_id)
+    .execute(&mut *conn)
+    .await?;
 
     // ── An open shift (teller = the demo admin) ─────────────────────────────
     let shift_id = Uuid::new_v4();

@@ -22,6 +22,7 @@ pub mod inventory;
 pub mod kitchen;
 pub mod menu;
 pub mod menu_advisor;
+pub mod menu_unification;
 pub mod models;
 pub mod openapi;
 pub mod orders;

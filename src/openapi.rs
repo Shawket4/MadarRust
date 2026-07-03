@@ -142,6 +142,27 @@ paths(
         crate::menu::handlers::list_branch_addon_overrides,
         crate::menu::handlers::upsert_branch_addon_override,
         crate::menu::handlers::delete_branch_addon_override,
+        // ── menu studio (Wave 2, new unified tables) ────────────────
+        crate::menu::studio::get_studio,
+        crate::menu::studio::put_sizes,
+        crate::menu::studio::put_size_recipe,
+        crate::menu::studio::put_modifier_groups,
+        crate::menu::studio::duplicate_item,
+        // ── POS catalog sync (Wave 2, new unified tables) ───────────
+        crate::menu::catalog_sync::catalog_sync,
+        // ── menu studio: modifiers + pricing (Wave 2, new tables) ───
+        crate::menu::modifiers::list_groups,
+        crate::menu::modifiers::create_group,
+        crate::menu::modifiers::patch_group,
+        crate::menu::modifiers::delete_group,
+        crate::menu::modifiers::create_option,
+        crate::menu::modifiers::patch_option,
+        crate::menu::modifiers::delete_option,
+        crate::menu::modifiers::put_option_recipe,
+        crate::menu::modifiers::put_item_options,
+        crate::menu::modifiers::put_price_override,
+        crate::menu::modifiers::delete_price_override,
+        crate::menu::modifiers::get_item_cost,
         // ── uploads ───────────────────────────────────────────────────
         crate::uploads::handlers::upload_menu_item_image,
         // ── inventory ─────────────────────────────────────────────────

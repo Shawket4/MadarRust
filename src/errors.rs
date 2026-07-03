@@ -98,6 +98,11 @@ fn status_for_sqlstate(code: Option<&str>) -> actix_web::http::StatusCode {
     match code {
         Some("23505") | Some("23503") => StatusCode::CONFLICT, // unique / foreign-key violation
         Some("23514") | Some("23502") => StatusCode::BAD_REQUEST, // check / not-null violation
+        // 55000 = write to a non-updatable VIEW. Post-flip (menu unification)
+        // the legacy catalog tables are read-only shim views, so a straggler
+        // caller of a retired legacy WRITE endpoint gets a clean 409 pointing
+        // at the DB detail ("cannot insert into view …"), not a 500.
+        Some("55000") => StatusCode::CONFLICT,
         Some(c) if c.starts_with("22") => StatusCode::BAD_REQUEST, // data exception (overflow, bad enum/uuid/encoding, offset range)
         Some(c) if c.starts_with("23") => StatusCode::CONFLICT,    // other integrity violations
         _ => StatusCode::INTERNAL_SERVER_ERROR,

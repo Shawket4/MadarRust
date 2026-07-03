@@ -2396,6 +2396,97 @@ mod it {
         let opts = it["optionals"].as_array().unwrap();
         assert_eq!(opts.len(), 1);
         assert_eq!(opts[0]["name"], "Extra Hot");
+
+        // No unified rows seeded → modifier_groups is present but empty (the
+        // customizer's fallback signal).
+        assert_eq!(it["modifier_groups"].as_array().unwrap().len(), 0);
+    }
+
+    /// The unified per-item modifier groups (menu-unification): constraints come
+    /// from the attachment overrides, options honour `included_option_ids`, the
+    /// price resolves branch_channel → branch → channel → catalog, and
+    /// effectively-unavailable options are excluded entirely.
+    #[sqlx::test]
+    async fn public_menu_exposes_unified_modifier_groups(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        seed_settings(&pool, branch, true, false, 0).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+
+        // A reusable "Milk" group (single-select) with three options.
+        let gid = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO modifier_groups (id, org_id, name, selection_type, min_selections, max_selections, is_required, legacy_addon_type) \
+             VALUES ($1,$2,'Milk','single',0,1,false,'milk_type')",
+        )
+        .bind(gid).bind(org).execute(&pool).await.unwrap();
+        let (oat, almond, soy) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        for (id, name, price, sort) in [
+            (oat, "Oat", 100, 0),
+            (almond, "Almond", 150, 1),
+            (soy, "Soy", 200, 2),
+        ] {
+            sqlx::query(
+                "INSERT INTO modifier_options (id, group_id, name, price, sort) VALUES ($1,$2,$3,$4,$5)",
+            )
+            .bind(id).bind(gid).bind(name).bind(price).bind(sort)
+            .execute(&pool).await.unwrap();
+        }
+        // Attach to the item: required + min 1 (overrides beat the group's 0/false)
+        // and an allowlist of oat+almond (soy excluded).
+        sqlx::query(
+            "INSERT INTO menu_item_modifier_groups \
+                 (menu_item_id, group_id, sort, min_override, is_required_override, included_option_ids) \
+             VALUES ($1,$2,0,1,true,ARRAY[$3,$4]::uuid[])",
+        )
+        .bind(item).bind(gid).bind(oat).bind(almond)
+        .execute(&pool).await.unwrap();
+        // Channel-scoped price for oat (beats the 100 catalog default)…
+        sqlx::query(
+            "INSERT INTO menu_price_overrides (scope, branch_id, channel, target_type, target_id, price) \
+             VALUES ('branch_channel',$1,'in_mall'::delivery_channel,'modifier_option',$2,130)",
+        )
+        .bind(branch).bind(oat).execute(&pool).await.unwrap();
+        // …and a branch-scoped kill-switch for almond → excluded entirely.
+        sqlx::query(
+            "INSERT INTO menu_price_overrides (scope, branch_id, target_type, target_id, is_available) \
+             VALUES ('branch',$1,'modifier_option',$2,false)",
+        )
+        .bind(branch).bind(almond).execute(&pool).await.unwrap();
+
+        let app = app!(&pool);
+        let (st, b) = send(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!("/public/branches/{branch}/menu?channel=in_mall")),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{b}");
+
+        let groups = b["items"][0]["modifier_groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 1, "{b}");
+        let g = &groups[0];
+        assert_eq!(g["group_id"], gid.to_string());
+        assert_eq!(g["name"], "Milk");
+        assert_eq!(g["selection_type"], "single");
+        assert_eq!(g["addon_type"], "milk_type");
+        assert_eq!(g["min_selections"], 1, "attachment override beats group 0");
+        assert_eq!(g["max_selections"], 1);
+        assert_eq!(
+            g["is_required"], true,
+            "attachment override beats group false"
+        );
+
+        let options = g["options"].as_array().unwrap();
+        assert_eq!(
+            options.len(),
+            1,
+            "soy allowlisted-out, almond branch-unavailable: {b}"
+        );
+        assert_eq!(options[0]["option_id"], oat.to_string());
+        assert_eq!(options[0]["price"], 130, "branch_channel beats catalog 100");
     }
 
     #[sqlx::test]

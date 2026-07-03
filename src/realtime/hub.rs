@@ -38,7 +38,11 @@ struct BranchBus {
 
 impl BranchBus {
     fn new() -> Self {
-        Self { tx: broadcast::channel(CHANNEL_CAPACITY).0, next_id: 1, recent: VecDeque::new() }
+        Self {
+            tx: broadcast::channel(CHANNEL_CAPACITY).0,
+            next_id: 1,
+            recent: VecDeque::new(),
+        }
     }
 }
 
@@ -57,7 +61,10 @@ impl BranchEventHub {
     /// Subscribe to a branch's bus, creating it on first use.
     pub fn subscribe(&self, branch_id: Uuid) -> broadcast::Receiver<BranchEvent> {
         let mut map = self.inner.lock().expect("realtime hub mutex poisoned");
-        map.entry(branch_id).or_insert_with(BranchBus::new).tx.subscribe()
+        map.entry(branch_id)
+            .or_insert_with(BranchBus::new)
+            .tx
+            .subscribe()
     }
 
     /// Publish an event to a branch: stamp the next per-branch id, retain it in the
@@ -83,7 +90,12 @@ impl BranchEventHub {
     pub fn replay_since(&self, branch_id: Uuid, after_id: u64) -> Vec<BranchEvent> {
         let map = self.inner.lock().expect("realtime hub mutex poisoned");
         match map.get(&branch_id) {
-            Some(bus) => bus.recent.iter().filter(|e| e.id > after_id).cloned().collect(),
+            Some(bus) => bus
+                .recent
+                .iter()
+                .filter(|e| e.id > after_id)
+                .cloned()
+                .collect(),
             None => Vec::new(),
         }
     }
@@ -104,7 +116,10 @@ mod tests {
         let branch = Uuid::new_v4();
         // No bus yet (nobody subscribed) → publish is a no-op, nothing to replay.
         hub.publish(branch, ev("dropped"));
-        assert!(hub.replay_since(branch, 0).is_empty(), "no subscriber → nothing buffered");
+        assert!(
+            hub.replay_since(branch, 0).is_empty(),
+            "no subscriber → nothing buffered"
+        );
 
         let _rx = hub.subscribe(branch); // creates the bus
         hub.publish(branch, ev("one"));
@@ -112,14 +127,29 @@ mod tests {
         hub.publish(branch, ev("three"));
 
         let all = hub.replay_since(branch, 0);
-        assert_eq!(all.iter().map(|e| e.id).collect::<Vec<_>>(), vec![1, 2, 3], "monotonic ids from 1");
         assert_eq!(
-            all.iter().map(|e| e.event_type.as_str()).collect::<Vec<_>>(),
+            all.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "monotonic ids from 1"
+        );
+        assert_eq!(
+            all.iter()
+                .map(|e| e.event_type.as_str())
+                .collect::<Vec<_>>(),
             vec!["one", "two", "three"],
         );
         // A reconnecting client replays only what's AFTER its last-seen id.
-        assert_eq!(hub.replay_since(branch, 2).iter().map(|e| e.id).collect::<Vec<_>>(), vec![3]);
-        assert!(hub.replay_since(branch, 3).is_empty(), "caught up → nothing to replay");
+        assert_eq!(
+            hub.replay_since(branch, 2)
+                .iter()
+                .map(|e| e.id)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+        assert!(
+            hub.replay_since(branch, 3).is_empty(),
+            "caught up → nothing to replay"
+        );
     }
 
     #[test]
@@ -134,6 +164,10 @@ mod tests {
         assert_eq!(buffered.len(), REPLAY_BUFFER, "buffer is bounded");
         // The oldest 50 were evicted; ids stay monotonic, so the window starts at 51.
         assert_eq!(buffered.first().unwrap().id, 51, "oldest evicted");
-        assert_eq!(buffered.last().unwrap().id, (REPLAY_BUFFER + 50) as u64, "newest retained");
+        assert_eq!(
+            buffered.last().unwrap().id,
+            (REPLAY_BUFFER + 50) as u64,
+            "newest retained"
+        );
     }
 }
