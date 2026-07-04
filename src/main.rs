@@ -13,9 +13,9 @@ use tracing_subscriber::EnvFilter;
 
 use madar_rust::openapi::ApiDoc;
 use madar_rust::{
-    auth, branches, bundles, costing, delivery, demo, discounts, inventory, kitchen, menu,
-    menu_advisor, orders, orgs, payment_methods, permissions, purchasing, qr_card, realtime,
-    recipes, reports, reservations, shifts, stocktakes, sync, tickets, tills, uploads, users,
+    auth, branches, bundles, costing, delivery, demo, discounts, inventory, kitchen, menu, orders,
+    orgs, payment_methods, permissions, purchasing, qr_card, realtime, recipes, reports,
+    reservations, shifts, stocktakes, sync, tickets, tills, uploads, users,
 };
 
 use utoipa::OpenApi;
@@ -202,7 +202,6 @@ async fn main() -> std::io::Result<()> {
             .configure(|cfg| reports::routes::configure(cfg, read_pool.clone()))
             .configure(uploads::routes::configure)
             .configure(bundles::routes::configure)
-            .configure(menu_advisor::routes::configure)
             .configure(payment_methods::routes::configure)
             .configure(costing::routes::configure)
             .configure(delivery::routes::configure)

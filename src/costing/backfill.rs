@@ -10,8 +10,8 @@
 //! reflect the fixed numbers. It is wired to the `backfill-cost-snapshots`
 //! binary only — never to an HTTP route.
 //!
-//! Pricing model (mirrors the menu-engineering report's `cost_basis=current`
-//! and the live pipeline's cost composition):
+//! Pricing model (a "current recipe costs" view — the live pipeline's cost
+//! composition applied to realized quantities):
 //!   - recipe scope: the SKU's CURRENT `menu_item_recipes` rollup at
 //!     `COALESCE(open ingredient_cost_history epoch, org_ingredients
 //!     .cost_per_unit)` — piastres. `unit_cost` = that rollup; NULL for

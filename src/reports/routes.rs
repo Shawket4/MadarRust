@@ -52,10 +52,6 @@ pub fn configure(cfg: &mut web::ServiceConfig, read_pool: web::Data<PgPool>) {
                 web::get().to(handlers::branch_combined_item_sales),
             )
             .route(
-                "/branches/{branch_id}/menu-engineering",
-                web::get().to(handlers::branch_menu_engineering),
-            )
-            .route(
                 "/branches/{branch_id}/inventory-valuation",
                 web::get().to(handlers::branch_inventory_valuation),
             )
