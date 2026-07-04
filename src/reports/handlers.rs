@@ -1717,7 +1717,8 @@ async fn require_branch_access(
 /// endpoints; any other UUID means that one branch, after the usual access
 /// check. The per-resource `check_permission` gate in each handler still
 /// applies, so this does not widen who may read reports — only the scope.
-async fn resolve_report_branches(
+/// `pub(crate)`: the insights module scopes its ledger the same way.
+pub(crate) async fn resolve_report_branches(
     pool: &PgPool,
     claims: &Claims,
     req: &HttpRequest,

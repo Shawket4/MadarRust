@@ -8266,6 +8266,315 @@
         ]
       }
     },
+    "/insights/branches/{branch_id}/margin-watch": {
+      "get": {
+        "tags": [
+          "insights"
+        ],
+        "operationId": "margin_watch",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch id, or the nil UUID for org-wide",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "cost_basis",
+            "in": "query",
+            "description": "`snapshot` (default) | `current`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Dashboard-home margin summary: totals, top/bottom contributors, open signal count.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarginWatch"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/insights/branches/{branch_id}/menu-margin": {
+      "get": {
+        "tags": [
+          "insights"
+        ],
+        "operationId": "menu_margin_ledger",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch id, or the nil UUID for every branch in the org",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "cost_basis",
+            "in": "query",
+            "description": "`snapshot` (default) | `current`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ranked margin ledger with live signals. Cost-unknown rows are returned flagged (margin null) — never 0, never dropped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarginLedgerReport"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/insights/decisions": {
+      "get": {
+        "tags": [
+          "insights"
+        ],
+        "operationId": "list_decisions",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "branch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Decision log, newest first, each with its measured after-window impact.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DecisionOut"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "insights"
+        ],
+        "operationId": "create_decision",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Decision recorded with a server-computed evidence baseline.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecisionOut"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/insights/margin-target": {
+      "get": {
+        "tags": [
+          "insights"
+        ],
+        "operationId": "get_margin_targets",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarginTargets"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "insights"
+        ],
+        "operationId": "put_margin_target",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutTargetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarginTargets"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/inventory/branches/{branch_id}/movements": {
       "get": {
         "tags": [
@@ -30622,6 +30931,23 @@
           }
         }
       },
+      "BranchTarget": {
+        "type": "object",
+        "required": [
+          "branch_id",
+          "target_pct"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "target_pct": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
       "Bundle": {
         "type": "object",
         "required": [
@@ -31929,6 +32255,40 @@
           }
         }
       },
+      "CreateDecisionRequest": {
+        "type": "object",
+        "required": [
+          "menu_item_id",
+          "signal_kind",
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "`acted` | `dismissed` | `snoozed`."
+          },
+          "branch_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "detail": {
+            "type": "object"
+          },
+          "menu_item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "signal_kind": {
+            "type": "string"
+          },
+          "size_label": {
+            "type": "string"
+          }
+        }
+      },
       "CreateDiscountRequest": {
         "type": "object",
         "required": [
@@ -32975,6 +33335,76 @@
           "reason": {
             "type": "string",
             "description": "expired | spoiled | damaged | overproduction | order_cancelled | theft | other\n(`order_cancelled` is normally auto-logged by void/cancel, not entered here)"
+          }
+        }
+      },
+      "DecisionOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "menu_item_id",
+          "size_label",
+          "item_name",
+          "signal_kind",
+          "action",
+          "detail",
+          "baseline",
+          "created_at",
+          "impact",
+          "impact_complete"
+        ],
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "baseline": {
+            "type": "object"
+          },
+          "branch_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "detail": {
+            "type": "object"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "impact": {
+            "type": "object",
+            "description": "Measured after-window aggregate; `null` until ≥1 day of after-data."
+          },
+          "impact_complete": {
+            "type": "boolean",
+            "description": "True once the full baseline window has elapsed since the decision."
+          },
+          "item_name": {
+            "type": "string"
+          },
+          "menu_item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "signal_kind": {
+            "type": "string"
+          },
+          "size_label": {
+            "type": "string"
           }
         }
       },
@@ -35142,6 +35572,58 @@
           }
         }
       },
+      "LedgerTotals": {
+        "type": "object",
+        "required": [
+          "revenue",
+          "cost_known",
+          "margin_known",
+          "revenue_cost_unknown",
+          "prev_revenue",
+          "prev_margin_known",
+          "below_target_gap"
+        ],
+        "properties": {
+          "below_target_gap": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Σ(target·revenue − margin) over below-target rows — \"margin left on\nthe table\" this period, in piastres."
+          },
+          "cost_known": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Cost summed over rows where it is known."
+          },
+          "margin_known": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "margin_pct": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "prev_margin_known": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "prev_revenue": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "revenue": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "revenue_cost_unknown": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Revenue sitting on rows whose cost is unknown (visibly reconciles)."
+          }
+        }
+      },
       "LoginRequest": {
         "type": "object",
         "description": "Login is dual-mode:\n\n- **Email + password** (admins, managers, super-admins): supply\n  `email` and `password`. `org_id` is optional — if provided, the\n  user must belong to that org; if omitted, lookup is by email only.\n- **PIN + name** (tellers): supply `name`, `pin`, and **`branch_id`**\n  (required). The teller must be assigned to that branch. `org_id` is\n  derived server-side from the branch — never trusted from the client.",
@@ -35279,6 +35761,249 @@
           },
           "unit": {
             "type": "string"
+          }
+        }
+      },
+      "MarginLedgerReport": {
+        "type": "object",
+        "required": [
+          "branch_id",
+          "cost_basis",
+          "target_pct",
+          "target_source",
+          "totals",
+          "rows",
+          "rows_cost_unknown"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "cost_basis": {
+            "type": "string"
+          },
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MarginLedgerRow"
+            }
+          },
+          "rows_cost_unknown": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows whose cost is unknown under the chosen basis (they ARE in `rows`)."
+          },
+          "target_pct": {
+            "type": "number",
+            "format": "double"
+          },
+          "target_source": {
+            "type": "string",
+            "description": "`branch` | `org` | `default`."
+          },
+          "to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/LedgerTotals"
+          }
+        }
+      },
+      "MarginLedgerRow": {
+        "type": "object",
+        "required": [
+          "menu_item_id",
+          "size_label",
+          "item_name",
+          "on_menu",
+          "quantity_sold",
+          "revenue",
+          "prev_quantity",
+          "flags"
+        ],
+        "properties": {
+          "category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "category_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Piastres under the chosen basis; `null` = unknown (never 0)."
+          },
+          "flags": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Signal"
+            }
+          },
+          "item_name": {
+            "type": "string"
+          },
+          "margin": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "margin_pct": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "margin_share_pct": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "This row's share of the total KNOWN margin (null when margin unknown\nor total margin ≤ 0)."
+          },
+          "menu_item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "on_menu": {
+            "type": "boolean",
+            "description": "False when this SKU no longer exists on the active menu (historical\nsales under a removed size/item)."
+          },
+          "prev_margin": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "prev_quantity": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Previous equal-length period, for the trend column."
+          },
+          "quantity_sold": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "revenue": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "size_label": {
+            "type": "string",
+            "description": "`\"one_size\"` for items without sizes."
+          }
+        }
+      },
+      "MarginTargets": {
+        "type": "object",
+        "required": [
+          "branches",
+          "builtin_default_pct"
+        ],
+        "properties": {
+          "branches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BranchTarget"
+            }
+          },
+          "builtin_default_pct": {
+            "type": "number",
+            "format": "double"
+          },
+          "org_default_pct": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          }
+        }
+      },
+      "MarginWatch": {
+        "type": "object",
+        "required": [
+          "branch_id",
+          "target_pct",
+          "totals",
+          "top",
+          "bottom",
+          "open_signals",
+          "rows_cost_unknown"
+        ],
+        "properties": {
+          "bottom": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MarginLedgerRow"
+            },
+            "description": "Worst contributors (asc, only rows with known margin), max 3."
+          },
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "open_signals": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "rows_cost_unknown": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "target_pct": {
+            "type": "number",
+            "format": "double"
+          },
+          "to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "top": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MarginLedgerRow"
+            },
+            "description": "Top contributors by known margin (desc), max 3."
+          },
+          "totals": {
+            "$ref": "#/components/schemas/LedgerTotals"
           }
         }
       },
@@ -38584,6 +39309,26 @@
           }
         }
       },
+      "PutTargetRequest": {
+        "type": "object",
+        "required": [
+          "target_pct"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Omit for the org default; set for a branch override."
+          },
+          "target_pct": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
       "QrResponse": {
         "type": "object",
         "description": "JSON returned from every QR-generation endpoint.",
@@ -39492,6 +40237,28 @@
           },
           "unit": {
             "type": "string"
+          }
+        }
+      },
+      "Signal": {
+        "type": "object",
+        "description": "One advisory flag on a ledger row. `params` carries the evidence numbers the\nclient templates into a localized reason; `link` names the fix surface.",
+        "required": [
+          "kind",
+          "params",
+          "link"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "below_cost | below_target | cost_spike | price_candidate |\nremoval_candidate | recipe_incomplete"
+          },
+          "link": {
+            "type": "string",
+            "description": "Where the fix lives: `pricing` | `studio` | `studio_recipe`."
+          },
+          "params": {
+            "type": "object"
           }
         }
       },
@@ -42247,6 +43014,10 @@
     {
       "name": "reports",
       "description": "Sales analytics and reporting."
+    },
+    {
+      "name": "insights",
+      "description": "Menu profitability: the ranked margin ledger with live advisory signals, margin targets (org default + branch overrides), and the append-only decision log with measured impact."
     },
     {
       "name": "uploads",

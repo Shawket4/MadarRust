@@ -53,6 +53,7 @@ use utoipa::{
         (name = "discounts",    description = "Discount definitions and applicability rules."),
         (name = "bundles",      description = "Combo bundles and bundle pricing."),
         (name = "reports",      description = "Sales analytics and reporting."),
+        (name = "insights",     description = "Menu profitability: the ranked margin ledger with live advisory signals, margin targets (org default + branch overrides), and the append-only decision log with measured impact."),
         (name = "uploads",      description = "Logo and image uploads."),
         (name = "payment_methods", description = "Dynamic payment methods configuration."),
         (name = "costing",      description = "Canonical recipe/addon cost rollups in piastres. NULL cost = unknown, never zero."),
@@ -67,6 +68,13 @@ paths(
         crate::orgs::onboarding::get_onboarding,
         crate::orgs::onboarding::complete_onboarding,
         crate::costing::handlers::list_addon_costs,
+        // ── insights (menu profitability) ─────────────────────────────
+        crate::insights::handlers::menu_margin_ledger,
+        crate::insights::handlers::margin_watch,
+        crate::insights::handlers::get_margin_targets,
+        crate::insights::handlers::put_margin_target,
+        crate::insights::handlers::create_decision,
+        crate::insights::handlers::list_decisions,
         // ── auth ────────────────────────────────────────────────────
         crate::auth::handlers::login,
         crate::auth::handlers::resolve_branch,
