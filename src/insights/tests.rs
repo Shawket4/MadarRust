@@ -169,6 +169,30 @@ async fn seed_costed_recipe(pool: &PgPool, org_id: Uuid, item: Uuid, cost: f64) 
 }
 
 async fn seed_order(pool: &PgPool, branch_id: Uuid, org_id: Uuid) -> Uuid {
+    // Reuse the branch's open shift if one exists (one open shift per till).
+    let existing: Option<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT id, teller_id FROM shifts WHERE branch_id = $1 AND status = 'open' LIMIT 1",
+    )
+    .bind(branch_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap();
+    if let Some((shift, teller)) = existing {
+        return sqlx::query_scalar(
+            "INSERT INTO orders (branch_id, teller_id, shift_id, idempotency_key, subtotal, \
+                 discount_amount, tax_amount, total_amount, status, order_number, payment_method, \
+                 order_ref) \
+             VALUES ($1, $2, $3, gen_random_uuid(), 0, 0, 0, 0, 'completed', \
+                 COALESCE((SELECT MAX(order_number) + 1 FROM orders WHERE shift_id = $3), 1), \
+                 'cash', gen_random_uuid()::text) RETURNING id",
+        )
+        .bind(branch_id)
+        .bind(teller)
+        .bind(shift)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    }
     let teller = seed_user(pool, org_id, "teller").await;
     let shift: Uuid = sqlx::query_scalar(
         "INSERT INTO shifts (branch_id, teller_id, status, opening_cash) \
@@ -665,4 +689,224 @@ async fn test_margin_watch_top_bottom_and_counts(pool: PgPool) {
         "C/D are below target"
     );
     assert_eq!(body["target_pct"].as_f64().unwrap(), 60.0);
+}
+
+#[sqlx::test]
+async fn test_elasticity_tempers_the_suggested_price(pool: PgPool) {
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let admin = seed_user(&pool, org, "org_admin").await;
+    grant(&pool, "orders", "read").await;
+    let token = org_admin_token(admin, org);
+    let cat = seed_category(&pool, org).await;
+
+    // Current window: 6 sold @1200 (unit cost 700) → margin 41.7%, under the
+    // 55% price-candidate bar. The NAIVE target-restoring price would be
+    // 700/(1-0.6) = 1750 → 1800.
+    let item = seed_item(&pool, org, cat, "Learned", 1200).await;
+    seed_costed_recipe(&pool, org, item, 700.0).await;
+    let order = seed_order(&pool, branch, org).await;
+    seed_line(&pool, order, item, "Learned", 1200, 6, Some(700)).await;
+
+    // A measured prior change 40 days ago (outside the 30-day acted-quiet
+    // window, so the signal may speak again) that WORKED, whose (price,
+    // volume) pair teaches elasticity: baseline 28 units @avg 1000 (qpd 1.0,
+    // margin/day 200) → after-window [40d, 12d ago]: 17 units @1200 over 28
+    // days (qpd 0.607, margin/day ≈303). e = ln(0.607)/ln(1.2) ≈ −2.74.
+    sqlx::query(
+        "INSERT INTO menu_decisions \
+             (org_id, branch_id, menu_item_id, size_label, signal_kind, action, baseline, created_at) \
+         VALUES ($1, $2, $3, 'one_size', 'price_candidate', 'acted', \
+                 '{\"window_days\":28,\"quantity\":28,\"revenue\":28000,\"cost\":22400, \
+                   \"margin\":5600,\"margin_pct\":20.0,\"qty_per_day\":1.0}', \
+                 now() - interval '40 days')",
+    )
+    .bind(org)
+    .bind(branch)
+    .bind(item)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // The after-window sales that teach the elasticity (backdated 20 days).
+    let order_after = seed_order(&pool, branch, org).await;
+    seed_line(&pool, order_after, item, "Learned", 1200, 17, Some(700)).await;
+    sqlx::query("UPDATE orders SET created_at = now() - interval '20 days' WHERE id = $1")
+        .bind(order_after)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let app = app(pool.clone()).await;
+    let from = (chrono::Utc::now() - chrono::Duration::days(7))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let body = get_json(
+        &app,
+        &token,
+        &format!("/insights/branches/{branch}/menu-margin?from={from}"),
+    )
+    .await;
+    let pc = body["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["item_name"] == "Learned")
+        .unwrap()["flags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["kind"] == "price_candidate")
+        .expect("price candidate fires (worked ⇒ no caution)")
+        .clone();
+
+    assert_eq!(pc["params"]["last_worked"], true);
+    let e = pc["params"]["elasticity"]
+        .as_f64()
+        .expect("elasticity learned");
+    assert!((-3.0..=-2.6).contains(&e), "e≈−2.8, got {e}");
+    // With demand this elastic, raising price LOSES margin/day — the optimizer
+    // holds at the current realized price instead of the naive 1800.
+    assert_eq!(pc["params"]["suggested_price"].as_i64().unwrap(), 1_200);
+    assert_eq!(
+        pc["params"]["expected_margin_per_day_delta"]
+            .as_f64()
+            .unwrap(),
+        0.0
+    );
+}
+
+#[sqlx::test]
+async fn test_adaptive_bar_and_min_volume_floor(pool: PgPool) {
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let admin = seed_user(&pool, org, "org_admin").await;
+    grant(&pool, "orders", "read").await;
+    let token = org_admin_token(admin, org);
+    let cat = seed_category(&pool, org).await;
+
+    // Three DISTINCT SKUs' below_target signals were dismissed recently and
+    // none acted → the kind's bar rises by (3−0−2)×2 = 2 points.
+    for i in 0..3 {
+        let it = seed_item(&pool, org, cat, &format!("Dismissed{i}"), 1000).await;
+        sqlx::query(
+            "INSERT INTO menu_decisions \
+                 (org_id, branch_id, menu_item_id, size_label, signal_kind, action, baseline) \
+             VALUES ($1, $2, $3, 'one_size', 'below_target', 'dismissed', '{\"margin_pct\": 99.0}')",
+        )
+        .bind(org)
+        .bind(branch)
+        .bind(it)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // SmallGap: 59% margin — under the 60% target but INSIDE the raised bar
+    // (60−2=58) ⇒ no flag. BigGap: 40% ⇒ flags, with the bar disclosed.
+    // TinyQty: 30% margin but only 2 sold ⇒ under the volume floor, no flag.
+    let small = seed_item(&pool, org, cat, "SmallGap", 1000).await;
+    seed_costed_recipe(&pool, org, small, 410.0).await;
+    let big = seed_item(&pool, org, cat, "BigGap", 1000).await;
+    seed_costed_recipe(&pool, org, big, 600.0).await;
+    let tiny = seed_item(&pool, org, cat, "TinyQty", 1000).await;
+    seed_costed_recipe(&pool, org, tiny, 700.0).await;
+    let order = seed_order(&pool, branch, org).await;
+    seed_line(&pool, order, small, "SmallGap", 1000, 6, Some(410)).await;
+    seed_line(&pool, order, big, "BigGap", 1000, 6, Some(600)).await;
+    seed_line(&pool, order, tiny, "TinyQty", 1000, 2, Some(700)).await;
+
+    let app = app(pool.clone()).await;
+    let from = (chrono::Utc::now() - chrono::Duration::days(7))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let body = get_json(
+        &app,
+        &token,
+        &format!("/insights/branches/{branch}/menu-margin?from={from}"),
+    )
+    .await;
+    let flags_of = |name: &str| -> Vec<String> {
+        body["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["item_name"] == name)
+            .unwrap()["flags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["kind"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert!(
+        !flags_of("SmallGap").contains(&"below_target".into()),
+        "59% vs raised bar 58 ⇒ quiet"
+    );
+    assert!(flags_of("BigGap").contains(&"below_target".into()));
+    let bt = body["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["item_name"] == "BigGap")
+        .unwrap()["flags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["kind"] == "below_target")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        bt["params"]["adaptive_bar"].as_f64().unwrap(),
+        2.0,
+        "bar disclosed"
+    );
+    assert!(
+        !flags_of("TinyQty").contains(&"below_target".into()),
+        "2 sold is noise, not evidence"
+    );
+}
+
+#[sqlx::test]
+async fn test_prev_period_revenue_in_totals(pool: PgPool) {
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let admin = seed_user(&pool, org, "org_admin").await;
+    grant(&pool, "orders", "read").await;
+    let token = org_admin_token(admin, org);
+    let cat = seed_category(&pool, org).await;
+
+    let item = seed_item(&pool, org, cat, "Steady", 1000).await;
+    seed_costed_recipe(&pool, org, item, 200.0).await;
+    // Current-window sale + a PREVIOUS-window sale (backdated 10 days).
+    let order_now = seed_order(&pool, branch, org).await;
+    seed_line(&pool, order_now, item, "Steady", 1000, 3, Some(200)).await;
+    let order_prev = seed_order(&pool, branch, org).await;
+    seed_line(&pool, order_prev, item, "Steady", 1000, 5, Some(200)).await;
+    sqlx::query("UPDATE orders SET created_at = now() - interval '10 days' WHERE id = $1")
+        .bind(order_prev)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let app = app(pool.clone()).await;
+    let from = (chrono::Utc::now() - chrono::Duration::days(7))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let body = get_json(
+        &app,
+        &token,
+        &format!("/insights/branches/{branch}/menu-margin?from={from}"),
+    )
+    .await;
+
+    assert_eq!(body["totals"]["revenue"].as_i64().unwrap(), 3_000);
+    assert_eq!(
+        body["totals"]["prev_revenue"].as_i64().unwrap(),
+        5_000,
+        "previous equal-length window revenue feeds the header trend"
+    );
+    let row = body["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["item_name"] == "Steady")
+        .unwrap();
+    assert_eq!(row["prev_quantity"].as_i64().unwrap(), 5);
 }

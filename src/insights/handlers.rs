@@ -46,6 +46,22 @@ const WORSENED_PTS: f64 = 5.0;
 const BASELINE_DAYS: i64 = 28;
 /// Suggested prices round UP to whole EGP (100 piastres).
 const PRICE_ROUND: i64 = 100;
+/// Margin-based signals need at least this many units sold in the window —
+/// two stray sales are noise, not evidence. `below_cost` is exempt (selling
+/// under cost even once is a hard fact worth surfacing).
+const MIN_SIGNAL_QTY: i64 = 5;
+/// Elasticity estimates outside this band are treated as noise and ignored
+/// (F&B own-price elasticity plausibly sits in roughly −0.2…−4).
+const ELASTICITY_BAND: (f64, f64) = (-6.0, -0.05);
+/// Elasticity pairs need this many units on BOTH sides and a ≥2% price move.
+const ELASTICITY_MIN_QTY: f64 = 5.0;
+/// Adaptive thresholds: for each signal kind, every net-dismissed SKU beyond
+/// the grace count raises that kind's evidence bar, capped.
+const ADAPTIVE_GRACE: i64 = 2;
+const ADAPTIVE_PTS_PER: f64 = 2.0;
+const ADAPTIVE_MAX_PTS: f64 = 10.0;
+/// The optimizer never suggests more than this single-step price increase.
+const MAX_PRICE_STEP_PCT: f64 = 25.0;
 
 // ── Wire types ────────────────────────────────────────────────────────────────
 
@@ -231,7 +247,6 @@ struct SalesRow {
     quantity_sold: i64,
     revenue: i64,
     snapshot_cost: Option<i64>,
-    cost_missing_lines: i64,
 }
 
 /// Aggregate non-voided, non-bundle item sales per SKU over a window.
@@ -254,8 +269,7 @@ async fn sales_agg(
             CASE
                 WHEN bool_or(oi.unit_cost IS NULL) THEN NULL
                 ELSE SUM(oi.unit_cost * oi.quantity)::bigint
-            END AS snapshot_cost,
-            COUNT(*) FILTER (WHERE oi.cost_missing)::bigint AS cost_missing_lines
+            END AS snapshot_cost
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
         JOIN menu_items mi ON mi.id = oi.menu_item_id
@@ -453,13 +467,120 @@ async fn suppressions(
     Ok(rows)
 }
 
-/// The measured outcome of the LATEST completed-enough `acted` pricing decision
-/// per SKU at this scope — what "makes the next suggestion better". A decision
-/// needs ≥7 days of after-data before it speaks.
+/// One window spec for the batched SKU aggregate (a decision's after-window).
+struct WindowSpec {
+    item: Uuid,
+    size_label: String,
+    /// `None` = every branch in the org.
+    branch: Option<Uuid>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WindowStats {
+    quantity: i64,
+    revenue: i64,
+    /// `None` = any line's snapshot cost unknown, or no sales at all.
+    cost: Option<i64>,
+    days: f64,
+}
+
+/// Aggregate MANY (SKU, branch-scope, window) specs in ONE round trip — the
+/// per-decision loop this replaces was an N+1 on the ledger hot path.
+async fn sku_windows_batch(
+    pool: &PgPool,
+    org_branches: &[Uuid],
+    specs: &[WindowSpec],
+) -> Result<Vec<WindowStats>, AppError> {
+    if specs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let idxs: Vec<i64> = (0..specs.len() as i64).collect();
+    let items: Vec<Uuid> = specs.iter().map(|s| s.item).collect();
+    let sizes: Vec<String> = specs.iter().map(|s| s.size_label.clone()).collect();
+    let branches: Vec<Option<Uuid>> = specs.iter().map(|s| s.branch).collect();
+    let froms: Vec<DateTime<Utc>> = specs.iter().map(|s| s.from).collect();
+    let tos: Vec<DateTime<Utc>> = specs.iter().map(|s| s.to).collect();
+
+    #[derive(sqlx::FromRow)]
+    struct Agg {
+        idx: i64,
+        quantity: i64,
+        revenue: i64,
+        cost: Option<i64>,
+        lines: i64,
+    }
+    let rows: Vec<Agg> = sqlx::query_as(
+        r#"
+        WITH spec AS (
+            SELECT * FROM UNNEST($1::bigint[], $2::uuid[], $3::text[], $4::uuid[],
+                                 $5::timestamptz[], $6::timestamptz[])
+                AS t(idx, item_id, size_label, branch_id, w_from, w_to)
+        )
+        SELECT s.idx,
+               COALESCE(SUM(oi.quantity), 0)::bigint   AS quantity,
+               COALESCE(SUM(oi.line_total), 0)::bigint AS revenue,
+               CASE WHEN COUNT(oi.id) = 0 THEN NULL
+                    WHEN bool_or(oi.unit_cost IS NULL) THEN NULL
+                    ELSE SUM(oi.unit_cost * oi.quantity)::bigint END AS cost,
+               COUNT(oi.id)::bigint AS lines
+        FROM spec s
+        LEFT JOIN orders o
+               ON o.status != 'voided'
+              AND o.created_at >= s.w_from AND o.created_at < s.w_to
+              AND ((s.branch_id IS NOT NULL AND o.branch_id = s.branch_id)
+                   OR (s.branch_id IS NULL AND o.branch_id = ANY($7)))
+        LEFT JOIN order_items oi
+               ON oi.order_id = o.id
+              AND oi.bundle_id IS NULL
+              AND oi.menu_item_id = s.item_id
+              AND COALESCE(oi.size_label::text, 'one_size') = s.size_label
+        GROUP BY s.idx
+        ORDER BY s.idx
+        "#,
+    )
+    .bind(&idxs)
+    .bind(&items)
+    .bind(&sizes)
+    .bind(&branches)
+    .bind(&froms)
+    .bind(&tos)
+    .bind(org_branches)
+    .fetch_all(pool)
+    .await?;
+
+    let mut out: Vec<WindowStats> = specs
+        .iter()
+        .map(|s| WindowStats {
+            quantity: 0,
+            revenue: 0,
+            cost: None,
+            days: ((s.to - s.from).num_seconds() as f64 / 86_400.0).max(0.01),
+        })
+        .collect();
+    for r in rows {
+        let i = r.idx as usize;
+        out[i].quantity = r.quantity;
+        out[i].revenue = r.revenue;
+        // COUNT(oi)=0 rows come back with quantity 0 + cost NULL — the "no
+        // sales" shape callers already expect.
+        out[i].cost = if r.lines == 0 { None } else { r.cost };
+    }
+    Ok(out)
+}
+
+/// What the org's ACTED pricing decisions have measurably taught us per SKU at
+/// this scope. A decision needs ≥7 days of after-data before it speaks.
 struct PriorOutcome {
-    /// Δ margin/day (after − baseline), piastres. Negative = the change hurt.
+    /// Δ margin/day (after − baseline) of the LATEST measured change, piastres.
     margin_per_day_delta: f64,
     qty_per_day_delta: f64,
+    /// Own-price elasticity estimated from measured (price, volume) pairs —
+    /// median of log-arc estimates over this SKU's acted decisions. `None`
+    /// until at least one clean pair exists (adequate volume both sides,
+    /// ≥2% realized price move, estimate inside the sanity band).
+    elasticity: Option<f64>,
 }
 
 async fn prior_pricing_outcomes(
@@ -475,11 +596,12 @@ async fn prior_pricing_outcomes(
         baseline: serde_json::Value,
         created_at: DateTime<Utc>,
     }
-    // Latest acted pricing decision per SKU at this scope, old enough to measure.
+    // ALL measurable acted pricing decisions at this scope (latest first): the
+    // newest drives the caution rule; every clean pair feeds the elasticity
+    // estimate.
     let rows: Vec<Row> = sqlx::query_as(
         r#"
-        SELECT DISTINCT ON (menu_item_id, size_label)
-               menu_item_id, size_label, branch_id, baseline, created_at
+        SELECT menu_item_id, size_label, branch_id, baseline, created_at
         FROM menu_decisions
         WHERE org_id = $1
           AND (branch_id IS NULL OR branch_id = $2)
@@ -494,6 +616,9 @@ async fn prior_pricing_outcomes(
     .bind(branch_scope)
     .fetch_all(pool)
     .await?;
+    if rows.is_empty() {
+        return Ok(Default::default());
+    }
 
     let org_branches: Vec<Uuid> = if rows.iter().any(|r| r.branch_id.is_none()) {
         sqlx::query_scalar("SELECT id FROM branches WHERE org_id = $1")
@@ -505,45 +630,106 @@ async fn prior_pricing_outcomes(
     };
 
     let now = Utc::now();
-    let mut out = std::collections::HashMap::new();
-    for r in rows {
-        let (Some(base_mpd), Some(base_qpd)) = (
-            r.baseline["margin"]
-                .as_f64()
-                .zip(r.baseline["window_days"].as_f64())
-                .map(|(m, d)| m / d.max(0.01)),
+    let specs: Vec<WindowSpec> = rows
+        .iter()
+        .map(|r| WindowSpec {
+            item: r.menu_item_id,
+            size_label: r.size_label.clone(),
+            branch: r.branch_id,
+            from: r.created_at,
+            to: (r.created_at + Duration::days(BASELINE_DAYS)).min(now),
+        })
+        .collect();
+    let afters = sku_windows_batch(pool, &org_branches, &specs).await?;
+
+    let mut out: std::collections::HashMap<(Uuid, String), PriorOutcome> = Default::default();
+    let mut elasticity_pairs: std::collections::HashMap<(Uuid, String), Vec<f64>> =
+        Default::default();
+
+    for (r, after) in rows.iter().zip(afters.iter()) {
+        let key = (r.menu_item_id, r.size_label.clone());
+        let (Some(base_m), Some(base_days), Some(base_qpd), Some(base_qty), Some(base_rev)) = (
+            r.baseline["margin"].as_f64(),
+            r.baseline["window_days"].as_f64(),
             r.baseline["qty_per_day"].as_f64(),
+            r.baseline["quantity"].as_f64(),
+            r.baseline["revenue"].as_f64(),
         ) else {
-            continue; // baseline margin unknown — nothing to learn from
+            continue; // baseline incomplete — nothing to learn from
         };
-        let branch_ids: Vec<Uuid> = match r.branch_id {
-            Some(b) => vec![b],
-            None => org_branches.clone(),
+        let Some(after_margin) = after.cost.map(|c| (after.revenue - c) as f64) else {
+            continue; // after-window cost unknown
         };
-        let window_end = (r.created_at + Duration::days(BASELINE_DAYS)).min(now);
-        let after = sku_window(
-            pool,
-            &branch_ids,
-            r.menu_item_id,
-            &r.size_label,
-            r.created_at,
-            window_end,
-        )
-        .await?;
-        let (Some(after_m), Some(after_d)) =
-            (after["margin"].as_f64(), after["window_days"].as_f64())
-        else {
-            continue; // after-window margin unknown
-        };
-        out.insert(
-            (r.menu_item_id, r.size_label),
-            PriorOutcome {
-                margin_per_day_delta: after_m / after_d.max(0.01) - base_mpd,
-                qty_per_day_delta: after["qty_per_day"].as_f64().unwrap_or(0.0) - base_qpd,
-            },
-        );
+
+        // Latest decision per SKU (rows are DESC) drives the caution deltas.
+        let after_qpd = after.quantity as f64 / after.days;
+        out.entry(key.clone()).or_insert_with(|| PriorOutcome {
+            margin_per_day_delta: after_margin / after.days - base_m / base_days.max(0.01),
+            qty_per_day_delta: after_qpd - base_qpd,
+            elasticity: None,
+        });
+
+        // Elasticity pair: realized average unit price before vs after (derived
+        // from order history itself — no reliance on operator-typed details).
+        if base_qty >= ELASTICITY_MIN_QTY && after.quantity as f64 >= ELASTICITY_MIN_QTY {
+            let p0 = base_rev / base_qty;
+            let p1 = after.revenue as f64 / after.quantity as f64;
+            if p0 > 0.0 && p1 > 0.0 && (p1 / p0 - 1.0).abs() >= 0.02 && base_qpd > 0.0 {
+                let e = (after_qpd / base_qpd).ln() / (p1 / p0).ln();
+                if e >= ELASTICITY_BAND.0 && e <= ELASTICITY_BAND.1 {
+                    elasticity_pairs.entry(key).or_default().push(e);
+                }
+            }
+        }
+    }
+
+    // Median elasticity per SKU (robust to one weird period).
+    for (key, mut es) in elasticity_pairs {
+        es.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median = es[es.len() / 2];
+        if let Some(o) = out.get_mut(&key) {
+            o.elasticity = Some(median);
+        }
     }
     Ok(out)
+}
+
+/// Per-kind adaptive evidence bars learned from the org's dismissal patterns at
+/// this scope: every net-dismissed SKU of a kind beyond the grace count raises
+/// that kind's bar (capped). Hard facts (`below_cost`, `cost_spike`) never damp.
+async fn kind_bars(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_scope: Option<Uuid>,
+) -> Result<std::collections::HashMap<String, f64>, AppError> {
+    let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+        r#"
+        SELECT signal_kind,
+               COUNT(DISTINCT (menu_item_id, size_label))
+                   FILTER (WHERE action IN ('dismissed', 'snoozed'))::bigint AS dismissed,
+               COUNT(DISTINCT (menu_item_id, size_label))
+                   FILTER (WHERE action = 'acted')::bigint AS acted
+        FROM menu_decisions
+        WHERE org_id = $1
+          AND (branch_id IS NULL OR branch_id = $2)
+          AND created_at > now() - interval '90 days'
+        GROUP BY signal_kind
+        "#,
+    )
+    .bind(org_id)
+    .bind(branch_scope)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter(|(kind, ..)| kind != "below_cost" && kind != "cost_spike")
+        .map(|(kind, dismissed, acted)| {
+            let extra = ((dismissed - acted - ADAPTIVE_GRACE).max(0) as f64 * ADAPTIVE_PTS_PER)
+                .min(ADAPTIVE_MAX_PTS);
+            (kind, extra)
+        })
+        .filter(|(_, extra)| *extra > 0.0)
+        .collect())
 }
 
 struct Ledger {
@@ -601,26 +787,47 @@ async fn build_ledger(
         _ => (None, None),
     };
 
-    let sales = sales_agg(pool, branch_ids, from, to).await?;
-    let prev = if prev_from.is_some() {
-        sales_agg(pool, branch_ids, prev_from, prev_to).await?
-    } else {
-        Vec::new()
+    // Every input is independent — fetch concurrently (this runs on the
+    // dashboard home page; serial awaits were pure added latency).
+    let prev_fut = async {
+        if prev_from.is_some() {
+            sales_agg(pool, branch_ids, prev_from, prev_to).await
+        } else {
+            Ok(Vec::new())
+        }
     };
-    let catalog = catalog_skus(pool, org_id).await?;
-    let (target_pct, target_source) = resolve_target(pool, org_id, branch_scope).await?;
-    let spikes = cost_spikes(pool, org_id, from, to).await?;
-    let supp = suppressions(pool, org_id, branch_scope).await?;
-    let outcomes = prior_pricing_outcomes(pool, org_id, branch_scope).await?;
+    let (sales, prev, catalog, (target_pct, target_source), spikes, supp, outcomes, bars, skus) = tokio::try_join!(
+        sales_agg(pool, branch_ids, from, to),
+        prev_fut,
+        catalog_skus(pool, org_id),
+        resolve_target(pool, org_id, branch_scope),
+        cost_spikes(pool, org_id, from, to),
+        suppressions(pool, org_id, branch_scope),
+        prior_pricing_outcomes(pool, org_id, branch_scope),
+        kind_bars(pool, org_id, branch_scope),
+        crate::costing::org_sku_costs(pool, org_id, branch_scope),
+    )?;
 
     // Current recipe rollups: the cost source under `current`, and the
     // recipe-incomplete signal under both bases.
-    let current_costs: std::collections::HashMap<(Uuid, String), Option<i64>> =
-        crate::costing::org_sku_costs(pool, org_id, branch_scope)
-            .await?
-            .into_iter()
-            .map(|s| ((s.menu_item_id, s.size_label), s.cost))
-            .collect();
+    let current_costs: std::collections::HashMap<(Uuid, String), Option<i64>> = skus
+        .into_iter()
+        .map(|s| ((s.menu_item_id, s.size_label), s.cost))
+        .collect();
+
+    // Previous-period revenue total (for the header trend) — from the same
+    // prev fetch, before it is consumed into the per-SKU map.
+    let prev_revenue_total: i64 = prev.iter().map(|r| r.revenue).sum();
+
+    // Window length in days — turns the current window's quantities into a
+    // rate for the elasticity forecast. `None` for open-ended windows.
+    let window_days: Option<f64> = match (from, to) {
+        (Some(f), t) => {
+            let t = t.unwrap_or_else(Utc::now);
+            (t > f).then(|| ((t - f).num_seconds() as f64 / 86_400.0).max(0.01))
+        }
+        _ => None,
+    };
 
     let prev_by: std::collections::HashMap<(Uuid, String), (i64, Option<i64>)> = prev
         .into_iter()
@@ -753,39 +960,83 @@ async fn build_ledger(
             .map(|c| c.is_none())
             .unwrap_or(false);
 
+        // Adaptive bars: kinds this org keeps dismissing need stronger evidence.
+        let bar = |kind: &str| bars.get(kind).copied().unwrap_or(0.0);
+
         if let (Some(m), true) = (r.margin, r.quantity_sold > 0)
             && m < 0
         {
+            // A hard fact — no volume floor, no adaptive damping.
             flags.push(Signal {
                 kind: "below_cost".into(),
                 params: json!({ "margin": m, "revenue": r.revenue, "cost": r.cost }),
                 link: "pricing".into(),
             });
         } else if let Some(pct) = r.margin_pct
-            && pct < target_pct
-            && r.quantity_sold > 0
+            && pct < target_pct - bar("below_target")
+            && r.quantity_sold >= MIN_SIGNAL_QTY
         {
+            let mut params = json!({
+                "margin_pct": (pct * 10.0).round() / 10.0,
+                "target_pct": target_pct,
+            });
+            if bar("below_target") > 0.0 {
+                // Transparency: tell the operator the bar was raised (and why).
+                params["adaptive_bar"] = json!(bar("below_target"));
+            }
             flags.push(Signal {
                 kind: "below_target".into(),
-                params: json!({ "margin_pct": (pct * 10.0).round() / 10.0, "target_pct": target_pct }),
+                params,
                 link: "pricing".into(),
             });
         }
         if let Some(pct) = r.margin_pct
             && r.quantity_sold >= qty_q3
-            && pct < target_pct - PRICE_BUFFER_PCT
+            && pct < target_pct - PRICE_BUFFER_PCT - bar("price_candidate")
             && let Some(cost) = r.cost
-            && r.quantity_sold > 0
+            && r.quantity_sold >= MIN_SIGNAL_QTY
         {
-            // Unit economics: suggested unit price = unit cost ÷ (1 − target).
+            // Baseline suggestion: the target-restoring price (cost ÷ (1−target)).
             let unit_cost = cost as f64 / r.quantity_sold as f64;
-            let raw = unit_cost / (1.0 - target_pct / 100.0);
-            let suggested = ((raw / PRICE_ROUND as f64).ceil() as i64) * PRICE_ROUND;
-            // OUTCOME-AWARE (per branch scope): if the LAST acted pricing
-            // decision on this SKU measurably reduced net margin/day (volume
-            // fell harder than margin rose), do NOT push a higher price again —
-            // advise holding/reverting, with the measured evidence attached.
+            let target_price_raw = unit_cost / (1.0 - target_pct / 100.0);
+            let round_up =
+                |p: f64| -> i64 { ((p / PRICE_ROUND as f64).ceil() as i64) * PRICE_ROUND };
+            let mut suggested = round_up(target_price_raw);
+            let mut expected_mpd_delta: Option<f64> = None;
+
             let prior = outcomes.get(&(r.menu_item_id, r.size_label.clone()));
+
+            // ELASTICITY-AWARE OPTIMIZATION: when this SKU's measured history
+            // yields an elasticity estimate, don't jump straight to the
+            // target-restoring price — walk the price grid and pick the point
+            // maximizing expected margin/day under a constant-elasticity demand
+            // model (q ∝ p^E), bounded by the target price and a max step.
+            if let (Some(o), Some(days)) = (prior, window_days)
+                && let Some(e) = o.elasticity
+                && r.quantity_sold > 0
+                && r.revenue > 0
+            {
+                let p0 = r.revenue as f64 / r.quantity_sold as f64; // realized avg price
+                let qpd0 = r.quantity_sold as f64 / days;
+                let mpd0 = (p0 - unit_cost) * qpd0;
+                let cap = (p0 * (1.0 + MAX_PRICE_STEP_PCT / 100.0))
+                    .min(target_price_raw.max(p0 + PRICE_ROUND as f64));
+                let mut best = (round_up(p0), mpd0);
+                let mut p = p0 + PRICE_ROUND as f64;
+                while p <= cap + 0.001 {
+                    let qpd = qpd0 * (p / p0).powf(e);
+                    let mpd = (p - unit_cost) * qpd;
+                    if mpd > best.1 {
+                        best = (round_up(p), mpd);
+                    }
+                    p += PRICE_ROUND as f64;
+                }
+                suggested = best.0;
+                expected_mpd_delta = Some(best.1 - mpd0);
+            }
+
+            // OUTCOME CAUTION: the latest measured change on this SKU HURT net
+            // margin — advise holding/reverting instead of pushing higher.
             let params = match prior {
                 Some(o) if o.margin_per_day_delta < 0.0 => json!({
                     "margin_pct": (pct * 10.0).round() / 10.0,
@@ -794,13 +1045,22 @@ async fn build_ledger(
                     "last_margin_per_day_delta": o.margin_per_day_delta.round(),
                     "last_qty_per_day_delta": (o.qty_per_day_delta * 100.0).round() / 100.0,
                 }),
-                _ => json!({
-                    "margin_pct": (pct * 10.0).round() / 10.0,
-                    "target_pct": target_pct,
-                    "suggested_price": suggested,
-                    // A prior change that WORKED is evidence the price has room.
-                    "last_worked": prior.map(|o| o.margin_per_day_delta > 0.0),
-                }),
+                _ => {
+                    let mut p = json!({
+                        "margin_pct": (pct * 10.0).round() / 10.0,
+                        "target_pct": target_pct,
+                        "suggested_price": suggested,
+                        // A prior change that WORKED is evidence the price has room.
+                        "last_worked": prior.map(|o| o.margin_per_day_delta > 0.0),
+                    });
+                    if let Some(e) = prior.and_then(|o| o.elasticity) {
+                        p["elasticity"] = json!((e * 100.0).round() / 100.0);
+                    }
+                    if let Some(d) = expected_mpd_delta {
+                        p["expected_margin_per_day_delta"] = json!(d.round());
+                    }
+                    p
+                }
             };
             flags.push(Signal {
                 kind: "price_candidate".into(),
@@ -808,7 +1068,13 @@ async fn build_ledger(
                 link: "pricing".into(),
             });
         }
-        if r.on_menu && r.quantity_sold == 0 && from.is_some() {
+        // Removal: when the org keeps dismissing these, require the DOUBLE
+        // signal — unsold this period AND the previous one.
+        if r.on_menu
+            && r.quantity_sold == 0
+            && from.is_some()
+            && (bar("removal_candidate") <= 0.0 || r.prev_quantity == 0)
+        {
             flags.push(Signal {
                 kind: "removal_candidate".into(),
                 params: json!({}),
@@ -848,7 +1114,7 @@ async fn build_ledger(
         .filter(|r| r.cost.is_none() && r.quantity_sold > 0)
         .map(|r| r.revenue)
         .sum();
-    let prev_revenue = 0_i64; // filled below from prev rows we folded in
+    let prev_revenue = prev_revenue_total;
     let prev_margin_known: i64 = rows.iter().filter_map(|r| r.prev_margin).sum();
     let below_target_gap: i64 = rows
         .iter()
@@ -980,7 +1246,7 @@ pub async fn menu_margin_ledger(
         Some(*branch_id)
     };
 
-    let mut ledger = build_ledger(
+    let ledger = build_ledger(
         pool.get_ref(),
         org_id,
         &branch_ids,
@@ -990,16 +1256,6 @@ pub async fn menu_margin_ledger(
         basis,
     )
     .await?;
-
-    // Previous-period revenue total (cheap second pass over prev rows already
-    // folded per-SKU is not enough for revenue — sum directly).
-    if let (Some(f), t) = (query.from, query.to) {
-        let t = t.unwrap_or_else(Utc::now);
-        if t > f {
-            let prev = sales_agg(pool.get_ref(), &branch_ids, Some(f - (t - f)), Some(f)).await?;
-            ledger.totals.prev_revenue = prev.iter().map(|r| r.revenue).sum();
-        }
-    }
 
     Ok(HttpResponse::Ok().json(MarginLedgerReport {
         branch_id: *branch_id,
@@ -1369,30 +1625,54 @@ pub async fn list_decisions(
         .fetch_all(pool.get_ref())
         .await?;
 
+    // One batched round trip for every measurable decision's after-window
+    // (the per-decision loop was an N+1 with up to `limit` queries).
     let now = Utc::now();
-    let mut out = Vec::with_capacity(rows.len());
-    for r in rows {
-        let branch_ids: Vec<Uuid> = match r.branch_id {
-            Some(b) => vec![b],
-            None => org_branches.clone(),
-        };
-        let window_end = (r.created_at + Duration::days(BASELINE_DAYS)).min(now);
-        let impact = if now > r.created_at + Duration::days(1) {
-            Some(
-                sku_window(
-                    pool.get_ref(),
-                    &branch_ids,
-                    r.menu_item_id,
-                    &r.size_label,
-                    r.created_at,
-                    window_end,
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
-        out.push(DecisionOut {
+    let measurable: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| now > r.created_at + Duration::days(1))
+        .map(|(i, _)| i)
+        .collect();
+    let specs: Vec<WindowSpec> = measurable
+        .iter()
+        .map(|&i| {
+            let r = &rows[i];
+            WindowSpec {
+                item: r.menu_item_id,
+                size_label: r.size_label.clone(),
+                branch: r.branch_id,
+                from: r.created_at,
+                to: (r.created_at + Duration::days(BASELINE_DAYS)).min(now),
+            }
+        })
+        .collect();
+    let stats = sku_windows_batch(pool.get_ref(), &org_branches, &specs).await?;
+    let mut impacts: std::collections::HashMap<usize, serde_json::Value> = Default::default();
+    for (&i, s) in measurable.iter().zip(stats.iter()) {
+        let margin = s.cost.map(|c| s.revenue - c);
+        impacts.insert(
+            i,
+            json!({
+                "window_days": (s.days * 10.0).round() / 10.0,
+                "quantity": s.quantity,
+                "revenue": s.revenue,
+                "cost": s.cost,
+                "margin": margin,
+                "margin_pct": match (margin, s.revenue) {
+                    (Some(m), rev) if rev > 0 =>
+                        Some((m as f64 / rev as f64 * 1000.0).round() / 10.0),
+                    _ => None,
+                },
+                "qty_per_day": ((s.quantity as f64 / s.days) * 100.0).round() / 100.0,
+            }),
+        );
+    }
+
+    let out: Vec<DecisionOut> = rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| DecisionOut {
             id: r.id,
             branch_id: r.branch_id,
             menu_item_id: r.menu_item_id,
@@ -1404,10 +1684,10 @@ pub async fn list_decisions(
             baseline: r.baseline,
             created_by: r.created_by,
             created_at: r.created_at,
-            impact,
+            impact: impacts.remove(&i),
             impact_complete: now >= r.created_at + Duration::days(BASELINE_DAYS),
-        });
-    }
+        })
+        .collect();
 
     Ok(HttpResponse::Ok().json(out))
 }
