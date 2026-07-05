@@ -35847,6 +35847,13 @@
               "null"
             ]
           },
+          "class": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Classic menu-engineering class (Kasavana–Smith): `star` | `workhorse` |\n`challenge` | `dog`. High/low popularity splits at the 70%-rule\nthreshold (0.70/n of tracked units); high/low profit splits at the\nweighted-average unit contribution margin. `null` for rows that can't\nbe classified (no sales in the period, or cost unknown)."
+          },
           "cost": {
             "type": [
               "integer",
@@ -35893,6 +35900,14 @@
           "on_menu": {
             "type": "boolean",
             "description": "False when this SKU no longer exists on the active menu (historical\nsales under a removed size/item)."
+          },
+          "popularity_pct": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "This SKU's share of tracked units (the popularity axis), when classified."
           },
           "prev_margin": {
             "type": [

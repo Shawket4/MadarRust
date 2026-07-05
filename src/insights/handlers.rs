@@ -94,6 +94,14 @@ pub struct MarginLedgerRow {
     /// Previous equal-length period, for the trend column.
     pub prev_quantity: i64,
     pub prev_margin: Option<i64>,
+    /// Classic menu-engineering class (Kasavana–Smith): `star` | `workhorse` |
+    /// `challenge` | `dog`. High/low popularity splits at the 70%-rule
+    /// threshold (0.70/n of tracked units); high/low profit splits at the
+    /// weighted-average unit contribution margin. `null` for rows that can't
+    /// be classified (no sales in the period, or cost unknown).
+    pub class: Option<String>,
+    /// This SKU's share of tracked units (the popularity axis), when classified.
+    pub popularity_pct: Option<f64>,
     pub flags: Vec<Signal>,
 }
 
@@ -540,6 +548,8 @@ async fn build_ledger(
                 margin_share_pct: None,
                 prev_quantity: 0,
                 prev_margin: None,
+                class: None,
+                popularity_pct: None,
                 flags: Vec::new(),
             },
         );
@@ -571,6 +581,8 @@ async fn build_ledger(
                 margin_share_pct: None,
                 prev_quantity: 0,
                 prev_margin: None,
+                class: None,
+                popularity_pct: None,
                 flags: Vec::new(),
             });
         entry.quantity_sold = s.quantity_sold;
@@ -727,6 +739,54 @@ async fn build_ledger(
                 .map(|m| (m as f64 / margin_known as f64 * 1000.0).round() / 10.0);
         }
     }
+
+    // ── Classic menu-engineering class (the star/workhorse/challenge/dog
+    // vocabulary operators already know) — a secondary lens over the same rows,
+    // Kasavana–Smith as the retired report computed it: popularity splits at
+    // the 70%-rule threshold (0.70/n of tracked units), profit at the
+    // weighted-average unit contribution margin. Only rows that SOLD with a
+    // KNOWN margin are classified; zero-sale / cost-unknown rows stay `null`
+    // rather than being force-binned (honesty over false precision).
+    {
+        let classified: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.quantity_sold > 0 && r.margin.is_some())
+            .map(|(i, _)| i)
+            .collect();
+        if !classified.is_empty() {
+            let total_units: i64 = classified.iter().map(|&i| rows[i].quantity_sold).sum();
+            let pop_threshold = 0.70 / classified.len() as f64;
+            let (tracked_profit, tracked_units) =
+                classified.iter().fold((0_i64, 0_i64), |acc, &i| {
+                    (
+                        acc.0 + rows[i].margin.unwrap_or(0),
+                        acc.1 + rows[i].quantity_sold,
+                    )
+                });
+            let avg_unit_profit = if tracked_units > 0 {
+                tracked_profit as f64 / tracked_units as f64
+            } else {
+                0.0
+            };
+            for &i in &classified {
+                let r = &mut rows[i];
+                let pop = r.quantity_sold as f64 / total_units.max(1) as f64;
+                let unit_profit = r.margin.unwrap_or(0) as f64 / r.quantity_sold as f64;
+                r.popularity_pct = Some((pop * 1000.0).round() / 10.0);
+                r.class = Some(
+                    match (pop >= pop_threshold, unit_profit >= avg_unit_profit) {
+                        (true, true) => "star",
+                        (true, false) => "workhorse",
+                        (false, true) => "challenge",
+                        (false, false) => "dog",
+                    }
+                    .into(),
+                );
+            }
+        }
+    }
+
     let rows_cost_unknown = rows
         .iter()
         .filter(|r| r.quantity_sold > 0 && r.cost.is_none())
@@ -867,6 +927,7 @@ pub async fn margin_watch(
         iter.take(3)
             .map(|r| MarginLedgerRow {
                 flags: r.flags.clone(),
+                class: r.class.clone(),
                 item_name: r.item_name.clone(),
                 size_label: r.size_label.clone(),
                 category_name: r.category_name.clone(),

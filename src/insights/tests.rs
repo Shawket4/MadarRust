@@ -319,6 +319,16 @@ async fn test_ledger_ranking_signals_and_honesty(pool: PgPool) {
         "80% margin is above target"
     );
 
+    // Classic menu-engineering class rides along as a secondary lens:
+    // Star (pop 10/18, unit profit 800 > avg ≈577) → star;
+    // Thin (pop 8/18 high, unit profit 300 < avg) → workhorse;
+    // Mystery (unknown cost) + Sleeper (no sales) stay unclassified.
+    assert_eq!(rows[idx("Star")]["class"], "star");
+    assert_eq!(rows[idx("Thin")]["class"], "workhorse");
+    assert!(rows[idx("Mystery")]["class"].is_null());
+    assert!(rows[idx("Sleeper")]["class"].is_null());
+    assert!(rows[idx("Star")]["popularity_pct"].as_f64().unwrap() > 50.0);
+
     // Totals honesty: unknown-cost revenue reported separately, not zeroed in.
     assert_eq!(
         body["totals"]["revenue"].as_i64().unwrap(),
