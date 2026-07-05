@@ -64,9 +64,10 @@ async fn seed_org(pool: &PgPool) -> Uuid {
 
 async fn seed_branch(pool: &PgPool, org_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'Main')")
+    sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, $3)")
         .bind(id)
         .bind(org_id)
+        .bind(format!("Branch {id}"))
         .execute(pool)
         .await
         .unwrap();
@@ -77,10 +78,11 @@ async fn seed_user(pool: &PgPool, org_id: Uuid, role: &str) -> Uuid {
     let user_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO users (id, org_id, name, email, password_hash, role) \
-         VALUES ($1, $2, 'Test User', $3, 'hash', $4::user_role)",
+         VALUES ($1, $2, $3, $4, 'hash', $5::user_role)",
     )
     .bind(user_id)
     .bind(org_id)
+    .bind(format!("User {user_id}"))
     .bind(format!("u-{user_id}@test.com"))
     .bind(role)
     .execute(pool)
@@ -479,6 +481,142 @@ async fn test_decision_records_baseline_and_suppresses_signal(pool: PgPool) {
         has_below_target(&worsened),
         "margin 30% vs baseline 55% ⇒ worsened ⇒ re-raised"
     );
+}
+
+#[sqlx::test]
+async fn test_suppression_is_branch_scoped(pool: PgPool) {
+    let org = seed_org(&pool).await;
+    let branch_a = seed_branch(&pool, org).await;
+    let branch_b = seed_branch(&pool, org).await;
+    let admin = seed_user(&pool, org, "org_admin").await;
+    grant(&pool, "orders", "read").await;
+    grant(&pool, "menu_items", "update").await;
+    let token = org_admin_token(admin, org);
+    let cat = seed_category(&pool, org).await;
+
+    // The same thin-margin SKU sells at BOTH branches.
+    let thin = seed_item(&pool, org, cat, "Thin", 1000).await;
+    seed_costed_recipe(&pool, org, thin, 700.0).await;
+    for br in [branch_a, branch_b] {
+        let order = seed_order(&pool, br, org).await;
+        seed_line(&pool, order, thin, "Thin", 1000, 8, Some(700)).await;
+    }
+
+    let app = app(pool.clone()).await;
+    let from = (chrono::Utc::now() - chrono::Duration::days(7))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let has_flag = |body: &serde_json::Value| {
+        body["rows"].as_array().unwrap().iter().any(|r| {
+            r["item_name"] == "Thin"
+                && r["flags"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|f| f["kind"] == "below_target")
+        })
+    };
+
+    // Dismiss at branch A ONLY.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/insights/decisions?org_id={org}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(json!({
+                "branch_id": branch_a,
+                "menu_item_id": thin,
+                "signal_kind": "below_target",
+                "action": "dismissed",
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 201);
+
+    let led_a = get_json(
+        &app,
+        &token,
+        &format!("/insights/branches/{branch_a}/menu-margin?from={from}"),
+    )
+    .await;
+    let led_b = get_json(
+        &app,
+        &token,
+        &format!("/insights/branches/{branch_b}/menu-margin?from={from}"),
+    )
+    .await;
+    assert!(!has_flag(&led_a), "dismissed at A ⇒ suppressed at A");
+    assert!(
+        has_flag(&led_b),
+        "branches differ — a dismissal at A must NOT silence B"
+    );
+}
+
+#[sqlx::test]
+async fn test_price_candidate_learns_from_prior_outcome(pool: PgPool) {
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let admin = seed_user(&pool, org, "org_admin").await;
+    grant(&pool, "orders", "read").await;
+    let token = org_admin_token(admin, org);
+    let cat = seed_category(&pool, org).await;
+
+    // Thin-margin top seller in the CURRENT window ⇒ price_candidate territory.
+    let thin = seed_item(&pool, org, cat, "Thin", 1000).await;
+    seed_costed_recipe(&pool, org, thin, 700.0).await;
+    let order = seed_order(&pool, branch, org).await;
+    seed_line(&pool, order, thin, "Thin", 1000, 8, Some(700)).await;
+
+    // A PRIOR acted pricing decision 10 days ago whose baseline was much
+    // healthier than what actually happened after (margin/day collapsed):
+    // baseline 28d window: qty 280, margin 84000 ⇒ 3000/day vs the after
+    // window's ~8 units total ⇒ the change measurably hurt.
+    sqlx::query(
+        "INSERT INTO menu_decisions \
+             (org_id, branch_id, menu_item_id, size_label, signal_kind, action, baseline, created_at) \
+         VALUES ($1, $2, $3, 'one_size', 'price_candidate', 'acted', \
+                 '{\"window_days\":28,\"quantity\":280,\"revenue\":280000,\"cost\":196000, \
+                   \"margin\":84000,\"margin_pct\":30.0,\"qty_per_day\":10.0}', \
+                 now() - interval '10 days')",
+    )
+    .bind(org)
+    .bind(branch)
+    .bind(thin)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = app(pool.clone()).await;
+    let from = (chrono::Utc::now() - chrono::Duration::days(7))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let body = get_json(
+        &app,
+        &token,
+        &format!("/insights/branches/{branch}/menu-margin?from={from}"),
+    )
+    .await;
+
+    let pc = body["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["item_name"] == "Thin")
+        .unwrap()["flags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["kind"] == "price_candidate")
+        .expect("still a price candidate (acted 10d ago > suppression handles acted? no — acted suppresses for 30d)")
+        .clone();
+    assert_eq!(
+        pc["params"]["caution"], true,
+        "prior change hurt ⇒ caution, not a higher price"
+    );
+    assert!(
+        pc["params"]["suggested_price"].is_null(),
+        "no escalated suggestion after a failed change"
+    );
+    assert!(pc["params"]["last_margin_per_day_delta"].as_f64().unwrap() < 0.0);
 }
 
 #[sqlx::test]

@@ -424,22 +424,126 @@ struct Suppression {
     baseline_margin_pct: Option<f64>,
 }
 
-async fn suppressions(pool: &PgPool, org_id: Uuid) -> Result<Vec<Suppression>, AppError> {
+/// BRANCH-SCOPED: a decision recorded for branch B only suppresses B's ledger
+/// (branches differ — a dismissal in Zamalek must not silence New Cairo).
+/// Org-wide decisions (branch_id NULL, recorded from the all-branches view)
+/// suppress everywhere; the all-branches ledger honors ONLY org-wide ones.
+async fn suppressions(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_scope: Option<Uuid>,
+) -> Result<Vec<Suppression>, AppError> {
     let rows: Vec<Suppression> = sqlx::query_as(
         r#"
         SELECT DISTINCT ON (menu_item_id, size_label, signal_kind)
                menu_item_id, size_label, signal_kind, action,
                (baseline->>'margin_pct')::float8 AS baseline_margin_pct
         FROM menu_decisions
-        WHERE org_id = $1 AND created_at > now() - make_interval(days => $2)
+        WHERE org_id = $1
+          AND (branch_id IS NULL OR branch_id = $2)
+          AND created_at > now() - make_interval(days => $3)
         ORDER BY menu_item_id, size_label, signal_kind, created_at DESC
         "#,
     )
     .bind(org_id)
+    .bind(branch_scope)
     .bind(SUPPRESS_DAYS as i32)
     .fetch_all(pool)
     .await?;
     Ok(rows)
+}
+
+/// The measured outcome of the LATEST completed-enough `acted` pricing decision
+/// per SKU at this scope — what "makes the next suggestion better". A decision
+/// needs ≥7 days of after-data before it speaks.
+struct PriorOutcome {
+    /// Δ margin/day (after − baseline), piastres. Negative = the change hurt.
+    margin_per_day_delta: f64,
+    qty_per_day_delta: f64,
+}
+
+async fn prior_pricing_outcomes(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_scope: Option<Uuid>,
+) -> Result<std::collections::HashMap<(Uuid, String), PriorOutcome>, AppError> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        menu_item_id: Uuid,
+        size_label: String,
+        branch_id: Option<Uuid>,
+        baseline: serde_json::Value,
+        created_at: DateTime<Utc>,
+    }
+    // Latest acted pricing decision per SKU at this scope, old enough to measure.
+    let rows: Vec<Row> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT ON (menu_item_id, size_label)
+               menu_item_id, size_label, branch_id, baseline, created_at
+        FROM menu_decisions
+        WHERE org_id = $1
+          AND (branch_id IS NULL OR branch_id = $2)
+          AND action = 'acted'
+          AND signal_kind IN ('price_candidate', 'below_target', 'below_cost')
+          AND created_at <= now() - interval '7 days'
+          AND created_at > now() - interval '180 days'
+        ORDER BY menu_item_id, size_label, created_at DESC
+        "#,
+    )
+    .bind(org_id)
+    .bind(branch_scope)
+    .fetch_all(pool)
+    .await?;
+
+    let org_branches: Vec<Uuid> = if rows.iter().any(|r| r.branch_id.is_none()) {
+        sqlx::query_scalar("SELECT id FROM branches WHERE org_id = $1")
+            .bind(org_id)
+            .fetch_all(pool)
+            .await?
+    } else {
+        Vec::new()
+    };
+
+    let now = Utc::now();
+    let mut out = std::collections::HashMap::new();
+    for r in rows {
+        let (Some(base_mpd), Some(base_qpd)) = (
+            r.baseline["margin"]
+                .as_f64()
+                .zip(r.baseline["window_days"].as_f64())
+                .map(|(m, d)| m / d.max(0.01)),
+            r.baseline["qty_per_day"].as_f64(),
+        ) else {
+            continue; // baseline margin unknown — nothing to learn from
+        };
+        let branch_ids: Vec<Uuid> = match r.branch_id {
+            Some(b) => vec![b],
+            None => org_branches.clone(),
+        };
+        let window_end = (r.created_at + Duration::days(BASELINE_DAYS)).min(now);
+        let after = sku_window(
+            pool,
+            &branch_ids,
+            r.menu_item_id,
+            &r.size_label,
+            r.created_at,
+            window_end,
+        )
+        .await?;
+        let (Some(after_m), Some(after_d)) =
+            (after["margin"].as_f64(), after["window_days"].as_f64())
+        else {
+            continue; // after-window margin unknown
+        };
+        out.insert(
+            (r.menu_item_id, r.size_label),
+            PriorOutcome {
+                margin_per_day_delta: after_m / after_d.max(0.01) - base_mpd,
+                qty_per_day_delta: after["qty_per_day"].as_f64().unwrap_or(0.0) - base_qpd,
+            },
+        );
+    }
+    Ok(out)
 }
 
 struct Ledger {
@@ -506,7 +610,8 @@ async fn build_ledger(
     let catalog = catalog_skus(pool, org_id).await?;
     let (target_pct, target_source) = resolve_target(pool, org_id, branch_scope).await?;
     let spikes = cost_spikes(pool, org_id, from, to).await?;
-    let supp = suppressions(pool, org_id).await?;
+    let supp = suppressions(pool, org_id, branch_scope).await?;
+    let outcomes = prior_pricing_outcomes(pool, org_id, branch_scope).await?;
 
     // Current recipe rollups: the cost source under `current`, and the
     // recipe-incomplete signal under both bases.
@@ -630,8 +735,13 @@ async fn build_ledger(
                         (Some(base), Some(now)) => now > base - WORSENED_PTS,
                         _ => true,
                     },
-                    // Acted: quiet for the whole impact window.
-                    _ => true,
+                    // Acted: quiet while the change is measuring or once it
+                    // WORKED — but a measured-BAD outcome re-raises early so
+                    // the caution/revert advice reaches the operator.
+                    _ => !outcomes
+                        .get(&(r.menu_item_id, r.size_label.clone()))
+                        .map(|o| o.margin_per_day_delta < 0.0)
+                        .unwrap_or(false),
                 }
         })
     };
@@ -671,13 +781,30 @@ async fn build_ledger(
             let unit_cost = cost as f64 / r.quantity_sold as f64;
             let raw = unit_cost / (1.0 - target_pct / 100.0);
             let suggested = ((raw / PRICE_ROUND as f64).ceil() as i64) * PRICE_ROUND;
-            flags.push(Signal {
-                kind: "price_candidate".into(),
-                params: json!({
+            // OUTCOME-AWARE (per branch scope): if the LAST acted pricing
+            // decision on this SKU measurably reduced net margin/day (volume
+            // fell harder than margin rose), do NOT push a higher price again —
+            // advise holding/reverting, with the measured evidence attached.
+            let prior = outcomes.get(&(r.menu_item_id, r.size_label.clone()));
+            let params = match prior {
+                Some(o) if o.margin_per_day_delta < 0.0 => json!({
+                    "margin_pct": (pct * 10.0).round() / 10.0,
+                    "target_pct": target_pct,
+                    "caution": true,
+                    "last_margin_per_day_delta": o.margin_per_day_delta.round(),
+                    "last_qty_per_day_delta": (o.qty_per_day_delta * 100.0).round() / 100.0,
+                }),
+                _ => json!({
                     "margin_pct": (pct * 10.0).round() / 10.0,
                     "target_pct": target_pct,
                     "suggested_price": suggested,
+                    // A prior change that WORKED is evidence the price has room.
+                    "last_worked": prior.map(|o| o.margin_per_day_delta > 0.0),
                 }),
+            };
+            flags.push(Signal {
+                kind: "price_candidate".into(),
+                params,
                 link: "pricing".into(),
             });
         }
