@@ -42,8 +42,14 @@ const ORDER_SELECT: &str =
 // ── Shared summary aggregate columns ──────────────────────────
 /// Aggregate columns hydrating [OrderSummary] (by name, via `FromRow`). Used by
 /// both the list and export summary queries; assumes `orders o` is LEFT JOINed
-/// to `delivery_orders d` (for the channel split).
-const ORDER_SUMMARY_COLS: &str =
+/// to `delivery_orders d` (for the channel split). `exclude_idx`, when set, is
+/// the bind position of a uuid[] of menu_item/bundle ids left out of the
+/// `line_items` count ONLY — every money/count aggregate stays authoritative.
+fn order_summary_cols(exclude_idx: Option<i32>) -> String {
+    let exclude = exclude_idx
+        .map(|i| format!(" AND COALESCE(oi.menu_item_id, oi.bundle_id) != ALL(${i}::uuid[])"))
+        .unwrap_or_default();
+    format!(
     "COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN o.total_amount ELSE 0 END), 0) AS revenue,
      COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN 1 ELSE 0 END), 0) AS completed,
      COALESCE(SUM(CASE WHEN o.status::text = 'voided'    THEN 1 ELSE 0 END), 0) AS voided,
@@ -58,7 +64,23 @@ const ORDER_SUMMARY_COLS: &str =
      COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND d.channel::text = 'outside' THEN 1 ELSE 0 END), 0) AS outside_orders,
      COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND d.channel::text = 'outside' THEN o.total_amount ELSE 0 END), 0) AS outside_revenue,
      COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND d.channel::text = 'outside' THEN o.delivery_fee ELSE 0 END), 0) AS outside_fees,
-     COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN (SELECT COALESCE(SUM(oi.quantity), 0) FROM order_items oi WHERE oi.order_id = o.id) ELSE 0 END), 0)::bigint AS line_items";
+     COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN (SELECT COALESCE(SUM(oi.quantity), 0) FROM order_items oi WHERE oi.order_id = o.id{exclude}) ELSE 0 END), 0)::bigint AS line_items"
+    )
+}
+
+/// Parse a comma-separated uuid list (query-param form for uuid[] filters).
+pub(crate) fn parse_uuid_csv(param: &str, raw: &str) -> Result<Option<Vec<Uuid>>, AppError> {
+    let ids = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            Uuid::parse_str(s)
+                .map_err(|_| AppError::BadRequest(format!("Invalid uuid in {param}: {s}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(if ids.is_empty() { None } else { Some(ids) })
+}
 
 // ── Models ────────────────────────────────────────────────────
 
@@ -415,6 +437,11 @@ pub struct ListOrdersQuery {
     /// [PaginatedOrdersFull]. Lets offline-first clients cache complete
     /// orders in one round trip instead of fetching each order separately.
     pub include_items: Option<bool>,
+    /// Comma-separated menu_item/bundle UUIDs left out of the summary's
+    /// `line_items` count (units sold) — e.g. water bottles or service
+    /// pseudo-items that inflate it. Affects ONLY that KPI: revenue, order
+    /// counts, and the order rows themselves are untouched.
+    pub exclude_items: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -2075,19 +2102,28 @@ pub async fn list_orders(
         .fetch_one(pool.get_ref())
         .await?;
 
+    // Exclusions ride the summary query only ($count_idx is the next free
+    // placeholder after the shared filters, bound last below).
+    let parsed_exclude_items = match &query.exclude_items {
+        Some(raw) => parse_uuid_csv("exclude_items", raw)?,
+        None => None,
+    };
     let summary_sql = format!(
         "SELECT {} \
          FROM orders o JOIN users u ON u.id = o.teller_id \
          LEFT JOIN users w ON w.id = o.waiter_id \
          LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id \
          WHERE {} {}",
-        ORDER_SUMMARY_COLS, scope_condition, count_filter
+        order_summary_cols(parsed_exclude_items.as_ref().map(|_| count_idx)),
+        scope_condition,
+        count_filter
     );
 
-    let summary: OrderSummary =
-        bind_filters!(sqlx::query_as::<_, OrderSummary>(&summary_sql).bind(scope_id))
-            .fetch_one(pool.get_ref())
-            .await?;
+    let mut summary_q = bind_filters!(sqlx::query_as::<_, OrderSummary>(&summary_sql).bind(scope_id));
+    if let Some(ref v) = parsed_exclude_items {
+        summary_q = summary_q.bind(v);
+    }
+    let summary: OrderSummary = summary_q.fetch_one(pool.get_ref()).await?;
 
     let data: Vec<Order> = bind_filters!(sqlx::query_as::<_, Order>(&data_sql).bind(scope_id))
         .bind(per_page)
@@ -3159,7 +3195,9 @@ pub async fn export_orders(
          LEFT JOIN users w ON w.id = o.waiter_id \
          LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id \
          WHERE {} {}",
-        ORDER_SUMMARY_COLS, scope_condition, filter
+        order_summary_cols(None),
+        scope_condition,
+        filter
     );
 
     let summary: OrderSummary =

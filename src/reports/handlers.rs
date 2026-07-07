@@ -25,6 +25,17 @@ pub struct DateRangeQuery {
 
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
+pub struct BranchSalesQuery {
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    pub limit: Option<i64>, // for top_items (default 20)
+    /// Comma-separated menu_item/bundle UUIDs left out of `total_line_items`
+    /// (units sold) ONLY — revenue, top items, and categories are untouched.
+    pub exclude_items: Option<String>,
+}
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct TimeseriesQuery {
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
@@ -314,7 +325,7 @@ pub async fn shift_deductions(
     path = "/reports/branches/{branch_id}/sales",
     tag = "reports",
     params(("branch_id" = Uuid, Path, description = "Branch ID")),
-    params(DateRangeQuery),
+    params(BranchSalesQuery),
     responses((status = 200, description = "Branch sales", body = BranchSalesReport), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
@@ -322,13 +333,18 @@ pub async fn branch_sales(
     req: HttpRequest,
     pool: web::Data<PgPool>,
     branch_id: web::Path<Uuid>,
-    query: web::Query<DateRangeQuery>,
+    query: web::Query<BranchSalesQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
     let (branch_ids, _org) =
         resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
     let branch_name = branch_label(pool.get_ref(), *branch_id).await?;
+
+    let exclude_items = match &query.exclude_items {
+        Some(raw) => crate::orders::handlers::parse_uuid_csv("exclude_items", raw)?,
+        None => None,
+    };
 
     let totals: (i64, i64, i64, i64, i64, i64, i64, serde_json::Value) = sqlx::query_as(
         r#"
@@ -346,6 +362,7 @@ pub async fn branch_sales(
               WHERE o3.branch_id = ANY($1) AND o3.status != 'voided'
                 AND ($2::timestamptz IS NULL OR o3.created_at >= $2)
                 AND ($3::timestamptz IS NULL OR o3.created_at <= $3)
+                AND ($4::uuid[] IS NULL OR COALESCE(oi.menu_item_id, oi.bundle_id) != ALL($4::uuid[]))
             ), 0)::bigint,
             COALESCE((
               SELECT json_object_agg(method, rev) FROM (
@@ -367,6 +384,7 @@ pub async fn branch_sales(
     .bind(&branch_ids)
     .bind(query.from)
     .bind(query.to)
+    .bind(&exclude_items)
     .fetch_one(pool.get_ref())
     .await?;
 

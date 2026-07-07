@@ -831,6 +831,23 @@ async fn test_list_orders(pool: PgPool) {
     assert_eq!(list.data.len(), 2);
     assert_eq!(list.total, 2);
     assert_eq!(list.summary.completed, 2);
+    assert_eq!(list.summary.line_items, 2);
+
+    // exclude_items drops units from the summary count only — combined with
+    // another filter to exercise the dynamic bind indexing (exclude binds last).
+    let req = test::TestRequest::get()
+        .uri(&format!(
+            "/orders?branch_id={}&status=completed&exclude_items={}",
+            branch_id, menu_item_id
+        ))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+    let excluded: PaginatedOrders = test::read_body_json(resp).await;
+    assert_eq!(excluded.summary.line_items, 0);
+    assert_eq!(excluded.summary.completed, 2, "counts must be untouched");
+    assert_eq!(excluded.data.len(), 2, "order rows must be untouched");
 }
 
 #[sqlx::test]

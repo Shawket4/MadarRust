@@ -264,8 +264,24 @@ async fn test_branch_sales(pool: PgPool) {
     let sales: BranchSalesReport = test::read_body_json(resp).await;
     assert_eq!(sales.total_orders, 1);
     assert_eq!(sales.total_revenue, 570);
+    assert_eq!(sales.total_line_items, 1);
     assert_eq!(sales.top_items.len(), 1);
     assert_eq!(sales.by_category.len(), 1);
+
+    // exclude_items drops the item from the units count ONLY.
+    let req = test::TestRequest::get()
+        .uri(&format!(
+            "/reports/branches/{}/sales?exclude_items={}",
+            branch_id, item_id
+        ))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+    let excluded: BranchSalesReport = test::read_body_json(resp).await;
+    assert_eq!(excluded.total_line_items, 0);
+    assert_eq!(excluded.total_revenue, 570, "revenue must be untouched");
+    assert_eq!(excluded.top_items.len(), 1, "top items must be untouched");
 }
 
 #[sqlx::test]

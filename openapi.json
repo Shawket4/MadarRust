@@ -16254,6 +16254,15 @@
             "schema": {
               "type": "boolean"
             }
+          },
+          {
+            "name": "exclude_items",
+            "in": "query",
+            "description": "Comma-separated menu_item/bundle UUIDs left out of the summary's\n`line_items` count (units sold) — e.g. water bottles or service\npseudo-items that inflate it. Affects ONLY that KPI: revenue, order\ncounts, and the order rows themselves are untouched.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -23485,6 +23494,15 @@
             "schema": {
               "type": "integer",
               "format": "int64"
+            }
+          },
+          {
+            "name": "exclude_items",
+            "in": "query",
+            "description": "Comma-separated menu_item/bundle UUIDs left out of `total_line_items`\n(units sold) ONLY — revenue, top items, and categories are untouched.",
+            "required": false,
+            "schema": {
+              "type": "string"
             }
           },
           {
