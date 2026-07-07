@@ -12,7 +12,7 @@ use crate::reports::handlers::{
     AddonSalesRow, BranchComparison, BranchSalesReport, BranchStockReport, BundleSalesRow,
     CategorySales, CombinedItemSalesRow, ConsumptionRow, DeductionLogRow, InventoryValuationReport,
     ItemSales, LowStockRow, OrgComparisonReport, PeakHourPoint, ShiftSummary, ShrinkageRow,
-    StockRow, TellerStats, TimeseriesPoint, WasteReportRow,
+    StockRow, TellerStats, TimeseriesPoint, WaiterStatsReport, WasteReportRow,
 };
 use crate::reports::routes;
 
@@ -450,6 +450,70 @@ async fn test_branch_teller_stats(pool: PgPool) {
     assert_eq!(stats.len(), 1);
     assert_eq!(stats[0].orders, 1);
     assert_eq!(stats[0].revenue, 570);
+}
+
+#[sqlx::test]
+async fn test_branch_waiter_stats(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let waiter_id = seed_user(&pool, org_id, "waiter").await;
+
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+
+    // One waiter-attributed order with 2 + 1 units, one direct teller sale.
+    let attributed = seed_order(&pool, branch_id, user_id, shift_id).await;
+    sqlx::query("UPDATE orders SET waiter_id = $1 WHERE id = $2")
+        .bind(waiter_id)
+        .bind(attributed)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO order_items (order_id, item_name, quantity, unit_price, line_total) VALUES ($1, 'Coffee', 2, 200, 400), ($1, 'Cake', 1, 170, 170)")
+        .bind(attributed)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Direct teller sale (no waiter); inline because seed_order hardcodes
+    // order_number 1 and shifts are unique per open teller.
+    sqlx::query(
+        "INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, customer_name, subtotal, discount_amount, tax_amount, total_amount, status, order_number, payment_method, order_ref)
+         VALUES (gen_random_uuid(), $1, $2, $3, gen_random_uuid(), 'Customer', 500, 0, 70, 570, 'completed', 2, 'cash', gen_random_uuid()::text)"
+    )
+    .bind(branch_id)
+    .bind(user_id)
+    .bind(shift_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/reports/branches/{}/waiters", branch_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+
+    let report: WaiterStatsReport = test::read_body_json(resp).await;
+    assert_eq!(report.attributed_orders, 1);
+    assert_eq!(report.total_orders, 2);
+    assert_eq!(report.waiters.len(), 1, "direct sale must not appear");
+    let w = &report.waiters[0];
+    assert_eq!(w.waiter_id, waiter_id);
+    assert_eq!(w.orders, 1);
+    assert_eq!(w.revenue, 570);
+    assert_eq!(w.line_items, 3, "units sold, not distinct lines");
+    assert!((w.avg_items_per_order - 3.0).abs() < f64::EPSILON);
 }
 
 #[sqlx::test]

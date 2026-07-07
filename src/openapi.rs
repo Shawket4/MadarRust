@@ -307,6 +307,7 @@ paths(
         crate::reports::handlers::branch_sales_timeseries,
         crate::reports::handlers::branch_sales_peak_hours,
         crate::reports::handlers::branch_teller_stats,
+        crate::reports::handlers::branch_waiter_stats,
         crate::reports::handlers::branch_addon_sales,
         crate::reports::handlers::org_branch_comparison,
         crate::reports::handlers::branch_delivery_sales,

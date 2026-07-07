@@ -24177,6 +24177,129 @@
         ]
       }
     },
+    "/reports/branches/{branch_id}/waiters": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "operationId": "branch_waiter_stats",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "branch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Branch waiter stats",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WaiterStatsReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/reports/branches/{branch_id}/waste-report": {
       "get": {
         "tags": [
@@ -30679,6 +30802,11 @@
           "total_discount": {
             "type": "integer",
             "format": "int64"
+          },
+          "total_line_items": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Units sold (SUM of order_items.quantity) across non-voided orders in\nrange. Counts units, not distinct lines (\"3× burger\" contributes 3),\nmatching quantity_sold in the item/category breakdowns."
           },
           "total_orders": {
             "type": "integer",
@@ -37821,6 +37949,11 @@
             "type": "integer",
             "format": "int64"
           },
+          "line_items": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Units sold (SUM of order_items.quantity) across completed orders in\nscope. Counts units, not distinct lines, matching the item-sales\nreports (\"3× burger\" contributes 3)."
+          },
           "outside_fees": {
             "type": "integer",
             "format": "int64"
@@ -42814,6 +42947,82 @@
               "null"
             ],
             "format": "date-time"
+          }
+        }
+      },
+      "WaiterStats": {
+        "type": "object",
+        "description": "Per-waiter sales split. Only waiter-attributed orders appear (dine-in\nsettled from a waiter's ticket — `orders.waiter_id IS NOT NULL`); direct\nteller sales and delivery orders are out of scope, so totals here are a\nsubset of the branch overview. `attributed_orders`/`attributed_revenue`\non the report envelope let the UI caption that gap.",
+        "required": [
+          "waiter_id",
+          "waiter_name",
+          "orders",
+          "revenue",
+          "avg_order_value",
+          "voided",
+          "line_items",
+          "avg_items_per_order"
+        ],
+        "properties": {
+          "avg_items_per_order": {
+            "type": "number",
+            "format": "double",
+            "description": "line_items / orders; 0 when the waiter has no non-voided orders."
+          },
+          "avg_order_value": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "line_items": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Units sold (SUM of order_items.quantity) on this waiter's non-voided\norders — the upsell signal behind avg_items_per_order."
+          },
+          "orders": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "revenue": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "voided": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "waiter_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "waiter_name": {
+            "type": "string"
+          }
+        }
+      },
+      "WaiterStatsReport": {
+        "type": "object",
+        "description": "Envelope for the waiters split: rows plus the branch-level totals needed\nto caption coverage (\"X of Y orders came through waiters\").",
+        "required": [
+          "waiters",
+          "attributed_orders",
+          "total_orders"
+        ],
+        "properties": {
+          "attributed_orders": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Non-voided orders in range that carry a waiter."
+          },
+          "total_orders": {
+            "type": "integer",
+            "format": "int64",
+            "description": "All non-voided orders in range (waiter or not)."
+          },
+          "waiters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WaiterStats"
+            }
           }
         }
       },

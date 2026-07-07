@@ -102,6 +102,11 @@ pub struct BranchSalesReport {
     pub total_discount: i64,
     pub total_tax: i64,
     pub total_revenue: i64,
+    /// Units sold (SUM of order_items.quantity) across non-voided orders in
+    /// range. Counts units, not distinct lines ("3× burger" contributes 3),
+    /// matching quantity_sold in the item/category breakdowns.
+    #[serde(default)]
+    pub total_line_items: i64,
     pub revenue_by_method: serde_json::Value,
     pub top_items: Vec<ItemSales>,
     pub by_category: Vec<CategorySales>,
@@ -149,6 +154,37 @@ pub struct TellerStats {
     pub avg_order_value: i64,
     pub voided: i64,
     pub shifts: i64,
+}
+
+/// Per-waiter sales split. Only waiter-attributed orders appear (dine-in
+/// settled from a waiter's ticket — `orders.waiter_id IS NOT NULL`); direct
+/// teller sales and delivery orders are out of scope, so totals here are a
+/// subset of the branch overview. `attributed_orders`/`attributed_revenue`
+/// on the report envelope let the UI caption that gap.
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct WaiterStats {
+    pub waiter_id: Uuid,
+    pub waiter_name: String,
+    pub orders: i64,
+    pub revenue: i64,
+    pub avg_order_value: i64,
+    pub voided: i64,
+    /// Units sold (SUM of order_items.quantity) on this waiter's non-voided
+    /// orders — the upsell signal behind avg_items_per_order.
+    pub line_items: i64,
+    /// line_items / orders; 0 when the waiter has no non-voided orders.
+    pub avg_items_per_order: f64,
+}
+
+/// Envelope for the waiters split: rows plus the branch-level totals needed
+/// to caption coverage ("X of Y orders came through waiters").
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct WaiterStatsReport {
+    pub waiters: Vec<WaiterStats>,
+    /// Non-voided orders in range that carry a waiter.
+    pub attributed_orders: i64,
+    /// All non-voided orders in range (waiter or not).
+    pub total_orders: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -294,7 +330,7 @@ pub async fn branch_sales(
         resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
     let branch_name = branch_label(pool.get_ref(), *branch_id).await?;
 
-    let totals: (i64, i64, i64, i64, i64, i64, serde_json::Value) = sqlx::query_as(
+    let totals: (i64, i64, i64, i64, i64, i64, i64, serde_json::Value) = sqlx::query_as(
         r#"
         SELECT
             COUNT(*) FILTER (WHERE status != 'voided')::bigint,
@@ -303,6 +339,14 @@ pub async fn branch_sales(
             COALESCE(SUM(discount_amount) FILTER (WHERE status != 'voided'), 0)::bigint,
             COALESCE(SUM(tax_amount)      FILTER (WHERE status != 'voided'), 0)::bigint,
             COALESCE(SUM(total_amount)    FILTER (WHERE status != 'voided'), 0)::bigint,
+            COALESCE((
+              SELECT SUM(oi.quantity)::bigint
+              FROM order_items oi
+              JOIN orders o3 ON o3.id = oi.order_id
+              WHERE o3.branch_id = ANY($1) AND o3.status != 'voided'
+                AND ($2::timestamptz IS NULL OR o3.created_at >= $2)
+                AND ($3::timestamptz IS NULL OR o3.created_at <= $3)
+            ), 0)::bigint,
             COALESCE((
               SELECT json_object_agg(method, rev) FROM (
                 SELECT op.method, SUM(op.amount)::bigint AS rev
@@ -438,7 +482,8 @@ pub async fn branch_sales(
         total_discount: totals.3,
         total_tax: totals.4,
         total_revenue: totals.5,
-        revenue_by_method: totals.6,
+        total_line_items: totals.6,
+        revenue_by_method: totals.7,
         top_items,
         by_category,
     }))
@@ -801,6 +846,95 @@ pub async fn branch_teller_stats(
     .await?;
 
     Ok(HttpResponse::Ok().json(rows))
+}
+
+// ── GET /reports/branches/:id/waiters ────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/reports/branches/{branch_id}/waiters",
+    tag = "reports",
+    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    params(DateRangeQuery),
+    responses((status = 200, description = "Branch waiter stats", body = WaiterStatsReport), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn branch_waiter_stats(
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
+    branch_id: web::Path<Uuid>,
+    query: web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "orders", "read").await?;
+    let (branch_ids, _org) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+
+    // Served by the partial index idx_orders_waiter (WHERE waiter_id IS NOT NULL).
+    let waiters = sqlx::query_as::<_, WaiterStats>(
+        r#"
+        SELECT
+            o.waiter_id,
+            w.name AS waiter_name,
+            COUNT(o.id) FILTER (WHERE o.status != 'voided')::bigint AS orders,
+            COALESCE(SUM(o.total_amount) FILTER (WHERE o.status != 'voided'), 0)::bigint AS revenue,
+            CASE
+                WHEN COUNT(o.id) FILTER (WHERE o.status != 'voided') = 0 THEN 0
+                ELSE (
+                    COALESCE(SUM(o.total_amount) FILTER (WHERE o.status != 'voided'), 0)
+                    / COUNT(o.id) FILTER (WHERE o.status != 'voided')
+                )::bigint
+            END AS avg_order_value,
+            COUNT(o.id) FILTER (WHERE o.status = 'voided')::bigint AS voided,
+            COALESCE(SUM(iq.qty) FILTER (WHERE o.status != 'voided'), 0)::bigint AS line_items,
+            CASE
+                WHEN COUNT(o.id) FILTER (WHERE o.status != 'voided') = 0 THEN 0::float8
+                ELSE COALESCE(SUM(iq.qty) FILTER (WHERE o.status != 'voided'), 0)::float8
+                     / COUNT(o.id) FILTER (WHERE o.status != 'voided')
+            END AS avg_items_per_order
+        FROM orders o
+        JOIN users w ON w.id = o.waiter_id
+        LEFT JOIN LATERAL (
+            SELECT SUM(oi.quantity)::bigint AS qty
+            FROM order_items oi WHERE oi.order_id = o.id
+        ) iq ON true
+        WHERE o.waiter_id IS NOT NULL
+          AND o.branch_id = ANY($1)
+          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
+          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+        GROUP BY o.waiter_id, w.name
+        ORDER BY revenue DESC
+        "#,
+    )
+    .bind(&branch_ids)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    let (attributed_orders, total_orders): (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            COUNT(*) FILTER (WHERE waiter_id IS NOT NULL)::bigint,
+            COUNT(*)::bigint
+        FROM orders
+        WHERE status != 'voided'
+          AND branch_id = ANY($1)
+          AND ($2::timestamptz IS NULL OR created_at >= $2)
+          AND ($3::timestamptz IS NULL OR created_at <= $3)
+        "#,
+    )
+    .bind(&branch_ids)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_one(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(WaiterStatsReport {
+        waiters,
+        attributed_orders,
+        total_orders,
+    }))
 }
 
 // ── GET /reports/branches/:id/addons ─────────────────────────

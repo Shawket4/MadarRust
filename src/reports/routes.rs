@@ -36,6 +36,10 @@ pub fn configure(cfg: &mut web::ServiceConfig, read_pool: web::Data<PgPool>) {
                 web::get().to(handlers::branch_teller_stats),
             )
             .route(
+                "/branches/{branch_id}/waiters",
+                web::get().to(handlers::branch_waiter_stats),
+            )
+            .route(
                 "/branches/{branch_id}/addons",
                 web::get().to(handlers::branch_addon_sales),
             )

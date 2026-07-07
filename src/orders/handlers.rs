@@ -57,7 +57,8 @@ const ORDER_SUMMARY_COLS: &str =
      COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND d.channel::text = 'in_mall' THEN o.delivery_fee ELSE 0 END), 0) AS in_mall_fees,
      COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND d.channel::text = 'outside' THEN 1 ELSE 0 END), 0) AS outside_orders,
      COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND d.channel::text = 'outside' THEN o.total_amount ELSE 0 END), 0) AS outside_revenue,
-     COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND d.channel::text = 'outside' THEN o.delivery_fee ELSE 0 END), 0) AS outside_fees";
+     COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND d.channel::text = 'outside' THEN o.delivery_fee ELSE 0 END), 0) AS outside_fees,
+     COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN (SELECT COALESCE(SUM(oi.quantity), 0) FROM order_items oi WHERE oi.order_id = o.id) ELSE 0 END), 0)::bigint AS line_items";
 
 // ── Models ────────────────────────────────────────────────────
 
@@ -448,6 +449,11 @@ pub struct OrderSummary {
     pub outside_revenue: i64,
     #[serde(default)]
     pub outside_fees: i64,
+    /// Units sold (SUM of order_items.quantity) across completed orders in
+    /// scope. Counts units, not distinct lines, matching the item-sales
+    /// reports ("3× burger" contributes 3).
+    #[serde(default)]
+    pub line_items: i64,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
