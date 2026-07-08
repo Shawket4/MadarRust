@@ -104,6 +104,45 @@ async fn grant(pool: &PgPool, resource: &str, action: &str) {
     .unwrap();
 }
 
+#[sqlx::test]
+async fn repricing_suggests_target_price_and_skips_uncosted(pool: PgPool) {
+    // Espresso: price 100.00, cost 60.00 → 40% margin, below the default 60%
+    // target → suggested 150.00 (uplift 50.00). Croissant: priced but NO recipe
+    // cost → must be COUNTED as cost-unknown, never suggested (no guessed cost).
+    let org = seed_org(&pool).await;
+    seed_branch(&pool, org).await;
+    let user = seed_user(&pool, org, "org_admin").await;
+    grant(&pool, "orders", "read").await;
+    let cat = seed_category(&pool, org).await;
+    let espresso = seed_item(&pool, org, cat, "Espresso", 10000).await;
+    seed_costed_recipe(&pool, org, espresso, 6000.0).await;
+    seed_item(&pool, org, cat, "Croissant", 8000).await; // priced, no recipe cost
+
+    let app = app(pool).await;
+    let req = test::TestRequest::get()
+        .uri(&format!("/insights/branches/{}/repricing", Uuid::nil()))
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", org_admin_token(user, org)),
+        ))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+
+    assert_eq!(body["target_pct"], 60.0);
+    let sugg = body["suggestions"].as_array().unwrap();
+    assert_eq!(sugg.len(), 1, "only the costed, underpriced item");
+    assert_eq!(sugg[0]["item_name"], "Espresso");
+    assert_eq!(sugg[0]["current_price"], 10000);
+    assert_eq!(sugg[0]["cost"], 6000);
+    assert_eq!(sugg[0]["suggested_price"], 15000);
+    assert_eq!(sugg[0]["uplift"], 5000);
+    assert_eq!(sugg[0]["below_cost"], false);
+    // Croissant (no cost) is counted as unknown, not suggested.
+    assert!(body["skus_cost_unknown"].as_i64().unwrap() >= 1);
+}
+
 async fn seed_category(pool: &PgPool, org_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO categories (id, org_id, name) VALUES ($1, $2, 'Drinks')")

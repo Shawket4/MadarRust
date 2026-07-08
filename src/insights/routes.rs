@@ -17,6 +17,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 web::get().to(handlers::margin_watch),
             )
             .route(
+                "/branches/{branch_id}/repricing",
+                web::get().to(handlers::repricing),
+            )
+            .route(
                 "/margin-target",
                 web::get().to(handlers::get_margin_targets),
             )

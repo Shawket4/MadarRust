@@ -74,6 +74,7 @@ paths(
         // ── insights (menu profitability) ─────────────────────────────
         crate::insights::handlers::menu_margin_ledger,
         crate::insights::handlers::margin_watch,
+        crate::insights::handlers::repricing,
         crate::insights::handlers::get_margin_targets,
         crate::insights::handlers::put_margin_target,
         crate::insights::handlers::create_decision,

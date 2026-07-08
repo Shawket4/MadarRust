@@ -608,6 +608,67 @@ async fn branch_narrowing_limits_to_named_branch(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn scope_defaults_to_selected_branch_when_none_named(pool: PgPool) {
+    // No branch named, but the global selector (X-Branch-Id) is on "Branch Two":
+    // the answer follows the selector, not all branches — all backend, the
+    // selector itself is never touched.
+    let org = seed(&pool, "A").await; // Branch A, revenue 5000
+    let branch2 = seed_extra_branch(&pool, org, "Two", 9000).await;
+    let app = app_with(&pool).await; // MockProvider: "revenue" → sales_summary, no branch arg
+
+    let req = test::TestRequest::post()
+        .uri("/ai/chat")
+        .insert_header(("Authorization", format!("Bearer {}", org_admin_token(org))))
+        .insert_header(("X-Branch-Id", branch2.to_string()))
+        .set_json(serde_json::json!({ "question": "total revenue" }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status();
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body["scope"]["all_branches"], false);
+    assert_eq!(body["scope"]["label"], "Branch Two");
+    assert_eq!(body["rows"][0]["revenue"], 9000, "only the selected branch");
+}
+
+#[sqlx::test]
+async fn named_branch_overrides_selected_branch(pool: PgPool) {
+    // Selector on Branch A, but the question names Branch Two → the named branch
+    // wins over the selector default.
+    let org = seed(&pool, "A").await;
+    seed_extra_branch(&pool, org, "Two", 9000).await;
+    let branch_a: Uuid = sqlx::query_scalar("SELECT id FROM branches WHERE name = 'Branch A'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let args = serde_json::json!({ "branch": "Branch Two" })
+        .as_object()
+        .unwrap()
+        .clone();
+    let app = app_with_provider(
+        &pool,
+        Arc::new(ScriptedProvider {
+            report_id: "sales_summary".into(),
+            args,
+        }),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/ai/chat")
+        .insert_header(("Authorization", format!("Bearer {}", org_admin_token(org))))
+        .insert_header(("X-Branch-Id", branch_a.to_string()))
+        .set_json(serde_json::json!({ "question": "sales in branch two" }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status();
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body["scope"]["label"], "Branch Two");
+    assert_eq!(body["rows"][0]["revenue"], 9000);
+}
+
+#[sqlx::test]
 async fn scope_defaults_to_all_accessible_branches(pool: PgPool) {
     // No branch named → cover every branch the user can access, flagged as such.
     let org = seed(&pool, "A").await;

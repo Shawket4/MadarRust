@@ -1270,6 +1270,121 @@ pub async fn menu_margin_ledger(
     }))
 }
 
+/// One repricing suggestion: an underpriced SKU + the price that would restore
+/// the target margin.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RepricingSuggestion {
+    pub menu_item_id: Uuid,
+    pub item_name: String,
+    /// `"one_size"` for items without sizes.
+    pub size_label: String,
+    /// Current selling price, piastres.
+    pub current_price: i64,
+    /// Complete recipe cost, piastres.
+    pub cost: i64,
+    /// `(price − cost) / price`, current.
+    pub margin_pct: f64,
+    /// The org/branch target margin this suggestion aims for.
+    pub target_pct: f64,
+    /// Target-restoring price `ceil(cost / (1 − target))` to whole EGP, piastres.
+    pub suggested_price: i64,
+    /// `suggested_price − current_price`, piastres.
+    pub uplift: i64,
+    /// True when the item currently sells BELOW cost (negative margin).
+    pub below_cost: bool,
+}
+
+/// The repricing surface for a branch (or org-wide).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RepricingReport {
+    pub branch_id: Uuid,
+    pub target_pct: f64,
+    /// `branch` | `org` | `default`.
+    pub target_source: String,
+    /// Underpriced SKUs with a target-restoring suggestion, biggest uplift first.
+    pub suggestions: Vec<RepricingSuggestion>,
+    /// Active priced SKUs whose cost is not fully known — NOT suggested (no
+    /// guessed cost); surfaced so coverage is transparent.
+    pub skus_cost_unknown: i64,
+    /// Active priced SKUs considered in total.
+    pub skus_considered: i64,
+}
+
+#[utoipa::path(
+    get,
+    path = "/insights/branches/{branch_id}/repricing",
+    tag = "insights",
+    params(("branch_id" = Uuid, Path, description = "Branch id (branch-actual costs), or the nil UUID for org-wide (org-standard costs)")),
+    responses((status = 200, description = "Repricing suggestions: underpriced SKUs with a target-restoring price. Items without a COMPLETE recipe cost are excluded (never a guessed cost), so fewer costed recipes just means fewer suggestions — the counts make coverage explicit.", body = RepricingReport)),
+    security(("bearer_auth" = []))
+)]
+pub async fn repricing(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    branch_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "orders", "read").await?;
+    let (_branch_ids, org_id) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+    let branch_scope = if branch_id.is_nil() {
+        None
+    } else {
+        Some(*branch_id)
+    };
+
+    // Reuse the cost engine (single source of truth): current price + current
+    // recipe-cost rollup per SKU, branch-actual when a branch is scoped.
+    let skus = crate::costing::org_sku_costs(pool.get_ref(), org_id, branch_scope).await?;
+    let (target_pct, target_source) = resolve_target(pool.get_ref(), org_id, branch_scope).await?;
+
+    let mut suggestions = Vec::new();
+    let mut considered = 0i64;
+    let mut unknown = 0i64;
+    for s in &skus {
+        if s.price <= 0 {
+            continue;
+        }
+        considered += 1;
+        // Never guess: only a COMPLETE cost yields a suggestion.
+        let cost = match (s.cost, s.cost_missing) {
+            (Some(c), false) => c,
+            _ => {
+                unknown += 1;
+                continue;
+            }
+        };
+        let margin_pct = 100.0 * (s.price - cost) as f64 / s.price as f64;
+        if margin_pct >= target_pct {
+            continue; // already at or above target
+        }
+        // Target-restoring price, rounded up to whole EGP (100 piastres).
+        let suggested = (((cost as f64 / (1.0 - target_pct / 100.0)) / 100.0).ceil() as i64) * 100;
+        suggestions.push(RepricingSuggestion {
+            menu_item_id: s.menu_item_id,
+            item_name: s.item_name.clone(),
+            size_label: s.size_label.clone(),
+            current_price: s.price,
+            cost,
+            margin_pct: (margin_pct * 10.0).round() / 10.0,
+            target_pct,
+            suggested_price: suggested,
+            uplift: suggested - s.price,
+            below_cost: cost > s.price,
+        });
+    }
+    suggestions.sort_by_key(|s| std::cmp::Reverse(s.uplift));
+
+    Ok(HttpResponse::Ok().json(RepricingReport {
+        branch_id: *branch_id,
+        target_pct,
+        target_source: target_source.to_string(),
+        suggestions,
+        skus_cost_unknown: unknown,
+        skus_considered: considered,
+    }))
+}
+
 #[utoipa::path(
     get,
     path = "/insights/branches/{branch_id}/margin-watch",

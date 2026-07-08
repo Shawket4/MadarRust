@@ -8489,6 +8489,43 @@
         ]
       }
     },
+    "/insights/branches/{branch_id}/repricing": {
+      "get": {
+        "tags": [
+          "insights"
+        ],
+        "operationId": "repricing",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch id (branch-actual costs), or the nil UUID for org-wide (org-standard costs)",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Repricing suggestions: underpriced SKUs with a target-restoring price. Items without a COMPLETE recipe cost are excluded (never a guessed cost), so fewer costed recipes just means fewer suggestions — the counts make coverage explicit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepricingReport"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/insights/decisions": {
       "get": {
         "tags": [
@@ -40013,6 +40050,112 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "RepricingReport": {
+        "type": "object",
+        "description": "The repricing surface for a branch (or org-wide).",
+        "required": [
+          "branch_id",
+          "target_pct",
+          "target_source",
+          "suggestions",
+          "skus_cost_unknown",
+          "skus_considered"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "skus_considered": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Active priced SKUs considered in total."
+          },
+          "skus_cost_unknown": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Active priced SKUs whose cost is not fully known — NOT suggested (no\nguessed cost); surfaced so coverage is transparent."
+          },
+          "suggestions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RepricingSuggestion"
+            },
+            "description": "Underpriced SKUs with a target-restoring suggestion, biggest uplift first."
+          },
+          "target_pct": {
+            "type": "number",
+            "format": "double"
+          },
+          "target_source": {
+            "type": "string",
+            "description": "`branch` | `org` | `default`."
+          }
+        }
+      },
+      "RepricingSuggestion": {
+        "type": "object",
+        "description": "One repricing suggestion: an underpriced SKU + the price that would restore\nthe target margin.",
+        "required": [
+          "menu_item_id",
+          "item_name",
+          "size_label",
+          "current_price",
+          "cost",
+          "margin_pct",
+          "target_pct",
+          "suggested_price",
+          "uplift",
+          "below_cost"
+        ],
+        "properties": {
+          "below_cost": {
+            "type": "boolean",
+            "description": "True when the item currently sells BELOW cost (negative margin)."
+          },
+          "cost": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Complete recipe cost, piastres."
+          },
+          "current_price": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Current selling price, piastres."
+          },
+          "item_name": {
+            "type": "string"
+          },
+          "margin_pct": {
+            "type": "number",
+            "format": "double",
+            "description": "`(price − cost) / price`, current."
+          },
+          "menu_item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "size_label": {
+            "type": "string",
+            "description": "`\"one_size\"` for items without sizes."
+          },
+          "suggested_price": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Target-restoring price `ceil(cost / (1 − target))` to whole EGP, piastres."
+          },
+          "target_pct": {
+            "type": "number",
+            "format": "double",
+            "description": "The org/branch target margin this suggestion aims for."
+          },
+          "uplift": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`suggested_price − current_price`, piastres."
           }
         }
       },

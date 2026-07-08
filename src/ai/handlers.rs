@@ -160,37 +160,80 @@ async fn assigned_branches(db: &Db, user_id: Uuid) -> Result<Vec<(Uuid, String)>
     Ok(rows)
 }
 
-/// Resolve the branch set to query + a human-readable scope, from the caller's
-/// accessible branches and the optional branch name the model lifted from the
-/// question. The named branch is fuzzy-matched WITHIN the accessible set, so it
-/// can only ever NARROW the scope, never widen it. An unmatched name falls back
-/// to all accessible branches and is flagged so the answer states what it covered.
-fn resolve_scope(accessible: &[(Uuid, String)], requested: Option<&str>) -> (Vec<Uuid>, ScopeInfo) {
-    let all_ids: Vec<Uuid> = accessible.iter().map(|(id, _)| *id).collect();
-    let all_names: Vec<String> = accessible.iter().map(|(_, n)| n.clone()).collect();
-    let all_label = match all_names.len() {
+/// The branch the dashboard's global selector is on, from the `X-Branch-Id`
+/// header the frontend already sends on every request. `None` = the selector is
+/// on "All branches" (the header is absent, or the all-zeros sentinel). It is
+/// only ever used as a *default* and is always intersected with the accessible
+/// set, so a forged value can never widen scope past the caller's access.
+fn header_branch_id(req: &HttpRequest) -> Option<Uuid> {
+    req.headers()
+        .get("X-Branch-Id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .filter(|id| !id.is_nil())
+}
+
+/// Resolve the branch set to query + a human-readable scope. Priority:
+///   1. a branch NAMED in the question (fuzzy-matched within the accessible set);
+///   2. else the branch the global selector is on (`selected`, the X-Branch-Id
+///      the app already sends), when it is one the caller can access;
+///   3. else every accessible branch.
+///
+/// Every path can only ever NARROW to a subset of the accessible set — a named
+/// branch, a forged/foreign selected id, all resolve within it. This is entirely
+/// backend: the selector is read, never written, so the UI never changes.
+fn resolve_scope(
+    accessible: &[(Uuid, String)],
+    requested: Option<&str>,
+    selected: Option<Uuid>,
+) -> (Vec<Uuid>, ScopeInfo) {
+    // 1. A branch named in the question takes priority.
+    if let Some(req) = requested.map(str::trim).filter(|s| !s.is_empty()) {
+        let matches = fuzzy_match_branches(accessible, req);
+        if !matches.is_empty() {
+            return branches_scope(&matches, None);
+        }
+        // Named but unmatched → fall back to the selector/all default, flagged.
+        return default_scope(accessible, selected, Some(req.to_string()));
+    }
+    // 2/3. No branch named → the selector's branch, else all accessible.
+    default_scope(accessible, selected, None)
+}
+
+/// The default scope when the question names no (matched) branch: the selected
+/// branch if the caller can access it, otherwise all accessible branches.
+fn default_scope(
+    accessible: &[(Uuid, String)],
+    selected: Option<Uuid>,
+    unmatched: Option<String>,
+) -> (Vec<Uuid>, ScopeInfo) {
+    if let Some(sel) = selected
+        && let Some(hit) = accessible.iter().find(|(id, _)| *id == sel)
+    {
+        return branches_scope(std::slice::from_ref(hit), unmatched);
+    }
+    let names: Vec<String> = accessible.iter().map(|(_, n)| n.clone()).collect();
+    let label = match names.len() {
         0 => "No branches".to_string(),
-        1 => all_names[0].clone(),
+        1 => names[0].clone(),
         n => format!("All branches ({n})"),
     };
-    let all_scope = |unmatched: Option<String>| ScopeInfo {
-        all_branches: true,
-        branches: all_names.clone(),
-        label: all_label.clone(),
-        unmatched_branch: unmatched,
-    };
+    let ids = accessible.iter().map(|(id, _)| *id).collect();
+    (
+        ids,
+        ScopeInfo {
+            all_branches: true,
+            branches: names,
+            label,
+            unmatched_branch: unmatched,
+        },
+    )
+}
 
-    let requested = requested.map(str::trim).filter(|s| !s.is_empty());
-    let Some(req) = requested else {
-        return (all_ids, all_scope(None));
-    };
-
-    let matches = fuzzy_match_branches(accessible, req);
-    if matches.is_empty() {
-        return (all_ids, all_scope(Some(req.to_string())));
-    }
-    let ids = matches.iter().map(|(id, _)| *id).collect();
-    let names: Vec<String> = matches.iter().map(|(_, n)| n.clone()).collect();
+/// Build a narrowed scope (`all_branches = false`) over a specific branch subset.
+fn branches_scope(subset: &[(Uuid, String)], unmatched: Option<String>) -> (Vec<Uuid>, ScopeInfo) {
+    let ids = subset.iter().map(|(id, _)| *id).collect();
+    let names: Vec<String> = subset.iter().map(|(_, n)| n.clone()).collect();
     let label = names.join(", ");
     (
         ids,
@@ -198,7 +241,7 @@ fn resolve_scope(accessible: &[(Uuid, String)], requested: Option<&str>) -> (Vec
             all_branches: false,
             branches: names,
             label,
-            unmatched_branch: None,
+            unmatched_branch: unmatched,
         },
     )
 }
@@ -345,7 +388,11 @@ pub async fn chat(
         .ok_or_else(|| AppError::BadRequest("The assistant chose an unknown report.".into()))?;
 
     let requested_branch = choice.args.get("branch").and_then(Value::as_str);
-    let (branch_ids, scope) = resolve_scope(&accessible, requested_branch);
+    // Fallback branch = whatever the dashboard's global selector is on (the
+    // X-Branch-Id the app already sends). Backend-only; the selector is never
+    // changed.
+    let selected_branch = header_branch_id(&req);
+    let (branch_ids, scope) = resolve_scope(&accessible, requested_branch, selected_branch);
 
     // 2. Backend runs the pre-written query: read-only, capped, RLS-scoped, and
     //    fenced to the resolved branch set, with localized labels.
