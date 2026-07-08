@@ -17,10 +17,14 @@ use crate::{
 use super::AiState;
 use super::catalog::{self, ChartHint, Column};
 use super::executor::ExecCtx;
-use super::provider::ChatContext;
+use super::provider::{ChatContext, HistoryTurn};
 
 /// Longest question we accept — a guard against pathological prompts.
 const MAX_QUESTION_LEN: usize = 1000;
+
+/// Most prior turns we keep in the conversation window. Bounds per-message cost
+/// regardless of how long the chat runs.
+const MAX_HISTORY: usize = 8;
 
 /// How many result rows we hand the model when asking for a summary. The full
 /// result still goes to the client; the summary needs only a representative
@@ -45,6 +49,27 @@ pub struct AiChatRequest {
     /// and the summary language. Usually the dashboard's active language.
     #[serde(default)]
     pub locale: Option<String>,
+    /// Recent prior turns in this conversation (oldest → newest), so follow-ups
+    /// like "and last month?" resolve. Send only the last few; the server caps
+    /// the window regardless.
+    #[serde(default)]
+    pub history: Option<Vec<HistoryTurn>>,
+}
+
+/// Which branches an answer actually covers — surfaced on every response so the
+/// scope is never ambiguous ("all branches" vs a specific one).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct ScopeInfo {
+    /// True when the answer spans EVERY branch the caller can access.
+    pub all_branches: bool,
+    /// The branch names the answer covers.
+    pub branches: Vec<String>,
+    /// Human-readable label, e.g. "All branches (3)" or "Sidi Henish".
+    pub label: String,
+    /// Set when the user named a branch that couldn't be matched; the answer
+    /// then falls back to all accessible branches and this flags the mismatch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unmatched_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -52,6 +77,8 @@ pub struct AiChatResponse {
     /// The report the assistant chose.
     pub report_id: String,
     pub title: String,
+    /// Which branches this answer covers.
+    pub scope: ScopeInfo,
     /// Suggested visualization for the result.
     pub chart: ChartHint,
     /// Column metadata for rendering the table/chart.
@@ -93,18 +120,25 @@ fn normalize_locale(requested: &Option<String>) -> String {
 /// Runs on the RLS-scoped tenant pool, so every query here is already fenced to
 /// the caller's org. This set is injected into every report as `:branch_ids` and
 /// can never be widened by the model.
-async fn accessible_branches(db: &Db, claims: &Claims) -> Result<Vec<Uuid>, AppError> {
+async fn accessible_branches(db: &Db, claims: &Claims) -> Result<Vec<(Uuid, String)>, AppError> {
     match claims.role {
         UserRole::OrgAdmin | UserRole::SuperAdmin => {
-            let ids =
-                sqlx::query_scalar::<_, Uuid>("SELECT id FROM branches WHERE deleted_at IS NULL")
-                    .fetch_all(db.get_ref())
-                    .await?;
-            Ok(ids)
+            let rows = sqlx::query_as::<_, (Uuid, String)>(
+                "SELECT id, name FROM branches WHERE deleted_at IS NULL ORDER BY name",
+            )
+            .fetch_all(db.get_ref())
+            .await?;
+            Ok(rows)
         }
         UserRole::Teller => {
             if let Some(b) = claims.branch_id() {
-                return Ok(vec![b]);
+                let row = sqlx::query_as::<_, (Uuid, String)>(
+                    "SELECT id, name FROM branches WHERE id = $1 AND deleted_at IS NULL",
+                )
+                .bind(b)
+                .fetch_optional(db.get_ref())
+                .await?;
+                return Ok(row.into_iter().collect());
             }
             assigned_branches(db, claims.user_id()).await
         }
@@ -114,16 +148,88 @@ async fn accessible_branches(db: &Db, claims: &Claims) -> Result<Vec<Uuid>, AppE
     }
 }
 
-async fn assigned_branches(db: &Db, user_id: Uuid) -> Result<Vec<Uuid>, AppError> {
-    let ids = sqlx::query_scalar::<_, Uuid>(
-        "SELECT uba.branch_id FROM user_branch_assignments uba \
+async fn assigned_branches(db: &Db, user_id: Uuid) -> Result<Vec<(Uuid, String)>, AppError> {
+    let rows = sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT b.id, b.name FROM user_branch_assignments uba \
          JOIN branches b ON b.id = uba.branch_id AND b.deleted_at IS NULL \
-         WHERE uba.user_id = $1",
+         WHERE uba.user_id = $1 ORDER BY b.name",
     )
     .bind(user_id)
     .fetch_all(db.get_ref())
     .await?;
-    Ok(ids)
+    Ok(rows)
+}
+
+/// Resolve the branch set to query + a human-readable scope, from the caller's
+/// accessible branches and the optional branch name the model lifted from the
+/// question. The named branch is fuzzy-matched WITHIN the accessible set, so it
+/// can only ever NARROW the scope, never widen it. An unmatched name falls back
+/// to all accessible branches and is flagged so the answer states what it covered.
+fn resolve_scope(accessible: &[(Uuid, String)], requested: Option<&str>) -> (Vec<Uuid>, ScopeInfo) {
+    let all_ids: Vec<Uuid> = accessible.iter().map(|(id, _)| *id).collect();
+    let all_names: Vec<String> = accessible.iter().map(|(_, n)| n.clone()).collect();
+    let all_label = match all_names.len() {
+        0 => "No branches".to_string(),
+        1 => all_names[0].clone(),
+        n => format!("All branches ({n})"),
+    };
+    let all_scope = |unmatched: Option<String>| ScopeInfo {
+        all_branches: true,
+        branches: all_names.clone(),
+        label: all_label.clone(),
+        unmatched_branch: unmatched,
+    };
+
+    let requested = requested.map(str::trim).filter(|s| !s.is_empty());
+    let Some(req) = requested else {
+        return (all_ids, all_scope(None));
+    };
+
+    let matches = fuzzy_match_branches(accessible, req);
+    if matches.is_empty() {
+        return (all_ids, all_scope(Some(req.to_string())));
+    }
+    let ids = matches.iter().map(|(id, _)| *id).collect();
+    let names: Vec<String> = matches.iter().map(|(_, n)| n.clone()).collect();
+    let label = names.join(", ");
+    (
+        ids,
+        ScopeInfo {
+            all_branches: false,
+            branches: names,
+            label,
+            unmatched_branch: None,
+        },
+    )
+}
+
+/// Case/whitespace-insensitive branch-name match within the accessible set.
+/// Prefers an exact match; otherwise a substring either way — handling
+/// "sidi henish" vs "Sidi Henish", partials, and Arabic names.
+fn fuzzy_match_branches(accessible: &[(Uuid, String)], query: &str) -> Vec<(Uuid, String)> {
+    let norm = |s: &str| {
+        s.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    let q = norm(query);
+    let exact: Vec<(Uuid, String)> = accessible
+        .iter()
+        .filter(|(_, n)| norm(n) == q)
+        .cloned()
+        .collect();
+    if !exact.is_empty() {
+        return exact;
+    }
+    accessible
+        .iter()
+        .filter(|(_, n)| {
+            let nn = norm(n);
+            nn.contains(&q) || q.contains(&nn)
+        })
+        .cloned()
+        .collect()
 }
 
 /// The org's timezone name and today's date IN that timezone, so relative dates
@@ -186,22 +292,41 @@ pub async fn chat(
 
     let locale = normalize_locale(&body.locale);
 
+    // Recent conversation window (sliding, server-capped) for follow-up
+    // continuity. Compact by construction (question + report id), so cost stays
+    // constant per message.
+    let mut history = body.history.clone().unwrap_or_default();
+    if history.len() > MAX_HISTORY {
+        history.drain(0..history.len() - MAX_HISTORY);
+    }
+
     // Cache key is scoped by USER (branch access differs per user) + locale +
-    // summary flag, so two users in the same org with different branch access can
-    // never be served each other's answer.
+    // summary flag + a signature of the conversation window, so two users in the
+    // same org — or the same user with different prior context — are never served
+    // each other's (or a stale) answer.
+    let hist_sig = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for turn in &history {
+            turn.question.hash(&mut h);
+            turn.report_id.hash(&mut h);
+        }
+        h.finish()
+    };
     let cache_key = format!(
-        "{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}",
         claims.user_id(),
         locale,
         body.include_summary,
+        hist_sig,
         question
     );
     if let Some(hit) = state.cache.get(&cache_key).await {
         return Ok(HttpResponse::Ok().json(hit));
     }
 
-    // Branch scope (accessible set) + grounding context (timezone/today).
-    let branch_ids = accessible_branches(&db, &claims).await?;
+    // Accessible branches (id + name) + grounding context (timezone/today).
+    let accessible = accessible_branches(&db, &claims).await?;
     let (timezone, today) = org_timezone_and_today(&db).await?;
 
     let ctx = ChatContext {
@@ -209,15 +334,21 @@ pub async fn chat(
         today,
         timezone: timezone.clone(),
         locale: locale.clone(),
+        branch_names: accessible.iter().map(|(_, n)| n.clone()).collect(),
+        history,
     };
 
-    // 1. Model picks a report + fills typed params (never SQL, never branches).
+    // 1. Model picks a report + fills typed params, and MAY name a branch (never
+    //    SQL). The branch name can only narrow within the accessible set below.
     let choice = provider.choose_report(&ctx).await?;
     let report = catalog::find(&choice.report_id)
         .ok_or_else(|| AppError::BadRequest("The assistant chose an unknown report.".into()))?;
 
+    let requested_branch = choice.args.get("branch").and_then(Value::as_str);
+    let (branch_ids, scope) = resolve_scope(&accessible, requested_branch);
+
     // 2. Backend runs the pre-written query: read-only, capped, RLS-scoped, and
-    //    fenced to the caller's accessible branches, with localized labels.
+    //    fenced to the resolved branch set, with localized labels.
     let exec_ctx = ExecCtx {
         branch_ids: &branch_ids,
         locale: &locale,
@@ -225,12 +356,13 @@ pub async fn chat(
     };
     let result = super::executor::run(&db, report, &choice.args, &exec_ctx).await?;
 
-    // 3. Optional summary — best-effort in the requested language; never fail the
-    //    answer over it.
+    // 3. Optional summary — best-effort in the requested language; the scope is
+    //    included so the sentence states which branch(es) it covers. Never fail
+    //    the answer over the summary.
     let summary = if body.include_summary {
         let sample: Vec<&Map<String, Value>> =
             result.rows.iter().take(SUMMARY_ROW_SAMPLE).collect();
-        let data_json = serde_json::to_string(&sample).unwrap_or_else(|_| "[]".into());
+        let data_json = serde_json::json!({ "scope": scope.label, "rows": sample }).to_string();
         match provider.summarize(&ctx, report.title, &data_json).await {
             Ok(s) => s,
             Err(e) => {
@@ -245,6 +377,7 @@ pub async fn chat(
     let response = AiChatResponse {
         report_id: report.id.to_string(),
         title: report.title.to_string(),
+        scope,
         chart: report.chart,
         columns: result.columns.to_vec(),
         rows: result.rows,

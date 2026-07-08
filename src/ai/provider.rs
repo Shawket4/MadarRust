@@ -8,13 +8,28 @@
 //! optional one-line summary of a result.
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use utoipa::ToSchema;
+
+/// One earlier exchange in the same conversation, in COMPACT form: the question
+/// and which report answered it. This is all the model needs to resolve a
+/// follow-up ("and last month?", "what about Sidi Henish?") — never the full
+/// result tables — so per-message cost stays constant with the sliding window.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct HistoryTurn {
+    /// The earlier user question.
+    pub question: String,
+    /// The report id that answered it, if known.
+    #[serde(default)]
+    pub report_id: Option<String>,
+}
 
 /// Everything the model needs to interpret a question: the question itself plus
-/// the grounding context (today's date + timezone so relative dates resolve, and
-/// the answer language). Passed to both provider calls; the heavy, invariant
-/// part of the request (system prompt + tool schema) stays out of here so it can
-/// remain a byte-stable cacheable prefix.
+/// the grounding context (today's date + timezone so relative dates resolve, the
+/// answer language, and a short window of prior turns). Passed to both provider
+/// calls; the heavy, invariant part of the request (system prompt + tool schema)
+/// stays out of here so it can remain a byte-stable cacheable prefix.
 #[derive(Debug, Clone)]
 pub struct ChatContext {
     pub question: String,
@@ -24,6 +39,12 @@ pub struct ChatContext {
     pub timezone: String,
     /// BCP-47-ish locale the answer should be in (e.g. "en", "ar").
     pub locale: String,
+    /// Names of the branches this caller may query — given to the model so it
+    /// can map a branch the user names ("sidi henish") to a real one and pass
+    /// it as the `branch` argument.
+    pub branch_names: Vec<String>,
+    /// Recent prior turns (oldest → newest), for follow-up continuity.
+    pub history: Vec<HistoryTurn>,
 }
 
 /// What the model decided: which report to run and the values to fill in.
@@ -104,7 +125,13 @@ pub struct MockProvider;
 impl LlmProvider for MockProvider {
     async fn choose_report(&self, ctx: &ChatContext) -> Result<ToolChoice, ProviderError> {
         let q = ctx.question.to_lowercase();
-        let id = if q.contains("profit") || q.contains("margin") {
+        let id = if q.contains("reprice")
+            || q.contains("raise price")
+            || q.contains("underpriced")
+            || q.contains("pricing")
+        {
+            "repricing_opportunities"
+        } else if q.contains("profit") || q.contains("margin") {
             "product_profit"
         } else if q.contains("product") || q.contains("best sell") {
             "top_products"

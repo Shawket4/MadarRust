@@ -182,6 +182,42 @@ impl crate::ai::provider::LlmProvider for ScriptedProvider {
     }
 }
 
+/// A provider that answers a vague follow-up by reusing the report from the
+/// LAST conversation turn — models how real memory resolves "and last month?".
+/// Errors when there's no history, so a test can prove the window was plumbed.
+struct FollowUpProvider;
+
+#[async_trait::async_trait]
+impl crate::ai::provider::LlmProvider for FollowUpProvider {
+    async fn choose_report(
+        &self,
+        ctx: &crate::ai::provider::ChatContext,
+    ) -> Result<crate::ai::provider::ToolChoice, crate::ai::provider::ProviderError> {
+        if let Some(last) = ctx.history.last()
+            && let Some(report_id) = &last.report_id
+        {
+            return Ok(crate::ai::provider::ToolChoice {
+                report_id: report_id.clone(),
+                args: serde_json::Map::new(),
+            });
+        }
+        Err(crate::ai::provider::ProviderError::NoChoice(
+            "no prior turn to continue".into(),
+        ))
+    }
+    async fn summarize(
+        &self,
+        _ctx: &crate::ai::provider::ChatContext,
+        _title: &str,
+        _data: &str,
+    ) -> Result<Option<String>, crate::ai::provider::ProviderError> {
+        Ok(None)
+    }
+    fn name(&self) -> &'static str {
+        "followup"
+    }
+}
+
 /// Snapshot of row counts on the tables an injection would try to read/mutate.
 /// Taken via the OWNER pool (bypasses RLS) so we see the true global state.
 async fn table_counts(pool: &PgPool) -> (i64, i64, i64) {
@@ -440,6 +476,173 @@ async fn branch_scoping_limits_manager_to_assigned_branch(pool: PgPool) {
     assert_eq!(rows.len(), 1, "manager must see only their assigned branch");
     assert_eq!(rows[0]["revenue"], 9000);
     assert_eq!(rows[0]["branch"], "Branch Two");
+}
+
+#[sqlx::test]
+async fn repricing_suggests_target_restoring_price(pool: PgPool) {
+    // A priced item with a fully-costed recipe: price 100.00, cost 60.00 → 40%
+    // margin, below the default 60% target. Suggested price restores the target:
+    // ceil(6000 / (1 - 0.60)) = 15000 (150.00 EGP), a 50.00 uplift.
+    let org = seed(&pool, "A").await;
+    let item = Uuid::new_v4();
+    let ing = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO menu_items (id, org_id, name, base_price) VALUES ($1,$2,'Espresso',10000)",
+    )
+    .bind(item)
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit) VALUES ($1,$2,'Beans','pcs',6000)")
+        .bind(ing).bind(org).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO menu_item_recipes (menu_item_id, size_label, quantity_used, org_ingredient_id, ingredient_name, ingredient_unit)
+         VALUES ($1,'one_size',1,$2,'Beans','pcs')",
+    )
+    .bind(item).bind(ing).execute(&pool).await.unwrap();
+
+    let app = app_with_provider(
+        &pool,
+        Arc::new(ScriptedProvider {
+            report_id: "repricing_opportunities".into(),
+            args: serde_json::Map::new(),
+        }),
+    )
+    .await;
+    let (status, body) = ask(&app, &org_admin_token(org), "suggest repricing", false).await;
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body["report_id"], "repricing_opportunities");
+    let rows = body["rows"].as_array().unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "only the costed, underpriced item is suggested"
+    );
+    assert_eq!(rows[0]["product"], "Espresso");
+    assert_eq!(rows[0]["current_price"], 10000);
+    assert_eq!(rows[0]["cost"], 6000);
+    assert_eq!(rows[0]["suggested_price"], 15000);
+    assert_eq!(rows[0]["uplift"], 5000);
+}
+
+#[sqlx::test]
+async fn repricing_skips_items_without_complete_cost(pool: PgPool) {
+    // An item priced but with NO recipe cost must NOT be suggested — no guessed
+    // cost. The seeded "Latte A" has a price of 0 and no recipe, so the report is
+    // empty, proving partial/absent data yields no wrong suggestion.
+    let org = seed(&pool, "A").await;
+    let app = app_with_provider(
+        &pool,
+        Arc::new(ScriptedProvider {
+            report_id: "repricing_opportunities".into(),
+            args: serde_json::Map::new(),
+        }),
+    )
+    .await;
+    let (status, body) = ask(&app, &org_admin_token(org), "reprice", false).await;
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body["rows"].as_array().unwrap().len(), 0);
+}
+
+#[sqlx::test]
+async fn history_enables_follow_up(pool: PgPool) {
+    // A vague follow-up ("and last month") carries prior history pointing at
+    // sales_summary → the provider (using ctx.history) resolves it and the
+    // report runs. Proves the conversation window reaches the model.
+    let org = seed(&pool, "A").await;
+    let app = app_with_provider(&pool, Arc::new(FollowUpProvider)).await;
+
+    let req = test::TestRequest::post()
+        .uri("/ai/chat")
+        .insert_header(("Authorization", format!("Bearer {}", org_admin_token(org))))
+        .set_json(serde_json::json!({
+            "question": "and last month",
+            "history": [{ "question": "how were sales", "report_id": "sales_summary" }]
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status();
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body["report_id"], "sales_summary");
+}
+
+#[sqlx::test]
+async fn no_history_no_follow_up(pool: PgPool) {
+    // Same provider, but no history → nothing to continue → 400. Confirms the
+    // follow-up above genuinely came from the plumbed window, not a default.
+    let org = seed(&pool, "A").await;
+    let app = app_with_provider(&pool, Arc::new(FollowUpProvider)).await;
+    let (status, _body) = ask(&app, &org_admin_token(org), "and last month", false).await;
+    assert_eq!(status.as_u16(), 400);
+}
+
+#[sqlx::test]
+async fn branch_narrowing_limits_to_named_branch(pool: PgPool) {
+    // Org A: branch "Branch A" (rev 5000) + "Branch Two" (rev 9000). The model
+    // named "Branch Two", so the answer must cover ONLY that branch.
+    let org = seed(&pool, "A").await;
+    seed_extra_branch(&pool, org, "Two", 9000).await;
+    let args = serde_json::json!({ "branch": "Branch Two" })
+        .as_object()
+        .unwrap()
+        .clone();
+    let app = app_with_provider(
+        &pool,
+        Arc::new(ScriptedProvider {
+            report_id: "sales_summary".into(),
+            args,
+        }),
+    )
+    .await;
+
+    let (status, body) = ask(&app, &org_admin_token(org), "sales in branch two", false).await;
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(
+        body["rows"][0]["revenue"], 9000,
+        "only Branch Two's revenue"
+    );
+    assert_eq!(body["scope"]["all_branches"], false);
+    assert_eq!(body["scope"]["label"], "Branch Two");
+}
+
+#[sqlx::test]
+async fn scope_defaults_to_all_accessible_branches(pool: PgPool) {
+    // No branch named → cover every branch the user can access, flagged as such.
+    let org = seed(&pool, "A").await;
+    seed_extra_branch(&pool, org, "Two", 9000).await;
+    let app = app_with(&pool).await;
+
+    let (status, body) = ask(&app, &org_admin_token(org), "total revenue", false).await;
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body["scope"]["all_branches"], true);
+    assert_eq!(body["rows"][0]["revenue"], 14000, "both branches summed");
+    assert_eq!(body["scope"]["label"], "All branches (2)");
+}
+
+#[sqlx::test]
+async fn unmatched_branch_falls_back_and_is_flagged(pool: PgPool) {
+    // The model named a branch we can't match → answer covers all accessible
+    // branches, and the unmatched name is surfaced so the scope is never a lie.
+    let org = seed(&pool, "A").await;
+    let args = serde_json::json!({ "branch": "Nonexistent Place" })
+        .as_object()
+        .unwrap()
+        .clone();
+    let app = app_with_provider(
+        &pool,
+        Arc::new(ScriptedProvider {
+            report_id: "sales_summary".into(),
+            args,
+        }),
+    )
+    .await;
+
+    let (status, body) = ask(&app, &org_admin_token(org), "sales", false).await;
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body["scope"]["all_branches"], true);
+    assert_eq!(body["scope"]["unmatched_branch"], "Nonexistent Place");
 }
 
 #[sqlx::test]

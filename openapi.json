@@ -29879,6 +29879,16 @@
           "question"
         ],
         "properties": {
+          "history": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/HistoryTurn"
+            },
+            "description": "Recent prior turns in this conversation (oldest → newest), so follow-ups\nlike \"and last month?\" resolve. Send only the last few; the server caps\nthe window regardless."
+          },
           "include_summary": {
             "type": "boolean",
             "description": "When true, also return a one-sentence natural-language summary of the\nresult (a second, small model call, answered in `locale`). Default false."
@@ -29901,6 +29911,7 @@
         "required": [
           "report_id",
           "title",
+          "scope",
           "chart",
           "columns",
           "rows",
@@ -29942,6 +29953,10 @@
               }
             },
             "description": "Result rows, each an object keyed by column key."
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ScopeInfo",
+            "description": "Which branches this answer covers."
           },
           "summary": {
             "type": [
@@ -35493,6 +35508,26 @@
           }
         }
       },
+      "HistoryTurn": {
+        "type": "object",
+        "description": "One earlier exchange in the same conversation, in COMPACT form: the question\nand which report answered it. This is all the model needs to resolve a\nfollow-up (\"and last month?\", \"what about Sidi Henish?\") — never the full\nresult tables — so per-message cost stays constant with the sliding window.",
+        "required": [
+          "question"
+        ],
+        "properties": {
+          "question": {
+            "type": "string",
+            "description": "The earlier user question."
+          },
+          "report_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The report id that answered it, if known."
+          }
+        }
+      },
       "InventoryValuationReport": {
         "type": "object",
         "required": [
@@ -40167,6 +40202,39 @@
             "items": {
               "$ref": "#/components/schemas/TablePosition"
             }
+          }
+        }
+      },
+      "ScopeInfo": {
+        "type": "object",
+        "description": "Which branches an answer actually covers — surfaced on every response so the\nscope is never ambiguous (\"all branches\" vs a specific one).",
+        "required": [
+          "all_branches",
+          "branches",
+          "label"
+        ],
+        "properties": {
+          "all_branches": {
+            "type": "boolean",
+            "description": "True when the answer spans EVERY branch the caller can access."
+          },
+          "branches": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The branch names the answer covers."
+          },
+          "label": {
+            "type": "string",
+            "description": "Human-readable label, e.g. \"All branches (3)\" or \"Sidi Henish\"."
+          },
+          "unmatched_branch": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set when the user named a branch that couldn't be matched; the answer\nthen falls back to all accessible branches and this flags the mismatch."
           }
         }
       },

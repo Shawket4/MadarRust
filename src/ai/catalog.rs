@@ -437,20 +437,25 @@ pub static REPORTS: &[Report] = &[
         id: "product_profit",
         title: "Product profitability",
         description: "Top products by PROFIT (revenue minus cost) using the cost engine, \
-            with margin %. Localized names. Use for 'most profitable products', 'margins', \
+            with margin %. Localized names. A product whose cost is not fully known \
+            shows blank cost/profit/margin (never a guessed zero), matching the \
+            profitability page. Use for 'most profitable products', 'margins', \
             'أعلى ربحية', 'هامش الربح', 'المنتجات الأكثر ربحا'.",
         params: PERIOD_LIMIT,
+        // Mirrors the menu-profitability engine: non-voided orders, and cost is
+        // NULL (unknown) — not 0 — if ANY line for the product lacks a cost, so a
+        // partially-costed product is never graded on an understated cost.
         sql: "SELECT COALESCE(NULLIF(oi.name_translations->>:locale,''), oi.item_name) AS product, \
                      SUM(oi.line_total)::bigint AS revenue, \
-                     COALESCE(SUM(oi.line_cost),0)::bigint AS cost, \
-                     (SUM(oi.line_total) - COALESCE(SUM(oi.line_cost),0))::bigint AS profit, \
-                     ROUND(100.0 * (SUM(oi.line_total) - COALESCE(SUM(oi.line_cost),0)) \
-                           / NULLIF(SUM(oi.line_total),0), 1)::float8 AS margin_pct \
+                     (CASE WHEN bool_or(oi.line_cost IS NULL) THEN NULL ELSE SUM(oi.line_cost) END)::bigint AS cost, \
+                     (CASE WHEN bool_or(oi.line_cost IS NULL) THEN NULL ELSE SUM(oi.line_total) - SUM(oi.line_cost) END)::bigint AS profit, \
+                     (CASE WHEN bool_or(oi.line_cost IS NULL) THEN NULL \
+                           ELSE ROUND(100.0 * (SUM(oi.line_total) - SUM(oi.line_cost)) / NULLIF(SUM(oi.line_total),0), 1) END)::float8 AS margin_pct \
               FROM order_items oi JOIN orders o ON o.id = oi.order_id \
-              WHERE o.status='completed' AND o.branch_id = ANY(:branch_ids) \
+              WHERE o.status <> 'voided' AND o.branch_id = ANY(:branch_ids) \
                 AND (:from::timestamptz IS NULL OR o.created_at >= :from) \
                 AND (:to::timestamptz   IS NULL OR o.created_at <= :to) \
-              GROUP BY product ORDER BY profit DESC LIMIT :limit",
+              GROUP BY product ORDER BY profit DESC NULLS LAST LIMIT :limit",
         columns: &[
             Column {
                 key: "product",
@@ -475,6 +480,92 @@ pub static REPORTS: &[Report] = &[
             },
         ],
         chart: ChartHint::Bar,
+    },
+    Report {
+        id: "repricing_opportunities",
+        title: "Repricing opportunities",
+        description: "Menu items whose current price gives a margin BELOW the org's \
+            target, with a SUGGESTED price that restores the target margin. Costs come \
+            from the current recipe rollup; an item without a complete recipe cost is \
+            skipped (no guessed cost), so with fewer costed recipes it simply covers \
+            fewer items — never a wrong suggestion. Use for 'where should I raise \
+            prices', 'repricing', 'underpriced items', 'suggest new prices', 'pricing \
+            suggestions', 'أين أرفع الأسعار', 'اقترح تسعير', 'المنتجات المنخفضة السعر', \
+            'تحسين التسعير'.",
+        params: &[LIMIT],
+        // Org-level target-restoring suggestion. Mirrors costing::org_sku_costs
+        // (never-default-to-0: an uncosted/unlinked ingredient is EXCLUDED and the
+        // SKU marked incomplete → skipped) and margin_targets (branch NULL = org
+        // default, builtin 60%). suggested = ceil(cost / (1 - target)) to whole EGP.
+        sql: "WITH expanded AS ( \
+                 SELECT mi.id AS menu_item_id, \
+                        COALESCE(NULLIF(mi.name_translations->>:locale,''), mi.name) AS product, \
+                        COALESCE(sz.label, 'one_size') AS size_label, \
+                        COALESCE(sz.price_override, mi.base_price)::bigint AS price \
+                 FROM menu_items mi \
+                 LEFT JOIN item_sizes sz ON sz.menu_item_id = mi.id AND sz.is_active = true \
+                 WHERE mi.deleted_at IS NULL AND mi.is_active = true \
+              ), costed AS ( \
+                 SELECT e.product, e.price, r.cost, r.incomplete \
+                 FROM expanded e CROSS JOIN LATERAL ( \
+                   SELECT SUM(rc.quantity_used * ing.cost_per_unit) FILTER (WHERE ing.cost_per_unit IS NOT NULL) AS cost, \
+                          bool_or(rc.org_ingredient_id IS NULL OR ing.cost_per_unit IS NULL) AS incomplete \
+                   FROM menu_item_recipes rc \
+                   LEFT JOIN org_ingredients ing ON ing.id = rc.org_ingredient_id \
+                   WHERE rc.menu_item_id = e.menu_item_id AND COALESCE(rc.size_label,'one_size') = e.size_label \
+                 ) r \
+                 WHERE r.cost IS NOT NULL AND NOT COALESCE(r.incomplete, true) \
+              ), tgt AS ( \
+                 SELECT COALESCE((SELECT target_pct FROM margin_targets WHERE branch_id IS NULL LIMIT 1), 60)::numeric AS target_pct \
+              ) \
+              SELECT c.product, \
+                     c.price AS current_price, \
+                     ROUND(c.cost)::bigint AS cost, \
+                     ROUND(100.0 * (c.price - c.cost) / NULLIF(c.price,0), 1)::float8 AS margin_pct, \
+                     t.target_pct::float8 AS target_pct, \
+                     (CEIL(c.cost / (1 - t.target_pct/100.0) / 100.0) * 100)::bigint AS suggested_price, \
+                     ((CEIL(c.cost / (1 - t.target_pct/100.0) / 100.0) * 100) - c.price)::bigint AS uplift \
+              FROM costed c CROSS JOIN tgt t \
+              WHERE c.price > 0 AND (100.0 * (c.price - c.cost) / c.price) < t.target_pct \
+              ORDER BY uplift DESC LIMIT :limit",
+        columns: &[
+            Column {
+                key: "product",
+                label: "Product",
+                kind: ColumnKind::Label,
+            },
+            Column {
+                key: "current_price",
+                label: "Current price",
+                kind: ColumnKind::Money,
+            },
+            Column {
+                key: "cost",
+                label: "Cost",
+                kind: ColumnKind::Money,
+            },
+            Column {
+                key: "margin_pct",
+                label: "Margin %",
+                kind: ColumnKind::Number,
+            },
+            Column {
+                key: "target_pct",
+                label: "Target %",
+                kind: ColumnKind::Number,
+            },
+            Column {
+                key: "suggested_price",
+                label: "Suggested price",
+                kind: ColumnKind::Money,
+            },
+            Column {
+                key: "uplift",
+                label: "Price uplift",
+                kind: ColumnKind::Money,
+            },
+        ],
+        chart: ChartHint::Table,
     },
     // ── Payments, discounts, tips ───────────────────────────────────────────
     Report {

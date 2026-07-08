@@ -94,17 +94,44 @@ impl GeminiProvider {
 impl LlmProvider for GeminiProvider {
     async fn choose_report(&self, ctx: &ChatContext) -> Result<ToolChoice, ProviderError> {
         // Stable prefix (system + tools) first so it caches upstream; ALL the
-        // per-request variation (question + today's date/timezone/language) goes
-        // in the trailing user turn.
+        // per-request variation (question + today/timezone/language/branches)
+        // goes in the trailing user turn.
+        let branches = if ctx.branch_names.is_empty() {
+            "none".to_string()
+        } else {
+            ctx.branch_names.join(", ")
+        };
         let user_text = format!(
-            "Today is {} in timezone {}. Answer language: {}.\n\nQuestion: {}",
-            ctx.today, ctx.timezone, ctx.locale, ctx.question
+            "Today is {} in timezone {}. Answer language: {}.\n\
+             Branches available: {}. If the question names a branch, pass its \
+             name as the `branch` argument; otherwise omit it.\n\n\
+             Question: {}",
+            ctx.today, ctx.timezone, ctx.locale, branches, ctx.question
         );
+
+        // Replay the recent conversation as plain text turns (user question +
+        // a short model note of which report answered) BEFORE the current turn,
+        // so the model can resolve follow-ups like "and last month?". Plain text
+        // avoids the function-call/response protocol; the current turn still
+        // triggers a fresh function call. The system+tools prefix is unchanged,
+        // so it keeps caching.
+        let mut contents: Vec<Value> = Vec::with_capacity(ctx.history.len() * 2 + 1);
+        for turn in &ctx.history {
+            contents.push(json!({ "role": "user", "parts": [{ "text": turn.question }] }));
+            if let Some(report) = &turn.report_id {
+                contents.push(json!({
+                    "role": "model",
+                    "parts": [{ "text": format!("Answered using report: {report}.") }]
+                }));
+            }
+        }
+        contents.push(json!({ "role": "user", "parts": [{ "text": user_text }] }));
+
         let body = json!({
             "systemInstruction": { "parts": [{ "text": SYSTEM_PROMPT }] },
             "tools": tool_declarations(),
             "toolConfig": { "functionCallingConfig": { "mode": "ANY" } },
-            "contents": [{ "role": "user", "parts": [{ "text": user_text }] }],
+            "contents": contents,
             "generationConfig": {
                 "temperature": 0,
                 "maxOutputTokens": 256,
@@ -203,6 +230,18 @@ fn tool_declarations() -> &'static Value {
                         required.push(Value::from(p.name));
                     }
                 }
+                // Every report is branch-scoped, so all accept an optional
+                // branch narrowing. The backend fuzzy-matches this within the
+                // caller's accessible branches and can only narrow, never widen.
+                properties.insert(
+                    "branch".to_string(),
+                    json!({
+                        "type": "string",
+                        "description": "Optional: restrict to ONE branch, by the name the \
+                            user used (e.g. 'Sidi Henish'). Omit to cover every branch the \
+                            user can access."
+                    }),
+                );
                 json!({
                     "name": r.id,
                     "description": r.description,
