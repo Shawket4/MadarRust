@@ -26,7 +26,9 @@ use super::catalog::REPORTS;
 use super::prompt;
 use super::provider::{ChatContext, LlmProvider, ProviderError, ToolChoice};
 
-const MODEL: &str = "gemini-2.5-flash";
+/// Default Gemini model — override with `GEMINI_MODEL`. Gemini 3.1 Flash-Lite
+/// (GA): cheap + fast and supports the function calling the report router needs.
+const DEFAULT_MODEL: &str = "gemini-3.1-flash-lite";
 const ENDPOINT: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 
 /// Gemini-backed provider. Cheap to clone (holds an `reqwest::Client`, which is
@@ -34,6 +36,7 @@ const ENDPOINT: &str = "https://generativelanguage.googleapis.com/v1beta/models"
 #[derive(Clone)]
 pub struct GeminiProvider {
     api_key: String,
+    model: String,
     http: reqwest::Client,
 }
 
@@ -45,15 +48,22 @@ impl GeminiProvider {
         if api_key.trim().is_empty() {
             return None;
         }
+        // `GEMINI_MODEL` overrides the default (e.g. to try a newer model or pin
+        // a dated build) without a rebuild.
+        let model = std::env::var("GEMINI_MODEL")
+            .ok()
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
             .build()
             .ok()?;
-        Some(Self { api_key, http })
+        Some(Self { api_key, model, http })
     }
 
     async fn post(&self, body: &Value) -> Result<Value, ProviderError> {
-        let url = format!("{ENDPOINT}/{MODEL}:generateContent");
+        let url = format!("{ENDPOINT}/{}:generateContent", self.model);
         let resp = self
             .http
             .post(&url)
@@ -163,7 +173,7 @@ impl LlmProvider for GeminiProvider {
     }
 
     fn name(&self) -> String {
-        MODEL.to_string()
+        self.model.clone()
     }
 }
 
