@@ -179,21 +179,22 @@ BEGIN
         ALTER TABLE delivery_otp ENABLE ROW LEVEL SECURITY;
     END IF;
 
-    -- ── Harden tenant-exposing VIEWS (PG15+) ──────────────────────────────────
-    -- A view runs with its owner's rights by default, which would BYPASS the
-    -- policies above. `security_invoker = true` makes it run with the querying
-    -- role's rights, so the underlying base tables' RLS applies through the view
-    -- too. Scoped to views that expose an org_id/branch_id column (the shim
-    -- catalog views); best-effort per view so an unusual/unowned view can't
-    -- abort the migration.
+    -- ── Harden ALL views (PG15+) ──────────────────────────────────────────────
+    -- A view runs with its OWNER's rights by default, so a view over a
+    -- tenant table would BYPASS the policies above — a cross-tenant read vector.
+    -- `security_invoker = true` makes the view run with the querying role's
+    -- rights, so the underlying tables' RLS applies through it. Every view here
+    -- is a shim over tenant tables (post menu-unification: addon_items,
+    -- item_sizes, menu_item_recipes, the branch override views, …), and none
+    -- exists to expose owner-only data — so all are hardened, not just those
+    -- that happen to surface an org_id/branch_id column (child-level shims like
+    -- item_sizes do not, yet still read tenant rows). Best-effort per view so an
+    -- unusual/unowned view can't abort the migration; `madar_app` holds SELECT
+    -- on every table (part 1), so invoker views resolve fine for it.
     IF current_setting('server_version_num')::int >= 150000 THEN
         FOR t IN
             SELECT it.table_name FROM information_schema.tables it
             WHERE it.table_schema = 'public' AND it.table_type = 'VIEW'
-              AND EXISTS (
-                  SELECT 1 FROM information_schema.columns col
-                  WHERE col.table_schema = 'public' AND col.table_name = it.table_name
-                    AND col.column_name IN ('org_id', 'branch_id'))
         LOOP
             BEGIN
                 EXECUTE format('ALTER VIEW %I SET (security_invoker = true)', t);
