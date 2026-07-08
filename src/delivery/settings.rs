@@ -11,7 +11,6 @@
 use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::NaiveTime;
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
@@ -127,7 +126,7 @@ pub struct BranchQuery {
 )]
 pub async fn get_branch_settings(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<BranchQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -219,7 +218,7 @@ pub struct BranchSettingsInput {
 )]
 pub async fn put_branch_settings(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<BranchSettingsInput>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -360,7 +359,7 @@ pub struct AcceptingInput {
 )]
 pub async fn set_accepting(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<AcceptingInput>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -431,7 +430,7 @@ const ZONE_SELECT: &str = "SELECT id, branch_id, name, name_translations, \
 )]
 pub async fn list_zones(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<BranchQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -483,7 +482,7 @@ fn validate_zone(input: &ZoneInput) -> Result<(), AppError> {
 )]
 pub async fn create_zone(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<ZoneInput>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -524,7 +523,7 @@ pub async fn create_zone(
 )]
 pub async fn update_zone(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     path: web::Path<Uuid>,
     body: web::Json<ZoneInput>,
 ) -> Result<HttpResponse, AppError> {
@@ -571,7 +570,7 @@ pub async fn update_zone(
 )]
 pub async fn delete_zone(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     path: web::Path<Uuid>,
     query: web::Query<BranchQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -614,7 +613,7 @@ pub struct ChannelOverrideQuery {
 )]
 pub async fn list_channel_overrides(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ChannelOverrideQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -650,7 +649,7 @@ pub struct ChannelOverrideInput {
 )]
 pub async fn upsert_channel_override(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<ChannelOverrideInput>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -695,7 +694,7 @@ pub struct ChannelOverrideDeleteQuery {
 )]
 pub async fn delete_channel_override(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ChannelOverrideDeleteQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -733,7 +732,7 @@ pub struct ChannelAddonOverride {
 )]
 pub async fn list_channel_addon_overrides(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ChannelOverrideQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -769,7 +768,7 @@ pub struct ChannelAddonOverrideInput {
 )]
 pub async fn upsert_channel_addon_override(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<ChannelAddonOverrideInput>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -814,7 +813,7 @@ pub struct ChannelAddonOverrideDeleteQuery {
 )]
 pub async fn delete_channel_addon_override(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ChannelAddonOverrideDeleteQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;

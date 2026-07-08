@@ -1231,7 +1231,7 @@ async fn build_ledger(
 )]
 pub async fn menu_margin_ledger(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     query: web::Query<LedgerQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -1280,7 +1280,7 @@ pub async fn menu_margin_ledger(
 )]
 pub async fn margin_watch(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     query: web::Query<LedgerQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -1350,7 +1350,7 @@ pub struct OrgQuery {
 )]
 pub async fn get_margin_targets(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<OrgQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1390,7 +1390,7 @@ pub async fn get_margin_targets(
 )]
 pub async fn put_margin_target(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<OrgQuery>,
     body: web::Json<PutTargetRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -1482,7 +1482,7 @@ async fn sku_window(
 )]
 pub async fn create_decision(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<OrgQuery>,
     body: web::Json<CreateDecisionRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -1581,7 +1581,7 @@ pub async fn create_decision(
 )]
 pub async fn list_decisions(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<DecisionsQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;

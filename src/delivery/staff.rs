@@ -123,7 +123,7 @@ pub struct ListQuery {
 )]
 pub async fn list_delivery_orders(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ListQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -158,7 +158,7 @@ pub async fn list_delivery_orders(
 )]
 pub async fn get_delivery_order(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -196,7 +196,7 @@ pub struct StreamQuery {
 )]
 pub async fn stream_delivery_orders(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     query: web::Query<StreamQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -314,7 +314,7 @@ fn jump_whatsapp_message(
 )]
 pub async fn set_status(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     path: web::Path<Uuid>,
     body: web::Json<StatusInput>,
@@ -402,7 +402,7 @@ fn default_true() -> bool {
 )]
 pub async fn cancel_delivery_order(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     path: web::Path<Uuid>,
     body: web::Json<CancelInput>,
@@ -511,7 +511,7 @@ pub struct FinalizeResponse {
 )]
 pub async fn finalize_delivery_order(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     path: web::Path<Uuid>,
     body: web::Json<FinalizeInput>,
@@ -679,7 +679,7 @@ pub struct PrepTimeInput {
 )]
 pub async fn set_prep_time(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     path: web::Path<Uuid>,
     body: web::Json<PrepTimeInput>,

@@ -94,7 +94,7 @@ async fn fetch_station(pool: &PgPool, id: Uuid) -> Result<KitchenStation, AppErr
     responses((status = 200, body = Vec<KitchenStation>), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn list_stations(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<BranchQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -114,7 +114,7 @@ pub async fn list_stations(
     responses((status = 201, body = KitchenStation), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn create_station(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<CreateStationRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -168,7 +168,7 @@ pub async fn create_station(
     responses((status = 200, body = KitchenStation), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn update_station(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<UpdateStationRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -231,7 +231,7 @@ pub async fn update_station(
     responses((status = 204), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn delete_station(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -271,7 +271,7 @@ pub struct StationRoutes {
     responses((status = 200, body = StationRoutes), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn list_routes(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<BranchQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -303,7 +303,7 @@ pub struct CategoryRouteInput {
     responses((status = 204), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn put_category_route(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<CategoryRouteInput>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -334,7 +334,7 @@ pub struct CategoryRouteKey {
     responses((status = 204), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn delete_category_route(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<CategoryRouteKey>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -359,7 +359,7 @@ pub struct ItemRouteInput {
     responses((status = 204), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn put_item_route(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<ItemRouteInput>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -390,7 +390,7 @@ pub struct ItemRouteKey {
     responses((status = 204), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn delete_item_route(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ItemRouteKey>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -440,7 +440,7 @@ pub struct RoutingModeResponse {
     responses((status = 200, body = RoutingModeResponse), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn get_routing_mode(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<BranchQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -468,7 +468,7 @@ pub struct SetRoutingModeRequest {
     responses((status = 200, body = RoutingModeResponse), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn set_routing_mode(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<SetRoutingModeRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;

@@ -152,7 +152,7 @@ pub struct ListOrdersQuery {
 )]
 pub async fn create_supplier(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     org_id: web::Path<Uuid>,
     body: web::Json<CreateSupplierRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -191,7 +191,7 @@ pub async fn create_supplier(
 )]
 pub async fn list_suppliers(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     org_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -220,7 +220,7 @@ pub async fn list_suppliers(
 )]
 pub async fn update_supplier(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<UpdateSupplierRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -270,7 +270,7 @@ pub async fn update_supplier(
 )]
 pub async fn delete_supplier(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -306,7 +306,7 @@ pub async fn delete_supplier(
 )]
 pub async fn create_order(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     body: web::Json<CreatePurchaseOrderRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -452,7 +452,7 @@ pub async fn create_order(
 )]
 pub async fn list_orders(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     query: web::Query<ListOrdersQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -510,7 +510,7 @@ pub async fn list_orders(
 )]
 pub async fn list_org_orders(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     org_id: web::Path<Uuid>,
     query: web::Query<ListOrdersQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -553,7 +553,7 @@ pub async fn list_org_orders(
 )]
 pub async fn get_order(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -577,7 +577,7 @@ pub async fn get_order(
 )]
 pub async fn receive_order(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<ReceivePurchaseOrderRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -835,7 +835,7 @@ pub async fn receive_order(
 )]
 pub async fn submit_order(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -877,7 +877,7 @@ pub async fn submit_order(
 )]
 pub async fn cancel_order(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -946,7 +946,7 @@ pub struct ReorderSuggestion {
 )]
 pub async fn reorder_suggestions(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1070,7 +1070,7 @@ pub struct CreateReturnRequest {
 )]
 pub async fn list_po_receipts(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1096,7 +1096,7 @@ pub async fn list_po_receipts(
 )]
 pub async fn create_return(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     body: web::Json<CreateReturnRequest>,
 ) -> Result<HttpResponse, AppError> {

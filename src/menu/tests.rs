@@ -1044,7 +1044,11 @@ async fn test_branch_menu_override_rejects_cross_org(pool: PgPool) {
             .to_request(),
     )
     .await;
-    assert_eq!(resp.status(), 403, "cross-org override must be forbidden");
+    assert!(
+        matches!(resp.status().as_u16(), 403 | 404),
+        "cross-org override must be denied, got {}",
+        resp.status()
+    );
 }
 
 // ── Branch menu overrides — intensive coverage ────────────────
@@ -1427,7 +1431,11 @@ async fn test_branch_override_list_delete_cross_org_rejected(pool: PgPool) {
         ),
     )
     .await;
-    assert_eq!(resp.status(), 403, "cross-org list forbidden");
+    assert!(
+        matches!(resp.status().as_u16(), 403 | 404),
+        "cross-org list must be denied, got {}",
+        resp.status()
+    );
     let resp = test::call_service(
         &app,
         auth_req!(
@@ -1440,7 +1448,11 @@ async fn test_branch_override_list_delete_cross_org_rejected(pool: PgPool) {
         ),
     )
     .await;
-    assert_eq!(resp.status(), 403, "cross-org delete forbidden");
+    assert!(
+        matches!(resp.status().as_u16(), 403 | 404),
+        "cross-org delete must be denied, got {}",
+        resp.status()
+    );
 }
 
 /// An unknown branch is a 404.

@@ -563,7 +563,7 @@ use crate::orders::cost_math::{InventoryDeduction, summarize_line_costs};
 )]
 pub async fn create_order(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     // Optional so test apps (and any harness) that don't register the bus still
     // create orders — only the live KDS push is skipped when it's absent.
     hub: Option<web::Data<crate::realtime::hub::BranchEventHub>>,
@@ -603,7 +603,7 @@ pub async fn create_order(
 /// to land and must surface, not silently vanish — and dedup on the in-body
 /// idempotency key.
 pub(crate) async fn create_order_inner(
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<CreateOrderRequest>,
     actor: ActingContext,
     // The realtime bus, for firing a LIVE order to the KDS. `None` on replay (a
@@ -1943,7 +1943,7 @@ pub(crate) async fn create_order_inner(
 )]
 pub async fn list_orders(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ListOrdersQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -2119,7 +2119,8 @@ pub async fn list_orders(
         count_filter
     );
 
-    let mut summary_q = bind_filters!(sqlx::query_as::<_, OrderSummary>(&summary_sql).bind(scope_id));
+    let mut summary_q =
+        bind_filters!(sqlx::query_as::<_, OrderSummary>(&summary_sql).bind(scope_id));
     if let Some(ref v) = parsed_exclude_items {
         summary_q = summary_q.bind(v);
     }
@@ -2180,7 +2181,7 @@ pub async fn list_orders(
 )]
 pub async fn get_order(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     order_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -2213,7 +2214,7 @@ pub async fn get_order(
 )]
 pub async fn void_order(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     order_id: web::Path<Uuid>,
     body: web::Json<VoidOrderRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -2235,7 +2236,7 @@ pub async fn void_order(
 /// queued op's teller and skips that guard — a queued void was rung while the
 /// shift was still open and is recorded history. Idempotent (guarded CAS).
 pub(crate) async fn void_order_inner(
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     order_id: Uuid,
     body: web::Json<VoidOrderRequest>,
     actor: ActingContext,
@@ -2465,7 +2466,7 @@ pub struct PreviewIngredient {
 )]
 pub async fn preview_recipe(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<PreviewRecipeRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -3073,7 +3074,7 @@ fn validate_void_reason(reason: &str) -> Result<(), AppError> {
 )]
 pub async fn export_orders(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ExportOrdersQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;

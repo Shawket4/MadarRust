@@ -2,7 +2,6 @@
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use serde::Deserialize;
-use sqlx::PgPool;
 use utoipa::IntoParams;
 use uuid::Uuid;
 
@@ -41,7 +40,7 @@ pub struct OrgQuery {
 )]
 pub async fn list_sku_costs(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<OrgQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -64,7 +63,7 @@ pub async fn list_sku_costs(
 )]
 pub async fn list_addon_costs(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<OrgQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;

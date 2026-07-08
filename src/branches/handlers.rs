@@ -174,7 +174,7 @@ where
 )]
 pub async fn list_branches(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ListBranchesQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -241,7 +241,7 @@ pub async fn list_branches(
 )]
 pub async fn get_branch(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -266,7 +266,7 @@ pub async fn get_branch(
 )]
 pub async fn create_branch(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<CreateBranchRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -341,7 +341,7 @@ pub async fn create_branch(
 )]
 pub async fn update_branch(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<UpdateBranchRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -450,7 +450,7 @@ pub async fn update_branch(
 )]
 pub async fn delete_branch(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -481,7 +481,7 @@ pub async fn delete_branch(
     ),
     security(("bearer_jwt" = []))
 )]
-pub async fn list_timezones(pool: web::Data<PgPool>) -> Result<HttpResponse, AppError> {
+pub async fn list_timezones(pool: crate::db::Db) -> Result<HttpResponse, AppError> {
     let names: Vec<String> = sqlx::query_scalar(
         "SELECT enumlabel::text FROM pg_enum WHERE enumtypid = 'timezone_name'::regtype ORDER BY enumlabel",
     )

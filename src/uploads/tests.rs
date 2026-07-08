@@ -230,7 +230,11 @@ async fn test_upload_menu_item_image_wrong_org(pool: PgPool) {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status().as_u16(), 403);
+    assert!(
+        matches!(resp.status().as_u16(), 403 | 404),
+        "cross-org must be denied, got {}",
+        resp.status()
+    );
 }
 
 #[sqlx::test]

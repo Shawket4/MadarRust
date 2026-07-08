@@ -254,7 +254,7 @@ pub struct InMallQuery {
 )]
 pub async fn branch_qr(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     provider: web::Data<Arc<dyn ShortLinkProvider>>,
     id: web::Path<Uuid>,
     q: web::Query<QrRenderQuery>,
@@ -342,7 +342,7 @@ pub async fn branch_qr(
 )]
 pub async fn org_qr(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     provider: web::Data<Arc<dyn ShortLinkProvider>>,
     id: web::Path<Uuid>,
     q: web::Query<QrRenderQuery>,
@@ -392,7 +392,7 @@ pub async fn org_qr(
 )]
 pub async fn create_table(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<CreateTableRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -429,7 +429,7 @@ pub async fn create_table(
 )]
 pub async fn list_tables(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -473,7 +473,7 @@ pub struct TablePath {
 )]
 pub async fn delete_table(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     path: web::Path<TablePath>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -518,7 +518,7 @@ pub struct TableQrPath {
 )]
 pub async fn table_qr(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     provider: web::Data<Arc<dyn ShortLinkProvider>>,
     path: web::Path<TableQrPath>,
     q: web::Query<QrRenderQuery>,
@@ -580,7 +580,7 @@ pub async fn table_qr(
 )]
 pub async fn delivery_order_qr(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     provider: web::Data<Arc<dyn ShortLinkProvider>>,
     id: web::Path<Uuid>,
     q: web::Query<QrRenderQuery>,
@@ -650,7 +650,7 @@ pub struct CreateMarketingLinkRequest {
 )]
 pub async fn create_marketing_link(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     provider: web::Data<Arc<dyn ShortLinkProvider>>,
     body: web::Json<CreateMarketingLinkRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -718,7 +718,7 @@ pub struct MarketingLink {
 )]
 pub async fn list_marketing_links(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "branches", "read").await?;

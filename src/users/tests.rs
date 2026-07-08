@@ -393,7 +393,11 @@ async fn test_assign_branch_cross_org_forbidden(pool: PgPool) {
             .to_request(),
     )
     .await;
-    assert_eq!(resp.status(), 403, "cross-org assign must be forbidden");
+    assert!(
+        matches!(resp.status().as_u16(), 403 | 404),
+        "cross-org assign must be denied, got {}",
+        resp.status()
+    );
 
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id=$1 AND branch_id=$2)",

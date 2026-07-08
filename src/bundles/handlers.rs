@@ -475,7 +475,7 @@ async fn validate_bundle_rules(
 )]
 pub async fn list_bundles(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ListBundlesQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -581,7 +581,7 @@ pub async fn list_bundles(
 )]
 pub async fn create_bundle(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<CreateBundleRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -702,7 +702,7 @@ pub async fn create_bundle(
 )]
 pub async fn get_bundle(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -729,7 +729,7 @@ pub async fn get_bundle(
 )]
 pub async fn update_bundle(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<UpdateBundleRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -948,7 +948,7 @@ pub async fn update_bundle(
 )]
 pub async fn delete_bundle(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1005,7 +1005,7 @@ pub async fn delete_bundle(
 )]
 pub async fn activate_bundle(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1072,7 +1072,7 @@ pub async fn activate_bundle(
 )]
 pub async fn archive_bundle(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1115,7 +1115,7 @@ pub async fn archive_bundle(
 )]
 pub async fn available_bundles(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<AvailableBundlesQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1198,7 +1198,7 @@ pub async fn available_bundles(
 )]
 pub async fn bundle_performance(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     query: web::Query<PerformanceQuery>,
 ) -> Result<HttpResponse, AppError> {

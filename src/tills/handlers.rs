@@ -87,7 +87,7 @@ async fn fetch_till(pool: &PgPool, id: Uuid) -> Result<Till, AppError> {
 )]
 pub async fn list_tills(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ListTillsQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -121,7 +121,7 @@ pub async fn list_tills(
 )]
 pub async fn create_till(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<CreateTillRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -187,7 +187,7 @@ pub async fn create_till(
 )]
 pub async fn update_till(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<UpdateTillRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -253,7 +253,7 @@ pub async fn update_till(
 )]
 pub async fn delete_till(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;

@@ -908,7 +908,13 @@ async fn test_create_transfer_different_org(pool: PgPool) {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
+    // Cross-org transfer: the other org's branch/ingredient is now invisible
+    // under RLS (404) rather than caught by validation (400). Either denies it.
+    assert!(
+        matches!(resp.status().as_u16(), 400 | 404),
+        "cross-org transfer must be denied, got {}",
+        resp.status()
+    );
 }
 
 #[sqlx::test]

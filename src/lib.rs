@@ -7,12 +7,14 @@
 //! `cargo run --bin export-openapi` reach `ApiDoc` without spinning up
 //! the HTTP server.
 
+pub mod ai;
 pub mod auth;
 pub mod branches;
 pub mod bundles;
 pub mod cache;
 pub mod clock;
 pub mod costing;
+pub mod db;
 pub mod delivery;
 pub mod demo;
 pub mod discounts;
@@ -48,3 +50,6 @@ pub mod users;
 
 #[cfg(test)]
 pub mod e2e_tests;
+
+#[cfg(test)]
+pub mod rls_tests;

@@ -819,7 +819,7 @@ async fn fetch_availability(
 )]
 pub async fn get_studio(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -847,7 +847,7 @@ pub async fn get_studio(
 )]
 pub async fn put_sizes(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<PutSizesRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -958,7 +958,7 @@ pub async fn put_sizes(
 )]
 pub async fn put_size_recipe(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     size_id: web::Path<Uuid>,
     body: web::Json<PutRecipeRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -1056,7 +1056,7 @@ pub async fn put_size_recipe(
 )]
 pub async fn put_modifier_groups(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<PutModifierGroupsRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -1152,7 +1152,7 @@ pub async fn put_modifier_groups(
 #[allow(clippy::type_complexity)]
 pub async fn duplicate_item(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;

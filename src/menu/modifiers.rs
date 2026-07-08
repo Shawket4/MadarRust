@@ -398,7 +398,7 @@ pub struct ListGroupsQuery {
 )]
 pub async fn list_groups(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ListGroupsQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -430,7 +430,7 @@ pub async fn list_groups(
 )]
 pub async fn create_group(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<CreateGroupRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -491,7 +491,7 @@ pub async fn create_group(
 )]
 pub async fn patch_group(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     gid: web::Path<Uuid>,
     body: web::Json<PatchGroupRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -560,7 +560,7 @@ pub async fn patch_group(
 )]
 pub async fn delete_group(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     gid: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -634,7 +634,7 @@ pub async fn delete_group(
 )]
 pub async fn create_option(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     gid: web::Path<Uuid>,
     body: web::Json<CreateOptionRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -693,7 +693,7 @@ pub async fn create_option(
 )]
 pub async fn patch_option(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     oid: web::Path<Uuid>,
     body: web::Json<PatchOptionRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -754,7 +754,7 @@ pub async fn patch_option(
 )]
 pub async fn delete_option(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     oid: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -819,7 +819,7 @@ pub async fn delete_option(
 )]
 pub async fn put_option_recipe(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     oid: web::Path<Uuid>,
     body: web::Json<Vec<OptionRecipeLineInput>>,
 ) -> Result<HttpResponse, AppError> {
@@ -974,7 +974,7 @@ async fn verify_ingredient_org(pool: &PgPool, org_id: Uuid, ing: Uuid) -> Result
 )]
 pub async fn put_item_options(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<PutItemOptionsRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -1299,7 +1299,7 @@ async fn verify_branch_org(pool: &PgPool, org_id: Uuid, branch_id: Uuid) -> Resu
 )]
 pub async fn put_price_override(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<PriceOverrideRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1419,7 +1419,7 @@ pub async fn put_price_override(
 )]
 pub async fn delete_price_override(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<PriceOverrideRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1474,7 +1474,7 @@ pub async fn delete_price_override(
 )]
 pub async fn get_item_cost(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;

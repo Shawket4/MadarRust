@@ -241,7 +241,7 @@ fn require_gateway() -> Result<String, AppError> {
     responses((status = 200, body = WhatsappStatus), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
-pub async fn status(req: HttpRequest, pool: web::Data<PgPool>) -> Result<HttpResponse, AppError> {
+pub async fn status(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     require_super_admin(&claims)?;
     Ok(HttpResponse::Ok().json(build_status(pool.get_ref()).await))
@@ -259,7 +259,7 @@ pub async fn status(req: HttpRequest, pool: web::Data<PgPool>) -> Result<HttpRes
     ),
     security(("bearer_jwt" = []))
 )]
-pub async fn pair(req: HttpRequest, pool: web::Data<PgPool>) -> Result<HttpResponse, AppError> {
+pub async fn pair(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     require_super_admin(&claims)?;
     let base = require_gateway()?;
@@ -304,7 +304,7 @@ pub async fn pair(req: HttpRequest, pool: web::Data<PgPool>) -> Result<HttpRespo
     ),
     security(("bearer_jwt" = []))
 )]
-pub async fn logout(req: HttpRequest, pool: web::Data<PgPool>) -> Result<HttpResponse, AppError> {
+pub async fn logout(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     require_super_admin(&claims)?;
     let base = require_gateway()?;
@@ -347,7 +347,7 @@ pub async fn logout(req: HttpRequest, pool: web::Data<PgPool>) -> Result<HttpRes
 )]
 pub async fn pause(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<PauseInput>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;

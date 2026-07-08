@@ -143,7 +143,7 @@ pub struct UpsertItemsRequest {
 )]
 pub async fn create_stocktake(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     body: web::Json<CreateStocktakeRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -244,7 +244,7 @@ pub async fn create_stocktake(
 )]
 pub async fn list_stocktakes(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -299,7 +299,7 @@ pub async fn list_stocktakes(
 )]
 pub async fn get_stocktake(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -329,7 +329,7 @@ pub async fn get_stocktake(
 )]
 pub async fn upsert_items(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<UpsertItemsRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -415,7 +415,7 @@ pub async fn upsert_items(
 )]
 pub async fn finalize_stocktake(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -590,7 +590,7 @@ pub async fn finalize_stocktake(
 )]
 pub async fn cancel_stocktake(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -632,7 +632,7 @@ pub async fn cancel_stocktake(
 )]
 pub async fn variance_report(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;

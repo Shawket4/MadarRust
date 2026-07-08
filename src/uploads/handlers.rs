@@ -9,7 +9,6 @@ use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use futures::StreamExt;
 use image::ImageReader;
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use std::{
     io::Cursor,
     path::{Path, PathBuf},
@@ -62,7 +61,7 @@ pub struct UploadImageMultipart {
 )]
 pub async fn upload_menu_item_image(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     menu_item_id: web::Path<Uuid>,
     mut payload: Multipart,
 ) -> Result<HttpResponse, AppError> {

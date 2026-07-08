@@ -169,7 +169,7 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 /// op at this route instead of the per-resource live one.
 pub async fn replay(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     body: web::Json<ReplayOp>,
 ) -> Result<HttpResponse, AppError> {

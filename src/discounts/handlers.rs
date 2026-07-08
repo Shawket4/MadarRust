@@ -63,7 +63,7 @@ pub struct UpdateDiscountRequest {
 )]
 pub async fn list_discounts(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ListQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -95,7 +95,7 @@ pub async fn list_discounts(
 )]
 pub async fn create_discount(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<CreateDiscountRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -142,7 +142,7 @@ pub async fn create_discount(
 )]
 pub async fn update_discount(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<UpdateDiscountRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -208,7 +208,7 @@ pub async fn update_discount(
 )]
 pub async fn delete_discount(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;

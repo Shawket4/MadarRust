@@ -588,6 +588,101 @@
         ]
       }
     },
+    "/ai/chat": {
+      "post": {
+        "tags": [
+          "ai"
+        ],
+        "operationId": "chat",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AiChatRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Answer with a table/chart and optional summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiChatResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/auth/login": {
       "post": {
         "tags": [
@@ -29778,6 +29873,92 @@
           }
         }
       },
+      "AiChatRequest": {
+        "type": "object",
+        "required": [
+          "question"
+        ],
+        "properties": {
+          "include_summary": {
+            "type": "boolean",
+            "description": "When true, also return a one-sentence natural-language summary of the\nresult (a second, small model call, answered in `locale`). Default false."
+          },
+          "locale": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Answer language — \"en\" or \"ar\" (default \"en\"). Drives translated labels\nand the summary language. Usually the dashboard's active language."
+          },
+          "question": {
+            "type": "string",
+            "description": "The merchant's plain-language question, e.g. \"top 5 products last month\"\nor \"أعلى ٥ منتجات الشهر الماضي\"."
+          }
+        }
+      },
+      "AiChatResponse": {
+        "type": "object",
+        "required": [
+          "report_id",
+          "title",
+          "chart",
+          "columns",
+          "rows",
+          "row_count",
+          "truncated",
+          "provider"
+        ],
+        "properties": {
+          "chart": {
+            "$ref": "#/components/schemas/ChartHint",
+            "description": "Suggested visualization for the result."
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Column"
+            },
+            "description": "Column metadata for rendering the table/chart."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Which model answered (e.g. \"gemini-2.5-flash\")."
+          },
+          "report_id": {
+            "type": "string",
+            "description": "The report the assistant chose."
+          },
+          "row_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": {},
+              "propertyNames": {
+                "type": "string"
+              }
+            },
+            "description": "Result rows, each an object keyed by column key."
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional one-sentence summary (only when `include_summary` was set and\nthe model produced one), in the requested locale."
+          },
+          "title": {
+            "type": "string"
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when the result was capped."
+          }
+        }
+      },
       "AssignBranchRequest": {
         "type": "object",
         "required": [
@@ -31864,6 +32045,16 @@
           }
         }
       },
+      "ChartHint": {
+        "type": "string",
+        "description": "A hint for how the result is best visualized. The frontend may override.",
+        "enum": [
+          "table",
+          "bar",
+          "line",
+          "pie"
+        ]
+      },
       "CloseShiftRequest": {
         "type": "object",
         "required": [
@@ -31899,6 +32090,37 @@
             "$ref": "#/components/schemas/Shift"
           }
         }
+      },
+      "Column": {
+        "type": "object",
+        "description": "One output column: its SQL alias (also the JSON key) and how to render it.",
+        "required": [
+          "key",
+          "label",
+          "kind"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ColumnKind"
+          },
+          "label": {
+            "type": "string"
+          }
+        }
+      },
+      "ColumnKind": {
+        "type": "string",
+        "description": "The renderable kind of an output column (money vs count vs label vs a time\naxis) so the frontend can format it and pick a chart.",
+        "enum": [
+          "money",
+          "count",
+          "label",
+          "date",
+          "number"
+        ]
       },
       "CombinedItemSalesRow": {
         "type": "object",
@@ -43288,6 +43510,10 @@
     {
       "name": "qr",
       "description": "Branded A6 QR card generator (PNG/SVG) and plain receipt QR. Renders a Shlink short URL into a print-perfect, Madar-styled image."
+    },
+    {
+      "name": "ai",
+      "description": "AI analytics chat: a plain-language question over the merchant's own data, answered by picking a pre-written report (Gemini 2.5 Flash) and running it read-only, RLS-scoped."
     }
   ]
 }

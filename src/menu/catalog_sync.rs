@@ -205,7 +205,7 @@ async fn current_catalog_revision(pool: &PgPool, org_id: Uuid) -> Result<i64, Ap
 )]
 pub async fn catalog_sync(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<CatalogSyncQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;

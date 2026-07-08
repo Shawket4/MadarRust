@@ -79,7 +79,7 @@ struct CountsRow {
 )]
 pub async fn get_onboarding(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let org_id = path.into_inner();
@@ -103,7 +103,7 @@ pub async fn get_onboarding(
 )]
 pub async fn complete_onboarding(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let org_id = path.into_inner();

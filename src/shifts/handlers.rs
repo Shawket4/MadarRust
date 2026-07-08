@@ -385,7 +385,7 @@ pub struct CurrentShiftQuery {
 )]
 pub async fn get_current_shift(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     query: web::Query<CurrentShiftQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -479,7 +479,7 @@ pub async fn get_current_shift(
 )]
 pub async fn open_shift(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     body: web::Json<OpenShiftRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -503,7 +503,7 @@ pub async fn open_shift(
 /// partial indexes and the idempotent early-return still protect integrity. The
 /// shift attaches to a till (the drawer); `body.till_id` else the branch default.
 pub(crate) async fn open_shift_inner(
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: Uuid,
     body: web::Json<OpenShiftRequest>,
     actor: ActingContext,
@@ -718,7 +718,7 @@ pub(crate) async fn open_shift_inner(
 )]
 pub async fn list_shifts(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     query: web::Query<ListShiftsQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -821,7 +821,7 @@ pub async fn list_shifts(
 )]
 pub async fn get_shift(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     shift_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -849,7 +849,7 @@ pub async fn get_shift(
 )]
 pub async fn get_shift_report(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     shift_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1001,7 +1001,7 @@ async fn fetch_cash_movement_by_client_ref(
 )]
 pub async fn add_cash_movement(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     shift_id: web::Path<Uuid>,
     body: web::Json<CashMovementRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -1025,7 +1025,7 @@ pub async fn add_cash_movement(
 /// on `client_ref`; still requires the shift to be open (a movement on a closed
 /// shift would corrupt its already-settled cash reconciliation).
 pub(crate) async fn add_cash_movement_inner(
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     shift_id: Uuid,
     body: web::Json<CashMovementRequest>,
     actor: ActingContext,
@@ -1138,7 +1138,7 @@ pub(crate) async fn add_cash_movement_inner(
 )]
 pub async fn list_cash_movements(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     shift_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1184,7 +1184,7 @@ pub struct CloseShiftResponse {
 )]
 pub async fn close_shift(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     shift_id: web::Path<Uuid>,
     body: web::Json<CloseShiftRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -1207,7 +1207,7 @@ pub async fn close_shift(
 /// own-shift guard (the device flushing the backlog may be a different teller).
 /// Idempotent: an already-closed shift just returns it.
 pub(crate) async fn close_shift_inner(
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     shift_id: Uuid,
     body: web::Json<CloseShiftRequest>,
     actor: ActingContext,
@@ -1314,7 +1314,7 @@ pub(crate) async fn close_shift_inner(
 )]
 pub async fn force_close_shift(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     shift_id: web::Path<Uuid>,
     body: web::Json<ForceCloseRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -1409,7 +1409,7 @@ pub async fn force_close_shift(
 )]
 pub async fn delete_shift(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     shift_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;

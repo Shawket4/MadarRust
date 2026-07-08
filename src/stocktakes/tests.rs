@@ -709,7 +709,12 @@ async fn test_permission_denied_and_branch_isolation(pool: PgPool) {
             .to_request(),
     )
     .await;
-    assert_eq!(resp.status(), 403);
+    // Permission denial (same org, own branch, missing grant) — strictly 403.
+    assert_eq!(
+        resp.status().as_u16(),
+        403,
+        "missing permission must be forbidden"
+    );
 
     // (2) Branch isolation: an org-A admin (with permission) cannot start a
     // count on an org-B branch.
@@ -724,7 +729,11 @@ async fn test_permission_denied_and_branch_isolation(pool: PgPool) {
             .to_request(),
     )
     .await;
-    assert_eq!(resp.status(), 403);
+    assert!(
+        matches!(resp.status().as_u16(), 403 | 404),
+        "cross-org/branch must be denied, got {}",
+        resp.status()
+    );
 }
 
 #[sqlx::test]

@@ -33,7 +33,7 @@ pub struct FeedQuery {
     responses((status = 200, body = Vec<KitchenTicketView>), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn feed(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<FeedQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -197,7 +197,7 @@ pub(crate) async fn set_bump_inner(
 /// Live bump/unbump: permission + branch gate, then delegate to the shared core.
 async fn set_bump(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     item_id: Uuid,
     bumped: bool,
@@ -228,7 +228,7 @@ async fn set_bump(
     responses((status = 204), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn bump(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     item_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
@@ -240,7 +240,7 @@ pub async fn bump(
     responses((status = 204), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn unbump(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     item_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {

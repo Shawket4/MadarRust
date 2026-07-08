@@ -288,7 +288,7 @@ pub struct CreateWasteRequest {
 )]
 pub async fn list_catalog(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     org_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -327,7 +327,7 @@ pub async fn list_catalog(
 )]
 pub async fn create_catalog_item(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     org_id: web::Path<Uuid>,
     body: web::Json<CreateCatalogItemRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -413,7 +413,7 @@ pub async fn create_catalog_item(
 )]
 pub async fn update_catalog_item(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     path: web::Path<(Uuid, Uuid)>,
     body: web::Json<UpdateCatalogItemRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -672,7 +672,7 @@ pub async fn update_catalog_item(
 )]
 pub async fn delete_catalog_item(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     path: web::Path<(Uuid, Uuid)>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -728,7 +728,7 @@ pub async fn delete_catalog_item(
 )]
 pub async fn get_inventory_settings(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     org_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -760,7 +760,7 @@ pub async fn get_inventory_settings(
 )]
 pub async fn update_inventory_settings(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     org_id: web::Path<Uuid>,
     body: web::Json<UpdateInventorySettingsRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -801,7 +801,7 @@ pub async fn update_inventory_settings(
 )]
 pub async fn list_branch_stock(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -853,7 +853,7 @@ pub async fn list_branch_stock(
 )]
 pub async fn add_to_branch_stock(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     body: web::Json<AddToStockRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -940,7 +940,7 @@ pub async fn add_to_branch_stock(
 )]
 pub async fn update_branch_stock(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     path: web::Path<(Uuid, Uuid)>,
     body: web::Json<UpdateStockRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -1001,7 +1001,7 @@ pub async fn update_branch_stock(
 )]
 pub async fn remove_from_branch_stock(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     path: web::Path<(Uuid, Uuid)>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1040,7 +1040,7 @@ pub async fn remove_from_branch_stock(
 )]
 pub async fn list_movements(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     query: web::Query<ListMovementsQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -1102,7 +1102,7 @@ pub async fn list_movements(
 )]
 pub async fn create_waste(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     body: web::Json<CreateWasteRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -1191,7 +1191,7 @@ pub async fn create_waste(
 )]
 pub async fn list_waste(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     page: web::Query<ListPageQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -1257,7 +1257,7 @@ pub async fn list_waste(
 )]
 pub async fn create_transfer(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<CreateTransferRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1497,7 +1497,7 @@ pub async fn create_transfer(
 )]
 pub async fn list_transfers(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     query: web::Query<ListTransfersQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -1585,7 +1585,7 @@ pub async fn list_transfers(
 )]
 pub async fn update_transfer(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<UpdateTransferRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -1660,7 +1660,7 @@ pub async fn update_transfer(
 )]
 pub async fn delete_transfer(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;

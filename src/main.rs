@@ -13,7 +13,7 @@ use tracing_subscriber::EnvFilter;
 
 use madar_rust::openapi::ApiDoc;
 use madar_rust::{
-    auth, branches, bundles, costing, delivery, demo, discounts, insights, inventory, kitchen,
+    ai, auth, branches, bundles, costing, delivery, demo, discounts, insights, inventory, kitchen,
     menu, orders, orgs, payment_methods, permissions, purchasing, qr_card, realtime, recipes,
     reports, reservations, shifts, stocktakes, sync, tickets, tills, uploads, users,
 };
@@ -83,6 +83,11 @@ async fn main() -> std::io::Result<()> {
     // The unified per-branch realtime bus — delivery, kitchen, waiter tickets, and
     // order events all ride one connection. Shared across all workers.
     let realtime_bus = web::Data::new(realtime::hub::BranchEventHub::new());
+
+    // AI analytics chat state (Gemini provider + response cache). Wires the
+    // provider only when GEMINI_API_KEY is set; otherwise the /ai endpoints
+    // report the feature as unavailable and the rest of the server is unaffected.
+    let ai_state = web::Data::new(ai::AiState::from_env());
 
     // The reservations nudge scheduler — flat departure nudges, no-show warns,
     // table holds, and the OSRM waitlist head-out. Spawned ONCE here (not in the
@@ -163,6 +168,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(realtime_bus.clone())
             .app_data(qr_provider.clone())
             .app_data(demo_cfg.clone())
+            .app_data(ai_state.clone())
             // Render actix's built-in extractor parse errors (bad path UUID, bad
             // query param, malformed JSON body) as our JSON ErrorBody with a 400,
             // instead of the default text/plain — so the wire contract is uniform.
@@ -206,7 +212,8 @@ async fn main() -> std::io::Result<()> {
             .configure(payment_methods::routes::configure)
             .configure(costing::routes::configure)
             .configure(delivery::routes::configure)
-            .configure(qr_card::routes::configure);
+            .configure(qr_card::routes::configure)
+            .configure(ai::routes::configure);
 
         // Public demo endpoints only when DEMO_MODE is on.
         if demo_enabled {

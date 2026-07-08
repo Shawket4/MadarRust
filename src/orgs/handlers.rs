@@ -141,7 +141,7 @@ pub struct UploadLogoMultipart {
 )]
 pub async fn create_org(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     mut mp: Multipart,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -296,10 +296,7 @@ pub async fn create_org(
     ),
     security(("bearer_jwt" = []))
 )]
-pub async fn list_orgs(
-    req: HttpRequest,
-    pool: web::Data<PgPool>,
-) -> Result<HttpResponse, AppError> {
+pub async fn list_orgs(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orgs", "read").await?;
     require_super_admin(&claims)?;
@@ -335,7 +332,7 @@ pub async fn list_orgs(
 )]
 pub async fn get_org(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     org_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -396,7 +393,7 @@ pub struct OfflineAuthBundle {
 )]
 pub async fn offline_auth_bundle(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     org_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -454,7 +451,7 @@ pub async fn offline_auth_bundle(
 )]
 pub async fn update_org(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     org_id: web::Path<Uuid>,
     body: web::Json<UpdateOrgRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -568,7 +565,7 @@ pub async fn update_org(
 )]
 pub async fn upload_org_logo(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     org_id: web::Path<Uuid>,
     mut mp: Multipart,
 ) -> Result<HttpResponse, AppError> {
@@ -669,7 +666,7 @@ pub async fn upload_org_logo(
 )]
 pub async fn delete_org(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     org_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;

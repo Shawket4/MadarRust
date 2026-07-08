@@ -226,7 +226,7 @@ fn validate_table_status(status: &str) -> Result<(), AppError> {
 )]
 pub async fn list_sections(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<BranchQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -250,7 +250,7 @@ pub async fn list_sections(
 )]
 pub async fn create_section(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<CreateSectionRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -288,7 +288,7 @@ pub async fn create_section(
 )]
 pub async fn update_section(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<UpdateSectionRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -336,7 +336,7 @@ pub async fn update_section(
 )]
 pub async fn delete_section(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -368,7 +368,7 @@ pub async fn delete_section(
 )]
 pub async fn list_tables(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<BranchQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -392,7 +392,7 @@ pub async fn list_tables(
 )]
 pub async fn create_table(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<CreateFloorTableRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -439,7 +439,7 @@ pub async fn create_table(
 )]
 pub async fn update_table(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<UpdateFloorTableRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -495,7 +495,7 @@ pub async fn update_table(
 )]
 pub async fn delete_table(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -532,7 +532,7 @@ pub async fn delete_table(
 )]
 pub async fn save_layout(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<SaveLayoutRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -579,7 +579,7 @@ pub async fn save_layout(
 )]
 pub async fn set_table_status(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<crate::realtime::hub::BranchEventHub>,
     id: web::Path<Uuid>,
     body: web::Json<SetTableStatusRequest>,
@@ -621,7 +621,7 @@ pub async fn set_table_status(
 )]
 pub async fn get_reservation_settings(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<BranchQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -641,7 +641,7 @@ pub async fn get_reservation_settings(
 )]
 pub async fn put_reservation_settings(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<BranchQuery>,
     body: web::Json<UpdateSettingsRequest>,
 ) -> Result<HttpResponse, AppError> {

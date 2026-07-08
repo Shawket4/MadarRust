@@ -74,7 +74,7 @@ pub struct DeleteRecipeQuery {
 )]
 pub async fn list_drink_recipes(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     menu_item_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -113,7 +113,7 @@ pub async fn list_drink_recipes(
 )]
 pub async fn upsert_drink_recipe(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     menu_item_id: web::Path<Uuid>,
     body: web::Json<UpsertDrinkRecipeRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -181,7 +181,7 @@ pub async fn upsert_drink_recipe(
 )]
 pub async fn delete_drink_recipe(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     path: web::Path<(Uuid, String)>,
     query: web::Query<DeleteRecipeQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -220,7 +220,7 @@ pub async fn delete_drink_recipe(
 )]
 pub async fn list_addon_ingredients(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     addon_item_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -259,7 +259,7 @@ pub async fn list_addon_ingredients(
 )]
 pub async fn upsert_addon_ingredient(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     addon_item_id: web::Path<Uuid>,
     body: web::Json<UpsertAddonIngredientRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -323,7 +323,7 @@ pub async fn upsert_addon_ingredient(
 )]
 pub async fn delete_addon_ingredient(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     path: web::Path<Uuid>,
     query: web::Query<DeleteRecipeQuery>,
 ) -> Result<HttpResponse, AppError> {

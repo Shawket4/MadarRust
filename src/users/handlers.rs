@@ -1,6 +1,5 @@
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
@@ -100,7 +99,7 @@ pub struct UserBranch {
 )]
 pub async fn create_user(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<CreateUserRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -274,7 +273,7 @@ pub async fn create_user(
 )]
 pub async fn list_users(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ListUsersQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -369,7 +368,7 @@ pub async fn list_users(
 )]
 pub async fn get_user(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     user_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -433,7 +432,7 @@ pub async fn get_user(
 )]
 pub async fn update_user(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     user_id: web::Path<Uuid>,
     body: web::Json<UpdateUserRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -566,7 +565,7 @@ pub async fn update_user(
 )]
 pub async fn delete_user(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     user_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -634,7 +633,7 @@ pub async fn delete_user(
 )]
 pub async fn assign_branch(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     user_id: web::Path<Uuid>,
     body: web::Json<AssignBranchRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -715,7 +714,7 @@ pub async fn assign_branch(
 )]
 pub async fn unassign_branch(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     path: web::Path<(Uuid, Uuid)>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -779,7 +778,7 @@ pub async fn unassign_branch(
 )]
 pub async fn list_user_branches(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     user_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;

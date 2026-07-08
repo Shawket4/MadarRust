@@ -68,7 +68,7 @@ pub(crate) async fn permitted_topics(
 )]
 pub async fn stream(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     query: web::Query<StreamQuery>,
 ) -> Result<HttpResponse, AppError> {

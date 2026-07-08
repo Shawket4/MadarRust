@@ -60,9 +60,12 @@ use utoipa::{
         (name = "delivery",     description = "Delivery config (settings, zones, org defaults), the staff queue, status transitions, finalize, and cancel/waste."),
         (name = "delivery-public", description = "Unauthenticated, rate-limited customer endpoints: branch selector, channel menu, OSRM quote, WhatsApp OTP, order intake."),
         (name = "whatsapp",     description = "Super-admin relay to the private WhatsApp gateway: QR pairing, link status, logout, and the global send pause switch."),
-        (name = "qr",           description = "Branded A6 QR card generator (PNG/SVG) and plain receipt QR. Renders a Shlink short URL into a print-perfect, Madar-styled image.")
+        (name = "qr",           description = "Branded A6 QR card generator (PNG/SVG) and plain receipt QR. Renders a Shlink short URL into a print-perfect, Madar-styled image."),
+        (name = "ai",           description = "AI analytics chat: a plain-language question over the merchant's own data, answered by picking a pre-written report (Gemini 2.5 Flash) and running it read-only, RLS-scoped.")
     ),
 paths(
+        // ── ai analytics chat ────────────────────────────────────────
+        crate::ai::handlers::chat,
         // ── costing ─────────────────────────────────────────────────
         crate::costing::handlers::list_sku_costs,
         crate::orgs::onboarding::get_onboarding,
@@ -380,6 +383,11 @@ paths(
         // Most schemas are pulled in transitively via path responses, but
         // listing the shared error body explicitly makes it discoverable.
         crate::errors::ErrorBody,
+        crate::ai::handlers::AiChatRequest,
+        crate::ai::handlers::AiChatResponse,
+        crate::ai::catalog::Column,
+        crate::ai::catalog::ColumnKind,
+        crate::ai::catalog::ChartHint,
         crate::auth::handlers::ResolveBranchRequest,
         crate::auth::handlers::ResolveBranchResponse,
         // GET /orders?include_items=true response shape (the annotation's

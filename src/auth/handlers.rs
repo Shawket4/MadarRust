@@ -374,7 +374,7 @@ pub async fn login(
     ),
     security(("bearer_jwt" = []))
 )]
-pub async fn me(req: HttpRequest, pool: web::Data<PgPool>) -> Result<HttpResponse, AppError> {
+pub async fn me(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
     let claims = req
         .extensions()
         .get::<Claims>()
@@ -515,10 +515,7 @@ pub async fn resolve_branch(
     ),
     security(("bearer_jwt" = []))
 )]
-pub async fn permissions(
-    req: HttpRequest,
-    pool: web::Data<PgPool>,
-) -> Result<HttpResponse, AppError> {
+pub async fn permissions(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
     let claims = req
         .extensions()
         .get::<Claims>()

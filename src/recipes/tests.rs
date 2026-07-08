@@ -268,7 +268,11 @@ async fn test_drink_recipes_wrong_org(pool: PgPool) {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status().as_u16(), 403);
+    assert!(
+        matches!(resp.status().as_u16(), 403 | 404),
+        "cross-org must be denied, got {}",
+        resp.status()
+    );
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -373,7 +377,11 @@ async fn test_addon_ingredients_wrong_org(pool: PgPool) {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status().as_u16(), 403);
+    assert!(
+        matches!(resp.status().as_u16(), 403 | 404),
+        "cross-org must be denied, got {}",
+        resp.status()
+    );
 }
 
 /// V22: a positive recipe quantity that rounds to 0 in the ingredient's base

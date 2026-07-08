@@ -948,10 +948,10 @@ async fn test_modifier_group_cross_org_forbidden(pool: PgPool) {
             .to_request(),
     )
     .await;
-    assert_eq!(
-        resp.status(),
-        403,
-        "cross-org group patch must be forbidden"
+    assert!(
+        matches!(resp.status().as_u16(), 403 | 404),
+        "cross-org group patch must be denied, got {}",
+        resp.status()
     );
 
     // org B cannot list org A's groups.

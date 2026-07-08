@@ -241,7 +241,7 @@ pub struct OrgComparisonReport {
 )]
 pub async fn shift_summary(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     shift_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -305,7 +305,7 @@ pub async fn shift_summary(
 )]
 pub async fn shift_deductions(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     shift_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -331,7 +331,7 @@ pub async fn shift_deductions(
 )]
 pub async fn branch_sales(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     query: web::Query<BranchSalesQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -519,7 +519,7 @@ pub async fn branch_sales(
 )]
 pub async fn branch_stock(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -592,7 +592,7 @@ pub async fn branch_stock(
 )]
 pub async fn branch_sales_timeseries(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     query: web::Query<TimeseriesQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -712,7 +712,7 @@ pub struct PeakHourPoint {
 )]
 pub async fn branch_sales_peak_hours(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -823,7 +823,7 @@ pub async fn branch_sales_peak_hours(
 )]
 pub async fn branch_teller_stats(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -879,7 +879,7 @@ pub async fn branch_teller_stats(
 )]
 pub async fn branch_waiter_stats(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -968,7 +968,7 @@ pub async fn branch_waiter_stats(
 )]
 pub async fn branch_addon_sales(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -1020,7 +1020,7 @@ pub async fn branch_addon_sales(
 )]
 pub async fn org_branch_comparison(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     org_id: web::Path<Uuid>,
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -1149,7 +1149,7 @@ pub struct DeliverySalesReport {
 )]
 pub async fn branch_delivery_sales(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -1297,7 +1297,7 @@ pub struct WasteReportRow {
 )]
 pub async fn branch_inventory_valuation(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1348,7 +1348,7 @@ pub async fn branch_inventory_valuation(
 )]
 pub async fn org_inventory_valuation(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     org_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1392,7 +1392,7 @@ pub async fn org_inventory_valuation(
 )]
 pub async fn org_low_stock(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     org_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1433,7 +1433,7 @@ pub async fn org_low_stock(
 )]
 pub async fn branch_low_stock(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1479,7 +1479,7 @@ pub async fn branch_low_stock(
 )]
 pub async fn branch_consumption(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -1527,7 +1527,7 @@ pub async fn branch_consumption(
 )]
 pub async fn branch_waste_report(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -1574,7 +1574,7 @@ pub async fn branch_waste_report(
 )]
 pub async fn org_consumption(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     org_id: web::Path<Uuid>,
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -1620,7 +1620,7 @@ pub async fn org_consumption(
 )]
 pub async fn org_waste_report(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     org_id: web::Path<Uuid>,
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -1679,7 +1679,7 @@ pub struct ShrinkageRow {
 )]
 pub async fn branch_shrinkage(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -1725,7 +1725,7 @@ pub async fn branch_shrinkage(
 )]
 pub async fn org_shrinkage(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     org_id: web::Path<Uuid>,
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -1951,7 +1951,7 @@ pub struct CombinedItemSalesRow {
 )]
 pub async fn branch_bundle_sales(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -1999,7 +1999,7 @@ pub async fn branch_bundle_sales(
 )]
 pub async fn branch_combined_item_sales(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {

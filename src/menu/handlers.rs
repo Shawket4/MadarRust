@@ -446,7 +446,7 @@ pub struct UpsertAddonOverrideRequest {
 )]
 pub async fn list_categories(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<OrgQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -477,7 +477,7 @@ pub async fn list_categories(
 )]
 pub async fn create_category(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<CreateCategoryRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -519,7 +519,7 @@ pub async fn create_category(
 )]
 pub async fn update_category(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<UpdateCategoryRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -587,7 +587,7 @@ pub async fn update_category(
 )]
 pub async fn delete_category(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -617,7 +617,7 @@ pub async fn delete_category(
 )]
 pub async fn list_menu_items(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     cache: Option<web::Data<crate::menu::cache::MenuCache>>,
     query: web::Query<MenuItemQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -727,7 +727,7 @@ pub async fn list_menu_items(
 )]
 pub async fn list_menu_catalog(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<MenuCatalogQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -844,7 +844,7 @@ pub async fn list_menu_catalog(
 )]
 pub async fn get_menu_item(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -879,7 +879,7 @@ pub async fn get_menu_item(
 )]
 pub async fn create_menu_item(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<CreateMenuItemRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -962,7 +962,7 @@ pub async fn create_menu_item(
 )]
 pub async fn update_menu_item(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<UpdateMenuItemRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -1091,7 +1091,7 @@ pub async fn update_menu_item(
 )]
 pub async fn delete_menu_item(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1131,7 +1131,7 @@ pub async fn delete_menu_item(
 )]
 pub async fn upsert_size(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<UpsertSizeRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -1214,7 +1214,7 @@ pub async fn upsert_size(
 )]
 pub async fn delete_size(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     path: web::Path<(Uuid, Uuid)>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1269,7 +1269,7 @@ pub async fn delete_size(
 )]
 pub async fn list_addon_items(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<AddonItemQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1348,7 +1348,7 @@ pub struct AddonCatalogQuery {
 )]
 pub async fn list_addon_catalog(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<AddonCatalogQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1432,7 +1432,7 @@ pub async fn list_addon_catalog(
 )]
 pub async fn create_addon_item(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<CreateAddonItemRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1478,7 +1478,7 @@ pub async fn create_addon_item(
 )]
 pub async fn update_addon_item(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<UpdateAddonItemRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -1539,7 +1539,7 @@ pub async fn update_addon_item(
 )]
 pub async fn delete_addon_item(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1568,7 +1568,7 @@ pub async fn delete_addon_item(
 )]
 pub async fn list_addon_slots(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1592,7 +1592,7 @@ pub async fn list_addon_slots(
 )]
 pub async fn create_addon_slot(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<CreateAddonSlotRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -1654,7 +1654,7 @@ pub async fn create_addon_slot(
 )]
 pub async fn update_addon_slot(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     path: web::Path<(Uuid, Uuid)>,
     body: web::Json<UpdateAddonSlotRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -1726,7 +1726,7 @@ pub async fn update_addon_slot(
 )]
 pub async fn delete_addon_slot(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     path: web::Path<(Uuid, Uuid)>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1757,7 +1757,7 @@ pub async fn delete_addon_slot(
 )]
 pub async fn list_addon_overrides(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1811,7 +1811,7 @@ pub async fn list_addon_overrides(
 )]
 pub async fn upsert_addon_override(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<UpsertAddonOverrideRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -1993,7 +1993,7 @@ pub async fn upsert_addon_override(
 )]
 pub async fn delete_addon_override(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     path: web::Path<(Uuid, Uuid)>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -2034,7 +2034,7 @@ pub struct PutAllowedAddonsRequest {
 )]
 pub async fn put_allowed_addons(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<PutAllowedAddonsRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -2132,7 +2132,7 @@ pub struct UpdateOptionalFieldRequest {
 )]
 pub async fn list_optional_fields(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -2169,7 +2169,7 @@ pub async fn list_optional_fields(
 )]
 pub async fn create_optional_field(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<CreateOptionalFieldRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -2271,7 +2271,7 @@ pub async fn create_optional_field(
 )]
 pub async fn update_optional_field(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     path: web::Path<(Uuid, Uuid)>,
     body: web::Json<UpdateOptionalFieldRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -2392,7 +2392,7 @@ pub async fn update_optional_field(
 )]
 pub async fn delete_optional_field(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     path: web::Path<(Uuid, Uuid)>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -2483,7 +2483,7 @@ async fn apply_branch_size_overrides(
 )]
 pub async fn list_branch_menu_overrides(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<BranchOverridesQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -2535,7 +2535,7 @@ pub async fn list_branch_menu_overrides(
 )]
 pub async fn upsert_branch_menu_override(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<BranchMenuOverrideInput>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -2645,7 +2645,7 @@ pub async fn upsert_branch_menu_override(
 )]
 pub async fn delete_branch_menu_override(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<BranchOverrideKeyQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -2683,7 +2683,7 @@ pub async fn delete_branch_menu_override(
 )]
 pub async fn list_branch_addon_overrides(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<BranchOverridesQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -2712,7 +2712,7 @@ pub async fn list_branch_addon_overrides(
 )]
 pub async fn upsert_branch_addon_override(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<BranchAddonOverrideInput>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -2766,7 +2766,7 @@ pub async fn upsert_branch_addon_override(
 )]
 pub async fn delete_branch_addon_override(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<BranchAddonOverrideKeyQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;

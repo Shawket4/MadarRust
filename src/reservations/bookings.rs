@@ -165,7 +165,7 @@ fn user_id(claims: &crate::auth::jwt::Claims) -> Result<Uuid, AppError> {
 )]
 pub async fn list_bookings(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ListBookingsQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -206,7 +206,7 @@ pub async fn list_bookings(
 )]
 pub async fn create_booking(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     body: web::Json<CreateBookingRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -275,7 +275,7 @@ pub async fn create_booking(
 )]
 pub async fn update_booking(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     id: web::Path<Uuid>,
     body: web::Json<UpdateBookingRequest>,
@@ -365,7 +365,7 @@ pub async fn update_booking(
 )]
 pub async fn assign_tables(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     id: web::Path<Uuid>,
     body: web::Json<AssignTablesRequest>,
@@ -472,7 +472,7 @@ pub async fn assign_tables(
 )]
 pub async fn notify_booking(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {

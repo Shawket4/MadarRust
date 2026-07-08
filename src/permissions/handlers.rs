@@ -87,7 +87,7 @@ pub struct PermissionMatrix {
 )]
 pub async fn get_user_permissions(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     user_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -120,7 +120,7 @@ pub async fn get_user_permissions(
 )]
 pub async fn get_permission_matrix(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     user_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -200,7 +200,7 @@ pub async fn get_permission_matrix(
 )]
 pub async fn upsert_user_permission(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     user_id: web::Path<Uuid>,
     body: web::Json<UpsertPermissionRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -248,7 +248,7 @@ pub async fn upsert_user_permission(
 )]
 pub async fn delete_user_permission(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     path: web::Path<(Uuid, String, String)>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -286,7 +286,7 @@ pub async fn delete_user_permission(
 )]
 pub async fn get_role_permissions(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "permissions", "read").await?;
@@ -316,7 +316,7 @@ pub async fn get_role_permissions(
 )]
 pub async fn upsert_role_permission(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<UpsertRolePermissionRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;

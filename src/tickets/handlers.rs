@@ -124,7 +124,7 @@ async fn table_label(pool: &PgPool, table_id: Option<Uuid>) -> Result<Option<Str
     responses((status = 201, body = OpenTicketView), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn create_open_ticket(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     body: web::Json<CreateOpenTicketRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -146,7 +146,7 @@ pub async fn create_open_ticket(
 /// LAN-first at fire time — the ticket floats free of any till and is settled
 /// later). BOTH dedup on the in-body ticket idempotency key.
 pub(crate) async fn create_open_ticket_inner(
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<CreateOpenTicketRequest>,
     actor: ActingContext,
     // The realtime bus, for firing a LIVE ticket to the KDS. `None` on replay (a
@@ -250,7 +250,7 @@ pub(crate) async fn create_open_ticket_inner(
     responses((status = 200, body = OpenTicketView), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn add_round(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     id: web::Path<Uuid>,
     body: web::Json<AddRoundRequest>,
@@ -272,7 +272,7 @@ pub async fn add_round(
 /// open ticket. Shared by the live route and `/sync/replay` (a queued offline
 /// round); dedups on the per-round idempotency key.
 pub(crate) async fn add_round_inner(
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: Uuid,
     body: web::Json<AddRoundRequest>,
     actor: ActingContext,
@@ -361,7 +361,7 @@ pub(crate) async fn add_round_inner(
     responses((status = 200, body = Vec<OpenTicketView>), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn list_open_tickets(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ListQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -390,7 +390,7 @@ pub async fn list_open_tickets(
     responses((status = 200, body = OpenTicketView), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn get_open_ticket(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -409,7 +409,7 @@ pub async fn get_open_ticket(
     responses((status = 200, body = OpenTicketView), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn void_open_ticket(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     id: web::Path<Uuid>,
     body: web::Json<VoidOpenTicketRequest>,
@@ -424,7 +424,7 @@ pub async fn void_open_ticket(
 /// Shared by the live route and `/sync/replay` (a queued offline void). No actor
 /// attribution (the void carries only a reason), so it takes no `ActingContext`.
 pub(crate) async fn void_open_ticket_inner(
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: Uuid,
     body: web::Json<VoidOpenTicketRequest>,
     hub: Option<&BranchEventHub>,
@@ -496,7 +496,7 @@ pub struct MoveTicketTableRequest {
     security(("bearer_jwt" = [])))]
 pub async fn move_ticket_table(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     id: web::Path<Uuid>,
     body: web::Json<MoveTicketTableRequest>,
@@ -589,7 +589,7 @@ pub async fn move_ticket_table(
         AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn settle_open_ticket(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     id: web::Path<Uuid>,
     body: web::Json<SettleOpenTicketRequest>,
@@ -616,7 +616,7 @@ pub async fn settle_open_ticket(
 /// `/sync/replay` (a queued offline settle).
 #[allow(clippy::type_complexity)]
 pub(crate) async fn settle_open_ticket_inner(
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: Uuid,
     body: web::Json<SettleOpenTicketRequest>,
     actor: ActingContext,

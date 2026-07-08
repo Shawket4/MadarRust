@@ -1,7 +1,6 @@
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use std::collections::HashMap;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -59,7 +58,7 @@ pub struct UpdatePaymentMethodRequest {
 )]
 pub async fn list_payment_methods(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "payment_methods", "read").await?;
@@ -93,7 +92,7 @@ pub async fn list_payment_methods(
 )]
 pub async fn create_payment_method(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     mut body: web::Json<CreatePaymentMethodRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -151,7 +150,7 @@ pub async fn create_payment_method(
 )]
 pub async fn update_payment_method(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     mut body: web::Json<UpdatePaymentMethodRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -230,7 +229,7 @@ pub async fn update_payment_method(
 )]
 pub async fn activate_payment_method(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -263,7 +262,7 @@ pub async fn activate_payment_method(
 )]
 pub async fn deactivate_payment_method(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
