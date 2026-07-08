@@ -177,8 +177,8 @@ impl crate::ai::provider::LlmProvider for ScriptedProvider {
     ) -> Result<Option<String>, crate::ai::provider::ProviderError> {
         Ok(None)
     }
-    fn name(&self) -> &'static str {
-        "scripted"
+    fn name(&self) -> String {
+        "scripted".to_string()
     }
 }
 
@@ -213,8 +213,8 @@ impl crate::ai::provider::LlmProvider for FollowUpProvider {
     ) -> Result<Option<String>, crate::ai::provider::ProviderError> {
         Ok(None)
     }
-    fn name(&self) -> &'static str {
-        "followup"
+    fn name(&self) -> String {
+        "followup".to_string()
     }
 }
 

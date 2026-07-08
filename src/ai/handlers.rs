@@ -431,7 +431,7 @@ pub async fn chat(
         row_count: result.row_count,
         truncated: result.truncated,
         summary,
-        provider: provider.name().to_string(),
+        provider: provider.name(),
     };
 
     state.cache.insert(cache_key, response.clone()).await;

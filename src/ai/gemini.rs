@@ -7,39 +7,27 @@
 //!     JSON prefix (`tool_declarations()`), reused verbatim on every request.
 //!     Because that prefix is identical across calls and sits *first* in the
 //!     payload (the user's question is the only varying, trailing part), Gemini
-//!     2.5's implicit context caching hits it automatically — the large,
-//!     invariant tool schema isn't re-billed at full input price on repeat
-//!     calls, and we spend zero CPU re-serializing it.
+//!     2.5's implicit context caching hits it automatically.
 //!   * **No thinking.** `thinkingBudget: 0` disables Flash's thinking tokens.
 //!   * **Forced single call.** `functionCallingConfig.mode = ANY` makes the
-//!     model answer with a function call and no prose, so one round trip picks
-//!     the report — no wasted output tokens, no follow-up turn.
+//!     model answer with a function call and no prose.
 //!   * **Tight output cap + temperature 0** for determinism (also cache-friendly).
 //!
-//! The summary pass is a separate, optional, equally-small call.
+//! Prompts and the per-report tool schema are shared with every other provider
+//! via [`super::prompt`], so they can't drift.
 
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
-use super::catalog::{ParamKind, REPORTS};
+use super::catalog::REPORTS;
+use super::prompt;
 use super::provider::{ChatContext, LlmProvider, ProviderError, ToolChoice};
 
 const MODEL: &str = "gemini-2.5-flash";
 const ENDPOINT: &str = "https://generativelanguage.googleapis.com/v1beta/models";
-
-const SYSTEM_PROMPT: &str = "You are the analytics assistant for a restaurant \
-point-of-sale system. The merchant asks about THEIR OWN business data in plain \
-language, in English or Arabic (including Egyptian dialect). Choose exactly one \
-of the provided report functions and fill in its parameters from the question. \
-The user's message states today's date and timezone — resolve relative dates \
-(\"last week\", \"this month\", \"yesterday\", \"الأسبوع الماضي\", \"امبارح\", \
-\"الشهر ده\") to concrete ISO-8601 dates relative to that. You do NOT choose \
-which branches to include — branch access is enforced by the backend. If no \
-report fits, still choose the closest one. You never write SQL and never invent \
-data.";
 
 /// Gemini-backed provider. Cheap to clone (holds an `reqwest::Client`, which is
 /// internally reference-counted).
@@ -94,27 +82,9 @@ impl GeminiProvider {
 impl LlmProvider for GeminiProvider {
     async fn choose_report(&self, ctx: &ChatContext) -> Result<ToolChoice, ProviderError> {
         // Stable prefix (system + tools) first so it caches upstream; ALL the
-        // per-request variation (question + today/timezone/language/branches)
-        // goes in the trailing user turn.
-        let branches = if ctx.branch_names.is_empty() {
-            "none".to_string()
-        } else {
-            ctx.branch_names.join(", ")
-        };
-        let user_text = format!(
-            "Today is {} in timezone {}. Answer language: {}.\n\
-             Branches available: {}. If the question names a branch, pass its \
-             name as the `branch` argument; otherwise omit it.\n\n\
-             Question: {}",
-            ctx.today, ctx.timezone, ctx.locale, branches, ctx.question
-        );
-
-        // Replay the recent conversation as plain text turns (user question +
-        // a short model note of which report answered) BEFORE the current turn,
-        // so the model can resolve follow-ups like "and last month?". Plain text
-        // avoids the function-call/response protocol; the current turn still
-        // triggers a fresh function call. The system+tools prefix is unchanged,
-        // so it keeps caching.
+        // per-request variation goes in the trailing user turn. Recent history is
+        // replayed as plain text turns so follow-ups ("and last month?") resolve
+        // without the function-call/response protocol.
         let mut contents: Vec<Value> = Vec::with_capacity(ctx.history.len() * 2 + 1);
         for turn in &ctx.history {
             contents.push(json!({ "role": "user", "parts": [{ "text": turn.question }] }));
@@ -125,10 +95,10 @@ impl LlmProvider for GeminiProvider {
                 }));
             }
         }
-        contents.push(json!({ "role": "user", "parts": [{ "text": user_text }] }));
+        contents.push(json!({ "role": "user", "parts": [{ "text": prompt::user_text(ctx) }] }));
 
         let body = json!({
-            "systemInstruction": { "parts": [{ "text": SYSTEM_PROMPT }] },
+            "systemInstruction": { "parts": [{ "text": prompt::SYSTEM_PROMPT }] },
             "tools": tool_declarations(),
             "toolConfig": { "functionCallingConfig": { "mode": "ANY" } },
             "contents": contents,
@@ -173,14 +143,9 @@ impl LlmProvider for GeminiProvider {
         data_json: &str,
     ) -> Result<Option<String>, ProviderError> {
         let body = json!({
-            "systemInstruction": { "parts": [{ "text":
-                "You summarize restaurant analytics results. Given the user's \
-                 question and the resulting data as JSON, reply with ONE short, \
-                 factual sentence stating the key takeaway. Reply in the SAME \
-                 language as the question. No preamble, no markdown, no lists." }] },
-            "contents": [{ "role": "user", "parts": [{ "text":
-                format!("Language: {}\nQuestion: {}\nReport: {report_title}\nData: {data_json}",
-                        ctx.locale, ctx.question) }] }],
+            "systemInstruction": { "parts": [{ "text": prompt::SUMMARY_SYSTEM_PROMPT }] },
+            "contents": [{ "role": "user", "parts": [{
+                "text": prompt::summary_user_text(ctx, report_title, data_json) }] }],
             "generationConfig": {
                 "temperature": 0,
                 "maxOutputTokens": 160,
@@ -197,59 +162,24 @@ impl LlmProvider for GeminiProvider {
         Ok(text)
     }
 
-    fn name(&self) -> &'static str {
-        MODEL
+    fn name(&self) -> String {
+        MODEL.to_string()
     }
 }
 
 /// The `tools` array (function declarations) for the request, built once from
-/// the report catalog and cached. Its bytes are identical on every call, which
-/// is what makes the request prefix cacheable upstream.
+/// the report catalog and cached. Identical bytes on every call → cacheable
+/// prefix upstream.
 fn tool_declarations() -> &'static Value {
     static TOOLS: OnceLock<Value> = OnceLock::new();
     TOOLS.get_or_init(|| {
         let declarations: Vec<Value> = REPORTS
             .iter()
             .map(|r| {
-                let mut properties = Map::new();
-                let mut required: Vec<Value> = Vec::new();
-                for p in r.params {
-                    let schema = match p.kind {
-                        ParamKind::Date => json!({
-                            "type": "string",
-                            "format": "date-time",
-                            "description": p.description
-                        }),
-                        ParamKind::Int { .. } => json!({
-                            "type": "integer",
-                            "description": p.description
-                        }),
-                    };
-                    properties.insert(p.name.to_string(), schema);
-                    if p.required {
-                        required.push(Value::from(p.name));
-                    }
-                }
-                // Every report is branch-scoped, so all accept an optional
-                // branch narrowing. The backend fuzzy-matches this within the
-                // caller's accessible branches and can only narrow, never widen.
-                properties.insert(
-                    "branch".to_string(),
-                    json!({
-                        "type": "string",
-                        "description": "Optional: restrict to ONE branch, by the name the \
-                            user used (e.g. 'Sidi Henish'). Omit to cover every branch the \
-                            user can access."
-                    }),
-                );
                 json!({
                     "name": r.id,
                     "description": r.description,
-                    "parameters": {
-                        "type": "object",
-                        "properties": properties,
-                        "required": required
-                    }
+                    "parameters": prompt::report_parameters_schema(r),
                 })
             })
             .collect();

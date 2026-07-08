@@ -111,8 +111,9 @@ pub trait LlmProvider: Send + Sync {
         data_json: &str,
     ) -> Result<Option<String>, ProviderError>;
 
-    /// Provider label for logs / responses (e.g. "gemini-2.5-flash").
-    fn name(&self) -> &'static str;
+    /// Provider label for logs / responses (e.g. "gemini-2.5-flash",
+    /// "groq/llama-3.3-70b-versatile").
+    fn name(&self) -> String;
 }
 
 /// A deterministic provider for tests: maps a question to a report by keyword,
@@ -176,7 +177,7 @@ impl LlmProvider for MockProvider {
         )))
     }
 
-    fn name(&self) -> &'static str {
-        "mock"
+    fn name(&self) -> String {
+        "mock".to_string()
     }
 }
