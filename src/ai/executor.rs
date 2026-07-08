@@ -27,7 +27,7 @@ use uuid::Uuid;
 
 use crate::db::Db;
 
-use super::catalog::{Column, ColumnKind, ParamKind, Report};
+use super::catalog::{ChartHint, Column, ColumnKind, Param, ParamKind, Report};
 
 /// Hard ceiling on rows returned regardless of a report's own LIMIT.
 const MAX_ROWS: usize = 1000;
@@ -59,30 +59,48 @@ impl From<ExecError> for crate::errors::AppError {
 }
 
 /// A validated value ready to bind.
-enum Bound {
+pub(crate) enum Bound {
     Int(i64),
     Text(String),
     Ts(Option<DateTime<Utc>>),
     Uuids(Vec<Uuid>),
 }
 
+/// A fully-resolved query ready to execute: assembled SQL + output columns +
+/// presentation. A static [`Report`] builds this from its fixed fields; the
+/// semantic builder assembles it from whitelisted fragments. Either way it runs
+/// through the same hardened [`run_resolved`].
+pub struct ResolvedQuery {
+    /// A single read-only SELECT with named params (`:from`, `:branch_ids`, …).
+    pub sql: String,
+    /// Output columns, keyed by their SQL alias.
+    pub columns: Vec<Column>,
+    /// Suggested visualization.
+    pub chart: ChartHint,
+    /// When set, the frontend renders one section per distinct value of this
+    /// column key (e.g. "one table per branch").
+    pub facet_by: Option<String>,
+}
+
 /// The tabular result of a report.
 pub struct QueryResult {
-    pub columns: &'static [Column],
+    pub columns: Vec<Column>,
     pub rows: Vec<Map<String, Value>>,
     pub row_count: usize,
     pub truncated: bool,
+    pub chart: ChartHint,
+    pub facet_by: Option<String>,
 }
 
 /// Validate the model's raw args against the report's declared params, keyed by
 /// name. Missing optionals become NULL (dates) or their default (ints); unknown
 /// keys are ignored; malformed / out-of-bounds values are rejected.
 fn resolve_model_args(
-    report: &Report,
+    params: &[Param],
     raw: &Map<String, Value>,
 ) -> Result<HashMap<String, Bound>, ExecError> {
     let mut out = HashMap::new();
-    for p in report.params {
+    for p in params {
         let v = raw.get(p.name);
         let bound = match p.kind {
             ParamKind::Date => {
@@ -117,6 +135,70 @@ fn resolve_model_args(
                     }
                 };
                 Bound::Int(n.clamp(min, max))
+            }
+            ParamKind::Enum { variants, .. } => {
+                match v {
+                    None | Some(Value::Null) => {}
+                    Some(Value::String(s)) => {
+                        if !variants.contains(&s.as_str()) {
+                            return Err(ExecError::BadArg(format!(
+                                "'{}' must be one of: {}",
+                                p.name,
+                                variants.join(", ")
+                            )));
+                        }
+                    }
+                    Some(_) => {
+                        return Err(ExecError::BadArg(format!(
+                            "'{}' must be a string",
+                            p.name
+                        )));
+                    }
+                }
+                // Enum/list values select SQL *fragments* in the builder; they
+                // are never bound as SQL values, so there is nothing to bind.
+                continue;
+            }
+            ParamKind::StrList { variants } => {
+                match v {
+                    None | Some(Value::Null) => {}
+                    Some(Value::Array(items)) => {
+                        for it in items {
+                            let s = it.as_str().ok_or_else(|| {
+                                ExecError::BadArg(format!(
+                                    "'{}' must be a list of strings",
+                                    p.name
+                                ))
+                            })?;
+                            if !variants.contains(&s) {
+                                return Err(ExecError::BadArg(format!(
+                                    "'{}' has an unknown value '{s}'",
+                                    p.name
+                                )));
+                            }
+                        }
+                    }
+                    Some(_) => {
+                        return Err(ExecError::BadArg(format!(
+                            "'{}' must be an array of strings",
+                            p.name
+                        )));
+                    }
+                }
+                continue;
+            }
+            ParamKind::Bool { .. } => {
+                match v {
+                    None | Some(Value::Null) | Some(Value::Bool(_)) => {}
+                    Some(Value::String(s)) if s == "true" || s == "false" => {}
+                    Some(_) => {
+                        return Err(ExecError::BadArg(format!(
+                            "'{}' must be true or false",
+                            p.name
+                        )));
+                    }
+                }
+                continue;
             }
         };
         out.insert(p.name.to_string(), bound);
@@ -211,20 +293,45 @@ pub struct ExecCtx<'a> {
     pub tz: &'a str,
 }
 
-/// Execute `report` for the caller with the system-injected [`ExecCtx`].
+/// Execute a static [`Report`] for the caller with the system-injected
+/// [`ExecCtx`]. Thin wrapper: wrap the report's fixed SQL/columns/chart in a
+/// [`ResolvedQuery`] and run it — identical behavior to before.
 pub async fn run(
     db: &Db,
-    report: &'static Report,
+    report: &Report,
     raw: &Map<String, Value>,
     ctx: &ExecCtx<'_>,
 ) -> Result<QueryResult, ExecError> {
-    let mut values = resolve_model_args(report, raw)?;
+    let resolved = ResolvedQuery {
+        sql: report.sql.to_string(),
+        columns: report.columns.to_vec(),
+        chart: report.chart,
+        facet_by: None,
+    };
+    run_resolved(db, &resolved, report.params, raw, ctx).await
+}
+
+/// Execute a [`ResolvedQuery`] — from a static report OR the semantic builder.
+///
+/// `params` + `raw` supply the model's typed values for the SQL's named binds
+/// (`:from`, `:to`, `:limit`, …); the system params `:branch_ids` / `:locale` /
+/// `:tz` are injected here and can never be overridden by the model. All the
+/// defense-in-depth (read-only txn, statement timeout, row cap, RLS) applies
+/// regardless of how the SQL was produced.
+pub async fn run_resolved(
+    db: &Db,
+    resolved: &ResolvedQuery,
+    params: &[Param],
+    raw: &Map<String, Value>,
+    ctx: &ExecCtx<'_>,
+) -> Result<QueryResult, ExecError> {
+    let mut values = resolve_model_args(params, raw)?;
     // System-injected params — authoritative, cannot be overridden by the model.
     values.insert("branch_ids".into(), Bound::Uuids(ctx.branch_ids.to_vec()));
     values.insert("locale".into(), Bound::Text(ctx.locale.to_string()));
     values.insert("tz".into(), Bound::Text(ctx.tz.to_string()));
 
-    let (positional_sql, order) = rewrite_named(report.sql);
+    let (positional_sql, order) = rewrite_named(&resolved.sql);
 
     let mut tx = db.begin().await.map_err(ExecError::Db)?;
     sqlx::query("SET TRANSACTION READ ONLY")
@@ -240,9 +347,9 @@ pub async fn run(
 
     let mut q = sqlx::query(&positional_sql);
     for name in &order {
-        let bound = values.get(name).ok_or_else(|| {
-            ExecError::BadArg(format!("report '{}' references unknown :{name}", report.id))
-        })?;
+        let bound = values
+            .get(name)
+            .ok_or_else(|| ExecError::BadArg(format!("query references unknown :{name}")))?;
         q = match bound {
             Bound::Int(n) => q.bind(*n),
             Bound::Text(s) => q.bind(s.clone()),
@@ -258,11 +365,13 @@ pub async fn run(
     let rows: Vec<Map<String, Value>> = pg_rows
         .iter()
         .take(MAX_ROWS)
-        .map(|row| map_row(row, report.columns))
+        .map(|row| map_row(row, &resolved.columns))
         .collect();
 
     Ok(QueryResult {
-        columns: report.columns,
+        columns: resolved.columns.clone(),
+        chart: resolved.chart,
+        facet_by: resolved.facet_by.clone(),
         row_count: rows.len(),
         rows,
         truncated,

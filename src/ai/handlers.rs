@@ -88,6 +88,10 @@ pub struct AiChatResponse {
     pub row_count: usize,
     /// True when the result was capped.
     pub truncated: bool,
+    /// When set, the client renders one section (chart + table) per distinct
+    /// value of this column key — e.g. one table per branch ("faceting").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub facet_by: Option<String>,
     /// Optional one-sentence summary (only when `include_summary` was set and
     /// the model produced one), in the requested locale.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -401,7 +405,16 @@ pub async fn chat(
         locale: &locale,
         tz: &timezone,
     };
-    let result = super::executor::run(&db, report, &choice.args, &exec_ctx).await?;
+    // The flexible builder composes SQL at runtime from a whitelisted semantic
+    // layer; curated reports run their fixed SQL. Both go through the same
+    // hardened executor (read-only, timed, row-capped, branch-fenced).
+    let result = if report.id == "analytics_query" {
+        let resolved = super::semantic::build(&choice.args)?;
+        super::executor::run_resolved(&db, &resolved, report.params, &choice.args, &exec_ctx)
+            .await?
+    } else {
+        super::executor::run(&db, report, &choice.args, &exec_ctx).await?
+    };
 
     // 3. Optional summary — best-effort in the requested language; the scope is
     //    included so the sentence states which branch(es) it covers. Never fail
@@ -425,11 +438,12 @@ pub async fn chat(
         report_id: report.id.to_string(),
         title: report.title.to_string(),
         scope,
-        chart: report.chart,
-        columns: result.columns.to_vec(),
+        chart: result.chart,
+        columns: result.columns,
         rows: result.rows,
         row_count: result.row_count,
         truncated: result.truncated,
+        facet_by: result.facet_by,
         summary,
         provider: provider.name(),
     };

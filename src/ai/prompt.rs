@@ -19,9 +19,14 @@ of the provided report functions and fill in its parameters from the question. \
 The user's message states today's date and timezone — resolve relative dates \
 (\"last week\", \"this month\", \"yesterday\", \"الأسبوع الماضي\", \"امبارح\", \
 \"الشهر ده\") to concrete ISO-8601 dates relative to that. You do NOT choose \
-which branches to include — branch access is enforced by the backend. If no \
-report fits, still choose the closest one. You never write SQL and never invent \
-data.";
+which branches to include — branch access is enforced by the backend. Prefer a \
+specific report when one clearly fits. Otherwise — when the question needs a \
+custom breakdown (by day/branch/waiter/product/…), a metric or grouping the \
+fixed reports lack, a per-group ranking (e.g. the top item in EACH branch), or \
+a particular table-vs-chart output — use the flexible `analytics_query` function \
+and compose it from its dataset/dimensions/measures/filters/output parameters. \
+Only fall back to the closest fixed report if `analytics_query` cannot express \
+the request. You never write SQL and never invent data.";
 
 /// System instruction for the one-line summary call.
 pub const SUMMARY_SYSTEM_PROMPT: &str = "You summarize restaurant analytics \
@@ -70,6 +75,20 @@ pub fn report_parameters_schema(report: &Report) -> Value {
             }),
             ParamKind::Int { .. } => json!({
                 "type": "integer",
+                "description": p.description
+            }),
+            ParamKind::Enum { variants, .. } => json!({
+                "type": "string",
+                "enum": variants,
+                "description": p.description
+            }),
+            ParamKind::StrList { variants } => json!({
+                "type": "array",
+                "items": { "type": "string", "enum": variants },
+                "description": p.description
+            }),
+            ParamKind::Bool { .. } => json!({
+                "type": "boolean",
                 "description": p.description
             }),
         };

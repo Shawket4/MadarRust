@@ -343,6 +343,11 @@ async fn every_catalog_report_runs_against_the_live_schema(pool: PgPool) {
         tz: "Africa/Cairo",
     };
     for report in crate::ai::catalog::REPORTS {
+        // The flexible builder has no static SQL — it's exercised by
+        // `builder_composes_valid_sql_for_every_dataset_dim_measure` below.
+        if report.id == "analytics_query" {
+            continue;
+        }
         let args = serde_json::Map::new();
         let res = crate::ai::executor::run(&db, report, &args, &ctx).await;
         assert!(
@@ -351,6 +356,152 @@ async fn every_catalog_report_runs_against_the_live_schema(pool: PgPool) {
             report.id,
             res.err()
         );
+    }
+}
+
+#[sqlx::test]
+async fn builder_composes_valid_sql_for_every_dataset_dim_measure(pool: PgPool) {
+    // The analogue of the catalog compile test for the flexible builder: every
+    // dataset × dimension × measure the schema advertises must assemble into SQL
+    // that executes against the live schema. Combos invalid for a dataset are
+    // rejected at build time (fine); only the valid ones reach the DB.
+    let org = seed(&pool, "A").await;
+    let db = crate::db::Db::for_org(&pool, org).await;
+    let branches: Vec<uuid::Uuid> =
+        sqlx::query_scalar("SELECT id FROM branches WHERE deleted_at IS NULL")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let ctx = crate::ai::executor::ExecCtx {
+        branch_ids: &branches,
+        locale: "ar",
+        tz: "Africa/Cairo",
+    };
+    let params = crate::ai::catalog::find("analytics_query").unwrap().params;
+    for dataset in crate::ai::semantic::DATASET_IDS {
+        for dim in crate::ai::semantic::DIMENSION_IDS {
+            for measure in crate::ai::semantic::MEASURE_IDS {
+                let args = serde_json::json!({
+                    "dataset": dataset,
+                    "dimensions": [dim],
+                    "measures": [measure],
+                })
+                .as_object()
+                .unwrap()
+                .clone();
+                let Ok(resolved) = crate::ai::semantic::build(&args) else {
+                    continue; // invalid for this dataset — skip
+                };
+                let res =
+                    crate::ai::executor::run_resolved(&db, &resolved, params, &args, &ctx).await;
+                assert!(
+                    res.is_ok(),
+                    "builder {dataset}/{dim}/{measure} failed: {:?}",
+                    res.err()
+                );
+            }
+        }
+    }
+}
+
+#[sqlx::test]
+async fn builder_facets_top_n_per_group(pool: PgPool) {
+    // per + top_per → per-group ranking with a facet_by hint and a rank column.
+    let org = seed(&pool, "A").await;
+    let db = crate::db::Db::for_org(&pool, org).await;
+    let branches: Vec<uuid::Uuid> =
+        sqlx::query_scalar("SELECT id FROM branches WHERE deleted_at IS NULL")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let ctx = crate::ai::executor::ExecCtx {
+        branch_ids: &branches,
+        locale: "en",
+        tz: "Africa/Cairo",
+    };
+    let params = crate::ai::catalog::find("analytics_query").unwrap().params;
+    let args = serde_json::json!({
+        "dataset": "order_items",
+        "dimensions": ["branch", "product"],
+        "measures": ["line_item_units"],
+        "per": "branch",
+        "top_per": 1,
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    let resolved = crate::ai::semantic::build(&args).unwrap();
+    assert_eq!(resolved.facet_by.as_deref(), Some("branch"));
+    let res = crate::ai::executor::run_resolved(&db, &resolved, params, &args, &ctx)
+        .await
+        .unwrap();
+    assert!(res.facet_by.as_deref() == Some("branch"));
+    assert!(res.columns.iter().any(|c| c.key == "rank"));
+}
+
+#[sqlx::test]
+async fn builder_sort_threshold_waste_profit_run(pool: PgPool) {
+    // Exercises the builder features the exhaustive combo test doesn't pass:
+    // ascending sort + HAVING threshold, the waste dataset (its own alias), and
+    // the order_items profit measures — each must run against the live schema.
+    let org = seed(&pool, "A").await;
+    let db = crate::db::Db::for_org(&pool, org).await;
+    let branches: Vec<uuid::Uuid> =
+        sqlx::query_scalar("SELECT id FROM branches WHERE deleted_at IS NULL")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let ctx = crate::ai::executor::ExecCtx {
+        branch_ids: &branches,
+        locale: "en",
+        tz: "Africa/Cairo",
+    };
+    let params = crate::ai::catalog::find("analytics_query").unwrap().params;
+    let cases = [
+        serde_json::json!({ "dataset": "order_items", "dimensions": ["product"], "measures": ["line_item_units"], "sort_dir": "asc", "having_min": 2 }),
+        serde_json::json!({ "dataset": "waste", "dimensions": ["day", "ingredient"], "measures": ["waste_cost", "waste_qty"] }),
+        serde_json::json!({ "dataset": "order_items", "dimensions": ["category"], "measures": ["item_profit", "margin_pct"], "per": "category", "top_per": 3 }),
+    ];
+    for c in cases {
+        let args = c.as_object().unwrap().clone();
+        let resolved = crate::ai::semantic::build(&args).unwrap();
+        let res = crate::ai::executor::run_resolved(&db, &resolved, params, &args, &ctx).await;
+        assert!(res.is_ok(), "failed: {:?}\nSQL: {}", res.err(), resolved.sql);
+    }
+}
+
+#[sqlx::test]
+async fn builder_compare_share_cumulative_run(pool: PgPool) {
+    // Period-over-period comparison, share-of-total, and cumulative running
+    // totals must each assemble into SQL that runs against the live schema.
+    let org = seed(&pool, "A").await;
+    let db = crate::db::Db::for_org(&pool, org).await;
+    let branches: Vec<uuid::Uuid> =
+        sqlx::query_scalar("SELECT id FROM branches WHERE deleted_at IS NULL")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let ctx = crate::ai::executor::ExecCtx {
+        branch_ids: &branches,
+        locale: "en",
+        tz: "Africa/Cairo",
+    };
+    let params = crate::ai::catalog::find("analytics_query").unwrap().params;
+    let cases = [
+        // Comparison with an entity breakdown → LEFT JOIN prev USING (branch).
+        serde_json::json!({ "dataset": "orders", "dimensions": ["branch"], "measures": ["revenue", "order_count"], "compare": "previous_period", "from": "2026-07-01", "to": "2026-07-07" }),
+        // Comparison of a headline total → CROSS JOIN prev.
+        serde_json::json!({ "dataset": "orders", "measures": ["revenue"], "compare": "previous_year", "from": "2026-01-01", "to": "2026-06-30" }),
+        // Share of grand total.
+        serde_json::json!({ "dataset": "order_items", "dimensions": ["category"], "measures": ["item_revenue"], "share": true }),
+        // Cumulative running total over a time axis.
+        serde_json::json!({ "dataset": "orders", "dimensions": ["day"], "measures": ["revenue"], "cumulative": true }),
+    ];
+    for c in cases {
+        let args = c.as_object().unwrap().clone();
+        let resolved = crate::ai::semantic::build(&args).unwrap();
+        let res = crate::ai::executor::run_resolved(&db, &resolved, params, &args, &ctx).await;
+        assert!(res.is_ok(), "failed: {:?}\nSQL: {}", res.err(), resolved.sql);
     }
 }
 

@@ -23,6 +23,7 @@ pub mod handlers;
 pub mod prompt;
 pub mod provider;
 pub mod routes;
+pub mod semantic;
 
 #[cfg(test)]
 mod tests;

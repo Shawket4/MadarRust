@@ -29968,6 +29968,13 @@
             },
             "description": "Column metadata for rendering the table/chart."
           },
+          "facet_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When set, the client renders one section (chart + table) per distinct\nvalue of this column key — e.g. one table per branch (\"faceting\")."
+          },
           "provider": {
             "type": "string",
             "description": "Which model answered (e.g. \"gemini-2.5-flash\")."

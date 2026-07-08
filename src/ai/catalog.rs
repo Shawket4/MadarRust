@@ -21,6 +21,8 @@
 use serde::Serialize;
 use utoipa::ToSchema;
 
+use super::semantic;
+
 /// A typed parameter the model fills in when choosing a report.
 #[derive(Clone, Copy)]
 pub struct Param {
@@ -36,6 +38,19 @@ pub enum ParamKind {
     Date,
     /// A bounded positive integer (e.g. a top-N limit).
     Int { min: i64, max: i64, default: i64 },
+    /// Exactly one value from a fixed whitelist (e.g. a dataset, an output
+    /// format). The model must pick one of `variants`; any other value is
+    /// rejected server-side. Consumed by a builder (never bound into SQL as a
+    /// value), so it can safely select a SQL fragment.
+    Enum {
+        variants: &'static [&'static str],
+        default: &'static str,
+    },
+    /// Zero or more values, each from `variants` (e.g. the measures to compute).
+    /// Order is preserved; unknown values are rejected. Also builder-consumed.
+    StrList { variants: &'static [&'static str] },
+    /// A boolean toggle (builder-consumed, never bound into SQL as a value).
+    Bool { default: bool },
 }
 
 /// The renderable kind of an output column (money vs count vs label vs a time
@@ -123,6 +138,170 @@ const LIMIT: Param = Param {
 const PERIOD: &[Param] = &[FROM, TO];
 const PERIOD_LIMIT: &[Param] = &[FROM, TO, LIMIT];
 
+/// Params for the flexible `analytics_query` builder. The enum/list variants are
+/// the semantic-layer whitelists, so the schema the model sees always matches
+/// what the builder actually accepts.
+const ANALYTICS_PARAMS: &[Param] = &[
+    Param {
+        name: "dataset",
+        kind: ParamKind::Enum {
+            variants: semantic::DATASET_IDS,
+            default: "orders",
+        },
+        required: false,
+        description: "What to count: 'orders' (one row per order — sales, counts, \
+            staff, discounts, tips, order type), 'order_items' (one row per line — \
+            products / categories / sizes / units / profit), 'payments' (one row \
+            per tender — payment methods, amounts), or 'waste' (inventory waste by \
+            ingredient). Default 'orders'.",
+    },
+    Param {
+        name: "dimensions",
+        kind: ParamKind::StrList {
+            variants: semantic::DIMENSION_IDS,
+        },
+        required: false,
+        description: "Break the result down by these, in order: time \
+            (day/week/month/hour/weekday), branch, waiter, cashier, order_type, \
+            delivery_channel, status, void_reason (orders); product, category, size \
+            (order_items); payment_method (payments); ingredient (waste). Empty = \
+            one overall row.",
+    },
+    Param {
+        name: "measures",
+        kind: ParamKind::StrList {
+            variants: semantic::MEASURE_IDS,
+        },
+        required: false,
+        description: "What to compute: order_count, revenue, discount_total, \
+            tax_total, tip_total, delivery_fees, avg_order_value, void_count \
+            (orders); line_item_units (quantity sold), distinct_lines, item_revenue, \
+            item_cost, item_profit, margin_pct (order_items); payment_count, \
+            paid_amount (payments); waste_qty, waste_cost (waste). Pick one or \
+            several. Defaults to the dataset's headline measures.",
+    },
+    Param {
+        name: "status",
+        kind: ParamKind::Enum {
+            variants: semantic::STATUS_IDS,
+            default: "completed",
+        },
+        required: false,
+        description: "Which orders to include: 'completed' (default, settled \
+            sales), 'not_voided', or 'all' (use 'all' for void_count / void_reason).",
+    },
+    Param {
+        name: "order_type",
+        kind: ParamKind::Enum {
+            variants: semantic::ORDER_TYPE_IDS,
+            default: "any",
+        },
+        required: false,
+        description: "Filter by fulfillment: 'any' (default), 'dine_in', or 'delivery'.",
+    },
+    Param {
+        name: "per",
+        kind: ParamKind::Enum {
+            variants: semantic::PER_IDS,
+            default: "none",
+        },
+        required: false,
+        description: "Rank WITHIN each value of this dimension and return one \
+            section per value (e.g. per='branch' with top_per=1 → the top row for \
+            EACH branch). Must also be listed in `dimensions`. Default 'none'.",
+    },
+    Param {
+        name: "top_per",
+        kind: ParamKind::Int {
+            min: 1,
+            max: 50,
+            default: 5,
+        },
+        required: false,
+        description: "With `per`: how many top rows to keep per group. Default 5.",
+    },
+    Param {
+        name: "output",
+        kind: ParamKind::Enum {
+            variants: semantic::OUTPUT_IDS,
+            default: "auto",
+        },
+        required: false,
+        description: "Preferred visualization: 'auto' (default), 'table', 'bar', \
+            'line', or 'pie'.",
+    },
+    Param {
+        name: "sort",
+        kind: ParamKind::Enum {
+            variants: semantic::MEASURE_IDS,
+            default: "order_count",
+        },
+        required: false,
+        description: "Which measure to sort by (must be one of the chosen \
+            measures). Defaults to the first measure.",
+    },
+    Param {
+        name: "sort_dir",
+        kind: ParamKind::Enum {
+            variants: semantic::SORT_DIR_IDS,
+            default: "desc",
+        },
+        required: false,
+        description: "Sort direction: 'desc' (default — most / top / best) or \
+            'asc' (least / bottom / worst / slowest / cheapest).",
+    },
+    Param {
+        name: "having_min",
+        kind: ParamKind::Int {
+            min: 0,
+            max: 1_000_000_000,
+            default: 0,
+        },
+        required: false,
+        description: "Keep only groups whose sort measure is at least this value \
+            (0 = no threshold; e.g. products with ≥ 100 units sold).",
+    },
+    Param {
+        name: "compare",
+        kind: ParamKind::Enum {
+            variants: semantic::COMPARE_IDS,
+            default: "none",
+        },
+        required: false,
+        description: "Compare the sort measure vs a prior window: 'previous_period' \
+            (the equal-length span immediately before) or 'previous_year'. Adds \
+            Previous + Change % columns. Needs an explicit date range; use for \
+            entity/overall breakdowns, not time series ('this week vs last week', \
+            'growth vs last month', 'مقارنة بالأسبوع الماضي').",
+    },
+    Param {
+        name: "share",
+        kind: ParamKind::Bool { default: false },
+        required: false,
+        description: "Add each row's share (% of the grand total) of the sort \
+            measure — for contribution analysis ('% of sales per branch').",
+    },
+    Param {
+        name: "cumulative",
+        kind: ParamKind::Bool { default: false },
+        required: false,
+        description: "Add a running total of the sort measure in time order \
+            (needs a day/week/month dimension) — 'cumulative sales this month'.",
+    },
+    FROM,
+    TO,
+    Param {
+        name: "limit",
+        kind: ParamKind::Int {
+            min: 1,
+            max: 1000,
+            default: 200,
+        },
+        required: false,
+        description: "Max rows to return. Default 200 (breakdowns can be large).",
+    },
+];
+
 // ── Column helpers (const arrays) ───────────────────────────────────────────
 
 const C_REVENUE: Column = Column {
@@ -150,6 +329,44 @@ const C_QTY: Column = Column {
 ///   AND (:from::timestamptz IS NULL OR o.created_at >= :from)
 ///   AND (:to::timestamptz   IS NULL OR o.created_at <= :to)
 pub static REPORTS: &[Report] = &[
+    // ── Flexible builder (the catch-all) ────────────────────────────────────
+    // Composed at runtime by `semantic::build` from the args below — NOT fixed
+    // SQL. `handlers::chat` routes this id to the builder; the empty sql/columns
+    // here are never executed. The model should prefer a curated report when one
+    // fits and fall back to this whenever a question needs a custom mix of
+    // dimensions/measures/filters, a day/branch/etc. breakdown, per-group top-N,
+    // or a table-vs-graph choice — so a poor-fit report is rarely chosen.
+    Report {
+        id: "analytics_query",
+        title: "Custom analytics",
+        description: "Compose a custom analytics query when no specific report \
+            fits. Choose a dataset ('orders', 'order_items', or 'payments'), one or \
+            more dimensions to break down by (day/week/month/hour/weekday, branch, \
+            waiter, cashier, order_type, delivery_channel, status; product/category \
+            for items; payment_method for payments), one or more measures \
+            (order_count, revenue, discount_total, tax_total, tip_total, \
+            delivery_fees, avg_order_value, void_count, line_item_units, \
+            item_revenue, payment_count, paid_amount), optional filters (status, \
+            order_type, branch, date range), and an output format. Set `per` to a \
+            dimension + `top_per` to rank within each group (e.g. per='branch', \
+            top_per=1 → the top product in EACH branch, one table per branch). Use \
+            for 'day by day', 'per branch', 'by waiter and day', 'most sold item in \
+            each branch', 'least sold products' (sort_dir='asc'), 'most profitable \
+            items' (measures=item_profit/margin_pct), 'sales by category', 'sales by \
+            size', 'payment method breakdown', 'tips by waiter', 'waste by \
+            ingredient' (dataset='waste'), 'this week vs last week' \
+            (compare='previous_period'), 'growth vs last year' \
+            (compare='previous_year'), '% of sales per branch' (share=true), \
+            'cumulative sales this month' (cumulative=true), 'يوم بيوم', 'لكل فرع', \
+            'أكثر صنف مبيعًا في كل فرع', 'أقل الأصناف مبيعًا', 'ربحية المنتجات', \
+            'المبيعات حسب الفئة', 'طرق الدفع', 'الهالك حسب الصنف', \
+            'مقارنة بالأسبوع الماضي', 'نسبة كل فرع من المبيعات', 'المبيعات التراكمية', \
+            and any breakdown the fixed reports miss.",
+        params: ANALYTICS_PARAMS,
+        sql: "",
+        columns: &[],
+        chart: ChartHint::Table,
+    },
     // ── Sales headline & splits ─────────────────────────────────────────────
     Report {
         id: "sales_summary",
