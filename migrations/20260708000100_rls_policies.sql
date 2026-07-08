@@ -10,8 +10,7 @@
 -- fails → deny-by-default (a scoped connection can never "fall open").
 --
 -- Rather than 80 hand-written statements (which silently rot when the schema
--- changes — an earlier draft referenced tables a later migration had dropped),
--- this generates policies from the live catalog:
+-- changes), this generates policies from the live catalog:
 --
 --   * table has `org_id`      → USING (org_id = <guc>)
 --   * else table has `branch_id` → USING (branch_id IN (SELECT id FROM branches))
@@ -23,21 +22,32 @@
 -- FOR ALL + USING only: WITH CHECK defaults to USING, so INSERT/UPDATE cannot
 -- place a row in — or repoint an FK at — another org.
 --
+-- VIEWS: this only ever touches BASE TABLES — RLS cannot be enabled on a view
+-- (SQLSTATE 42809). After the menu-unification flip, several legacy catalog
+-- relations (e.g. `addon_items`, `item_sizes`) are read-only shim VIEWS over the
+-- unified base tables in some environments. `information_schema.columns` lists a
+-- view's columns too, so every loop below is filtered to `BASE TABLE`. A view
+-- would otherwise be an RLS *bypass* (it runs as its owner, ignoring policies),
+-- so the last step sets `security_invoker = true` on every tenant-exposing view
+-- (PG15+) — making the underlying tables' RLS apply through the view as well.
+--
 -- A completeness assertion at the end RAISEs if any base table was left without
 -- row security, so a NEW table added by a future migration fails loudly here
--- (and in the src/rls_tests.rs coverage test) until it is classified — it can
--- never quietly ship world-readable.
+-- (and in the src/rls_tests.rs coverage test) until it is classified.
 
 DO $rls$
 DECLARE
-    t      text;
-    m      record;
+    t       text;
+    m       record;
     missing text;
 BEGIN
-    -- ── Org-rooted tables (direct org_id equality) ───────────────────────────
+    -- ── Org-rooted BASE TABLES (direct org_id equality) ──────────────────────
     FOR t IN
-        SELECT table_name FROM information_schema.columns
-        WHERE table_schema = 'public' AND column_name = 'org_id'
+        SELECT c.table_name FROM information_schema.columns c
+        JOIN information_schema.tables it
+          ON it.table_schema = c.table_schema AND it.table_name = c.table_name
+         AND it.table_type = 'BASE TABLE'
+        WHERE c.table_schema = 'public' AND c.column_name = 'org_id'
     LOOP
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
         EXECUTE format(
@@ -45,14 +55,15 @@ BEGIN
             'USING (org_id = (SELECT current_setting(''app.org_id'', true)::uuid))', t);
     END LOOP;
 
-    -- ── Branch-rooted tables (org reached via the branches policy) ───────────
-    -- Only NOT NULL branch_id qualifies: a nullable branch_id row (e.g. an
-    -- org-level `ingredient_cost_history` cost) would be `NULL IN (…)` → never
-    -- true → invisible AND un-insertable. Such tables are routed through the
-    -- child map below on a NOT NULL FK instead; any future nullable-branch_id
-    -- table that is *not* mapped trips the completeness gate.
+    -- ── Branch-rooted BASE TABLES (org reached via the branches policy) ──────
+    -- Only NOT NULL branch_id qualifies: a nullable branch_id row would be
+    -- `NULL IN (…)` → never true → invisible AND un-insertable. Those are routed
+    -- through the child map below on a NOT NULL FK instead.
     FOR t IN
         SELECT c.table_name FROM information_schema.columns c
+        JOIN information_schema.tables it
+          ON it.table_schema = c.table_schema AND it.table_name = c.table_name
+         AND it.table_type = 'BASE TABLE'
         WHERE c.table_schema = 'public' AND c.column_name = 'branch_id'
           AND c.is_nullable = 'NO'
           AND NOT EXISTS (
@@ -66,13 +77,13 @@ BEGIN
             'USING (branch_id IN (SELECT b.id FROM branches b))', t);
     END LOOP;
 
-    -- ── Child / junction tables (scoped through their owning parent) ──────────
-    -- Each entry names the ONE foreign key that defines the row's tenancy. It
-    -- is deliberately explicit: which FK owns a junction row is a semantic call
-    -- (e.g. order_items belongs to its `order`, not to the menu_item it names),
-    -- and picking wrong would either leak rows or hide legitimate ones.
+    -- ── Child / junction BASE TABLES (scoped through their owning parent) ─────
+    -- Each entry names the ONE foreign key that defines the row's tenancy. The
+    -- `BASE TABLE` filter means an entry that is a view (or absent) in this
+    -- environment is skipped — its data is protected by the underlying unified
+    -- table's own policy instead.
     FOR m IN
-        SELECT * FROM (VALUES
+        SELECT cm.* FROM (VALUES
             ('addon_item_ingredients',                'addon_items',    'addon_item_id'),
             ('booking_nudges',                        'bookings',       'booking_id'),
             ('booking_tables',                        'bookings',       'booking_id'),
@@ -108,6 +119,10 @@ BEGIN
             ('shift_cash_movements',                  'shifts',         'shift_id'),
             ('stocktake_items',                       'stocktakes',     'stocktake_id')
         ) AS cm(child, parent, fk)
+        WHERE EXISTS (
+            SELECT 1 FROM information_schema.tables it
+            WHERE it.table_schema = 'public' AND it.table_name = cm.child
+              AND it.table_type = 'BASE TABLE')
     LOOP
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', m.child);
         EXECUTE format(
@@ -116,51 +131,82 @@ BEGIN
             m.child, m.parent, m.child, m.fk);
     END LOOP;
 
-    -- ── Special cases ─────────────────────────────────────────────────────────
+    -- ── Special cases (each guarded so a view/absent relation is skipped) ─────
 
-    -- A tenant may read + update its own org row (settings, timezone, logo),
-    -- but never insert/delete orgs and never see another's.
-    ALTER TABLE organizations ENABLE ROW LEVEL SECURITY;
-    CREATE POLICY org_read   ON organizations FOR SELECT
-        USING (id = (SELECT current_setting('app.org_id', true)::uuid));
-    CREATE POLICY org_update ON organizations FOR UPDATE
-        USING (id = (SELECT current_setting('app.org_id', true)::uuid));
+    -- A tenant may read + update its own org row, but never insert/delete orgs
+    -- and never see another's.
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='organizations' AND table_type='BASE TABLE') THEN
+        ALTER TABLE organizations ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY org_read   ON organizations FOR SELECT
+            USING (id = (SELECT current_setting('app.org_id', true)::uuid));
+        CREATE POLICY org_update ON organizations FOR UPDATE
+            USING (id = (SELECT current_setting('app.org_id', true)::uuid));
+    END IF;
 
     -- Global role→permission defaults: world-readable to tenants, writable only
     -- through the super-admin bypass pool (no write policy).
-    ALTER TABLE role_permissions ENABLE ROW LEVEL SECURITY;
-    CREATE POLICY global_read ON role_permissions FOR SELECT USING (true);
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='role_permissions' AND table_type='BASE TABLE') THEN
+        ALTER TABLE role_permissions ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY global_read ON role_permissions FOR SELECT USING (true);
+    END IF;
 
     -- Singleton WhatsApp pause switch: readable by the send path, written only
     -- via the super-admin bypass pool.
-    ALTER TABLE whatsapp_gateway_settings ENABLE ROW LEVEL SECURITY;
-    CREATE POLICY global_read ON whatsapp_gateway_settings FOR SELECT USING (true);
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='whatsapp_gateway_settings' AND table_type='BASE TABLE') THEN
+        ALTER TABLE whatsapp_gateway_settings ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY global_read ON whatsapp_gateway_settings FOR SELECT USING (true);
+    END IF;
 
     -- Menu price overrides are polymorphic: `branch`/`branch_channel` scopes
     -- carry a branch_id, while a `channel` scope has branch_id NULL and anchors
     -- on target_id — which points (no FK; target_type discriminates) at either a
     -- menu_item_size or a modifier_option, both org-scoped by their own policy.
-    -- One predicate covers all three scopes.
-    ALTER TABLE menu_price_overrides ENABLE ROW LEVEL SECURITY;
-    CREATE POLICY tenant_isolation ON menu_price_overrides FOR ALL
-        USING (
-            branch_id IN (SELECT b.id FROM branches b)
-            OR (branch_id IS NULL AND EXISTS (
-                SELECT 1 FROM menu_item_sizes s   WHERE s.id  = target_id
-                UNION ALL
-                SELECT 1 FROM modifier_options mo WHERE mo.id = target_id))
-        );
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='menu_price_overrides' AND table_type='BASE TABLE') THEN
+        ALTER TABLE menu_price_overrides ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY tenant_isolation ON menu_price_overrides FOR ALL
+            USING (
+                branch_id IN (SELECT b.id FROM branches b)
+                OR (branch_id IS NULL AND EXISTS (
+                    SELECT 1 FROM menu_item_sizes s   WHERE s.id  = target_id
+                    UNION ALL
+                    SELECT 1 FROM modifier_options mo WHERE mo.id = target_id))
+            );
+    END IF;
 
     -- Customer OTPs are keyed by phone, not tenant, and touched exclusively by
-    -- the PUBLIC delivery flow (bypass pool). RLS on with no policy = deny-all
-    -- for madar_app.
-    ALTER TABLE delivery_otp ENABLE ROW LEVEL SECURITY;
+    -- the PUBLIC delivery flow (bypass pool). RLS on with no policy = deny-all.
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='delivery_otp' AND table_type='BASE TABLE') THEN
+        ALTER TABLE delivery_otp ENABLE ROW LEVEL SECURITY;
+    END IF;
+
+    -- ── Harden tenant-exposing VIEWS (PG15+) ──────────────────────────────────
+    -- A view runs with its owner's rights by default, which would BYPASS the
+    -- policies above. `security_invoker = true` makes it run with the querying
+    -- role's rights, so the underlying base tables' RLS applies through the view
+    -- too. Scoped to views that expose an org_id/branch_id column (the shim
+    -- catalog views); best-effort per view so an unusual/unowned view can't
+    -- abort the migration.
+    IF current_setting('server_version_num')::int >= 150000 THEN
+        FOR t IN
+            SELECT it.table_name FROM information_schema.tables it
+            WHERE it.table_schema = 'public' AND it.table_type = 'VIEW'
+              AND EXISTS (
+                  SELECT 1 FROM information_schema.columns col
+                  WHERE col.table_schema = 'public' AND col.table_name = it.table_name
+                    AND col.column_name IN ('org_id', 'branch_id'))
+        LOOP
+            BEGIN
+                EXECUTE format('ALTER VIEW %I SET (security_invoker = true)', t);
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'RLS: could not set security_invoker on view % (%)', t, SQLERRM;
+            END;
+        END LOOP;
+    END IF;
 
     -- ── Completeness gate ─────────────────────────────────────────────────────
     -- Every base table must now enforce row security. `_sqlx_migrations` is
     -- owner-only (its madar_app grants were revoked in part 1) and is the sole
-    -- exemption. Anything else here is an unclassified table — fail the
-    -- migration rather than ship it readable.
+    -- exemption. Anything else is an unclassified table — fail the migration.
     SELECT string_agg(c.relname, ', ' ORDER BY c.relname) INTO missing
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
