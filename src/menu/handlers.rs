@@ -976,30 +976,31 @@ pub async fn update_menu_item(
     let image_url_is_present = mut_body.image_url.is_some();
     let image_url_val = mut_body.image_url.as_ref().and_then(|o| o.clone());
 
+    // The plain `name` column is the source of truth for the base ("en") locale.
+    // Overlay any client-supplied translations first (so an Arabic edit sent in the
+    // same request as a rename — the dashboard always sends `name` — isn't dropped),
+    // then sync "en" to the effective base name and backfill missing languages.
     let mut name_translations = existing.name_translations;
-    if let Some(new_name) = &mut_body.name {
-        crate::translation::ensure_translations_json(&mut name_translations, Some(new_name))
-            .await
-            .map_err(|_| AppError::Internal)?;
-    } else if let Some(new_tr) = mut_body.name_translations {
-        name_translations = new_tr;
-        crate::translation::ensure_translations_json(&mut name_translations, Some(&existing.name))
-            .await
-            .map_err(|_| AppError::Internal)?;
+    if let Some(new_tr) = &mut_body.name_translations {
+        crate::translation::merge_translations_json(&mut name_translations, new_tr);
     }
+    let base_name = mut_body.name.as_deref().unwrap_or(existing.name.as_str());
+    crate::translation::ensure_translations_json(&mut name_translations, Some(base_name))
+        .await
+        .map_err(|_| AppError::Internal)?;
 
     let mut description_translations = existing.description_translations;
-    if let Some(new_desc) = &mut_body.description {
-        crate::translation::ensure_translations_json(&mut description_translations, Some(new_desc))
+    if let Some(new_tr) = &mut_body.description_translations {
+        crate::translation::merge_translations_json(&mut description_translations, new_tr);
+    }
+    if let Some(desc) = mut_body
+        .description
+        .as_deref()
+        .or(existing.description.as_deref())
+    {
+        crate::translation::ensure_translations_json(&mut description_translations, Some(desc))
             .await
             .map_err(|_| AppError::Internal)?;
-    } else if let Some(new_tr) = mut_body.description_translations {
-        description_translations = new_tr;
-        if let Some(desc) = &existing.description {
-            crate::translation::ensure_translations_json(&mut description_translations, Some(desc))
-                .await
-                .map_err(|_| AppError::Internal)?;
-        }
     }
 
     let mut tx = pool.get_ref().begin().await?;

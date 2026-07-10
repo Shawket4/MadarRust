@@ -179,8 +179,10 @@ pub async fn ensure_translations(translations: &mut HashMap<String, String>) -> 
 /// (e.g. bundles). Converts the JSON value to a `HashMap`, runs `ensure_translations`,
 /// and converts back.
 ///
-/// If the input value is `null` or `{}`, it creates an empty map. If the `source_name`
-/// is provided, it is used as the English source text when the JSON object has no "en" key.
+/// If the input value is `null` or `{}`, it creates an empty map. When `source_name`
+/// is provided it is treated as the authoritative English ("en") value and always
+/// written into the map, keeping the plain `name` column and `name_translations["en"]`
+/// in sync on renames.
 pub async fn ensure_translations_json(
     value: &mut serde_json::Value,
     source_name: Option<&str>,
@@ -193,15 +195,97 @@ pub async fn ensure_translations_json(
         None => HashMap::new(),
     };
 
-    // If the JSON had no "en" key but we have a source name, seed it
+    // The base `name` column is the source of truth for the English ("en")
+    // display name, so always mirror it into the translations map. Previously
+    // this only seeded "en" when it was absent, so a rename updated the plain
+    // `name` column but left `name_translations["en"]` stale — and bilingual
+    // clients (e.g. the POS) that resolve the display name from the translations
+    // map first kept showing the old name.
     if let Some(name) = source_name {
-        if !map.contains_key("en") || map["en"].trim().is_empty() {
-            map.insert("en".to_string(), name.to_string());
-        }
+        map.insert("en".to_string(), name.to_string());
     }
 
     ensure_translations(&mut map).await?;
 
     *value = serde_json::to_value(&map).unwrap_or_default();
     Ok(())
+}
+
+/// Overlay the non-empty string entries of `src` onto `dst` (both are
+/// `*_translations` JSON objects). Used on update paths so a client-supplied
+/// translation (e.g. `{"ar": "..."}`) sent alongside a rename is applied on top
+/// of the existing map instead of being dropped or replacing it wholesale.
+/// A non-object `src` replaces `dst` outright; non-string / empty entries are ignored.
+pub fn merge_translations_json(dst: &mut serde_json::Value, src: &serde_json::Value) {
+    let Some(src_obj) = src.as_object() else {
+        *dst = src.clone();
+        return;
+    };
+    if !dst.is_object() {
+        *dst = serde_json::json!({});
+    }
+    let dst_obj = dst.as_object_mut().expect("dst is an object");
+    for (key, val) in src_obj {
+        if let Some(text) = val.as_str() {
+            if !text.trim().is_empty() {
+                dst_obj.insert(key.clone(), serde_json::Value::String(text.to_string()));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // Regression: a rename must OVERWRITE the existing English translation, not
+    // just seed it when absent. Otherwise the plain `name` column moves forward
+    // while `name_translations["en"]` stays stale, and clients that resolve the
+    // display name from the translations map first (e.g. the POS) keep showing
+    // the old name. The map already carries en+ar, so `ensure_translations` finds
+    // nothing missing and makes no network call — deterministic.
+    #[tokio::test]
+    async fn ensure_translations_json_overwrites_existing_en_on_rename() {
+        let mut value = json!({ "en": "Old name", "ar": "الاسم القديم" });
+        ensure_translations_json(&mut value, Some("New name"))
+            .await
+            .unwrap();
+        assert_eq!(value["en"], "New name");
+        assert_eq!(value["ar"], "الاسم القديم"); // untouched language preserved
+    }
+
+    #[tokio::test]
+    async fn ensure_translations_json_seeds_en_when_absent() {
+        let mut value = json!({ "ar": "قهوة" });
+        ensure_translations_json(&mut value, Some("Coffee"))
+            .await
+            .unwrap();
+        assert_eq!(value["en"], "Coffee");
+        assert_eq!(value["ar"], "قهوة");
+    }
+
+    #[test]
+    fn merge_translations_json_overlays_without_dropping_existing() {
+        let mut dst = json!({ "en": "Latte", "ar": "لاتيه" });
+        // Client sends only a new Arabic name alongside a rename.
+        merge_translations_json(&mut dst, &json!({ "ar": "لاتيه كبير" }));
+        assert_eq!(dst["en"], "Latte"); // untouched language preserved
+        assert_eq!(dst["ar"], "لاتيه كبير"); // overlaid
+    }
+
+    #[test]
+    fn merge_translations_json_ignores_empty_and_non_string() {
+        let mut dst = json!({ "en": "Tea", "ar": "شاي" });
+        merge_translations_json(&mut dst, &json!({ "ar": "  ", "en": 42 }));
+        assert_eq!(dst["en"], "Tea");
+        assert_eq!(dst["ar"], "شاي"); // blank string skipped, not cleared
+    }
+
+    #[test]
+    fn merge_translations_json_replaces_when_src_not_object() {
+        let mut dst = json!({ "en": "X" });
+        merge_translations_json(&mut dst, &json!("not-an-object"));
+        assert_eq!(dst, json!("not-an-object"));
+    }
 }
