@@ -184,11 +184,14 @@ const ANALYTICS_PARAMS: &[Param] = &[
         name: "status",
         kind: ParamKind::Enum {
             variants: semantic::STATUS_IDS,
-            default: "completed",
+            default: "sold",
         },
         required: false,
-        description: "Which orders to include: 'completed' (default, settled \
-            sales), 'not_voided', or 'all' (use 'all' for void_count / void_reason).",
+        description: "Which orders to include: 'sold' (default — everything not \
+            voided or refunded; this is what the sales and shift reports count, \
+            so use it for any revenue question), 'completed' (settled only, \
+            excludes tickets still open on the KDS), 'not_voided', or 'all' \
+            (use 'all' for void_count / void_reason).",
     },
     Param {
         name: "order_type",

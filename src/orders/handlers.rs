@@ -10,6 +10,7 @@ use crate::{
     auth::jwt::Claims,
     errors::{AppError, AppErrorResponse},
     models::UserRole,
+    orders::SOLD,
     permissions::checker::check_permission,
     sync::ActingContext,
 };
@@ -29,6 +30,8 @@ const ORDER_SELECT: &str =
     "SELECT o.id, o.branch_id, o.shift_id, o.teller_id, u.name AS teller_name,
      o.waiter_id, w.name AS waiter_name,
      o.order_number, o.order_ref, o.status::text, o.payment_method::text,
+     COALESCE((SELECT json_agg(json_build_object('method', op.method, 'amount', op.amount) ORDER BY op.id)
+               FROM order_payments op WHERE op.order_id = o.id), '[]'::json) AS payment_legs,
      o.subtotal, o.discount_type::text, o.discount_value,
      o.discount_amount, o.tax_amount, o.total_amount,
      o.amount_tendered, o.change_given, o.tip_amount, o.tip_payment_method, o.discount_id,
@@ -45,26 +48,49 @@ const ORDER_SELECT: &str =
 /// to `delivery_orders d` (for the channel split). `exclude_idx`, when set, is
 /// the bind position of a uuid[] of menu_item/bundle ids left out of the
 /// `line_items` count ONLY — every money/count aggregate stays authoritative.
+///
+/// Money here is scoped by [`SOLD`], the SAME predicate the sales and shift
+/// reports use. These columns used to filter on `status = 'completed'`, which
+/// silently dropped orders still open on the KDS / on a waiter's ticket and made
+/// this strip disagree with every other screen for the same day.
 fn order_summary_cols(exclude_idx: Option<i32>) -> String {
     let exclude = exclude_idx
         .map(|i| format!(" AND COALESCE(oi.menu_item_id, oi.bundle_id) != ALL(${i}::uuid[])"))
         .unwrap_or_default();
+    let sold = SOLD;
     format!(
-    "COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN o.total_amount ELSE 0 END), 0) AS revenue,
-     COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN 1 ELSE 0 END), 0) AS completed,
-     COALESCE(SUM(CASE WHEN o.status::text = 'voided'    THEN 1 ELSE 0 END), 0) AS voided,
-     COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN o.discount_amount ELSE 0 END), 0) AS discounts,
-     COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN COALESCE(o.tip_amount, 0) ELSE 0 END), 0) AS tips,
-     COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN o.delivery_fee ELSE 0 END), 0) AS delivery_fees,
-     COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND o.order_type = 'delivery' THEN 1 ELSE 0 END), 0) AS delivery_orders,
-     COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND o.order_type = 'delivery' THEN o.total_amount ELSE 0 END), 0) AS delivery_revenue,
-     COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND d.channel::text = 'in_mall' THEN 1 ELSE 0 END), 0) AS in_mall_orders,
-     COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND d.channel::text = 'in_mall' THEN o.total_amount ELSE 0 END), 0) AS in_mall_revenue,
-     COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND d.channel::text = 'in_mall' THEN o.delivery_fee ELSE 0 END), 0) AS in_mall_fees,
-     COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND d.channel::text = 'outside' THEN 1 ELSE 0 END), 0) AS outside_orders,
-     COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND d.channel::text = 'outside' THEN o.total_amount ELSE 0 END), 0) AS outside_revenue,
-     COALESCE(SUM(CASE WHEN o.status::text = 'completed' AND d.channel::text = 'outside' THEN o.delivery_fee ELSE 0 END), 0) AS outside_fees,
-     COALESCE(SUM(CASE WHEN o.status::text = 'completed' THEN (SELECT COALESCE(SUM(oi.quantity), 0) FROM order_items oi WHERE oi.order_id = o.id{exclude}) ELSE 0 END), 0)::bigint AS line_items"
+    "COALESCE(SUM(CASE WHEN o.{sold} THEN o.total_amount ELSE 0 END), 0) AS revenue,
+     COALESCE(SUM(CASE WHEN o.{sold} THEN 1 ELSE 0 END), 0) AS completed,
+     COALESCE(SUM(CASE WHEN o.status::text = 'voided' THEN 1 ELSE 0 END), 0) AS voided,
+     COALESCE(SUM(CASE WHEN o.{sold} THEN o.discount_amount ELSE 0 END), 0) AS discounts,
+     COALESCE(SUM(CASE WHEN o.{sold} THEN COALESCE(o.tip_amount, 0) ELSE 0 END), 0) AS tips,
+     COALESCE(SUM(CASE WHEN o.{sold} THEN o.delivery_fee ELSE 0 END), 0) AS delivery_fees,
+     COALESCE(SUM(CASE WHEN o.{sold} AND o.order_type = 'delivery' THEN 1 ELSE 0 END), 0) AS delivery_orders,
+     COALESCE(SUM(CASE WHEN o.{sold} AND o.order_type = 'delivery' THEN o.total_amount ELSE 0 END), 0) AS delivery_revenue,
+     COALESCE(SUM(CASE WHEN o.{sold} AND d.channel::text = 'in_mall' THEN 1 ELSE 0 END), 0) AS in_mall_orders,
+     COALESCE(SUM(CASE WHEN o.{sold} AND d.channel::text = 'in_mall' THEN o.total_amount ELSE 0 END), 0) AS in_mall_revenue,
+     COALESCE(SUM(CASE WHEN o.{sold} AND d.channel::text = 'in_mall' THEN o.delivery_fee ELSE 0 END), 0) AS in_mall_fees,
+     COALESCE(SUM(CASE WHEN o.{sold} AND d.channel::text = 'outside' THEN 1 ELSE 0 END), 0) AS outside_orders,
+     COALESCE(SUM(CASE WHEN o.{sold} AND d.channel::text = 'outside' THEN o.total_amount ELSE 0 END), 0) AS outside_revenue,
+     COALESCE(SUM(CASE WHEN o.{sold} AND d.channel::text = 'outside' THEN o.delivery_fee ELSE 0 END), 0) AS outside_fees,
+     COALESCE(SUM(CASE WHEN o.{sold} THEN (SELECT COALESCE(SUM(oi.quantity), 0) FROM order_items oi WHERE oi.order_id = o.id{exclude}) ELSE 0 END), 0)::bigint AS line_items"
+    )
+}
+
+/// SQL for the `payment_method` query filter, at bind position `idx` (a `text[]`).
+///
+/// Matches on what was ACTUALLY tendered (`order_payments`) as well as the
+/// nominal label. Filtering on the legs alone is what makes "card" agree with
+/// the card bucket in the sales and shift reports: a split sale stores the
+/// literal `'mixed'` in `orders.payment_method`, so the old label-only filter
+/// hid the card half of every split order while the reports counted it.
+/// The nominal label is kept in the OR so `?payment_method=mixed` still selects
+/// split orders as a group.
+fn payment_method_filter(idx: i32) -> String {
+    format!(
+        " AND (o.payment_method::text = ANY(${idx}::text[]) \
+           OR EXISTS (SELECT 1 FROM order_payments op \
+                      WHERE op.order_id = o.id AND op.method = ANY(${idx}::text[])))"
     )
 }
 
@@ -84,6 +110,13 @@ pub(crate) fn parse_uuid_csv(param: &str, raw: &str) -> Result<Option<Vec<Uuid>>
 
 // ── Models ────────────────────────────────────────────────────
 
+/// One tender against an order (`order_payments`). A split sale has several.
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
+pub struct PaymentLeg {
+    pub method: String,
+    pub amount: i32,
+}
+
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct Order {
     pub id: Uuid,
@@ -102,7 +135,18 @@ pub struct Order {
     /// window before the historical backfill runs; never null afterwards.
     pub order_ref: Option<String>,
     pub status: String,
+    /// The order's NOMINAL payment label. For a split order this is the literal
+    /// `'mixed'` — a label that exists in no money report, because reports bucket
+    /// by what was actually tendered. Use [`Order::payment_legs`] for the real
+    /// methods; treat this as a display badge only.
     pub payment_method: String,
+    /// What was ACTUALLY tendered, one entry per `order_payments` row — the same
+    /// rows every money report buckets by. A single-tender order has one leg; a
+    /// split order has one per leg (e.g. card 285.00 + cash 255.00). Empty on the
+    /// response to order creation, where the legs are written just after the row
+    /// this statement returns; every read hydrates it.
+    #[sqlx(json)]
+    pub payment_legs: Vec<PaymentLeg>,
     pub subtotal: i32,
     pub discount_type: Option<String>,
     pub discount_value: i32,
@@ -1446,6 +1490,9 @@ pub(crate) async fn create_order_inner(
             (SELECT name FROM users WHERE id = $3) AS teller_name,
             waiter_id, (SELECT name FROM users WHERE id = $25) AS waiter_name,
             order_number, order_ref, status::text, payment_method::text,
+            -- The payment rows are inserted just after this statement, so there is
+            -- nothing to aggregate yet. Reads hydrate the real legs.
+            '[]'::json AS payment_legs,
             subtotal, discount_type::text, discount_value,
             discount_amount, tax_amount, total_amount,
             amount_tendered, change_given, tip_amount, tip_payment_method, discount_id,
@@ -2024,14 +2071,8 @@ pub async fn list_orders(
     push_filter!("u.name ILIKE", query.teller_name);
     push_filter!("w.name ILIKE", query.waiter_name);
     if parsed_payment_methods.is_some() {
-        data_filter.push_str(&format!(
-            " AND o.payment_method::text = ANY(${}::text[])",
-            data_idx
-        ));
-        count_filter.push_str(&format!(
-            " AND o.payment_method::text = ANY(${}::text[])",
-            count_idx
-        ));
+        data_filter.push_str(&payment_method_filter(data_idx));
+        count_filter.push_str(&payment_method_filter(count_idx));
         data_idx += 1;
         count_idx += 1;
     }
@@ -2301,6 +2342,8 @@ pub(crate) async fn void_order_inner(
                (SELECT name FROM users WHERE id = teller_id) AS teller_name,
                waiter_id, (SELECT name FROM users WHERE id = waiter_id) AS waiter_name,
                order_number, order_ref, status::text, payment_method::text,
+               COALESCE((SELECT json_agg(json_build_object('method', op.method, 'amount', op.amount) ORDER BY op.id)
+                         FROM order_payments op WHERE op.order_id = orders.id), '[]'::json) AS payment_legs,
                subtotal, discount_type::text, discount_value,
                discount_amount, tax_amount, total_amount,
                amount_tendered, change_given, tip_amount, tip_payment_method,
@@ -3138,10 +3181,7 @@ pub async fn export_orders(
     push_export_filter!("u.name ILIKE", query.teller_name);
     push_export_filter!("w.name ILIKE", query.waiter_name);
     if parsed_payment_methods.is_some() {
-        filter.push_str(&format!(
-            " AND o.payment_method::text = ANY(${}::text[])",
-            idx
-        ));
+        filter.push_str(&payment_method_filter(idx));
         idx += 1;
     }
     push_export_filter!("o.status::text =", query.status);

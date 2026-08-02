@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use serde_json::{Map, Value};
 use sqlx::{Column as _, Row};
 use uuid::Uuid;
@@ -206,10 +206,33 @@ fn resolve_model_args(
     Ok(out)
 }
 
-/// Accept a full RFC-3339 timestamp or a bare `YYYY-MM-DD` (midnight UTC).
+/// Parse a date the model produced, being liberal in what we accept. In order:
+///   * full RFC-3339 with a timezone — `2026-07-07T23:59:59Z`, `…+02:00`;
+///   * a naive date-time with NO offset (what the model commonly emits for a
+///     precise day given the `date-time` schema hint, e.g. `2026-07-07T23:59:59`
+///     or `2026-07-07 00:00:00`), taken as UTC;
+///   * a bare `YYYY-MM-DD`, taken as midnight UTC.
+///
+/// The naive-date-time forms are why single-day questions ("yesterday") stopped
+/// erroring: an end-of-day timestamp without an offset used to fail RFC-3339 AND
+/// the bare-date parse and was rejected as "not a valid ISO-8601 date".
 fn parse_date(s: &str) -> Option<DateTime<Utc>> {
+    let s = s.trim();
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
         return Some(dt.with_timezone(&Utc));
+    }
+    const NAIVE_FORMS: &[&str] = &[
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M",
+    ];
+    for fmt in NAIVE_FORMS {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(s, fmt) {
+            return Some(DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc));
+        }
     }
     NaiveDate::parse_from_str(s, "%Y-%m-%d")
         .ok()
@@ -437,5 +460,25 @@ mod rewrite_tests {
         // The string literal ':00' is untouched; no named `:ident` remains.
         assert!(sql.contains("'0') || ':00'"));
         assert!(!sql.contains(":branch_ids") && !sql.contains(":from") && !sql.contains(":limit"));
+    }
+
+    #[test]
+    fn parse_date_accepts_the_forms_the_model_emits() {
+        use super::parse_date;
+        // Baselines that always worked.
+        assert!(parse_date("2026-07-07").is_some());
+        assert!(parse_date("2026-07-07T23:59:59Z").is_some());
+        assert!(parse_date("2026-07-07T00:00:00+02:00").is_some());
+        // Naive date-time WITHOUT an offset — the "yesterday" case that used to
+        // 400 with "not a valid ISO-8601 date". These must now parse.
+        assert!(parse_date("2026-07-07T23:59:59").is_some());
+        assert!(parse_date("2026-07-07T00:00:00").is_some());
+        assert!(parse_date("2026-07-07 00:00:00").is_some());
+        assert!(parse_date("2026-07-07T23:59:59.999").is_some());
+        assert!(parse_date("  2026-07-07T12:30  ").is_some());
+        // Garbage / injection stays rejected — never coerced into a date.
+        assert!(parse_date("not a date").is_none());
+        assert!(parse_date("2026-13-40").is_none());
+        assert!(parse_date("'; DROP TABLE orders; --").is_none());
     }
 }

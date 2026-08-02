@@ -604,6 +604,9 @@ pub async fn apply_snapshot(
             -- Delivery orders never pass through a waiter's ticket → always null.
             waiter_id, (SELECT name FROM users WHERE id = waiter_id) AS waiter_name,
             order_number, order_ref, status::text, payment_method::text,
+            -- Written just after this statement (see the order_payments insert
+            -- below); reads hydrate the real legs.
+            '[]'::json AS payment_legs,
             subtotal, discount_type::text, discount_value,
             discount_amount, tax_amount, total_amount,
             amount_tendered, change_given, tip_amount, tip_payment_method, discount_id,

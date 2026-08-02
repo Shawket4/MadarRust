@@ -1440,3 +1440,281 @@ async fn test_timeseries_timezone_is_bound(pool: PgPool) {
         "an invalid/injection timezone must be rejected by the timezone_name enum"
     );
 }
+
+// ── Sales ↔ shift reconciliation ──────────────────────────────
+//
+// The regression these guard: for one branch, one shift, one day, the sales
+// report and the shift report have to describe the SAME money. They used to
+// disagree three ways at once — tips were folded into the shift's method
+// buckets but absent from sales, split orders bucketed under a phantom 'mixed',
+// and the two picked different order statuses.
+
+/// Seeds an order plus its `order_payments` legs. `legs` is (method, amount);
+/// a multi-leg order gets the nominal `'mixed'` label the POS actually sends.
+#[allow(clippy::too_many_arguments)]
+async fn seed_paid_order(
+    pool: &PgPool,
+    branch_id: Uuid,
+    teller_id: Uuid,
+    shift_id: Uuid,
+    order_number: i32,
+    status: &str,
+    legs: &[(&str, i32)],
+    tip: Option<(i32, &str, bool)>,
+) -> Uuid {
+    let id = Uuid::new_v4();
+    let total: i32 = legs.iter().map(|(_, a)| *a).sum();
+    let nominal = if legs.len() > 1 { "mixed" } else { legs[0].0 };
+    let (tip_amount, tip_method, tip_is_cash) = match tip {
+        Some((amt, m, is_cash)) => (amt, Some(m), Some(is_cash)),
+        None => (0, None, None),
+    };
+
+    sqlx::query(
+        "INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal,
+             discount_amount, tax_amount, total_amount, status, order_number, payment_method,
+             tip_amount, tip_payment_method, tip_is_cash, order_ref)
+         VALUES ($1, $2, $3, $4, gen_random_uuid(), $5, 0, 0, $5, $6::order_status, $7, $8,
+                 $9, $10, $11, gen_random_uuid()::text)",
+    )
+    .bind(id)
+    .bind(branch_id)
+    .bind(teller_id)
+    .bind(shift_id)
+    .bind(total)
+    .bind(status)
+    .bind(order_number)
+    .bind(nominal)
+    .bind(tip_amount)
+    .bind(tip_method)
+    .bind(tip_is_cash)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    for (method, amount) in legs {
+        sqlx::query(
+            "INSERT INTO order_payments (order_id, method, amount, is_cash)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(id)
+        .bind(method)
+        .bind(amount)
+        .bind(*method == "cash")
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    id
+}
+
+/// One shift, one day, a realistic mix: a plain cash sale, a card sale with a
+/// card tip, a cash sale with a cash tip, a SPLIT card+cash sale, a ticket still
+/// open on the KDS, and a void. The sales report and the shift report must
+/// agree on revenue, on every method bucket, and on tips.
+#[sqlx::test]
+async fn sales_and_shift_reports_reconcile(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
+            .configure(crate::shifts::routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    grant_permission(&pool, "org_admin", "shifts", "read").await;
+
+    seed_paid_order(
+        &pool,
+        branch_id,
+        user_id,
+        shift_id,
+        1,
+        "completed",
+        &[("cash", 570)],
+        None,
+    )
+    .await;
+    seed_paid_order(
+        &pool,
+        branch_id,
+        user_id,
+        shift_id,
+        2,
+        "completed",
+        &[("card", 1000)],
+        Some((50, "card", false)),
+    )
+    .await;
+    seed_paid_order(
+        &pool,
+        branch_id,
+        user_id,
+        shift_id,
+        3,
+        "completed",
+        &[("cash", 800)],
+        Some((100, "cash", true)),
+    )
+    .await;
+    // The split sale: nominal label 'mixed', real legs card 400 + cash 200.
+    seed_paid_order(
+        &pool,
+        branch_id,
+        user_id,
+        shift_id,
+        4,
+        "completed",
+        &[("card", 400), ("cash", 200)],
+        None,
+    )
+    .await;
+    // Still on the KDS — rung, paid for, not yet marked completed.
+    seed_paid_order(
+        &pool,
+        branch_id,
+        user_id,
+        shift_id,
+        5,
+        "ready",
+        &[("cash", 300)],
+        None,
+    )
+    .await;
+    // Voided: never collected, must not appear in either report's revenue.
+    seed_paid_order(
+        &pool,
+        branch_id,
+        user_id,
+        shift_id,
+        6,
+        "voided",
+        &[("card", 9999)],
+        None,
+    )
+    .await;
+
+    let sales: BranchSalesReport = {
+        let req = test::TestRequest::get()
+            .uri(&format!("/reports/branches/{branch_id}/sales"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        test::read_body_json(test::call_service(&app, req).await).await
+    };
+    let shift: crate::shifts::handlers::ShiftReportResponse = {
+        let req = test::TestRequest::get()
+            .uri(&format!("/shifts/{shift_id}/report"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        test::read_body_json(test::call_service(&app, req).await).await
+    };
+
+    // 570 + 1000 + 800 + 600 + 300 (the open ticket counts; the void does not).
+    let expected_revenue = 3270;
+    assert_eq!(sales.total_revenue, expected_revenue);
+    assert_eq!(
+        shift.total_payments, expected_revenue,
+        "the shift report must collect the same money the sales report reports"
+    );
+    assert_eq!(sales.total_orders, 5, "the open KDS ticket is a sale");
+
+    // Tips: standalone on both, and identical.
+    assert_eq!(sales.total_tips, 150);
+    assert_eq!(shift.total_tips, 150);
+    assert_eq!(sales.cash_tips, 100);
+    assert_eq!(shift.cash_tips, 100);
+    assert_eq!(shift.non_cash_tips, 50);
+    assert_eq!(
+        shift.net_payments, expected_revenue,
+        "tips must NOT be added into net_payments"
+    );
+
+    // Method buckets: identical on both, split by the legs actually tendered,
+    // with no tip money and no phantom 'mixed' bucket anywhere.
+    let shift_buckets: std::collections::HashMap<String, i64> = shift
+        .payment_summary
+        .iter()
+        .map(|r| (r.payment_method.clone(), r.total))
+        .collect();
+    // cash: 570 + 800 + 200 (split leg) + 300 (open ticket) = 1870
+    // card: 1000 + 400 (split leg)                          = 1400
+    assert_eq!(sales.revenue_by_method["cash"], json!(1870));
+    assert_eq!(sales.revenue_by_method["card"], json!(1400));
+    assert_eq!(shift_buckets.get("cash"), Some(&1870));
+    assert_eq!(shift_buckets.get("card"), Some(&1400));
+    assert!(
+        sales.revenue_by_method.get("mixed").is_none(),
+        "'mixed' is a nominal label, never a money bucket"
+    );
+    assert!(
+        !shift_buckets.contains_key("mixed"),
+        "a tip on a split order must not invent a 'mixed' bucket"
+    );
+
+    // The drawer still counts cash tips — they are physically in it — even
+    // though they are not part of net_payments.
+    // opening 10000 + cash sales 1870 + cash tip 100
+    assert_eq!(shift.expected_cash, 11970);
+}
+
+/// Guard against a fourth revenue-status dialect appearing. Every money
+/// aggregate must scope on [`crate::orders::SOLD`]; the historical variants
+/// (`= 'completed'`, `!= 'voided'`) are what let three screens drift apart.
+// Fully qualified: `actix_web::test` is imported into this module, which would
+// otherwise shadow the attribute and demand an async fn.
+#[::core::prelude::v1::test]
+fn status_predicates_are_unified() {
+    let sources = [
+        (
+            "reports/handlers.rs",
+            include_str!("../reports/handlers.rs"),
+        ),
+        ("orders/handlers.rs", include_str!("../orders/handlers.rs")),
+        ("shifts/handlers.rs", include_str!("../shifts/handlers.rs")),
+        (
+            "insights/handlers.rs",
+            include_str!("../insights/handlers.rs"),
+        ),
+        (
+            "bundles/handlers.rs",
+            include_str!("../bundles/handlers.rs"),
+        ),
+    ];
+    for (name, src) in sources {
+        for line in src.lines() {
+            let l = line.trim();
+            if l.starts_with("//") || l.starts_with("--") {
+                continue;
+            }
+            // Single-ROW guards are not money scoping and may legitimately say
+            // "anything but voided": the void handler's idempotency check
+            // (`WHERE id = $1 AND status <> 'voided'`) and the delete-shift
+            // "does this shift have any orders at all" EXISTS probe.
+            let is_row_guard = l.contains("WHERE id = $") || l.contains("EXISTS(");
+            if is_row_guard {
+                continue;
+            }
+            for stale in [
+                "status != 'voided'",
+                "status <> 'voided'",
+                "status::text = 'completed'",
+                "status = 'completed'",
+            ] {
+                assert!(
+                    !l.contains(stale),
+                    "{name}: `{l}`\nscopes orders on `{stale}`. Use crate::orders::SOLD \
+                     (status NOT IN ('voided', 'refunded')) so the sales report, the \
+                     shift report and the orders KPI strip all count the same orders."
+                );
+            }
+        }
+    }
+}

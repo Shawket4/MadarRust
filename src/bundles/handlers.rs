@@ -1224,7 +1224,7 @@ pub async fn bundle_performance(
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
         WHERE oi.bundle_id = $1
-          AND o.status != 'voided'
+          AND o.status NOT IN ('voided', 'refunded')
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         "#,
@@ -1247,7 +1247,7 @@ pub async fn bundle_performance(
         JOIN orders o ON o.id = oi.order_id
         JOIN menu_items mi ON mi.id = olbc.item_id
         WHERE oi.bundle_id = $1
-          AND o.status != 'voided'
+          AND o.status NOT IN ('voided', 'refunded')
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         GROUP BY olbc.item_id, mi.name
@@ -1270,7 +1270,7 @@ pub async fn bundle_performance(
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
         WHERE oi.bundle_id = $1
-          AND o.status != 'voided'
+          AND o.status NOT IN ('voided', 'refunded')
           AND oi.cost_missing = false
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)

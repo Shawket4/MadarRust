@@ -275,7 +275,7 @@ async fn sales_agg(
         JOIN menu_items mi ON mi.id = oi.menu_item_id
         LEFT JOIN categories c ON c.id = mi.category_id
         WHERE o.branch_id = ANY($1)
-          AND o.status != 'voided'
+          AND o.status NOT IN ('voided', 'refunded')
           AND oi.menu_item_id IS NOT NULL
           AND oi.bundle_id IS NULL
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
@@ -527,7 +527,7 @@ async fn sku_windows_batch(
                COUNT(oi.id)::bigint AS lines
         FROM spec s
         LEFT JOIN orders o
-               ON o.status != 'voided'
+               ON o.status NOT IN ('voided', 'refunded')
               AND o.created_at >= s.w_from AND o.created_at < s.w_to
               AND ((s.branch_id IS NOT NULL AND o.branch_id = s.branch_id)
                    OR (s.branch_id IS NULL AND o.branch_id = ANY($7)))
@@ -1553,7 +1553,7 @@ async fn sku_window(
                     ELSE SUM(oi.unit_cost * oi.quantity)::bigint END
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
-        WHERE o.branch_id = ANY($1) AND o.status != 'voided'
+        WHERE o.branch_id = ANY($1) AND o.status NOT IN ('voided', 'refunded')
           AND oi.bundle_id IS NULL
           AND oi.menu_item_id = $2
           AND COALESCE(oi.size_label::text, 'one_size') = $3

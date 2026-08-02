@@ -3050,3 +3050,192 @@ async fn test_void_voided_at_guard(pool: PgPool) {
         "voided_at round-trips"
     );
 }
+
+// ── Split payments are visible by their real legs ─────────────
+
+/// A split sale is stored as `orders.payment_method = 'mixed'` with the real
+/// tenders in `order_payments`. Every money report buckets by the tenders, so
+/// filtering the orders list by the nominal label alone hid the card half of a
+/// split sale here while the sales report counted it — the "card is sometimes
+/// off" gap. Filtering on a leg must find the order, and the row must carry the
+/// legs so the UI can show them.
+#[sqlx::test]
+async fn split_payment_orders_filter_and_display_by_real_legs(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "teller").await;
+    assign_user_to_branch(&pool, user_id, branch_id).await;
+    let token = generate_teller_token(user_id, org_id, branch_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    grant_permission(&pool, "teller", "orders", "create").await;
+    grant_permission(&pool, "teller", "orders", "read").await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item_id = seed_menu_item(&pool, org_id, cat_id).await;
+    // The nominal label a real POS sends for a split tender.
+    sqlx::query(
+        "INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash, is_active)
+         VALUES ($1, 'mixed', '{}', 'slate', 'call_split', false, true)",
+    )
+    .bind(org_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // One split sale: card 400 + cash 200.
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(json!({
+            "branch_id": branch_id,
+            "shift_id": shift_id,
+            "payment_method": "mixed",
+            "items": [{ "menu_item_id": item_id, "quantity": 1 }],
+            "subtotal": 600, "discount_amount": 0, "tax_amount": 0, "total_amount": 600,
+            "payment_splits": [
+                { "method": "card", "amount": 400 },
+                { "method": "cash", "amount": 200 }
+            ]
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 201, "split order should be created");
+
+    let list = |q: &str| {
+        let uri = format!("/orders?branch_id={branch_id}&{q}");
+        test::TestRequest::get()
+            .uri(&uri)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request()
+    };
+
+    // Filtering by a LEG finds the split order — this is what makes the orders
+    // list agree with the sales report's card bucket.
+    let by_card: PaginatedOrders =
+        test::read_body_json(test::call_service(&app, list("payment_method=card")).await).await;
+    assert_eq!(
+        by_card.total, 1,
+        "filtering by 'card' must find the split sale"
+    );
+
+    let by_cash: PaginatedOrders =
+        test::read_body_json(test::call_service(&app, list("payment_method=cash")).await).await;
+    assert_eq!(by_cash.total, 1, "the same split sale also tendered cash");
+
+    // The nominal label still works, so "show me split sales" is expressible.
+    let by_mixed: PaginatedOrders =
+        test::read_body_json(test::call_service(&app, list("payment_method=mixed")).await).await;
+    assert_eq!(by_mixed.total, 1);
+
+    // And the row carries the legs, so the UI need not guess what 'mixed' means.
+    let order = &by_card.data[0];
+    assert_eq!(order.payment_method, "mixed");
+    let mut legs: Vec<(String, i32)> = order
+        .payment_legs
+        .iter()
+        .map(|l| (l.method.clone(), l.amount))
+        .collect();
+    legs.sort();
+    assert_eq!(
+        legs,
+        vec![("card".to_string(), 400), ("cash".to_string(), 200)]
+    );
+}
+
+/// `order_payments.method` stores the method's NAME as free text and every money
+/// report groups by that string, so a rename has to carry the history with it —
+/// otherwise yesterday's "card" and today's "Credit Card" become two buckets and
+/// the totals stop matching.
+#[sqlx::test]
+async fn renaming_a_payment_method_carries_history(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+            .configure(crate::payment_methods::routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    assign_user_to_branch(&pool, user_id, branch_id).await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    grant_permission(&pool, "org_admin", "payment_methods", "update").await;
+
+    sqlx::query(
+        "INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal,
+             discount_amount, tax_amount, total_amount, status, order_number, payment_method,
+             tip_amount, tip_payment_method, tip_is_cash, order_ref)
+         VALUES (gen_random_uuid(), $1, $2, $3, gen_random_uuid(), 1000, 0, 0, 1000,
+                 'completed', 1, 'card', 50, 'card', false, gen_random_uuid()::text)",
+    )
+    .bind(branch_id)
+    .bind(user_id)
+    .bind(shift_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO order_payments (order_id, method, amount, is_cash)
+         SELECT id, 'card', 1000, false FROM orders WHERE shift_id = $1",
+    )
+    .bind(shift_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let card_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM org_payment_methods WHERE org_id = $1 AND name = 'card'",
+    )
+    .bind(org_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/payment-methods/{card_id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(json!({ "name": "credit_card" }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 200);
+
+    let orphans: i64 = sqlx::query_scalar(
+        "SELECT (SELECT COUNT(*) FROM order_payments WHERE method = 'card')
+              + (SELECT COUNT(*) FROM orders WHERE payment_method = 'card')
+              + (SELECT COUNT(*) FROM orders WHERE tip_payment_method = 'card')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        orphans, 0,
+        "a rename must leave no history pointing at the old name, or reports \
+         silently split into two buckets"
+    );
+
+    let renamed: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(amount), 0)::bigint FROM order_payments WHERE method = 'credit_card'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(renamed, 1000, "the money must follow the rename intact");
+
+    // is_cash is snapshotted per row and must NOT be restated by a rename.
+    let is_cash: Option<bool> =
+        sqlx::query_scalar("SELECT is_cash FROM order_payments WHERE method = 'credit_card'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(is_cash, Some(false));
+}

@@ -30463,7 +30463,14 @@
           "branch_name": {
             "type": "string"
           },
-          "revenue_by_method": {},
+          "cash_tips": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The cash slice of `total_tips`."
+          },
+          "revenue_by_method": {
+            "description": "Goods only, by method actually tendered. Tips are in `total_tips`."
+          },
           "total_orders": {
             "type": "integer",
             "format": "int64"
@@ -30471,6 +30478,11 @@
           "total_revenue": {
             "type": "integer",
             "format": "int64"
+          },
+          "total_tips": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Tips, standalone — same definition as on the branch sales + shift reports."
           },
           "void_rate_pct": {
             "type": "number",
@@ -31032,6 +31044,11 @@
               "$ref": "#/components/schemas/CategorySales"
             }
           },
+          "cash_tips": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The cash slice of `total_tips` (snapshotted `tip_is_cash`)."
+          },
           "from": {
             "type": [
               "string",
@@ -31039,7 +31056,9 @@
             ],
             "format": "date-time"
           },
-          "revenue_by_method": {},
+          "revenue_by_method": {
+            "description": "Money collected FOR GOODS, bucketed by the method actually tendered\n(`order_payments`). Tips are not in here — see `total_tips`."
+          },
           "subtotal": {
             "type": "integer",
             "format": "int64"
@@ -31077,6 +31096,11 @@
           "total_tax": {
             "type": "integer",
             "format": "int64"
+          },
+          "total_tips": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Tips, standalone — never folded into a method bucket and never part of\n`total_revenue`. Same definition as `total_tips` on the shift report, so\nthe two screens can be reconciled line for line."
           },
           "voided_orders": {
             "type": "integer",
@@ -37288,6 +37312,7 @@
           "order_number",
           "status",
           "payment_method",
+          "payment_legs",
           "subtotal",
           "discount_value",
           "discount_amount",
@@ -37407,8 +37432,16 @@
             "type": "string",
             "description": "Order origin: \"dine_in\" (POS sale) or \"delivery\" (finalized delivery\norder). Defaults to \"dine_in\" for every POS sale."
           },
+          "payment_legs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PaymentLeg"
+            },
+            "description": "What was ACTUALLY tendered, one entry per `order_payments` row — the same\nrows every money report buckets by. A single-tender order has one leg; a\nsplit order has one per leg (e.g. card 285.00 + cash 255.00). Empty on the\nresponse to order creation, where the legs are written just after the row\nthis statement returns; every read hydrates it."
+          },
           "payment_method": {
-            "type": "string"
+            "type": "string",
+            "description": "The order's NOMINAL payment label. For a split order this is the literal\n`'mixed'` — a label that exists in no money report, because reports bucket\nby what was actually tendered. Use [`Order::payment_legs`] for the real\nmethods; treat this as a display badge only."
           },
           "shift_id": {
             "type": "string",
@@ -38946,6 +38979,23 @@
           "paused": {
             "type": "boolean",
             "description": "`true` = mute all sends; `false` = resume."
+          }
+        }
+      },
+      "PaymentLeg": {
+        "type": "object",
+        "description": "One tender against an order (`order_payments`). A split sale has several.",
+        "required": [
+          "method",
+          "amount"
+        ],
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "method": {
+            "type": "string"
           }
         }
       },
@@ -40649,6 +40699,9 @@
           "total_payments",
           "voided_amount",
           "net_payments",
+          "total_tips",
+          "cash_tips",
+          "non_cash_tips",
           "cash_movements",
           "cash_movements_in",
           "cash_movements_out",
@@ -40676,6 +40729,11 @@
             "type": "integer",
             "format": "int64"
           },
+          "cash_tips": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The cash slice of `total_tips` (snapshotted `tip_is_cash`). This IS in\nthe drawer, so it is counted by `expected_cash` even though it is not\npart of `net_payments`."
+          },
           "expected_cash": {
             "type": "integer",
             "format": "int64",
@@ -40685,11 +40743,17 @@
             "type": "integer",
             "format": "int64"
           },
+          "non_cash_tips": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`total_tips - cash_tips` — tips added onto a card/wallet tender."
+          },
           "payment_summary": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/PaymentSummaryRow"
-            }
+            },
+            "description": "Money COLLECTED FOR GOODS, bucketed by the method actually tendered\n(`order_payments`, so a split order contributes to each leg it really\nused). Tips are NOT in here — see `total_tips`."
           },
           "printed_at": {
             "type": "string",
@@ -40701,6 +40765,11 @@
           "total_payments": {
             "type": "integer",
             "format": "int64"
+          },
+          "total_tips": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Tips, as a standalone figure — never folded into a method bucket, and\nnever part of `total_payments`/`net_payments`. Mirrors `total_tips` on\nthe sales reports so the two screens agree on what \"revenue\" means."
           },
           "voided_amount": {
             "type": "integer",
@@ -40741,6 +40810,11 @@
             ],
             "format": "int64"
           },
+          "cash_tips": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The cash slice of `total_tips`."
+          },
           "closed_at": {
             "type": [
               "string",
@@ -40770,7 +40844,9 @@
             "type": "integer",
             "format": "int64"
           },
-          "revenue_by_method": {},
+          "revenue_by_method": {
+            "description": "Goods only, by method actually tendered. Tips are in `total_tips`."
+          },
           "shift_id": {
             "type": "string",
             "format": "uuid"
@@ -40800,6 +40876,11 @@
           "total_tax": {
             "type": "integer",
             "format": "int64"
+          },
+          "total_tips": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Tips, standalone — matches `total_tips` on `GET /shifts/{id}/report`."
           },
           "voided_orders": {
             "type": "integer",

@@ -61,9 +61,16 @@ pub struct ShiftSummary {
     pub total_orders: i64,
     pub voided_orders: i64,
     pub total_revenue: i64,
+    /// Goods only, by method actually tendered. Tips are in `total_tips`.
     pub revenue_by_method: serde_json::Value,
     pub total_discount: i64,
     pub total_tax: i64,
+    /// Tips, standalone — matches `total_tips` on `GET /shifts/{id}/report`.
+    #[serde(default)]
+    pub total_tips: i64,
+    /// The cash slice of `total_tips`.
+    #[serde(default)]
+    pub cash_tips: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -118,7 +125,17 @@ pub struct BranchSalesReport {
     /// matching quantity_sold in the item/category breakdowns.
     #[serde(default)]
     pub total_line_items: i64,
+    /// Money collected FOR GOODS, bucketed by the method actually tendered
+    /// (`order_payments`). Tips are not in here — see `total_tips`.
     pub revenue_by_method: serde_json::Value,
+    /// Tips, standalone — never folded into a method bucket and never part of
+    /// `total_revenue`. Same definition as `total_tips` on the shift report, so
+    /// the two screens can be reconciled line for line.
+    #[serde(default)]
+    pub total_tips: i64,
+    /// The cash slice of `total_tips` (snapshotted `tip_is_cash`).
+    #[serde(default)]
+    pub cash_tips: i64,
     pub top_items: Vec<ItemSales>,
     pub by_category: Vec<CategorySales>,
 }
@@ -216,7 +233,14 @@ pub struct BranchComparison {
     pub total_orders: i64,
     pub voided_orders: i64,
     pub total_revenue: i64,
+    /// Goods only, by method actually tendered. Tips are in `total_tips`.
     pub revenue_by_method: serde_json::Value,
+    /// Tips, standalone — same definition as on the branch sales + shift reports.
+    #[serde(default)]
+    pub total_tips: i64,
+    /// The cash slice of `total_tips`.
+    #[serde(default)]
+    pub cash_tips: i64,
     pub avg_order_value: i64,
     pub void_rate_pct: f64,
 }
@@ -263,20 +287,26 @@ pub async fn shift_summary(
             s.closing_cash_declared::bigint,
             s.closing_cash_system::bigint,
             s.cash_discrepancy::bigint,
-            COUNT(o.id) FILTER (WHERE o.status != 'voided')::bigint     AS total_orders,
+            COUNT(o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint     AS total_orders,
             COUNT(o.id) FILTER (WHERE o.status = 'voided')::bigint      AS voided_orders,
-            COALESCE(SUM(o.total_amount) FILTER (WHERE o.status != 'voided'), 0)::bigint AS total_revenue,
+            COALESCE(SUM(o.total_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_revenue,
             COALESCE((
               SELECT json_object_agg(method, rev) FROM (
                 SELECT op.method, SUM(op.amount)::bigint AS rev
                 FROM order_payments op
                 JOIN orders o2 ON o2.id = op.order_id
-                WHERE o2.shift_id = s.id AND o2.status != 'voided'
+                WHERE o2.shift_id = s.id AND o2.status NOT IN ('voided', 'refunded')
                 GROUP BY op.method
               ) sub
             ), '{}'::json) AS revenue_by_method,
-            COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status != 'voided'), 0)::bigint AS total_discount,
-            COALESCE(SUM(o.tax_amount)      FILTER (WHERE o.status != 'voided'), 0)::bigint AS total_tax
+            COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_discount,
+            COALESCE(SUM(o.tax_amount)      FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_tax,
+            COALESCE(SUM(o.tip_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_tips,
+            COALESCE(SUM(o.tip_amount) FILTER (
+                WHERE o.status NOT IN ('voided', 'refunded')
+                  AND COALESCE(o.tip_is_cash,
+                               COALESCE(o.tip_payment_method, o.payment_method) = 'cash')
+            ), 0)::bigint AS cash_tips
         FROM shifts s
         JOIN branches b ON b.id = s.branch_id
         JOIN users    u ON u.id = s.teller_id
@@ -346,20 +376,20 @@ pub async fn branch_sales(
         None => None,
     };
 
-    let totals: (i64, i64, i64, i64, i64, i64, i64, serde_json::Value) = sqlx::query_as(
+    let totals: (i64, i64, i64, i64, i64, i64, i64, serde_json::Value, i64, i64) = sqlx::query_as(
         r#"
         SELECT
-            COUNT(*) FILTER (WHERE status != 'voided')::bigint,
+            COUNT(*) FILTER (WHERE status NOT IN ('voided', 'refunded'))::bigint,
             COUNT(*) FILTER (WHERE status = 'voided')::bigint,
-            COALESCE(SUM(subtotal)        FILTER (WHERE status != 'voided'), 0)::bigint,
-            COALESCE(SUM(discount_amount) FILTER (WHERE status != 'voided'), 0)::bigint,
-            COALESCE(SUM(tax_amount)      FILTER (WHERE status != 'voided'), 0)::bigint,
-            COALESCE(SUM(total_amount)    FILTER (WHERE status != 'voided'), 0)::bigint,
+            COALESCE(SUM(subtotal)        FILTER (WHERE status NOT IN ('voided', 'refunded')), 0)::bigint,
+            COALESCE(SUM(discount_amount) FILTER (WHERE status NOT IN ('voided', 'refunded')), 0)::bigint,
+            COALESCE(SUM(tax_amount)      FILTER (WHERE status NOT IN ('voided', 'refunded')), 0)::bigint,
+            COALESCE(SUM(total_amount)    FILTER (WHERE status NOT IN ('voided', 'refunded')), 0)::bigint,
             COALESCE((
               SELECT SUM(oi.quantity)::bigint
               FROM order_items oi
               JOIN orders o3 ON o3.id = oi.order_id
-              WHERE o3.branch_id = ANY($1) AND o3.status != 'voided'
+              WHERE o3.branch_id = ANY($1) AND o3.status NOT IN ('voided', 'refunded')
                 AND ($2::timestamptz IS NULL OR o3.created_at >= $2)
                 AND ($3::timestamptz IS NULL OR o3.created_at <= $3)
                 AND ($4::uuid[] IS NULL OR COALESCE(oi.menu_item_id, oi.bundle_id) != ALL($4::uuid[]))
@@ -369,12 +399,21 @@ pub async fn branch_sales(
                 SELECT op.method, SUM(op.amount)::bigint AS rev
                 FROM order_payments op
                 JOIN orders o2 ON o2.id = op.order_id
-                WHERE o2.branch_id = ANY($1) AND o2.status != 'voided'
+                WHERE o2.branch_id = ANY($1) AND o2.status NOT IN ('voided', 'refunded')
                   AND ($2::timestamptz IS NULL OR o2.created_at >= $2)
                   AND ($3::timestamptz IS NULL OR o2.created_at <= $3)
                 GROUP BY op.method
               ) sub
-            ), '{}'::json)
+            ), '{}'::json),
+            -- Tips, standalone. Deliberately NOT added into total_amount or into
+            -- any method bucket above: `revenue_by_method` is goods-only so it
+            -- lines up with the shift report's payment_summary.
+            COALESCE(SUM(tip_amount) FILTER (WHERE status NOT IN ('voided', 'refunded')), 0)::bigint,
+            COALESCE(SUM(tip_amount) FILTER (
+                WHERE status NOT IN ('voided', 'refunded')
+                  AND COALESCE(tip_is_cash,
+                               COALESCE(tip_payment_method, payment_method) = 'cash')
+            ), 0)::bigint
         FROM orders
         WHERE branch_id = ANY($1)
           AND ($2::timestamptz IS NULL OR created_at >= $2)
@@ -398,7 +437,7 @@ pub async fn branch_sales(
                SUM(oi.line_total)::bigint AS revenue
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
-        WHERE o.branch_id = ANY($1) AND o.status != 'voided'
+        WHERE o.branch_id = ANY($1) AND o.status NOT IN ('voided', 'refunded')
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         GROUP BY COALESCE(oi.menu_item_id, oi.bundle_id), oi.item_name
@@ -439,7 +478,7 @@ pub async fn branch_sales(
         JOIN orders o     ON o.id  = oi.order_id
         LEFT JOIN menu_items m ON m.id  = oi.menu_item_id
         LEFT JOIN categories c ON c.id = m.category_id
-        WHERE o.branch_id = ANY($1) AND o.status != 'voided'
+        WHERE o.branch_id = ANY($1) AND o.status NOT IN ('voided', 'refunded')
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         GROUP BY
@@ -502,6 +541,8 @@ pub async fn branch_sales(
         total_revenue: totals.5,
         total_line_items: totals.6,
         revenue_by_method: totals.7,
+        total_tips: totals.8,
+        cash_tips: totals.9,
         top_items,
         by_category,
     }))
@@ -636,11 +677,11 @@ pub async fn branch_sales_timeseries(
                     date_trunc('{trunc}', o.created_at AT TIME ZONE $4),
                     'YYYY-MM-DD"T"HH24:MI:SS'
                 ) AS period_str,
-                COUNT(o.id)   FILTER (WHERE o.status != 'voided')::bigint  AS orders,
-                COALESCE(SUM(o.total_amount)    FILTER (WHERE o.status != 'voided'), 0)::bigint AS revenue,
+                COUNT(o.id)   FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint  AS orders,
+                COALESCE(SUM(o.total_amount)    FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS revenue,
                 COUNT(o.id)   FILTER (WHERE o.status  = 'voided')::bigint  AS voided,
-                COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status != 'voided'), 0)::bigint AS discount,
-                COALESCE(SUM(o.tax_amount)      FILTER (WHERE o.status != 'voided'), 0)::bigint AS tax
+                COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS discount,
+                COALESCE(SUM(o.tax_amount)      FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS tax
             FROM orders o
             WHERE o.branch_id = ANY($1)
               AND ($2::timestamptz IS NULL OR o.created_at >= $2)
@@ -659,7 +700,7 @@ pub async fn branch_sales_timeseries(
                 SELECT op2.method, SUM(op2.amount)::bigint AS rev
                 FROM order_payments op2
                 JOIN orders o2 ON o2.id = op2.order_id
-                WHERE o2.branch_id = ANY($1) AND o2.status != 'voided'
+                WHERE o2.branch_id = ANY($1) AND o2.status NOT IN ('voided', 'refunded')
                   AND date_trunc('{trunc}', o2.created_at AT TIME ZONE $4) = p.period_val
                 GROUP BY op2.method
               ) sub
@@ -761,11 +802,11 @@ pub async fn branch_sales_peak_hours(
         aggregated AS (
             SELECT
                 EXTRACT(hour FROM o.created_at AT TIME ZONE $4)::int AS hour,
-                COUNT(o.id)   FILTER (WHERE o.status != 'voided')::bigint  AS orders,
-                COALESCE(SUM(o.total_amount)    FILTER (WHERE o.status != 'voided'), 0)::bigint AS revenue,
+                COUNT(o.id)   FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint  AS orders,
+                COALESCE(SUM(o.total_amount)    FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS revenue,
                 COUNT(o.id)   FILTER (WHERE o.status  = 'voided')::bigint  AS voided,
-                COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status != 'voided'), 0)::bigint AS discount,
-                COALESCE(SUM(o.tax_amount)      FILTER (WHERE o.status != 'voided'), 0)::bigint AS tax
+                COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS discount,
+                COALESCE(SUM(o.tax_amount)      FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS tax
             FROM orders o
             WHERE o.branch_id = ANY($1)
               AND ($2::timestamptz IS NULL OR o.created_at >= $2)
@@ -837,13 +878,13 @@ pub async fn branch_teller_stats(
         SELECT
             o.teller_id,
             u.name AS teller_name,
-            COUNT(o.id) FILTER (WHERE o.status != 'voided')::bigint AS orders,
-            COALESCE(SUM(o.total_amount) FILTER (WHERE o.status != 'voided'), 0)::bigint AS revenue,
+            COUNT(o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint AS orders,
+            COALESCE(SUM(o.total_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS revenue,
             CASE
-                WHEN COUNT(o.id) FILTER (WHERE o.status != 'voided') = 0 THEN 0
+                WHEN COUNT(o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded')) = 0 THEN 0
                 ELSE (
-                    COALESCE(SUM(o.total_amount) FILTER (WHERE o.status != 'voided'), 0)
-                    / COUNT(o.id) FILTER (WHERE o.status != 'voided')
+                    COALESCE(SUM(o.total_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)
+                    / COUNT(o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded'))
                 )::bigint
             END AS avg_order_value,
             COUNT(o.id) FILTER (WHERE o.status = 'voided')::bigint AS voided,
@@ -894,21 +935,21 @@ pub async fn branch_waiter_stats(
         SELECT
             o.waiter_id,
             w.name AS waiter_name,
-            COUNT(o.id) FILTER (WHERE o.status != 'voided')::bigint AS orders,
-            COALESCE(SUM(o.total_amount) FILTER (WHERE o.status != 'voided'), 0)::bigint AS revenue,
+            COUNT(o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint AS orders,
+            COALESCE(SUM(o.total_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS revenue,
             CASE
-                WHEN COUNT(o.id) FILTER (WHERE o.status != 'voided') = 0 THEN 0
+                WHEN COUNT(o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded')) = 0 THEN 0
                 ELSE (
-                    COALESCE(SUM(o.total_amount) FILTER (WHERE o.status != 'voided'), 0)
-                    / COUNT(o.id) FILTER (WHERE o.status != 'voided')
+                    COALESCE(SUM(o.total_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)
+                    / COUNT(o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded'))
                 )::bigint
             END AS avg_order_value,
             COUNT(o.id) FILTER (WHERE o.status = 'voided')::bigint AS voided,
-            COALESCE(SUM(iq.qty) FILTER (WHERE o.status != 'voided'), 0)::bigint AS line_items,
+            COALESCE(SUM(iq.qty) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS line_items,
             CASE
-                WHEN COUNT(o.id) FILTER (WHERE o.status != 'voided') = 0 THEN 0::float8
-                ELSE COALESCE(SUM(iq.qty) FILTER (WHERE o.status != 'voided'), 0)::float8
-                     / COUNT(o.id) FILTER (WHERE o.status != 'voided')
+                WHEN COUNT(o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded')) = 0 THEN 0::float8
+                ELSE COALESCE(SUM(iq.qty) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::float8
+                     / COUNT(o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded'))
             END AS avg_items_per_order
         FROM orders o
         JOIN users w ON w.id = o.waiter_id
@@ -936,7 +977,7 @@ pub async fn branch_waiter_stats(
             COUNT(*) FILTER (WHERE waiter_id IS NOT NULL)::bigint,
             COUNT(*)::bigint
         FROM orders
-        WHERE status != 'voided'
+        WHERE status NOT IN ('voided', 'refunded')
           AND branch_id = ANY($1)
           AND ($2::timestamptz IS NULL OR created_at >= $2)
           AND ($3::timestamptz IS NULL OR created_at <= $3)
@@ -991,7 +1032,7 @@ pub async fn branch_addon_sales(
         JOIN orders o       ON o.id   = oi.order_id
         LEFT JOIN addon_items ai ON ai.id = oia.addon_item_id
         WHERE o.branch_id = ANY($1)
-          AND o.status != 'voided'
+          AND o.status NOT IN ('voided', 'refunded')
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         GROUP BY oia.addon_item_id, oia.addon_name, ai.type
@@ -1039,6 +1080,8 @@ pub async fn org_branch_comparison(
         voided_orders: i64,
         total_revenue: i64,
         revenue_by_method: serde_json::Value,
+        total_tips: i64,
+        cash_tips: i64,
     }
 
     let rows = sqlx::query_as::<_, Row>(
@@ -1046,20 +1089,26 @@ pub async fn org_branch_comparison(
         SELECT
             b.id   AS branch_id,
             b.name AS branch_name,
-            COUNT(DISTINCT o.id) FILTER (WHERE o.status != 'voided')::bigint AS total_orders,
+            COUNT(DISTINCT o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint AS total_orders,
             COUNT(DISTINCT o.id) FILTER (WHERE o.status  = 'voided')::bigint AS voided_orders,
-            COALESCE(SUM(o.total_amount) FILTER (WHERE o.status != 'voided'), 0)::bigint AS total_revenue,
+            COALESCE(SUM(o.total_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_revenue,
             COALESCE((
               SELECT json_object_agg(method, rev) FROM (
                 SELECT op.method, SUM(op.amount)::bigint AS rev
                 FROM order_payments op
                 JOIN orders o2 ON o2.id = op.order_id
-                WHERE o2.branch_id = b.id AND o2.status != 'voided'
+                WHERE o2.branch_id = b.id AND o2.status NOT IN ('voided', 'refunded')
                   AND ($2::timestamptz IS NULL OR o2.created_at >= $2)
                   AND ($3::timestamptz IS NULL OR o2.created_at <= $3)
                 GROUP BY op.method
               ) sub
-            ), '{}'::json) AS revenue_by_method
+            ), '{}'::json) AS revenue_by_method,
+            COALESCE(SUM(o.tip_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_tips,
+            COALESCE(SUM(o.tip_amount) FILTER (
+                WHERE o.status NOT IN ('voided', 'refunded')
+                  AND COALESCE(o.tip_is_cash,
+                               COALESCE(o.tip_payment_method, o.payment_method) = 'cash')
+            ), 0)::bigint AS cash_tips
         FROM branches b
         LEFT JOIN orders o          ON o.branch_id = b.id
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
@@ -1084,6 +1133,8 @@ pub async fn org_branch_comparison(
             voided_orders: r.voided_orders,
             total_revenue: r.total_revenue,
             revenue_by_method: r.revenue_by_method,
+            total_tips: r.total_tips,
+            cash_tips: r.cash_tips,
             avg_order_value: if r.total_orders == 0 {
                 0
             } else {
@@ -1970,7 +2021,7 @@ pub async fn branch_bundle_sales(
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
         WHERE o.branch_id = ANY($1)
-          AND o.status != 'voided'
+          AND o.status NOT IN ('voided', 'refunded')
           AND oi.bundle_id IS NOT NULL
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
@@ -2020,7 +2071,7 @@ pub async fn branch_combined_item_sales(
             FROM order_items oi
             JOIN orders o ON o.id = oi.order_id
             WHERE o.branch_id = ANY($1)
-              AND o.status != 'voided'
+              AND o.status NOT IN ('voided', 'refunded')
               AND oi.menu_item_id IS NOT NULL
               AND ($2::timestamptz IS NULL OR o.created_at >= $2)
               AND ($3::timestamptz IS NULL OR o.created_at <= $3)
@@ -2038,7 +2089,7 @@ pub async fn branch_combined_item_sales(
             JOIN orders o ON o.id = oi.order_id
             JOIN menu_items mi ON mi.id = bc.item_id
             WHERE o.branch_id = ANY($1)
-              AND o.status != 'voided'
+              AND o.status NOT IN ('voided', 'refunded')
               AND oi.bundle_id IS NOT NULL
               AND ($2::timestamptz IS NULL OR o.created_at >= $2)
               AND ($3::timestamptz IS NULL OR o.created_at <= $3)

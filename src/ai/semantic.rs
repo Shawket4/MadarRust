@@ -71,8 +71,10 @@ fn join_clause(id: &str) -> &'static str {
         "waiter" => "LEFT JOIN users w ON w.id = o.waiter_id",
         "cashier" => "LEFT JOIN users t ON t.id = o.teller_id",
         // Per-order item rollup — keeps the order grain (no revenue fan-out).
-        "items" => "LEFT JOIN LATERAL (SELECT COALESCE(SUM(oi.quantity),0) AS units, \
-                    COUNT(oi.id) AS lines FROM order_items oi WHERE oi.order_id = o.id) it ON true",
+        "items" => {
+            "LEFT JOIN LATERAL (SELECT COALESCE(SUM(oi.quantity),0) AS units, \
+                    COUNT(oi.id) AS lines FROM order_items oi WHERE oi.order_id = o.id) it ON true"
+        }
         // Item grain (order_items dataset): product → category. `menu_item`
         // must precede `category` (the latter references `mi`).
         "menu_item" => "LEFT JOIN menu_items mi ON mi.id = oi.menu_item_id",
@@ -89,81 +91,367 @@ fn join_clause(id: &str) -> &'static str {
 }
 
 // ── Shared time dimensions (both grains hang off `o.created_at`) ──────────────
-const D_DAY: Dim = Dim { id: "day", label: "Day", expr: "(o.created_at AT TIME ZONE :tz)::date", kind: ColumnKind::Date, joins: &[], time: true };
-const D_WEEK: Dim = Dim { id: "week", label: "Week", expr: "date_trunc('week', o.created_at AT TIME ZONE :tz)::date", kind: ColumnKind::Date, joins: &[], time: true };
-const D_MONTH: Dim = Dim { id: "month", label: "Month", expr: "date_trunc('month', o.created_at AT TIME ZONE :tz)::date", kind: ColumnKind::Date, joins: &[], time: true };
-const D_HOUR: Dim = Dim { id: "hour", label: "Hour", expr: "to_char(o.created_at AT TIME ZONE :tz, 'HH24:00')", kind: ColumnKind::Label, joins: &[], time: true };
-const D_WEEKDAY: Dim = Dim { id: "weekday", label: "Weekday", expr: "trim(to_char(o.created_at AT TIME ZONE :tz, 'Day'))", kind: ColumnKind::Label, joins: &[], time: true };
-const D_BRANCH: Dim = Dim { id: "branch", label: "Branch", expr: "b.name", kind: ColumnKind::Label, joins: &["branch"], time: false };
-const D_WAITER: Dim = Dim { id: "waiter", label: "Waiter", expr: "w.name", kind: ColumnKind::Label, joins: &["waiter"], time: false };
+const D_DAY: Dim = Dim {
+    id: "day",
+    label: "Day",
+    expr: "(o.created_at AT TIME ZONE :tz)::date",
+    kind: ColumnKind::Date,
+    joins: &[],
+    time: true,
+};
+const D_WEEK: Dim = Dim {
+    id: "week",
+    label: "Week",
+    expr: "date_trunc('week', o.created_at AT TIME ZONE :tz)::date",
+    kind: ColumnKind::Date,
+    joins: &[],
+    time: true,
+};
+const D_MONTH: Dim = Dim {
+    id: "month",
+    label: "Month",
+    expr: "date_trunc('month', o.created_at AT TIME ZONE :tz)::date",
+    kind: ColumnKind::Date,
+    joins: &[],
+    time: true,
+};
+const D_HOUR: Dim = Dim {
+    id: "hour",
+    label: "Hour",
+    expr: "to_char(o.created_at AT TIME ZONE :tz, 'HH24:00')",
+    kind: ColumnKind::Label,
+    joins: &[],
+    time: true,
+};
+const D_WEEKDAY: Dim = Dim {
+    id: "weekday",
+    label: "Weekday",
+    expr: "trim(to_char(o.created_at AT TIME ZONE :tz, 'Day'))",
+    kind: ColumnKind::Label,
+    joins: &[],
+    time: true,
+};
+const D_BRANCH: Dim = Dim {
+    id: "branch",
+    label: "Branch",
+    expr: "b.name",
+    kind: ColumnKind::Label,
+    joins: &["branch"],
+    time: false,
+};
+const D_WAITER: Dim = Dim {
+    id: "waiter",
+    label: "Waiter",
+    expr: "w.name",
+    kind: ColumnKind::Label,
+    joins: &["waiter"],
+    time: false,
+};
 
 const ORDERS_DIMS: &[Dim] = &[
-    D_DAY, D_WEEK, D_MONTH, D_HOUR, D_WEEKDAY, D_BRANCH, D_WAITER,
-    Dim { id: "cashier", label: "Cashier", expr: "t.name", kind: ColumnKind::Label, joins: &["cashier"], time: false },
-    Dim { id: "order_type", label: "Order type", expr: "COALESCE(o.order_type, 'unknown')", kind: ColumnKind::Label, joins: &[], time: false },
-    Dim { id: "delivery_channel", label: "Channel", expr: "d.channel::text", kind: ColumnKind::Label, joins: &["delivery"], time: false },
-    Dim { id: "status", label: "Status", expr: "o.status::text", kind: ColumnKind::Label, joins: &[], time: false },
-    Dim { id: "void_reason", label: "Void reason", expr: "COALESCE(o.void_reason::text, 'unspecified')", kind: ColumnKind::Label, joins: &[], time: false },
+    D_DAY,
+    D_WEEK,
+    D_MONTH,
+    D_HOUR,
+    D_WEEKDAY,
+    D_BRANCH,
+    D_WAITER,
+    Dim {
+        id: "cashier",
+        label: "Cashier",
+        expr: "t.name",
+        kind: ColumnKind::Label,
+        joins: &["cashier"],
+        time: false,
+    },
+    Dim {
+        id: "order_type",
+        label: "Order type",
+        expr: "COALESCE(o.order_type, 'unknown')",
+        kind: ColumnKind::Label,
+        joins: &[],
+        time: false,
+    },
+    Dim {
+        id: "delivery_channel",
+        label: "Channel",
+        expr: "d.channel::text",
+        kind: ColumnKind::Label,
+        joins: &["delivery"],
+        time: false,
+    },
+    Dim {
+        id: "status",
+        label: "Status",
+        expr: "o.status::text",
+        kind: ColumnKind::Label,
+        joins: &[],
+        time: false,
+    },
+    Dim {
+        id: "void_reason",
+        label: "Void reason",
+        expr: "COALESCE(o.void_reason::text, 'unspecified')",
+        kind: ColumnKind::Label,
+        joins: &[],
+        time: false,
+    },
 ];
 
 const ORDERS_MEASURES: &[Meas] = &[
-    Meas { id: "order_count", label: "Orders", expr: "COUNT(DISTINCT o.id)", kind: ColumnKind::Count, joins: &[] },
-    Meas { id: "revenue", label: "Revenue", expr: "COALESCE(SUM(o.total_amount),0)", kind: ColumnKind::Money, joins: &[] },
-    Meas { id: "discount_total", label: "Discounts", expr: "COALESCE(SUM(o.discount_amount),0)", kind: ColumnKind::Money, joins: &[] },
-    Meas { id: "tax_total", label: "Tax", expr: "COALESCE(SUM(o.tax_amount),0)", kind: ColumnKind::Money, joins: &[] },
-    Meas { id: "tip_total", label: "Tips", expr: "COALESCE(SUM(o.tip_amount),0)", kind: ColumnKind::Money, joins: &[] },
-    Meas { id: "delivery_fees", label: "Delivery fees", expr: "COALESCE(SUM(o.delivery_fee),0)", kind: ColumnKind::Money, joins: &[] },
-    Meas { id: "avg_order_value", label: "Avg order", expr: "COALESCE(AVG(o.total_amount),0)::bigint", kind: ColumnKind::Money, joins: &[] },
-    Meas { id: "void_count", label: "Voids", expr: "COUNT(*) FILTER (WHERE o.status = 'voided')", kind: ColumnKind::Count, joins: &[] },
-    Meas { id: "line_item_units", label: "Units sold", expr: "COALESCE(SUM(it.units),0)", kind: ColumnKind::Count, joins: &["items"] },
-    Meas { id: "distinct_lines", label: "Line items", expr: "COALESCE(SUM(it.lines),0)", kind: ColumnKind::Count, joins: &["items"] },
+    Meas {
+        id: "order_count",
+        label: "Orders",
+        expr: "COUNT(DISTINCT o.id)",
+        kind: ColumnKind::Count,
+        joins: &[],
+    },
+    Meas {
+        id: "revenue",
+        label: "Revenue",
+        expr: "COALESCE(SUM(o.total_amount),0)",
+        kind: ColumnKind::Money,
+        joins: &[],
+    },
+    Meas {
+        id: "discount_total",
+        label: "Discounts",
+        expr: "COALESCE(SUM(o.discount_amount),0)",
+        kind: ColumnKind::Money,
+        joins: &[],
+    },
+    Meas {
+        id: "tax_total",
+        label: "Tax",
+        expr: "COALESCE(SUM(o.tax_amount),0)",
+        kind: ColumnKind::Money,
+        joins: &[],
+    },
+    Meas {
+        id: "tip_total",
+        label: "Tips",
+        expr: "COALESCE(SUM(o.tip_amount),0)",
+        kind: ColumnKind::Money,
+        joins: &[],
+    },
+    Meas {
+        id: "delivery_fees",
+        label: "Delivery fees",
+        expr: "COALESCE(SUM(o.delivery_fee),0)",
+        kind: ColumnKind::Money,
+        joins: &[],
+    },
+    Meas {
+        id: "avg_order_value",
+        label: "Avg order",
+        expr: "COALESCE(AVG(o.total_amount),0)::bigint",
+        kind: ColumnKind::Money,
+        joins: &[],
+    },
+    Meas {
+        id: "void_count",
+        label: "Voids",
+        expr: "COUNT(*) FILTER (WHERE o.status = 'voided')",
+        kind: ColumnKind::Count,
+        joins: &[],
+    },
+    Meas {
+        id: "line_item_units",
+        label: "Units sold",
+        expr: "COALESCE(SUM(it.units),0)",
+        kind: ColumnKind::Count,
+        joins: &["items"],
+    },
+    Meas {
+        id: "distinct_lines",
+        label: "Line items",
+        expr: "COALESCE(SUM(it.lines),0)",
+        kind: ColumnKind::Count,
+        joins: &["items"],
+    },
 ];
 
 const ITEM_DIMS: &[Dim] = &[
-    D_DAY, D_WEEK, D_MONTH, D_BRANCH, D_WAITER,
-    Dim { id: "product", label: "Product", expr: "COALESCE(oi.name_translations->>:locale, oi.item_name)", kind: ColumnKind::Label, joins: &[], time: false },
-    Dim { id: "category", label: "Category", expr: "COALESCE(NULLIF(c.name_translations->>:locale,''), c.name, 'Uncategorized')", kind: ColumnKind::Label, joins: &["menu_item", "category"], time: false },
-    Dim { id: "size", label: "Size", expr: "COALESCE(oi.size_label, '—')", kind: ColumnKind::Label, joins: &[], time: false },
+    D_DAY,
+    D_WEEK,
+    D_MONTH,
+    D_BRANCH,
+    D_WAITER,
+    Dim {
+        id: "product",
+        label: "Product",
+        expr: "COALESCE(oi.name_translations->>:locale, oi.item_name)",
+        kind: ColumnKind::Label,
+        joins: &[],
+        time: false,
+    },
+    Dim {
+        id: "category",
+        label: "Category",
+        expr: "COALESCE(NULLIF(c.name_translations->>:locale,''), c.name, 'Uncategorized')",
+        kind: ColumnKind::Label,
+        joins: &["menu_item", "category"],
+        time: false,
+    },
+    Dim {
+        id: "size",
+        label: "Size",
+        expr: "COALESCE(oi.size_label, '—')",
+        kind: ColumnKind::Label,
+        joins: &[],
+        time: false,
+    },
 ];
 
 const ITEM_MEASURES: &[Meas] = &[
-    Meas { id: "line_item_units", label: "Units sold", expr: "COALESCE(SUM(oi.quantity),0)", kind: ColumnKind::Count, joins: &[] },
-    Meas { id: "distinct_lines", label: "Line items", expr: "COUNT(oi.id)", kind: ColumnKind::Count, joins: &[] },
-    Meas { id: "item_revenue", label: "Revenue", expr: "COALESCE(SUM(oi.line_total),0)", kind: ColumnKind::Money, joins: &[] },
+    Meas {
+        id: "line_item_units",
+        label: "Units sold",
+        expr: "COALESCE(SUM(oi.quantity),0)",
+        kind: ColumnKind::Count,
+        joins: &[],
+    },
+    Meas {
+        id: "distinct_lines",
+        label: "Line items",
+        expr: "COUNT(oi.id)",
+        kind: ColumnKind::Count,
+        joins: &[],
+    },
+    Meas {
+        id: "item_revenue",
+        label: "Revenue",
+        expr: "COALESCE(SUM(oi.line_total),0)",
+        kind: ColumnKind::Money,
+        joins: &[],
+    },
     // Cost / profit / margin — NULL when any line in the group lacks a cost
     // snapshot (matches the product_profit report's honest-null convention).
-    Meas { id: "item_cost", label: "Cost", expr: "(CASE WHEN bool_or(oi.line_cost IS NULL) THEN NULL ELSE SUM(oi.line_cost) END)::bigint", kind: ColumnKind::Money, joins: &[] },
-    Meas { id: "item_profit", label: "Profit", expr: "(CASE WHEN bool_or(oi.line_cost IS NULL) THEN NULL ELSE SUM(oi.line_total) - SUM(oi.line_cost) END)::bigint", kind: ColumnKind::Money, joins: &[] },
-    Meas { id: "margin_pct", label: "Margin %", expr: "(CASE WHEN bool_or(oi.line_cost IS NULL) THEN NULL ELSE ROUND(100.0 * (SUM(oi.line_total) - SUM(oi.line_cost)) / NULLIF(SUM(oi.line_total),0), 1) END)::float8", kind: ColumnKind::Number, joins: &[] },
-    Meas { id: "order_count", label: "Orders", expr: "COUNT(DISTINCT o.id)", kind: ColumnKind::Count, joins: &[] },
+    Meas {
+        id: "item_cost",
+        label: "Cost",
+        expr: "(CASE WHEN bool_or(oi.line_cost IS NULL) THEN NULL ELSE SUM(oi.line_cost) END)::bigint",
+        kind: ColumnKind::Money,
+        joins: &[],
+    },
+    Meas {
+        id: "item_profit",
+        label: "Profit",
+        expr: "(CASE WHEN bool_or(oi.line_cost IS NULL) THEN NULL ELSE SUM(oi.line_total) - SUM(oi.line_cost) END)::bigint",
+        kind: ColumnKind::Money,
+        joins: &[],
+    },
+    Meas {
+        id: "margin_pct",
+        label: "Margin %",
+        expr: "(CASE WHEN bool_or(oi.line_cost IS NULL) THEN NULL ELSE ROUND(100.0 * (SUM(oi.line_total) - SUM(oi.line_cost)) / NULLIF(SUM(oi.line_total),0), 1) END)::float8",
+        kind: ColumnKind::Number,
+        joins: &[],
+    },
+    Meas {
+        id: "order_count",
+        label: "Orders",
+        expr: "COUNT(DISTINCT o.id)",
+        kind: ColumnKind::Count,
+        joins: &[],
+    },
 ];
 
 // Payments grain — one row per payment line (`order_payments`). A split-tender
 // order contributes several rows; `paid_amount` sums the tender, not order totals.
 const PAYMENT_DIMS: &[Dim] = &[
-    D_DAY, D_WEEK, D_MONTH, D_BRANCH,
-    Dim { id: "payment_method", label: "Method", expr: "COALESCE(NULLIF(pm.label_translations->>:locale,''), pm.name, op.method)", kind: ColumnKind::Label, joins: &["pay_method"], time: false },
+    D_DAY,
+    D_WEEK,
+    D_MONTH,
+    D_BRANCH,
+    Dim {
+        id: "payment_method",
+        label: "Method",
+        expr: "COALESCE(NULLIF(pm.label_translations->>:locale,''), pm.name, op.method)",
+        kind: ColumnKind::Label,
+        joins: &["pay_method"],
+        time: false,
+    },
 ];
 
 const PAYMENT_MEASURES: &[Meas] = &[
-    Meas { id: "payment_count", label: "Payments", expr: "COUNT(*)", kind: ColumnKind::Count, joins: &[] },
-    Meas { id: "paid_amount", label: "Amount", expr: "COALESCE(SUM(op.amount),0)", kind: ColumnKind::Money, joins: &[] },
+    Meas {
+        id: "payment_count",
+        label: "Payments",
+        expr: "COUNT(*)",
+        kind: ColumnKind::Count,
+        joins: &[],
+    },
+    Meas {
+        id: "paid_amount",
+        label: "Amount",
+        expr: "COALESCE(SUM(op.amount),0)",
+        kind: ColumnKind::Money,
+        joins: &[],
+    },
 ];
 
 // Waste grain — `inventory_movements` of type 'waste'; the "item" is an
 // ingredient. Its own alias (`im`) + time/branch columns, so it needs the
 // generalized WHERE (no `o` alias, no status/order_type filters).
 const WASTE_DIMS: &[Dim] = &[
-    Dim { id: "day", label: "Day", expr: "(im.created_at AT TIME ZONE :tz)::date", kind: ColumnKind::Date, joins: &[], time: true },
-    Dim { id: "week", label: "Week", expr: "date_trunc('week', im.created_at AT TIME ZONE :tz)::date", kind: ColumnKind::Date, joins: &[], time: true },
-    Dim { id: "month", label: "Month", expr: "date_trunc('month', im.created_at AT TIME ZONE :tz)::date", kind: ColumnKind::Date, joins: &[], time: true },
-    Dim { id: "branch", label: "Branch", expr: "b.name", kind: ColumnKind::Label, joins: &["branch_im"], time: false },
-    Dim { id: "ingredient", label: "Item", expr: "ing.name", kind: ColumnKind::Label, joins: &["ingredient"], time: false },
+    Dim {
+        id: "day",
+        label: "Day",
+        expr: "(im.created_at AT TIME ZONE :tz)::date",
+        kind: ColumnKind::Date,
+        joins: &[],
+        time: true,
+    },
+    Dim {
+        id: "week",
+        label: "Week",
+        expr: "date_trunc('week', im.created_at AT TIME ZONE :tz)::date",
+        kind: ColumnKind::Date,
+        joins: &[],
+        time: true,
+    },
+    Dim {
+        id: "month",
+        label: "Month",
+        expr: "date_trunc('month', im.created_at AT TIME ZONE :tz)::date",
+        kind: ColumnKind::Date,
+        joins: &[],
+        time: true,
+    },
+    Dim {
+        id: "branch",
+        label: "Branch",
+        expr: "b.name",
+        kind: ColumnKind::Label,
+        joins: &["branch_im"],
+        time: false,
+    },
+    Dim {
+        id: "ingredient",
+        label: "Item",
+        expr: "ing.name",
+        kind: ColumnKind::Label,
+        joins: &["ingredient"],
+        time: false,
+    },
 ];
 
 const WASTE_MEASURES: &[Meas] = &[
-    Meas { id: "waste_qty", label: "Quantity", expr: "ROUND(SUM(ABS(im.quantity)),2)::float8", kind: ColumnKind::Number, joins: &[] },
-    Meas { id: "waste_cost", label: "Cost", expr: "COALESCE(ROUND(SUM(ABS(im.quantity) * COALESCE(im.unit_cost,0))),0)::bigint", kind: ColumnKind::Money, joins: &[] },
+    Meas {
+        id: "waste_qty",
+        label: "Quantity",
+        expr: "ROUND(SUM(ABS(im.quantity)),2)::float8",
+        kind: ColumnKind::Number,
+        joins: &[],
+    },
+    Meas {
+        id: "waste_cost",
+        label: "Cost",
+        expr: "COALESCE(ROUND(SUM(ABS(im.quantity) * COALESCE(im.unit_cost,0))),0)::bigint",
+        kind: ColumnKind::Money,
+        joins: &[],
+    },
 ];
 
 const DATASETS: &[Dataset] = &[
@@ -216,24 +504,66 @@ const DATASETS: &[Dataset] = &[
 // ── Schema whitelists exposed to the `analytics_query` tool declaration ───────
 pub const DATASET_IDS: &[&str] = &["orders", "order_items", "payments", "waste"];
 pub const DIMENSION_IDS: &[&str] = &[
-    "day", "week", "month", "hour", "weekday", "branch", "waiter", "cashier",
-    "order_type", "delivery_channel", "status", "void_reason", "product",
-    "category", "size", "payment_method", "ingredient",
+    "day",
+    "week",
+    "month",
+    "hour",
+    "weekday",
+    "branch",
+    "waiter",
+    "cashier",
+    "order_type",
+    "delivery_channel",
+    "status",
+    "void_reason",
+    "product",
+    "category",
+    "size",
+    "payment_method",
+    "ingredient",
 ];
 pub const MEASURE_IDS: &[&str] = &[
-    "order_count", "revenue", "discount_total", "tax_total", "tip_total",
-    "delivery_fees", "avg_order_value", "void_count", "line_item_units",
-    "distinct_lines", "item_revenue", "item_cost", "item_profit", "margin_pct",
-    "payment_count", "paid_amount", "waste_qty", "waste_cost",
+    "order_count",
+    "revenue",
+    "discount_total",
+    "tax_total",
+    "tip_total",
+    "delivery_fees",
+    "avg_order_value",
+    "void_count",
+    "line_item_units",
+    "distinct_lines",
+    "item_revenue",
+    "item_cost",
+    "item_profit",
+    "margin_pct",
+    "payment_count",
+    "paid_amount",
+    "waste_qty",
+    "waste_cost",
 ];
 pub const OUTPUT_IDS: &[&str] = &["auto", "table", "bar", "line", "pie"];
-pub const STATUS_IDS: &[&str] = &["completed", "not_voided", "all"];
+/// `sold` is the canonical revenue scope ([`crate::orders::SOLD`]) and the
+/// default, so the chat's numbers match the sales + shift reports. The other
+/// two are kept for explicit narrower/wider questions.
+pub const STATUS_IDS: &[&str] = &["sold", "completed", "not_voided", "all"];
 pub const ORDER_TYPE_IDS: &[&str] = &["any", "dine_in", "delivery"];
 pub const SORT_DIR_IDS: &[&str] = &["desc", "asc"];
 pub const COMPARE_IDS: &[&str] = &["none", "previous_period", "previous_year"];
 pub const PER_IDS: &[&str] = &[
-    "none", "branch", "waiter", "cashier", "product", "category", "size",
-    "payment_method", "ingredient", "order_type", "day", "week", "month",
+    "none",
+    "branch",
+    "waiter",
+    "cashier",
+    "product",
+    "category",
+    "size",
+    "payment_method",
+    "ingredient",
+    "order_type",
+    "day",
+    "week",
+    "month",
 ];
 
 fn bad(msg: impl Into<String>) -> ExecError {
@@ -275,11 +605,12 @@ pub fn build(raw: &Map<String, Value>) -> Result<ResolvedQuery, ExecError> {
     // Dimensions (deduped, order preserved), each valid for this dataset.
     let mut dims: Vec<&Dim> = Vec::new();
     for id in list_arg(raw, "dimensions") {
-        let d = ds
-            .dims
-            .iter()
-            .find(|d| d.id == id)
-            .ok_or_else(|| bad(format!("dimension '{id}' isn't available for dataset '{}'", ds.id)))?;
+        let d = ds.dims.iter().find(|d| d.id == id).ok_or_else(|| {
+            bad(format!(
+                "dimension '{id}' isn't available for dataset '{}'",
+                ds.id
+            ))
+        })?;
         if !dims.iter().any(|x| x.id == d.id) {
             dims.push(d);
         }
@@ -294,11 +625,12 @@ pub fn build(raw: &Map<String, Value>) -> Result<ResolvedQuery, ExecError> {
     };
     let mut measures: Vec<&Meas> = Vec::new();
     for id in meas_ids {
-        let m = ds
-            .measures
-            .iter()
-            .find(|m| m.id == id)
-            .ok_or_else(|| bad(format!("measure '{id}' isn't available for dataset '{}'", ds.id)))?;
+        let m = ds.measures.iter().find(|m| m.id == id).ok_or_else(|| {
+            bad(format!(
+                "measure '{id}' isn't available for dataset '{}'",
+                ds.id
+            ))
+        })?;
         if !measures.iter().any(|x| x.id == m.id) {
             measures.push(m);
         }
@@ -320,7 +652,8 @@ pub fn build(raw: &Map<String, Value>) -> Result<ResolvedQuery, ExecError> {
     // Status + order-type filters — the value only *selects* a whitelisted
     // predicate. They reference `o.*`, so they apply only to order-based datasets
     // (still validated regardless, so a bad value is always rejected).
-    let status_raw = match str_arg(raw, "status").unwrap_or("completed") {
+    let status_raw = match str_arg(raw, "status").unwrap_or("sold") {
+        "sold" => "AND o.status NOT IN ('voided', 'refunded')",
         "completed" => "AND o.status = 'completed'",
         "not_voided" => "AND o.status <> 'voided'",
         "all" => "",
@@ -340,7 +673,11 @@ pub fn build(raw: &Map<String, Value>) -> Result<ResolvedQuery, ExecError> {
 
     // Collect joins from dims + measures (ordered, deduped by id).
     let mut join_ids: Vec<&str> = Vec::new();
-    for src in dims.iter().flat_map(|d| d.joins).chain(measures.iter().flat_map(|m| m.joins)) {
+    for src in dims
+        .iter()
+        .flat_map(|d| d.joins)
+        .chain(measures.iter().flat_map(|m| m.joins))
+    {
         if !join_ids.contains(src) {
             join_ids.push(*src);
         }
@@ -356,11 +693,19 @@ pub fn build(raw: &Map<String, Value>) -> Result<ResolvedQuery, ExecError> {
     let mut columns: Vec<Column> = Vec::new();
     for d in &dims {
         select.push(format!("{} AS {}", d.expr, d.id));
-        columns.push(Column { key: d.id, label: d.label, kind: d.kind });
+        columns.push(Column {
+            key: d.id,
+            label: d.label,
+            kind: d.kind,
+        });
     }
     for m in &measures {
         select.push(format!("{} AS {}", m.expr, m.id));
-        columns.push(Column { key: m.id, label: m.label, kind: m.kind });
+        columns.push(Column {
+            key: m.id,
+            label: m.label,
+            kind: m.kind,
+        });
     }
 
     // Branch fence + period, keyed off the dataset's own columns, plus any
@@ -379,7 +724,10 @@ pub fn build(raw: &Map<String, Value>) -> Result<ResolvedQuery, ExecError> {
     } else {
         format!(
             "GROUP BY {}",
-            (1..=dims.len()).map(|i| i.to_string()).collect::<Vec<_>>().join(", ")
+            (1..=dims.len())
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     };
     let first_meas = measures[0];
@@ -402,7 +750,10 @@ pub fn build(raw: &Map<String, Value>) -> Result<ResolvedQuery, ExecError> {
     // Optional HAVING threshold on the sort measure ("products selling ≥ 100").
     let having_min = raw
         .get("having_min")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())))
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+        })
         .unwrap_or(0);
     let having = if having_min > 0 {
         format!("HAVING {} >= :having_min", sort_meas.expr)
@@ -427,11 +778,16 @@ pub fn build(raw: &Map<String, Value>) -> Result<ResolvedQuery, ExecError> {
             ));
         }
         if str_arg(raw, "from").is_none() || str_arg(raw, "to").is_none() {
-            return Err(bad("'compare' needs an explicit date range (both from and to)"));
+            return Err(bad(
+                "'compare' needs an explicit date range (both from and to)",
+            ));
         }
         let prev_period = match cmp {
             "previous_period" => {
-                format!("AND {t} >= (:from - (:to - :from)) AND {t} < :from", t = ds.time_col)
+                format!(
+                    "AND {t} >= (:from - (:to - :from)) AND {t} < :from",
+                    t = ds.time_col
+                )
             }
             "previous_year" => format!(
                 "AND {t} >= (:from - interval '1 year') AND {t} <= (:to - interval '1 year')",
@@ -469,14 +825,29 @@ pub fn build(raw: &Map<String, Value>) -> Result<ResolvedQuery, ExecError> {
             s = sort_meas.id,
         );
         let mut cols = columns.clone();
-        cols.push(Column { key: "prev", label: "Previous", kind: sort_meas.kind });
-        cols.push(Column { key: "change_pct", label: "Change %", kind: ColumnKind::Number });
-        return Ok(ResolvedQuery { sql, columns: cols, chart: ChartHint::Table, facet_by: None });
+        cols.push(Column {
+            key: "prev",
+            label: "Previous",
+            kind: sort_meas.kind,
+        });
+        cols.push(Column {
+            key: "change_pct",
+            label: "Change %",
+            kind: ColumnKind::Number,
+        });
+        return Ok(ResolvedQuery {
+            sql,
+            columns: cols,
+            chart: ChartHint::Table,
+            facet_by: None,
+        });
     }
 
     let (sql, facet_by) = if let Some(p) = per {
         if share || cumulative {
-            return Err(bad("'share'/'cumulative' can't combine with per-group ranking (per)"));
+            return Err(bad(
+                "'share'/'cumulative' can't combine with per-group ranking (per)",
+            ));
         }
         let per_dim = dims.iter().find(|d| d.id == p).expect("validated above");
         let mut sel = select.clone();
@@ -484,7 +855,11 @@ pub fn build(raw: &Map<String, Value>) -> Result<ResolvedQuery, ExecError> {
             "ROW_NUMBER() OVER (PARTITION BY {} ORDER BY {} {dir}) AS rank",
             per_dim.expr, sort_meas.expr,
         ));
-        columns.push(Column { key: "rank", label: "Rank", kind: ColumnKind::Count });
+        columns.push(Column {
+            key: "rank",
+            label: "Rank",
+            kind: ColumnKind::Count,
+        });
         let sql = format!(
             "SELECT * FROM (SELECT {sel} FROM {from} {joins} {where_clause} {status} {ot} {group_by} {having}) ranked \
              WHERE rank <= :top_per ORDER BY {p}, rank LIMIT :limit",
@@ -510,7 +885,11 @@ pub fn build(raw: &Map<String, Value>) -> Result<ResolvedQuery, ExecError> {
                 "ROUND(100.0 * base.{pm} / NULLIF(SUM(base.{pm}) OVER (), 0), 1) AS share_pct",
                 pm = sort_meas.id
             ));
-            columns.push(Column { key: "share_pct", label: "% of total", kind: ColumnKind::Number });
+            columns.push(Column {
+                key: "share_pct",
+                label: "% of total",
+                kind: ColumnKind::Number,
+            });
         }
         let time_dim = dims.iter().find(|d| d.time);
         if cumulative {
@@ -521,7 +900,11 @@ pub fn build(raw: &Map<String, Value>) -> Result<ResolvedQuery, ExecError> {
                 pm = sort_meas.id,
                 tid = td.id
             ));
-            columns.push(Column { key: "cumulative", label: "Cumulative", kind: sort_meas.kind });
+            columns.push(Column {
+                key: "cumulative",
+                label: "Cumulative",
+                kind: sort_meas.kind,
+            });
         }
         // A running total reads in time order; otherwise keep the requested sort.
         let order = match (cumulative, time_dim) {
@@ -566,7 +949,12 @@ pub fn build(raw: &Map<String, Value>) -> Result<ResolvedQuery, ExecError> {
         _ => ChartHint::Table,
     };
 
-    Ok(ResolvedQuery { sql, columns, chart, facet_by })
+    Ok(ResolvedQuery {
+        sql,
+        columns,
+        chart,
+        facet_by,
+    })
 }
 
 #[cfg(test)]

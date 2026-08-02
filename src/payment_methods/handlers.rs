@@ -160,18 +160,19 @@ pub async fn update_payment_method(
         .org_id()
         .ok_or_else(|| AppError::Forbidden("No org id".into()))?;
 
-    // Verify ownership
-    let existing: Option<serde_json::Value> = sqlx::query_scalar(
-        "SELECT label_translations FROM org_payment_methods WHERE id = $1 AND org_id = $2",
+    // Verify ownership. The current name comes back too: historical rows
+    // reference a method by NAME, so a rename has to carry them along.
+    let existing: Option<(serde_json::Value, String)> = sqlx::query_as(
+        "SELECT label_translations, name FROM org_payment_methods WHERE id = $1 AND org_id = $2",
     )
     .bind(*id)
     .bind(org_id)
     .fetch_optional(pool.get_ref())
     .await?;
 
-    if existing.is_none() {
+    let Some((_, old_name)) = existing else {
         return Err(AppError::NotFound("Payment method not found".into()));
-    }
+    };
 
     let mut update_translations = None;
     if let Some(ref mut tr) = body.label_translations {
@@ -181,10 +182,15 @@ pub async fn update_payment_method(
         update_translations = Some(serde_json::to_value(tr).unwrap());
     }
 
+    // A rename has to be atomic with the history rewrite below, or a crash in
+    // between would leave orders pointing at a method name that no longer exists
+    // and split every historical report bucket in two.
+    let mut tx = pool.begin().await?;
+
     let method = sqlx::query_as::<_, OrgPaymentMethod>(
         r#"
-        UPDATE org_payment_methods 
-        SET 
+        UPDATE org_payment_methods
+        SET
             name = COALESCE($1, name),
             label_translations = COALESCE($2, label_translations),
             color = COALESCE($3, color),
@@ -203,7 +209,7 @@ pub async fn update_payment_method(
     .bind(body.is_active)
     .bind(*id)
     .bind(org_id)
-    .fetch_one(pool.get_ref())
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
         if let sqlx::Error::Database(db_err) = &e {
@@ -213,6 +219,53 @@ pub async fn update_payment_method(
         }
         AppError::from(e)
     })?;
+
+    // Carry the history along. `order_payments.method`, `orders.payment_method`
+    // and `orders.tip_payment_method` store the method's NAME as free text (no
+    // FK), and every money report buckets by that string — so without this, a
+    // rename would silently split a method's history into an "old name" bucket
+    // and a "new name" bucket, and yesterday's card total would stop matching
+    // today's. Scoped to this org via the branch join.
+    //
+    // `is_cash` is deliberately NOT rewritten: it is snapshotted per row at sale
+    // time (migration 20260614010000) precisely so that flipping the flag today
+    // cannot restate what was in the drawer last month.
+    if method.name != old_name {
+        sqlx::query(
+            "UPDATE order_payments op SET method = $1
+             FROM orders o JOIN branches b ON b.id = o.branch_id
+             WHERE op.order_id = o.id AND b.org_id = $2 AND op.method = $3",
+        )
+        .bind(&method.name)
+        .bind(org_id)
+        .bind(&old_name)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "UPDATE orders o SET payment_method = $1
+             FROM branches b
+             WHERE b.id = o.branch_id AND b.org_id = $2 AND o.payment_method = $3",
+        )
+        .bind(&method.name)
+        .bind(org_id)
+        .bind(&old_name)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "UPDATE orders o SET tip_payment_method = $1
+             FROM branches b
+             WHERE b.id = o.branch_id AND b.org_id = $2 AND o.tip_payment_method = $3",
+        )
+        .bind(&method.name)
+        .bind(org_id)
+        .bind(&old_name)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
 
     Ok(HttpResponse::Ok().json(method))
 }

@@ -99,10 +99,23 @@ pub struct CashMovementSummaryRow {
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct ShiftReportResponse {
     pub shift: Shift,
+    /// Money COLLECTED FOR GOODS, bucketed by the method actually tendered
+    /// (`order_payments`, so a split order contributes to each leg it really
+    /// used). Tips are NOT in here — see `total_tips`.
     pub payment_summary: Vec<PaymentSummaryRow>,
     pub total_payments: i64,
     pub voided_amount: i64, // informational only — not subtracted from payments
     pub net_payments: i64,
+    /// Tips, as a standalone figure — never folded into a method bucket, and
+    /// never part of `total_payments`/`net_payments`. Mirrors `total_tips` on
+    /// the sales reports so the two screens agree on what "revenue" means.
+    pub total_tips: i64,
+    /// The cash slice of `total_tips` (snapshotted `tip_is_cash`). This IS in
+    /// the drawer, so it is counted by `expected_cash` even though it is not
+    /// part of `net_payments`.
+    pub cash_tips: i64,
+    /// `total_tips - cash_tips` — tips added onto a card/wallet tender.
+    pub non_cash_tips: i64,
     pub cash_movements: Vec<CashMovementSummaryRow>,
     pub cash_movements_in: i64,
     pub cash_movements_out: i64,
@@ -858,33 +871,53 @@ pub async fn get_shift_report(
     let shift = fetch_shift_or_404(pool.get_ref(), *shift_id).await?;
     require_branch_access(pool.get_ref(), &claims, shift.branch_id).await?;
 
+    // Tenders for GOODS only. Tips used to be UNIONed in here, which (a) made the
+    // shift's "card" bucket disagree with the sales report's, and (b) invented a
+    // phantom bucket for split orders, whose nominal `orders.payment_method` is
+    // 'mixed' — a label that never appears in `order_payments`. Tips are now a
+    // standalone figure; the buckets are pure `order_payments`, identical to
+    // `branch_sales.revenue_by_method`.
+    //
+    // Grouping is by METHOD ALONE (is_cash folded with bool_or) to match the
+    // sales report. A method whose `is_cash` flag was flipped mid-life would
+    // otherwise split into two rows here and stay one row there.
     let payment_summary = sqlx::query_as::<_, PaymentSummaryRow>(
         r#"
-        WITH all_payments AS (
-            SELECT op.method AS payment_method, op.amount, op.order_id, op.is_cash
-            FROM order_payments op
-            JOIN orders o ON o.id = op.order_id
-            WHERE o.shift_id = $1
-              AND o.status NOT IN ('voided', 'refunded')
-            UNION ALL
-            SELECT COALESCE(o.tip_payment_method, o.payment_method) AS payment_method, o.tip_amount AS amount, o.id AS order_id, o.tip_is_cash AS is_cash
-            FROM orders o
-            WHERE o.shift_id = $1
-              AND o.tip_amount IS NOT NULL
-              AND o.status NOT IN ('voided', 'refunded')
-        )
         SELECT
-            ap.payment_method::text,
-            COALESCE(ap.is_cash, ap.payment_method = 'cash') AS is_cash,
-            COALESCE(SUM(ap.amount), 0)::bigint AS total,
-            COUNT(DISTINCT ap.order_id)::bigint AS order_count
-        FROM all_payments ap
-        GROUP BY ap.payment_method, COALESCE(ap.is_cash, ap.payment_method = 'cash')
-        ORDER BY ap.payment_method
+            op.method::text AS payment_method,
+            bool_or(COALESCE(op.is_cash, op.method = 'cash')) AS is_cash,
+            COALESCE(SUM(op.amount), 0)::bigint AS total,
+            COUNT(DISTINCT op.order_id)::bigint AS order_count
+        FROM order_payments op
+        JOIN orders o ON o.id = op.order_id
+        WHERE o.shift_id = $1
+          AND o.status NOT IN ('voided', 'refunded')
+        GROUP BY op.method
+        ORDER BY op.method
         "#,
     )
     .bind(*shift_id)
     .fetch_all(pool.get_ref())
+    .await?;
+
+    // Tips, standalone. Split cash/non-cash because the cash slice is physically
+    // in the drawer (and so is inside `expected_cash` via compute_system_cash)
+    // while the rest rode along on a card tender.
+    let (total_tips, cash_tips): (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            COALESCE(SUM(o.tip_amount), 0)::bigint,
+            COALESCE(SUM(o.tip_amount) FILTER (
+                WHERE COALESCE(o.tip_is_cash,
+                               COALESCE(o.tip_payment_method, o.payment_method) = 'cash')
+            ), 0)::bigint
+        FROM orders o
+        WHERE o.shift_id = $1
+          AND o.status NOT IN ('voided', 'refunded')
+        "#,
+    )
+    .bind(*shift_id)
+    .fetch_one(pool.get_ref())
     .await?;
 
     let total_returns: i64 = sqlx::query_scalar(
@@ -927,6 +960,8 @@ pub async fn get_shift_report(
         .map(|m| m.amount.unsigned_abs() as i64)
         .sum();
 
+    // Goods only — tips are reported separately in `total_tips` and are NOT
+    // added here, so this equals the sales report's revenue for the same orders.
     let total_payments: i64 = payment_summary.iter().map(|r| r.total).sum();
     // voided orders were never collected — they are informational only,
     // not subtracted. total_payments already excludes voided orders.
@@ -948,6 +983,9 @@ pub async fn get_shift_report(
         total_payments,
         voided_amount: total_returns,
         net_payments,
+        total_tips,
+        cash_tips,
+        non_cash_tips: total_tips - cash_tips,
         cash_movements,
         cash_movements_in,
         cash_movements_out,

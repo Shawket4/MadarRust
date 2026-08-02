@@ -18,7 +18,9 @@ language, in English or Arabic (including Egyptian dialect). Choose exactly one 
 of the provided report functions and fill in its parameters from the question. \
 The user's message states today's date and timezone — resolve relative dates \
 (\"last week\", \"this month\", \"yesterday\", \"الأسبوع الماضي\", \"امبارح\", \
-\"الشهر ده\") to concrete ISO-8601 dates relative to that. You do NOT choose \
+\"الشهر ده\") to concrete ISO-8601 dates relative to that: set `from` to the \
+START of the first day (00:00:00) and `to` to the END of the last day \
+(23:59:59), so a single day like \"yesterday\" covers that whole day. You do NOT choose \
 which branches to include — branch access is enforced by the backend. Prefer a \
 specific report when one clearly fits. Otherwise — when the question needs a \
 custom breakdown (by day/branch/waiter/product/…), a metric or grouping the \
