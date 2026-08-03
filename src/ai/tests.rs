@@ -466,7 +466,12 @@ async fn builder_sort_threshold_waste_profit_run(pool: PgPool) {
         let args = c.as_object().unwrap().clone();
         let resolved = crate::ai::semantic::build(&args).unwrap();
         let res = crate::ai::executor::run_resolved(&db, &resolved, params, &args, &ctx).await;
-        assert!(res.is_ok(), "failed: {:?}\nSQL: {}", res.err(), resolved.sql);
+        assert!(
+            res.is_ok(),
+            "failed: {:?}\nSQL: {}",
+            res.err(),
+            resolved.sql
+        );
     }
 }
 
@@ -501,7 +506,12 @@ async fn builder_compare_share_cumulative_run(pool: PgPool) {
         let args = c.as_object().unwrap().clone();
         let resolved = crate::ai::semantic::build(&args).unwrap();
         let res = crate::ai::executor::run_resolved(&db, &resolved, params, &args, &ctx).await;
-        assert!(res.is_ok(), "failed: {:?}\nSQL: {}", res.err(), resolved.sql);
+        assert!(
+            res.is_ok(),
+            "failed: {:?}\nSQL: {}",
+            res.err(),
+            resolved.sql
+        );
     }
 }
 

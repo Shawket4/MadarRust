@@ -67,9 +67,17 @@ async fn publish_update(pool: &PgPool, hub: &BranchEventHub, booking_id: Uuid, b
 
 /// 1. Flat departure nudge.
 async fn departure(pool: &PgPool, hub: &BranchEventHub) -> Result<(), sqlx::Error> {
-    let rows: Vec<(Uuid, Uuid, String, String, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT b.id, b.branch_id, b.customer_name, b.customer_phone, b.reserved_for \
+    // The time goes straight into a WhatsApp message to the CUSTOMER, so it has
+    // to be the branch's local wall-clock time (branch → org → Africa/Cairo),
+    // formatted in SQL alongside the row. It used to be rendered as
+    // `%H:%M UTC`, which told a customer with an 8pm Cairo booking to come at
+    // 17:00.
+    let rows: Vec<(Uuid, Uuid, String, String, String)> = sqlx::query_as(
+        "SELECT b.id, b.branch_id, b.customer_name, b.customer_phone, \
+                to_char(b.reserved_for AT TIME ZONE COALESCE(br.timezone, o.timezone)::text, 'HH24:MI') \
          FROM bookings b \
+         JOIN branches br ON br.id = b.branch_id \
+         JOIN organizations o ON o.id = br.org_id \
          LEFT JOIN branch_reservation_settings s ON s.branch_id = b.branch_id \
          WHERE b.status = 'confirmed' AND b.reserved_for IS NOT NULL \
            AND now() >= b.reserved_for - make_interval(mins => COALESCE(s.lead_minutes, 30)) \
@@ -80,8 +88,7 @@ async fn departure(pool: &PgPool, hub: &BranchEventHub) -> Result<(), sqlx::Erro
     .fetch_all(pool)
     .await?;
 
-    for (id, branch_id, name, phone, reserved_for) in rows {
-        let when = reserved_for.format("%H:%M UTC").to_string();
+    for (id, branch_id, name, phone, when) in rows {
         whatsapp::send_message(
             pool.clone(),
             phone,

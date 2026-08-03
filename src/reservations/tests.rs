@@ -377,3 +377,136 @@ async fn public_booking_requires_verified_phone(pool: PgPool) {
         resp.status()
     );
 }
+
+/// The host board's default view — `GET /reservations?branch_id=…` with no
+/// status and no date — plus each filter combination. Every branch of the
+/// query builder must bind exactly the parameters its SQL references.
+#[sqlx::test]
+async fn list_bookings_every_filter_combination(pool: PgPool) {
+    let app = app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let admin = seed_admin(&pool, org_id).await;
+    grant_all(&pool).await;
+    let token = admin_token(admin, org_id);
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    for q in [
+        String::new(),
+        "&status=confirmed".to_string(),
+        "&date=2026-08-03".to_string(),
+        "&status=confirmed&date=2026-08-03".to_string(),
+    ] {
+        let req = test::TestRequest::get()
+            .uri(&format!("/reservations?branch_id={branch_id}{q}"))
+            .insert_header(auth.clone())
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            200,
+            "GET /reservations?branch_id=…{q} must succeed"
+        );
+    }
+}
+
+/// The date filter must resolve in the BRANCH's effective timezone, the way
+/// every other date bucket in the codebase does — not in whatever zone the
+/// Postgres server happens to be configured with. Casting a `timestamptz`
+/// straight to `::date` silently uses the session zone, so a late-night
+/// booking lands on the wrong calendar day (and the day it lands on changes
+/// between dev, CI and prod depending on the server's `TimeZone` setting).
+#[sqlx::test]
+async fn booking_date_filter_uses_branch_timezone(pool: PgPool) {
+    let app = app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let admin = seed_admin(&pool, org_id).await;
+    grant_all(&pool).await;
+    let token = admin_token(admin, org_id);
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    // A zone far from both UTC and the server default, so the assertion can't
+    // pass by accident on a differently-configured Postgres.
+    // 2026-08-02T12:00Z is Aug 3 in Kiritimati (UTC+14) but Aug 2 in Cairo/UTC.
+    sqlx::query("UPDATE branches SET timezone = 'Pacific/Kiritimati'::timezone_name WHERE id = $1")
+        .bind(branch_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let created: BookingView = test::read_body_json(
+        test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/reservations")
+                .insert_header(auth.clone())
+                .set_json(&serde_json::json!({
+                    "branch_id": branch_id,
+                    "customer_name": "Late Night",
+                    "customer_phone": "01001112222",
+                    "party_size": 2,
+                    "reserved_for": "2026-08-02T12:00:00Z"
+                }))
+                .to_request(),
+        )
+        .await,
+    )
+    .await;
+
+    let list = |date: &str| {
+        test::TestRequest::get()
+            .uri(&format!("/reservations?branch_id={branch_id}&date={date}"))
+            .insert_header(auth.clone())
+            .to_request()
+    };
+
+    let on_local_day: Vec<BookingView> =
+        test::read_body_json(test::call_service(&app, list("2026-08-03")).await).await;
+    assert!(
+        on_local_day.iter().any(|b| b.id == created.id),
+        "the booking must appear on its BRANCH-LOCAL day (Aug 3 in Kiritimati)"
+    );
+
+    let on_utc_day: Vec<BookingView> =
+        test::read_body_json(test::call_service(&app, list("2026-08-02")).await).await;
+    assert!(
+        !on_utc_day.iter().any(|b| b.id == created.id),
+        "and must NOT appear on the UTC/session-zone day (Aug 2)"
+    );
+}
+
+/// Times that reach a CUSTOMER (the WhatsApp departure nudge) must be the
+/// branch's local wall clock, not the UTC instant. Formatting `reserved_for`
+/// directly told a customer with an 8pm Cairo booking to arrive at 17:00.
+#[sqlx::test]
+async fn nudge_time_is_branch_local_not_utc(pool: PgPool) {
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+
+    // Cairo is UTC+3 in August (DST): 17:00Z is a 20:00 booking.
+    let at = chrono::DateTime::parse_from_rfc3339("2026-08-02T17:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+
+    let cairo = crate::reservations::bookings::local_hhmm(&pool, branch_id, at)
+        .await
+        .unwrap();
+    assert_eq!(
+        cairo, "20:00",
+        "a Cairo branch must read its own wall clock"
+    );
+
+    sqlx::query("UPDATE branches SET timezone = 'Pacific/Kiritimati'::timezone_name WHERE id = $1")
+        .bind(branch_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let kiritimati = crate::reservations::bookings::local_hhmm(&pool, branch_id, at)
+        .await
+        .unwrap();
+    assert_eq!(
+        kiritimati, "07:00",
+        "the zone is dynamic per branch, not hardcoded to Cairo"
+    );
+}

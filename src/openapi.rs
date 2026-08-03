@@ -53,6 +53,7 @@ use utoipa::{
         (name = "discounts",    description = "Discount definitions and applicability rules."),
         (name = "bundles",      description = "Combo bundles and bundle pricing."),
         (name = "reports",      description = "Sales analytics and reporting."),
+        (name = "integrations", description = "Read-only partner analytics pull (HTTP Basic, single-branch scope) and the org-admin surface that issues, rotates, and revokes its credentials."),
         (name = "insights",     description = "Menu profitability: the ranked margin ledger with live advisory signals, margin targets (org default + branch overrides), and the append-only decision log with measured impact."),
         (name = "uploads",      description = "Logo and image uploads."),
         (name = "payment_methods", description = "Dynamic payment methods configuration."),
@@ -72,6 +73,11 @@ paths(
         crate::orgs::onboarding::complete_onboarding,
         crate::costing::handlers::list_addon_costs,
         // ── insights (menu profitability) ─────────────────────────────
+        crate::integrations::handlers::analytics_orders,
+        crate::integrations::handlers::create_credential,
+        crate::integrations::handlers::list_credentials,
+        crate::integrations::handlers::rotate_credential,
+        crate::integrations::handlers::revoke_credential,
         crate::insights::handlers::menu_margin_ledger,
         crate::insights::handlers::margin_watch,
         crate::insights::handlers::repricing,
@@ -477,6 +483,21 @@ impl Modify for SecurityAddon {
             .components
             .as_mut()
             .expect("OpenAPI components should exist after derive");
+
+        components.add_security_scheme(
+            "basic_integration",
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Basic)
+                    .description(Some(
+                        "Partner analytics credential issued from the dashboard \
+                         (`POST /integrations/credentials`). Send as \
+                         `Authorization: Basic base64(username:secret)`. Read-only \
+                         and scoped to a single branch.",
+                    ))
+                    .build(),
+            ),
+        );
 
         components.add_security_scheme(
             "bearer_jwt",

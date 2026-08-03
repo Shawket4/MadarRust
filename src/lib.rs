@@ -21,6 +21,7 @@ pub mod discounts;
 pub mod errors;
 pub mod geo;
 pub mod insights;
+pub mod integrations;
 pub mod inventory;
 pub mod kitchen;
 pub mod menu;

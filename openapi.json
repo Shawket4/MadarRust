@@ -8707,6 +8707,501 @@
         ]
       }
     },
+    "/integrations/analytics/orders": {
+      "get": {
+        "tags": [
+          "integrations"
+        ],
+        "operationId": "analytics_orders",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "First business day to include, `YYYY-MM-DD`, in the branch's timezone.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Last business day to include, `YYYY-MM-DD`, INCLUSIVE.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Optional page size (max 5000). Omit for the whole window.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Optional row offset, used with `limit`. Defaults to 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Branch order analytics for the window",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyticsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "basic_integration": []
+          }
+        ]
+      }
+    },
+    "/integrations/credentials": {
+      "get": {
+        "tags": [
+          "integrations"
+        ],
+        "operationId": "list_credentials",
+        "responses": {
+          "200": {
+            "description": "Credentials in this org (secrets never included)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CredentialSummary"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "integrations"
+        ],
+        "operationId": "create_credential",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCredentialRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Credential created; `secret` is shown this once only",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialWithSecret"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/integrations/credentials/{id}": {
+      "delete": {
+        "tags": [
+          "integrations"
+        ],
+        "operationId": "revoke_credential",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Credential ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Credential revoked"
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/integrations/credentials/{id}/rotate": {
+      "post": {
+        "tags": [
+          "integrations"
+        ],
+        "operationId": "rotate_credential",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Credential ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "New secret issued; shown this once only",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialWithSecret"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/inventory/branches/{branch_id}/movements": {
       "get": {
         "tags": [
@@ -30018,6 +30513,180 @@
           }
         }
       },
+      "AnalyticsOrder": {
+        "type": "object",
+        "description": "One order, reduced to the money that belongs to the order itself.",
+        "required": [
+          "order_id",
+          "order_number",
+          "status",
+          "business_date",
+          "created_at",
+          "subtotal",
+          "discount_amount",
+          "tax_amount",
+          "service_charge",
+          "total_amount"
+        ],
+        "properties": {
+          "business_date": {
+            "type": "string",
+            "format": "date",
+            "description": "Calendar day the order belongs to, in the branch's timezone. Derived\nfrom `created_at` — the SAME derivation the receipt's `order_ref` uses,\nso the date here always matches the date embedded in that reference."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "discount_amount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "order_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "order_number": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Per-shift sequence number shown on the POS."
+          },
+          "order_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The human-readable reference printed on the receipt\n(`<BRANCHCODE>-<YYMMDD>-<NNNN>`). Null for orders predating it."
+          },
+          "service_charge": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Always 0: Madar has no service-charge concept. Present so the field is\nstable if one is ever introduced."
+          },
+          "status": {
+            "type": "string"
+          },
+          "subtotal": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Piastres. Sum of the line items before discount and tax."
+          },
+          "tax_amount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "total_amount": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`subtotal - discount_amount + tax_amount`. Deliberately COMPUTED rather\nthan read from `orders.total_amount`, which also carries the delivery\nfee — this figure is the order's own value and nothing else. Tips are\nexcluded too (they are not part of `total_amount` in the first place)."
+          }
+        }
+      },
+      "AnalyticsResponse": {
+        "type": "object",
+        "required": [
+          "branch_id",
+          "branch_name",
+          "timezone",
+          "from",
+          "to",
+          "from_utc",
+          "to_utc",
+          "total_orders",
+          "subtotal",
+          "total_discount",
+          "total_tax",
+          "total_service_charge",
+          "total_revenue",
+          "avg_order_total",
+          "offset",
+          "returned",
+          "orders"
+        ],
+        "properties": {
+          "avg_order_total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`total_revenue / total_orders`, truncated to whole piastres. 0 when the\nwindow is empty."
+          },
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "branch_name": {
+            "type": "string"
+          },
+          "from": {
+            "type": "string",
+            "format": "date"
+          },
+          "from_utc": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The exact half-open instant window `[from_utc, to_utc)` the figures\ncover, echoed so there is never a question about what was included."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Echo of the paging actually applied, and how many rows came back."
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "orders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsOrder"
+            }
+          },
+          "returned": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "subtotal": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "timezone": {
+            "type": "string",
+            "description": "IANA zone the business days were resolved in."
+          },
+          "to": {
+            "type": "string",
+            "format": "date"
+          },
+          "to_utc": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "total_discount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total_orders": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Orders in the window. Voided and refunded orders are excluded here and\neverywhere below — they are not returned at all."
+          },
+          "total_revenue": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sum of the per-order `total_amount`."
+          },
+          "total_service_charge": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total_tax": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "AssignBranchRequest": {
         "type": "object",
         "required": [
@@ -32706,6 +33375,29 @@
           }
         }
       },
+      "CreateCredentialRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "branch_id",
+          "username"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The single branch this credential may read."
+          },
+          "name": {
+            "type": "string",
+            "description": "Operator-facing label, e.g. \"Rue — One Ninety\"."
+          },
+          "username": {
+            "type": "string",
+            "description": "Basic-auth username. Unique across all orgs, case-insensitively."
+          }
+        }
+      },
       "CreateDecisionRequest": {
         "type": "object",
         "required": [
@@ -33788,6 +34480,74 @@
             "description": "expired | spoiled | damaged | overproduction | order_cancelled | theft | other\n(`order_cancelled` is normally auto-logged by void/cancel, not entered here)"
           }
         }
+      },
+      "CredentialSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "username",
+          "branch_id",
+          "branch_name",
+          "created_at"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "branch_name": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Last successful authentication, or null if the partner has never pulled."
+          },
+          "name": {
+            "type": "string"
+          },
+          "revoked_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "username": {
+            "type": "string"
+          }
+        }
+      },
+      "CredentialWithSecret": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CredentialSummary"
+          },
+          {
+            "type": "object",
+            "required": [
+              "secret"
+            ],
+            "properties": {
+              "secret": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "description": "Returned ONLY by create and rotate. The secret is bcrypt-hashed on the way\nin and is not recoverable afterwards, so the dashboard must show it once and\ntell the operator to copy it."
       },
       "DecisionOut": {
         "type": "object",
@@ -43693,6 +44453,11 @@
       }
     },
     "securitySchemes": {
+      "basic_integration": {
+        "type": "http",
+        "scheme": "basic",
+        "description": "Partner analytics credential issued from the dashboard (`POST /integrations/credentials`). Send as `Authorization: Basic base64(username:secret)`. Read-only and scoped to a single branch."
+      },
       "bearer_jwt": {
         "type": "http",
         "scheme": "bearer",
@@ -43777,6 +44542,10 @@
     {
       "name": "reports",
       "description": "Sales analytics and reporting."
+    },
+    {
+      "name": "integrations",
+      "description": "Read-only partner analytics pull (HTTP Basic, single-branch scope) and the org-admin surface that issues, rotates, and revokes its credentials."
     },
     {
       "name": "insights",

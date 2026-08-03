@@ -1687,6 +1687,10 @@ fn status_predicates_are_unified() {
             "bundles/handlers.rs",
             include_str!("../bundles/handlers.rs"),
         ),
+        (
+            "integrations/handlers.rs",
+            include_str!("../integrations/handlers.rs"),
+        ),
     ];
     for (name, src) in sources {
         for line in src.lines() {

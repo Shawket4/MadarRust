@@ -59,7 +59,11 @@ impl GeminiProvider {
             .timeout(Duration::from_secs(20))
             .build()
             .ok()?;
-        Some(Self { api_key, model, http })
+        Some(Self {
+            api_key,
+            model,
+            http,
+        })
     }
 
     async fn post(&self, body: &Value) -> Result<Value, ProviderError> {

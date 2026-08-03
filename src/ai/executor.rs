@@ -149,10 +149,7 @@ fn resolve_model_args(
                         }
                     }
                     Some(_) => {
-                        return Err(ExecError::BadArg(format!(
-                            "'{}' must be a string",
-                            p.name
-                        )));
+                        return Err(ExecError::BadArg(format!("'{}' must be a string", p.name)));
                     }
                 }
                 // Enum/list values select SQL *fragments* in the builder; they
@@ -165,10 +162,7 @@ fn resolve_model_args(
                     Some(Value::Array(items)) => {
                         for it in items {
                             let s = it.as_str().ok_or_else(|| {
-                                ExecError::BadArg(format!(
-                                    "'{}' must be a list of strings",
-                                    p.name
-                                ))
+                                ExecError::BadArg(format!("'{}' must be a list of strings", p.name))
                             })?;
                             if !variants.contains(&s) {
                                 return Err(ExecError::BadArg(format!(

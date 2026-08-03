@@ -155,6 +155,27 @@ fn user_id(claims: &crate::auth::jwt::Claims) -> Result<Uuid, AppError> {
     Uuid::parse_str(&claims.sub).map_err(|_| AppError::Unauthorized("Invalid subject".into()))
 }
 
+/// `HH:MM` on the branch's wall clock (branch → org → Africa/Cairo).
+///
+/// Anything a customer reads has to go through this. A `DateTime<Utc>` formatted
+/// directly renders the UTC hour, which is 2–3 hours off in Cairo — the customer
+/// is told to arrive at the wrong time.
+pub(super) async fn local_hhmm(
+    pool: &PgPool,
+    branch_id: Uuid,
+    at: DateTime<Utc>,
+) -> Result<String, AppError> {
+    let hhmm: String = sqlx::query_scalar(
+        "SELECT to_char($1::timestamptz AT TIME ZONE COALESCE(b.timezone, o.timezone)::text, 'HH24:MI') \
+         FROM branches b JOIN organizations o ON o.id = b.org_id WHERE b.id = $2",
+    )
+    .bind(at)
+    .bind(branch_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(hhmm)
+}
+
 // ── GET /reservations ─────────────────────────────────────────
 
 #[utoipa::path(
@@ -183,14 +204,37 @@ pub async fn list_bookings(
         sql.push_str(" AND b.status = $2::booking_status");
     }
     if query.date.is_some() {
-        sql.push_str(" AND b.reserved_for::date = $3");
+        // `reserved_for` is a timestamptz, so a bare `::date` would resolve in
+        // the SERVER's session zone — which is neither the branch's configured
+        // zone nor stable across dev/CI/prod. Bucket it in the branch's
+        // effective zone (branch → org → Africa/Cairo), like every other date
+        // bucket in the codebase, so a late-night booking lands on the day the
+        // host actually booked it for.
+        //
+        // The zone is a DB value that originates as free text on the branch, so
+        // it MUST be bound ($4), never interpolated — otherwise a crafted branch
+        // timezone is a stored SQL injection (same rule as the sales timeseries).
+        sql.push_str(" AND (b.reserved_for AT TIME ZONE $4)::date = $3");
     }
     sql.push_str(" GROUP BY b.id ORDER BY COALESCE(b.reserved_for, b.created_at)");
+
+    let tz: String = sqlx::query_scalar(
+        "SELECT COALESCE(
+            (SELECT b.timezone::text FROM branches b WHERE b.id = $1 AND b.deleted_at IS NULL),
+            (SELECT o.timezone::text FROM organizations o
+              JOIN branches b ON b.org_id = o.id WHERE b.id = $1),
+            'Africa/Cairo'
+         )",
+    )
+    .bind(query.branch_id)
+    .fetch_one(pool.get_ref())
+    .await?;
 
     let rows = sqlx::query_as::<_, BookingView>(&sql)
         .bind(query.branch_id)
         .bind(query.status.as_deref())
         .bind(query.date)
+        .bind(&tz)
         .fetch_all(pool.get_ref())
         .await?;
     Ok(HttpResponse::Ok().json(rows))
@@ -483,11 +527,13 @@ pub async fn notify_booking(
     require_branch_access(pool.get_ref(), &claims, view.branch_id).await?;
 
     let (msg, nudge_kind) = if view.reserved_for.is_some() {
-        // Reservation: manual departure nudge.
-        let when = view
-            .reserved_for
-            .map(|t| t.format("%H:%M").to_string())
-            .unwrap_or_default();
+        // Reservation: manual departure nudge. The time is read by the CUSTOMER,
+        // so it must be the branch's local wall clock — formatting the UTC
+        // instant directly told an 8pm Cairo booking to arrive at 17:00.
+        let when = match view.reserved_for {
+            Some(t) => local_hhmm(pool.get_ref(), view.branch_id, t).await?,
+            None => String::new(),
+        };
         (
             crate::delivery::whatsapp::build_reservation_departure_message(
                 &view.customer_name,
