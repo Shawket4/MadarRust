@@ -23,6 +23,10 @@ pub struct OrgPaymentMethod {
     pub icon: String,
     pub is_cash: bool,
     pub is_active: bool,
+    /// When false, orders tendered with this method are excluded entirely
+    /// from the partner analytics API (`/integrations/analytics/orders`) —
+    /// rows and aggregates alike. Defaults to true.
+    pub visible_in_integrations: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -35,6 +39,8 @@ pub struct CreatePaymentMethodRequest {
     pub icon: String,
     pub is_cash: bool,
     pub is_active: Option<bool>,
+    /// Defaults to true — see [`OrgPaymentMethod::visible_in_integrations`].
+    pub visible_in_integrations: Option<bool>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -45,6 +51,7 @@ pub struct UpdatePaymentMethodRequest {
     pub icon: Option<String>,
     pub is_cash: Option<bool>,
     pub is_active: Option<bool>,
+    pub visible_in_integrations: Option<bool>,
 }
 
 // ── GET /payment-methods ──────────────────────────────────────────
@@ -68,10 +75,11 @@ pub async fn list_payment_methods(
         .ok_or_else(|| AppError::Forbidden("No org id".into()))?;
 
     let rows = sqlx::query_as::<_, OrgPaymentMethod>(
-        "SELECT id, org_id, name, label_translations, color, icon, is_cash, is_active, created_at, updated_at
+        "SELECT id, org_id, name, label_translations, color, icon, is_cash, is_active,
+                visible_in_integrations, created_at, updated_at
          FROM org_payment_methods
          WHERE org_id = $1
-         ORDER BY created_at ASC"
+         ORDER BY created_at ASC",
     )
     .bind(org_id)
     .fetch_all(pool.get_ref())
@@ -111,9 +119,9 @@ pub async fn create_payment_method(
     let method = sqlx::query_as::<_, OrgPaymentMethod>(
         r#"
         INSERT INTO org_payment_methods
-        (org_id, name, label_translations, color, icon, is_cash, is_active)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING id, org_id, name, label_translations, color, icon, is_cash, is_active, created_at, updated_at
+        (org_id, name, label_translations, color, icon, is_cash, is_active, visible_in_integrations)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING id, org_id, name, label_translations, color, icon, is_cash, is_active, visible_in_integrations, created_at, updated_at
         "#
     )
     .bind(org_id)
@@ -123,6 +131,7 @@ pub async fn create_payment_method(
     .bind(&body.icon)
     .bind(body.is_cash)
     .bind(body.is_active.unwrap_or(true))
+    .bind(body.visible_in_integrations.unwrap_or(true))
     .fetch_one(pool.get_ref())
     .await
     .map_err(|e| {
@@ -196,9 +205,10 @@ pub async fn update_payment_method(
             color = COALESCE($3, color),
             icon = COALESCE($4, icon),
             is_cash = COALESCE($5, is_cash),
-            is_active = COALESCE($6, is_active)
-        WHERE id = $7 AND org_id = $8
-        RETURNING id, org_id, name, label_translations, color, icon, is_cash, is_active, created_at, updated_at
+            is_active = COALESCE($6, is_active),
+            visible_in_integrations = COALESCE($7, visible_in_integrations)
+        WHERE id = $8 AND org_id = $9
+        RETURNING id, org_id, name, label_translations, color, icon, is_cash, is_active, visible_in_integrations, created_at, updated_at
         "#
     )
     .bind(&body.name)
@@ -207,6 +217,7 @@ pub async fn update_payment_method(
     .bind(&body.icon)
     .bind(body.is_cash)
     .bind(body.is_active)
+    .bind(body.visible_in_integrations)
     .bind(*id)
     .bind(org_id)
     .fetch_one(&mut *tx)

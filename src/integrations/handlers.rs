@@ -35,6 +35,31 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 /// the dashboard's always agree.
 const DEFAULT_TZ: &str = "Africa/Cairo";
 
+/// Orders whose money touched a payment method the merchant has hidden from
+/// partners are excluded ENTIRELY — from `orders[]` and from every aggregate —
+/// so the partner sees a coherent, self-consistent world and never learns that
+/// anything was withheld. Their totals will therefore NOT match the merchant's
+/// own dashboard, which is the intent.
+///
+/// Matched on `order_payments` (what was actually tendered) rather than
+/// `orders.payment_method`, which is the literal `'mixed'` for split orders and
+/// so would hide nothing. An order is dropped if ANY leg used a hidden method:
+/// a partly-hidden order still carries that method's money inside its total, so
+/// including it would leak exactly what the flag exists to conceal.
+///
+/// The nominal label is checked too, which covers legacy orders that predate
+/// `order_payments` and therefore have no legs to match on.
+///
+/// `org_payment_methods` needs no explicit org filter: this only ever runs on
+/// the caller's RLS-scoped pool, so the rows are already the right tenant's.
+const VISIBLE_PAYMENT: &str = "NOT EXISTS (
+             SELECT 1 FROM order_payments op
+               JOIN org_payment_methods pm ON pm.name = op.method
+              WHERE op.order_id = o.id AND NOT pm.visible_in_integrations)
+         AND NOT EXISTS (
+             SELECT 1 FROM org_payment_methods pm
+              WHERE pm.name = o.payment_method AND NOT pm.visible_in_integrations)";
+
 /// Upper bound on `limit`. Pagination is OPTIONAL today (omit `limit` and the
 /// full window comes back in one response); this only stops a partner asking
 /// for an absurd page. If volume forces pagination to become mandatory later,
@@ -98,7 +123,8 @@ pub struct AnalyticsResponse {
     pub from_utc: DateTime<Utc>,
     pub to_utc: DateTime<Utc>,
     /// Orders in the window. Voided and refunded orders are excluded here and
-    /// everywhere below — they are not returned at all.
+    /// everywhere below, as are orders tendered with a payment method the
+    /// merchant has hidden from partners — none are returned at all.
     pub total_orders: i64,
     pub subtotal: i64,
     pub total_discount: i64,
@@ -213,6 +239,7 @@ pub async fn analytics_orders(
            AND o.created_at >= $2
            AND o.created_at <  $3
            AND o.{SOLD}
+           AND {VISIBLE_PAYMENT}
         "#
     ))
     .bind(caller.branch_id)
@@ -241,6 +268,7 @@ pub async fn analytics_orders(
            AND o.created_at >= $2
            AND o.created_at <  $3
            AND o.{SOLD}
+           AND {VISIBLE_PAYMENT}
          ORDER BY o.created_at, o.id
          LIMIT $5 OFFSET $6
         "#

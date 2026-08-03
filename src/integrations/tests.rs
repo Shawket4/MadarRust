@@ -165,6 +165,40 @@ async fn seed_order(
     id
 }
 
+/// Register an org payment method and say whether partners may see its orders.
+async fn seed_payment_method(pool: &PgPool, s: &Seed, name: &str, visible: bool) {
+    sqlx::query(
+        "INSERT INTO org_payment_methods
+             (org_id, name, label_translations, color, icon, is_cash, visible_in_integrations)
+         VALUES ($1, $2, '{}'::jsonb, '#000000', 'money', false, $3)",
+    )
+    .bind(s.org)
+    .bind(name)
+    .bind(visible)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// Set an order's NOMINAL label (`'mixed'` for splits) and attach tender legs.
+async fn seed_tender(pool: &PgPool, order: Uuid, nominal: &str, legs: &[(&str, i32)]) {
+    sqlx::query("UPDATE orders SET payment_method = $2 WHERE id = $1")
+        .bind(order)
+        .bind(nominal)
+        .execute(pool)
+        .await
+        .unwrap();
+    for (method, amount) in legs {
+        sqlx::query("INSERT INTO order_payments (order_id, method, amount) VALUES ($1, $2, $3)")
+            .bind(order)
+            .bind(method)
+            .bind(amount)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+}
+
 /// Issue a credential directly (bypassing the HTTP surface) and return its secret.
 async fn seed_credential(pool: &PgPool, s: &Seed, username: &str) -> String {
     let secret = "s3cr3t-partner-token";
@@ -608,6 +642,161 @@ async fn rejects_a_backwards_window_and_bad_paging(pool: PgPool) {
             "`{qs}` should be rejected"
         );
     }
+}
+
+// ── payment-method visibility ─────────────────────────────────
+
+#[sqlx::test]
+async fn orders_on_a_hidden_payment_method_disappear_completely(pool: PgPool) {
+    let s = seed(&pool, "pm", Some("Africa/Cairo")).await;
+    let secret = seed_credential(&pool, &s, "partner").await;
+    seed_payment_method(&pool, &s, "cash", true).await;
+    seed_payment_method(&pool, &s, "aggregator", false).await;
+
+    let shown = seed_order(
+        &pool,
+        &s,
+        1,
+        "completed",
+        ts("2026-06-01T09:00:00Z"),
+        1_000,
+        0,
+        140,
+        0,
+        0,
+    )
+    .await;
+    seed_tender(&pool, shown, "cash", &[("cash", 1_140)]).await;
+
+    let hidden = seed_order(
+        &pool,
+        &s,
+        2,
+        "completed",
+        ts("2026-06-01T10:00:00Z"),
+        5_000,
+        0,
+        700,
+        0,
+        0,
+    )
+    .await;
+    seed_tender(&pool, hidden, "aggregator", &[("aggregator", 5_700)]).await;
+
+    let app = app(pool).await;
+    let req = test::TestRequest::get()
+        .uri("/integrations/analytics/orders?from=2026-06-01&to=2026-06-01")
+        .insert_header(("Authorization", basic("partner", &secret)))
+        .to_request();
+    let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+
+    // Gone from the rows AND from every aggregate — the partner's view is
+    // internally consistent and gives no hint that anything was withheld.
+    let orders = body["orders"].as_array().unwrap();
+    assert_eq!(orders.len(), 1);
+    assert_eq!(orders[0]["order_id"], shown.to_string());
+    assert_eq!(body["total_orders"], 1);
+    assert_eq!(body["subtotal"], 1_000);
+    assert_eq!(body["total_revenue"], 1_140);
+    assert_eq!(body["avg_order_total"], 1_140);
+}
+
+/// A split order carries the hidden method's money inside its own total, so
+/// one tainted leg must remove the whole order.
+#[sqlx::test]
+async fn split_order_is_hidden_when_any_leg_used_a_hidden_method(pool: PgPool) {
+    let s = seed(&pool, "split", Some("Africa/Cairo")).await;
+    let secret = seed_credential(&pool, &s, "partner").await;
+    seed_payment_method(&pool, &s, "cash", true).await;
+    seed_payment_method(&pool, &s, "aggregator", false).await;
+    seed_payment_method(&pool, &s, "mixed", true).await;
+
+    // Nominal label is the literal 'mixed' and IS visible — only the leg is not,
+    // which is exactly the case a nominal-label filter would miss.
+    let order = seed_order(
+        &pool,
+        &s,
+        1,
+        "completed",
+        ts("2026-06-01T09:00:00Z"),
+        2_000,
+        0,
+        280,
+        0,
+        0,
+    )
+    .await;
+    seed_tender(
+        &pool,
+        order,
+        "mixed",
+        &[("cash", 1_000), ("aggregator", 1_280)],
+    )
+    .await;
+
+    let app = app(pool).await;
+    let req = test::TestRequest::get()
+        .uri("/integrations/analytics/orders?from=2026-06-01&to=2026-06-01")
+        .insert_header(("Authorization", basic("partner", &secret)))
+        .to_request();
+    let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+
+    assert_eq!(
+        body["total_orders"], 0,
+        "a tainted leg must hide the whole order"
+    );
+    assert_eq!(body["total_revenue"], 0);
+    assert_eq!(body["orders"].as_array().unwrap().len(), 0);
+}
+
+/// The column defaults to true, and the endpoint predates it — an org that has
+/// never touched the toggle must keep seeing everything.
+#[sqlx::test]
+async fn methods_are_visible_unless_explicitly_hidden(pool: PgPool) {
+    let s = seed(&pool, "default", Some("Africa/Cairo")).await;
+    let secret = seed_credential(&pool, &s, "partner").await;
+    seed_payment_method(&pool, &s, "cash", true).await;
+
+    let listed = seed_order(
+        &pool,
+        &s,
+        1,
+        "completed",
+        ts("2026-06-01T09:00:00Z"),
+        100,
+        0,
+        0,
+        0,
+        0,
+    )
+    .await;
+    seed_tender(&pool, listed, "cash", &[("cash", 100)]).await;
+    // Tendered with a method that was never registered at all — nothing says to
+    // hide it, so it stays visible rather than silently vanishing.
+    let unregistered = seed_order(
+        &pool,
+        &s,
+        2,
+        "completed",
+        ts("2026-06-01T10:00:00Z"),
+        200,
+        0,
+        0,
+        0,
+        0,
+    )
+    .await;
+    seed_tender(&pool, unregistered, "voucher", &[("voucher", 200)]).await;
+
+    let app = app(pool).await;
+    let req = test::TestRequest::get()
+        .uri("/integrations/analytics/orders?from=2026-06-01&to=2026-06-01")
+        .insert_header(("Authorization", basic("partner", &secret)))
+        .to_request();
+    let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+
+    assert_eq!(body["total_orders"], 2);
+    assert_eq!(body["subtotal"], 300);
 }
 
 // ── operator surface ──────────────────────────────────────────

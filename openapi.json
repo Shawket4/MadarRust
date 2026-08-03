@@ -30670,7 +30670,7 @@
           "total_orders": {
             "type": "integer",
             "format": "int64",
-            "description": "Orders in the window. Voided and refunded orders are excluded here and\neverywhere below — they are not returned at all."
+            "description": "Orders in the window. Voided and refunded orders are excluded here and\neverywhere below, as are orders tendered with a payment method the\nmerchant has hidden from partners — none are returned at all."
           },
           "total_revenue": {
             "type": "integer",
@@ -34067,6 +34067,13 @@
           },
           "name": {
             "type": "string"
+          },
+          "visible_in_integrations": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Defaults to true — see [`OrgPaymentMethod::visible_in_integrations`]."
           }
         }
       },
@@ -39308,6 +39315,7 @@
           "icon",
           "is_cash",
           "is_active",
+          "visible_in_integrations",
           "created_at",
           "updated_at"
         ],
@@ -39343,6 +39351,10 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "visible_in_integrations": {
+            "type": "boolean",
+            "description": "When false, orders tendered with this method are excluded entirely\nfrom the partner analytics API (`/integrations/analytics/orders`) —\nrows and aggregates alike. Defaults to true."
           }
         }
       },
@@ -43402,6 +43414,12 @@
           "name": {
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "visible_in_integrations": {
+            "type": [
+              "boolean",
               "null"
             ]
           }
