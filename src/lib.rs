@@ -20,6 +20,7 @@ pub mod demo;
 pub mod discounts;
 pub mod errors;
 pub mod geo;
+pub mod held_orders;
 pub mod insights;
 pub mod integrations;
 pub mod inventory;

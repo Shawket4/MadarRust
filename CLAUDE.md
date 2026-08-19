@@ -1,7 +1,32 @@
-# Claude Code Conventions
+# Claude Code Conventions — MadarRust (backend)
 
 ## Project Overview
-This is a Rust backend project (`madar-rust`) built for the Madar ecosystem. It uses Actix-Web for the HTTP framework and SQLx (PostgreSQL) for database interactions.
+`madar-rust` is the **single source of truth** for the Madar ecosystem: the HTTP API,
+the database schema, and the money/cost engine. Actix-Web over SQLx/PostgreSQL.
+
+Every other project in the ecosystem is a *consumer* of this one — the OpenAPI spec
+this repo exports is the contract they generate their clients from. A change here is
+usually a change in two or three repos.
+
+## The Madar ecosystem — three repos
+
+| Repo | Path | Role |
+|---|---|---|
+| **MadarRust** (this) | `/Users/magd/MadarRust` | Actix-Web API, Postgres schema, money/cost engine |
+| **MadarDashboard** | `/Users/magd/MadarDashboard` | React 19 management dashboard (+ Tauri desktop, public ordering, landing) |
+| **madar** | `/Users/magd/madar` | Flutter POS/teller + KDS, over a shared Rust core (`rust-core/`) |
+
+`openapi.json` in this repo is the contract. Regenerate it here, then regenerate
+the clients downstream:
+
+```
+cargo run --bin export-openapi                 # this repo → openapi.json
+cd /Users/magd/MadarDashboard && npm run generate:api   # → src/data/api/generated (orval)
+cd /Users/magd/madar/rust-core && ./tool/generate_api.sh  # → crates/madar-api (reads ../../MadarRust)
+```
+
+**Adding or changing an endpoint is not done until the consumers are regenerated.**
+The Flutter side additionally needs `melos run bridge` when the FRB surface changes.
 
 ## Technology Stack
 - **Language**: Rust (Edition 2024)
@@ -55,16 +80,66 @@ Notes:
 6. **Async**: Rely on `tokio` for async operations. Use `actix_web::web::Data` for shared application state (e.g., database connection pools).
 
 ## File Structure
-- `src/`: Main application source code.
-  - `main.rs`: Entry point for the server.
-  - `lib.rs`: Library module exports.
-  - `bin/`: Additional binaries (e.g., `export_openapi.rs`).
-- `tests/`: Integration tests.
-- `migrations/`: SQL files for `sqlx` migrations.
-- `api_dumps/`: Stored OpenAPI and API dump data.
+- `src/main.rs` / `src/lib.rs` — entry point and module exports; `src/bin/` holds the
+  operator binaries (`export-openapi`, `backfill-cost-snapshots`, `fuzz-token`).
+- `src/errors.rs` — `AppError` + `status_for_sqlstate`. Lean on it and new handlers
+  inherit correct DB-error → HTTP mapping.
+- `migrations/` — `sqlx` migrations, applied on boot. **Never edit an applied
+  migration** (checksums; live DBs fail to start).
+- `tests/`, `api_dumps/`, `scripts/`, `loadtest/`.
+
+### Module map (`src/<module>/{mod,handlers,routes,tests}.rs`)
+Each feature module owns its routes, handlers and tests together.
+
+- **Identity & access** — `auth`, `users`, `orgs`, `branches`, `permissions`
+  (role × resource × action, seeded by `permissions::seeder`).
+- **Selling** — `orders`, `tickets` (waiter open tickets), `held_orders` (POS parked
+  carts + table occupancy + transfer waitlist), `tills`, `shifts`, `payment_methods`,
+  `discounts`, `bundles`.
+- **Catalog & cost** — `menu`, `menu_unification`, `recipes`, `costing`, `units`,
+  `inventory`, `purchasing`, `stocktakes`.
+- **Floor** — `reservations` (`floor.rs` = sections + table geometry + live status;
+  `bookings.rs`/`public.rs` = the DEPRECATED booking flow).
+- **Fulfilment** — `delivery`, `geo`, `kitchen`, `qr_card`.
+- **Platform** — `realtime` (per-branch SSE hub), `sync` (offline replay), `reports`,
+  `insights`, `ai`, `integrations`, `uploads`, `translation`, `rate_limit`, `cache`.
+
+## Cross-cutting contracts worth knowing
+
+### Offline replay
+The POS is offline-first. Every mutating POS operation is split **live route** /
+`*_inner` core so `/sync/replay` can flush a till's queued backlog through exactly the
+same code path (see `src/sync/handlers.rs` and the `*_inner` fns in `tickets`,
+`held_orders`). If you add a POS-facing mutation, split it the same way or offline
+tills silently lose the write.
+
+### Realtime
+`src/realtime` publishes per-branch events consumers subscribe to, e.g.
+`floor.layout_changed` (re-pull the authored layout) and `table.status_changed`.
+Publish **after** `tx.commit()`, never inside the transaction.
+
+### The floor / tables feature (spans all three repos)
+- `branch_tables` is one entity shared by three features: QR targets, floor geometry,
+  and live occupancy. It is also the **per-table mutex** — every occupancy mutation
+  locks its row (`SELECT … FOR UPDATE`) and then checks both held orders and open
+  tickets in the same transaction. Invariant: at most one live occupant per table.
+- Permissions are split on purpose: `floor_plan` = geometry authoring (managers,
+  dashboard), `reservations` = live table status (host/teller, POS).
+- **Bussing:** a checkout does NOT free its table. `complete` (held order) and settle
+  (open ticket) call `bus_table` → status `dirty`; the table stays there until a human
+  clears it on the POS. Moves/voids/discards call `free_table` → `free`, because no
+  party vacated. Both live in `src/held_orders/mod.rs`.
+- The booking flow (`/reservations`, `/public/reservations`) is **deprecated** and only
+  mounts behind `MADAR_ENABLE_RESERVATIONS`; `/floor/*` is always mounted.
 
 ## Related Projects (Ecosystem)
-When working on API changes or feature implementations, be aware that this backend interacts with other projects in the Madar ecosystem. You may need to search or modify code in these directories:
-- **MadarDashboard**: `/Users/shawket/Desktop/MadarDashboard` (Frontend Dashboard application)
-- **Madar POS**: `/Users/shawket/Desktop/madar_pos` (Point of Sale frontend application)
-You can use file read commands or `cd` into these directories to analyze frontend consumption of this backend API.
+- **MadarDashboard**: `/Users/magd/MadarDashboard` — management dashboard. Consumes this
+  API via orval-generated hooks; also ships the public ordering + landing bundles.
+- **madar**: `/Users/magd/madar` — Flutter POS/teller, KDS, and the shared Rust core
+  (`rust-core/crates/madar-core`) that mirrors this API **offline** and replays queued
+  writes through `/sync/replay`.
+
+Both consume `openapi.json`; see the codegen commands at the top of this file. When you
+change a handler's request/response shape, check whether the POS's offline core
+(`rust-core/crates/madar-core`) mirrors that shape too — it keeps its own lenient copies
+of the wire types so old app builds keep parsing new payloads.

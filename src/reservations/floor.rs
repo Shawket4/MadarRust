@@ -242,6 +242,21 @@ pub async fn list_sections(
     Ok(HttpResponse::Ok().json(rows))
 }
 
+/// Tell every device on the branch that the AUTHORED layout changed (sections
+/// or table geometry), so POS canvases re-pull instead of showing yesterday's
+/// room until the next manual sync. Lean signal — the client re-fetches
+/// `/floor/sections` + `/floor/tables` itself.
+fn publish_layout_changed(hub: &crate::realtime::hub::BranchEventHub, branch_id: Uuid) {
+    hub.publish(
+        branch_id,
+        crate::realtime::event::BranchEvent::new(
+            crate::realtime::event::Topic::Floor,
+            "floor.layout_changed",
+            &serde_json::json!({ "branch_id": branch_id }),
+        ),
+    );
+}
+
 #[utoipa::path(
     post, path = "/floor/sections", tag = "reservations",
     request_body = CreateSectionRequest,
@@ -251,6 +266,7 @@ pub async fn list_sections(
 pub async fn create_section(
     req: HttpRequest,
     pool: crate::db::Db,
+    hub: web::Data<crate::realtime::hub::BranchEventHub>,
     body: web::Json<CreateSectionRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -276,6 +292,7 @@ pub async fn create_section(
     .bind(body.canvas_h)
     .fetch_one(pool.get_ref())
     .await?;
+    publish_layout_changed(hub.get_ref(), body.branch_id);
     Ok(HttpResponse::Created().json(row))
 }
 
@@ -289,6 +306,7 @@ pub async fn create_section(
 pub async fn update_section(
     req: HttpRequest,
     pool: crate::db::Db,
+    hub: web::Data<crate::realtime::hub::BranchEventHub>,
     id: web::Path<Uuid>,
     body: web::Json<UpdateSectionRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -325,6 +343,7 @@ pub async fn update_section(
     .bind(body.canvas_h)
     .fetch_one(pool.get_ref())
     .await?;
+    publish_layout_changed(hub.get_ref(), branch_id);
     Ok(HttpResponse::Ok().json(row))
 }
 
@@ -337,6 +356,7 @@ pub async fn update_section(
 pub async fn delete_section(
     req: HttpRequest,
     pool: crate::db::Db,
+    hub: web::Data<crate::realtime::hub::BranchEventHub>,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -355,6 +375,7 @@ pub async fn delete_section(
         .bind(*id)
         .execute(pool.get_ref())
         .await?;
+    publish_layout_changed(hub.get_ref(), branch_id);
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -393,6 +414,7 @@ pub async fn list_tables(
 pub async fn create_table(
     req: HttpRequest,
     pool: crate::db::Db,
+    hub: web::Data<crate::realtime::hub::BranchEventHub>,
     body: web::Json<CreateFloorTableRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -427,6 +449,7 @@ pub async fn create_table(
     .bind(body.rotation)
     .fetch_one(pool.get_ref())
     .await?;
+    publish_layout_changed(hub.get_ref(), body.branch_id);
     Ok(HttpResponse::Created().json(row))
 }
 
@@ -440,6 +463,7 @@ pub async fn create_table(
 pub async fn update_table(
     req: HttpRequest,
     pool: crate::db::Db,
+    hub: web::Data<crate::realtime::hub::BranchEventHub>,
     id: web::Path<Uuid>,
     body: web::Json<UpdateFloorTableRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -484,6 +508,7 @@ pub async fn update_table(
     .bind(body.is_active)
     .fetch_one(pool.get_ref())
     .await?;
+    publish_layout_changed(hub.get_ref(), existing);
     Ok(HttpResponse::Ok().json(row))
 }
 
@@ -496,6 +521,7 @@ pub async fn update_table(
 pub async fn delete_table(
     req: HttpRequest,
     pool: crate::db::Db,
+    hub: web::Data<crate::realtime::hub::BranchEventHub>,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -521,6 +547,7 @@ pub async fn delete_table(
         .bind(*id)
         .execute(pool.get_ref())
         .await?;
+    publish_layout_changed(hub.get_ref(), branch_id);
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -533,6 +560,7 @@ pub async fn delete_table(
 pub async fn save_layout(
     req: HttpRequest,
     pool: crate::db::Db,
+    hub: web::Data<crate::realtime::hub::BranchEventHub>,
     body: web::Json<SaveLayoutRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -567,6 +595,7 @@ pub async fn save_layout(
     .bind(body.branch_id)
     .fetch_all(pool.get_ref())
     .await?;
+    publish_layout_changed(hub.get_ref(), body.branch_id);
     Ok(HttpResponse::Ok().json(rows))
 }
 

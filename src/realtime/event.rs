@@ -20,16 +20,21 @@ pub enum Topic {
     Kitchen,
     Orders,
     Reservations,
+    /// The live floor: held orders, table statuses, and the transfer waitlist.
+    /// Payloads are LEAN invalidation signals (no cart contents ride the bus) —
+    /// devices re-pull via the held-orders/transfers sync endpoints.
+    Floor,
 }
 
 impl Topic {
     /// Every topic, for the "subscribe to all I'm allowed to read" default.
-    pub const ALL: [Topic; 5] = [
+    pub const ALL: [Topic; 6] = [
         Topic::Delivery,
         Topic::Tickets,
         Topic::Kitchen,
         Topic::Orders,
         Topic::Reservations,
+        Topic::Floor,
     ];
 
     pub fn parse(s: &str) -> Option<Topic> {
@@ -39,6 +44,7 @@ impl Topic {
             "kitchen" => Some(Topic::Kitchen),
             "orders" => Some(Topic::Orders),
             "reservations" => Some(Topic::Reservations),
+            "floor" => Some(Topic::Floor),
             _ => None,
         }
     }
@@ -50,6 +56,7 @@ impl Topic {
             Topic::Kitchen => "kitchen",
             Topic::Orders => "orders",
             Topic::Reservations => "reservations",
+            Topic::Floor => "floor",
         }
     }
 
@@ -61,6 +68,7 @@ impl Topic {
             Topic::Kitchen => ("kitchen_orders", "read"),
             Topic::Orders => ("orders", "read"),
             Topic::Reservations => ("reservations", "read"),
+            Topic::Floor => ("floor_plan", "read"),
         }
     }
 }
