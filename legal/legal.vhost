@@ -1,0 +1,29 @@
+# legal.madar-pos.cloud — static legal documents.
+#
+# Deliberately dependency-free and backend-free: these URLs are cited in the App
+# Store and Google Play listings and must stay up even when the API is down.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name legal.madar-pos.cloud;
+
+    # Served by nginx directly, NOT proxied anywhere — renewals depend on it.
+    location /.well-known/acme-challenge/ { root /var/www/letsencrypt; try_files $uri =404; }
+
+    root /var/www/madar-legal;
+    index index.html;
+
+    # Static documents: no scripts at all, so the policy can be strict. Inline
+    # styles are allowed because the CSS is embedded to keep each page a single
+    # self-contained file.
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Content-Security-Policy "default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'" always;
+
+    # /privacy-policy and /privacy-policy.html both resolve.
+    location / { try_files $uri $uri.html $uri/ =404; }
+
+    access_log /var/log/nginx/legal-madar.access.log;
+    error_log  /var/log/nginx/legal-madar.error.log;
+}

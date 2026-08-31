@@ -135,6 +135,25 @@ fn db_key(opts: &sqlx::postgres::PgConnectOptions) -> String {
 pub async fn tenant_pool(base: &PgPool, org_id: Uuid) -> PgPool {
     let opts = base.connect_options().as_ref().clone();
     let key = (db_key(&opts), org_id);
+
+    // Preferred: authenticate tenant connections AS `madar_app`. Previously they
+    // connected as the owner (a superuser) and stepped DOWN via `SET ROLE`, which
+    // is reversible — anything able to issue `RESET ROLE` on that session would
+    // regain owner rights and with them an RLS bypass. Logging in as the role
+    // directly removes the privileged identity from the session entirely, so
+    // there is nothing to return to.
+    //
+    // Falls back to the `SET ROLE` path when no password is configured, which is
+    // what `#[sqlx::test]` and local development use (the throwaway per-test
+    // databases have the role but no credentials for it).
+    let app_password = std::env::var("MADAR_APP_DB_PASSWORD")
+        .ok()
+        .filter(|p| !p.trim().is_empty());
+    let login_as_app = app_password.is_some();
+    let opts = match &app_password {
+        Some(pw) => opts.username(APP_ROLE).password(pw),
+        None => opts,
+    };
     registry()
         .pools
         .get_with(key, async move {
@@ -161,9 +180,14 @@ pub async fn tenant_pool(base: &PgPool, org_id: Uuid) -> PgPool {
                             .bind(org)
                             .execute(&mut *conn)
                             .await?;
-                        sqlx::query("SET ROLE madar_app")
-                            .execute(&mut *conn)
-                            .await?;
+                        // Only needed on the fallback path: when the session
+                        // already authenticated as `madar_app` there is no
+                        // higher-privileged role to step down from.
+                        if !login_as_app {
+                            sqlx::query("SET ROLE madar_app")
+                                .execute(&mut *conn)
+                                .await?;
+                        }
                         Ok(())
                     })
                 })
