@@ -53,6 +53,14 @@ qrcode             = { version = "0.14", default-features = false }
 # fallback, no runtime filesystem dependency).
 resvg              = { version = "0.47", default-features = false, features = ["text"] }
 
+# Error reporting to the self-hosted Sentry. `default-features = false` drops the
+# native-tls transport (this binary is rustls end-to-end — see build_tls_config
+# and the sqlx/reqwest features above; pulling OpenSSL in for crash reports would
+# be the only native-TLS dependency in the tree) and drops `debug-images`, whose
+# only job is symbolicating a stripped release binary we don't upload debug files
+# for. `logs`/`metrics` stay off: this is an error reporter, not a log sink.
+sentry             = { version = "0.49", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls", "release-health"] }
+sentry-actix       = "0.49"
 [profile.release]
 lto = true
 codegen-units = 1
@@ -67,6 +75,10 @@ actix-http = "3"
 rqrr = "0.10"
 
 
+# `test` adds sentry's in-memory TestTransport, which lets the observability
+# tests assert on the exact events that WOULD have been sent — the only way to
+# prove the PII scrubber holds without pointing a test at the live Sentry.
+sentry = { version = "0.49", default-features = false, features = ["test"] }
 [[bin]]
 name = "madar-rust"
 path = "src/main.rs"

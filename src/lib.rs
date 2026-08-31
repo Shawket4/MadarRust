@@ -27,6 +27,7 @@ pub mod kitchen;
 pub mod menu;
 pub mod menu_unification;
 pub mod models;
+pub mod observability;
 pub mod openapi;
 pub mod orders;
 pub mod orgs;

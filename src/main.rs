@@ -15,21 +15,39 @@ use madar_rust::openapi::ApiDoc;
 use madar_rust::{
     ai, auth, branches, bundles, costing, delivery, demo, discounts, insights, integrations,
     inventory, kitchen, menu, orders, orgs, payment_methods, permissions, purchasing, qr_card,
-    realtime, recipes, reports, reservations, shifts, stocktakes, sync, tickets, tills, uploads,
-    users,
+    realtime, recipes, reports, reservations, shifts, stocktakes, sync, tickets, tills,
+    uploads, users,
 };
 
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-#[actix_web::main]
-async fn main() -> std::io::Result<()> {
+fn main() -> std::io::Result<()> {
+    // Env + logging first: Sentry's own config lives in the same `.env` the rest
+    // of the server reads, and its init decisions are logged through this
+    // subscriber.
     dotenv().ok();
 
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
+    // Sentry is initialised OUTSIDE the async runtime, as sentry-actix
+    // documents: the client owns a transport thread of its own, and the guard it
+    // returns must outlive the server — dropping it flushes queued events, so it
+    // is bound here and released only after `run()` returns. `None` simply means
+    // no SENTRY_DSN, i.e. the normal dev/CI/fuzz path, and the server then runs
+    // exactly as it did before this was added.
+    //
+    // This is why `main` is no longer `#[actix_web::main]`: that macro would
+    // build the runtime around the whole body, and `System::new().block_on` is
+    // the same thing with the init hoisted above it.
+    let _sentry_guard = madar_rust::observability::init();
+
+    actix_web::rt::System::new().block_on(run())
+}
+
+async fn run() -> std::io::Result<()> {
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let jwt_secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
     let uploads_dir = env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
@@ -95,10 +113,6 @@ async fn main() -> std::io::Result<()> {
     // per-worker closure below) so there's a single instance; idempotent via
     // booking_nudges. No-op when RESERVATION_NUDGES_ENABLED is falsy.
     reservations::nudge::spawn(pool.get_ref().clone(), realtime_bus.get_ref().clone());
-
-    // Public demo playground (DEMO_MODE). Throwaway per-visitor orgs with a TTL;
-    // the sweeper GCs expired ones. Spawned ONCE (single instance). Off by
-    // default — and meant to run on a SEPARATE backend + DB from production.
     let demo_settings = demo::config::DemoConfig::from_env();
     if demo_settings.enabled {
         tracing::warn!(
@@ -126,12 +140,22 @@ async fn main() -> std::io::Result<()> {
 
     let tls_config = build_tls_config();
 
+    // Built once and cloned per worker (it is a cheap handle), so the
+    // tracing-on/tracing-off decision is read from the env a single time
+    // instead of on every worker spawn.
+    let sentry_middleware = madar_rust::observability::middleware();
+
     tracing::info!("Starting madar-rust");
     tracing::info!("Uploads directory: {}", uploads_dir);
     if enable_swagger_ui {
         tracing::warn!("⚠️  Swagger UI ENABLED — exposes full API surface unauthenticated.");
         tracing::warn!("    Do NOT run with MADAR_ENABLE_SWAGGER_UI=true in production");
         tracing::warn!("    without nginx basic-auth in front of /api-docs/.");
+    // Built once and cloned per worker (it is a cheap handle), so the
+    // tracing-on/tracing-off decision is read from the env a single time
+    // instead of on every worker spawn.
+    let sentry_middleware = madar_rust::observability::middleware();
+
         tracing::info!(
             "Swagger UI at /api-docs/swagger-ui/  |  OpenAPI JSON at /api-docs/openapi.json"
         );
@@ -162,12 +186,28 @@ async fn main() -> std::io::Result<()> {
         let mut app = App::new()
             .wrap(cors)
             .wrap(Compress::default())
+            // Outermost middleware (actix runs the LAST `wrap` first), as
+            // sentry-actix requires: every downstream handler then runs on this
+            // request's Hub, so anything they capture carries the request
+            // context. It reports 5xx responses and 5xx-mapped `AppError`s only
+            // — expected 4xx (validation, 401/403, 404, 409 conflicts) are
+            // normal API traffic and would drown the issue stream. A no-op when
+            // SENTRY_DSN is unset and no client was initialised.
+            .wrap(sentry_middleware.clone())
             .app_data(pool.clone())
             .app_data(menu_cache.clone())
             .app_data(jwt_secret.clone())
             .app_data(org_status.clone())
             .app_data(realtime_bus.clone())
             .app_data(qr_provider.clone())
+            // Outermost middleware (actix runs the LAST `wrap` first), as
+            // sentry-actix requires: every downstream handler then runs on this
+            // request's Hub, so anything they capture carries the request
+            // context. It reports 5xx responses and 5xx-mapped `AppError`s only
+            // — expected 4xx (validation, 401/403, 404, 409 conflicts) are
+            // normal API traffic and would drown the issue stream. A no-op when
+            // SENTRY_DSN is unset and no client was initialised.
+            .wrap(sentry_middleware.clone())
             .app_data(demo_cfg.clone())
             .app_data(ai_state.clone())
             // Render actix's built-in extractor parse errors (bad path UUID, bad
