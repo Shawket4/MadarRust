@@ -359,6 +359,23 @@ pub async fn shift_deductions(
     responses((status = 200, description = "Branch sales", body = BranchSalesReport), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
+// ── Span instrumentation ──────────────────────────────────────
+//
+// The handlers below are the DB-heavy ones: each scans orders or inventory
+// movements over a caller-supplied date range, and production nginx logs put
+// them at the top of the latency list. A span per call makes the slow one
+// identifiable in Sentry's trace view instead of inferable from a timestamp.
+//
+// EVERY attribute uses `skip_all`. This is not stylistic: `#[tracing::instrument]`
+// records all arguments through `Debug` by default, and span data does NOT pass
+// through `observability::scrub_event` — the PII scrubber only sees events. A
+// bare `#[tracing::instrument]` on a handler whose `web::Query`/`web::Json`
+// argument carries a customer phone, a delivery address or a staff salary would
+// therefore ship it to Sentry in the clear, which the published privacy policy
+// says we do not do. So: skip everything, then re-add by hand only the fields
+// that cannot identify a person — opaque ids, the date window, and the report
+// mode. Any new field added here must clear that same bar.
+#[tracing::instrument(skip_all, fields(branch_id = %*branch_id, from = ?query.from, to = ?query.to, limit = ?query.limit))]
 pub async fn branch_sales(
     req: HttpRequest,
     pool: crate::db::Db,
@@ -631,6 +648,7 @@ pub async fn branch_stock(
     responses((status = 200, description = "Branch sales timeseries", body = Vec<TimeseriesPoint>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
+#[tracing::instrument(skip_all, fields(branch_id = %*branch_id, from = ?query.from, to = ?query.to, granularity = ?query.granularity))]
 pub async fn branch_sales_timeseries(
     req: HttpRequest,
     pool: crate::db::Db,
@@ -751,6 +769,7 @@ pub struct PeakHourPoint {
     responses((status = 200, description = "Peak hours aggregation (24 rows)", body = Vec<PeakHourPoint>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
+#[tracing::instrument(skip_all, fields(branch_id = %*branch_id, from = ?query.from, to = ?query.to))]
 pub async fn branch_sales_peak_hours(
     req: HttpRequest,
     pool: crate::db::Db,
@@ -862,6 +881,7 @@ pub async fn branch_sales_peak_hours(
     responses((status = 200, description = "Branch teller stats", body = Vec<TellerStats>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
+#[tracing::instrument(skip_all, fields(branch_id = %*branch_id, from = ?query.from, to = ?query.to))]
 pub async fn branch_teller_stats(
     req: HttpRequest,
     pool: crate::db::Db,
@@ -918,6 +938,7 @@ pub async fn branch_teller_stats(
     responses((status = 200, description = "Branch waiter stats", body = WaiterStatsReport), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
+#[tracing::instrument(skip_all, fields(branch_id = %*branch_id, from = ?query.from, to = ?query.to))]
 pub async fn branch_waiter_stats(
     req: HttpRequest,
     pool: crate::db::Db,
@@ -1007,6 +1028,7 @@ pub async fn branch_waiter_stats(
     responses((status = 200, description = "Branch addon sales", body = Vec<AddonSalesRow>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
+#[tracing::instrument(skip_all, fields(branch_id = %*branch_id, from = ?query.from, to = ?query.to))]
 pub async fn branch_addon_sales(
     req: HttpRequest,
     pool: crate::db::Db,
@@ -1059,6 +1081,7 @@ pub async fn branch_addon_sales(
     responses((status = 200, description = "Org comparison report", body = OrgComparisonReport), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
+#[tracing::instrument(skip_all, fields(org_id = %*org_id, from = ?query.from, to = ?query.to))]
 pub async fn org_branch_comparison(
     req: HttpRequest,
     pool: crate::db::Db,
@@ -1198,6 +1221,7 @@ pub struct DeliverySalesReport {
     responses((status = 200, description = "Delivery + per-channel sales", body = DeliverySalesReport), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
+#[tracing::instrument(skip_all, fields(branch_id = %*branch_id, from = ?query.from, to = ?query.to))]
 pub async fn branch_delivery_sales(
     req: HttpRequest,
     pool: crate::db::Db,
@@ -1528,6 +1552,7 @@ pub async fn branch_low_stock(
     responses((status = 200, description = "Ingredient consumption over a date range", body = Vec<ConsumptionRow>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
+#[tracing::instrument(skip_all, fields(branch_id = %*branch_id, from = ?query.from, to = ?query.to))]
 pub async fn branch_consumption(
     req: HttpRequest,
     pool: crate::db::Db,
@@ -1623,6 +1648,7 @@ pub async fn branch_waste_report(
     responses((status = 200, description = "Ingredient consumption across the org", body = Vec<ConsumptionRow>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
+#[tracing::instrument(skip_all, fields(org_id = %*org_id, from = ?query.from, to = ?query.to))]
 pub async fn org_consumption(
     req: HttpRequest,
     pool: crate::db::Db,
@@ -1728,6 +1754,7 @@ pub struct ShrinkageRow {
     responses((status = 200, description = "Stock-count shrinkage by reason", body = Vec<ShrinkageRow>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
+#[tracing::instrument(skip_all, fields(branch_id = %*branch_id, from = ?query.from, to = ?query.to))]
 pub async fn branch_shrinkage(
     req: HttpRequest,
     pool: crate::db::Db,
@@ -1774,6 +1801,7 @@ pub async fn branch_shrinkage(
     responses((status = 200, description = "Stock-count shrinkage by reason across the org", body = Vec<ShrinkageRow>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
+#[tracing::instrument(skip_all, fields(org_id = %*org_id, from = ?query.from, to = ?query.to))]
 pub async fn org_shrinkage(
     req: HttpRequest,
     pool: crate::db::Db,
@@ -2000,6 +2028,7 @@ pub struct CombinedItemSalesRow {
     responses((status = 200, description = "Branch bundle sales", body = Vec<BundleSalesRow>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
+#[tracing::instrument(skip_all, fields(branch_id = %*branch_id, from = ?query.from, to = ?query.to))]
 pub async fn branch_bundle_sales(
     req: HttpRequest,
     pool: crate::db::Db,
@@ -2048,6 +2077,7 @@ pub async fn branch_bundle_sales(
     responses((status = 200, description = "Branch combined item sales", body = Vec<CombinedItemSalesRow>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
+#[tracing::instrument(skip_all, fields(branch_id = %*branch_id, from = ?query.from, to = ?query.to))]
 pub async fn branch_combined_item_sales(
     req: HttpRequest,
     pool: crate::db::Db,

@@ -1229,6 +1229,23 @@ async fn build_ledger(
     responses((status = 200, description = "Ranked margin ledger with live signals. Cost-unknown rows are returned flagged (margin null) — never 0, never dropped.", body = MarginLedgerReport)),
     security(("bearer_auth" = []))
 )]
+// ── Span instrumentation ──────────────────────────────────────
+//
+// The handlers below are the DB-heavy ones: each scans orders or inventory
+// movements over a caller-supplied date range, and production nginx logs put
+// them at the top of the latency list. A span per call makes the slow one
+// identifiable in Sentry's trace view instead of inferable from a timestamp.
+//
+// EVERY attribute uses `skip_all`. This is not stylistic: `#[tracing::instrument]`
+// records all arguments through `Debug` by default, and span data does NOT pass
+// through `observability::scrub_event` — the PII scrubber only sees events. A
+// bare `#[tracing::instrument]` on a handler whose `web::Query`/`web::Json`
+// argument carries a customer phone, a delivery address or a staff salary would
+// therefore ship it to Sentry in the clear, which the published privacy policy
+// says we do not do. So: skip everything, then re-add by hand only the fields
+// that cannot identify a person — opaque ids, the date window, and the report
+// mode. Any new field added here must clear that same bar.
+#[tracing::instrument(skip_all, fields(branch_id = %*branch_id, from = ?query.from, to = ?query.to, cost_basis = ?query.cost_basis))]
 pub async fn menu_margin_ledger(
     req: HttpRequest,
     pool: crate::db::Db,
@@ -1318,6 +1335,7 @@ pub struct RepricingReport {
     responses((status = 200, description = "Repricing suggestions: underpriced SKUs with a target-restoring price. Items without a COMPLETE recipe cost are excluded (never a guessed cost), so fewer costed recipes just means fewer suggestions — the counts make coverage explicit.", body = RepricingReport)),
     security(("bearer_auth" = []))
 )]
+#[tracing::instrument(skip_all, fields(branch_id = %*branch_id))]
 pub async fn repricing(
     req: HttpRequest,
     pool: crate::db::Db,
@@ -1393,6 +1411,7 @@ pub async fn repricing(
     responses((status = 200, description = "Dashboard-home margin summary: totals, top/bottom contributors, open signal count.", body = MarginWatch)),
     security(("bearer_auth" = []))
 )]
+#[tracing::instrument(skip_all, fields(branch_id = %*branch_id, from = ?query.from, to = ?query.to, cost_basis = ?query.cost_basis))]
 pub async fn margin_watch(
     req: HttpRequest,
     pool: crate::db::Db,

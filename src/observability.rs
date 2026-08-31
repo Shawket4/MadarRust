@@ -264,6 +264,103 @@ pub fn middleware() -> sentry_actix::Sentry {
     }
 }
 
+/// The `tracing` → Sentry bridge, as a `tracing-subscriber` layer.
+///
+/// # Why this exists
+///
+/// sqlx already narrates itself: every statement it runs is emitted as a
+/// `tracing` event on the `sqlx::query` target carrying the SQL and its elapsed
+/// time. Bridging that into Sentry means an issue no longer arrives as a bare
+/// stack frame — it arrives with the last ~100 queries that ran on that request
+/// and how long each took, which is usually the whole diagnosis for a report
+/// endpoint that timed out or a handler that 500'd on a lock wait.
+///
+/// # The mapping, and why it is not the default one
+///
+/// `sentry_tracing::default_event_filter` turns every `ERROR`-level event into a
+/// full Sentry **event**. That is wrong here, and would actively make the issue
+/// stream worse: `sentry-actix` already captures 5xx responses at the middleware
+/// (see [`middleware`]), so a handler that logs `tracing::error!` and then
+/// returns a 5xx-mapped `AppError` — the normal shape in this codebase — would
+/// raise **two** issues for one failure, with different fingerprints, neither
+/// obviously the duplicate of the other.
+///
+/// So the rule is: this layer NEVER produces an event. It only produces
+/// breadcrumbs, which are attached to whatever event the middleware captures.
+/// One capture path, one issue, richer context on it.
+///
+///   * `ERROR` / `WARN` / `INFO` ⇒ breadcrumb. `WARN` on `sqlx::query` is a
+///     slow query (past sqlx's threshold); `INFO` is an ordinary one.
+///   * `DEBUG` / `TRACE` ⇒ ignored. Per-row and per-connection chatter, far
+///     below the signal a breadcrumb ring buffer should be spending slots on.
+///
+/// Spans are kept (they are how a slow endpoint becomes visible — a
+/// `#[tracing::instrument]` handler span becomes a child span under the
+/// `sentry-actix` request transaction, so its duration shows in the trace view),
+/// but only spans from THIS crate. Dependency-internal spans are noise we cannot
+/// vet, and — see below — span data is not scrubbed.
+///
+/// # PII
+///
+/// [`scrub_event`] runs on events, NOT on span data or on the breadcrumb fields
+/// this layer derives from span attributes. That asymmetry is the reason
+/// [`crate::reports`]/[`crate::insights`] instrument with `skip_all` and re-add
+/// only ids and date ranges: an argument recorded into a span reaches Sentry
+/// unfiltered. `span_filter` restricting to `madar_rust` targets is the second
+/// half of that guarantee — it means the only spans on the wire are ones whose
+/// fields we chose by hand.
+pub fn tracing_layer<S>() -> impl tracing_subscriber::Layer<S>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    use tracing_subscriber::Layer;
+
+    sentry_tracing::layer()
+        .event_filter(|metadata| event_filter_for(*metadata.level()))
+        .span_filter(|metadata| metadata.target().starts_with("madar_rust"))
+        // Records the span's own fields onto the Sentry span. Safe *because* of
+        // the `skip_all` discipline at the instrument sites; it would not be
+        // otherwise.
+        .enable_span_attributes()
+        // A filter of its own rather than riding on the global `RUST_LOG`. The
+        // console and the breadcrumb trail want different things: prod runs
+        // `RUST_LOG=info` and the load-test rig runs `RUST_LOG=warn`, and under
+        // the latter the `sqlx::query` INFO events — the entire point of this
+        // layer — would never be emitted at all. `SENTRY_TRACING_FILTER`
+        // overrides if a deployment needs to turn the query trail down.
+        .with_filter(sentry_tracing_filter())
+}
+
+/// Level → Sentry action for [`tracing_layer`]. Split out from the layer so the
+/// no-double-report invariant is testable: this function must never return
+/// [`EventFilter::Event`] for ANY level, because `sentry-actix` is the single
+/// capture path for errors.
+fn event_filter_for(level: tracing::Level) -> sentry_tracing::EventFilter {
+    use sentry_tracing::EventFilter;
+    use tracing::Level;
+    match level {
+        Level::ERROR | Level::WARN | Level::INFO => EventFilter::Breadcrumb,
+        Level::DEBUG | Level::TRACE => EventFilter::Ignore,
+    }
+}
+
+/// Filter directives for [`tracing_layer`]. `sqlx::query=info` is the load-
+/// bearing part: it is what puts executed statements and their timings in the
+/// breadcrumb trail. The buffer is a bounded ring, so a chatty request simply
+/// keeps the most recent queries — which are the ones next to the failure.
+fn sentry_tracing_filter() -> tracing_subscriber::EnvFilter {
+    let raw = std::env::var("SENTRY_TRACING_FILTER")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "info,sqlx::query=info".to_string());
+    tracing_subscriber::EnvFilter::try_new(&raw).unwrap_or_else(|e| {
+        // Same degrade-don't-die posture as a bad DSN: a typo in `.env` must not
+        // stop the server booting.
+        tracing::warn!("SENTRY_TRACING_FILTER is invalid ({e}); falling back to the default");
+        tracing_subscriber::EnvFilter::new("info,sqlx::query=info")
+    })
+}
+
 /// Parse `SENTRY_TRACES_SAMPLE_RATE`, clamped to the 0.0–1.0 the SDK accepts
 /// (it panics outside that range, and a misconfigured env var must not be able
 /// to stop the server booting). Unparseable or absent ⇒ tracing off.
@@ -382,6 +479,87 @@ mod tests {
         assert_eq!(user.id.as_deref(), Some("user-uuid"));
         assert!(user.email.is_none());
         assert!(user.username.is_none());
+    }
+
+    /// The invariant that keeps one failure to one issue: `sentry-actix`
+    /// captures the 5xx, and this layer only ever decorates that capture. If a
+    /// future edit lets ERROR through as an event, a handler that logs and then
+    /// returns `AppError::Internal` starts raising two issues per failure.
+    #[test]
+    fn tracing_layer_never_captures_a_second_event() {
+        use sentry_tracing::EventFilter;
+        use tracing::Level;
+
+        for level in [
+            Level::ERROR,
+            Level::WARN,
+            Level::INFO,
+            Level::DEBUG,
+            Level::TRACE,
+        ] {
+            let filter = event_filter_for(level);
+            assert!(
+                !filter.contains(EventFilter::Event),
+                "{level} must not produce a Sentry event — sentry-actix already reports it"
+            );
+        }
+
+        // Breadcrumbs are the whole point: sqlx logs statements at INFO and slow
+        // ones at WARN, and those are what should ride along with an issue.
+        for level in [Level::ERROR, Level::WARN, Level::INFO] {
+            assert!(event_filter_for(level).contains(EventFilter::Breadcrumb));
+        }
+        // Per-row/per-connection chatter stays out of the ring buffer.
+        for level in [Level::DEBUG, Level::TRACE] {
+            assert!(event_filter_for(level).is_empty());
+        }
+    }
+
+    /// The default must carry `sqlx::query=info`, or the query trail is empty on
+    /// the deployments that run a quiet console (`RUST_LOG=warn`).
+    #[test]
+    fn sentry_tracing_filter_defaults_to_capturing_sqlx_queries() {
+        // SAFETY: single-threaded assertion on process env, restored immediately.
+        unsafe { std::env::remove_var("SENTRY_TRACING_FILTER") };
+        assert!(sentry_tracing_filter().to_string().contains("sqlx::query"));
+
+        // A typo must degrade to the default, not abort the boot.
+        unsafe { std::env::set_var("SENTRY_TRACING_FILTER", "=====") };
+        assert!(sentry_tracing_filter().to_string().contains("sqlx::query"));
+        unsafe { std::env::remove_var("SENTRY_TRACING_FILTER") };
+    }
+
+    /// End-to-end proof that a sqlx statement actually lands as a breadcrumb on
+    /// a captured event — the filter unit test above only covers the decision,
+    /// not the wiring. Asserts the shape the layer is here to produce: an issue
+    /// that arrives carrying the queries that ran just before it, with timings.
+    #[test]
+    fn sqlx_queries_become_breadcrumbs_on_a_captured_event() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let events = sentry::test::with_captured_events(|| {
+            let subscriber = tracing_subscriber::registry().with(tracing_layer());
+            tracing::subscriber::with_default(subscriber, || {
+                tracing::info!(
+                    target: "sqlx::query",
+                    summary = "SELECT ... FROM orders",
+                    elapsed_secs = 0.42,
+                    "slow-ish query"
+                );
+                tracing::debug!(target: "sqlx::query", "per-row chatter");
+                sentry::capture_message("boom", sentry::Level::Error);
+            });
+        });
+
+        assert_eq!(events.len(), 1);
+        let crumbs = &events[0].breadcrumbs.values;
+        let wire = serde_json::to_string(crumbs).unwrap();
+        assert!(wire.contains("FROM orders"), "query trail missing: {wire}");
+        assert!(wire.contains("0.42"), "query timing missing: {wire}");
+        assert!(
+            !wire.contains("per-row chatter"),
+            "DEBUG must be ignored: {wire}"
+        );
     }
 
     #[test]

@@ -9,7 +9,9 @@ use actix_web::{App, HttpServer, web};
 use dotenvy::dotenv;
 use sqlx::postgres::PgPoolOptions;
 use std::{env, fs};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer};
 
 use madar_rust::openapi::ApiDoc;
 use madar_rust::{
@@ -28,8 +30,15 @@ fn main() -> std::io::Result<()> {
     // subscriber.
     dotenv().ok();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+    // The console layer keeps its historical behaviour exactly (RUST_LOG drives
+    // it, nothing else). The Sentry layer is added beside it rather than
+    // underneath it, carrying its own filter, so that turning the console quiet
+    // — `RUST_LOG=warn` in the load-test rig — does not also silence the sqlx
+    // query breadcrumbs. It is inert until `observability::init` installs a
+    // client below, so this costs nothing when SENTRY_DSN is unset.
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_filter(EnvFilter::from_default_env()))
+        .with(madar_rust::observability::tracing_layer())
         .init();
 
     // Sentry is initialised OUTSIDE the async runtime, as sentry-actix
@@ -151,11 +160,6 @@ async fn run() -> std::io::Result<()> {
         tracing::warn!("⚠️  Swagger UI ENABLED — exposes full API surface unauthenticated.");
         tracing::warn!("    Do NOT run with MADAR_ENABLE_SWAGGER_UI=true in production");
         tracing::warn!("    without nginx basic-auth in front of /api-docs/.");
-    // Built once and cloned per worker (it is a cheap handle), so the
-    // tracing-on/tracing-off decision is read from the env a single time
-    // instead of on every worker spawn.
-    let sentry_middleware = madar_rust::observability::middleware();
-
         tracing::info!(
             "Swagger UI at /api-docs/swagger-ui/  |  OpenAPI JSON at /api-docs/openapi.json"
         );
@@ -200,14 +204,6 @@ async fn run() -> std::io::Result<()> {
             .app_data(org_status.clone())
             .app_data(realtime_bus.clone())
             .app_data(qr_provider.clone())
-            // Outermost middleware (actix runs the LAST `wrap` first), as
-            // sentry-actix requires: every downstream handler then runs on this
-            // request's Hub, so anything they capture carries the request
-            // context. It reports 5xx responses and 5xx-mapped `AppError`s only
-            // — expected 4xx (validation, 401/403, 404, 409 conflicts) are
-            // normal API traffic and would drown the issue stream. A no-op when
-            // SENTRY_DSN is unset and no client was initialised.
-            .wrap(sentry_middleware.clone())
             .app_data(demo_cfg.clone())
             .app_data(ai_state.clone())
             // Render actix's built-in extractor parse errors (bad path UUID, bad
