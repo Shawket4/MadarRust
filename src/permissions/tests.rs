@@ -786,3 +786,44 @@ async fn kitchen_role_can_bump_but_not_touch_the_pos(pool: PgPool) {
         );
     }
 }
+
+/// The matrix and the DB enum must agree.
+///
+/// `GET /auth/permissions` iterates `RESOURCES`, so a label present in the enum
+/// but missing from the list is a grant no client can see — the endpoint keeps
+/// enforcing it while every app hides the feature. Ten resources drifted this
+/// way before this test existed (staff, delivery, reservations, floor plan).
+#[sqlx::test]
+async fn resources_match_the_db_enum(pool: PgPool) {
+    let labels: Vec<String> =
+        sqlx::query_scalar("SELECT unnest(enum_range(NULL::permission_resource))::text")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+
+    let listed: std::collections::HashSet<&str> =
+        crate::permissions::RESOURCES.iter().copied().collect();
+    let retired: std::collections::HashSet<&str> = crate::permissions::RETIRED_RESOURCES
+        .iter()
+        .copied()
+        .collect();
+
+    let missing: Vec<&String> = labels
+        .iter()
+        .filter(|l| !listed.contains(l.as_str()) && !retired.contains(l.as_str()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these permission_resource labels are missing from RESOURCES (add them, \
+         or list them in RETIRED_RESOURCES if deliberately dropped): {missing:?}"
+    );
+
+    let unknown: Vec<&&str> = listed
+        .iter()
+        .filter(|r| !labels.iter().any(|l| l == *r))
+        .collect();
+    assert!(
+        unknown.is_empty(),
+        "RESOURCES names labels the DB enum does not have: {unknown:?}"
+    );
+}

@@ -1,295 +1,148 @@
-//! `POST /ai/chat` — the merchant-facing analytics chat endpoint.
+//! `POST /ai/chat` — the merchant-facing analytics chat.
+//!
+//! The response is a **tagged union with a 200 status**, not an error code. An
+//! assistant that cannot answer, or that needs one thing clarified, is having a
+//! normal conversation — rendering that as a 400 forces the client to show an
+//! error toast where a chat bubble belongs. Only genuine faults (no permission,
+//! no configured provider, a broken upstream) are HTTP errors.
+
+use std::time::Instant;
 
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use utoipa::ToSchema;
-use uuid::Uuid;
 
 use crate::{
+    analytics::{
+        compile::CompileCtx,
+        scope::{self, ScopeInfo},
+        spec::QuerySpec,
+        types::{Column, Grain, Viz},
+    },
     auth::jwt::Claims,
     db::Db,
     errors::{AppError, AppErrorResponse},
-    models::UserRole,
     permissions::checker::check_permission,
 };
 
-use super::AiState;
-use super::catalog::{self, ChartHint, Column};
-use super::executor::ExecCtx;
-use super::provider::{ChatContext, HistoryTurn};
+use super::{
+    AiState,
+    agent::{self, AgentOutcome},
+    prompt,
+    telemetry::TurnLog,
+    tools::{QueryData, ToolCtx},
+};
 
-/// Longest question we accept — a guard against pathological prompts.
+/// Longest question accepted — a guard against pathological prompts.
 const MAX_QUESTION_LEN: usize = 1000;
+/// Prior turns kept. Bounds per-message cost however long a chat runs.
+const MAX_HISTORY: usize = 6;
 
-/// Most prior turns we keep in the conversation window. Bounds per-message cost
-/// regardless of how long the chat runs.
-const MAX_HISTORY: usize = 8;
-
-/// How many result rows we hand the model when asking for a summary. The full
-/// result still goes to the client; the summary needs only a representative
-/// sample, and a small slice keeps that second call cheap.
-const SUMMARY_ROW_SAMPLE: usize = 50;
-
-/// Answer languages we support. Anything else falls back to English. The value
-/// is used only as a translation-lookup key (a bound param), so this is about
-/// predictability, not safety.
-const SUPPORTED_LOCALES: &[&str] = &["en", "ar"];
+/// One earlier exchange, in compact form. The result tables are never replayed —
+/// the question and the answer are all a follow-up ("and last month?") needs.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct HistoryTurn {
+    pub question: String,
+    /// What the assistant replied. Optional so a client can send a partial log.
+    #[serde(default)]
+    pub answer: Option<String>,
+}
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct AiChatRequest {
     /// The merchant's plain-language question, e.g. "top 5 products last month"
     /// or "أعلى ٥ منتجات الشهر الماضي".
     pub question: String,
-    /// When true, also return a one-sentence natural-language summary of the
-    /// result (a second, small model call, answered in `locale`). Default false.
-    #[serde(default)]
-    pub include_summary: bool,
     /// Answer language — "en" or "ar" (default "en"). Drives translated labels
-    /// and the summary language. Usually the dashboard's active language.
+    /// and the reply language.
     #[serde(default)]
     pub locale: Option<String>,
-    /// Recent prior turns in this conversation (oldest → newest), so follow-ups
-    /// like "and last month?" resolve. Send only the last few; the server caps
-    /// the window regardless.
+    /// Recent prior turns, oldest first. The server caps the window regardless.
     #[serde(default)]
     pub history: Option<Vec<HistoryTurn>>,
 }
 
-/// Which branches an answer actually covers — surfaced on every response so the
-/// scope is never ambiguous ("all branches" vs a specific one).
+/// One dataset the assistant pulled while answering. A turn may carry several —
+/// "compare this month to last" is two.
 #[derive(Debug, Clone, Serialize, ToSchema)]
-pub struct ScopeInfo {
-    /// True when the answer spans EVERY branch the caller can access.
-    pub all_branches: bool,
-    /// The branch names the answer covers.
-    pub branches: Vec<String>,
-    /// Human-readable label, e.g. "All branches (3)" or "Sidi Henish".
-    pub label: String,
-    /// Set when the user named a branch that couldn't be matched; the answer
-    /// then falls back to all accessible branches and this flags the mismatch.
+pub struct ResultBlock {
+    /// Set when the data came from a curated metric.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub unmatched_branch: Option<String>,
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset_id: Option<String>,
+    /// The exact query that produced this. Sending it back is what makes
+    /// "pin this answer to my dashboard" a single client-side action: the spec
+    /// is already a valid widget definition.
+    pub spec: QuerySpec,
+    pub columns: Vec<Column>,
+    pub rows: Vec<Map<String, Value>>,
+    pub row_count: usize,
+    pub truncated: bool,
+    pub grain: Grain,
+    pub viz: Viz,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub facet_by: Option<String>,
+    /// Which branches this block covers.
+    pub scope: ScopeInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub period_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub period_to: Option<String>,
+}
+
+/// How the turn ended. Every variant is a 200.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AiChatKind {
+    /// A finding, with the data behind it.
+    Answer {
+        text: String,
+        results: Vec<ResultBlock>,
+    },
+    /// One question back before the assistant can proceed.
+    Clarify { question: String },
+    /// It could not get to an answer. Any data it did gather is still returned.
+    Incomplete {
+        text: String,
+        results: Vec<ResultBlock>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct AiChatResponse {
-    /// The report the assistant chose.
-    pub report_id: String,
-    pub title: String,
-    /// Which branches this answer covers.
-    pub scope: ScopeInfo,
-    /// Suggested visualization for the result.
-    pub chart: ChartHint,
-    /// Column metadata for rendering the table/chart.
-    pub columns: Vec<Column>,
-    /// Result rows, each an object keyed by column key.
-    pub rows: Vec<Map<String, Value>>,
-    pub row_count: usize,
-    /// True when the result was capped.
-    pub truncated: bool,
-    /// When set, the client renders one section (chart + table) per distinct
-    /// value of this column key — e.g. one table per branch ("faceting").
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub facet_by: Option<String>,
-    /// Optional one-sentence summary (only when `include_summary` was set and
-    /// the model produced one), in the requested locale.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-    /// Which model answered (e.g. "gemini-2.5-flash").
+    #[serde(flatten)]
+    pub outcome: AiChatKind,
+    /// Which model answered.
     pub provider: String,
+    /// The timezone every date in the answer is expressed in.
+    pub timezone: String,
 }
 
-fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
+fn claims_of(req: &HttpRequest) -> Result<Claims, AppError> {
     req.extensions()
         .get::<Claims>()
         .cloned()
         .ok_or_else(|| AppError::Unauthorized("Missing claims".into()))
 }
 
-/// Normalize the requested locale to a supported one, defaulting to English.
-fn normalize_locale(requested: &Option<String>) -> String {
-    match requested {
-        Some(l) if SUPPORTED_LOCALES.contains(&l.as_str()) => l.clone(),
-        _ => "en".to_string(),
+fn to_block(d: QueryData) -> ResultBlock {
+    ResultBlock {
+        title: d.title,
+        preset_id: d.preset_id,
+        spec: d.spec,
+        columns: d.result.columns,
+        rows: d.result.rows,
+        row_count: d.result.row_count,
+        truncated: d.result.truncated,
+        grain: d.result.grain,
+        viz: d.result.viz,
+        facet_by: d.result.facet_by.map(str::to_string),
+        period_from: d.result.period.from.map(|t| t.to_rfc3339()),
+        period_to: d.result.period.to.map(|t| t.to_rfc3339()),
+        scope: d.scope,
     }
-}
-
-/// The set of branches this caller may see analytics for — NOT all org branches,
-/// NOT a single one, but exactly the caller's access:
-///   * org_admin (super_admin is refused earlier) → every branch in the org;
-///   * branch_manager / waiter / kitchen → their `user_branch_assignments`;
-///   * teller → the branch their token is bound to (falling back to assignments).
-///
-/// Runs on the RLS-scoped tenant pool, so every query here is already fenced to
-/// the caller's org. This set is injected into every report as `:branch_ids` and
-/// can never be widened by the model.
-async fn accessible_branches(db: &Db, claims: &Claims) -> Result<Vec<(Uuid, String)>, AppError> {
-    match claims.role {
-        UserRole::OrgAdmin | UserRole::SuperAdmin => {
-            let rows = sqlx::query_as::<_, (Uuid, String)>(
-                "SELECT id, name FROM branches WHERE deleted_at IS NULL ORDER BY name",
-            )
-            .fetch_all(db.get_ref())
-            .await?;
-            Ok(rows)
-        }
-        UserRole::Teller => {
-            if let Some(b) = claims.branch_id() {
-                let row = sqlx::query_as::<_, (Uuid, String)>(
-                    "SELECT id, name FROM branches WHERE id = $1 AND deleted_at IS NULL",
-                )
-                .bind(b)
-                .fetch_optional(db.get_ref())
-                .await?;
-                return Ok(row.into_iter().collect());
-            }
-            assigned_branches(db, claims.user_id()).await
-        }
-        UserRole::BranchManager | UserRole::Waiter | UserRole::Kitchen => {
-            assigned_branches(db, claims.user_id()).await
-        }
-    }
-}
-
-async fn assigned_branches(db: &Db, user_id: Uuid) -> Result<Vec<(Uuid, String)>, AppError> {
-    let rows = sqlx::query_as::<_, (Uuid, String)>(
-        "SELECT b.id, b.name FROM user_branch_assignments uba \
-         JOIN branches b ON b.id = uba.branch_id AND b.deleted_at IS NULL \
-         WHERE uba.user_id = $1 ORDER BY b.name",
-    )
-    .bind(user_id)
-    .fetch_all(db.get_ref())
-    .await?;
-    Ok(rows)
-}
-
-/// The branch the dashboard's global selector is on, from the `X-Branch-Id`
-/// header the frontend already sends on every request. `None` = the selector is
-/// on "All branches" (the header is absent, or the all-zeros sentinel). It is
-/// only ever used as a *default* and is always intersected with the accessible
-/// set, so a forged value can never widen scope past the caller's access.
-fn header_branch_id(req: &HttpRequest) -> Option<Uuid> {
-    req.headers()
-        .get("X-Branch-Id")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .filter(|id| !id.is_nil())
-}
-
-/// Resolve the branch set to query + a human-readable scope. Priority:
-///   1. a branch NAMED in the question (fuzzy-matched within the accessible set);
-///   2. else the branch the global selector is on (`selected`, the X-Branch-Id
-///      the app already sends), when it is one the caller can access;
-///   3. else every accessible branch.
-///
-/// Every path can only ever NARROW to a subset of the accessible set — a named
-/// branch, a forged/foreign selected id, all resolve within it. This is entirely
-/// backend: the selector is read, never written, so the UI never changes.
-fn resolve_scope(
-    accessible: &[(Uuid, String)],
-    requested: Option<&str>,
-    selected: Option<Uuid>,
-) -> (Vec<Uuid>, ScopeInfo) {
-    // 1. A branch named in the question takes priority.
-    if let Some(req) = requested.map(str::trim).filter(|s| !s.is_empty()) {
-        let matches = fuzzy_match_branches(accessible, req);
-        if !matches.is_empty() {
-            return branches_scope(&matches, None);
-        }
-        // Named but unmatched → fall back to the selector/all default, flagged.
-        return default_scope(accessible, selected, Some(req.to_string()));
-    }
-    // 2/3. No branch named → the selector's branch, else all accessible.
-    default_scope(accessible, selected, None)
-}
-
-/// The default scope when the question names no (matched) branch: the selected
-/// branch if the caller can access it, otherwise all accessible branches.
-fn default_scope(
-    accessible: &[(Uuid, String)],
-    selected: Option<Uuid>,
-    unmatched: Option<String>,
-) -> (Vec<Uuid>, ScopeInfo) {
-    if let Some(sel) = selected
-        && let Some(hit) = accessible.iter().find(|(id, _)| *id == sel)
-    {
-        return branches_scope(std::slice::from_ref(hit), unmatched);
-    }
-    let names: Vec<String> = accessible.iter().map(|(_, n)| n.clone()).collect();
-    let label = match names.len() {
-        0 => "No branches".to_string(),
-        1 => names[0].clone(),
-        n => format!("All branches ({n})"),
-    };
-    let ids = accessible.iter().map(|(id, _)| *id).collect();
-    (
-        ids,
-        ScopeInfo {
-            all_branches: true,
-            branches: names,
-            label,
-            unmatched_branch: unmatched,
-        },
-    )
-}
-
-/// Build a narrowed scope (`all_branches = false`) over a specific branch subset.
-fn branches_scope(subset: &[(Uuid, String)], unmatched: Option<String>) -> (Vec<Uuid>, ScopeInfo) {
-    let ids = subset.iter().map(|(id, _)| *id).collect();
-    let names: Vec<String> = subset.iter().map(|(_, n)| n.clone()).collect();
-    let label = names.join(", ");
-    (
-        ids,
-        ScopeInfo {
-            all_branches: false,
-            branches: names,
-            label,
-            unmatched_branch: unmatched,
-        },
-    )
-}
-
-/// Case/whitespace-insensitive branch-name match within the accessible set.
-/// Prefers an exact match; otherwise a substring either way — handling
-/// "sidi henish" vs "Sidi Henish", partials, and Arabic names.
-fn fuzzy_match_branches(accessible: &[(Uuid, String)], query: &str) -> Vec<(Uuid, String)> {
-    let norm = |s: &str| {
-        s.split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_lowercase()
-    };
-    let q = norm(query);
-    let exact: Vec<(Uuid, String)> = accessible
-        .iter()
-        .filter(|(_, n)| norm(n) == q)
-        .cloned()
-        .collect();
-    if !exact.is_empty() {
-        return exact;
-    }
-    accessible
-        .iter()
-        .filter(|(_, n)| {
-            let nn = norm(n);
-            nn.contains(&q) || q.contains(&nn)
-        })
-        .cloned()
-        .collect()
-}
-
-/// The org's timezone name and today's date IN that timezone, so relative dates
-/// ("yesterday", "امبارح") resolve correctly and time buckets are local. One
-/// round trip on the tenant pool; the org row is visible via RLS.
-async fn org_timezone_and_today(db: &Db) -> Result<(String, String), AppError> {
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT timezone::text, (now() AT TIME ZONE timezone::text)::date::text \
-         FROM organizations LIMIT 1",
-    )
-    .fetch_optional(db.get_ref())
-    .await?;
-    Ok(row.unwrap_or_else(|| ("Africa/Cairo".to_string(), String::new())))
 }
 
 #[utoipa::path(
@@ -298,7 +151,7 @@ async fn org_timezone_and_today(db: &Db) -> Result<(String, String), AppError> {
     tag = "ai",
     request_body = AiChatRequest,
     responses(
-        (status = 200, description = "Answer with a table/chart and optional summary", body = AiChatResponse),
+        (status = 200, description = "An answer with its data, or a clarifying question", body = AiChatResponse),
         AppErrorResponse
     ),
     security(("bearer_jwt" = []))
@@ -309,13 +162,14 @@ pub async fn chat(
     state: web::Data<AiState>,
     body: web::Json<AiChatRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let started = Instant::now();
+    let claims = claims_of(&req)?;
     check_permission(db.get_ref(), &claims, "reports", "read").await?;
 
-    // The chat answers over ONE merchant's data. A tenant token's `db` is already
+    // The chat answers over ONE merchant's data. A tenant token's pool is
     // RLS-scoped to its org; a super-admin token has no single org and would run
-    // reports unscoped (cross-tenant) — refuse it so the feature can never
-    // aggregate across merchants.
+    // unscoped, so it is refused — the feature can never aggregate across
+    // merchants, whatever is asked.
     if claims.org_id().is_none() {
         return Err(AppError::Forbidden(
             "AI analytics requires an organization-scoped account".into(),
@@ -326,7 +180,7 @@ pub async fn chat(
     if question.is_empty() {
         return Err(AppError::BadRequest("question cannot be empty".into()));
     }
-    if question.len() > MAX_QUESTION_LEN {
+    if question.chars().count() > MAX_QUESTION_LEN {
         return Err(AppError::BadRequest(format!(
             "question is too long (max {MAX_QUESTION_LEN} characters)"
         )));
@@ -337,117 +191,176 @@ pub async fn chat(
         .as_ref()
         .ok_or_else(|| AppError::ServiceUnavailable("AI analytics is not configured".into()))?;
 
-    let locale = normalize_locale(&body.locale);
+    let locale = crate::analytics::handlers::normalize_locale(body.locale.as_deref());
+    let mut log = TurnLog::new(&provider.name(), &locale, question);
 
-    // Recent conversation window (sliding, server-capped) for follow-up
-    // continuity. Compact by construction (question + report id), so cost stays
-    // constant per message.
-    let mut history = body.history.clone().unwrap_or_default();
+    let mut history: Vec<(String, String)> = body
+        .history
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| (t.question, t.answer.unwrap_or_default()))
+        .collect();
     if history.len() > MAX_HISTORY {
         history.drain(0..history.len() - MAX_HISTORY);
     }
 
-    // Cache key is scoped by USER (branch access differs per user) + locale +
-    // summary flag + a signature of the conversation window, so two users in the
-    // same org — or the same user with different prior context — are never served
-    // each other's (or a stale) answer.
-    let hist_sig = {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        for turn in &history {
-            turn.question.hash(&mut h);
-            turn.report_id.hash(&mut h);
-        }
-        h.finish()
-    };
-    let cache_key = format!(
-        "{}|{}|{}|{}|{}",
-        claims.user_id(),
-        locale,
-        body.include_summary,
-        hist_sig,
-        question
-    );
+    let clock = scope::org_clock(&db).await?;
+    let accessible = scope::accessible_branches(&db, &claims).await?;
+
+    // Cache key is scoped by the caller's BRANCH SET rather than their user id:
+    // two managers with identical access asking the same question share a hit,
+    // where a user-keyed cache would serve neither. Locale and the conversation
+    // window are included, so a follow-up is never answered from a different
+    // context.
+    let cache_key = cache_key(&accessible, &locale, &history, question);
     if let Some(hit) = state.cache.get(&cache_key).await {
+        log.served_from_cache();
+        log.emit(started.elapsed(), question);
         return Ok(HttpResponse::Ok().json(hit));
     }
 
-    // Accessible branches (id + name) + grounding context (timezone/today).
-    let accessible = accessible_branches(&db, &claims).await?;
-    let (timezone, today) = org_timezone_and_today(&db).await?;
-
-    let ctx = ChatContext {
-        question: question.to_string(),
-        today,
-        timezone: timezone.clone(),
-        locale: locale.clone(),
-        branch_names: accessible.iter().map(|(_, n)| n.clone()).collect(),
-        history,
+    let compile_ctx = CompileCtx {
+        tz: clock.tz,
+        now: chrono::Utc::now(),
     };
+    let today = compile_ctx
+        .now
+        .with_timezone(&clock.tz)
+        .date_naive()
+        .to_string();
+    let branch_names: Vec<String> = accessible.iter().map(|b| b.name.clone()).collect();
+    let grounding = prompt::grounding(&today, &clock.timezone, &locale, &branch_names);
 
-    // 1. Model picks a report + fills typed params, and MAY name a branch (never
-    //    SQL). The branch name can only narrow within the accessible set below.
-    let choice = provider.choose_report(&ctx).await?;
-    let report = catalog::find(&choice.report_id)
-        .ok_or_else(|| AppError::BadRequest("The assistant chose an unknown report.".into()))?;
-
-    let requested_branch = choice.args.get("branch").and_then(Value::as_str);
-    // Fallback branch = whatever the dashboard's global selector is on (the
-    // X-Branch-Id the app already sends). Backend-only; the selector is never
-    // changed.
-    let selected_branch = header_branch_id(&req);
-    let (branch_ids, scope) = resolve_scope(&accessible, requested_branch, selected_branch);
-
-    // 2. Backend runs the pre-written query: read-only, capped, RLS-scoped, and
-    //    fenced to the resolved branch set, with localized labels.
-    let exec_ctx = ExecCtx {
-        branch_ids: &branch_ids,
+    let tool_ctx = ToolCtx {
+        db: &db,
+        claims: &claims,
+        compile: &compile_ctx,
+        accessible: &accessible,
+        selected_branch: scope::header_branch_id(&req),
         locale: &locale,
-        tz: &timezone,
-    };
-    // The flexible builder composes SQL at runtime from a whitelisted semantic
-    // layer; curated reports run their fixed SQL. Both go through the same
-    // hardened executor (read-only, timed, row-capped, branch-fenced).
-    let result = if report.id == "analytics_query" {
-        let resolved = super::semantic::build(&choice.args)?;
-        super::executor::run_resolved(&db, &resolved, report.params, &choice.args, &exec_ctx)
-            .await?
-    } else {
-        super::executor::run(&db, report, &choice.args, &exec_ctx).await?
+        timezone: &clock.timezone,
     };
 
-    // 3. Optional summary — best-effort in the requested language; the scope is
-    //    included so the sentence states which branch(es) it covers. Never fail
-    //    the answer over the summary.
-    let summary = if body.include_summary {
-        let sample: Vec<&Map<String, Value>> =
-            result.rows.iter().take(SUMMARY_ROW_SAMPLE).collect();
-        let data_json = serde_json::json!({ "scope": scope.label, "rows": sample }).to_string();
-        match provider.summarize(&ctx, report.title, &data_json).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("AI summary failed (returning table only): {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let outcome = agent::run(
+        provider.as_ref(),
+        &tool_ctx,
+        &grounding,
+        &history,
+        question,
+        &mut log,
+    )
+    .await?;
 
     let response = AiChatResponse {
-        report_id: report.id.to_string(),
-        title: report.title.to_string(),
-        scope,
-        chart: result.chart,
-        columns: result.columns,
-        rows: result.rows,
-        row_count: result.row_count,
-        truncated: result.truncated,
-        facet_by: result.facet_by,
-        summary,
+        outcome: match outcome {
+            AgentOutcome::Answer { text, results } => AiChatKind::Answer {
+                text,
+                results: results.into_iter().map(to_block).collect(),
+            },
+            AgentOutcome::Clarify { question } => AiChatKind::Clarify { question },
+            AgentOutcome::Exhausted { text, results } => AiChatKind::Incomplete {
+                text,
+                results: results.into_iter().map(to_block).collect(),
+            },
+        },
         provider: provider.name(),
+        timezone: clock.timezone.clone(),
     };
 
-    state.cache.insert(cache_key, response.clone()).await;
+    // A clarifying question is not cached: it is a prompt for input, and caching
+    // it would answer the follow-up with the same question again.
+    if !matches!(response.outcome, AiChatKind::Clarify { .. }) {
+        state.cache.insert(cache_key, response.clone()).await;
+    }
+    log.emit(started.elapsed(), question);
     Ok(HttpResponse::Ok().json(response))
+}
+
+/// A cache key over the caller's *access*, not their identity.
+fn cache_key(
+    accessible: &[scope::BranchRef],
+    locale: &str,
+    history: &[(String, String)],
+    question: &str,
+) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for b in accessible {
+        b.id.hash(&mut h);
+    }
+    for (q, a) in history {
+        q.hash(&mut h);
+        a.hash(&mut h);
+    }
+    format!("{:x}|{locale}|{question}", h.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analytics::scope::BranchRef;
+    use uuid::Uuid;
+
+    fn branch(id: Uuid) -> BranchRef {
+        BranchRef {
+            id,
+            name: "B".into(),
+        }
+    }
+
+    #[test]
+    fn the_cache_key_is_shared_between_users_with_the_same_access() {
+        // Two different managers over the same branches ask the same question:
+        // one model call should serve both.
+        let ids: Vec<Uuid> = (0..2).map(|_| Uuid::new_v4()).collect();
+        let a: Vec<BranchRef> = ids.iter().copied().map(branch).collect();
+        let b: Vec<BranchRef> = ids.iter().copied().map(branch).collect();
+        assert_eq!(
+            cache_key(&a, "en", &[], "revenue today"),
+            cache_key(&b, "en", &[], "revenue today")
+        );
+    }
+
+    #[test]
+    fn different_branch_access_never_shares_a_cached_answer() {
+        // The property that stops one branch's figures reaching another's manager.
+        let a = vec![branch(Uuid::new_v4())];
+        let b = vec![branch(Uuid::new_v4())];
+        assert_ne!(
+            cache_key(&a, "en", &[], "revenue today"),
+            cache_key(&b, "en", &[], "revenue today")
+        );
+    }
+
+    #[test]
+    fn locale_and_conversation_context_are_part_of_the_key() {
+        let a = vec![branch(Uuid::new_v4())];
+        assert_ne!(cache_key(&a, "en", &[], "q"), cache_key(&a, "ar", &[], "q"));
+        assert_ne!(
+            cache_key(&a, "en", &[], "and last month?"),
+            cache_key(
+                &a,
+                "en",
+                &[("revenue".into(), "12 EGP".into())],
+                "and last month?"
+            )
+        );
+    }
+
+    #[test]
+    fn the_response_serializes_as_a_tagged_union() {
+        let r = AiChatResponse {
+            outcome: AiChatKind::Clarify {
+                question: "Which branch?".into(),
+            },
+            provider: "mock".into(),
+            timezone: "Africa/Cairo".into(),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["kind"], "clarify");
+        assert_eq!(v["question"], "Which branch?");
+        // Flattened, so the client reads one object rather than unwrapping.
+        assert_eq!(v["provider"], "mock");
+    }
 }

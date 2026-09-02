@@ -249,6 +249,44 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         // Waiter sees the board.
         ("waiter", "floor_plan", "read", true),
         ("waiter", "reservations", "read", true),
+        // ── staff / attendance / payroll ──────────────────────────
+        // Being an employee is a `staff_profiles` row, not a role, so nothing is
+        // granted here to make someone staff. These gate the ADMIN surface only;
+        // `/staff/me/*` is own-row scoped and needs no permission, which is what
+        // lets a teller clock in and read their own payslip while seeing nobody
+        // else's salary.
+        ("org_admin", "staff", "create", true),
+        ("org_admin", "staff", "read", true),
+        ("org_admin", "staff", "update", true),
+        ("org_admin", "staff", "delete", true),
+        ("org_admin", "work_shifts", "create", true),
+        ("org_admin", "work_shifts", "read", true),
+        ("org_admin", "work_shifts", "update", true),
+        ("org_admin", "work_shifts", "delete", true),
+        ("org_admin", "attendance", "create", true),
+        ("org_admin", "attendance", "read", true),
+        ("org_admin", "attendance", "update", true),
+        ("org_admin", "attendance", "delete", true),
+        ("org_admin", "leave", "create", true),
+        ("org_admin", "leave", "read", true),
+        ("org_admin", "leave", "update", true),
+        ("org_admin", "leave", "delete", true),
+        ("org_admin", "payroll", "create", true),
+        ("org_admin", "payroll", "read", true),
+        ("org_admin", "payroll", "update", true),
+        ("org_admin", "payroll", "delete", true),
+        // Branch manager runs the roster and approves requests, and may correct
+        // an attendance record. Deliberately NOT granted `payroll` (salaries stay
+        // with the owner) nor `staff` create/delete (hiring is an org decision);
+        // `staff` read is needed to see who is on the roster at all.
+        ("branch_manager", "staff", "read", true),
+        ("branch_manager", "work_shifts", "read", true),
+        ("branch_manager", "work_shifts", "update", true),
+        ("branch_manager", "attendance", "create", true),
+        ("branch_manager", "attendance", "read", true),
+        ("branch_manager", "attendance", "update", true),
+        ("branch_manager", "leave", "read", true),
+        ("branch_manager", "leave", "update", true),
     ];
 
     for &(role, resource, action, granted) in defaults {

@@ -15,10 +15,10 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 use madar_rust::openapi::ApiDoc;
 use madar_rust::{
-    ai, auth, branches, bundles, costing, delivery, demo, discounts, insights, integrations,
-    inventory, kitchen, menu, orders, orgs, payment_methods, permissions, purchasing, qr_card,
-    realtime, recipes, reports, reservations, shifts, stocktakes, sync, tickets, tills,
-    uploads, users,
+    ai, analytics, auth, branches, bundles, costing, delivery, demo, discounts, insights,
+    integrations, inventory, kitchen, menu, orders, orgs, payment_methods, permissions, purchasing,
+    qr_card, realtime, recipes, reports, reservations, shifts, staff, stocktakes, sync, tickets,
+    tills, uploads, users,
 };
 
 use utoipa::OpenApi;
@@ -122,6 +122,16 @@ async fn run() -> std::io::Result<()> {
     // per-worker closure below) so there's a single instance; idempotent via
     // booking_nudges. No-op when RESERVATION_NUDGES_ENABLED is falsy.
     reservations::nudge::spawn(pool.get_ref().clone(), realtime_bus.get_ref().clone());
+
+    // The attendance sweep — auto-close forgotten checkouts, mark absences, and
+    // apply late penalties. Spawned ONCE here for the same reason as the nudge
+    // scheduler; every step is idempotent. No-op when ATTENDANCE_SWEEP_ENABLED
+    // is falsy.
+    staff::jobs::spawn(pool.get_ref().clone());
+
+    // Public demo playground (DEMO_MODE). Throwaway per-visitor orgs with a TTL;
+    // the sweeper GCs expired ones. Spawned ONCE (single instance). Off by
+    // default — and meant to run on a SEPARATE backend + DB from production.
     let demo_settings = demo::config::DemoConfig::from_env();
     if demo_settings.enabled {
         tracing::warn!(
@@ -232,6 +242,7 @@ async fn run() -> std::io::Result<()> {
             .configure(inventory::routes::configure)
             .configure(recipes::routes::configure)
             .configure(shifts::routes::configure)
+            .configure(staff::routes::configure)
             .configure(tills::routes::configure)
             .configure(reservations::routes::configure)
             .configure(realtime::routes::configure)
@@ -243,6 +254,9 @@ async fn run() -> std::io::Result<()> {
             .configure(orders::routes::configure)
             .configure(discounts::routes::configure)
             .configure(|cfg| reports::routes::configure(cfg, read_pool.clone()))
+            // Metrics share the read replica with reports: both are read-only
+            // and both are dashboard-driven bursts.
+            .configure(|cfg| analytics::routes::configure(cfg, read_pool.clone()))
             .configure(uploads::routes::configure)
             .configure(bundles::routes::configure)
             .configure(insights::routes::configure)

@@ -23,3 +23,7 @@ INVENTORY_OVERHAUL_FRONTEND_SYNC.md
 
 # Load-test run artifacts
 /loadtest/results/
+
+# Local agent/tooling scratch directories
+.claude/
+.ua/

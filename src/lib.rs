@@ -8,6 +8,7 @@
 //! the HTTP server.
 
 pub mod ai;
+pub mod analytics;
 pub mod auth;
 pub mod branches;
 pub mod bundles;
@@ -41,6 +42,7 @@ pub mod recipes;
 pub mod reports;
 pub mod reservations;
 pub mod shifts;
+pub mod staff;
 pub mod stocktakes;
 pub mod sync;
 pub mod tickets;

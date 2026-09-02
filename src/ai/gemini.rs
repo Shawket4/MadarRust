@@ -1,38 +1,29 @@
-//! Gemini 2.5 Flash implementation of [`LlmProvider`].
+//! Gemini transport.
 //!
-//! Cost & latency are minimized deliberately:
+//! Wire format and HTTP only — no domain logic. Cost and latency are managed
+//! here because they are properties of the transport:
 //!
-//!   * **Cached tool definitions.** The function declarations (one per catalog
-//!     report) and the system instruction are built ONCE into a byte-stable
-//!     JSON prefix (`tool_declarations()`), reused verbatim on every request.
-//!     Because that prefix is identical across calls and sits *first* in the
-//!     payload (the user's question is the only varying, trailing part), Gemini
-//!     2.5's implicit context caching hits it automatically.
-//!   * **No thinking.** `thinkingBudget: 0` disables Flash's thinking tokens.
-//!   * **Forced single call.** `functionCallingConfig.mode = ANY` makes the
-//!     model answer with a function call and no prose.
-//!   * **Tight output cap + temperature 0** for determinism (also cache-friendly).
-//!
-//! Prompts and the per-report tool schema are shared with every other provider
-//! via [`super::prompt`], so they can't drift.
+//!   * the system instruction and tool declarations are byte-stable across every
+//!     request and sit *first* in the payload, so Gemini's implicit context
+//!     cache hits them automatically;
+//!   * `thinkingBudget: 0` disables Flash's thinking tokens;
+//!   * `temperature: 0` for determinism, which also keeps the prefix cacheable.
 
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::catalog::REPORTS;
-use super::prompt;
-use super::provider::{ChatContext, LlmProvider, ProviderError, ToolChoice};
+use super::llm::{Completion, LlmProvider, Message, ProviderError, ToolCall, ToolDef, Turn};
 
-/// Default Gemini model — override with `GEMINI_MODEL`. Gemini 3.1 Flash-Lite
-/// (GA): cheap + fast and supports the function calling the report router needs.
+/// Default model — override with `GEMINI_MODEL`. Flash-Lite is cheap and fast
+/// and supports the function calling the agent depends on.
 const DEFAULT_MODEL: &str = "gemini-3.1-flash-lite";
 const ENDPOINT: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+/// Per-call HTTP timeout. The agent may make several calls, so this is well
+/// under what a merchant will wait for the whole turn.
+const HTTP_TIMEOUT_SECS: u64 = 20;
 
-/// Gemini-backed provider. Cheap to clone (holds an `reqwest::Client`, which is
-/// internally reference-counted).
 #[derive(Clone)]
 pub struct GeminiProvider {
     api_key: String,
@@ -41,22 +32,20 @@ pub struct GeminiProvider {
 }
 
 impl GeminiProvider {
-    /// Build from `GEMINI_API_KEY`. Returns `None` when unset/empty so the
-    /// server can start with the AI feature simply disabled.
+    /// Build from `GEMINI_API_KEY`. `None` when unset or empty, so the server
+    /// starts with the feature simply disabled rather than failing.
     pub fn from_env() -> Option<Self> {
         let api_key = std::env::var("GEMINI_API_KEY").ok()?;
         if api_key.trim().is_empty() {
             return None;
         }
-        // `GEMINI_MODEL` overrides the default (e.g. to try a newer model or pin
-        // a dated build) without a rebuild.
         let model = std::env::var("GEMINI_MODEL")
             .ok()
             .map(|m| m.trim().to_string())
             .filter(|m| !m.is_empty())
             .unwrap_or_else(|| DEFAULT_MODEL.to_string());
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(20))
+            .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
             .build()
             .ok()?;
         Some(Self {
@@ -94,86 +83,60 @@ impl GeminiProvider {
 
 #[async_trait]
 impl LlmProvider for GeminiProvider {
-    async fn choose_report(&self, ctx: &ChatContext) -> Result<ToolChoice, ProviderError> {
-        // Stable prefix (system + tools) first so it caches upstream; ALL the
-        // per-request variation goes in the trailing user turn. Recent history is
-        // replayed as plain text turns so follow-ups ("and last month?") resolve
-        // without the function-call/response protocol.
-        let mut contents: Vec<Value> = Vec::with_capacity(ctx.history.len() * 2 + 1);
-        for turn in &ctx.history {
-            contents.push(json!({ "role": "user", "parts": [{ "text": turn.question }] }));
-            if let Some(report) = &turn.report_id {
-                contents.push(json!({
-                    "role": "model",
-                    "parts": [{ "text": format!("Answered using report: {report}.") }]
-                }));
-            }
-        }
-        contents.push(json!({ "role": "user", "parts": [{ "text": prompt::user_text(ctx) }] }));
-
-        let body = json!({
-            "systemInstruction": { "parts": [{ "text": prompt::SYSTEM_PROMPT }] },
-            "tools": tool_declarations(),
-            "toolConfig": { "functionCallingConfig": { "mode": "ANY" } },
-            "contents": contents,
+    async fn complete(&self, req: Completion<'_>) -> Result<Turn, ProviderError> {
+        let mut body = json!({
+            "systemInstruction": { "parts": [{ "text": req.system }] },
+            "tools": [{ "functionDeclarations": declarations(req.tools) }],
+            "contents": contents(req.messages),
             "generationConfig": {
                 "temperature": 0,
-                "maxOutputTokens": 256,
+                "maxOutputTokens": req.max_tokens,
                 "thinkingConfig": { "thinkingBudget": 0 }
             }
         });
+        if req.force_tool {
+            body["toolConfig"] = json!({ "functionCallingConfig": { "mode": "ANY" } });
+        }
 
         let payload = self.post(&body).await?;
         let parts = payload
             .pointer("/candidates/0/content/parts")
             .and_then(Value::as_array)
-            .ok_or_else(|| ProviderError::NoChoice("The assistant gave no answer.".into()))?;
-
-        let call = parts
-            .iter()
-            .find_map(|p| p.get("functionCall"))
-            .ok_or_else(|| {
-                ProviderError::NoChoice("I couldn't match that question to a report.".into())
-            })?;
-
-        let report_id = call
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ProviderError::Parse("function call missing name".into()))?
-            .to_string();
-        let args = call
-            .get("args")
-            .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
 
-        Ok(ToolChoice { report_id, args })
-    }
+        let calls: Vec<ToolCall> = parts
+            .iter()
+            .filter_map(|p| p.get("functionCall"))
+            .enumerate()
+            .filter_map(|(i, c)| {
+                let name = c.get("name").and_then(Value::as_str)?.to_string();
+                Some(ToolCall {
+                    // Gemini matches tool results by name, not id, so one is
+                    // synthesized purely to keep the transport types uniform.
+                    id: format!("{name}-{i}"),
+                    name,
+                    args: c.get("args").cloned().unwrap_or_else(|| json!({})),
+                })
+            })
+            .collect();
+        if !calls.is_empty() {
+            return Ok(Turn::Calls(calls));
+        }
 
-    async fn summarize(
-        &self,
-        ctx: &ChatContext,
-        report_title: &str,
-        data_json: &str,
-    ) -> Result<Option<String>, ProviderError> {
-        let body = json!({
-            "systemInstruction": { "parts": [{ "text": prompt::SUMMARY_SYSTEM_PROMPT }] },
-            "contents": [{ "role": "user", "parts": [{
-                "text": prompt::summary_user_text(ctx, report_title, data_json) }] }],
-            "generationConfig": {
-                "temperature": 0,
-                "maxOutputTokens": 160,
-                "thinkingConfig": { "thinkingBudget": 0 }
-            }
-        });
-
-        let payload = self.post(&body).await?;
-        let text = payload
-            .pointer("/candidates/0/content/parts/0/text")
-            .and_then(Value::as_str)
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        Ok(text)
+        let text = parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim()
+            .to_string();
+        if text.is_empty() {
+            return Err(ProviderError::Parse(
+                "no function call and no text in the response".into(),
+            ));
+        }
+        Ok(Turn::Text(text))
     }
 
     fn name(&self) -> String {
@@ -181,22 +144,109 @@ impl LlmProvider for GeminiProvider {
     }
 }
 
-/// The `tools` array (function declarations) for the request, built once from
-/// the report catalog and cached. Identical bytes on every call → cacheable
-/// prefix upstream.
-fn tool_declarations() -> &'static Value {
-    static TOOLS: OnceLock<Value> = OnceLock::new();
-    TOOLS.get_or_init(|| {
-        let declarations: Vec<Value> = REPORTS
-            .iter()
-            .map(|r| {
-                json!({
-                    "name": r.id,
-                    "description": r.description,
-                    "parameters": prompt::report_parameters_schema(r),
-                })
+fn declarations(tools: &[ToolDef]) -> Vec<Value> {
+    tools
+        .iter()
+        .map(|t| {
+            json!({
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.parameters,
             })
-            .collect();
-        json!([{ "functionDeclarations": declarations }])
-    })
+        })
+        .collect()
+}
+
+/// Translate the transport's messages into Gemini `contents`.
+///
+/// Gemini has no dedicated tool role: a tool result is a `functionResponse` part
+/// on a **user** turn, and it is matched to its call by function name.
+fn contents(messages: &[Message]) -> Vec<Value> {
+    let mut out = Vec::with_capacity(messages.len());
+    for m in messages {
+        match m {
+            Message::User(text) => out.push(json!({ "role": "user", "parts": [{ "text": text }] })),
+            Message::Assistant { text, calls } => {
+                let mut parts: Vec<Value> = Vec::new();
+                if let Some(t) = text.as_ref().filter(|t| !t.trim().is_empty()) {
+                    parts.push(json!({ "text": t }));
+                }
+                for c in calls {
+                    parts.push(json!({
+                        "functionCall": { "name": c.name, "args": c.args }
+                    }));
+                }
+                if !parts.is_empty() {
+                    out.push(json!({ "role": "model", "parts": parts }));
+                }
+            }
+            Message::ToolResult { name, content, .. } => {
+                out.push(json!({
+                    "role": "user",
+                    "parts": [{ "functionResponse": {
+                        "name": name,
+                        // Gemini requires an object here; a bare array or scalar
+                        // is rejected, so results are always wrapped.
+                        "response": { "result": content }
+                    }}]
+                }));
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tool_result_is_wrapped_in_an_object() {
+        let msgs = vec![Message::ToolResult {
+            id: "x".into(),
+            name: "query_metrics".into(),
+            content: json!([1, 2, 3]),
+        }];
+        let c = contents(&msgs);
+        // A bare array here is rejected by the API — the wrapper is required.
+        assert_eq!(
+            c[0]["parts"][0]["functionResponse"]["response"]["result"],
+            json!([1, 2, 3])
+        );
+        assert_eq!(c[0]["role"], "user");
+    }
+
+    #[test]
+    fn assistant_tool_calls_replay_as_model_function_calls() {
+        let msgs = vec![Message::Assistant {
+            text: None,
+            calls: vec![ToolCall {
+                id: "a".into(),
+                name: "run_preset".into(),
+                args: json!({ "preset": "top_products" }),
+            }],
+        }];
+        let c = contents(&msgs);
+        assert_eq!(c[0]["role"], "model");
+        assert_eq!(c[0]["parts"][0]["functionCall"]["name"], "run_preset");
+    }
+
+    #[test]
+    fn an_empty_assistant_turn_is_dropped_not_sent_as_a_blank() {
+        // Gemini rejects a content entry with no parts.
+        let msgs = vec![Message::Assistant {
+            text: Some("   ".into()),
+            calls: vec![],
+        }];
+        assert!(contents(&msgs).is_empty());
+    }
+
+    #[test]
+    fn declarations_pass_the_schema_through_unchanged() {
+        let tools = super::super::tools::tool_defs();
+        let d = declarations(tools);
+        assert_eq!(d.len(), tools.len());
+        assert_eq!(d[0]["name"], tools[0].name);
+        assert_eq!(d[0]["parameters"], tools[0].parameters);
+    }
 }

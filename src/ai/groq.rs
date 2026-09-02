@@ -1,27 +1,23 @@
-//! Groq implementation of [`LlmProvider`] (OpenAI-compatible chat completions).
+//! Groq transport (OpenAI-compatible chat completions).
 //!
-//! Groq runs open models (Llama, …) on their LPU inference — very fast and
-//! cheap. The report picker forces exactly one tool call
-//! (`tool_choice: "required"`); the summary is a plain completion. Prompts and
-//! the per-report tool schema are shared with Gemini via [`super::prompt`], so
-//! both providers behave identically — only the wire format and HTTP differ.
+//! Wire format and HTTP only. Groq runs open models on their LPU inference,
+//! which is fast and cheap; select it with `AI_PROVIDER=groq` and `GROQ_API_KEY`.
 //!
-//! Select it with `AI_PROVIDER=groq` and set `GROQ_API_KEY` (+ optional
-//! `GROQ_MODEL`) in `.env`.
+//! Because the tool declarations and prompts are shared with every other
+//! provider through [`super::tools`] and [`super::prompt`], the agent behaves
+//! identically here — only the JSON envelope differs.
 
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
-use super::catalog::REPORTS;
-use super::prompt;
-use super::provider::{ChatContext, LlmProvider, ProviderError, ToolChoice};
+use super::llm::{Completion, LlmProvider, Message, ProviderError, ToolCall, ToolDef, Turn};
 
 const ENDPOINT: &str = "https://api.groq.com/openai/v1/chat/completions";
-/// Default model — a solid tool-calling model on Groq. Override with `GROQ_MODEL`.
+/// Default model — override with `GROQ_MODEL`.
 const DEFAULT_MODEL: &str = "llama-3.3-70b-versatile";
+const HTTP_TIMEOUT_SECS: u64 = 20;
 
 #[derive(Clone)]
 pub struct GroqProvider {
@@ -31,7 +27,7 @@ pub struct GroqProvider {
 }
 
 impl GroqProvider {
-    /// Build from `GROQ_API_KEY` (+ optional `GROQ_MODEL`). `None` when unset/empty.
+    /// Build from `GROQ_API_KEY` (+ optional `GROQ_MODEL`). `None` when unset.
     pub fn from_env() -> Option<Self> {
         let api_key = std::env::var("GROQ_API_KEY").ok()?;
         if api_key.trim().is_empty() {
@@ -43,7 +39,7 @@ impl GroqProvider {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| DEFAULT_MODEL.to_string());
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(20))
+            .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
             .build()
             .ok()?;
         Some(Self {
@@ -80,77 +76,70 @@ impl GroqProvider {
 
 #[async_trait]
 impl LlmProvider for GroqProvider {
-    async fn choose_report(&self, ctx: &ChatContext) -> Result<ToolChoice, ProviderError> {
-        // OpenAI-style messages: system, then replayed history (user + a short
-        // assistant note of which report answered), then the current user turn.
-        // `tool_choice: "required"` forces exactly one function call.
-        let mut messages: Vec<Value> = Vec::with_capacity(ctx.history.len() * 2 + 2);
-        messages.push(json!({ "role": "system", "content": prompt::SYSTEM_PROMPT }));
-        for turn in &ctx.history {
-            messages.push(json!({ "role": "user", "content": turn.question }));
-            if let Some(report) = &turn.report_id {
-                messages.push(json!({
-                    "role": "assistant",
-                    "content": format!("Answered using report: {report}.")
-                }));
-            }
-        }
-        messages.push(json!({ "role": "user", "content": prompt::user_text(ctx) }));
+    async fn complete(&self, req: Completion<'_>) -> Result<Turn, ProviderError> {
+        let mut messages = vec![json!({ "role": "system", "content": req.system })];
+        messages.extend(wire_messages(req.messages));
 
         let body = json!({
             "model": self.model,
             "messages": messages,
-            "tools": tool_declarations(),
-            "tool_choice": "required",
+            "tools": tool_specs(req.tools),
+            "tool_choice": if req.force_tool { "required" } else { "auto" },
             "temperature": 0,
-            "max_tokens": 512
+            "max_tokens": req.max_tokens,
         });
 
         let payload = self.post(&body).await?;
-        let call = payload
-            .pointer("/choices/0/message/tool_calls/0/function")
-            .ok_or_else(|| {
-                ProviderError::NoChoice("I couldn't match that question to a report.".into())
-            })?;
+        let message = payload
+            .pointer("/choices/0/message")
+            .ok_or_else(|| ProviderError::Parse("no message in the response".into()))?;
 
-        let report_id = call
-            .get("name")
+        let calls: Vec<ToolCall> = message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|c| {
+                        let name = c.pointer("/function/name").and_then(Value::as_str)?;
+                        // Arguments arrive as a JSON *string* that must be
+                        // parsed; a model emitting malformed JSON here is
+                        // common enough that it becomes an empty object rather
+                        // than failing the whole turn — the tool then rejects it
+                        // with a message the model can act on.
+                        let args = c
+                            .pointer("/function/arguments")
+                            .and_then(Value::as_str)
+                            .and_then(|s| serde_json::from_str(s).ok())
+                            .unwrap_or_else(|| json!({}));
+                        Some(ToolCall {
+                            id: c
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .unwrap_or(name)
+                                .to_string(),
+                            name: name.to_string(),
+                            args,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !calls.is_empty() {
+            return Ok(Turn::Calls(calls));
+        }
+
+        let text = message
+            .get("content")
             .and_then(Value::as_str)
-            .ok_or_else(|| ProviderError::Parse("tool call missing name".into()))?
+            .map(str::trim)
+            .unwrap_or_default()
             .to_string();
-        // OpenAI-style: `arguments` is a JSON *string* that must be parsed.
-        let args = match call.get("arguments").and_then(Value::as_str) {
-            Some(s) if !s.trim().is_empty() => serde_json::from_str::<Map<String, Value>>(s)
-                .map_err(|e| ProviderError::Parse(format!("bad tool arguments: {e}")))?,
-            _ => Map::new(),
-        };
-
-        Ok(ToolChoice { report_id, args })
-    }
-
-    async fn summarize(
-        &self,
-        ctx: &ChatContext,
-        report_title: &str,
-        data_json: &str,
-    ) -> Result<Option<String>, ProviderError> {
-        let body = json!({
-            "model": self.model,
-            "messages": [
-                { "role": "system", "content": prompt::SUMMARY_SYSTEM_PROMPT },
-                { "role": "user", "content": prompt::summary_user_text(ctx, report_title, data_json) }
-            ],
-            "temperature": 0,
-            "max_tokens": 160
-        });
-
-        let payload = self.post(&body).await?;
-        let text = payload
-            .pointer("/choices/0/message/content")
-            .and_then(Value::as_str)
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        Ok(text)
+        if text.is_empty() {
+            return Err(ProviderError::Parse(
+                "no tool call and no content in the response".into(),
+            ));
+        }
+        Ok(Turn::Text(text))
     }
 
     fn name(&self) -> String {
@@ -158,23 +147,111 @@ impl LlmProvider for GroqProvider {
     }
 }
 
-/// OpenAI-style `tools` array, built once from the catalog and cached.
-fn tool_declarations() -> &'static Value {
-    static TOOLS: OnceLock<Value> = OnceLock::new();
-    TOOLS.get_or_init(|| {
-        let tools: Vec<Value> = REPORTS
-            .iter()
-            .map(|r| {
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": r.id,
-                        "description": r.description,
-                        "parameters": prompt::report_parameters_schema(r),
-                    }
-                })
+fn tool_specs(tools: &[ToolDef]) -> Vec<Value> {
+    tools
+        .iter()
+        .map(|t| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                }
             })
-            .collect();
-        Value::Array(tools)
-    })
+        })
+        .collect()
+}
+
+/// Translate the transport's messages into OpenAI-style ones. Tool results get
+/// their own `tool` role and are correlated by `tool_call_id`.
+fn wire_messages(messages: &[Message]) -> Vec<Value> {
+    let mut out = Vec::with_capacity(messages.len());
+    for m in messages {
+        match m {
+            Message::User(text) => out.push(json!({ "role": "user", "content": text })),
+            Message::Assistant { text, calls } => {
+                let mut msg = json!({ "role": "assistant" });
+                msg["content"] = match text {
+                    Some(t) if !t.trim().is_empty() => json!(t),
+                    _ => Value::Null,
+                };
+                if !calls.is_empty() {
+                    msg["tool_calls"] = json!(
+                        calls
+                            .iter()
+                            .map(|c| json!({
+                                "id": c.id,
+                                "type": "function",
+                                "function": {
+                                    "name": c.name,
+                                    // Arguments go back out as a string, the
+                                    // same shape they arrived in.
+                                    "arguments": c.args.to_string(),
+                                }
+                            }))
+                            .collect::<Vec<_>>()
+                    );
+                }
+                out.push(msg);
+            }
+            Message::ToolResult { id, name, content } => out.push(json!({
+                "role": "tool",
+                "tool_call_id": id,
+                "name": name,
+                "content": content.to_string(),
+            })),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_results_correlate_by_call_id() {
+        let msgs = vec![
+            Message::Assistant {
+                text: None,
+                calls: vec![ToolCall {
+                    id: "call_1".into(),
+                    name: "run_preset".into(),
+                    args: json!({ "preset": "top_products" }),
+                }],
+            },
+            Message::ToolResult {
+                id: "call_1".into(),
+                name: "run_preset".into(),
+                content: json!({ "row_count": 5 }),
+            },
+        ];
+        let w = wire_messages(&msgs);
+        assert_eq!(w[0]["tool_calls"][0]["id"], "call_1");
+        // Arguments are a JSON string on this wire format, not an object.
+        assert!(w[0]["tool_calls"][0]["function"]["arguments"].is_string());
+        assert_eq!(w[1]["role"], "tool");
+        assert_eq!(w[1]["tool_call_id"], "call_1");
+    }
+
+    #[test]
+    fn an_assistant_turn_with_no_text_sends_null_content() {
+        // OpenAI-style APIs require the key to be present even when there is
+        // only a tool call; omitting it is a 400.
+        let msgs = vec![Message::Assistant {
+            text: None,
+            calls: vec![],
+        }];
+        assert!(wire_messages(&msgs)[0]["content"].is_null());
+    }
+
+    #[test]
+    fn tool_specs_wrap_the_shared_declarations_unchanged() {
+        let tools = super::super::tools::tool_defs();
+        let s = tool_specs(tools);
+        assert_eq!(s[0]["type"], "function");
+        assert_eq!(s[0]["function"]["name"], tools[0].name);
+        assert_eq!(s[0]["function"]["parameters"], tools[0].parameters);
+    }
 }

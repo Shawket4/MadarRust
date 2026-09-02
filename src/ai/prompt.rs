@@ -1,114 +1,108 @@
-//! Prompts + tool-parameter schemas shared by every LLM provider.
+//! Prompts, shared by every provider.
 //!
-//! The report picker must behave IDENTICALLY no matter which model runs it, so
-//! the system instruction, the trailing user turn (question + grounding), the
-//! summary prompt, and the per-report JSON-Schema live here — not duplicated in
-//! each provider. Providers differ only in how they WRAP this (Gemini
-//! `functionDeclarations` vs OpenAI-style `tools`) and in their HTTP.
+//! The system instruction is assembled **once** and cached, and it embeds the
+//! whole semantic-layer digest ([`crate::analytics::registry::schema_digest`]).
+//! Two consequences worth stating:
+//!
+//!   * It is byte-stable across every request, so it sits in the cacheable
+//!     prefix that Gemini's implicit cache and OpenAI-style prefix caching both
+//!     key on. All per-request variation goes in the trailing user turn.
+//!   * It cannot drift from what actually executes, because it is generated from
+//!     the same registry the compiler reads. A measure that exists is described;
+//!     one that does not, is not.
 
-use serde_json::{Map, Value, json};
+use crate::analytics::registry::schema_digest;
 
-use super::catalog::{ParamKind, Report};
-use super::provider::ChatContext;
+/// Instructions the model gets before anything else.
+const INSTRUCTIONS: &str = "\
+You are the analytics assistant inside a restaurant point-of-sale system. A merchant \
+asks about THEIR OWN business data in plain language, in English or Arabic (including \
+Egyptian dialect). You answer with real figures pulled from their data.
 
-/// System instruction for the report-picking call.
-pub const SYSTEM_PROMPT: &str = "You are the analytics assistant for a restaurant \
-point-of-sale system. The merchant asks about THEIR OWN business data in plain \
-language, in English or Arabic (including Egyptian dialect). Choose exactly one \
-of the provided report functions and fill in its parameters from the question. \
-The user's message states today's date and timezone — resolve relative dates \
-(\"last week\", \"this month\", \"yesterday\", \"الأسبوع الماضي\", \"امبارح\", \
-\"الشهر ده\") to concrete ISO-8601 dates relative to that: set `from` to the \
-START of the first day (00:00:00) and `to` to the END of the last day \
-(23:59:59), so a single day like \"yesterday\" covers that whole day. You do NOT choose \
-which branches to include — branch access is enforced by the backend. Prefer a \
-specific report when one clearly fits. Otherwise — when the question needs a \
-custom breakdown (by day/branch/waiter/product/…), a metric or grouping the \
-fixed reports lack, a per-group ranking (e.g. the top item in EACH branch), or \
-a particular table-vs-chart output — use the flexible `analytics_query` function \
-and compose it from its dataset/dimensions/measures/filters/output parameters. \
-Only fall back to the closest fixed report if `analytics_query` cannot express \
-the request. You never write SQL and never invent data.";
+How you work:
+- You never write SQL. You call tools that run pre-approved, parameterized queries.
+- You do not choose which branches to include. Branch access is enforced by the backend. \
+If the merchant names a branch, pass its name as the `branch` argument and the backend \
+matches it within what they are allowed to see.
+- Money is returned in piastres (1/100 of a pound). State amounts in pounds.
+- Resolve relative dates with a `period.preset` such as `yesterday` or `last_month`. \
+The backend resolves these in the merchant's own timezone. Only use explicit from/to \
+dates for a window no preset covers, and never compute a date yourself when a preset fits.
 
-/// System instruction for the one-line summary call.
-pub const SUMMARY_SYSTEM_PROMPT: &str = "You summarize restaurant analytics \
-results. Given the user's question and the resulting data as JSON, reply with \
-ONE short, factual sentence stating the key takeaway. Reply in the SAME language \
-as the question. No preamble, no markdown, no lists.";
+Your loop:
+1. Pick the dataset whose single row IS the thing being counted. Revenue and ticket size \
+are order-grain; product and category questions are line-item grain; payment mix is \
+tender grain. Getting this wrong gives a plausible number that is simply false.
+2. Call `run_preset` when a curated metric clearly matches, otherwise `query_metrics`.
+3. If a call is rejected, READ THE ERROR — it lists the valid options — and retry. Do not \
+give up after one rejection, and do not answer from a query that failed.
+4. Call `answer` with the finding. Lead with the number that answers the question.
 
-/// The trailing user turn for the report-picking call: the question plus the
-/// per-request grounding (today's date, timezone, answer language, and the
-/// branches the caller may narrow to).
-pub fn user_text(ctx: &ChatContext) -> String {
-    let branches = if ctx.branch_names.is_empty() {
+Rules that matter:
+- If a query returns no rows, say there were none. Never present an empty result as a \
+zero, and never invent figures. Every number you state must come from a tool result.
+- If a measure comes back null because cost data is missing, say the cost is not \
+recorded rather than treating it as zero.
+- Answer in the same language as the question.
+- Two or three sentences. No markdown, no bullet lists, no preamble.
+- The merchant sees the table or chart alongside your words, so do not read the whole \
+table back to them — state the takeaway.";
+
+/// The full system instruction: fixed guidance plus the generated schema digest.
+pub fn system() -> &'static str {
+    static PROMPT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PROMPT.get_or_init(|| format!("{INSTRUCTIONS}\n\n---\n\n{}", schema_digest()))
+}
+
+/// Per-request grounding, sent as the leading user turn: everything that varies
+/// per merchant and per moment, kept out of the cacheable prefix.
+pub fn grounding(today: &str, timezone: &str, locale: &str, branches: &[String]) -> String {
+    let branch_list = if branches.is_empty() {
         "none".to_string()
     } else {
-        ctx.branch_names.join(", ")
+        branches.join(", ")
     };
     format!(
-        "Today is {} in timezone {}. Answer language: {}.\n\
-         Branches available: {}. If the question names a branch, pass its name as \
-         the `branch` argument; otherwise omit it.\n\n\
-         Question: {}",
-        ctx.today, ctx.timezone, ctx.locale, branches, ctx.question
+        "Context for this conversation.\n\
+         Today is {today} in timezone {timezone}.\n\
+         Answer language: {locale}.\n\
+         Branches this user can see: {branch_list}."
     )
 }
 
-/// The user turn for the summary call.
-pub fn summary_user_text(ctx: &ChatContext, report_title: &str, data_json: &str) -> String {
-    format!(
-        "Language: {}\nQuestion: {}\nReport: {report_title}\nData: {data_json}",
-        ctx.locale, ctx.question
-    )
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// JSON-Schema `parameters` object for a report's function/tool declaration: its
-/// typed params plus the universal optional `branch` narrowing. Standard JSON
-/// Schema, so both Gemini and OpenAI-style tool APIs accept it verbatim.
-pub fn report_parameters_schema(report: &Report) -> Value {
-    let mut properties = Map::new();
-    let mut required: Vec<Value> = Vec::new();
-    for p in report.params {
-        let schema = match p.kind {
-            ParamKind::Date => json!({
-                "type": "string",
-                "format": "date-time",
-                "description": p.description
-            }),
-            ParamKind::Int { .. } => json!({
-                "type": "integer",
-                "description": p.description
-            }),
-            ParamKind::Enum { variants, .. } => json!({
-                "type": "string",
-                "enum": variants,
-                "description": p.description
-            }),
-            ParamKind::StrList { variants } => json!({
-                "type": "array",
-                "items": { "type": "string", "enum": variants },
-                "description": p.description
-            }),
-            ParamKind::Bool { .. } => json!({
-                "type": "boolean",
-                "description": p.description
-            }),
-        };
-        properties.insert(p.name.to_string(), schema);
-        if p.required {
-            required.push(Value::from(p.name));
-        }
+    #[test]
+    fn the_system_prompt_carries_the_live_registry() {
+        let p = system();
+        // Not a hand-maintained copy: these come from the registry itself.
+        assert!(p.contains("order_items"));
+        assert!(p.contains("avg_order_value"));
+        assert!(p.contains("top_products"));
+        assert!(p.contains("last_month"));
     }
-    // Every report is branch-scoped, so all accept an optional branch narrowing.
-    // The backend fuzzy-matches this within the caller's accessible branches and
-    // can only narrow, never widen.
-    properties.insert(
-        "branch".to_string(),
-        json!({
-            "type": "string",
-            "description": "Optional: restrict to ONE branch, by the name the user used \
-                (e.g. 'Sidi Henish'). Omit to cover every branch the user can access."
-        }),
-    );
-    json!({ "type": "object", "properties": properties, "required": required })
+
+    #[test]
+    fn the_system_prompt_is_stable_across_calls() {
+        // Byte-stability is what makes upstream prefix caching hit.
+        assert_eq!(system().as_ptr(), system().as_ptr());
+    }
+
+    #[test]
+    fn grounding_holds_the_per_request_variation() {
+        let g = grounding("2026-09-03", "Africa/Cairo", "ar", &["Sidi Henish".into()]);
+        assert!(
+            g.contains("2026-09-03") && g.contains("Africa/Cairo") && g.contains("Sidi Henish")
+        );
+        // ...and none of it leaks into the cached prefix.
+        assert!(!system().contains("2026-09-03"));
+    }
+
+    #[test]
+    fn no_branches_is_stated_not_left_blank() {
+        let g = grounding("2026-09-03", "UTC", "en", &[]);
+        assert!(g.contains("none"));
+    }
 }

@@ -7,10 +7,18 @@ pub mod seeder;
 mod tests;
 
 /// Single source of truth for every permission resource the system knows about.
-/// Keep this in sync with the `permission_resource` DB enum
-/// (latest: migrations/20260613001000_inventory_permissions.sql).
-/// Note: 'shift_counts' remains a DB enum label but is retired (shift-close
-/// counting was removed), so it is intentionally omitted from the matrix.
+///
+/// MUST match the `permission_resource` DB enum, minus the retired labels below.
+/// `GET /auth/permissions` iterates THIS list, so a resource missing here is
+/// invisible to every client that mirrors permissions — the grant exists in
+/// `role_permissions` and the endpoint still enforces it, but the app believes
+/// nobody holds it and hides the feature. That is exactly how the staff,
+/// delivery, reservations and floor-plan resources went unreported for months.
+/// `resources_match_the_db_enum` in `tests.rs` fails if the two drift again.
+///
+/// Retired labels stay in the DB enum (values cannot be dropped) but are
+/// deliberately omitted here:
+///   - `shift_counts` — shift-close counting was removed.
 pub const RESOURCES: &[&str] = &[
     "orgs",
     "branches",
@@ -39,6 +47,23 @@ pub const RESOURCES: &[&str] = &[
     "kitchen_stations",
     "kitchen_orders",
     "open_tickets",
+    // Reservations & floor plan.
+    "reservations",
+    "floor_plan",
+    // Delivery.
+    "delivery_orders",
+    "delivery_settings",
+    // Staff / HR. `work_shifts` is the HR roster; `shifts` above is the
+    // teller's cash drawer. Never conflate them.
+    "staff",
+    "work_shifts",
+    "attendance",
+    "leave",
+    "payroll",
 ];
+
+/// DB enum labels that exist but are intentionally not part of the matrix.
+#[cfg(test)]
+pub const RETIRED_RESOURCES: &[&str] = &["shift_counts"];
 
 pub const ACTIONS: &[&str] = &["create", "read", "update", "delete"];

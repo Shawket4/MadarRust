@@ -15,6 +15,11 @@ serde              = { version = "1", features = ["derive"] }
 serde_json         = "1"
 uuid               = { version = "1", features = ["v4", "v5", "serde"] }
 chrono             = { version = "0.4", features = ["serde"] }
+# Timezone database. A reporting period ("last month", "yesterday") must resolve
+# in the MERCHANT's timezone — org/branch-configured, never the server's — so the
+# analytics layer converts local period bounds to UTC itself rather than pushing
+# date arithmetic into every query. Pure data, no C dependency.
+chrono-tz          = "0.10"
 jsonwebtoken       = { version = "10", features = ["rust_crypto"] }
 bcrypt             = "0.19"
 argon2             = "0.5"
@@ -34,7 +39,10 @@ sqlx               = { version = "0.8", features = ["runtime-tokio", "tls-rustls
 bigdecimal         = { version = "0.4", features = ["serde"] }
 rust_decimal       = { version = "1", features = ["serde-float", "maths"] }
 rust_decimal_macros = "1"
-utoipa = { version = "5.5.0", features = ["actix_extras", "chrono", "uuid", "decimal"] }
+# `decimal_float`, NOT `decimal`: rust_decimal is built with `serde-float`, so a
+# Decimal is serialized as a JSON number. The `decimal` feature would document it
+# as a string, and every generated client would then send the wrong type.
+utoipa = { version = "5.5.0", features = ["actix_extras", "chrono", "uuid", "decimal_float"] }
 utoipa-swagger-ui = { version = "9.0.2", features = ["actix-web"] }
 reqwest = { version = "0.13.4", features = ["json"] }
 base64 = "0.22"
@@ -52,16 +60,26 @@ qrcode             = { version = "0.14", default-features = false }
 # and font resolution is limited to the faces we explicitly load (no system-font
 # fallback, no runtime filesystem dependency).
 resvg              = { version = "0.47", default-features = false, features = ["text"] }
-
 # Error reporting to the self-hosted Sentry. `default-features = false` drops the
 # native-tls transport (this binary is rustls end-to-end — see build_tls_config
 # and the sqlx/reqwest features above; pulling OpenSSL in for crash reports would
 # be the only native-TLS dependency in the tree) and drops `debug-images`, whose
 # only job is symbolicating a stripped release binary we don't upload debug files
 # for. `logs`/`metrics` stay off: this is an error reporter, not a log sink.
+#
+# `release-health` is deliberately OFF. It emits a session envelope per request,
+# so envelope volume tracked total traffic rather than the sample rate (40 HTTP
+# requests produced 63 envelopes) — and every one of those crosses a residential
+# uplink to reach the self-hosted instance. Release adoption/crash-free-rate is
+# not worth that bandwidth here; errors and sampled traces are.
 sentry             = { version = "0.49", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls"] }
 sentry-actix       = "0.49"
+# Bridges `tracing` into Sentry. The reason it is here is sqlx: it logs every
+# statement to the `sqlx::query` target with its elapsed time, so this layer
+# turns those into breadcrumbs and an issue arrives carrying the queries that
+# ran just before it. See `observability::tracing_layer` for the mapping.
 sentry-tracing     = "0.49"
+
 [profile.release]
 lto = true
 codegen-units = 1
@@ -74,12 +92,11 @@ tempfile = "3.27.0"
 actix-http = "3"
 # Decode-verify rasterised QR output in tests (scannability is non-negotiable).
 rqrr = "0.10"
-
-
 # `test` adds sentry's in-memory TestTransport, which lets the observability
 # tests assert on the exact events that WOULD have been sent — the only way to
 # prove the PII scrubber holds without pointing a test at the live Sentry.
 sentry = { version = "0.49", default-features = false, features = ["test"] }
+
 [[bin]]
 name = "madar-rust"
 path = "src/main.rs"
@@ -111,6 +128,12 @@ path = "src/bin/bundle_margin_flip.rs"
 [[bin]]
 name = "fuzz-token"
 path = "src/bin/fuzz_token.rs"
+
+# Local development only: seeds a self-contained staff demo org. Never run
+# against production — it deletes and recreates the org by slug.
+[[bin]]
+name = "seed-staff-demo"
+path = "src/bin/seed_staff_demo.rs"
 
 [lib]
 name = "madar_rust"
