@@ -56,18 +56,34 @@ pub fn system() -> &'static str {
 
 /// Per-request grounding, sent as the leading user turn: everything that varies
 /// per merchant and per moment, kept out of the cacheable prefix.
-pub fn grounding(today: &str, timezone: &str, locale: &str, branches: &[String]) -> String {
+pub fn grounding(
+    today: &str,
+    timezone: &str,
+    locale: &str,
+    branches: &[String],
+    condensed: Option<&str>,
+) -> String {
     let branch_list = if branches.is_empty() {
         "none".to_string()
     } else {
         branches.join(", ")
     };
-    format!(
+    let mut out = format!(
         "Context for this conversation.\n\
          Today is {today} in timezone {timezone}.\n\
          Answer language: {locale}.\n\
          Branches this user can see: {branch_list}."
-    )
+    );
+    // The condensed head of a long conversation. It is stated as a summary
+    // rather than replayed as turns so the model treats it as background it
+    // already knows, not as something the merchant just said.
+    if let Some(summary) = condensed.map(str::trim).filter(|s| !s.is_empty()) {
+        out.push_str(&format!(
+            "\n\nEarlier in this conversation (condensed — the messages below are \
+             the most recent ones in full):\n{summary}"
+        ));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -92,7 +108,13 @@ mod tests {
 
     #[test]
     fn grounding_holds_the_per_request_variation() {
-        let g = grounding("2026-09-03", "Africa/Cairo", "ar", &["Sidi Henish".into()]);
+        let g = grounding(
+            "2026-09-03",
+            "Africa/Cairo",
+            "ar",
+            &["Sidi Henish".into()],
+            None,
+        );
         assert!(
             g.contains("2026-09-03") && g.contains("Africa/Cairo") && g.contains("Sidi Henish")
         );
@@ -102,7 +124,26 @@ mod tests {
 
     #[test]
     fn no_branches_is_stated_not_left_blank() {
-        let g = grounding("2026-09-03", "UTC", "en", &[]);
+        let g = grounding("2026-09-03", "UTC", "en", &[], None);
         assert!(g.contains("none"));
+    }
+
+    #[test]
+    fn a_condensed_head_is_labelled_as_background_not_as_a_new_message() {
+        // Replayed as a turn it would read as something the merchant just
+        // said; labelled as a summary it reads as context already known.
+        let g = grounding(
+            "2026-09-03",
+            "UTC",
+            "en",
+            &[],
+            Some("The merchant is reviewing the Marina branch."),
+        );
+        assert!(g.contains("Earlier in this conversation (condensed"));
+        assert!(g.contains("Marina branch"));
+
+        // An empty summary adds nothing rather than an empty heading.
+        let bare = grounding("2026-09-03", "UTC", "en", &[], Some("   "));
+        assert!(!bare.contains("Earlier in this conversation"));
     }
 }

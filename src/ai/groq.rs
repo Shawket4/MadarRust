@@ -80,14 +80,19 @@ impl LlmProvider for GroqProvider {
         let mut messages = vec![json!({ "role": "system", "content": req.system })];
         messages.extend(wire_messages(req.messages));
 
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "messages": messages,
-            "tools": tool_specs(req.tools),
-            "tool_choice": if req.force_tool { "required" } else { "auto" },
             "temperature": 0,
             "max_tokens": req.max_tokens,
         });
+        // Omitted entirely when there are none: an empty `tools` array with a
+        // `tool_choice` is a 400, and the compaction call offers no tools
+        // because it wants prose.
+        if !req.tools.is_empty() {
+            body["tools"] = json!(tool_specs(req.tools));
+            body["tool_choice"] = json!(if req.force_tool { "required" } else { "auto" });
+        }
 
         let payload = self.post(&body).await?;
         let message = payload

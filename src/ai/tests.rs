@@ -25,7 +25,7 @@ use crate::ai::AiState;
 use crate::ai::llm::{Completion, LlmProvider, ProviderError, Turn};
 use crate::ai::mock::MockProvider;
 use crate::ai::tools;
-use crate::analytics::tests::{org_admin_token, secret, seed};
+use crate::analytics::tests::{org_admin_token, org_admin_token_for, secret, seed};
 use crate::models::UserRole;
 
 async fn app(
@@ -617,4 +617,595 @@ async fn a_turn_that_ran_no_query_replays_without_one(pool: PgPool) {
     assert!(resp.status().is_success());
     let body: Value = test::read_body_json(resp).await;
     assert_eq!(body["kind"], "answer");
+}
+
+// ── Server-side conversations ───────────────────────────────────────────────
+
+async fn ask_in(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    token: &str,
+    conversation: Option<Uuid>,
+    question: &str,
+) -> Value {
+    let mut payload = json!({ "question": question });
+    if let Some(id) = conversation {
+        payload["conversation_id"] = json!(id);
+    }
+    let req = test::TestRequest::post()
+        .uri("/ai/chat")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(payload)
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert!(resp.status().is_success(), "chat failed: {}", resp.status());
+    test::read_body_json(resp).await
+}
+
+async fn get_json(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    token: &str,
+    uri: &str,
+) -> Value {
+    let req = test::TestRequest::get()
+        .uri(uri)
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert!(resp.status().is_success(), "GET {uri} → {}", resp.status());
+    test::read_body_json(resp).await
+}
+
+#[sqlx::test]
+async fn a_conversation_is_created_and_can_be_resumed(pool: PgPool) {
+    let s = seed(&pool, "a").await;
+    let app = app(&pool, Arc::new(MockProvider::router())).await;
+    let token = org_admin_token_for(s.org, s.admin);
+
+    let first = ask_in(&app, &token, None, "top products").await;
+    let id: Uuid = serde_json::from_value(first["conversation_id"].clone())
+        .expect("a turn that answered must be stored");
+
+    // The second message continues it WITHOUT the client re-uploading history.
+    let second = ask_in(&app, &token, Some(id), "and by branch?").await;
+    assert_eq!(second["conversation_id"], json!(id));
+
+    let detail = get_json(&app, &token, &format!("/ai/conversations/{id}")).await;
+    assert_eq!(detail["turn_count"], 2);
+    let turns = detail["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0]["seq"], 1);
+    assert_eq!(turns[0]["question"], "top products");
+    assert_eq!(turns[1]["question"], "and by branch?");
+    // The title comes from the first question, so the list is readable.
+    assert_eq!(detail["title"], "top products");
+}
+
+#[sqlx::test]
+async fn a_stored_turn_keeps_the_query_not_the_rows(pool: PgPool) {
+    // Rows go stale the moment another order is rung up; the spec re-runs and
+    // gives current figures. It is also what a client needs to pin a widget.
+    let s = seed(&pool, "a").await;
+    let app = app(&pool, Arc::new(MockProvider::router())).await;
+    let token = org_admin_token_for(s.org, s.admin);
+
+    let first = ask_in(&app, &token, None, "top products").await;
+    let id: Uuid = serde_json::from_value(first["conversation_id"].clone()).unwrap();
+    let detail = get_json(&app, &token, &format!("/ai/conversations/{id}")).await;
+
+    let specs = detail["turns"][0]["specs"].as_array().unwrap();
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0]["preset_id"], "top_products");
+    assert_eq!(specs[0]["spec"]["dataset"], "order_items");
+    // No rows anywhere in the stored turn.
+    let wire = detail["turns"][0].to_string();
+    assert!(
+        !wire.contains("\"rows\""),
+        "rows must not be stored: {wire}"
+    );
+}
+
+#[sqlx::test]
+async fn a_resumed_conversation_replays_the_previous_query(pool: PgPool) {
+    // The same property as the stateless follow-up test, but with the history
+    // coming from the SERVER — the client sends only a conversation id.
+    let s = seed(&pool, "a").await;
+    let token = org_admin_token_for(s.org, s.admin);
+
+    // Turn 1 with the router, so a real spec is stored.
+    let app1 = app(&pool, Arc::new(MockProvider::router())).await;
+    let first = ask_in(&app1, &token, None, "top products").await;
+    let id: Uuid = serde_json::from_value(first["conversation_id"].clone()).unwrap();
+
+    // Turn 2 with a provider that requires the prior spec to be in the
+    // transcript, so it cannot pass by accident.
+    let seen = Arc::new(AtomicUsize::new(0));
+    let app2 = app(
+        &pool,
+        Arc::new(FollowUp {
+            seen_prior_spec: seen.clone(),
+        }),
+    )
+    .await;
+    let second = ask_in(&app2, &token, Some(id), "and for all time?").await;
+
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        1,
+        "the stored spec never reached the transcript"
+    );
+    assert_eq!(second["results"][0]["spec"]["dataset"], "order_items");
+    assert_eq!(second["results"][0]["spec"]["period"]["preset"], "all_time");
+}
+
+#[sqlx::test]
+async fn conversations_are_private_to_their_user(pool: PgPool) {
+    // RLS fences the org; this is the second fence, which RLS cannot provide
+    // because the tenant pool is per-org and not per-user.
+    let s = seed(&pool, "a").await;
+    let app = app(&pool, Arc::new(MockProvider::router())).await;
+
+    let mine = org_admin_token_for(s.org, s.admin);
+    let created = ask_in(&app, &mine, None, "top products").await;
+    let id: Uuid = serde_json::from_value(created["conversation_id"].clone()).unwrap();
+
+    // A different user in the SAME org.
+    let other = org_admin_token_for(s.org, s.other_admin);
+    for (method, uri) in [
+        (
+            actix_web::http::Method::GET,
+            format!("/ai/conversations/{id}"),
+        ),
+        (
+            actix_web::http::Method::DELETE,
+            format!("/ai/conversations/{id}"),
+        ),
+    ] {
+        let req = test::TestRequest::default()
+            .method(method.clone())
+            .uri(&uri)
+            .insert_header(("Authorization", format!("Bearer {other}")))
+            .to_request();
+        assert_eq!(
+            test::call_service(&app, req).await.status(),
+            404,
+            "{method} {uri} leaked another user's conversation"
+        );
+    }
+
+    // ...and continuing it is refused too, which is the path that would
+    // otherwise leak the CONTENT rather than just its existence.
+    let req = test::TestRequest::post()
+        .uri("/ai/chat")
+        .insert_header(("Authorization", format!("Bearer {other}")))
+        .set_json(json!({ "question": "and last month?", "conversation_id": id }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 404);
+
+    // The owner still sees it, so the test cannot be passing because nothing
+    // exists.
+    let list = get_json(&app, &mine, "/ai/conversations").await;
+    assert_eq!(list["conversations"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        get_json(&app, &other, "/ai/conversations").await["conversations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[sqlx::test]
+async fn a_conversation_can_be_renamed_and_deleted(pool: PgPool) {
+    let s = seed(&pool, "a").await;
+    let app = app(&pool, Arc::new(MockProvider::router())).await;
+    let token = org_admin_token_for(s.org, s.admin);
+    let created = ask_in(&app, &token, None, "top products").await;
+    let id: Uuid = serde_json::from_value(created["conversation_id"].clone()).unwrap();
+
+    let req = test::TestRequest::patch()
+        .uri(&format!("/ai/conversations/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(json!({ "title": "  Menu review  " }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 204);
+    assert_eq!(
+        get_json(&app, &token, &format!("/ai/conversations/{id}")).await["title"],
+        "Menu review"
+    );
+
+    let req = test::TestRequest::patch()
+        .uri(&format!("/ai/conversations/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(json!({ "title": "   " }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 400);
+
+    let req = test::TestRequest::delete()
+        .uri(&format!("/ai/conversations/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 204);
+    // Soft-deleted: gone from the list and from resumption, both as 404.
+    assert!(
+        get_json(&app, &token, "/ai/conversations").await["conversations"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let req = test::TestRequest::get()
+        .uri(&format!("/ai/conversations/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 404);
+}
+
+#[sqlx::test]
+async fn concurrent_sends_into_one_conversation_do_not_collide(pool: PgPool) {
+    // Two devices, or a double-tap. Without the row lock in `append_turn` both
+    // would claim the same seq and one would lose to the unique constraint.
+    let s = seed(&pool, "a").await;
+    let app = app(&pool, Arc::new(MockProvider::router())).await;
+    let token = org_admin_token_for(s.org, s.admin);
+    let created = ask_in(&app, &token, None, "top products").await;
+    let id: Uuid = serde_json::from_value(created["conversation_id"].clone()).unwrap();
+
+    let db = crate::db::Db::for_org(&pool, s.org).await;
+
+    // Drive the store directly: the HTTP layer would serialize these.
+    let owner: Uuid = sqlx::query_scalar("SELECT user_id FROM ai_conversations WHERE id = $1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let record = |q: &str| crate::ai::store::TurnRecord {
+        question: q.to_string(),
+        answer: Some("ok".into()),
+        kind: "answer".into(),
+        specs: json!([]),
+        provider: None,
+    };
+    let (second, third) = (record("second"), record("third"));
+    let (a, b) = tokio::join!(
+        crate::ai::store::append_turn(&db, id, s.org, owner, &second),
+        crate::ai::store::append_turn(&db, id, s.org, owner, &third),
+    );
+    let mut seqs = vec![
+        a.expect("first concurrent append"),
+        b.expect("second concurrent append"),
+    ];
+    seqs.sort_unstable();
+    assert_eq!(seqs, vec![2, 3], "concurrent appends collided");
+}
+
+#[sqlx::test]
+async fn a_clarification_is_stored_as_the_reply_it_was(pool: PgPool) {
+    // A stored turn with a blank answer would read to the summarizer as a
+    // failure; what the merchant saw was a question back.
+    let s = seed(&pool, "a").await;
+    let app = app(&pool, Arc::new(MockProvider::router())).await;
+    let token = org_admin_token_for(s.org, s.admin);
+    let out = ask_in(&app, &token, None, "how is everything going").await;
+    assert_eq!(out["kind"], "clarify");
+    let id: Uuid = serde_json::from_value(out["conversation_id"].clone()).unwrap();
+
+    let detail = get_json(&app, &token, &format!("/ai/conversations/{id}")).await;
+    assert_eq!(detail["turns"][0]["kind"], "clarify");
+    assert!(!detail["turns"][0]["answer"].as_str().unwrap().is_empty());
+    assert_eq!(detail["turns"][0]["specs"].as_array().unwrap().len(), 0);
+}
+
+// ── Rolling compaction ──────────────────────────────────────────────────────
+
+/// A transport that always fails, for proving compaction degrades safely.
+struct AlwaysFails;
+
+#[async_trait]
+impl LlmProvider for AlwaysFails {
+    async fn complete(&self, _req: Completion<'_>) -> Result<Turn, ProviderError> {
+        Err(ProviderError::Upstream("upstream is down".into()))
+    }
+    fn name(&self) -> String {
+        "failing".into()
+    }
+}
+
+/// Append `n` turns straight to the store, bypassing the model.
+async fn seed_turns(db: &crate::db::Db, id: Uuid, org: Uuid, user: Uuid, n: i32) {
+    for i in 1..=n {
+        let record = crate::ai::store::TurnRecord {
+            question: format!("question {i}"),
+            answer: Some(format!("answer {i}")),
+            kind: "answer".into(),
+            specs: json!([{ "title": null, "preset_id": "revenue_total",
+                            "spec": { "dataset": "orders" } }]),
+            provider: Some("mock".into()),
+        };
+        crate::ai::store::append_turn(db, id, org, user, &record)
+            .await
+            .unwrap_or_else(|e| panic!("seeding turn {i}: {e}"));
+    }
+}
+
+async fn new_conversation(db: &crate::db::Db, s: &crate::analytics::tests::Seeded) -> Uuid {
+    crate::ai::store::create(db, s.org, s.admin, "en", "first question")
+        .await
+        .unwrap()
+}
+
+#[sqlx::test]
+async fn compaction_folds_older_turns_and_leaves_the_window_verbatim(pool: PgPool) {
+    use crate::ai::compaction::{VERBATIM_TURNS, compact};
+    use crate::ai::store;
+
+    let s = seed(&pool, "a").await;
+    let db = crate::db::Db::for_org(&pool, s.org).await;
+    let id = new_conversation(&db, &s).await;
+
+    // Nine turns: three should fold, six stay verbatim.
+    seed_turns(&db, id, s.org, s.admin, 9).await;
+
+    let provider = MockProvider::scripted(vec![Turn::Text(
+        "The merchant reviewed revenue and products for the Marina branch.".into(),
+    )]);
+    assert!(compact(&db, &provider, id).await.unwrap());
+
+    let ctx = store::replay_context(&db, id, s.admin, 14).await.unwrap();
+    assert_eq!(
+        ctx.summary.as_deref(),
+        Some("The merchant reviewed revenue and products for the Marina branch.")
+    );
+    // Exactly the window remains verbatim, and it is the NEWEST turns.
+    assert_eq!(ctx.turns.len(), VERBATIM_TURNS as usize);
+    assert_eq!(ctx.turns.first().unwrap().seq, 4);
+    assert_eq!(ctx.turns.last().unwrap().seq, 9);
+    // ...and they still carry their specs, so a follow-up still resolves.
+    assert!(store::primary_spec(ctx.turns.last().unwrap()).is_some());
+}
+
+#[sqlx::test]
+async fn a_short_conversation_is_never_compacted(pool: PgPool) {
+    use crate::ai::compaction::compact;
+
+    let s = seed(&pool, "a").await;
+    let db = crate::db::Db::for_org(&pool, s.org).await;
+    let id = new_conversation(&db, &s).await;
+    seed_turns(&db, id, s.org, s.admin, 6).await;
+
+    // A model call here would be pure waste — and would also mean every short
+    // chat pays for a summary nobody reads.
+    let provider = MockProvider::scripted(vec![Turn::Text("should never run".into())]);
+    assert!(!compact(&db, &provider, id).await.unwrap());
+
+    let ctx = crate::ai::store::replay_context(&db, id, s.admin, 14)
+        .await
+        .unwrap();
+    assert!(ctx.summary.is_none());
+    assert_eq!(ctx.turns.len(), 6);
+}
+
+#[sqlx::test]
+async fn compaction_is_cumulative_across_rounds(pool: PgPool) {
+    use crate::ai::compaction::compact;
+
+    let s = seed(&pool, "a").await;
+    let db = crate::db::Db::for_org(&pool, s.org).await;
+    let id = new_conversation(&db, &s).await;
+
+    seed_turns(&db, id, s.org, s.admin, 9).await;
+    let first = MockProvider::scripted(vec![Turn::Text("Round one summary.".into())]);
+    assert!(compact(&db, &first, id).await.unwrap());
+
+    // Five more turns; the window slides again.
+    seed_turns(&db, id, s.org, s.admin, 5).await;
+    let second = MockProvider::scripted(vec![Turn::Text("Round two summary.".into())]);
+    assert!(compact(&db, &second, id).await.unwrap());
+
+    let ctx = crate::ai::store::replay_context(&db, id, s.admin, 14)
+        .await
+        .unwrap();
+    // The second round REPLACES the first — the model was given the old summary
+    // and rewrote it, so the summary stays one bounded paragraph however long
+    // the conversation runs.
+    assert_eq!(ctx.summary.as_deref(), Some("Round two summary."));
+    assert_eq!(ctx.turns.len(), 6);
+    assert_eq!(ctx.turns.last().unwrap().seq, 14);
+}
+
+#[sqlx::test]
+async fn the_summarizer_is_shown_the_previous_summary_and_the_new_turns(pool: PgPool) {
+    // Without the previous summary each round would only describe its own
+    // slice, and everything before it would be silently lost — which is the
+    // failure this whole design exists to avoid.
+    use crate::ai::compaction::compact;
+
+    let s = seed(&pool, "a").await;
+    let db = crate::db::Db::for_org(&pool, s.org).await;
+    let id = new_conversation(&db, &s).await;
+    seed_turns(&db, id, s.org, s.admin, 9).await;
+
+    let first = MockProvider::scripted(vec![Turn::Text("Earlier: the Marina branch.".into())]);
+    compact(&db, &first, id).await.unwrap();
+    seed_turns(&db, id, s.org, s.admin, 5).await;
+
+    let seen = Arc::new(std::sync::Mutex::new(String::new()));
+    struct Recording(Arc<std::sync::Mutex<String>>);
+    #[async_trait]
+    impl LlmProvider for Recording {
+        async fn complete(&self, req: Completion<'_>) -> Result<Turn, ProviderError> {
+            if let Some(crate::ai::llm::Message::User(t)) = req.messages.first() {
+                *self.0.lock().unwrap() = t.clone();
+            }
+            // The summarizing call must offer NO tools, or the model answers
+            // with a tool call and no summary is ever written.
+            assert!(req.tools.is_empty(), "the summary call must be tool-less");
+            assert!(!req.force_tool);
+            Ok(Turn::Text("Combined summary.".into()))
+        }
+        fn name(&self) -> String {
+            "recording".into()
+        }
+    }
+
+    compact(&db, &Recording(seen.clone()), id).await.unwrap();
+    let prompt = seen.lock().unwrap().clone();
+    // The previous summary is carried in, so round two covers round one's
+    // material rather than only its own slice.
+    assert!(prompt.contains("Earlier: the Marina branch."), "{prompt}");
+    // Round one folded turns 1–3; with 14 turns the window now ends at 8, so
+    // this round folds 4–8 and nothing newer.
+    assert!(prompt.contains("[8] Merchant: question 8"), "{prompt}");
+    assert!(
+        !prompt.contains("[9] Merchant:"),
+        "a turn still inside the verbatim window was summarized: {prompt}"
+    );
+}
+
+#[sqlx::test]
+async fn a_failed_summary_leaves_the_conversation_intact(pool: PgPool) {
+    // Nothing depends on compaction succeeding: the next turn simply replays
+    // more verbatim history. An assistant that stopped answering because a
+    // SUMMARY could not be written would be a far worse outcome.
+    use crate::ai::compaction::compact;
+
+    let s = seed(&pool, "a").await;
+    let db = crate::db::Db::for_org(&pool, s.org).await;
+    let id = new_conversation(&db, &s).await;
+    seed_turns(&db, id, s.org, s.admin, 9).await;
+
+    assert!(compact(&db, &AlwaysFails, id).await.is_err());
+
+    let ctx = crate::ai::store::replay_context(&db, id, s.admin, 14)
+        .await
+        .unwrap();
+    assert!(
+        ctx.summary.is_none(),
+        "a failed pass must not write a summary"
+    );
+    // Every turn is still replayed — nothing was dropped on the floor.
+    assert_eq!(ctx.turns.len(), 9);
+
+    // ...and a later successful pass still catches up.
+    let good = MockProvider::scripted(vec![Turn::Text("Recovered summary.".into())]);
+    assert!(compact(&db, &good, id).await.unwrap());
+    let ctx = crate::ai::store::replay_context(&db, id, s.admin, 14)
+        .await
+        .unwrap();
+    assert_eq!(ctx.summary.as_deref(), Some("Recovered summary."));
+}
+
+#[sqlx::test]
+async fn a_model_that_answers_with_no_summary_changes_nothing(pool: PgPool) {
+    use crate::ai::compaction::compact;
+
+    let s = seed(&pool, "a").await;
+    let db = crate::db::Db::for_org(&pool, s.org).await;
+    let id = new_conversation(&db, &s).await;
+    seed_turns(&db, id, s.org, s.admin, 9).await;
+
+    // Blank prose is not a summary; storing it would erase context.
+    let blank = MockProvider::scripted(vec![Turn::Text("   ".into())]);
+    assert!(compact(&db, &blank, id).await.is_err());
+    assert!(
+        crate::ai::store::replay_context(&db, id, s.admin, 14)
+            .await
+            .unwrap()
+            .summary
+            .is_none()
+    );
+}
+
+#[sqlx::test]
+async fn a_losing_concurrent_pass_does_not_rewind_the_winner(pool: PgPool) {
+    // Two passes can overlap — a spawned one and a retry. The conditional
+    // update means the loser writes nothing rather than replacing a newer
+    // summary with an older one and losing the turns it covered.
+    use crate::ai::store;
+
+    let s = seed(&pool, "a").await;
+    let db = crate::db::Db::for_org(&pool, s.org).await;
+    let id = new_conversation(&db, &s).await;
+    seed_turns(&db, id, s.org, s.admin, 9).await;
+
+    assert!(
+        store::commit_summary(&db, id, "winner", 3, 0)
+            .await
+            .unwrap(),
+        "the first pass must commit"
+    );
+    assert!(
+        !store::commit_summary(&db, id, "loser", 3, 0).await.unwrap(),
+        "a pass working from a stale sequence must write nothing"
+    );
+    assert_eq!(
+        store::replay_context(&db, id, s.admin, 14)
+            .await
+            .unwrap()
+            .summary
+            .as_deref(),
+        Some("winner")
+    );
+}
+
+#[sqlx::test]
+async fn a_long_chat_reaches_the_model_as_a_summary_plus_a_window(pool: PgPool) {
+    // The end-to-end property: context is unlimited but the replayed prefix is
+    // bounded, and the condensed head is labelled as background rather than
+    // replayed as something the merchant just said.
+    let s = seed(&pool, "a").await;
+    let db = crate::db::Db::for_org(&pool, s.org).await;
+    let id = new_conversation(&db, &s).await;
+    seed_turns(&db, id, s.org, s.admin, 9).await;
+
+    let summarizer = MockProvider::scripted(vec![Turn::Text(
+        "Earlier the merchant compared branches for last month.".into(),
+    )]);
+    crate::ai::compaction::compact(&db, &summarizer, id)
+        .await
+        .unwrap();
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    struct Capture(Arc<std::sync::Mutex<Vec<String>>>);
+    #[async_trait]
+    impl LlmProvider for Capture {
+        async fn complete(&self, req: Completion<'_>) -> Result<Turn, ProviderError> {
+            let mut log = self.0.lock().unwrap();
+            if log.is_empty() {
+                for m in req.messages {
+                    if let crate::ai::llm::Message::User(t) = m {
+                        log.push(t.clone());
+                    }
+                }
+            }
+            drop(log);
+            Ok(MockProvider::answer("Here you go."))
+        }
+        fn name(&self) -> String {
+            "capture".into()
+        }
+    }
+
+    let app = app(&pool, Arc::new(Capture(seen.clone()))).await;
+    let token = org_admin_token_for(s.org, s.admin);
+    ask_in(&app, &token, Some(id), "and this month?").await;
+
+    let user_messages = seen.lock().unwrap().clone();
+    let grounding = &user_messages[0];
+    assert!(
+        grounding.contains("Earlier in this conversation (condensed"),
+        "the summary never reached the model: {grounding}"
+    );
+    assert!(grounding.contains("compared branches for last month"));
+    // Grounding + 6 replayed questions + the new question. The nine older
+    // turns are represented by the summary, not by nine more messages.
+    assert_eq!(user_messages.len(), 1 + 6 + 1);
+    assert!(user_messages.contains(&"question 9".to_string()));
+    assert!(!user_messages.contains(&"question 1".to_string()));
 }

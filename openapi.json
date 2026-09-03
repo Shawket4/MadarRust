@@ -683,6 +683,414 @@
         ]
       }
     },
+    "/ai/conversations": {
+      "get": {
+        "tags": [
+          "ai"
+        ],
+        "operationId": "list_conversations",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 30, max 100).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The caller's conversations, most recently used first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/ai/conversations/{id}": {
+      "get": {
+        "tags": [
+          "ai"
+        ],
+        "operationId": "get_conversation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Conversation id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many of the most recent turns to return (default 50, max 200).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The conversation with its most recent turns",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "ai"
+        ],
+        "operationId": "delete_conversation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Conversation id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "ai"
+        ],
+        "operationId": "rename_conversation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Conversation id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameConversationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Renamed"
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/auth/login": {
       "post": {
         "tags": [
@@ -37437,6 +37845,14 @@
           "question"
         ],
         "properties": {
+          "conversation_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Continue a stored conversation. When set, history is loaded from the\nserver and `history` below is ignored — this is the path that gives\nresumable chats and unlimited, compacted context.\n\nOmit it to start a new conversation; the response says which one was\ncreated."
+          },
           "history": {
             "type": [
               "array",
@@ -37445,7 +37861,7 @@
             "items": {
               "$ref": "#/components/schemas/HistoryTurn"
             },
-            "description": "Recent prior turns, oldest first. The server caps the window regardless."
+            "description": "Recent prior turns, oldest first. The stateless fallback, kept for\nclients that manage their own window and for one-off questions. Ignored\nwhen `conversation_id` is set. The server caps it regardless."
           },
           "locale": {
             "type": [
@@ -37472,6 +37888,14 @@
               "timezone"
             ],
             "properties": {
+              "conversation_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid",
+                "description": "The conversation this turn belongs to. Present whenever the turn was\nstored — send it back on the next message to continue."
+              },
               "provider": {
                 "type": "string",
                 "description": "Which model answered."
@@ -40428,6 +40852,88 @@
           },
           "unit": {
             "type": "string"
+          }
+        }
+      },
+      "ConversationDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ConversationSummary"
+          },
+          {
+            "type": "object",
+            "required": [
+              "turns"
+            ],
+            "properties": {
+              "condensed": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The running summary of everything before the verbatim window. Returned\nso the UI can show what was condensed instead of a silent gap."
+              },
+              "turns": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/StoredTurn"
+                }
+              }
+            }
+          }
+        ],
+        "description": "A conversation with its turns."
+      },
+      "ConversationList": {
+        "type": "object",
+        "required": [
+          "conversations"
+        ],
+        "properties": {
+          "conversations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConversationSummary"
+            }
+          }
+        }
+      },
+      "ConversationSummary": {
+        "type": "object",
+        "description": "A conversation without its turns, for the list view.",
+        "required": [
+          "id",
+          "title",
+          "turn_count",
+          "created_at",
+          "compacted"
+        ],
+        "properties": {
+          "compacted": {
+            "type": "boolean",
+            "description": "True once older turns have been folded into a summary — surfaced so a\nclient can say \"earlier messages condensed\" rather than appearing to\nhave lost them."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "last_turn_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "title": {
+            "type": "string"
+          },
+          "turn_count": {
+            "type": "integer",
+            "format": "int32"
           }
         }
       },
@@ -50156,6 +50662,17 @@
           }
         }
       },
+      "RenameConversationRequest": {
+        "type": "object",
+        "required": [
+          "title"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          }
+        }
+      },
       "ReorderLine": {
         "type": "object",
         "description": "One ingredient to reorder, with the quantity needed to reach its order-up-to\nlevel (par_max, else the reorder point).",
@@ -52131,6 +52648,54 @@
               "null"
             ],
             "description": "theft | spoilage | breakage | miscount | supplier_short | transfer_error | other."
+          }
+        }
+      },
+      "StoredTurn": {
+        "type": "object",
+        "description": "One stored exchange.",
+        "required": [
+          "id",
+          "seq",
+          "question",
+          "kind",
+          "specs",
+          "created_at"
+        ],
+        "properties": {
+          "answer": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`answer` | `clarify` | `incomplete`."
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "question": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "specs": {
+            "description": "The queries that produced the answer — `[{title, preset_id, spec}]`.\nRe-running these is how a reopened conversation shows CURRENT figures\nrather than the numbers that were true when it was first asked."
           }
         }
       },

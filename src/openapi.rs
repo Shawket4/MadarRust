@@ -68,6 +68,10 @@ use utoipa::{
 paths(
         // ── ai analytics chat ────────────────────────────────────────
         crate::ai::handlers::chat,
+        crate::ai::handlers::list_conversations,
+        crate::ai::handlers::get_conversation,
+        crate::ai::handlers::rename_conversation,
+        crate::ai::handlers::delete_conversation,
         crate::analytics::handlers::schema,
         crate::analytics::handlers::query,
         // ── costing ─────────────────────────────────────────────────
@@ -471,6 +475,11 @@ paths(
         crate::ai::handlers::AiChatKind,
         crate::ai::handlers::HistoryTurn,
         crate::ai::handlers::ResultBlock,
+        crate::ai::handlers::ConversationList,
+        crate::ai::handlers::RenameConversationRequest,
+        crate::ai::store::ConversationSummary,
+        crate::ai::store::ConversationDetail,
+        crate::ai::store::StoredTurn,
         crate::analytics::handlers::MetricsQueryRequest,
         crate::analytics::handlers::MetricsQueryResponse,
         crate::analytics::handlers::WidgetRequest,

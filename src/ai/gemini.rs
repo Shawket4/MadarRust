@@ -86,7 +86,6 @@ impl LlmProvider for GeminiProvider {
     async fn complete(&self, req: Completion<'_>) -> Result<Turn, ProviderError> {
         let mut body = json!({
             "systemInstruction": { "parts": [{ "text": req.system }] },
-            "tools": [{ "functionDeclarations": declarations(req.tools) }],
             "contents": contents(req.messages),
             "generationConfig": {
                 "temperature": 0,
@@ -94,8 +93,14 @@ impl LlmProvider for GeminiProvider {
                 "thinkingConfig": { "thinkingBudget": 0 }
             }
         });
-        if req.force_tool {
-            body["toolConfig"] = json!({ "functionCallingConfig": { "mode": "ANY" } });
+        // Omitted entirely when there are none: an empty `functionDeclarations`
+        // array is rejected, and the compaction call deliberately offers no
+        // tools because it wants prose.
+        if !req.tools.is_empty() {
+            body["tools"] = json!([{ "functionDeclarations": declarations(req.tools) }]);
+            if req.force_tool {
+                body["toolConfig"] = json!({ "functionCallingConfig": { "mode": "ANY" } });
+            }
         }
 
         let payload = self.post(&body).await?;

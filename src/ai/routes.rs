@@ -10,6 +10,24 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/ai")
             .wrap(JwtMiddleware)
-            .route("/chat", web::post().to(handlers::chat)),
+            .route("/chat", web::post().to(handlers::chat))
+            // Stored conversations. Private to the user who created them —
+            // see `ai::store` for the double fence (RLS + user_id).
+            .route(
+                "/conversations",
+                web::get().to(handlers::list_conversations),
+            )
+            .route(
+                "/conversations/{id}",
+                web::get().to(handlers::get_conversation),
+            )
+            .route(
+                "/conversations/{id}",
+                web::patch().to(handlers::rename_conversation),
+            )
+            .route(
+                "/conversations/{id}",
+                web::delete().to(handlers::delete_conversation),
+            ),
     );
 }

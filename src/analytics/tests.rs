@@ -20,15 +20,15 @@ pub(crate) fn secret() -> JwtSecret {
 }
 
 pub(crate) fn org_admin_token(org: Uuid) -> String {
-    create_token(
-        &secret(),
-        Uuid::new_v4(),
-        Some(org),
-        UserRole::OrgAdmin,
-        None,
-        24,
-    )
-    .unwrap()
+    org_admin_token_for(org, Uuid::new_v4())
+}
+
+/// A token for a SPECIFIC user id. Needed wherever a handler writes a row that
+/// references `users`: a token minted for an id with no user behind it is
+/// rejected by the foreign key, not by the auth layer, which produces a
+/// confusing failure a long way from its cause.
+pub(crate) fn org_admin_token_for(org: Uuid, user: Uuid) -> String {
+    create_token(&secret(), user, Some(org), UserRole::OrgAdmin, None, 24).unwrap()
 }
 
 /// What [`seed`] created, so tests can assert against known figures.
@@ -36,6 +36,13 @@ pub(crate) struct Seeded {
     pub org: Uuid,
     #[allow(dead_code)]
     pub branch: Uuid,
+    /// A real org-admin row, for tests whose handlers write rows referencing
+    /// `users`.
+    #[allow(dead_code)]
+    pub admin: Uuid,
+    /// A second real user in the same org, for isolation tests.
+    #[allow(dead_code)]
+    pub other_admin: Uuid,
 }
 
 /// One organization with a branch, a closed shift, two products in a category,
@@ -44,6 +51,7 @@ pub(crate) struct Seeded {
 /// Deliberately small but *broad*: it touches every dataset the registry
 /// exposes joins for, so a broken join surfaces here rather than in production.
 pub(crate) async fn seed(pool: &PgPool, label: &str) -> Seeded {
+    let (admin, other_admin) = (Uuid::new_v4(), Uuid::new_v4());
     let (org, teller, branch, till, shift) = (
         Uuid::new_v4(),
         Uuid::new_v4(),
@@ -71,6 +79,18 @@ pub(crate) async fn seed(pool: &PgPool, label: &str) -> Seeded {
     .execute(pool)
     .await
     .unwrap();
+    for (id, name) in [(admin, "Admin One"), (other_admin, "Admin Two")] {
+        sqlx::query(
+            "INSERT INTO users (id, name, role, org_id, password_hash) \
+             VALUES ($1,$2,'org_admin',$3,'x')",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(org)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
     sqlx::query("INSERT INTO branches (id, org_id, name, code) VALUES ($1,$2,$3,$4)")
         .bind(branch)
         .bind(org)
@@ -198,7 +218,12 @@ pub(crate) async fn seed(pool: &PgPool, label: &str) -> Seeded {
     .await
     .unwrap();
 
-    Seeded { org, branch }
+    Seeded {
+        org,
+        branch,
+        admin,
+        other_admin,
+    }
 }
 
 pub(crate) async fn metrics_app(

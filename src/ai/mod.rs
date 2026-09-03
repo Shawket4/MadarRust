@@ -29,12 +29,14 @@
 //!     next step is a correction rather than a failed request.
 
 pub mod agent;
+pub mod compaction;
 pub mod gemini;
 pub mod groq;
 pub mod handlers;
 pub mod llm;
 pub mod prompt;
 pub mod routes;
+pub mod store;
 pub mod telemetry;
 pub mod tools;
 
