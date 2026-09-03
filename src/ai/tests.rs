@@ -1209,3 +1209,210 @@ async fn a_long_chat_reaches_the_model_as_a_summary_plus_a_window(pool: PgPool) 
     assert!(user_messages.contains(&"question 9".to_string()));
     assert!(!user_messages.contains(&"question 1".to_string()));
 }
+
+// ── Pseudonymisation ────────────────────────────────────────────────────────
+
+/// Records every byte sent to the model, so assertions are on what actually
+/// crossed the boundary rather than on the code that built it.
+///
+/// When it sees a result it answers using the `waiter` value it was SHOWN,
+/// whatever that turned out to be. Hardcoding a code would make the test
+/// depend on user-id ordering, and would pass for the wrong reason the moment
+/// the seed changed.
+struct Wiretap {
+    seen: Arc<std::sync::Mutex<Vec<String>>>,
+    /// The reply, with `{code}` replaced by the pseudonym it was shown.
+    template: String,
+}
+
+#[async_trait]
+impl LlmProvider for Wiretap {
+    async fn complete(&self, req: Completion<'_>) -> Result<Turn, ProviderError> {
+        let mut log = self.seen.lock().unwrap();
+        log.push(req.system.to_string());
+        for m in req.messages {
+            log.push(format!("{m:?}"));
+        }
+        drop(log);
+
+        let shown_code = req.messages.iter().find_map(|m| match m {
+            crate::ai::llm::Message::ToolResult { content, .. } => content
+                .get("rows")
+                .and_then(Value::as_array)
+                .and_then(|rows| rows.first())
+                .and_then(|row| row.get("waiter"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            _ => None,
+        });
+
+        Ok(match shown_code {
+            Some(code) => MockProvider::answer(&self.template.replace("{code}", &code)),
+            None if req
+                .messages
+                .iter()
+                .any(|m| matches!(m, crate::ai::llm::Message::ToolResult { .. })) =>
+            {
+                MockProvider::answer(&self.template.replace("{code}", ""))
+            }
+            None => MockProvider::call(
+                tools::QUERY_METRICS,
+                json!({
+                    "dataset": "orders",
+                    "dimensions": ["waiter"],
+                    "measures": ["revenue"],
+                    "period": { "preset": "all_time" }
+                }),
+            ),
+        })
+    }
+    fn name(&self) -> String {
+        "wiretap".into()
+    }
+}
+
+/// Seed a waiter and an order they took, so a `waiter` breakdown has a real
+/// person's name in it.
+async fn seed_waiter(pool: &PgPool, s: &crate::analytics::tests::Seeded, name: &str) -> Uuid {
+    let waiter = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO users (id, name, role, org_id, pin_hash) VALUES ($1,$2,'waiter',$3,'x')",
+    )
+    .bind(waiter)
+    .bind(name)
+    .bind(s.org)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE orders SET waiter_id = $1 WHERE branch_id = $2")
+        .bind(waiter)
+        .bind(s.branch)
+        .execute(pool)
+        .await
+        .unwrap();
+    waiter
+}
+
+#[sqlx::test]
+async fn a_staff_name_never_reaches_the_model(pool: PgPool) {
+    // The property, asserted over everything that crossed the wire: the model
+    // is given a code, and the merchant is given the name back.
+    let s = seed(&pool, "a").await;
+    seed_waiter(&pool, &s, "Ahmed Hassan").await;
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let app = app(
+        &pool,
+        Arc::new(Wiretap {
+            seen: seen.clone(),
+            // Replies with whatever code it was actually shown.
+            template: "{code} led on revenue.".into(),
+        }),
+    )
+    .await;
+    let token = org_admin_token_for(s.org, s.admin);
+    let body = ask_in(&app, &token, None, "who sold the most?").await;
+
+    let wire = seen.lock().unwrap().join("\n");
+    assert!(
+        wire.contains("E-"),
+        "the model was never shown a pseudonym: {wire}"
+    );
+    assert!(
+        !wire.contains("Ahmed Hassan"),
+        "a staff name reached the model: {wire}"
+    );
+
+    // ...and the merchant gets the real name in the prose.
+    assert!(
+        body["text"].as_str().unwrap().contains("Ahmed Hassan"),
+        "the name was not restored: {}",
+        body["text"]
+    );
+    // The rows the client renders were never pseudonymised — they do not pass
+    // through the model at all.
+    assert_eq!(body["results"][0]["rows"][0]["waiter"], "Ahmed Hassan");
+}
+
+#[sqlx::test]
+async fn business_names_still_reach_the_model(pool: PgPool) {
+    // Over-redaction is its own failure: without product and branch names the
+    // model cannot reason or answer at all.
+    let s = seed(&pool, "a").await;
+    let app = app(&pool, Arc::new(MockProvider::router())).await;
+    let token = org_admin_token_for(s.org, s.admin);
+    let body = ask_in(&app, &token, None, "top products").await;
+    // Product names come back intact through the whole pipeline.
+    assert_eq!(body["results"][0]["rows"][0]["product"], "Latte");
+}
+
+#[sqlx::test]
+async fn a_question_naming_a_colleague_is_pseudonymised_too(pool: PgPool) {
+    // The merchant's own words are the easiest way for a name to leak.
+    let s = seed(&pool, "a").await;
+    seed_waiter(&pool, &s, "Ahmed Hassan").await;
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let app = app(
+        &pool,
+        Arc::new(Wiretap {
+            seen: seen.clone(),
+            template: "{code} took 12 orders.".into(),
+        }),
+    )
+    .await;
+    let token = org_admin_token_for(s.org, s.admin);
+    ask_in(&app, &token, None, "how did Ahmed Hassan do last week?").await;
+
+    let wire = seen.lock().unwrap().join("\n");
+    assert!(
+        !wire.contains("Ahmed Hassan"),
+        "the question leaked a staff name: {wire}"
+    );
+}
+
+#[sqlx::test]
+async fn a_replayed_answer_does_not_leak_what_this_turn_protects(pool: PgPool) {
+    // Prior answers are STORED with real names, because that is what the
+    // merchant saw. Replaying them raw would undo the whole mechanism.
+    let s = seed(&pool, "a").await;
+    seed_waiter(&pool, &s, "Ahmed Hassan").await;
+    let db = crate::db::Db::for_org(&pool, s.org).await;
+    let id = crate::ai::store::create(&db, s.org, s.admin, "en", "who sold the most")
+        .await
+        .unwrap();
+    crate::ai::store::append_turn(
+        &db,
+        id,
+        s.org,
+        s.admin,
+        &crate::ai::store::TurnRecord {
+            question: "who sold the most".into(),
+            answer: Some("Ahmed Hassan led on revenue.".into()),
+            kind: "answer".into(),
+            specs: json!([{ "title": null, "preset_id": null,
+                            "spec": { "dataset": "orders", "dimensions": ["waiter"] } }]),
+            provider: Some("mock".into()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let app = app(
+        &pool,
+        Arc::new(Wiretap {
+            seen: seen.clone(),
+            template: "Same as before.".into(),
+        }),
+    )
+    .await;
+    let token = org_admin_token_for(s.org, s.admin);
+    ask_in(&app, &token, Some(id), "and last month?").await;
+
+    let wire = seen.lock().unwrap().join("\n");
+    assert!(
+        !wire.contains("Ahmed Hassan"),
+        "a replayed answer leaked a staff name: {wire}"
+    );
+}

@@ -19,6 +19,7 @@ use std::time::Instant;
 
 use serde_json::{Value, json};
 
+use crate::ai::pseudonym::Directory as Pseudonyms;
 use crate::analytics::spec::QuerySpec;
 
 use super::{
@@ -109,15 +110,19 @@ pub async fn run(
     // large and which the model does not need in order to answer the next
     // question. Cost per message therefore stays roughly flat as a conversation
     // grows, while a follow-up still gets the one thing it actually needs.
-    messages.push(Message::User(grounding.to_string()));
+    messages.push(Message::User(ctx.pseudonyms.redact_text(grounding)));
     for turn in history {
-        messages.push(Message::User(turn.question.clone()));
+        messages.push(Message::User(ctx.pseudonyms.redact_text(&turn.question)));
         messages.push(Message::Assistant {
-            text: Some(turn.replay()),
+            // Replayed answers are stored with REAL names, because that is
+            // what the merchant saw. They are re-substituted here so an
+            // earlier turn cannot leak what this turn is protecting.
+            text: Some(ctx.pseudonyms.redact_text(&turn.replay())),
             calls: Vec::new(),
         });
     }
-    messages.push(Message::User(question.to_string()));
+    // The merchant's own question can name a colleague ("how did Ahmed do?").
+    messages.push(Message::User(ctx.pseudonyms.redact_text(question)));
 
     let mut results: Vec<QueryData> = Vec::new();
 
@@ -141,7 +146,10 @@ pub async fn run(
             // sentence, just without a table.
             Turn::Text(t) => {
                 log.finished("text_fallback");
-                return Ok(AgentOutcome::Answer { text: t, results });
+                return Ok(AgentOutcome::Answer {
+                    text: ctx.pseudonyms.restore_text(&t),
+                    results,
+                });
             }
             Turn::Calls(_) => {
                 log.finished("empty_call_list");
@@ -181,11 +189,17 @@ pub async fn run(
             match tools::dispatch(ctx, &call.name, &call.args).await {
                 ToolOutcome::Answer(text) => {
                     log.finished("answered");
-                    return Ok(AgentOutcome::Answer { text, results });
+                    return Ok(AgentOutcome::Answer {
+                        // Put the real names back before the merchant sees it.
+                        text: ctx.pseudonyms.restore_text(&text),
+                        results,
+                    });
                 }
                 ToolOutcome::Clarify(question) => {
                     log.finished("clarified");
-                    return Ok(AgentOutcome::Clarify { question });
+                    return Ok(AgentOutcome::Clarify {
+                        question: ctx.pseudonyms.restore_text(&question),
+                    });
                 }
                 ToolOutcome::Info(v) => tool_results.push(tool_message(call, v)),
                 ToolOutcome::Error(e) => {
@@ -195,7 +209,7 @@ pub async fn run(
                     tool_results.push(tool_message(call, json!({ "error": e })));
                 }
                 ToolOutcome::Data(data) => {
-                    let payload = summarize_for_model(&data);
+                    let payload = summarize_for_model(&data, ctx.pseudonyms);
                     log.record_rows(data.result.row_count);
                     results.push(*data);
                     tool_results.push(tool_message(call, payload));
@@ -235,8 +249,17 @@ fn tool_message(call: &ToolCall, content: Value) -> Message {
 /// What the model sees of a result: the column metadata, the row count, and a
 /// sample. Enough to state a finding and quote figures; not the whole table,
 /// which the client already has.
-fn summarize_for_model(data: &QueryData) -> Value {
+fn summarize_for_model(data: &QueryData, pseudonyms: &Pseudonyms) -> Value {
     let mut v = data.result.to_model_json(tools::MODEL_ROW_SAMPLE);
+    // The ONLY place result rows are shown to a model. `data.result.rows` keeps
+    // the real names for the client, which never routes through the model.
+    if let Some(rows) = v.get_mut("rows").and_then(Value::as_array_mut) {
+        for row in rows.iter_mut() {
+            if let Some(obj) = row.as_object() {
+                *row = Value::Object(pseudonyms.redact_row(obj));
+            }
+        }
+    }
     if let Some(obj) = v.as_object_mut() {
         obj.insert("scope".into(), json!(data.scope.label));
         if let Some(unmatched) = &data.scope.unmatched_branch {
@@ -330,14 +353,14 @@ mod tests {
 
     #[test]
     fn an_empty_result_is_labelled_so_it_is_not_narrated_as_zero() {
-        let v = summarize_for_model(&data(0, None));
+        let v = summarize_for_model(&data(0, None), &Pseudonyms::default());
         let note = v["note"].as_str().unwrap();
         assert!(note.contains("do NOT report it as a zero"));
     }
 
     #[test]
     fn a_non_empty_result_carries_no_empty_note() {
-        let v = summarize_for_model(&data(3, None));
+        let v = summarize_for_model(&data(3, None), &Pseudonyms::default());
         assert!(v.get("note").is_none());
         assert_eq!(v["row_count"], 3);
         assert_eq!(v["scope"], "All branches (1)");
@@ -345,13 +368,13 @@ mod tests {
 
     #[test]
     fn an_unmatched_branch_becomes_a_warning_the_model_must_relay() {
-        let v = summarize_for_model(&data(2, Some("Alexandria")));
+        let v = summarize_for_model(&data(2, Some("Alexandria")), &Pseudonyms::default());
         assert!(v["warning"].as_str().unwrap().contains("Alexandria"));
     }
 
     #[test]
     fn the_model_sees_a_sample_not_the_whole_table() {
-        let v = summarize_for_model(&data(500, None));
+        let v = summarize_for_model(&data(500, None), &Pseudonyms::default());
         assert_eq!(v["rows"].as_array().unwrap().len(), tools::MODEL_ROW_SAMPLE);
         // ...but is told the real size, so it never says "40 products".
         assert_eq!(v["row_count"], 500);

@@ -1,7 +1,7 @@
 ---
 title: Employee Privacy Notice (Dawam staff app)
-version: 1.0
-effective: 2026-09-01
+version: 1.1
+effective: 2026-09-03
 ---
 
 # Employee Privacy Notice
@@ -75,6 +75,24 @@ to review it.
 - Your managers and HR staff at your employer, according to their permissions.
 - Madar staff only where needed for support and maintenance, under confidentiality.
 - We do **not** sell it, and we do **not** give it to advertisers.
+
+## The analytics assistant, and your name
+
+Your manager can ask the system questions in plain language — "who took the most orders last
+week", "who was late most often". Answering those involves sending the figures to an AI
+provider outside Egypt.
+
+**Your name is not sent.** Before anything leaves, names in the results are replaced with
+codes — you become `E-4`, and the provider only ever sees `E-4`. When the answer comes back,
+the code is turned back into your name so your manager reads something useful. The same
+substitution is applied to your manager's own question, so typing your name into the box
+does not send it either.
+
+This is done in the software, not as a promise about how the provider behaves: the name
+never reaches them, so there is nothing for them to keep.
+
+What *is* sent is the figure attached to the code — how many orders, how many minutes late.
+Your manager can already see that; the assistant does not widen who can.
 
 ## How long
 

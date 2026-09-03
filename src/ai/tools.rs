@@ -53,6 +53,9 @@ pub struct ToolCtx<'a> {
     pub selected_branch: Option<Uuid>,
     pub locale: &'a str,
     pub timezone: &'a str,
+    /// Staff-name map for this organization. Result rows and every piece of
+    /// text that reaches the model pass through it; see `ai::pseudonym`.
+    pub pseudonyms: &'a super::pseudonym::Directory,
 }
 
 /// A tool ran. `Error` is a normal, recoverable outcome.

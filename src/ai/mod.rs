@@ -35,6 +35,7 @@ pub mod groq;
 pub mod handlers;
 pub mod llm;
 pub mod prompt;
+pub mod pseudonym;
 pub mod routes;
 pub mod store;
 pub mod telemetry;

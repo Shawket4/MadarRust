@@ -312,6 +312,20 @@ pub async fn chat(
         condensed.as_deref(),
     );
 
+    // Built once per turn from the org's users, so a person's code is stable
+    // across every query in this turn AND across turns — a follow-up referring
+    // to "the second one" means the same person it meant before.
+    let pseudonyms = match super::pseudonym::Directory::load(&db).await {
+        Ok(d) => d,
+        Err(e) => {
+            // Failing OPEN here would send real staff names to the model, so it
+            // fails closed instead: an empty directory redacts every personal
+            // cell to an opaque marker rather than passing names through.
+            report::report(Failure::new("ai", "load_pseudonyms"), &e);
+            super::pseudonym::Directory::default()
+        }
+    };
+
     let tool_ctx = ToolCtx {
         db: &db,
         claims: &claims,
@@ -320,6 +334,7 @@ pub async fn chat(
         selected_branch: scope::header_branch_id(&req),
         locale: &locale,
         timezone: &clock.timezone,
+        pseudonyms: &pseudonyms,
     };
 
     let outcome = agent::run(

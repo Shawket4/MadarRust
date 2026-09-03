@@ -151,6 +151,32 @@ pub fn dataset(id: &str) -> Option<&'static Dataset> {
     DATASETS.iter().find(|d| d.id == id)
 }
 
+/// Joins that resolve a row to a PERSON — they all reach `users`.
+///
+/// A dimension hanging off one of these produces a staff member's real name,
+/// which is why [`PERSONAL_DIMENSIONS`] exists and why a test below derives one
+/// list from the other rather than trusting them to stay in step by hand.
+pub const PERSON_JOINS: &[&str] = &["waiter", "cashier", "teller", "employee"];
+
+/// Dimensions whose values are a person's name.
+///
+/// These are pseudonymised before any result reaches a language model — see
+/// `ai::pseudonym`. Nothing else in the registry names a person: `branch`,
+/// `product`, `category` and `ingredient` are business data the model needs in
+/// order to reason at all, and `department` / `job_title` are roles rather than
+/// people.
+///
+/// `supplier` is deliberately NOT here. A supplier is a company, and its name is
+/// commercial information rather than personal data; a merchant asking who they
+/// spend the most with expects to be told. Move it in if that judgement changes
+/// — this list is the only thing that decides it.
+pub const PERSONAL_DIMENSIONS: &[&str] = &["waiter", "cashier", "teller", "employee"];
+
+/// True when a result column carries a person's name.
+pub fn is_personal_dimension(column_key: &str) -> bool {
+    PERSONAL_DIMENSIONS.contains(&column_key)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared time dimensions
 //
@@ -390,6 +416,61 @@ const ORDERS_MEASURES: &[Meas] = &[
         kind: ColumnKind::Money,
         joins: &[],
         help: "Tips collected.",
+    },
+    Meas {
+        id: "tip_rate",
+        label: "Tip %",
+        expr: "ROUND(100.0 * SUM(o.tip_amount) / NULLIF(SUM(o.total_amount),0), 1)::float8",
+        kind: ColumnKind::Number,
+        joins: &[],
+        help: "Tips as a percentage of revenue — whether service is actually being rewarded, \
+               independent of how busy the period was.",
+    },
+    Meas {
+        id: "tipped_order_count",
+        label: "Tipped orders",
+        expr: "COUNT(*) FILTER (WHERE COALESCE(o.tip_amount,0) > 0)",
+        kind: ColumnKind::Count,
+        joins: &[],
+        help: "Orders that left a tip at all.",
+    },
+    Meas {
+        id: "avg_tip",
+        label: "Avg tip",
+        // Averaged over TIPPED orders only. Dividing by every order answers a
+        // different question and reads as a collapse in tipping whenever a
+        // quiet untipped shift lands in the period.
+        expr: "COALESCE(AVG(o.tip_amount) FILTER (WHERE COALESCE(o.tip_amount,0) > 0),0)::bigint",
+        kind: ColumnKind::Money,
+        joins: &[],
+        help: "Average tip on the orders that were tipped — not diluted by the ones that \
+               were not.",
+    },
+    Meas {
+        id: "cash_tip_total",
+        label: "Cash tips",
+        expr: "COALESCE(SUM(o.tip_amount) FILTER (WHERE o.tip_is_cash),0)",
+        kind: ColumnKind::Money,
+        joins: &[],
+        help: "Tips taken in cash. These leave the drawer rather than the bank, so they \
+               matter to the shift count as well as to payroll.",
+    },
+    Meas {
+        id: "refund_count",
+        label: "Refunds",
+        expr: "COUNT(*) FILTER (WHERE o.status = 'refunded')",
+        kind: ColumnKind::Count,
+        joins: &[],
+        help: "Orders refunded. Needs the status filter set to 'all' or 'refunded' to be \
+               non-zero, because 'sold' excludes them.",
+    },
+    Meas {
+        id: "refund_amount",
+        label: "Refunded value",
+        expr: "COALESCE(SUM(o.total_amount) FILTER (WHERE o.status = 'refunded'),0)",
+        kind: ColumnKind::Money,
+        joins: &[],
+        help: "Value of refunded orders.",
     },
     Meas {
         id: "delivery_fees",
@@ -2005,6 +2086,55 @@ mod tests {
                     f.default
                 );
             }
+        }
+    }
+
+    /// The drift guard for pseudonymisation.
+    ///
+    /// A new dimension that joins to `users` and is not listed as personal
+    /// would send staff names to a third-party model silently. Derived from the
+    /// join graph rather than maintained by hand, so it cannot be forgotten.
+    #[test]
+    fn every_person_valued_dimension_is_marked_personal() {
+        for d in DATASETS {
+            for dim in d.dims {
+                if dim.joins.iter().any(|j| PERSON_JOINS.contains(j)) {
+                    assert!(
+                        PERSONAL_DIMENSIONS.contains(&dim.id),
+                        "{}/{} resolves to a person's name but is not in \
+                         PERSONAL_DIMENSIONS — it would reach the model unpseudonymised",
+                        d.id,
+                        dim.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_personal_dimension_actually_exists() {
+        for id in PERSONAL_DIMENSIONS {
+            assert!(
+                DATASETS.iter().any(|d| d.dims.iter().any(|x| x.id == *id)),
+                "PERSONAL_DIMENSIONS names '{id}', which no dataset has"
+            );
+        }
+    }
+
+    #[test]
+    fn business_dimensions_are_not_treated_as_personal() {
+        // Over-marking is its own failure: the model needs product and branch
+        // names to reason ("Latte and Mocha are both drinks"), and replacing
+        // them with codes would make answers unusable.
+        for id in [
+            "branch",
+            "product",
+            "category",
+            "ingredient",
+            "supplier",
+            "department",
+        ] {
+            assert!(!is_personal_dimension(id), "{id} must not be pseudonymised");
         }
     }
 

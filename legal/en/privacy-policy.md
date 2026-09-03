@@ -1,7 +1,7 @@
 ---
 title: Privacy Policy
-version: 1.0
-effective: 2026-09-01
+version: 1.1
+effective: 2026-09-03
 ---
 
 # Privacy Policy
@@ -54,7 +54,7 @@ numbers** — only which method was used and the amount.
 - No advertising identifiers, no cross-app tracking, no ad networks.
 - No selling or renting of personal data.
 - No storage of card numbers.
-- No third-party AI services.
+- **No customer data is sent to any AI service.** See section 6.
 
 ## 4. Who we share data with
 
@@ -69,19 +69,41 @@ Where a restaurant asks us to send its order data to another system it uses — 
 an in-house shopping-mall reporting system — we do so **only on that restaurant's written
 instruction**. The restaurant is responsible for that disclosure.
 
-## 5. Where data is stored
+## 5. The analytics assistant
+
+Restaurant managers can ask questions about their own business in plain language — "what
+sold best last week", "which branch is busiest on Fridays" — and get an answer with the
+figures behind it. Producing that answer involves sending the manager's question and the
+resulting figures to an AI provider (see
+**[Sub-processors](/subprocessors.html)**).
+
+What this means for **you as a diner** is simple, and it is a deliberate design choice
+rather than a policy promise we ask you to take on trust: **no customer data can reach the
+assistant at all.** It can only ask for a fixed set of pre-written business measures —
+revenue, units sold, waiting times, stock levels and the like. There is no measure in the
+system that returns a customer's name, phone number, address or location, so there is
+nothing for it to send. The assistant cannot write its own queries and cannot reach data
+outside that fixed set.
+
+Staff names are handled separately and are described in the
+**[Employee Privacy Notice](/employee-privacy-notice.html)**.
+
+Questions and answers are stored so a manager can return to a conversation. They are kept
+with the restaurant's own account data and are deleted with it.
+
+## 6. Where data is stored
 
 Primary systems are hosted in Europe. Backups are held on separate infrastructure under our
 control. Some providers listed under Sub-processors operate outside Egypt; that is
 identified there.
 
-## 6. How long we keep it
+## 7. How long we keep it
 
 Set out in full in the **[Data Retention Schedule](/data-retention.html)**. In summary:
 order records are kept for **5 years** to meet accounting and tax requirements; account data
 is kept while the account is active; diagnostic error reports are deleted after **30 days**.
 
-## 7. Your rights
+## 8. Your rights
 
 Under Egyptian data protection law you may request access to your data, its correction or
 deletion, and may object to how it is used. Because the restaurant is the controller of
@@ -89,19 +111,19 @@ order data, requests about orders go to them and we assist.
 
 To delete a Madar account, see **[Delete your account](/delete-account.html)**.
 
-## 8. Security
+## 9. Security
 
 How the platform is secured is described in **[Security](/security.html)**.
 
-## 9. Children
+## 10. Children
 
 Madar is a tool for businesses and their customers. It is not directed at children.
 
-## 10. Changes
+## 11. Changes
 
 We will notify material changes through the product. Every previous version of this policy
 remains available with its effective date.
 
-## 11. Contact
+## 12. Contact
 
 **privacy@madar-pos.cloud**
