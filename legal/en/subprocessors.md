@@ -16,6 +16,23 @@ notified at least **30 days** before a new one is added.
 | WhatsApp / Meta | Delivering one-time codes and order updates | Customer phone number, message text | Outside Egypt |
 | Google (Gemini) | Answering managers' plain-language questions about their own business | The manager's question and aggregated business figures — **no customer data**; staff names are replaced with codes before sending | Outside Egypt |
 
+### Current configuration (as of 3 September 2026)
+
+Stated concretely so this page can be checked against the running system rather
+than taken on trust.
+
+| | |
+|---|---|
+| Status | **Enabled** |
+| Provider and model | Google, `gemini-3.1-flash-lite` |
+| Sent per question | The question text, the merchant's branch names, the current date and timezone, and up to **40 rows** of the aggregated result |
+| Model calls per question | At most 4, and at most 3 database queries |
+| Sampling | Deterministic (temperature 0) |
+| Customer data sent | **None.** No measure in the system returns one |
+| Staff names sent | **None.** Replaced with `E-1`, `E-2` … before sending |
+| Conversations | Stored so a manager can reopen them; kept with the merchant's account and deleted with it. Only the questions, the answers and the queries are stored — never the result rows |
+| Turning it off | Removing the provider credential disables it entirely; nothing is then sent to any AI service |
+
 ## Run on our own infrastructure
 
 These functions are commonly outsourced. We do not outsource them, so the data stays under

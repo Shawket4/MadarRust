@@ -104,6 +104,19 @@ footer a{color:var(--muted)}
 <tr><td>WhatsApp / Meta</td><td>Delivering one-time codes and order updates</td><td>Customer phone number, message text</td><td>Outside Egypt</td></tr>
 <tr><td>Google (Gemini)</td><td>Answering managers' plain-language questions about their own business</td><td>The manager's question and aggregated business figures — <strong>no customer data</strong>; staff names are replaced with codes before sending</td><td>Outside Egypt</td></tr>
 </tbody></table></div>
+<h3 id="current-configuration-as-of-3-september-2026">Current configuration (as of 3 September 2026)</h3>
+<p>Stated concretely so this page can be checked against the running system rather than taken on trust.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody>
+<tr><td>Status</td><td><strong>Enabled</strong></td></tr>
+<tr><td>Provider and model</td><td>Google, <code>gemini-3.1-flash-lite</code></td></tr>
+<tr><td>Sent per question</td><td>The question text, the merchant's branch names, the current date and timezone, and up to <strong>40 rows</strong> of the aggregated result</td></tr>
+<tr><td>Model calls per question</td><td>At most 4, and at most 3 database queries</td></tr>
+<tr><td>Sampling</td><td>Deterministic (temperature 0)</td></tr>
+<tr><td>Customer data sent</td><td><strong>None.</strong> No measure in the system returns one</td></tr>
+<tr><td>Staff names sent</td><td><strong>None.</strong> Replaced with <code>E-1</code>, <code>E-2</code> … before sending</td></tr>
+<tr><td>Conversations</td><td>Stored so a manager can reopen them; kept with the merchant's account and deleted with it. Only the questions, the answers and the queries are stored — never the result rows</td></tr>
+<tr><td>Turning it off</td><td>Removing the provider credential disables it entirely; nothing is then sent to any AI service</td></tr>
+</tbody></table></div>
 <h2 id="run-on-our-own-infrastructure">Run on our own infrastructure</h2>
 <p>These functions are commonly outsourced. We do not outsource them, so the data stays under our control:</p>
 <ul><li><strong>Error and crash monitoring</strong> — self-hosted. Diagnostic data is not sent to any monitoring vendor, is configured to exclude personal data, and is deleted after 30 days.</li><li><strong>Route and distance calculation</strong> — self-hosted. Delivery addresses are <strong>not</strong> sent to a mapping company.</li><li><strong>Short links</strong> — self-hosted.</li><li><strong>WhatsApp gateway</strong> — self-hosted, though messages necessarily transit Meta.</li><li><strong>Backups</strong> — held on infrastructure we control, encrypted at rest.</li></ul>

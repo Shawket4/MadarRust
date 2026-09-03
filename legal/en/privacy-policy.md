@@ -89,7 +89,13 @@ Staff names are handled separately and are described in the
 **[Employee Privacy Notice](/employee-privacy-notice.html)**.
 
 Questions and answers are stored so a manager can return to a conversation. They are kept
-with the restaurant's own account data and are deleted with it.
+with the restaurant's own account data and are deleted with it. The result rows themselves
+are never stored — reopening a conversation re-runs the query, so the figures shown are
+current rather than a stale copy.
+
+The provider currently in use, the model, and exactly what is sent on each question are
+listed under **[Sub-processors](/subprocessors.html)**, so the statements above can be
+checked against the running system rather than taken on trust.
 
 ## 6. Where data is stored
 
