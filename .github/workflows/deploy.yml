@@ -52,6 +52,95 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # ── Publish the legal documents ──────────────────────────────────────────────
+  # https://legal.madar-pos.cloud — Markdown in `legal/en` rendered to static HTML.
+  #
+  # Runs on EVERY push and deliberately does NOT depend on `build-push`. Three
+  # reasons:
+  #
+  #   1. These documents are a compliance surface. When the privacy policy in git
+  #      says one thing and the published page says another, the published page
+  #      is what a regulator reads and what a user relies on. Until now this was
+  #      a manual `scp` that someone had to remember, and it drifted: the policy
+  #      claimed "No third-party AI services" for the whole time the assistant
+  #      was live in production.
+  #   2. It must not be blocked by a Rust build. A legal correction should ship
+  #      even when the backend does not compile — those failures are unrelated,
+  #      and coupling them means the worse outcome (a false published statement)
+  #      waits on the less urgent one.
+  #   3. It is cheap. `build.py` is dependency-free and the output is a handful
+  #      of small files, so running it unconditionally costs seconds and removes
+  #      the drift entirely rather than relying on a paths filter being right.
+  publish-legal:
+    name: publish legal docs
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Render the documents
+        run: python3 legal/build.py
+
+      # A rendering failure that produces an EMPTY or partial site would happily
+      # scp over a working one. Check the output before it can reach the box.
+      - name: Verify the rendered output
+        run: |
+          set -e
+          cd legal/dist
+          for doc in privacy-policy terms-of-service dpa subprocessors \
+                     employee-privacy-notice data-retention delete-account \
+                     security index; do
+            [ -s "$doc.html" ] || { echo "::error::$doc.html missing or empty"; exit 1; }
+          done
+          # Each page carries its own <title>; a truncated render loses it.
+          grep -q "<title" privacy-policy.html || { echo "::error::privacy-policy.html looks truncated"; exit 1; }
+          echo "✅ $(ls *.html | wc -l) documents rendered"
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "${{ secrets.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+
+      - name: Publish to the VPS
+        run: |
+          set -e
+          # One rolling backup, replaced each run. Git is the real history; this
+          # is just so a bad publish can be undone without waiting for CI.
+          ssh -i ~/.ssh/deploy_key -p ${{ secrets.SSH_PORT }} \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+            'rm -rf /var/www/madar-legal.prev && cp -a /var/www/madar-legal /var/www/madar-legal.prev 2>/dev/null || true'
+
+          scp -i ~/.ssh/deploy_key -P ${{ secrets.SSH_PORT }} \
+            legal/dist/*.html legal/dist/*.gz \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/var/www/madar-legal/
+
+          # scp preserves ownership only on files that already existed. A NEW
+          # document would land root-owned and inconsistent with the rest, so
+          # normalise every time.
+          ssh -i ~/.ssh/deploy_key -p ${{ secrets.SSH_PORT }} \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+            'chown -R www-data:www-data /var/www/madar-legal && chmod -R a+r /var/www/madar-legal'
+
+      # Verified over HTTPS against the LIVE site, and specifically against the
+      # gzip variant: `gzip_static` is on, so a stale `.gz` keeps serving the old
+      # text while the plain `.html` looks correct — which is invisible to any
+      # check that does not ask for compression.
+      - name: Verify the published site
+        run: |
+          set -e
+          for doc in privacy-policy subprocessors employee-privacy-notice; do
+            for enc in "" "--compressed"; do
+              code=$(curl -s -o /tmp/live.html -w "%{http_code}" $enc \
+                "https://legal.madar-pos.cloud/$doc.html" --max-time 20)
+              [ "$code" = "200" ] || { echo "::error::$doc.html returned $code"; exit 1; }
+              grep -q "<title" /tmp/live.html || { echo "::error::$doc.html served without a title"; exit 1; }
+            done
+          done
+          echo "✅ legal.madar-pos.cloud serving the current documents"
+
   # ── Deploy to VPS ────────────────────────────────────────────────────────────
   deploy:
     name: deploy to VPS
