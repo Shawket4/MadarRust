@@ -44402,7 +44402,7 @@
       },
       "HistoryTurn": {
         "type": "object",
-        "description": "One earlier exchange, in compact form. The result tables are never replayed —\nthe question and the answer are all a follow-up (\"and last month?\") needs.",
+        "description": "One earlier exchange, in compact form.\n\nResult *tables* are never replayed — they are large, and the model does not\nneed last week's rows to answer this week's question. What it does need is\nthe **query** that answered before, which is why `spec` is here: a follow-up\nlike \"and last month?\" or \"same thing for Marina\" is that spec with one\nfield changed. Prose alone forces the model to re-derive the whole query\nfrom its own summary, which is exactly where a follow-up silently drifts\ninto answering a different question.\n\nClients get the spec back on every result block (`results[].spec`) and\nshould echo it here.",
         "required": [
           "question"
         ],
@@ -44416,6 +44416,17 @@
           },
           "question": {
             "type": "string"
+          },
+          "spec": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/QuerySpec",
+                "description": "The query that produced that answer, from `results[].spec`. Optional so\nan older client, or a turn that ran no query, still works."
+              }
+            ]
           }
         }
       },

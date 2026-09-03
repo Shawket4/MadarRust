@@ -482,3 +482,139 @@ async fn two_merchants_asking_the_same_question_never_share_an_answer(pool: PgPo
     assert_eq!(ra["results"][0]["rows"][0]["branch"], "Branch a");
     assert_eq!(rb["results"][0]["rows"][0]["branch"], "Branch b");
 }
+
+// ── Conversational context ──────────────────────────────────────────────────
+
+/// Answers by reusing the spec it finds replayed from the previous turn,
+/// changing only the period. If the transcript does not carry a prior spec it
+/// errors, so this provider cannot pass by accident.
+struct FollowUp {
+    seen_prior_spec: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl LlmProvider for FollowUp {
+    async fn complete(&self, req: Completion<'_>) -> Result<Turn, ProviderError> {
+        // Answer once a query has run in THIS turn.
+        if req
+            .messages
+            .iter()
+            .any(|m| matches!(m, crate::ai::llm::Message::ToolResult { .. }))
+        {
+            return Ok(MockProvider::answer(
+                "And here it is for the earlier period.",
+            ));
+        }
+
+        // Find the replayed spec from the previous turn.
+        let replayed = req.messages.iter().find_map(|m| match m {
+            crate::ai::llm::Message::Assistant { text: Some(t), .. } if t.contains("[ran ") => {
+                let start = t.find('{')?;
+                let end = t.rfind('}')?;
+                Some(t[start..=end].to_string())
+            }
+            _ => None,
+        });
+        let Some(raw) = replayed else {
+            return Err(ProviderError::Parse(
+                "no prior spec in the transcript — a follow-up cannot resolve".into(),
+            ));
+        };
+        self.seen_prior_spec.fetch_add(1, Ordering::SeqCst);
+
+        // Reuse it verbatim, changing only the window — which is exactly what
+        // "and last month?" means.
+        let mut spec: Value = serde_json::from_str(&raw).expect("the replayed spec must parse");
+        spec["period"] = json!({ "preset": "all_time" });
+        Ok(MockProvider::call(tools::QUERY_METRICS, spec))
+    }
+
+    fn name(&self) -> String {
+        "follow-up".into()
+    }
+}
+
+#[sqlx::test]
+async fn a_follow_up_resolves_against_the_previous_query(pool: PgPool) {
+    // The property this is really testing: a conversation is contextual across
+    // messages, not only within one. Replaying prose alone would leave the
+    // model reconstructing its own previous query from its own summary.
+    let s = seed(&pool, "a").await;
+    let seen = Arc::new(AtomicUsize::new(0));
+    let app = app(
+        &pool,
+        Arc::new(FollowUp {
+            seen_prior_spec: seen.clone(),
+        }),
+    )
+    .await;
+
+    let prior = json!({
+        "dataset": "order_items",
+        "dimensions": ["product"],
+        "measures": ["units_sold", "item_revenue"],
+        "filters": { "status": "sold" },
+        "period": { "preset": "last_month" },
+        "sort": { "measure": "item_revenue", "dir": "desc" },
+        "limit": 5
+    });
+
+    let req = test::TestRequest::post()
+        .uri("/ai/chat")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", org_admin_token(s.org)),
+        ))
+        .set_json(json!({
+            "question": "and for all time?",
+            "history": [{
+                "question": "top products last month",
+                "answer": "Latte led on revenue.",
+                "spec": prior,
+            }]
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+    let body: Value = test::read_body_json(resp).await;
+
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        1,
+        "the previous turn's spec never reached the transcript"
+    );
+    assert_eq!(body["kind"], "answer");
+
+    // The follow-up kept every part of the earlier query except the window —
+    // dataset, breakdown, measures, filters and sort all carried over.
+    let spec = &body["results"][0]["spec"];
+    assert_eq!(spec["dataset"], "order_items");
+    assert_eq!(spec["dimensions"][0], "product");
+    assert_eq!(spec["sort"]["measure"], "item_revenue");
+    assert_eq!(spec["period"]["preset"], "all_time");
+    // ...and it ran against real data.
+    assert_eq!(body["results"][0]["rows"][0]["product"], "Latte");
+}
+
+#[sqlx::test]
+async fn a_turn_that_ran_no_query_replays_without_one(pool: PgPool) {
+    // A clarification carries no spec. Replaying it must not fabricate one or
+    // break the transcript.
+    let s = seed(&pool, "a").await;
+    let app = app(&pool, Arc::new(MockProvider::router())).await;
+    let req = test::TestRequest::post()
+        .uri("/ai/chat")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", org_admin_token(s.org)),
+        ))
+        .set_json(json!({
+            "question": "top products",
+            "history": [{ "question": "how is it going", "answer": "Which figure did you mean?" }]
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["kind"], "answer");
+}

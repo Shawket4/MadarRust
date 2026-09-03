@@ -19,6 +19,8 @@ use std::time::Instant;
 
 use serde_json::{Value, json};
 
+use crate::analytics::spec::QuerySpec;
+
 use super::{
     llm::{Completion, LlmProvider, Message, ProviderError, ToolCall, Turn},
     prompt,
@@ -34,6 +36,46 @@ pub const MAX_STEPS: usize = 4;
 pub const MAX_QUERIES: usize = 3;
 /// Output cap per model call.
 const MAX_TOKENS: u32 = 700;
+/// Named in the replay line so the model is told which tool a prior spec goes
+/// to rather than left to infer it.
+const QUERY_TOOL: &str = tools::QUERY_METRICS;
+
+/// One earlier exchange, as the agent replays it.
+///
+/// The `spec` is what makes a conversation actually conversational. Replaying
+/// only prose means "and last month?" is answered by a model reconstructing its
+/// own previous query from its own previous summary — which works for the
+/// simple cases and drifts badly for anything carrying filters, a sort
+/// direction, or a non-obvious dataset. Replaying the spec makes a follow-up
+/// what it should be: copy the last query, change one field.
+pub struct PriorTurn {
+    pub question: String,
+    pub answer: String,
+    pub spec: Option<QuerySpec>,
+}
+
+impl PriorTurn {
+    /// The spec as compact JSON, for the transcript and the cache key. `None`
+    /// when the turn ran no query (a clarification, a refusal).
+    pub fn spec_digest(&self) -> Option<String> {
+        self.spec
+            .as_ref()
+            .and_then(|s| serde_json::to_string(s).ok())
+    }
+
+    /// How the turn is replayed to the model: what was said, plus the exact
+    /// call that produced it.
+    fn replay(&self) -> String {
+        match self.spec_digest() {
+            Some(spec) => format!(
+                "{}\n[ran {QUERY_TOOL} with {spec} — to follow up, reuse this and change only \
+                 what the new question asks for]",
+                self.answer
+            ),
+            None => self.answer.clone(),
+        }
+    }
+}
 
 /// What the turn produced. Every variant is a *successful* HTTP response: a
 /// question the assistant cannot answer is a conversational outcome, not a 400.
@@ -56,20 +98,22 @@ pub async fn run(
     provider: &dyn LlmProvider,
     ctx: &ToolCtx<'_>,
     grounding: &str,
-    history: &[(String, String)],
+    history: &[PriorTurn],
     question: &str,
     log: &mut TurnLog,
 ) -> Result<AgentOutcome, ProviderError> {
     let mut messages: Vec<Message> = Vec::with_capacity(history.len() * 2 + 2 + MAX_STEPS * 2);
 
-    // Grounding first, then a compact replay of earlier turns — the question and
-    // what was answered, never the result tables. Per-message cost then stays
-    // flat as a conversation grows.
+    // Grounding first, then a compact replay of earlier turns: the question, the
+    // answer, and the SPEC that produced it — never the result tables, which are
+    // large and which the model does not need in order to answer the next
+    // question. Cost per message therefore stays roughly flat as a conversation
+    // grows, while a follow-up still gets the one thing it actually needs.
     messages.push(Message::User(grounding.to_string()));
-    for (q, a) in history {
-        messages.push(Message::User(q.clone()));
+    for turn in history {
+        messages.push(Message::User(turn.question.clone()));
         messages.push(Message::Assistant {
-            text: Some(a.clone()),
+            text: Some(turn.replay()),
             calls: Vec::new(),
         });
     }

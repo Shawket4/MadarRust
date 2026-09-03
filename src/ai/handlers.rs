@@ -39,14 +39,28 @@ const MAX_QUESTION_LEN: usize = 1000;
 /// Prior turns kept. Bounds per-message cost however long a chat runs.
 const MAX_HISTORY: usize = 6;
 
-/// One earlier exchange, in compact form. The result tables are never replayed —
-/// the question and the answer are all a follow-up ("and last month?") needs.
+/// One earlier exchange, in compact form.
+///
+/// Result *tables* are never replayed — they are large, and the model does not
+/// need last week's rows to answer this week's question. What it does need is
+/// the **query** that answered before, which is why `spec` is here: a follow-up
+/// like "and last month?" or "same thing for Marina" is that spec with one
+/// field changed. Prose alone forces the model to re-derive the whole query
+/// from its own summary, which is exactly where a follow-up silently drifts
+/// into answering a different question.
+///
+/// Clients get the spec back on every result block (`results[].spec`) and
+/// should echo it here.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct HistoryTurn {
     pub question: String,
     /// What the assistant replied. Optional so a client can send a partial log.
     #[serde(default)]
     pub answer: Option<String>,
+    /// The query that produced that answer, from `results[].spec`. Optional so
+    /// an older client, or a turn that ran no query, still works.
+    #[serde(default)]
+    pub spec: Option<QuerySpec>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -194,12 +208,16 @@ pub async fn chat(
     let locale = crate::analytics::handlers::normalize_locale(body.locale.as_deref());
     let mut log = TurnLog::new(&provider.name(), &locale, question);
 
-    let mut history: Vec<(String, String)> = body
+    let mut history: Vec<agent::PriorTurn> = body
         .history
         .clone()
         .unwrap_or_default()
         .into_iter()
-        .map(|t| (t.question, t.answer.unwrap_or_default()))
+        .map(|t| agent::PriorTurn {
+            question: t.question,
+            answer: t.answer.unwrap_or_default(),
+            spec: t.spec,
+        })
         .collect();
     if history.len() > MAX_HISTORY {
         history.drain(0..history.len() - MAX_HISTORY);
@@ -281,7 +299,7 @@ pub async fn chat(
 fn cache_key(
     accessible: &[scope::BranchRef],
     locale: &str,
-    history: &[(String, String)],
+    history: &[agent::PriorTurn],
     question: &str,
 ) -> String {
     use std::hash::{Hash, Hasher};
@@ -289,9 +307,13 @@ fn cache_key(
     for b in accessible {
         b.id.hash(&mut h);
     }
-    for (q, a) in history {
-        q.hash(&mut h);
-        a.hash(&mut h);
+    for turn in history {
+        turn.question.hash(&mut h);
+        turn.answer.hash(&mut h);
+        // The prior spec changes what a follow-up resolves to, so two
+        // conversations that differ only in what was previously run must not
+        // share a cached answer.
+        turn.spec_digest().hash(&mut h);
     }
     format!("{:x}|{locale}|{question}", h.finish())
 }
@@ -339,12 +361,30 @@ mod tests {
         assert_ne!(cache_key(&a, "en", &[], "q"), cache_key(&a, "ar", &[], "q"));
         assert_ne!(
             cache_key(&a, "en", &[], "and last month?"),
-            cache_key(
-                &a,
-                "en",
-                &[("revenue".into(), "12 EGP".into())],
-                "and last month?"
-            )
+            cache_key(&a, "en", &[prior_turn(None)], "and last month?")
+        );
+    }
+
+    fn prior_turn(spec: Option<QuerySpec>) -> agent::PriorTurn {
+        agent::PriorTurn {
+            question: "revenue".into(),
+            answer: "12 EGP".into(),
+            spec,
+        }
+    }
+
+    #[test]
+    fn the_previous_query_is_part_of_the_cache_key() {
+        // Two conversations that differ only in what was previously RUN resolve
+        // a follow-up differently, so they must not share a cached answer.
+        let a = vec![branch(Uuid::new_v4())];
+        let spec = QuerySpec {
+            dataset: "orders".into(),
+            ..Default::default()
+        };
+        assert_ne!(
+            cache_key(&a, "en", &[prior_turn(None)], "and last month?"),
+            cache_key(&a, "en", &[prior_turn(Some(spec))], "and last month?")
         );
     }
 
