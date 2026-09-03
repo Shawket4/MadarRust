@@ -565,11 +565,10 @@ mod tests {
             .max_age(3600)
             .allowed_origin("https://dashboard.madar-pos.cloud");
 
-        let app = test::init_service(
-            App::new()
-                .wrap(cors)
-                .route("/orders", web::post().to(|| async { HttpResponse::Ok().finish() })),
-        )
+        let app = test::init_service(App::new().wrap(cors).route(
+            "/orders",
+            web::post().to(|| async { HttpResponse::Ok().finish() }),
+        ))
         .await;
 
         // Every header the dashboard and the SDKs actually send.

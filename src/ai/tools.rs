@@ -174,6 +174,50 @@ fn build_tool_defs() -> Vec<ToolDef> {
     ]
 }
 
+/// JSON Schema for the `filters` map.
+///
+/// Every filter across every dataset is named EXPLICITLY, with its allowed
+/// values as an enum, rather than declared as a free-form
+/// `additionalProperties` map.
+///
+/// Two reasons, and the first is not optional:
+///
+///   1. **Gemini rejects `additionalProperties`.** Its function-declaration
+///      schema is a restricted subset of OpenAPI 3.0, and sending that keyword
+///      fails the whole request with `Unknown name "additionalProperties"` —
+///      taking every tool down with it, not just this field.
+///   2. It is simply better. The model now sees the real filter names and the
+///      exact values each accepts, instead of a map it has to guess the keys
+///      of. A wrong value becomes impossible to express rather than a
+///      round-trip through a rejection.
+///
+/// Ids are unique across datasets by construction (`status` is the same shared
+/// [`Filter`] wherever it appears), which a test below enforces — two filters
+/// sharing an id with different values would silently offer the model the wrong
+/// enum.
+fn filters_schema() -> Value {
+    let mut properties = serde_json::Map::new();
+    for ds in schema::DATASETS {
+        for f in ds.filters {
+            properties.entry(f.id.to_string()).or_insert_with(|| {
+                json!({
+                    "type": "string",
+                    "enum": f.values(),
+                    "description": f.help,
+                })
+            });
+        }
+    }
+    json!({
+        "type": "object",
+        "description": "Filters to apply. Only those valid for the chosen dataset are \
+            accepted; the system prompt lists which. Defaults apply when omitted — \
+            notably, sales already exclude voided and refunded orders, so ask for \
+            status 'all' or 'voided' if you want those.",
+        "properties": properties,
+    })
+}
+
 fn period_schema() -> Value {
     json!({
         "type": "object",
@@ -217,13 +261,7 @@ fn query_spec_schema(dataset_ids: &[&str]) -> Value {
                 "description": "What to compute. Leave empty for the dataset's headline \
                     measures. The first one drives sorting."
             },
-            "filters": {
-                "type": "object", "additionalProperties": { "type": "string" },
-                "description": "Filter id to value, e.g. {\"status\": \"voided\"}. Each \
-                    dataset's filters and their allowed values are in the system prompt. \
-                    Defaults apply when omitted — notably, sales already exclude voided \
-                    and refunded orders."
-            },
+            "filters": filters_schema(),
             "period": period_schema(),
             "sort": {
                 "type": "object",
@@ -433,6 +471,104 @@ async fn execute_spec(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Keywords Gemini's function-declaration schema does NOT accept.
+    ///
+    /// Its schema is a restricted subset of OpenAPI 3.0, and an unsupported
+    /// keyword fails the ENTIRE request — every tool goes down, not just the
+    /// field carrying it, and the merchant sees a raw 400 from the provider.
+    /// That is exactly what `additionalProperties` on the `filters` map did in
+    /// production.
+    ///
+    /// This is a build-time guard because the failure is invisible until a real
+    /// request is made against a real provider: the schema is valid JSON, valid
+    /// JSON Schema, and accepted by the OpenAI-style transports.
+    const GEMINI_UNSUPPORTED: &[&str] = &[
+        "additionalProperties",
+        "$ref",
+        "$schema",
+        "oneOf",
+        "allOf",
+        "not",
+        "patternProperties",
+        "const",
+        "definitions",
+    ];
+
+    fn walk<'a>(v: &'a Value, path: &str, found: &mut Vec<(String, String)>) {
+        match v {
+            Value::Object(map) => {
+                for (k, child) in map {
+                    if GEMINI_UNSUPPORTED.contains(&k.as_str()) {
+                        found.push((format!("{path}.{k}"), k.clone()));
+                    }
+                    walk(child, &format!("{path}.{k}"), found);
+                }
+            }
+            Value::Array(items) => {
+                for (i, child) in items.iter().enumerate() {
+                    walk(child, &format!("{path}[{i}]"), found);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn no_tool_schema_uses_a_keyword_gemini_rejects() {
+        let mut found = Vec::new();
+        for t in tool_defs() {
+            walk(&t.parameters, t.name, &mut found);
+        }
+        assert!(
+            found.is_empty(),
+            "these would make Gemini reject the whole request: {found:?}"
+        );
+    }
+
+    #[test]
+    fn every_filter_id_offers_the_same_values_wherever_it_appears() {
+        // The filters schema declares each id ONCE, taking the first
+        // definition it finds. Two datasets sharing an id with different
+        // allowed values would silently offer the model the wrong enum.
+        use std::collections::HashMap;
+        let mut seen: HashMap<&str, Vec<&str>> = HashMap::new();
+        for ds in schema::DATASETS {
+            for f in ds.filters {
+                let values = f.values();
+                match seen.get(f.id) {
+                    Some(prev) => assert_eq!(
+                        prev, &values,
+                        "filter '{}' has different values on dataset '{}'",
+                        f.id, ds.id
+                    ),
+                    None => {
+                        seen.insert(f.id, values);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_filters_schema_names_every_filter_with_its_values() {
+        let defs = tool_defs();
+        let filters = &defs[0].parameters["properties"]["filters"]["properties"];
+        // Every filter in the registry is offered by name.
+        for ds in schema::DATASETS {
+            for f in ds.filters {
+                let entry = &filters[f.id];
+                assert!(!entry.is_null(), "filter '{}' is not in the schema", f.id);
+                let offered: Vec<String> = entry["enum"]
+                    .as_array()
+                    .expect("an enum of allowed values")
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_string())
+                    .collect();
+                assert_eq!(offered, f.values(), "filter '{}' offers wrong values", f.id);
+            }
+        }
+    }
 
     #[test]
     fn every_tool_declares_a_valid_object_schema() {
