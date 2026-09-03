@@ -683,6 +683,97 @@
         ]
       }
     },
+    "/ai/chat/stream": {
+      "post": {
+        "tags": [
+          "ai"
+        ],
+        "operationId": "chat_stream",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AiChatRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Progress frames (`started`, `thinking`, `querying`, `result`) followed by exactly one terminal frame (`answer` or `error`). The `answer` frame's `response` is byte-identical to what POST /ai/chat returns, so a client may ignore every progress frame and still be correct.",
+            "content": {
+              "text/event-stream": {}
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/ai/conversations": {
       "get": {
         "tags": [
@@ -40555,6 +40646,135 @@
             }
           }
         }
+      },
+      "ChatFrame": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Sent first. Carries the conversation id when RESUMING one, so a client\ncan bind the stream immediately; `null` when starting a new conversation,\nbecause it is created lazily on the first turn that produces something —\nthe id then arrives on the `answer` frame.",
+            "required": [
+              "event"
+            ],
+            "properties": {
+              "conversation_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
+              "event": {
+                "type": "string",
+                "enum": [
+                  "started"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A model call is in flight. `step` counts from 1.",
+            "required": [
+              "step",
+              "event"
+            ],
+            "properties": {
+              "event": {
+                "type": "string",
+                "enum": [
+                  "thinking"
+                ]
+              },
+              "step": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A query is about to run. Carries what it is, not its results.",
+            "required": [
+              "dataset",
+              "event"
+            ],
+            "properties": {
+              "dataset": {
+                "type": "string"
+              },
+              "event": {
+                "type": "string",
+                "enum": [
+                  "querying"
+                ]
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A query came back. The block is identical to one in the final payload.",
+            "required": [
+              "block",
+              "event"
+            ],
+            "properties": {
+              "block": {
+                "$ref": "#/components/schemas/ResultBlock"
+              },
+              "event": {
+                "type": "string",
+                "enum": [
+                  "result"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The finished turn — the same body `/ai/chat` returns.",
+            "required": [
+              "response",
+              "event"
+            ],
+            "properties": {
+              "event": {
+                "type": "string",
+                "enum": [
+                  "answer"
+                ]
+              },
+              "response": {
+                "$ref": "#/components/schemas/AiChatResponse"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The turn failed. A client should render this, not retry blindly.",
+            "required": [
+              "message",
+              "event"
+            ],
+            "properties": {
+              "event": {
+                "type": "string",
+                "enum": [
+                  "error"
+                ]
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "description": "One frame of a streamed turn.\n\nEvery variant except `Answer`/`Clarify`/`Incomplete` is progress and may be\nignored. Deliberately coarse: emitting the model's partial tokens would mean\nstreaming text that has not been through pseudonym restoration yet, and a\nhalf-restored name is exactly what must never render."
       },
       "CheckInRequest": {
         "type": "object",

@@ -68,6 +68,7 @@ use utoipa::{
 paths(
         // ── ai analytics chat ────────────────────────────────────────
         crate::ai::handlers::chat,
+        crate::ai::stream::chat_stream,
         crate::ai::handlers::list_conversations,
         crate::ai::handlers::get_conversation,
         crate::ai::handlers::rename_conversation,
@@ -475,6 +476,7 @@ paths(
         crate::ai::handlers::AiChatKind,
         crate::ai::handlers::HistoryTurn,
         crate::ai::handlers::ResultBlock,
+        crate::ai::stream::ChatFrame,
         crate::ai::handlers::ConversationList,
         crate::ai::handlers::RenameConversationRequest,
         crate::ai::store::ConversationSummary,

@@ -163,6 +163,25 @@ fn claims_of(req: &HttpRequest) -> Result<Claims, AppError> {
         .ok_or_else(|| AppError::Unauthorized("Missing claims".into()))
 }
 
+/// Borrowing variant, for emitting a block before the turn has finished.
+pub fn to_block_ref(d: &QueryData) -> ResultBlock {
+    ResultBlock {
+        title: d.title.clone(),
+        preset_id: d.preset_id.clone(),
+        spec: d.spec.clone(),
+        columns: d.result.columns.clone(),
+        rows: d.result.rows.clone(),
+        row_count: d.result.row_count,
+        truncated: d.result.truncated,
+        grain: d.result.grain,
+        viz: d.result.viz,
+        facet_by: d.result.facet_by.map(str::to_string),
+        period_from: d.result.period.from.map(|t| t.to_rfc3339()),
+        period_to: d.result.period.to.map(|t| t.to_rfc3339()),
+        scope: d.scope.clone(),
+    }
+}
+
 fn to_block(d: QueryData) -> ResultBlock {
     ResultBlock {
         title: d.title,
@@ -179,6 +198,250 @@ fn to_block(d: QueryData) -> ResultBlock {
         period_to: d.result.period.to.map(|t| t.to_rfc3339()),
         scope: d.scope,
     }
+}
+
+/// Everything a turn needs, resolved before any model call.
+///
+/// Extracted so `/ai/chat` and `/ai/chat/stream` run the *same* preparation.
+/// Two endpoints that each assembled their own context would drift, and the
+/// thing that drifts first is always a scoping or redaction step.
+pub struct PreparedTurn {
+    pub provider: std::sync::Arc<dyn super::llm::LlmProvider>,
+    pub question: String,
+    pub locale: String,
+    pub org_id: Uuid,
+    pub user_id: Uuid,
+    pub conversation_id: Option<Uuid>,
+    pub history: Vec<agent::PriorTurn>,
+    pub condensed: Option<String>,
+    pub accessible: Vec<scope::BranchRef>,
+    pub timezone: String,
+    pub tz: chrono_tz::Tz,
+    pub grounding: String,
+    pub pseudonyms: super::pseudonym::Directory,
+    pub cache_key: String,
+    /// A cached response for exactly this turn, when one exists.
+    pub cached: Option<AiChatResponse>,
+}
+
+/// Validate, authorize and assemble a turn. Everything that can fail cheaply
+/// fails here, before a stream opens or a model is called.
+pub async fn prepare_turn(
+    db: &Db,
+    claims: &Claims,
+    req: &HttpRequest,
+    body: &AiChatRequest,
+    state: &AiState,
+) -> Result<PreparedTurn, AppError> {
+    let question = body.question.trim();
+    if question.is_empty() {
+        return Err(AppError::BadRequest("question cannot be empty".into()));
+    }
+    if question.chars().count() > MAX_QUESTION_LEN {
+        return Err(AppError::BadRequest(format!(
+            "question is too long (max {MAX_QUESTION_LEN} characters)"
+        )));
+    }
+
+    let provider = state
+        .provider
+        .clone()
+        .ok_or_else(|| AppError::ServiceUnavailable("AI analytics is not configured".into()))?;
+
+    let locale = crate::analytics::handlers::normalize_locale(body.locale.as_deref());
+    let org_id = claims
+        .org_id()
+        .ok_or_else(|| AppError::Forbidden("AI analytics requires an organization".into()))?;
+    let user_id = claims.user_id();
+
+    // A named conversation is loaded from the server; otherwise fall back to
+    // whatever window the client supplied. The server path is what makes a chat
+    // resumable and its context unlimited-but-compacted — a client-supplied
+    // window can be neither, because it can only ever hold what the client
+    // chose to re-upload.
+    let (conversation_id, condensed, mut history) = match body.conversation_id {
+        Some(id) => {
+            store::ensure_owned(db, id, user_id).await?;
+            let ctx =
+                store::replay_context(db, id, user_id, compaction::MAX_VERBATIM_TURNS).await?;
+            let turns: Vec<agent::PriorTurn> = ctx
+                .turns
+                .iter()
+                .map(|t| agent::PriorTurn {
+                    question: t.question.clone(),
+                    answer: t.answer.clone().unwrap_or_default(),
+                    spec: store::primary_spec(t),
+                })
+                .collect();
+            (Some(id), ctx.summary, turns)
+        }
+        None => {
+            let turns: Vec<agent::PriorTurn> = body
+                .history
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|t| agent::PriorTurn {
+                    question: t.question,
+                    answer: t.answer.unwrap_or_default(),
+                    spec: t.spec,
+                })
+                .collect();
+            (None, None, turns)
+        }
+    };
+    if history.len() > MAX_HISTORY_CEILING {
+        history.drain(0..history.len() - MAX_HISTORY_CEILING);
+    }
+
+    let clock = scope::org_clock(db).await?;
+    let accessible = scope::accessible_branches(db, claims).await?;
+
+    // Cache key is scoped by the caller's BRANCH SET rather than their user id:
+    // two managers with identical access asking the same question share a hit,
+    // where a user-keyed cache would serve neither. Locale and the conversation
+    // window are included, so a follow-up is never answered from a different
+    // context.
+    let key = cache_key(
+        &accessible,
+        &locale,
+        condensed.as_deref(),
+        &history,
+        question,
+    );
+    let cached = state.cache.get(&key).await;
+
+    let now = chrono::Utc::now();
+    let today = now.with_timezone(&clock.tz).date_naive().to_string();
+    let branch_names: Vec<String> = accessible.iter().map(|b| b.name.clone()).collect();
+    let grounding = prompt::grounding(
+        &today,
+        &clock.timezone,
+        &locale,
+        &branch_names,
+        condensed.as_deref(),
+    );
+
+    // Built once per turn from the org's users, so a person's code is stable
+    // across every query in this turn AND across turns — a follow-up referring
+    // to "the second one" means the same person it meant before.
+    let pseudonyms = match super::pseudonym::Directory::load(db).await {
+        Ok(d) => d,
+        Err(e) => {
+            // Failing OPEN here would send real staff names to the model, so it
+            // fails closed instead: an empty directory redacts every personal
+            // cell to an opaque marker rather than passing names through.
+            report::report(Failure::new("ai", "load_pseudonyms"), &e);
+            super::pseudonym::Directory::default()
+        }
+    };
+
+    let _ = req;
+    Ok(PreparedTurn {
+        provider,
+        question: question.to_string(),
+        locale,
+        org_id,
+        user_id,
+        conversation_id,
+        history,
+        condensed,
+        accessible,
+        timezone: clock.timezone,
+        tz: clock.tz,
+        grounding,
+        pseudonyms,
+        cache_key: key,
+        cached,
+    })
+}
+
+/// Persist the turn, trigger compaction, cache, and build the response body.
+///
+/// Shared by both endpoints for the same reason `prepare_turn` is: the storage
+/// and caching rules are part of the contract, not part of the transport.
+pub async fn finish_turn(
+    db: &Db,
+    state: &AiState,
+    _claims: &Claims,
+    prepared: &PreparedTurn,
+    outcome: AgentOutcome,
+    provider: &dyn super::llm::LlmProvider,
+) -> AiChatResponse {
+    let kind = match outcome {
+        AgentOutcome::Answer { text, results } => AiChatKind::Answer {
+            text,
+            results: results.into_iter().map(to_block).collect(),
+        },
+        AgentOutcome::Clarify { question } => AiChatKind::Clarify { question },
+        AgentOutcome::Exhausted { text, results } => AiChatKind::Incomplete {
+            text,
+            results: results.into_iter().map(to_block).collect(),
+        },
+    };
+
+    // A conversation is created lazily on the first message that produced
+    // something, so a rejected or empty question does not litter the list.
+    //
+    // Persistence failures are reported but do NOT fail the turn: the merchant
+    // has their answer, and losing it from the history is a far smaller harm
+    // than replacing a correct answer with a 500.
+    let conversation_id = match prepared.conversation_id {
+        Some(id) => Some(id),
+        None => match store::create(
+            db,
+            prepared.org_id,
+            prepared.user_id,
+            &prepared.locale,
+            &prepared.question,
+        )
+        .await
+        {
+            Ok(id) => Some(id),
+            Err(e) => {
+                report::report(Failure::new("ai", "create_conversation"), &e);
+                None
+            }
+        },
+    };
+    if let Some(id) = conversation_id {
+        let record = store::TurnRecord {
+            question: prepared.question.clone(),
+            answer: Some(kind.reply_text()),
+            kind: kind.name().to_string(),
+            specs: kind.specs_json(),
+            provider: Some(provider.name()),
+        };
+        match store::append_turn(db, id, prepared.org_id, prepared.user_id, &record).await {
+            Ok(seq) => {
+                // Fold older turns into the running summary once the window has
+                // slid past them. Spawned, so this message does not pay for it.
+                if seq > compaction::VERBATIM_TURNS {
+                    if let Some(p) = state.provider.clone() {
+                        compaction::spawn(db.clone(), p, id);
+                    }
+                }
+            }
+            Err(e) => report::report(Failure::new("ai", "append_turn"), &e),
+        }
+    }
+
+    let response = AiChatResponse {
+        outcome: kind,
+        conversation_id,
+        provider: provider.name(),
+        timezone: prepared.timezone.clone(),
+    };
+
+    // A clarifying question is not cached: it is a prompt for input, and caching
+    // it would answer the follow-up with the same question again.
+    if !matches!(response.outcome, AiChatKind::Clarify { .. }) {
+        state
+            .cache
+            .insert(prepared.cache_key.clone(), response.clone())
+            .await;
+    }
+    response
 }
 
 #[utoipa::path(
@@ -212,204 +475,55 @@ pub async fn chat(
         ));
     }
 
-    let question = body.question.trim();
-    if question.is_empty() {
-        return Err(AppError::BadRequest("question cannot be empty".into()));
-    }
-    if question.chars().count() > MAX_QUESTION_LEN {
-        return Err(AppError::BadRequest(format!(
-            "question is too long (max {MAX_QUESTION_LEN} characters)"
-        )));
-    }
-
-    let provider = state
-        .provider
-        .as_ref()
-        .ok_or_else(|| AppError::ServiceUnavailable("AI analytics is not configured".into()))?;
-
-    let locale = crate::analytics::handlers::normalize_locale(body.locale.as_deref());
-    let mut log = TurnLog::new(&provider.name(), &locale, question);
-
-    let org_id = claims.org_id().expect("checked above");
-    let user_id = claims.user_id();
-
-    // A named conversation is loaded from the server; otherwise fall back to
-    // whatever window the client supplied. The server path is what makes a chat
-    // resumable and its context unlimited-but-compacted — a client-supplied
-    // window can be neither, because it can only ever hold what the client
-    // chose to re-upload.
-    let (conversation_id, condensed, mut history) = match body.conversation_id {
-        Some(id) => {
-            store::ensure_owned(&db, id, user_id).await?;
-            let ctx =
-                store::replay_context(&db, id, user_id, compaction::MAX_VERBATIM_TURNS).await?;
-            let turns: Vec<agent::PriorTurn> = ctx
-                .turns
-                .iter()
-                .map(|t| agent::PriorTurn {
-                    question: t.question.clone(),
-                    answer: t.answer.clone().unwrap_or_default(),
-                    spec: store::primary_spec(t),
-                })
-                .collect();
-            (Some(id), ctx.summary, turns)
-        }
-        None => {
-            let turns: Vec<agent::PriorTurn> = body
-                .history
-                .clone()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|t| agent::PriorTurn {
-                    question: t.question,
-                    answer: t.answer.unwrap_or_default(),
-                    spec: t.spec,
-                })
-                .collect();
-            (None, None, turns)
-        }
-    };
-    if history.len() > MAX_HISTORY_CEILING {
-        history.drain(0..history.len() - MAX_HISTORY_CEILING);
-    }
-
-    let clock = scope::org_clock(&db).await?;
-    let accessible = scope::accessible_branches(&db, &claims).await?;
-
-    // Cache key is scoped by the caller's BRANCH SET rather than their user id:
-    // two managers with identical access asking the same question share a hit,
-    // where a user-keyed cache would serve neither. Locale and the conversation
-    // window are included, so a follow-up is never answered from a different
-    // context.
-    let cache_key = cache_key(
-        &accessible,
-        &locale,
-        condensed.as_deref(),
-        &history,
-        question,
+    let prepared = prepare_turn(&db, &claims, &req, &body, &state).await?;
+    let mut log = TurnLog::new(
+        &prepared.provider.name(),
+        &prepared.locale,
+        &prepared.question,
     );
-    if let Some(hit) = state.cache.get(&cache_key).await {
+
+    if let Some(hit) = prepared.cached.clone() {
         log.served_from_cache();
-        log.emit(started.elapsed(), question);
+        log.emit(started.elapsed(), &prepared.question);
         return Ok(HttpResponse::Ok().json(hit));
     }
 
     let compile_ctx = CompileCtx {
-        tz: clock.tz,
+        tz: prepared.tz,
         now: chrono::Utc::now(),
     };
-    let today = compile_ctx
-        .now
-        .with_timezone(&clock.tz)
-        .date_naive()
-        .to_string();
-    let branch_names: Vec<String> = accessible.iter().map(|b| b.name.clone()).collect();
-    let grounding = prompt::grounding(
-        &today,
-        &clock.timezone,
-        &locale,
-        &branch_names,
-        condensed.as_deref(),
-    );
-
-    // Built once per turn from the org's users, so a person's code is stable
-    // across every query in this turn AND across turns — a follow-up referring
-    // to "the second one" means the same person it meant before.
-    let pseudonyms = match super::pseudonym::Directory::load(&db).await {
-        Ok(d) => d,
-        Err(e) => {
-            // Failing OPEN here would send real staff names to the model, so it
-            // fails closed instead: an empty directory redacts every personal
-            // cell to an opaque marker rather than passing names through.
-            report::report(Failure::new("ai", "load_pseudonyms"), &e);
-            super::pseudonym::Directory::default()
-        }
-    };
-
     let tool_ctx = ToolCtx {
         db: &db,
         claims: &claims,
         compile: &compile_ctx,
-        accessible: &accessible,
+        accessible: &prepared.accessible,
         selected_branch: scope::header_branch_id(&req),
-        locale: &locale,
-        timezone: &clock.timezone,
-        pseudonyms: &pseudonyms,
+        locale: &prepared.locale,
+        timezone: &prepared.timezone,
+        pseudonyms: &prepared.pseudonyms,
     };
 
     let outcome = agent::run(
-        provider.as_ref(),
+        prepared.provider.as_ref(),
         &tool_ctx,
-        &grounding,
-        &history,
-        question,
+        &prepared.grounding,
+        &prepared.history,
+        &prepared.question,
         &mut log,
     )
     .await?;
 
-    let kind = match outcome {
-        AgentOutcome::Answer { text, results } => AiChatKind::Answer {
-            text,
-            results: results.into_iter().map(to_block).collect(),
-        },
-        AgentOutcome::Clarify { question } => AiChatKind::Clarify { question },
-        AgentOutcome::Exhausted { text, results } => AiChatKind::Incomplete {
-            text,
-            results: results.into_iter().map(to_block).collect(),
-        },
-    };
+    let response = finish_turn(
+        &db,
+        &state,
+        &claims,
+        &prepared,
+        outcome,
+        prepared.provider.as_ref(),
+    )
+    .await;
 
-    // ── Persist ─────────────────────────────────────────────────────────────
-    // A conversation is created lazily on the first message that produced
-    // something, so a rejected or empty question does not litter the list.
-    //
-    // Persistence failures are reported but do NOT fail the turn: the merchant
-    // has their answer, and losing it from the history is a far smaller harm
-    // than replacing a correct answer with a 500.
-    let conversation_id = match conversation_id {
-        Some(id) => Some(id),
-        None => match store::create(&db, org_id, user_id, &locale, question).await {
-            Ok(id) => Some(id),
-            Err(e) => {
-                report::report(Failure::new("ai", "create_conversation"), &e);
-                None
-            }
-        },
-    };
-    if let Some(id) = conversation_id {
-        let record = store::TurnRecord {
-            question: question.to_string(),
-            answer: Some(kind.reply_text()),
-            kind: kind.name().to_string(),
-            specs: kind.specs_json(),
-            provider: Some(provider.name()),
-        };
-        match store::append_turn(&db, id, org_id, user_id, &record).await {
-            Ok(seq) => {
-                // Fold older turns into the running summary once the window has
-                // slid past them. Spawned, so this message does not pay for it —
-                // otherwise one message in seven would be mysteriously slow.
-                if seq > compaction::VERBATIM_TURNS {
-                    compaction::spawn(db.clone(), provider.clone(), id);
-                }
-            }
-            Err(e) => report::report(Failure::new("ai", "append_turn"), &e),
-        }
-    }
-
-    let response = AiChatResponse {
-        outcome: kind,
-        conversation_id,
-        provider: provider.name(),
-        timezone: clock.timezone.clone(),
-    };
-
-    // A clarifying question is not cached: it is a prompt for input, and caching
-    // it would answer the follow-up with the same question again.
-    if !matches!(response.outcome, AiChatKind::Clarify { .. }) {
-        state.cache.insert(cache_key, response.clone()).await;
-    }
-    log.emit(started.elapsed(), question);
+    log.emit(started.elapsed(), &prepared.question);
     Ok(HttpResponse::Ok().json(response))
 }
 

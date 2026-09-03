@@ -1416,3 +1416,195 @@ async fn a_replayed_answer_does_not_leak_what_this_turn_protects(pool: PgPool) {
         "a replayed answer leaked a staff name: {wire}"
     );
 }
+
+// ── Streaming ───────────────────────────────────────────────────────────────
+
+/// Parse an SSE body into `(event, data)` pairs.
+fn parse_sse(body: &str) -> Vec<(String, Value)> {
+    body.split("\n\n")
+        .filter(|f| !f.trim().is_empty())
+        .filter_map(|frame| {
+            let mut name = None;
+            let mut data = None;
+            for line in frame.lines() {
+                if let Some(v) = line.strip_prefix("event: ") {
+                    name = Some(v.trim().to_string());
+                } else if let Some(v) = line.strip_prefix("data: ") {
+                    data = serde_json::from_str(v.trim()).ok();
+                }
+            }
+            Some((name?, data?))
+        })
+        .collect()
+}
+
+#[sqlx::test]
+async fn a_streamed_turn_reports_progress_then_the_same_answer(pool: PgPool) {
+    // The contract: progress frames are decoration, and the terminal `answer`
+    // frame carries exactly what POST /ai/chat would have returned. A client may
+    // ignore every progress frame and still be correct.
+    let s = seed(&pool, "a").await;
+    let app = app(&pool, Arc::new(MockProvider::router())).await;
+    let token = org_admin_token_for(s.org, s.admin);
+
+    let req = test::TestRequest::post()
+        .uri("/ai/chat/stream")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(json!({ "question": "top products" }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+    assert_eq!(
+        resp.headers().get("content-type").unwrap(),
+        "text/event-stream"
+    );
+
+    let body = String::from_utf8(test::read_body(resp).await.to_vec()).unwrap();
+    let frames = parse_sse(&body);
+    let names: Vec<&str> = frames.iter().map(|(n, _)| n.as_str()).collect();
+
+    // `started` first, so a client can store the conversation id before
+    // anything else arrives; exactly one terminal frame, last.
+    assert_eq!(names.first(), Some(&"started"));
+    assert_eq!(names.last(), Some(&"answer"));
+    assert_eq!(names.iter().filter(|n| **n == "answer").count(), 1);
+    assert!(names.contains(&"result"), "no result frame: {names:?}");
+    // Real progress, not just a split payload: the loop reports each model call
+    // and each query as it happens.
+    assert!(names.contains(&"thinking"), "no thinking frame: {names:?}");
+    assert!(names.contains(&"querying"), "no querying frame: {names:?}");
+    // ...and a result arrives BEFORE the answer, which is the point of streaming.
+    let result_at = names.iter().position(|n| *n == "result").unwrap();
+    let answer_at = names.iter().position(|n| *n == "answer").unwrap();
+    assert!(result_at < answer_at, "{names:?}");
+
+    let (_, answer) = frames.last().unwrap();
+    assert_eq!(answer["response"]["kind"], "answer");
+    assert_eq!(
+        answer["response"]["results"][0]["preset_id"],
+        "top_products"
+    );
+    // A NEW conversation has no id yet at `started` — it is created lazily on
+    // the first turn that produced something, so a failed question does not
+    // litter the list. The id arrives on `answer`.
+    assert!(frames[0].1["conversation_id"].is_null());
+    assert!(answer["response"]["conversation_id"].is_string());
+}
+
+#[sqlx::test]
+async fn a_resumed_stream_reports_its_conversation_up_front(pool: PgPool) {
+    // Resuming, the id IS known before any work starts, so a client can bind
+    // the stream to the open conversation immediately.
+    let s = seed(&pool, "a").await;
+    let app = app(&pool, Arc::new(MockProvider::router())).await;
+    let token = org_admin_token_for(s.org, s.admin);
+    let first = ask_in(&app, &token, None, "top products").await;
+    let id: Uuid = serde_json::from_value(first["conversation_id"].clone()).unwrap();
+
+    let req = test::TestRequest::post()
+        .uri("/ai/chat/stream")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(json!({ "question": "and by branch?", "conversation_id": id }))
+        .to_request();
+    let body = String::from_utf8(
+        test::read_body(test::call_service(&app, req).await)
+            .await
+            .to_vec(),
+    )
+    .unwrap();
+    let frames = parse_sse(&body);
+    assert_eq!(frames[0].0, "started");
+    assert_eq!(frames[0].1["conversation_id"], json!(id));
+}
+
+#[sqlx::test]
+async fn a_streamed_result_frame_matches_the_final_payload(pool: PgPool) {
+    // The chart is emitted before the sentence, so it can render while the model
+    // is still writing. It must be the SAME block, not an approximation.
+    let s = seed(&pool, "a").await;
+    let app = app(&pool, Arc::new(MockProvider::router())).await;
+    let token = org_admin_token_for(s.org, s.admin);
+
+    let req = test::TestRequest::post()
+        .uri("/ai/chat/stream")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(json!({ "question": "revenue by branch" }))
+        .to_request();
+    let body = String::from_utf8(
+        test::read_body(test::call_service(&app, req).await)
+            .await
+            .to_vec(),
+    )
+    .unwrap();
+    let frames = parse_sse(&body);
+
+    let streamed = frames
+        .iter()
+        .find(|(n, _)| n == "result")
+        .map(|(_, d)| d["block"].clone())
+        .expect("a result frame");
+    let final_block = frames
+        .iter()
+        .find(|(n, _)| n == "answer")
+        .map(|(_, d)| d["response"]["results"][0].clone())
+        .expect("an answer frame");
+    assert_eq!(streamed, final_block);
+}
+
+#[sqlx::test]
+async fn a_streamed_turn_still_pseudonymises(pool: PgPool) {
+    // Streaming must not become a way around the redaction path.
+    let s = seed(&pool, "a").await;
+    seed_waiter(&pool, &s, "Ahmed Hassan").await;
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let app = app(
+        &pool,
+        Arc::new(Wiretap {
+            seen: seen.clone(),
+            template: "{code} led on revenue.".into(),
+        }),
+    )
+    .await;
+    let token = org_admin_token_for(s.org, s.admin);
+
+    let req = test::TestRequest::post()
+        .uri("/ai/chat/stream")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(json!({ "question": "who sold the most?" }))
+        .to_request();
+    let body = String::from_utf8(
+        test::read_body(test::call_service(&app, req).await)
+            .await
+            .to_vec(),
+    )
+    .unwrap();
+
+    let wire = seen.lock().unwrap().join("\n");
+    assert!(!wire.contains("Ahmed Hassan"), "the stream leaked a name");
+    // ...and the merchant still gets the real name back.
+    assert!(body.contains("Ahmed Hassan"), "the name was not restored");
+}
+
+#[sqlx::test]
+async fn a_streamed_turn_rejects_a_bad_request_before_the_stream_opens(pool: PgPool) {
+    // A validation failure should be an HTTP error the client can handle, not
+    // an `error` frame buried inside a 200 it has to parse.
+    let s = seed(&pool, "a").await;
+    let app = app(&pool, Arc::new(MockProvider::router())).await;
+    let token = org_admin_token_for(s.org, s.admin);
+
+    let req = test::TestRequest::post()
+        .uri("/ai/chat/stream")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(json!({ "question": "   " }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 400);
+
+    // ...and an unknown conversation is a 404, not a stream that says nothing.
+    let req = test::TestRequest::post()
+        .uri("/ai/chat/stream")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(json!({ "question": "revenue", "conversation_id": Uuid::new_v4() }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 404);
+}

@@ -11,6 +11,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         web::scope("/ai")
             .wrap(JwtMiddleware)
             .route("/chat", web::post().to(handlers::chat))
+            // The same turn, streamed. Progress frames then one terminal frame
+            // whose payload is identical to /chat's body.
+            .route("/chat/stream", web::post().to(super::stream::chat_stream))
             // Stored conversations. Private to the user who created them —
             // see `ai::store` for the double fence (RLS + user_id).
             .route(

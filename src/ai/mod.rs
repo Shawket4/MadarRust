@@ -38,6 +38,7 @@ pub mod prompt;
 pub mod pseudonym;
 pub mod routes;
 pub mod store;
+pub mod stream;
 pub mod telemetry;
 pub mod tools;
 

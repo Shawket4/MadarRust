@@ -94,6 +94,19 @@ pub enum AgentOutcome {
     },
 }
 
+/// What the loop reports as it works, when anyone is listening.
+///
+/// Kept as a trait object rather than a channel so the non-streaming endpoint
+/// pays nothing: it passes `None` and no progress is ever constructed.
+pub trait Progress: Send + Sync {
+    /// A model call is starting. `step` counts from 1.
+    fn thinking(&self, step: usize);
+    /// A query is about to run.
+    fn querying(&self, title: Option<&str>, dataset: &str);
+    /// A query came back.
+    fn result(&self, data: &QueryData);
+}
+
 /// Run one turn of the conversation.
 pub async fn run(
     provider: &dyn LlmProvider,
@@ -102,6 +115,20 @@ pub async fn run(
     history: &[PriorTurn],
     question: &str,
     log: &mut TurnLog,
+) -> Result<AgentOutcome, ProviderError> {
+    run_with_progress(provider, ctx, grounding, history, question, log, None).await
+}
+
+/// [`run`], reporting progress to `progress` as it goes.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_with_progress(
+    provider: &dyn LlmProvider,
+    ctx: &ToolCtx<'_>,
+    grounding: &str,
+    history: &[PriorTurn],
+    question: &str,
+    log: &mut TurnLog,
+    progress: Option<&dyn Progress>,
 ) -> Result<AgentOutcome, ProviderError> {
     let mut messages: Vec<Message> = Vec::with_capacity(history.len() * 2 + 2 + MAX_STEPS * 2);
 
@@ -127,6 +154,9 @@ pub async fn run(
     let mut results: Vec<QueryData> = Vec::new();
 
     for step in 0..MAX_STEPS {
+        if let Some(p) = progress {
+            p.thinking(step + 1);
+        }
         let started = Instant::now();
         let turn = provider
             .complete(Completion {
@@ -186,6 +216,16 @@ pub async fn run(
                 continue;
             }
 
+            if let (Some(p), true) = (progress, is_query_tool(&call.name)) {
+                p.querying(
+                    call.args.get("preset").and_then(Value::as_str),
+                    call.args
+                        .get("dataset")
+                        .and_then(Value::as_str)
+                        .unwrap_or("preset"),
+                );
+            }
+
             match tools::dispatch(ctx, &call.name, &call.args).await {
                 ToolOutcome::Answer(text) => {
                     log.finished("answered");
@@ -209,6 +249,12 @@ pub async fn run(
                     tool_results.push(tool_message(call, json!({ "error": e })));
                 }
                 ToolOutcome::Data(data) => {
+                    // Emitted the moment the query returns, so a chart can
+                    // render while the model is still writing the sentence
+                    // about it — which is the whole reason to stream.
+                    if let Some(p) = progress {
+                        p.result(&data);
+                    }
                     let payload = summarize_for_model(&data, ctx.pseudonyms);
                     log.record_rows(data.result.row_count);
                     results.push(*data);
