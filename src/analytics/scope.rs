@@ -61,9 +61,23 @@ pub async fn org_clock(db: &Db) -> Result<OrgClock, AppError> {
     let row: Option<(String,)> = sqlx::query_as("SELECT timezone::text FROM organizations LIMIT 1")
         .fetch_optional(db.get_ref())
         .await?;
-    let timezone = row
-        .map(|r| r.0)
-        .unwrap_or_else(|| "Africa/Cairo".to_string());
+    let timezone = match row {
+        Some((tz,)) => tz,
+        None => {
+            // The pool is RLS-scoped to a real org, so exactly one row must be
+            // visible here. Zero means OUR data is wrong — a deleted org with
+            // live tokens, or a tenant pool bound to an id that no longer
+            // exists. This path answers 200 with a plausible default, so it is
+            // invisible to every status-based reporting rule; it has to be
+            // reported explicitly or it is never seen at all.
+            crate::observability::report::report_data_fault(
+                "analytics",
+                "org_clock",
+                &"no organization row visible on a tenant-scoped pool",
+            );
+            "Africa/Cairo".to_string()
+        }
+    };
     let tz = super::spec::parse_tz(&timezone);
     Ok(OrgClock { timezone, tz })
 }

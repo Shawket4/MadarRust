@@ -85,11 +85,15 @@ pub fn spawn(pool: PgPool, interval_secs: u64) {
         let mut tick = tokio::time::interval(Duration::from_secs(interval_secs.max(30)));
         loop {
             tick.tick().await;
-            match gc_expired(&pool).await {
-                Ok(n) if n > 0 => tracing::info!("demo gc: purged {n} expired org(s)"),
-                Ok(_) => {}
-                Err(e) => tracing::warn!("demo gc sweep failed: {e}"),
-            }
+            // Guarded at the job boundary — see `observability::report::guarded_tick`.
+            crate::observability::report::guarded_tick("demo_gc", || async {
+                let purged = gc_expired(&pool).await?;
+                if purged > 0 {
+                    tracing::info!("demo gc: purged {purged} expired org(s)");
+                }
+                Ok::<(), crate::errors::AppError>(())
+            })
+            .await;
         }
     });
 }

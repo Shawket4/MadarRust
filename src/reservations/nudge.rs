@@ -41,9 +41,11 @@ pub fn spawn(pool: PgPool, hub: BranchEventHub) {
         let mut ticker = tokio::time::interval(Duration::from_secs(secs));
         loop {
             ticker.tick().await;
-            if let Err(e) = run_tick(&pool, &hub).await {
-                tracing::warn!(error = %e, "reservation nudge tick failed");
-            }
+            // Guarded at the job boundary — see `observability::report::guarded_tick`.
+            crate::observability::report::guarded_tick("reservation_nudge", || {
+                run_tick(&pool, &hub)
+            })
+            .await;
         }
     });
 }

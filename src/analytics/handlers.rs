@@ -24,6 +24,7 @@ use crate::{
     auth::jwt::Claims,
     db::Db,
     errors::{AppError, AppErrorResponse},
+    observability::report,
     permissions::checker::check_permission,
 };
 
@@ -237,6 +238,15 @@ pub async fn query(
         .collect()
         .await;
 
+    // One event for a round where EVERYTHING failed — the shape of "the
+    // database is down", which forty per-widget issues would describe no
+    // better. Partial failure is normal and is already visible per widget.
+    let failed = results
+        .iter()
+        .filter(|(_, o)| matches!(o, WidgetOutcome::Error { .. }))
+        .count();
+    report::report_round("metrics", "query_batch", results.len(), failed);
+
     Ok(HttpResponse::Ok().json(MetricsQueryResponse {
         scope: scope_info,
         timezone: clock.timezone.clone(),
@@ -300,7 +310,16 @@ async fn run_widget(
                 "This metric took too long. Narrow the period or the breakdown.".to_string()
             }
             other => {
-                tracing::warn!(widget = %w.key, "metric query failed: {other}");
+                // This endpoint answers 200 with a per-widget error, so nothing
+                // downstream — not the middleware, not a status-keyed client —
+                // would ever see this. It is reported explicitly for that
+                // reason. A rejected SPEC is not reported: that is the caller
+                // asking for something that does not exist, not a fault.
+                report::report(
+                    report::Failure::new("metrics", "widget_query")
+                        .with("dataset", serde_json::Value::from(spec.dataset.clone())),
+                    &other,
+                );
                 "This metric could not be computed.".to_string()
             }
         })?;

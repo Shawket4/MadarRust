@@ -87,12 +87,22 @@ pub fn send_message(pool: PgPool, phone: String, message: String) {
         if let Some(h) = auth {
             req = req.header("Authorization", h);
         }
+        // Fire-and-forget means nobody is waiting for this, so a failure here
+        // reaches no HTTP status and no user — it was previously a log line and
+        // nothing else. A customer silently not receiving their OTP is exactly
+        // the class of failure worth an issue.
+        use crate::observability::report::{Failure, report};
         match req.send().await {
             Ok(resp) if resp.status().is_success() => {}
             Ok(resp) => {
-                tracing::warn!(status = %resp.status(), "WhatsApp gateway returned non-2xx")
+                let status = resp.status();
+                report(
+                    Failure::new("whatsapp", "send_message")
+                        .with("status", serde_json::Value::from(status.as_u16())),
+                    &format!("gateway returned {status}"),
+                );
             }
-            Err(e) => tracing::warn!(error = %e, "WhatsApp send failed"),
+            Err(e) => report(Failure::new("whatsapp", "send_message"), &e),
         }
     });
 }

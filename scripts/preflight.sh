@@ -58,6 +58,15 @@ hdr "clippy"
 if cargo clippy --all-targets 2>&1 | tail -15; [ "${PIPESTATUS[0]}" = 0 ]; then echo "✓ clippy"
 elif [ "${STRICT:-0}" = 1 ]; then FAILED+=("clippy"); else WARNED+=("clippy"); fi
 
+# The Sentry redaction lists are a compliance control that exists once per
+# surface, in three languages. Three copies drift, and the failure mode is
+# silent — two surfaces keep the privacy promise and one quietly stops. This is
+# a hard gate, not a warning: it costs nothing and it is the only thing that
+# makes the drift visible.
+hdr "sentry scrub parity  (GATE)"
+if scripts/check-scrub-parity.sh; then echo "✓ redaction lists identical across surfaces"
+else FAILED+=("scrub-parity"); fi
+
 hdr "cargo test --lib  (GATE)"
 if ! pg_up; then
   echo "✗ Postgres not reachable at \$DATABASE_URL ($DATABASE_URL)"; FAILED+=("test: no DB")

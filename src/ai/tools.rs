@@ -414,8 +414,14 @@ async fn execute_spec(
             )
         }
         Err(e) => {
-            // The model gets a generic message; the operator gets the detail.
-            tracing::warn!("analytics query failed inside the AI agent: {e}");
+            // The model gets a generic message it can act on; the operator gets
+            // an issue. The turn still returns 200, so without this the failure
+            // would be invisible to everything downstream.
+            crate::observability::report::report(
+                crate::observability::report::Failure::new("ai", "tool_query")
+                    .with("dataset", Value::from(spec.dataset.clone())),
+                &e,
+            );
             ToolOutcome::Error("That query could not be run. Try a simpler breakdown.".into())
         }
     }

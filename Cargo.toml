@@ -46,6 +46,11 @@ utoipa = { version = "5.5.0", features = ["actix_extras", "chrono", "uuid", "dec
 utoipa-swagger-ui = { version = "9.0.2", features = ["actix-web"] }
 reqwest = { version = "0.13.4", features = ["json"] }
 base64 = "0.22"
+# Used by the Sentry message sanitiser (`observability::scrub`) to redact
+# personal data inside free text — exception messages and log lines that
+# interpolated a value the key-based scrubber can never see. Already in the tree
+# transitively; made direct so the compliance control owns its dependency.
+regex              = "1"
 urlencoding = "2.1.3"
 actix-governor = "0.10"
 # Ergonomic async trait objects for the swappable AI provider interface

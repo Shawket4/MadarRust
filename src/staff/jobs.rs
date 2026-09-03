@@ -54,9 +54,11 @@ pub fn spawn(pool: PgPool) {
         let mut ticker = tokio::time::interval(Duration::from_secs(secs));
         loop {
             ticker.tick().await;
-            if let Err(e) = run_tick(&pool).await {
-                tracing::warn!(error = %e, "attendance sweep tick failed");
-            }
+            // Guarded at the job boundary: a returned error used to be a log
+            // line nobody saw, and a panic killed this loop for the life of the
+            // process while reporting nothing at all.
+            crate::observability::report::guarded_tick("attendance_sweep", || run_tick(&pool))
+                .await;
         }
     });
 }
