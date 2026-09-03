@@ -542,49 +542,70 @@ mod tests {
     /// `sentry-trace` and `baggage` are NOT CORS-safelisted. If the preflight
     /// does not allow them the browser strips them, and every other piece of
     /// trace propagation is inert.
+    ///
+    /// This test builds CORS **the way `main` does**, and asserts on the
+    /// headers the app actually needs as well as the trace ones.
+    ///
+    /// The earlier version of this test only checked that `sentry-trace` and
+    /// `baggage` were allowed. It passed against a configuration that had
+    /// silently restricted CORS to *only* those two headers — because
+    /// `actix-cors` downgrades `AllOrSome::All` to `Some(set)` on the first
+    /// `allowed_headers()` call. Preflight for `Authorization` then 400s and
+    /// every authenticated cross-origin request fails. Asserting only on what
+    /// you added is how a change that breaks everything else looks green.
     #[actix_web::test]
-    async fn trace_headers_survive_a_cors_preflight() {
+    async fn a_preflight_allows_the_headers_the_app_actually_sends() {
         use actix_cors::Cors;
         use actix_web::{App, HttpResponse, test, web};
 
+        // Mirrors `main.rs`. If that changes, this must change with it.
+        let cors = Cors::default()
+            .allow_any_method()
+            .allow_any_header()
+            .max_age(3600)
+            .allowed_origin("https://dashboard.madar-pos.cloud");
+
         let app = test::init_service(
             App::new()
-                .wrap(
-                    Cors::default()
-                        .allowed_origin("https://dashboard.madar-pos.cloud")
-                        .allow_any_method()
-                        .allow_any_header()
-                        .max_age(3600),
-                )
-                .route(
-                    "/orders",
-                    web::post().to(|| async { HttpResponse::Ok().finish() }),
-                ),
+                .wrap(cors)
+                .route("/orders", web::post().to(|| async { HttpResponse::Ok().finish() })),
         )
         .await;
 
-        let requested = TRACE_HEADERS.join(",");
+        // Every header the dashboard and the SDKs actually send.
+        let required: Vec<&str> = ["authorization", "content-type", "x-org-id", "x-branch-id"]
+            .into_iter()
+            .chain(TRACE_HEADERS.iter().copied())
+            .collect();
+
+        for header in &required {
+            let req = test::TestRequest::default()
+                .method(actix_web::http::Method::OPTIONS)
+                .uri("/orders")
+                .insert_header(("Origin", "https://dashboard.madar-pos.cloud"))
+                .insert_header(("Access-Control-Request-Method", "POST"))
+                .insert_header(("Access-Control-Request-Headers", *header))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert!(
+                resp.status().is_success(),
+                "preflight rejected '{header}' ({}) — cross-origin requests carrying it will fail",
+                resp.status()
+            );
+        }
+
+        // ...and all of them together, which is what a browser actually sends.
+        let joined = required.join(",");
         let req = test::TestRequest::default()
             .method(actix_web::http::Method::OPTIONS)
             .uri("/orders")
             .insert_header(("Origin", "https://dashboard.madar-pos.cloud"))
             .insert_header(("Access-Control-Request-Method", "POST"))
-            .insert_header(("Access-Control-Request-Headers", requested.as_str()))
+            .insert_header(("Access-Control-Request-Headers", joined.as_str()))
             .to_request();
-        let resp = test::call_service(&app, req).await;
-
-        assert!(resp.status().is_success(), "preflight was rejected");
-        let allowed = resp
-            .headers()
-            .get("access-control-allow-headers")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        for header in TRACE_HEADERS {
-            assert!(
-                allowed.contains(header) || allowed.contains('*'),
-                "{header} is not allowed at preflight ({allowed}) — the browser will strip it"
-            );
-        }
+        assert!(
+            test::call_service(&app, req).await.status().is_success(),
+            "preflight rejected the real header set"
+        );
     }
 }

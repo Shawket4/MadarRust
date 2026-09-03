@@ -183,14 +183,18 @@ async fn run() -> std::io::Result<()> {
         let cors = {
             let base = Cors::default()
                 .allow_any_method()
+                // Covers `sentry-trace` and `baggage` (see
+                // `observability::TRACE_HEADERS`) along with everything else.
+                //
+                // Do NOT add `.allowed_headers(...)` alongside this to "make the
+                // trace headers explicit": actix-cors DOWNGRADES `AllOrSome::All`
+                // to `Some(set)` on the first `allowed_headers` call, so naming
+                // two headers silently replaces "any header" with exactly those
+                // two — and every authenticated request starts failing preflight
+                // on `Authorization`. If CORS is ever tightened, list the full
+                // set (authorization, content-type, x-org-id, x-branch-id, and
+                // TRACE_HEADERS) in one call.
                 .allow_any_header()
-                // Named explicitly on top of `allow_any_header`, because these
-                // two are the ones that silently break distributed tracing if a
-                // future tightening of CORS drops the blanket rule: neither
-                // `sentry-trace` nor `baggage` is CORS-safelisted, so a browser
-                // strips them at preflight and the frontend and backend end up
-                // in two unrelated traces with no error anywhere to say so.
-                .allowed_headers(madar_rust::observability::TRACE_HEADERS.iter().copied())
                 .max_age(3600);
             match std::env::var("CORS_ALLOWED_ORIGINS") {
                 Ok(list) if !list.trim().is_empty() => list
