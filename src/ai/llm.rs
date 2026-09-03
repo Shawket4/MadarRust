@@ -31,6 +31,18 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub args: Value,
+    /// Opaque provider state that must be echoed back verbatim when this call is
+    /// replayed in a later turn.
+    ///
+    /// Gemini 3 returns a `thoughtSignature` on every `functionCall` part and
+    /// **rejects the next request** if the signature is missing when that part
+    /// is sent back — the model's reasoning is stateless across requests, and
+    /// the signature is how it recovers what it was thinking. Dropping it fails
+    /// the whole turn with "Function call is missing a thought_signature".
+    ///
+    /// It is deliberately opaque: nothing here interprets it, and providers that
+    /// have no such concept (the OpenAI-style ones) leave it `None`.
+    pub signature: Option<String>,
 }
 
 /// One turn of the conversation as the transport sees it.

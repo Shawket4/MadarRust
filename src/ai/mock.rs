@@ -52,6 +52,8 @@ impl MockProvider {
             id: format!("{name}-call"),
             name: name.to_string(),
             args,
+            // No provider state in a mock.
+            signature: None,
         }])
     }
 

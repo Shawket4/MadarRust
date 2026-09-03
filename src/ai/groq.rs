@@ -124,6 +124,8 @@ impl LlmProvider for GroqProvider {
                                 .to_string(),
                             name: name.to_string(),
                             args,
+                            // OpenAI-style APIs carry no equivalent.
+                            signature: None,
                         })
                     })
                     .collect()
@@ -224,6 +226,7 @@ mod tests {
                     id: "call_1".into(),
                     name: "run_preset".into(),
                     args: json!({ "preset": "top_products" }),
+                    signature: None,
                 }],
             },
             Message::ToolResult {

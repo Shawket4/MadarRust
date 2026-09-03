@@ -112,9 +112,11 @@ impl LlmProvider for GeminiProvider {
 
         let calls: Vec<ToolCall> = parts
             .iter()
-            .filter_map(|p| p.get("functionCall"))
             .enumerate()
-            .filter_map(|(i, c)| {
+            // The signature lives on the PART, beside `functionCall`, not
+            // inside it — so the part has to be kept, not just the call.
+            .filter_map(|(i, part)| {
+                let c = part.get("functionCall")?;
                 let name = c.get("name").and_then(Value::as_str)?.to_string();
                 Some(ToolCall {
                     // Gemini matches tool results by name, not id, so one is
@@ -122,6 +124,10 @@ impl LlmProvider for GeminiProvider {
                     id: format!("{name}-{i}"),
                     name,
                     args: c.get("args").cloned().unwrap_or_else(|| json!({})),
+                    signature: part
+                        .get("thoughtSignature")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                 })
             })
             .collect();
@@ -177,9 +183,17 @@ fn contents(messages: &[Message]) -> Vec<Value> {
                     parts.push(json!({ "text": t }));
                 }
                 for c in calls {
-                    parts.push(json!({
+                    let mut part = json!({
                         "functionCall": { "name": c.name, "args": c.args }
-                    }));
+                    });
+                    // Echoed back verbatim. Gemini 3 rejects the request
+                    // outright when a replayed `functionCall` part has lost its
+                    // signature, because its reasoning does not persist between
+                    // requests and this is how it is restored.
+                    if let Some(sig) = &c.signature {
+                        part["thoughtSignature"] = json!(sig);
+                    }
+                    parts.push(part);
                 }
                 if !parts.is_empty() {
                     out.push(json!({ "role": "model", "parts": parts }));
@@ -229,11 +243,70 @@ mod tests {
                 id: "a".into(),
                 name: "run_preset".into(),
                 args: json!({ "preset": "top_products" }),
+                signature: Some("sig-abc".into()),
             }],
         }];
         let c = contents(&msgs);
         assert_eq!(c[0]["role"], "model");
         assert_eq!(c[0]["parts"][0]["functionCall"]["name"], "run_preset");
+    }
+
+    #[test]
+    fn a_thought_signature_survives_the_round_trip() {
+        // Gemini 3 rejects the whole request when a replayed `functionCall`
+        // part has lost its signature: "Function call is missing a
+        // thought_signature". It lives on the PART, beside `functionCall`, not
+        // inside it — which is exactly how it got dropped.
+        let payload = json!({
+            "candidates": [{ "content": { "parts": [{
+                "functionCall": { "name": "run_preset", "args": { "preset": "top_products" } },
+                "thoughtSignature": "Ct8BAd..."
+            }]}}]
+        });
+        let parts = payload
+            .pointer("/candidates/0/content/parts")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap();
+        let call = parts
+            .iter()
+            .enumerate()
+            .find_map(|(i, part)| {
+                let c = part.get("functionCall")?;
+                Some(ToolCall {
+                    id: format!("x-{i}"),
+                    name: c.get("name")?.as_str()?.to_string(),
+                    args: c.get("args").cloned().unwrap(),
+                    signature: part
+                        .get("thoughtSignature")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                })
+            })
+            .expect("a call");
+        assert_eq!(call.signature.as_deref(), Some("Ct8BAd..."));
+
+        // ...and it is emitted again on the way back out.
+        let replayed = contents(&[Message::Assistant {
+            text: None,
+            calls: vec![call],
+        }]);
+        assert_eq!(replayed[0]["parts"][0]["thoughtSignature"], "Ct8BAd...");
+    }
+
+    #[test]
+    fn a_call_without_a_signature_omits_the_field_entirely() {
+        // Sending `thoughtSignature: null` is not the same as omitting it.
+        let replayed = contents(&[Message::Assistant {
+            text: None,
+            calls: vec![ToolCall {
+                id: "a".into(),
+                name: "answer".into(),
+                args: json!({ "text": "hi" }),
+                signature: None,
+            }],
+        }]);
+        assert!(replayed[0]["parts"][0].get("thoughtSignature").is_none());
     }
 
     #[test]
