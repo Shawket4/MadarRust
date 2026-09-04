@@ -1,0 +1,2987 @@
+{
+  "now": "2026-09-03T10:00:00Z",
+  "cases": [
+    {
+      "id": "route-en-001",
+      "lang": "en",
+      "question": "how much did we make today",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "today",
+        "accept_presets": [
+          "sales_summary"
+        ]
+      }
+    },
+    {
+      "id": "route-ar-001",
+      "lang": "ar",
+      "question": "عملنا كام النهاردة",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "today",
+        "accept_presets": [
+          "sales_summary"
+        ]
+      }
+    },
+    {
+      "id": "route-en-002",
+      "lang": "en",
+      "question": "revenue yesterday",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "yesterday",
+        "accept_presets": [
+          "sales_summary"
+        ]
+      }
+    },
+    {
+      "id": "route-ar-002",
+      "lang": "ar",
+      "question": "مبيعات امبارح",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "yesterday",
+        "accept_presets": [
+          "sales_summary"
+        ]
+      }
+    },
+    {
+      "id": "route-en-003",
+      "lang": "en",
+      "question": "what did we take last month",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "last_month",
+        "accept_presets": [
+          "sales_summary"
+        ]
+      }
+    },
+    {
+      "id": "route-ar-003",
+      "lang": "ar",
+      "question": "كام عملنا الشهر اللي فات",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "last_month",
+        "accept_presets": [
+          "sales_summary"
+        ]
+      }
+    },
+    {
+      "id": "route-en-004",
+      "lang": "en",
+      "question": "how many orders today",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "order_count_total",
+        "period": "today"
+      }
+    },
+    {
+      "id": "route-ar-004",
+      "lang": "ar",
+      "question": "كام أوردر النهاردة",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "order_count_total",
+        "period": "today"
+      }
+    },
+    {
+      "id": "route-en-005",
+      "lang": "en",
+      "question": "average ticket this week",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "avg_ticket",
+        "period": "this_week"
+      }
+    },
+    {
+      "id": "route-ar-005",
+      "lang": "ar",
+      "question": "متوسط الفاتورة الأسبوع ده",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "avg_ticket",
+        "period": "this_week"
+      }
+    },
+    {
+      "id": "route-en-006",
+      "lang": "en",
+      "question": "give me a sales summary for last week",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "sales_summary",
+        "period": "last_week",
+        "accept_presets": [
+          "revenue_total"
+        ]
+      }
+    },
+    {
+      "id": "route-ar-006",
+      "lang": "ar",
+      "question": "اديني ملخص مبيعات الأسبوع اللي فات",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "sales_summary",
+        "period": "last_week",
+        "accept_presets": [
+          "revenue_total"
+        ]
+      }
+    },
+    {
+      "id": "route-en-007",
+      "lang": "en",
+      "question": "revenue per day this month",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "sales_by_day",
+        "period": "this_month",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-ar-007",
+      "lang": "ar",
+      "question": "المبيعات يوم بيوم الشهر ده",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "sales_by_day",
+        "period": "this_month",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-en-008",
+      "lang": "en",
+      "question": "what hours are busiest",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "sales_by_hour",
+        "period": "last_30_days",
+        "accept_presets": [
+          "peak_hours_heatmap"
+        ],
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-ar-008",
+      "lang": "ar",
+      "question": "إمتى بنبقى أزحم",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "sales_by_hour",
+        "period": "last_30_days",
+        "accept_presets": [
+          "peak_hours_heatmap"
+        ],
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-en-009",
+      "lang": "en",
+      "question": "which weekday sells most",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "sales_by_weekday",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-ar-009",
+      "lang": "ar",
+      "question": "أنهي يوم في الأسبوع بيبيع أكتر",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "sales_by_weekday",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-en-010",
+      "lang": "en",
+      "question": "compare my branches",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "sales_by_branch",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-ar-010",
+      "lang": "ar",
+      "question": "قارنلي الفروع",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "sales_by_branch",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-en-011",
+      "lang": "en",
+      "question": "show me the busiest times grid",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "peak_hours_heatmap",
+        "period": "last_30_days",
+        "accept_presets": [
+          "sales_by_hour"
+        ]
+      }
+    },
+    {
+      "id": "route-ar-011",
+      "lang": "ar",
+      "question": "وريني جدول الزحمة",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "peak_hours_heatmap",
+        "period": "last_30_days",
+        "accept_presets": [
+          "sales_by_hour"
+        ]
+      }
+    },
+    {
+      "id": "route-en-012",
+      "lang": "en",
+      "question": "dine in versus delivery",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "sales_by_order_type",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-ar-012",
+      "lang": "ar",
+      "question": "الصالة ولا الدليفري",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "sales_by_order_type",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-en-013",
+      "lang": "en",
+      "question": "delivery revenue by channel",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "sales_by_channel",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-ar-013",
+      "lang": "ar",
+      "question": "مبيعات الدليفري حسب القناة",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "sales_by_channel",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-en-014",
+      "lang": "en",
+      "question": "what sold best last month",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "top_products",
+        "period": "last_month",
+        "accept_presets": [
+          "product_profit"
+        ]
+      }
+    },
+    {
+      "id": "route-ar-014",
+      "lang": "ar",
+      "question": "إيه أكتر صنف اتباع الشهر اللي فات",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "top_products",
+        "period": "last_month",
+        "accept_presets": [
+          "product_profit"
+        ]
+      }
+    },
+    {
+      "id": "route-en-015",
+      "lang": "en",
+      "question": "which items barely sell",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "worst_products",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-ar-015",
+      "lang": "ar",
+      "question": "أنهي أصناف مش بتتباع",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "worst_products",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-en-016",
+      "lang": "en",
+      "question": "revenue by category",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "top_categories",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-ar-016",
+      "lang": "ar",
+      "question": "المبيعات حسب الفئة",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "top_categories",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-en-017",
+      "lang": "en",
+      "question": "most profitable products",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "product_profit",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-ar-017",
+      "lang": "ar",
+      "question": "أكتر الأصناف ربح",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "product_profit",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-en-018",
+      "lang": "en",
+      "question": "which products have the thinnest margin",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "thin_margin_products",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-ar-018",
+      "lang": "ar",
+      "question": "أنهي أصناف هامشها ضعيف",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "thin_margin_products",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-en-019",
+      "lang": "en",
+      "question": "best seller in each branch",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "best_seller_per_branch",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-ar-019",
+      "lang": "ar",
+      "question": "أكتر صنف مبيعا في كل فرع",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "best_seller_per_branch",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-en-020",
+      "lang": "en",
+      "question": "how did people pay today",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "payment_mix",
+        "period": "today"
+      }
+    },
+    {
+      "id": "route-ar-020",
+      "lang": "ar",
+      "question": "الناس دفعت إزاي النهاردة",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "payment_mix",
+        "period": "today"
+      }
+    },
+    {
+      "id": "route-en-021",
+      "lang": "en",
+      "question": "how much of our money is cash",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "cash_vs_card",
+        "period": "last_30_days",
+        "accept_presets": [
+          "payment_mix"
+        ]
+      }
+    },
+    {
+      "id": "route-ar-021",
+      "lang": "ar",
+      "question": "كام من فلوسنا كاش",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "cash_vs_card",
+        "period": "last_30_days",
+        "accept_presets": [
+          "payment_mix"
+        ]
+      }
+    },
+    {
+      "id": "route-en-022",
+      "lang": "en",
+      "question": "who has drawer differences",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "drawer_variance",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-ar-022",
+      "lang": "ar",
+      "question": "مين عنده فروقات في الدرج",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "drawer_variance",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-en-023",
+      "lang": "en",
+      "question": "shift cash summary",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "shift_cash_summary",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-ar-023",
+      "lang": "ar",
+      "question": "ملخص كاش الورديات",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "shift_cash_summary",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-en-024",
+      "lang": "en",
+      "question": "how much did we give away in discounts",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "discount_usage",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-ar-024",
+      "lang": "ar",
+      "question": "كام خصومات اداينا",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "discount_usage",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-en-025",
+      "lang": "en",
+      "question": "why are orders being voided",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "voids_by_reason",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-ar-025",
+      "lang": "ar",
+      "question": "ليه الأوردرات بتتلغي",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "voids_by_reason",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-en-026",
+      "lang": "en",
+      "question": "which cashier voids the most",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "voids_by_cashier",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-ar-026",
+      "lang": "ar",
+      "question": "أنهي كاشير بيلغي أكتر",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "voids_by_cashier",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-en-027",
+      "lang": "en",
+      "question": "how are my waiters doing",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "waiter_performance",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-ar-027",
+      "lang": "ar",
+      "question": "الويترز عاملين إيه",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "waiter_performance",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-en-028",
+      "lang": "en",
+      "question": "cashier performance",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "cashier_performance",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-ar-028",
+      "lang": "ar",
+      "question": "أداء الكاشير",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "cashier_performance",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-en-029",
+      "lang": "en",
+      "question": "who is late the most",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "lateness_by_employee",
+        "period": "last_month"
+      }
+    },
+    {
+      "id": "route-ar-029",
+      "lang": "ar",
+      "question": "مين بيتأخر أكتر",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "lateness_by_employee",
+        "period": "last_month"
+      }
+    },
+    {
+      "id": "route-en-030",
+      "lang": "en",
+      "question": "overtime by employee",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "overtime_by_employee",
+        "period": "last_month"
+      }
+    },
+    {
+      "id": "route-ar-030",
+      "lang": "ar",
+      "question": "الأوفر تايم لكل موظف",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "overtime_by_employee",
+        "period": "last_month"
+      }
+    },
+    {
+      "id": "route-en-031",
+      "lang": "en",
+      "question": "attendance trend",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "attendance_by_day",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-ar-031",
+      "lang": "ar",
+      "question": "الحضور على مدار الأيام",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "attendance_by_day",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-en-032",
+      "lang": "en",
+      "question": "what am I wasting money on",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "waste_by_ingredient",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-ar-032",
+      "lang": "ar",
+      "question": "بخسر فلوس في إيه",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "waste_by_ingredient",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "route-en-033",
+      "lang": "en",
+      "question": "waste over time",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "waste_trend",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-ar-033",
+      "lang": "ar",
+      "question": "الهالك على مدار الوقت",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "waste_trend",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-en-034",
+      "lang": "en",
+      "question": "what does the kitchen go through",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "consumption_by_ingredient",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-ar-034",
+      "lang": "ar",
+      "question": "المطبخ بيستهلك إيه",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "consumption_by_ingredient",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-en-035",
+      "lang": "en",
+      "question": "what stock goes missing",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "shrinkage_by_ingredient",
+        "period": "last_90_days"
+      }
+    },
+    {
+      "id": "route-ar-035",
+      "lang": "ar",
+      "question": "إيه اللي بيضيع من المخزن",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "shrinkage_by_ingredient",
+        "period": "last_90_days"
+      }
+    },
+    {
+      "id": "route-en-036",
+      "lang": "en",
+      "question": "why does stock go missing",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "shrinkage_by_reason",
+        "period": "last_90_days"
+      }
+    },
+    {
+      "id": "route-ar-036",
+      "lang": "ar",
+      "question": "ليه المخزون بيضيع",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "shrinkage_by_reason",
+        "period": "last_90_days"
+      }
+    },
+    {
+      "id": "route-en-037",
+      "lang": "en",
+      "question": "who do I spend the most with",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "spend_by_supplier",
+        "period": "last_90_days"
+      }
+    },
+    {
+      "id": "route-ar-037",
+      "lang": "ar",
+      "question": "بصرف على مين أكتر",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "spend_by_supplier",
+        "period": "last_90_days"
+      }
+    },
+    {
+      "id": "route-en-038",
+      "lang": "en",
+      "question": "what ingredients cost me most",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "spend_by_ingredient",
+        "period": "last_90_days"
+      }
+    },
+    {
+      "id": "route-ar-038",
+      "lang": "ar",
+      "question": "أنهي مكونات بتكلفني أكتر",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "spend_by_ingredient",
+        "period": "last_90_days"
+      }
+    },
+    {
+      "id": "route-en-039",
+      "lang": "en",
+      "question": "how are bookings going",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "bookings_trend",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-ar-039",
+      "lang": "ar",
+      "question": "الحجوزات عاملة إيه",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "bookings_trend",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-en-040",
+      "lang": "en",
+      "question": "how many reservations do not show up",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "no_show_rate",
+        "period": "last_90_days"
+      }
+    },
+    {
+      "id": "route-ar-040",
+      "lang": "ar",
+      "question": "كام حجز مبيجيش",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "no_show_rate",
+        "period": "last_90_days"
+      }
+    },
+    {
+      "id": "route-en-041",
+      "lang": "en",
+      "question": "how much did we get in tips",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "tips_total",
+        "period": "today"
+      }
+    },
+    {
+      "id": "route-ar-041",
+      "lang": "ar",
+      "question": "اخدنا كام بقشيش",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "tips_total",
+        "period": "today"
+      }
+    },
+    {
+      "id": "route-en-042",
+      "lang": "en",
+      "question": "tips over time",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "tips_by_day",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-ar-042",
+      "lang": "ar",
+      "question": "البقشيش على مدار الوقت",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "tips_by_day",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-en-043",
+      "lang": "en",
+      "question": "which waiter earns the most tips",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "tips_by_waiter",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-ar-043",
+      "lang": "ar",
+      "question": "أنهي ويتر بياخد بقشيش أكتر",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "tips_by_waiter",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-en-044",
+      "lang": "en",
+      "question": "how much of the tips is cash",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "cash_vs_card_tips",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-ar-044",
+      "lang": "ar",
+      "question": "كام من البقشيش كاش",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "cash_vs_card_tips",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-en-045",
+      "lang": "en",
+      "question": "show me refunds",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "refunds_by_day",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "route-ar-045",
+      "lang": "ar",
+      "question": "وريني المرتجعات",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "tool_selection",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "refunds_by_day",
+        "period": "last_30_days",
+        "accept_custom_query": true
+      }
+    },
+    {
+      "id": "period-001",
+      "lang": "en",
+      "question": "revenue today",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "today"
+      }
+    },
+    {
+      "id": "period-002",
+      "lang": "ar",
+      "question": "مبيعات النهاردة",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "today"
+      }
+    },
+    {
+      "id": "period-003",
+      "lang": "en",
+      "question": "revenue yesterday",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "yesterday"
+      }
+    },
+    {
+      "id": "period-004",
+      "lang": "ar",
+      "question": "مبيعات امبارح",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "yesterday"
+      }
+    },
+    {
+      "id": "period-005",
+      "lang": "en",
+      "question": "revenue this week",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "this_week"
+      }
+    },
+    {
+      "id": "period-006",
+      "lang": "ar",
+      "question": "مبيعات الأسبوع ده",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "this_week"
+      }
+    },
+    {
+      "id": "period-007",
+      "lang": "en",
+      "question": "revenue last week",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "last_week"
+      }
+    },
+    {
+      "id": "period-008",
+      "lang": "ar",
+      "question": "مبيعات الأسبوع اللي فات",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "last_week"
+      }
+    },
+    {
+      "id": "period-009",
+      "lang": "en",
+      "question": "revenue this month",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "this_month"
+      }
+    },
+    {
+      "id": "period-010",
+      "lang": "ar",
+      "question": "مبيعات الشهر ده",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "this_month"
+      }
+    },
+    {
+      "id": "period-011",
+      "lang": "en",
+      "question": "revenue last month",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "last_month"
+      }
+    },
+    {
+      "id": "period-012",
+      "lang": "ar",
+      "question": "مبيعات الشهر اللي فات",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "last_month"
+      }
+    },
+    {
+      "id": "period-013",
+      "lang": "en",
+      "question": "revenue this year",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "this_year"
+      }
+    },
+    {
+      "id": "period-014",
+      "lang": "ar",
+      "question": "مبيعات السنة دي",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "this_year"
+      }
+    },
+    {
+      "id": "period-015",
+      "lang": "en",
+      "question": "revenue last year",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "last_year"
+      }
+    },
+    {
+      "id": "period-016",
+      "lang": "ar",
+      "question": "مبيعات السنة اللي فاتت",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "last_year"
+      }
+    },
+    {
+      "id": "period-017",
+      "lang": "en",
+      "question": "revenue over the last 7 days",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "last_7_days"
+      }
+    },
+    {
+      "id": "period-018",
+      "lang": "ar",
+      "question": "مبيعات آخر ٧ أيام",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "last_7_days"
+      }
+    },
+    {
+      "id": "period-019",
+      "lang": "en",
+      "question": "revenue over the last 30 days",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "period-020",
+      "lang": "ar",
+      "question": "مبيعات آخر ٣٠ يوم",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "period-021",
+      "lang": "en",
+      "question": "revenue over the last 90 days",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "last_90_days"
+      }
+    },
+    {
+      "id": "period-022",
+      "lang": "ar",
+      "question": "مبيعات آخر ٩٠ يوم",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "last_90_days"
+      }
+    },
+    {
+      "id": "period-023",
+      "lang": "en",
+      "question": "revenue over the last 12 months",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "last_12_months"
+      }
+    },
+    {
+      "id": "period-024",
+      "lang": "ar",
+      "question": "مبيعات آخر ١٢ شهر",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "last_12_months"
+      }
+    },
+    {
+      "id": "period-025",
+      "lang": "en",
+      "question": "revenue of all time",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "all_time"
+      }
+    },
+    {
+      "id": "period-026",
+      "lang": "ar",
+      "question": "المبيعات من الأول",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "period_resolution",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "all_time"
+      }
+    },
+    {
+      "id": "custom-001",
+      "lang": "en",
+      "question": "tips per branch last month",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "dimensions": [
+          "branch"
+        ],
+        "measures": [
+          "tip_total"
+        ],
+        "period": "last_month"
+      }
+    },
+    {
+      "id": "custom-002",
+      "lang": "ar",
+      "question": "البقشيش لكل فرع الشهر اللي فات",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "dimensions": [
+          "branch"
+        ],
+        "measures": [
+          "tip_total"
+        ],
+        "period": "last_month"
+      }
+    },
+    {
+      "id": "custom-003",
+      "lang": "en",
+      "question": "units sold per category this week",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "order_items",
+        "dimensions": [
+          "category"
+        ],
+        "measures": [
+          "units_sold"
+        ],
+        "period": "this_week"
+      }
+    },
+    {
+      "id": "custom-004",
+      "lang": "ar",
+      "question": "الكميات المباعة لكل فئة الأسبوع ده",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "order_items",
+        "dimensions": [
+          "category"
+        ],
+        "measures": [
+          "units_sold"
+        ],
+        "period": "this_week"
+      }
+    },
+    {
+      "id": "custom-005",
+      "lang": "en",
+      "question": "refund value per branch",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "dimensions": [
+          "branch"
+        ],
+        "measures": [
+          "refund_amount"
+        ],
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "custom-006",
+      "lang": "ar",
+      "question": "قيمة المرتجعات لكل فرع",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "dimensions": [
+          "branch"
+        ],
+        "measures": [
+          "refund_amount"
+        ],
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "custom-007",
+      "lang": "en",
+      "question": "payment amounts by method per day",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "payments",
+        "dimensions": [
+          "day"
+        ],
+        "measures": [
+          "paid_amount"
+        ],
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "custom-008",
+      "lang": "ar",
+      "question": "المدفوعات يوم بيوم",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "payments",
+        "dimensions": [
+          "day"
+        ],
+        "measures": [
+          "paid_amount"
+        ],
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "custom-009",
+      "lang": "en",
+      "question": "waste cost per branch",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "inventory",
+        "dimensions": [
+          "branch"
+        ],
+        "measures": [
+          "movement_cost"
+        ],
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "custom-010",
+      "lang": "ar",
+      "question": "تكلفة الهالك لكل فرع",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "inventory",
+        "dimensions": [
+          "branch"
+        ],
+        "measures": [
+          "movement_cost"
+        ],
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "custom-011",
+      "lang": "en",
+      "question": "worked minutes per department",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "attendance",
+        "dimensions": [
+          "department"
+        ],
+        "measures": [
+          "worked_minutes"
+        ],
+        "period": "last_month"
+      }
+    },
+    {
+      "id": "custom-012",
+      "lang": "ar",
+      "question": "ساعات الشغل لكل قسم",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "attendance",
+        "dimensions": [
+          "department"
+        ],
+        "measures": [
+          "worked_minutes"
+        ],
+        "period": "last_month"
+      }
+    },
+    {
+      "id": "custom-013",
+      "lang": "en",
+      "question": "covers booked per day",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "bookings",
+        "dimensions": [
+          "day"
+        ],
+        "measures": [
+          "covers"
+        ],
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "custom-014",
+      "lang": "ar",
+      "question": "عدد الأفراد المحجوزين يوم بيوم",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "bookings",
+        "dimensions": [
+          "day"
+        ],
+        "measures": [
+          "covers"
+        ],
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "custom-015",
+      "lang": "en",
+      "question": "supplier fill rate",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "purchasing",
+        "dimensions": [
+          "supplier"
+        ],
+        "measures": [
+          "fill_rate"
+        ],
+        "period": "last_90_days"
+      }
+    },
+    {
+      "id": "custom-016",
+      "lang": "ar",
+      "question": "نسبة توريد كل مورد",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "purchasing",
+        "dimensions": [
+          "supplier"
+        ],
+        "measures": [
+          "fill_rate"
+        ],
+        "period": "last_90_days"
+      }
+    },
+    {
+      "id": "custom-017",
+      "lang": "en",
+      "question": "shrinkage by reason",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "stocktakes",
+        "dimensions": [
+          "variance_reason"
+        ],
+        "measures": [
+          "shrink_cost"
+        ],
+        "period": "last_90_days"
+      }
+    },
+    {
+      "id": "custom-018",
+      "lang": "ar",
+      "question": "الفاقد حسب السبب",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "stocktakes",
+        "dimensions": [
+          "variance_reason"
+        ],
+        "measures": [
+          "shrink_cost"
+        ],
+        "period": "last_90_days"
+      }
+    },
+    {
+      "id": "custom-019",
+      "lang": "en",
+      "question": "cash variance per teller",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "shifts",
+        "dimensions": [
+          "teller"
+        ],
+        "measures": [
+          "abs_discrepancy"
+        ],
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "custom-020",
+      "lang": "ar",
+      "question": "فرق الكاش لكل كاشير",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "shifts",
+        "dimensions": [
+          "teller"
+        ],
+        "measures": [
+          "abs_discrepancy"
+        ],
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "custom-021",
+      "lang": "en",
+      "question": "average tip per waiter this month",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "dimensions": [
+          "waiter"
+        ],
+        "measures": [
+          "avg_tip"
+        ],
+        "period": "this_month"
+      }
+    },
+    {
+      "id": "custom-022",
+      "lang": "ar",
+      "question": "متوسط البقشيش لكل ويتر الشهر ده",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "dimensions": [
+          "waiter"
+        ],
+        "measures": [
+          "avg_tip"
+        ],
+        "period": "this_month"
+      }
+    },
+    {
+      "id": "custom-023",
+      "lang": "en",
+      "question": "tip rate per branch",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "dimensions": [
+          "branch"
+        ],
+        "measures": [
+          "tip_rate"
+        ],
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "custom-024",
+      "lang": "ar",
+      "question": "نسبة البقشيش لكل فرع",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "dimensions": [
+          "branch"
+        ],
+        "measures": [
+          "tip_rate"
+        ],
+        "period": "last_30_days"
+      }
+    },
+    {
+      "id": "entity-001",
+      "lang": "en",
+      "question": "how did Ahmed do as a waiter last week",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "entity_resolution",
+      "confidence": "review",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "dimensions": [
+          "waiter"
+        ],
+        "period": "last_week",
+        "entity_kind": "waiter"
+      },
+      "note": "A bare first name is ambiguous across kinds; the expected kind follows from the question's context word (waiter / till / late)."
+    },
+    {
+      "id": "entity-002",
+      "lang": "ar",
+      "question": "أحمد عمل إيه كويتر الأسبوع اللي فات",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "entity_resolution",
+      "confidence": "review",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "dimensions": [
+          "waiter"
+        ],
+        "period": "last_week",
+        "entity_kind": "waiter"
+      },
+      "note": "A bare first name is ambiguous across kinds; the expected kind follows from the question's context word (waiter / till / late)."
+    },
+    {
+      "id": "entity-003",
+      "lang": "en",
+      "question": "how much did Ahmed ring up on the till",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "entity_resolution",
+      "confidence": "review",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "dimensions": [
+          "cashier"
+        ],
+        "period": "last_30_days",
+        "entity_kind": "cashier"
+      },
+      "note": "A bare first name is ambiguous across kinds; the expected kind follows from the question's context word (waiter / till / late)."
+    },
+    {
+      "id": "entity-004",
+      "lang": "ar",
+      "question": "أحمد سحب كام على الكاشير",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "entity_resolution",
+      "confidence": "review",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "dimensions": [
+          "cashier"
+        ],
+        "period": "last_30_days",
+        "entity_kind": "cashier"
+      },
+      "note": "A bare first name is ambiguous across kinds; the expected kind follows from the question's context word (waiter / till / late)."
+    },
+    {
+      "id": "entity-005",
+      "lang": "en",
+      "question": "was Ahmed late this month",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "entity_resolution",
+      "confidence": "review",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "attendance",
+        "dimensions": [
+          "employee"
+        ],
+        "period": "this_month",
+        "entity_kind": "employee"
+      },
+      "note": "A bare first name is ambiguous across kinds; the expected kind follows from the question's context word (waiter / till / late)."
+    },
+    {
+      "id": "entity-006",
+      "lang": "ar",
+      "question": "أحمد اتأخر الشهر ده",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "entity_resolution",
+      "confidence": "review",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "attendance",
+        "dimensions": [
+          "employee"
+        ],
+        "period": "this_month",
+        "entity_kind": "employee"
+      },
+      "note": "A bare first name is ambiguous across kinds; the expected kind follows from the question's context word (waiter / till / late)."
+    },
+    {
+      "id": "entity-007",
+      "lang": "en",
+      "question": "revenue at Marina",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "entity_resolution",
+      "confidence": "review",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "dimensions": [
+          "branch"
+        ],
+        "period": "last_30_days",
+        "entity_kind": "branch"
+      },
+      "note": "A bare first name is ambiguous across kinds; the expected kind follows from the question's context word (waiter / till / late)."
+    },
+    {
+      "id": "entity-008",
+      "lang": "ar",
+      "question": "مبيعات فرع المارينا",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "entity_resolution",
+      "confidence": "review",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "dimensions": [
+          "branch"
+        ],
+        "period": "last_30_days",
+        "entity_kind": "branch"
+      },
+      "note": "A bare first name is ambiguous across kinds; the expected kind follows from the question's context word (waiter / till / late)."
+    },
+    {
+      "id": "entity-009",
+      "lang": "en",
+      "question": "how many lattes did we sell",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "entity_resolution",
+      "confidence": "review",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "order_items",
+        "dimensions": [
+          "product"
+        ],
+        "period": "last_30_days",
+        "entity_kind": "product"
+      },
+      "note": "A bare first name is ambiguous across kinds; the expected kind follows from the question's context word (waiter / till / late)."
+    },
+    {
+      "id": "entity-010",
+      "lang": "ar",
+      "question": "بعنا كام لاتيه",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "entity_resolution",
+      "confidence": "review",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "order_items",
+        "dimensions": [
+          "product"
+        ],
+        "period": "last_30_days",
+        "entity_kind": "product"
+      },
+      "note": "A bare first name is ambiguous across kinds; the expected kind follows from the question's context word (waiter / till / late)."
+    },
+    {
+      "id": "entity-011",
+      "lang": "en",
+      "question": "how much milk did we go through",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "entity_resolution",
+      "confidence": "review",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "inventory",
+        "dimensions": [
+          "ingredient"
+        ],
+        "period": "last_30_days",
+        "entity_kind": "ingredient"
+      },
+      "note": "A bare first name is ambiguous across kinds; the expected kind follows from the question's context word (waiter / till / late)."
+    },
+    {
+      "id": "entity-012",
+      "lang": "ar",
+      "question": "استهلكنا كام لبن",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "entity_resolution",
+      "confidence": "review",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "inventory",
+        "dimensions": [
+          "ingredient"
+        ],
+        "period": "last_30_days",
+        "entity_kind": "ingredient"
+      },
+      "note": "A bare first name is ambiguous across kinds; the expected kind follows from the question's context word (waiter / till / late)."
+    },
+    {
+      "id": "negative-001",
+      "lang": "en",
+      "question": "revenue at Zamalek",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "negative",
+      "confidence": "review",
+      "expect": {
+        "outcome": "unknown_entity"
+      },
+      "note": "No branch by that name; the answer must say so rather than silently covering all branches."
+    },
+    {
+      "id": "negative-002",
+      "lang": "ar",
+      "question": "مبيعات فرع الزمالك",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "negative",
+      "confidence": "review",
+      "expect": {
+        "outcome": "unknown_entity"
+      },
+      "note": "نفس الحالة بالعربي."
+    },
+    {
+      "id": "negative-003",
+      "lang": "en",
+      "question": "what is the weather today",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "negative",
+      "confidence": "review",
+      "expect": {
+        "outcome": "no_tool"
+      },
+      "note": "Nothing in the registry answers this; it must decline rather than route somewhere plausible."
+    },
+    {
+      "id": "negative-004",
+      "lang": "ar",
+      "question": "الجو عامل إيه النهاردة",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "negative",
+      "confidence": "review",
+      "expect": {
+        "outcome": "no_tool"
+      },
+      "note": "نفس الحالة بالعربي."
+    },
+    {
+      "id": "negative-005",
+      "lang": "en",
+      "question": "revenue next month",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "negative",
+      "confidence": "review",
+      "expect": {
+        "outcome": "invalid_period"
+      },
+      "note": "A future window has no data; it must not silently answer for the past."
+    },
+    {
+      "id": "negative-006",
+      "lang": "ar",
+      "question": "مبيعات الشهر الجاي",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "negative",
+      "confidence": "review",
+      "expect": {
+        "outcome": "invalid_period"
+      },
+      "note": "نفس الحالة بالعربي."
+    },
+    {
+      "id": "negative-007",
+      "lang": "en",
+      "question": "what is my customers' phone list",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "negative",
+      "confidence": "review",
+      "expect": {
+        "outcome": "refused"
+      },
+      "note": "No measure returns customer contact data; there is nothing to query."
+    },
+    {
+      "id": "negative-008",
+      "lang": "ar",
+      "question": "اديني أرقام تليفونات العملاء",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "negative",
+      "confidence": "review",
+      "expect": {
+        "outcome": "refused"
+      },
+      "note": "نفس الحالة بالعربي."
+    },
+    {
+      "id": "negative-009",
+      "lang": "en",
+      "question": "show me profit margin on staff salaries",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "negative",
+      "confidence": "review",
+      "expect": {
+        "outcome": "no_tool"
+      },
+      "note": "Conflates two datasets that do not join; it should clarify rather than invent."
+    },
+    {
+      "id": "negative-010",
+      "lang": "ar",
+      "question": "وريني هامش الربح على مرتبات الموظفين",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "negative",
+      "confidence": "review",
+      "expect": {
+        "outcome": "no_tool"
+      },
+      "note": "نفس الحالة بالعربي."
+    },
+    {
+      "id": "negative-011",
+      "lang": "en",
+      "question": "how did it go",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "negative",
+      "confidence": "review",
+      "expect": {
+        "outcome": "clarify"
+      },
+      "note": "Too vague to route; asking is correct."
+    },
+    {
+      "id": "negative-012",
+      "lang": "ar",
+      "question": "عاملين إيه",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "negative",
+      "confidence": "review",
+      "expect": {
+        "outcome": "clarify"
+      },
+      "note": "نفس الحالة بالعربي."
+    },
+    {
+      "id": "adversarial-001",
+      "lang": "ar",
+      "question": "مبيعات ٢٠٢٦-٠٨-٠١",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "adversarial",
+      "confidence": "review",
+      "expect": {
+        "outcome": "review"
+      },
+      "note": "Arabic-Indic digits in a date must normalise to ASCII before parsing."
+    },
+    {
+      "id": "adversarial-002",
+      "lang": "mixed",
+      "question": "show me مبيعات last month",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "adversarial",
+      "confidence": "review",
+      "expect": {
+        "outcome": "review"
+      },
+      "note": "A sentence mixing scripts mid-way must still route."
+    },
+    {
+      "id": "adversarial-003",
+      "lang": "en",
+      "question": "and the one before that",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "adversarial",
+      "confidence": "review",
+      "expect": {
+        "outcome": "review"
+      },
+      "note": "A pronoun-only follow-up with no prior turn has nothing to resolve; it must ask."
+    },
+    {
+      "id": "adversarial-004",
+      "lang": "en",
+      "question": "how did Water do last week",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "adversarial",
+      "confidence": "review",
+      "expect": {
+        "outcome": "review"
+      },
+      "note": "A PRODUCT named like a common word, in a phrasing that reads as a person."
+    },
+    {
+      "id": "adversarial-005",
+      "lang": "ar",
+      "question": "الفرع الجديد عامل إيه",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "adversarial",
+      "confidence": "review",
+      "expect": {
+        "outcome": "review"
+      },
+      "note": "«the new branch» — most recently opened, or ask? A business decision, not a code fact."
+    },
+    {
+      "id": "adversarial-006",
+      "lang": "ar",
+      "question": "مبيعات الويك اند",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "adversarial",
+      "confidence": "review",
+      "expect": {
+        "outcome": "review"
+      },
+      "note": "«the weekend» — Fri–Sat, Sat–Sun or Fri–Sun for an Egyptian F&B tenant is a business decision."
+    },
+    {
+      "id": "adversarial-007",
+      "lang": "en",
+      "question": "best product",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "adversarial",
+      "confidence": "review",
+      "expect": {
+        "outcome": "review"
+      },
+      "note": "«best» by revenue, quantity or margin is genuinely ambiguous."
+    },
+    {
+      "id": "adversarial-008",
+      "lang": "ar",
+      "question": "أحسن صنف",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "adversarial",
+      "confidence": "review",
+      "expect": {
+        "outcome": "review"
+      },
+      "note": "نفس الغموض بالعربي."
+    },
+    {
+      "id": "transform-001",
+      "lang": "en",
+      "question": "compare this month to last month",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "transform",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "measures": [
+          "revenue"
+        ],
+        "period": "this_month",
+        "compare": "previous_period"
+      }
+    },
+    {
+      "id": "transform-002",
+      "lang": "ar",
+      "question": "قارن الشهر ده بالشهر اللي فات",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "transform",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "measures": [
+          "revenue"
+        ],
+        "period": "this_month",
+        "compare": "previous_period"
+      }
+    },
+    {
+      "id": "transform-003",
+      "lang": "en",
+      "question": "how does this month compare to the same month last year",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "transform",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "measures": [
+          "revenue"
+        ],
+        "period": "this_month",
+        "compare": "previous_year"
+      }
+    },
+    {
+      "id": "transform-004",
+      "lang": "ar",
+      "question": "الشهر ده مقارنة بنفس الشهر السنة اللي فاتت",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "transform",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "measures": [
+          "revenue"
+        ],
+        "period": "this_month",
+        "compare": "previous_year"
+      }
+    },
+    {
+      "id": "transform-005",
+      "lang": "en",
+      "question": "branch revenue versus last month",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "transform",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "dimensions": [
+          "branch"
+        ],
+        "measures": [
+          "revenue"
+        ],
+        "period": "this_month",
+        "compare": "previous_period"
+      }
+    },
+    {
+      "id": "transform-006",
+      "lang": "ar",
+      "question": "مبيعات الفروع مقارنة بالشهر اللي فات",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "transform",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "dimensions": [
+          "branch"
+        ],
+        "measures": [
+          "revenue"
+        ],
+        "period": "this_month",
+        "compare": "previous_period"
+      }
+    },
+    {
+      "id": "transform-007",
+      "lang": "en",
+      "question": "what share of revenue does each category take",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "transform",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "order_items",
+        "dimensions": [
+          "category"
+        ],
+        "measures": [
+          "item_revenue"
+        ],
+        "period": "last_30_days",
+        "share": true
+      }
+    },
+    {
+      "id": "transform-008",
+      "lang": "ar",
+      "question": "كل فئة بتاخد كام في المية من المبيعات",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "transform",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "order_items",
+        "dimensions": [
+          "category"
+        ],
+        "measures": [
+          "item_revenue"
+        ],
+        "period": "last_30_days",
+        "share": true
+      }
+    },
+    {
+      "id": "transform-009",
+      "lang": "en",
+      "question": "running total of revenue this month",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "transform",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "dimensions": [
+          "day"
+        ],
+        "measures": [
+          "revenue"
+        ],
+        "period": "this_month",
+        "cumulative": true
+      }
+    },
+    {
+      "id": "transform-010",
+      "lang": "ar",
+      "question": "المبيعات التراكمية الشهر ده",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "transform",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "dimensions": [
+          "day"
+        ],
+        "measures": [
+          "revenue"
+        ],
+        "period": "this_month",
+        "cumulative": true
+      }
+    },
+    {
+      "id": "transform-011",
+      "lang": "en",
+      "question": "top 3 products in each branch",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "transform",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "order_items",
+        "dimensions": [
+          "branch",
+          "product"
+        ],
+        "measures": [
+          "item_revenue"
+        ],
+        "period": "last_30_days",
+        "top_per": "branch"
+      }
+    },
+    {
+      "id": "transform-012",
+      "lang": "ar",
+      "question": "أعلى ٣ أصناف في كل فرع",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "transform",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "order_items",
+        "dimensions": [
+          "branch",
+          "product"
+        ],
+        "measures": [
+          "item_revenue"
+        ],
+        "period": "last_30_days",
+        "top_per": "branch"
+      }
+    },
+    {
+      "id": "filter-001",
+      "lang": "en",
+      "question": "show me voided orders",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "filters",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "period": "last_30_days",
+        "filters": {
+          "status": "voided"
+        }
+      }
+    },
+    {
+      "id": "filter-002",
+      "lang": "ar",
+      "question": "وريني الأوردرات الملغية",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "filters",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "period": "last_30_days",
+        "filters": {
+          "status": "voided"
+        }
+      }
+    },
+    {
+      "id": "filter-003",
+      "lang": "en",
+      "question": "refunded orders this month",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "filters",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "period": "this_month",
+        "filters": {
+          "status": "refunded"
+        }
+      }
+    },
+    {
+      "id": "filter-004",
+      "lang": "ar",
+      "question": "الأوردرات المرتجعة الشهر ده",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "filters",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "period": "this_month",
+        "filters": {
+          "status": "refunded"
+        }
+      }
+    },
+    {
+      "id": "filter-005",
+      "lang": "en",
+      "question": "delivery orders only",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "filters",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "period": "last_30_days",
+        "filters": {
+          "order_type": "delivery"
+        }
+      }
+    },
+    {
+      "id": "filter-006",
+      "lang": "ar",
+      "question": "أوردرات الدليفري بس",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "filters",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "period": "last_30_days",
+        "filters": {
+          "order_type": "delivery"
+        }
+      }
+    },
+    {
+      "id": "filter-007",
+      "lang": "en",
+      "question": "dine in orders only",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "filters",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "period": "last_30_days",
+        "filters": {
+          "order_type": "dine_in"
+        }
+      }
+    },
+    {
+      "id": "filter-008",
+      "lang": "ar",
+      "question": "أوردرات الصالة بس",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "filters",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "period": "last_30_days",
+        "filters": {
+          "order_type": "dine_in"
+        }
+      }
+    },
+    {
+      "id": "filter-009",
+      "lang": "en",
+      "question": "orders that had a discount",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "filters",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "period": "last_30_days",
+        "filters": {
+          "discounted": "yes"
+        }
+      }
+    },
+    {
+      "id": "filter-010",
+      "lang": "ar",
+      "question": "الأوردرات اللي عليها خصم",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "filters",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "orders",
+        "period": "last_30_days",
+        "filters": {
+          "discounted": "yes"
+        }
+      }
+    },
+    {
+      "id": "filter-011",
+      "lang": "en",
+      "question": "waste movements only",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "filters",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "inventory",
+        "period": "last_30_days",
+        "filters": {
+          "movement_type": "waste"
+        }
+      }
+    },
+    {
+      "id": "filter-012",
+      "lang": "ar",
+      "question": "حركات الهالك بس",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "filters",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "inventory",
+        "period": "last_30_days",
+        "filters": {
+          "movement_type": "waste"
+        }
+      }
+    },
+    {
+      "id": "filter-013",
+      "lang": "en",
+      "question": "stock we bought in",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "filters",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "inventory",
+        "period": "last_90_days",
+        "filters": {
+          "movement_type": "purchase"
+        }
+      }
+    },
+    {
+      "id": "filter-014",
+      "lang": "ar",
+      "question": "المخزون اللي اشتريناه",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "filters",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "inventory",
+        "period": "last_90_days",
+        "filters": {
+          "movement_type": "purchase"
+        }
+      }
+    },
+    {
+      "id": "filter-015",
+      "lang": "en",
+      "question": "who was absent last month",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "filters",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "attendance",
+        "period": "last_month",
+        "filters": {
+          "attendance_status": "absent"
+        }
+      }
+    },
+    {
+      "id": "filter-016",
+      "lang": "ar",
+      "question": "مين كان غايب الشهر اللي فات",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "filters",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "attendance",
+        "period": "last_month",
+        "filters": {
+          "attendance_status": "absent"
+        }
+      }
+    }
+  ]
+}

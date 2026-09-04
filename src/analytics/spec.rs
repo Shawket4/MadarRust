@@ -144,9 +144,28 @@ pub enum PeriodPreset {
     LastMonth,
     ThisYear,
     LastYear,
+    // EXPLICIT renames. serde's `rename_all = "snake_case"` does not insert an
+    // underscore before a digit group, so `Last30Days` derives as `last30_days`
+    // — while `ALL` below (which builds the tool schema and the OpenAPI enum)
+    // advertises `last_30_days`. The two disagreed silently: every client that
+    // sent the DOCUMENTED value was rejected as an unknown variant, so four of
+    // the thirteen windows could not be used at all.
+    //
+    // `ALL` and these names are pinned together by
+    // `every_advertised_period_round_trips`.
+    //
+    // The `alias` on each is for DATA ALREADY WRITTEN. Stored conversation
+    // specs (`ai_messages.specs`) and any saved widget were serialized with the
+    // old derived spelling, so dropping it would make every existing follow-up
+    // silently lose its query. The alias is read-only compatibility: new writes
+    // use the canonical name.
+    #[serde(rename = "last_7_days", alias = "last7_days")]
     Last7Days,
+    #[serde(rename = "last_30_days", alias = "last30_days")]
     Last30Days,
+    #[serde(rename = "last_90_days", alias = "last90_days")]
     Last90Days,
+    #[serde(rename = "last_12_months", alias = "last12_months")]
     Last12Months,
     AllTime,
 }
@@ -405,6 +424,79 @@ mod tests {
         let now = at("2026-03-31T10:00:00Z");
         let p = Period::preset(PeriodPreset::LastMonth).resolve(cairo(), now);
         assert!(p.from.is_some() && p.to.is_some());
+    }
+
+    /// The guard that was missing.
+    ///
+    /// `ALL` is what the model's tool schema and the OpenAPI enum advertise;
+    /// the serde names are what deserialization accepts. Nothing forced them to
+    /// agree, and they did not: `last_30_days` was documented and rejected.
+    #[test]
+    fn every_advertised_period_round_trips() {
+        for advertised in PeriodPreset::ALL {
+            let parsed: PeriodPreset =
+                serde_json::from_value(serde_json::Value::String((*advertised).to_string()))
+                    .unwrap_or_else(|e| {
+                        panic!("'{advertised}' is advertised but cannot be parsed: {e}")
+                    });
+            let back = serde_json::to_value(parsed).unwrap();
+            assert_eq!(
+                back.as_str(),
+                Some(*advertised),
+                "'{advertised}' does not serialize back to itself"
+            );
+        }
+    }
+
+    #[test]
+    fn the_legacy_spelling_still_parses() {
+        // Conversations and widgets stored before the rename hold the old
+        // derived spelling. Rejecting it would quietly drop the query from
+        // every existing follow-up.
+        for (legacy, canonical) in [
+            ("last7_days", "last_7_days"),
+            ("last30_days", "last_30_days"),
+            ("last90_days", "last_90_days"),
+            ("last12_months", "last_12_months"),
+        ] {
+            let parsed: PeriodPreset =
+                serde_json::from_value(serde_json::Value::String(legacy.into()))
+                    .unwrap_or_else(|e| panic!("legacy '{legacy}' must still parse: {e}"));
+            // ...but it is written back in the canonical form.
+            assert_eq!(
+                serde_json::to_value(parsed).unwrap().as_str(),
+                Some(canonical)
+            );
+        }
+    }
+
+    #[test]
+    fn all_lists_every_variant() {
+        // A variant missing from ALL is one the model is never told about.
+        use PeriodPreset::*;
+        let every = [
+            Today,
+            Yesterday,
+            ThisWeek,
+            LastWeek,
+            ThisMonth,
+            LastMonth,
+            ThisYear,
+            LastYear,
+            Last7Days,
+            Last30Days,
+            Last90Days,
+            Last12Months,
+            AllTime,
+        ];
+        assert_eq!(every.len(), PeriodPreset::ALL.len());
+        for v in every {
+            let name = serde_json::to_value(v).unwrap();
+            assert!(
+                PeriodPreset::ALL.contains(&name.as_str().unwrap()),
+                "{name} is a real variant but is not advertised in ALL"
+            );
+        }
     }
 
     #[test]

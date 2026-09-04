@@ -19,6 +19,7 @@
 //! metric is one entry in [`schema::DATASETS`]. Nothing else changes.
 
 pub mod compile;
+pub mod entities;
 pub mod execute;
 pub mod handlers;
 pub mod presets;

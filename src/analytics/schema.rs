@@ -160,21 +160,22 @@ pub const PERSON_JOINS: &[&str] = &["waiter", "cashier", "teller", "employee"];
 
 /// Dimensions whose values are a person's name.
 ///
-/// These are pseudonymised before any result reaches a language model — see
-/// `ai::pseudonym`. Nothing else in the registry names a person: `branch`,
-/// `product`, `category` and `ingredient` are business data the model needs in
-/// order to reason at all, and `department` / `job_title` are roles rather than
-/// people.
-///
-/// `supplier` is deliberately NOT here. A supplier is a company, and its name is
-/// commercial information rather than personal data; a merchant asking who they
-/// spend the most with expects to be told. Move it in if that judgement changes
-/// — this list is the only thing that decides it.
-pub const PERSONAL_DIMENSIONS: &[&str] = &["waiter", "cashier", "teller", "employee"];
+/// Derived from [`crate::analytics::entities::ENTITY_KINDS`] rather than
+/// maintained here. This used to be a hand-written list beside the join graph,
+/// which meant two places had to agree about which dimensions name people — and
+/// the failure mode of them disagreeing is staff names reaching a language
+/// model.
+pub fn personal_dimensions() -> Vec<&'static str> {
+    super::entities::ENTITY_KINDS
+        .iter()
+        .filter(|k| k.personal)
+        .flat_map(|k| k.dimensions.iter().copied())
+        .collect()
+}
 
 /// True when a result column carries a person's name.
 pub fn is_personal_dimension(column_key: &str) -> bool {
-    PERSONAL_DIMENSIONS.contains(&column_key)
+    super::entities::is_personal_dimension(column_key)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2100,9 +2101,9 @@ mod tests {
             for dim in d.dims {
                 if dim.joins.iter().any(|j| PERSON_JOINS.contains(j)) {
                     assert!(
-                        PERSONAL_DIMENSIONS.contains(&dim.id),
-                        "{}/{} resolves to a person's name but is not in \
-                         PERSONAL_DIMENSIONS — it would reach the model unpseudonymised",
+                        is_personal_dimension(dim.id),
+                        "{}/{} resolves to a person's name but no EntityKind \
+                         claims it — it would reach the model unpseudonymised",
                         d.id,
                         dim.id
                     );
@@ -2113,10 +2114,10 @@ mod tests {
 
     #[test]
     fn every_personal_dimension_actually_exists() {
-        for id in PERSONAL_DIMENSIONS {
+        for id in personal_dimensions() {
             assert!(
-                DATASETS.iter().any(|d| d.dims.iter().any(|x| x.id == *id)),
-                "PERSONAL_DIMENSIONS names '{id}', which no dataset has"
+                DATASETS.iter().any(|d| d.dims.iter().any(|x| x.id == id)),
+                "a personal kind names dimension '{id}', which no dataset has"
             );
         }
     }

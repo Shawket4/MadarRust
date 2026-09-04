@@ -49,7 +49,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde_json::{Map, Value};
 
-use crate::{analytics::schema, db::Db, errors::AppError};
+use crate::{analytics::entities as schema_entities, analytics::schema, db::Db, errors::AppError};
 
 /// Prefix for a staff placeholder. Short, and shaped like an identifier so a
 /// model copies it verbatim instead of rewording it the way it would reword
@@ -82,14 +82,13 @@ impl Directory {
     /// staff. Ordering by id — not by name — is what makes a code stable when
     /// somebody is renamed or a new hire lands alphabetically in the middle.
     pub async fn load(db: &Db) -> Result<Self, AppError> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT name FROM users \
-             WHERE deleted_at IS NULL AND name IS NOT NULL AND name <> '' \
-             ORDER BY id",
-        )
-        .fetch_all(db.get_ref())
-        .await?;
-        Ok(Self::from_names(rows.into_iter().map(|r| r.0)))
+        // Sourced from the entity registry rather than a query written here, so
+        // adding a personal kind automatically extends what gets pseudonymised.
+        // `list_people` deduplicates by user id across kinds: one human who is
+        // both a waiter and an attendance record must get ONE code, or an answer
+        // mentioning them twice reads as two different people.
+        let people = schema_entities::list_people(db).await?;
+        Ok(Self::from_names(people.into_iter().map(|e| e.name)))
     }
 
     /// Build from an explicit list, for tests and for callers that already hold

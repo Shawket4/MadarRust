@@ -30,6 +30,7 @@
 
 pub mod agent;
 pub mod compaction;
+pub mod evals;
 pub mod gemini;
 pub mod groq;
 pub mod handlers;

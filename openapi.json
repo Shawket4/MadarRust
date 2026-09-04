@@ -49458,10 +49458,10 @@
           "last_month",
           "this_year",
           "last_year",
-          "last7_days",
-          "last30_days",
-          "last90_days",
-          "last12_months",
+          "last_7_days",
+          "last_30_days",
+          "last_90_days",
+          "last_12_months",
           "all_time"
         ]
       },
