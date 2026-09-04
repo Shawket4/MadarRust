@@ -166,6 +166,19 @@ pub struct TablePosition {
     pub width: f64,
     pub height: f64,
     pub rotation: f64,
+    /// Optimistic-concurrency token: the `updated_at` the client last saw for
+    /// this table.
+    ///
+    /// The dashboard autosaves every gesture, so two managers arranging the
+    /// same room no longer collide rarely and visibly -- they collide often and
+    /// silently, each overwriting the other's last drag. When this is sent, the
+    /// write only lands if the row has not moved since; otherwise the whole
+    /// request is rejected and the caller is told exactly which tables changed.
+    ///
+    /// Optional so existing clients (and the POS) keep working unchanged: absent
+    /// means "no guard", which is the previous last-write-wins behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_updated_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -246,6 +259,42 @@ pub async fn list_sections(
 /// or table geometry), so POS canvases re-pull instead of showing yesterday's
 /// room until the next manual sync. Lean signal — the client re-fetches
 /// `/floor/sections` + `/floor/tables` itself.
+/// Build the 409 for a layout save that lost a race.
+///
+/// Deliberately names the tables. "Someone else changed the layout" tells a
+/// manager nothing they can act on -- they cannot tell whether their whole
+/// arrangement is lost or one table moved a centimetre. Naming the labels lets
+/// the client say which tables to look at, and reload just those.
+///
+/// Best-effort by construction: if the lookup itself fails we still return the
+/// conflict, because reporting a vaguer 409 is right and reporting a 500 is not.
+async fn stale_layout_error(
+    pool: &sqlx::PgPool,
+    branch_id: Uuid,
+    stale: &[Uuid],
+) -> crate::errors::AppError {
+    let labels: Vec<String> = sqlx::query_scalar(
+        "SELECT label FROM branch_tables \
+         WHERE branch_id = $1 AND id = ANY($2) ORDER BY lower(label)",
+    )
+    .bind(branch_id)
+    .bind(stale)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let named = if labels.is_empty() {
+        format!("{} table(s)", stale.len())
+    } else {
+        labels.join(", ")
+    };
+    crate::errors::AppError::Conflict(format!(
+        "The layout changed while you were editing: {named}. \
+         Nothing was saved. Reload the floor to pick up the current positions, \
+         then reapply your changes."
+    ))
+}
+
 fn publish_layout_changed(hub: &crate::realtime::hub::BranchEventHub, branch_id: Uuid) {
     hub.publish(
         branch_id,
@@ -568,13 +617,20 @@ pub async fn save_layout(
     require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
 
     let mut tx = pool.get_ref().begin().await?;
+    // Tables whose guard did not match. Collected rather than returned on the
+    // first miss so the caller learns everything that moved under them in one
+    // round trip, instead of rediscovering it one table at a time.
+    let mut stale: Vec<Uuid> = Vec::new();
     for t in &body.tables {
         // Scoped to the branch so a forged id can't move another branch's table.
-        sqlx::query(
+        // The `expected_updated_at` clause is what makes an autosaving client
+        // safe: no match means someone else wrote this row first.
+        let affected = sqlx::query(
             "UPDATE branch_tables SET \
                  section_id = $3, pos_x = $4, pos_y = $5, width = $6, height = $7, \
                  rotation = $8, updated_at = now() \
-             WHERE id = $1 AND branch_id = $2",
+             WHERE id = $1 AND branch_id = $2 \
+               AND ($9::timestamptz IS NULL OR updated_at = $9)",
         )
         .bind(t.id)
         .bind(body.branch_id)
@@ -584,8 +640,24 @@ pub async fn save_layout(
         .bind(t.width)
         .bind(t.height)
         .bind(t.rotation)
+        .bind(t.expected_updated_at)
         .execute(&mut *tx)
-        .await?;
+        .await?
+        .rows_affected();
+
+        // Only a supplied guard can fail this way. Without one the clause is a
+        // no-op, and zero rows just means the id is not this branch's -- which
+        // this endpoint has always ignored rather than treated as an error.
+        if affected == 0 && t.expected_updated_at.is_some() {
+            stale.push(t.id);
+        }
+    }
+
+    if !stale.is_empty() {
+        // All or nothing. A partial layout save would leave the room in a state
+        // neither manager arranged, which is worse than refusing.
+        tx.rollback().await?;
+        return Err(stale_layout_error(pool.get_ref(), body.branch_id, &stale).await);
     }
     tx.commit().await?;
 
