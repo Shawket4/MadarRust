@@ -182,6 +182,37 @@ pub fn to_block_ref(d: &QueryData) -> ResultBlock {
     }
 }
 
+/// How many rows of a block are persisted with the conversation.
+///
+/// A live block may carry up to the executor's 1000-row cap. Persisting that
+/// for every turn of every conversation is a lot of JSONB for something a
+/// person scrolls past, and the value of a stored chart is in seeing its shape
+/// again, not in re-reading row 700. Anything longer keeps its head and says so.
+const MAX_STORED_ROWS: usize = 200;
+
+/// The renderable part of a block, trimmed for storage.
+///
+/// Deliberately the same field names the live response uses, so the client
+/// renders a replayed block with the same component and no second code path —
+/// two renderers for the same data is how a stored chart quietly starts
+/// disagreeing with a live one.
+fn snapshot_of(b: &ResultBlock) -> Value {
+    let stored: Vec<&Map<String, Value>> = b.rows.iter().take(MAX_STORED_ROWS).collect();
+    serde_json::json!({
+        "columns": b.columns,
+        "rows": stored,
+        "row_count": b.row_count,
+        // True if the ORIGINAL query was capped, or if storage trimmed it here.
+        "truncated": b.truncated || b.rows.len() > MAX_STORED_ROWS,
+        "grain": b.grain,
+        "viz": b.viz,
+        "facet_by": b.facet_by,
+        "scope": b.scope,
+        "period_from": b.period_from,
+        "period_to": b.period_to,
+    })
+}
+
 fn to_block(d: QueryData) -> ResultBlock {
     ResultBlock {
         title: d.title,
@@ -548,9 +579,21 @@ impl AiChatKind {
         }
     }
 
-    /// The queries this turn ran, in the shape `ai_messages.specs` stores:
-    /// `[{title, preset_id, spec}]`. Rows are deliberately not stored — see the
-    /// migration for why.
+    /// The queries this turn ran AND what they returned, in the shape
+    /// `ai_messages.specs` stores:
+    /// `[{title, preset_id, spec, captured_at, snapshot}]`.
+    ///
+    /// The snapshot is why reopening a conversation shows its charts again
+    /// instead of an empty shell. The original design stored only the spec and
+    /// re-ran it, on the reasoning that stored rows go stale — which is true,
+    /// but it made scrolling back through your own conversation a page of
+    /// prose referring to tables that were not there.
+    ///
+    /// Both concerns are satisfied by keeping the spec *and* stamping the
+    /// snapshot with `captured_at`. History renders instantly from the
+    /// snapshot, labelled with when it was taken; the spec is still there to
+    /// re-run for current figures, and to pin the answer to a dashboard. What
+    /// is never done is presenting a stored number as if it were current.
     fn specs_json(&self) -> Value {
         let blocks = match self {
             AiChatKind::Answer { results, .. } | AiChatKind::Incomplete { results, .. } => {
@@ -558,6 +601,7 @@ impl AiChatKind {
             }
             AiChatKind::Clarify { .. } => &[],
         };
+        let captured_at = chrono::Utc::now().to_rfc3339();
         Value::Array(
             blocks
                 .iter()
@@ -566,6 +610,8 @@ impl AiChatKind {
                         "title": b.title,
                         "preset_id": b.preset_id,
                         "spec": b.spec,
+                        "captured_at": captured_at,
+                        "snapshot": snapshot_of(b),
                     })
                 })
                 .collect(),
@@ -611,6 +657,134 @@ mod tests {
             id,
             name: "B".into(),
         }
+    }
+
+    fn block_with(rows: usize) -> ResultBlock {
+        use crate::analytics::types::ColumnKind;
+        ResultBlock {
+            title: Some("Tips by waiter".into()),
+            preset_id: Some("tips_by_waiter".into()),
+            spec: serde_json::from_value(serde_json::json!({
+                "dataset": "orders",
+                "dimensions": ["waiter"],
+                "measures": ["tip_total"],
+                "period": { "preset": "last_month" }
+            }))
+            .expect("a valid spec"),
+            columns: vec![
+                Column {
+                    key: "waiter",
+                    label: "Waiter",
+                    kind: ColumnKind::Label,
+                },
+                Column {
+                    key: "tip_total",
+                    label: "Tips",
+                    kind: ColumnKind::Money,
+                },
+            ],
+            rows: (0..rows)
+                .map(|i| {
+                    let mut m = Map::new();
+                    m.insert("waiter".into(), serde_json::json!(format!("W{i}")));
+                    m.insert("tip_total".into(), serde_json::json!(i as i64 * 100));
+                    m
+                })
+                .collect(),
+            row_count: rows,
+            truncated: false,
+            grain: Grain::Categorical,
+            viz: Viz::Bar,
+            facet_by: None,
+            scope: ScopeInfo {
+                all_branches: true,
+                branches: vec!["Maadi".into()],
+                label: "All branches (1)".into(),
+                unmatched_branch: None,
+            },
+            period_from: Some("2026-08-01T00:00:00Z".into()),
+            period_to: Some("2026-09-01T00:00:00Z".into()),
+        }
+    }
+
+    /// A reopened conversation must show its charts, not prose referring to
+    /// tables that are no longer there. The snapshot is what makes that work.
+    #[test]
+    fn a_stored_turn_carries_the_chart_that_was_shown() {
+        let kind = AiChatKind::Answer {
+            text: "Forkesha led on tips.".into(),
+            results: vec![block_with(3)],
+        };
+        let stored = kind.specs_json();
+        let entry = &stored[0];
+
+        // The spec survives: re-running for current figures, and pinning the
+        // answer to a dashboard, both still work.
+        assert_eq!(entry["spec"]["dataset"], "orders");
+        assert_eq!(entry["preset_id"], "tips_by_waiter");
+
+        // ...and so does everything needed to draw it again.
+        let snap = &entry["snapshot"];
+        assert_eq!(snap["rows"].as_array().unwrap().len(), 3);
+        assert_eq!(snap["columns"].as_array().unwrap().len(), 2);
+        assert_eq!(snap["viz"], "bar");
+        assert_eq!(snap["scope"]["label"], "All branches (1)");
+        assert_eq!(snap["period_from"], "2026-08-01T00:00:00Z");
+
+        // A stored figure is never presented as a current one, so it has to
+        // carry the moment it was taken.
+        assert!(
+            entry["captured_at"]
+                .as_str()
+                .is_some_and(|t| t.contains('T')),
+            "a snapshot without a timestamp cannot be labelled as historical"
+        );
+    }
+
+    #[test]
+    fn a_large_result_is_trimmed_for_storage_and_says_so() {
+        // Persisting the executor's full 1000-row cap for every turn of every
+        // conversation is a lot of JSONB for rows nobody scrolls to.
+        let kind = AiChatKind::Answer {
+            text: "Long table.".into(),
+            results: vec![block_with(MAX_STORED_ROWS + 250)],
+        };
+        let snap = &kind.specs_json()[0]["snapshot"];
+        assert_eq!(snap["rows"].as_array().unwrap().len(), MAX_STORED_ROWS);
+        // The trim must be visible, or the chart silently misrepresents itself.
+        assert_eq!(snap["truncated"], true);
+        // The true size is still reported.
+        assert_eq!(snap["row_count"], MAX_STORED_ROWS + 250);
+    }
+
+    #[test]
+    fn a_clarification_stores_no_snapshot_because_it_ran_nothing() {
+        let kind = AiChatKind::Clarify {
+            question: "Which branch?".into(),
+        };
+        assert_eq!(kind.specs_json(), serde_json::json!([]));
+    }
+
+    /// `store::primary_spec` reads `specs[0].spec`. Adding the snapshot beside
+    /// it must not disturb that, or follow-up questions lose their context.
+    #[test]
+    fn adding_the_snapshot_did_not_move_the_spec() {
+        let kind = AiChatKind::Answer {
+            text: "x".into(),
+            results: vec![block_with(1)],
+        };
+        let turn = crate::ai::store::StoredTurn {
+            id: Uuid::new_v4(),
+            seq: 1,
+            question: "q".into(),
+            answer: Some("a".into()),
+            kind: "answer".into(),
+            specs: kind.specs_json(),
+            provider: None,
+            created_at: chrono::Utc::now(),
+        };
+        let spec = crate::ai::store::primary_spec(&turn).expect("the spec is still readable");
+        assert_eq!(spec.dataset, "orders");
     }
 
     #[test]

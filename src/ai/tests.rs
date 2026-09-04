@@ -689,9 +689,12 @@ async fn a_conversation_is_created_and_can_be_resumed(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn a_stored_turn_keeps_the_query_not_the_rows(pool: PgPool) {
-    // Rows go stale the moment another order is rung up; the spec re-runs and
-    // gives current figures. It is also what a client needs to pin a widget.
+async fn a_stored_turn_keeps_both_the_query_and_the_chart(pool: PgPool) {
+    // The spec is kept because it re-runs for CURRENT figures and is what a
+    // client needs to pin a widget. The snapshot is kept because without it,
+    // scrolling back through a conversation shows prose about charts that are
+    // no longer there. Staleness is handled by stamping the snapshot with when
+    // it was taken, not by throwing it away.
     let s = seed(&pool, "a").await;
     let app = app(&pool, Arc::new(MockProvider::router())).await;
     let token = org_admin_token_for(s.org, s.admin);
@@ -704,12 +707,19 @@ async fn a_stored_turn_keeps_the_query_not_the_rows(pool: PgPool) {
     assert_eq!(specs.len(), 1);
     assert_eq!(specs[0]["preset_id"], "top_products");
     assert_eq!(specs[0]["spec"]["dataset"], "order_items");
-    // No rows anywhere in the stored turn.
-    let wire = detail["turns"][0].to_string();
-    assert!(
-        !wire.contains("\"rows\""),
-        "rows must not be stored: {wire}"
-    );
+
+    // The chart can be drawn again from history alone.
+    let snap = &specs[0]["snapshot"];
+    let rows = snap["rows"].as_array().expect("the rows are stored");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["product"], "Latte");
+    assert!(!snap["columns"].as_array().unwrap().is_empty());
+    assert_eq!(snap["viz"], "bar");
+    // Scope travels with it: "which branches was this?" must not become
+    // unanswerable just because the turn is now history.
+    assert_eq!(snap["scope"]["label"], "Branch a");
+    // And it is dated, so it is never shown as a current figure.
+    assert!(specs[0]["captured_at"].as_str().is_some());
 }
 
 #[sqlx::test]
