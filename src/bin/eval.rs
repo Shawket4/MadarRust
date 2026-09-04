@@ -5,6 +5,7 @@
 //!   cargo run --bin eval -- --category period_resolution
 //!   cargo run --bin eval -- --limit 20      # a cheap smoke run
 //!   cargo run --bin eval -- --threshold 0.8 # gate CI on accuracy
+//!   cargo run --bin eval -- --delay-ms 0     # no pacing (paid key)
 //!   cargo run --bin eval -- --export-jsonl out.jsonl   # fine-tuning data, no API calls
 //! ```
 //!
@@ -96,6 +97,14 @@ async fn main() {
     let threshold: f64 = flag("--threshold")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0.0);
+    // Pacing. Gemini's free tier allows 15 requests/minute, so an unpaced
+    // 200-case run spends most of itself being rate-limited and reports the
+    // 429s as excluded cases — a run that looks like it worked while covering a
+    // fraction of the set. 4.2s keeps just under the free-tier ceiling; set it
+    // to 0 on a paid key.
+    let delay_ms: u64 = flag("--delay-ms")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4_200);
 
     let state = madar_rust::ai::AiState::from_env();
     let Some(provider) = state.provider else {
@@ -126,7 +135,10 @@ async fn main() {
     let mut transport_failures = 0usize;
     let mut misses: Vec<(String, String)> = Vec::new();
 
-    for case in &selected {
+    for (i, case) in selected.iter().enumerate() {
+        if i > 0 && delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
         let outcome = run_case(provider.as_ref(), case).await;
         match outcome {
             Outcome::Failed(why) => {

@@ -45,9 +45,7 @@ use crate::{
 };
 
 use super::{
-    AiState,
-    agent::{self, AgentOutcome},
-    compaction, prompt,
+    AiState, agent, compaction, prompt,
     store::{self},
     telemetry::TurnLog,
     tools::ToolCtx,

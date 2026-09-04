@@ -2982,6 +2982,234 @@
           "attendance_status": "absent"
         }
       }
+    },
+    {
+      "id": "regress-branch-001",
+      "lang": "en",
+      "question": "waiter performance in sidi henish this summer with tips",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "regression",
+      "confidence": "review",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "tips_by_waiter",
+        "period": "last_90_days",
+        "accept_presets": [
+          "tips_total",
+          "waiter_performance"
+        ],
+        "accept_custom_query": true
+      },
+      "note": "Real failure: the branch is spelled SIDI HENEISH and the merchant typed 'sidi henish'. Substring matching missed it by one letter, so the branch went unmatched and no answer was produced. 'This summer' has no preset, so the period is a judgement call — a rolling 90 days is the closest available."
+    },
+    {
+      "id": "regress-branch-002",
+      "lang": "en",
+      "question": "tips by waiter at sidi heneish over the summer",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "regression",
+      "confidence": "review",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "tips_by_waiter",
+        "period": "last_90_days",
+        "accept_presets": [
+          "tips_total",
+          "waiter_performance"
+        ],
+        "accept_custom_query": true
+      },
+      "note": "Real failure: the branch is spelled SIDI HENEISH and the merchant typed 'sidi henish'. Substring matching missed it by one letter, so the branch went unmatched and no answer was produced. 'This summer' has no preset, so the period is a judgement call — a rolling 90 days is the closest available."
+    },
+    {
+      "id": "regress-branch-003",
+      "lang": "en",
+      "question": "how did the waiters at Sidi Henish do with tips this summer",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "regression",
+      "confidence": "review",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "tips_by_waiter",
+        "period": "last_90_days",
+        "accept_presets": [
+          "tips_total",
+          "waiter_performance"
+        ],
+        "accept_custom_query": true
+      },
+      "note": "Real failure: the branch is spelled SIDI HENEISH and the merchant typed 'sidi henish'. Substring matching missed it by one letter, so the branch went unmatched and no answer was produced. 'This summer' has no preset, so the period is a judgement call — a rolling 90 days is the closest available."
+    },
+    {
+      "id": "regress-branch-004",
+      "lang": "ar",
+      "question": "أداء الويترز في سيدي حنيش الصيف ده بالتيبس",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "regression",
+      "confidence": "review",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "tips_by_waiter",
+        "period": "last_90_days",
+        "accept_presets": [
+          "tips_total",
+          "waiter_performance"
+        ],
+        "accept_custom_query": true
+      },
+      "note": "Real failure: the branch is spelled SIDI HENEISH and the merchant typed 'sidi henish'. Substring matching missed it by one letter, so the branch went unmatched and no answer was produced. 'This summer' has no preset, so the period is a judgement call — a rolling 90 days is the closest available."
+    },
+    {
+      "id": "regress-branch-005",
+      "lang": "en",
+      "question": "tips per waiter in heneish last 90 days",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "regression",
+      "confidence": "review",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "tips_by_waiter",
+        "period": "last_90_days",
+        "accept_presets": [
+          "tips_total",
+          "waiter_performance"
+        ],
+        "accept_custom_query": true
+      },
+      "note": "Real failure: the branch is spelled SIDI HENEISH and the merchant typed 'sidi henish'. Substring matching missed it by one letter, so the branch went unmatched and no answer was produced. 'This summer' has no preset, so the period is a judgement call — a rolling 90 days is the closest available."
+    },
+    {
+      "id": "regress-summer-001",
+      "lang": "en",
+      "question": "revenue across this summer",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "regression",
+      "confidence": "review",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "last_90_days",
+        "accept_presets": [
+          "sales_summary",
+          "sales_by_day"
+        ],
+        "accept_custom_query": true
+      },
+      "note": "'Summer' is not a period preset. The model must map it onto a real preset or an explicit from/to range; inventing 'this_summer' is the failure this pins."
+    },
+    {
+      "id": "regress-summer-002",
+      "lang": "ar",
+      "question": "مبيعات الصيف ده",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "regression",
+      "confidence": "review",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "last_90_days",
+        "accept_presets": [
+          "sales_summary",
+          "sales_by_day"
+        ],
+        "accept_custom_query": true
+      },
+      "note": "'Summer' is not a period preset. The model must map it onto a real preset or an explicit from/to range; inventing 'this_summer' is the failure this pins."
+    },
+    {
+      "id": "regress-summer-003",
+      "lang": "en",
+      "question": "how did we do over the summer months",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "regression",
+      "confidence": "review",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "revenue_total",
+        "period": "last_90_days",
+        "accept_presets": [
+          "sales_summary",
+          "sales_by_day"
+        ],
+        "accept_custom_query": true
+      },
+      "note": "'Summer' is not a period preset. The model must map it onto a real preset or an explicit from/to range; inventing 'this_summer' is the failure this pins."
+    },
+    {
+      "id": "regress-money-001",
+      "lang": "en",
+      "question": "total tips last month",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "regression",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "tips_total",
+        "period": "last_month",
+        "accept_presets": [
+          "tips_by_waiter",
+          "tips_total"
+        ],
+        "accept_custom_query": true
+      },
+      "note": "Money is handed to the model already converted to pounds. This case exists because a stated figure once disagreed with the table beside it by 10x."
+    },
+    {
+      "id": "regress-money-002",
+      "lang": "ar",
+      "question": "إجمالي التيبس الشهر اللي فات",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "regression",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "tips_total",
+        "period": "last_month",
+        "accept_presets": [
+          "tips_by_waiter",
+          "tips_total"
+        ],
+        "accept_custom_query": true
+      },
+      "note": "Money is handed to the model already converted to pounds. This case exists because a stated figure once disagreed with the table beside it by 10x."
+    },
+    {
+      "id": "regress-money-003",
+      "lang": "en",
+      "question": "which waiter earned the most in tips last month",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "regression",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "tips_by_waiter",
+        "period": "last_month",
+        "accept_presets": [
+          "tips_by_waiter",
+          "tips_total"
+        ],
+        "accept_custom_query": true
+      },
+      "note": "Money is handed to the model already converted to pounds. This case exists because a stated figure once disagreed with the table beside it by 10x."
+    },
+    {
+      "id": "regress-money-004",
+      "lang": "ar",
+      "question": "مين الويتر اللي خد أكتر تيبس الشهر اللي فات",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "regression",
+      "confidence": "high",
+      "expect": {
+        "tool": "run_preset",
+        "preset": "tips_by_waiter",
+        "period": "last_month",
+        "accept_presets": [
+          "tips_by_waiter",
+          "tips_total"
+        ],
+        "accept_custom_query": true
+      },
+      "note": "Money is handed to the model already converted to pounds. This case exists because a stated figure once disagreed with the table beside it by 10x."
     }
   ]
 }

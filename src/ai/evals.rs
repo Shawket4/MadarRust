@@ -117,7 +117,11 @@ mod tests {
     #[test]
     fn the_case_file_parses_and_ids_are_unique() {
         let f = load();
-        assert_eq!(f.cases.len(), 200, "the set is sized at 200 cases");
+        assert!(
+            f.cases.len() >= 200,
+            "the set is sized at 200+ cases, found {}",
+            f.cases.len()
+        );
         let mut seen = HashSet::new();
         for c in &f.cases {
             assert!(seen.insert(c.id.clone()), "duplicate case id {}", c.id);
@@ -141,6 +145,16 @@ mod tests {
                 assert!(
                     presets::preset(p).is_some(),
                     "{}: unknown preset '{p}'",
+                    c.id
+                );
+            }
+            // Alternatives are expectations too. An `accept_presets` entry that
+            // names nothing real quietly collapses the case back to a single
+            // right answer — the same decoration failure this file guards.
+            for alt in &e.accept_presets {
+                assert!(
+                    presets::preset(alt).is_some(),
+                    "{}: unknown accept_preset '{alt}'",
                     c.id
                 );
             }
@@ -284,6 +298,29 @@ mod tests {
             assert!(
                 c.note.as_deref().is_some_and(|n| n.len() > 20),
                 "{}: a review case must explain the judgement made",
+                c.id
+            );
+        }
+    }
+
+    /// Every regression case must trace to a real failure. A regression suite
+    /// whose cases have no story attached decays into ordinary cases nobody
+    /// dares delete.
+    #[test]
+    fn regression_cases_record_the_failure_they_pin() {
+        let cases = load().cases;
+        let regressions: Vec<_> = cases
+            .iter()
+            .filter(|c| c.category == "regression")
+            .collect();
+        assert!(
+            !regressions.is_empty(),
+            "the regression category exists but is empty"
+        );
+        for c in regressions {
+            assert!(
+                c.note.as_deref().is_some_and(|n| n.len() > 40),
+                "{}: a regression case must say what actually broke",
                 c.id
             );
         }

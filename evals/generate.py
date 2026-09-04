@@ -260,12 +260,77 @@ FILTERS = [
 for i,(lang,q,ds,filt,per) in enumerate(FILTERS,1):
     add(f"filter-{i:03d}",lang,q,query(ds,None,None,per,filters=filt),"filters")
 
+# ── Regressions: questions that failed in production ────────────────────────
+#
+# Each of these is a real question a merchant asked that came back wrong or
+# unanswered. They are kept as cases so the specific failure cannot return
+# quietly; the note records what actually broke.
+
+# The branch is "SIDI HENEISH"; merchants type it a dozen ways. Before the
+# fuzzy matcher was fixed, anything but the exact spelling went unmatched and
+# the whole question came back "I couldn't work that one out".
+BRANCH_TYPOS = [
+    ("en", "waiter performance in sidi henish this summer with tips"),
+    ("en", "tips by waiter at sidi heneish over the summer"),
+    ("en", "how did the waiters at Sidi Henish do with tips this summer"),
+    ("ar", "أداء الويترز في سيدي حنيش الصيف ده بالتيبس"),
+    ("en", "tips per waiter in heneish last 90 days"),
+]
+for i, (lang, q) in enumerate(BRANCH_TYPOS, 1):
+    add(f"regress-branch-{i:03d}", lang, q,
+        preset("tips_by_waiter", "last_90_days",
+               accept_presets=["tips_total", "waiter_performance"],
+               accept_custom_query=True),
+        "regression", confidence="review",
+        note="Real failure: the branch is spelled SIDI HENEISH and the merchant typed "
+             "'sidi henish'. Substring matching missed it by one letter, so the branch went "
+             "unmatched and no answer was produced. 'This summer' has no preset, so the "
+             "period is a judgement call — a rolling 90 days is the closest available.")
+
+# The summer window itself: there is no `this_summer` preset, and the model must
+# pick a real one or an explicit range rather than inventing an id.
+for i, (lang, q) in enumerate([
+    ("en", "revenue across this summer"),
+    ("ar", "مبيعات الصيف ده"),
+    ("en", "how did we do over the summer months"),
+], 1):
+    add(f"regress-summer-{i:03d}", lang, q,
+        preset("revenue_total", "last_90_days",
+               accept_presets=["sales_summary", "sales_by_day"],
+               accept_custom_query=True),
+        "regression", confidence="review",
+        note="'Summer' is not a period preset. The model must map it onto a real preset or an "
+             "explicit from/to range; inventing 'this_summer' is the failure this pins.")
+
+# Money reporting. The model once divided piastres by 1000 instead of 100, so
+# the prose said 1,178.30 where the table beside it said 11,783. Amounts now
+# reach the model already in pounds; these cases keep the routing honest.
+for i, (lang, q) in enumerate([
+    ("en", "total tips last month"),
+    ("ar", "إجمالي التيبس الشهر اللي فات"),
+    ("en", "which waiter earned the most in tips last month"),
+    ("ar", "مين الويتر اللي خد أكتر تيبس الشهر اللي فات"),
+], 1):
+    tips_preset = "tips_total" if i <= 2 else "tips_by_waiter"
+    add(f"regress-money-{i:03d}", lang, q,
+        preset(tips_preset, "last_month",
+               accept_presets=["tips_by_waiter", "tips_total"],
+               accept_custom_query=True),
+        "regression",
+        note="Money is handed to the model already converted to pounds. This case exists "
+             "because a stated figure once disagreed with the table beside it by 10x.")
+
 # ── Validate everything against the real registry before writing ────────────
 errors = []
 for c in cases:
     e = c["expect"]
     if e.get("preset") and e["preset"] not in PRESETS:
         errors.append(f"{c['id']}: unknown preset {e['preset']}")
+    # Alternatives are expectations too. An accept_presets entry naming a preset
+    # that does not exist silently narrows the case to a single right answer.
+    for alt in e.get("accept_presets") or []:
+        if alt not in PRESETS:
+            errors.append(f"{c['id']}: unknown accept_preset {alt}")
     if e.get("dataset") and e["dataset"] not in DATASETS:
         errors.append(f"{c['id']}: unknown dataset {e['dataset']}")
     if e.get("period") and e["period"] not in PERIODS:

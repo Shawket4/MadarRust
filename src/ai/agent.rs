@@ -152,6 +152,9 @@ pub async fn run_with_progress(
     messages.push(Message::User(ctx.pseudonyms.redact_text(question)));
 
     let mut results: Vec<QueryData> = Vec::new();
+    // Kept so a failed run can say what actually went wrong rather than
+    // shrugging. See `fallback_text`.
+    let mut tool_errors: Vec<String> = Vec::new();
 
     for step in 0..MAX_STEPS {
         if let Some(p) = progress {
@@ -184,7 +187,7 @@ pub async fn run_with_progress(
             Turn::Calls(_) => {
                 log.finished("empty_call_list");
                 return Ok(AgentOutcome::Exhausted {
-                    text: fallback_text(&results),
+                    text: fallback_text(&results, &tool_errors),
                     results,
                 });
             }
@@ -244,6 +247,7 @@ pub async fn run_with_progress(
                 ToolOutcome::Info(v) => tool_results.push(tool_message(call, v)),
                 ToolOutcome::Error(e) => {
                     log.record_tool_error(&e);
+                    tool_errors.push(e.clone());
                     // Handed back rather than raised: this is the mechanism that
                     // lets the next step be a correction.
                     tool_results.push(tool_message(call, json!({ "error": e })));
@@ -275,7 +279,7 @@ pub async fn run_with_progress(
 
     log.finished("exhausted");
     Ok(AgentOutcome::Exhausted {
-        text: fallback_text(&results),
+        text: fallback_text(&results, &tool_errors),
         results,
     })
 }
@@ -338,18 +342,95 @@ fn summarize_for_model(data: &QueryData, pseudonyms: &Pseudonyms) -> Value {
     v
 }
 
-/// Said when the loop ends without the model calling `answer`. It reports the
-/// state honestly rather than fabricating a finding.
-fn fallback_text(results: &[QueryData]) -> String {
-    if results.is_empty() {
-        "I couldn't work that one out. Try asking about a specific figure and period — \
-         for example, revenue last week, or your top products this month."
-            .to_string()
-    } else {
-        "Here is the data I found for that. I wasn't able to summarize it — the table \
-         below has the figures."
-            .to_string()
+/// Said when the loop ends without the model calling `answer`.
+///
+/// This used to be one sentence — "I couldn't work that one out" — regardless of
+/// what happened, which told the merchant nothing and gave them no way to get a
+/// different result. The loop always knew more than that: which queries were
+/// rejected and why, and whether any data came back at all. It now says so.
+///
+/// The rule it follows: name what went wrong, then give one concrete thing to
+/// try. Never invent a finding.
+fn fallback_text(results: &[QueryData], tool_errors: &[String]) -> String {
+    if !results.is_empty() {
+        // Data exists; only the prose is missing. The table is the answer.
+        return "I found the figures for that but couldn't write the summary. \
+                The table below has the numbers."
+            .to_string();
     }
+
+    // A branch name that matched nothing is the single most actionable failure,
+    // and the merchant can fix it themselves by spelling it differently.
+    if let Some(name) = tool_errors.iter().find_map(|e| unmatched_branch_in(e)) {
+        return format!(
+            "I couldn't find a branch called \"{name}\" in the ones you have access to. \
+             Check the spelling, or ask without naming a branch to cover all of them."
+        );
+    }
+
+    match tool_errors.last() {
+        Some(err) => format!(
+            "I couldn't run that query. {} \
+             Try naming the figure and the period explicitly — for example, \
+             \"tips by waiter last month\".",
+            explain(err)
+        ),
+        None => "I couldn't work that one out. Try asking about a specific figure and period — \
+                 for example, revenue last week, or your top products this month."
+            .to_string(),
+    }
+}
+
+/// Turn a model-facing tool error into a sentence a merchant can act on.
+///
+/// Tool errors are written for the model and list valid ids so it can correct
+/// itself; pasted verbatim they read as gibberish to a person. This keeps the
+/// part that says *what* was wrong and drops the machine-readable remainder.
+fn explain(err: &str) -> String {
+    let lower = err.to_lowercase();
+    let reason = if lower.contains("period") {
+        "I didn't understand the time range."
+    } else if lower.contains("no dimension") || lower.contains("no measure") {
+        "That combination of figures isn't available together."
+    } else if lower.contains("unknown dataset") {
+        "I don't hold data of that kind."
+    } else if lower.contains("no filter") || lower.contains("filter") {
+        "One of the filters in the question isn't one I can apply."
+    } else if lower.contains("timeout") || lower.contains("statement timeout") {
+        "The query covered too much data to finish in time — try a shorter period."
+    } else {
+        // Unclassified: show the first sentence, which is the human-readable
+        // part of every tool error, and never the id dump that follows.
+        return first_sentence(err);
+    };
+    reason.to_string()
+}
+
+fn first_sentence(err: &str) -> String {
+    let s = err
+        .split_once(". ")
+        .map(|(head, _)| head)
+        .unwrap_or(err)
+        .trim()
+        .trim_end_matches('.');
+    if s.is_empty() {
+        return "It wasn't a query I could build.".to_string();
+    }
+    format!("{s}.")
+}
+
+/// Pull the branch name out of the executor's unmatched-branch error, if that
+/// is what this was.
+fn unmatched_branch_in(err: &str) -> Option<String> {
+    let lower = err.to_lowercase();
+    if !(lower.contains("branch") && (lower.contains("no ") || lower.contains("unmatched"))) {
+        return None;
+    }
+    // The name is quoted in the error.
+    let start = err.find('\'')?;
+    let rest = &err[start + 1..];
+    let end = rest.find('\'')?;
+    Some(rest[..end].to_string())
 }
 
 #[cfg(test)]
@@ -429,11 +510,63 @@ mod tests {
 
     #[test]
     fn the_fallback_never_invents_a_finding() {
-        assert!(fallback_text(&[]).contains("couldn't work that one out"));
-        let with = fallback_text(std::slice::from_ref(&data(1, None)));
+        assert!(fallback_text(&[], &[]).contains("couldn't work that one out"));
+        let with = fallback_text(std::slice::from_ref(&data(1, None)), &[]);
         assert!(with.contains("table below"));
         // Neither variant states a figure.
         assert!(!with.contains('0'));
+    }
+
+    /// The failure message has to say what went wrong. A merchant who is told
+    /// only "that didn't work" has no way to ask a better question, which is
+    /// what makes a wrong answer and no answer feel equally useless.
+    #[test]
+    fn a_failure_names_its_cause_and_offers_a_way_forward() {
+        let cases = [
+            (
+                "No branch matched 'Alexandria', valid branches: Maadi, Arkan",
+                "Alexandria",
+            ),
+            ("Unknown period preset 'this_summer'", "time range"),
+            (
+                "dataset 'orders' has no measure 'profit_margin'",
+                "available together",
+            ),
+            (
+                "query failed: canceling statement due to statement timeout",
+                "shorter period",
+            ),
+        ];
+        for (err, expected) in cases {
+            let text = fallback_text(&[], &[err.to_string()]);
+            assert!(
+                text.contains(expected),
+                "error {err:?} should surface {expected:?}, produced {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failure_message_never_leaks_the_models_id_dump() {
+        // Tool errors list every valid id so the MODEL can self-correct. Pasting
+        // that at a person is noise, not help.
+        let err = "dataset 'orders' has no dimension 'foo'. Valid dimensions: \
+                   branch, waiter, cashier, product, category, hour, day, week";
+        let text = fallback_text(&[], &[err.to_string()]);
+        assert!(!text.contains("Valid dimensions"), "{text}");
+        assert!(!text.contains("cashier"), "{text}");
+    }
+
+    #[test]
+    fn data_without_prose_points_at_the_table_rather_than_reporting_an_error() {
+        // Rows came back; only the summary is missing. That is not a failure to
+        // answer, and calling it one would hide a perfectly good table.
+        let text = fallback_text(
+            std::slice::from_ref(&data(3, None)),
+            &["some earlier rejected spec".to_string()],
+        );
+        assert!(text.contains("table below"), "{text}");
+        assert!(!text.contains("couldn't run"), "{text}");
     }
 
     #[test]

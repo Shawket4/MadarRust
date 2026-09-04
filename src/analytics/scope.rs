@@ -197,36 +197,157 @@ fn narrowed(subset: &[BranchRef], unmatched: Option<String>) -> (Vec<Uuid>, Scop
     )
 }
 
-/// Case- and whitespace-insensitive branch-name match *within the accessible
-/// set*. Prefers an exact match, then a substring either way — which handles
-/// "sidi henish" for "Sidi Henish", partial names, and Arabic names.
+/// Branch-name match *within the accessible set*, tolerant of how people
+/// actually type a name into a chat box.
+///
+/// The tiers, tried in order and stopping at the first that hits:
+///
+///   1. exact, after normalization;
+///   2. substring either way — handles "maadi" for "Maadi Branch";
+///   3. every word of the query appears in the name — handles word order and
+///      dropped words ("heneish sidi", "sidi");
+///   4. a small edit distance — handles a genuine misspelling.
+///
+/// Tier 4 exists because of a real failure: a merchant asked about
+/// "sidi henish" when the branch is "SIDI HENEISH". One missing letter, no
+/// substring relationship, so the branch went unmatched and the question came
+/// back unanswered. A one-character typo is the single most likely thing a
+/// human does to a proper noun, and it should not be a dead end.
+///
+/// The distance budget scales with length and stays tight (1 edit for a short
+/// name, at most 3 for a long one), so it fixes typos without inventing
+/// matches: "Alexandria" still does not match "Maadi", which is what keeps
+/// `unmatched_branch` meaningful.
 fn fuzzy_match(accessible: &[BranchRef], query: &str) -> Vec<BranchRef> {
-    let norm = |s: &str| {
-        s.split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_lowercase()
-    };
-    let q = norm(query);
+    let q = normalize_name(query);
     if q.is_empty() {
         return Vec::new();
     }
-    let exact: Vec<BranchRef> = accessible
-        .iter()
-        .filter(|b| norm(&b.name) == q)
-        .cloned()
-        .collect();
+
+    let pick = |f: &dyn Fn(&str) -> bool| -> Vec<BranchRef> {
+        accessible
+            .iter()
+            .filter(|b| f(&normalize_name(&b.name)))
+            .cloned()
+            .collect()
+    };
+
+    let exact = pick(&|n| n == q);
     if !exact.is_empty() {
         return exact;
     }
-    accessible
-        .iter()
-        .filter(|b| {
-            let n = norm(&b.name);
-            n.contains(&q) || q.contains(&n)
+    let substring = pick(&|n| n.contains(&q) || q.contains(n));
+    if !substring.is_empty() {
+        return substring;
+    }
+    let words: Vec<&str> = q.split(' ').filter(|w| !w.is_empty()).collect();
+    let by_word = pick(&|n| {
+        if discriminators(&q) != discriminators(n) {
+            return false;
+        }
+        let name_words: Vec<&str> = n.split(' ').collect();
+        words.iter().all(|w| {
+            name_words.iter().any(|nw| {
+                // A short token must match exactly. Loose containment here is
+                // how "Branch b" matched "Branch a" — "branch" contains "b".
+                nw == w || (w.chars().count() >= 3 && nw.starts_with(w))
+            })
         })
-        .cloned()
+    });
+    if !by_word.is_empty() {
+        return by_word;
+    }
+
+    // Typo tier: keep only the closest candidates within budget, so a near-miss
+    // never drags along a distant one.
+    let mut best: Option<usize> = None;
+    let mut hits: Vec<BranchRef> = Vec::new();
+    for br in accessible {
+        let n = normalize_name(&br.name);
+        // Names that differ only in their discriminator are DIFFERENT branches,
+        // however close the strings are. "Branch a"/"Branch b" and
+        // "Maadi 1"/"Maadi 2" are one edit apart, and quietly answering about
+        // the wrong one is the exact failure this tier must not introduce.
+        if discriminators(&q) != discriminators(&n) {
+            continue;
+        }
+        let budget = (n.chars().count().max(q.chars().count()) / 5).clamp(1, 3);
+        let d = edit_distance(&q, &n);
+        if d > budget {
+            continue;
+        }
+        match best {
+            Some(b) if d > b => continue,
+            Some(b) if d < b => {
+                hits.clear();
+                best = Some(d);
+            }
+            None => best = Some(d),
+            _ => {}
+        }
+        hits.push(br.clone());
+    }
+    hits
+}
+
+/// The tokens that distinguish one branch from a sibling: numbers, and very
+/// short words. These are never typos of each other, so the typo tier must
+/// treat them as exact.
+fn discriminators(name: &str) -> std::collections::BTreeSet<&str> {
+    name.split(' ')
+        .filter(|t| !t.is_empty())
+        .filter(|t| t.chars().count() <= 2 || t.chars().all(|c| c.is_numeric()))
         .collect()
+}
+
+/// Fold a name to a comparable form: lowercase, single-spaced, punctuation
+/// dropped, and Arabic orthography unified.
+///
+/// The Arabic part matters as much as the case folding. A merchant typing
+/// "المعادى" for a branch stored as "المعادي" differs only in the final letter
+/// (ى vs ي), and the same is true of the alef family (أ إ آ → ا) and ة/ه.
+/// Those are spelling conventions, not different names, and treating them as
+/// different names fails the question for a bilingual merchant.
+fn normalize_name(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        let mapped = match ch {
+            'أ' | 'إ' | 'آ' | 'ٱ' => Some('ا'),
+            'ى' => Some('ي'),
+            'ة' => Some('ه'),
+            'ؤ' => Some('و'),
+            'ئ' => Some('ي'),
+            // Tashkeel (harakat) and tatweel carry no lexical weight here.
+            '\u{0640}' | '\u{064B}'..='\u{0652}' | '\u{0670}' => None,
+            c if c.is_alphanumeric() => Some(c.to_lowercase().next().unwrap_or(c)),
+            _ => Some(' '),
+        };
+        if let Some(c) = mapped {
+            out.push(c);
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Levenshtein distance over chars, two-row. Inputs here are branch names, so
+/// the quadratic cost is irrelevant.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() {
+        return b.len();
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
 }
 
 /// The branch the dashboard's global selector is on, from the `X-Branch-Id`
@@ -275,6 +396,77 @@ mod tests {
         let acc = vec![b("Sidi Henish"), b("Marina")];
         let (ids, _) = resolve(&acc, Some("marina"), None);
         assert_eq!(ids, vec![acc[1].id]);
+    }
+
+    /// The exact question that came back unanswered: the merchant typed
+    /// "sidi henish"; the branch is "SIDI HENEISH". One letter.
+    #[test]
+    fn a_one_letter_misspelling_still_finds_the_branch() {
+        let acc = vec![b("SIDI HENEISH"), b("Maadi"), b("Centrada")];
+        let (ids, scope) = resolve(&acc, Some("sidi henish"), None);
+        assert_eq!(ids, vec![acc[0].id]);
+        assert_eq!(scope.label, "SIDI HENEISH");
+        assert!(scope.unmatched_branch.is_none());
+    }
+
+    #[test]
+    fn dropped_and_reordered_words_still_match() {
+        let acc = vec![b("SIDI HENEISH"), b("Maadi Branch")];
+        for typed in ["heneish sidi", "heneish", "sidi"] {
+            let (ids, _) = resolve(&acc, Some(typed), None);
+            assert_eq!(ids, vec![acc[0].id], "{typed} should match SIDI HENEISH");
+        }
+    }
+
+    #[test]
+    fn arabic_spelling_variants_are_the_same_name() {
+        // ى/ي and أ/ا are conventions, not different branches.
+        let acc = vec![b("المعادي"), b("وسط البلد")];
+        let (ids, _) = resolve(&acc, Some("المعادى"), None);
+        assert_eq!(ids, vec![acc[0].id]);
+    }
+
+    /// The tolerance has to stay tight, or `unmatched_branch` stops meaning
+    /// anything and a wrong branch gets answered confidently.
+    #[test]
+    fn a_genuinely_different_name_is_still_unmatched() {
+        let acc = vec![b("SIDI HENEISH"), b("Maadi"), b("Arkan")];
+        for typed in ["Alexandria", "Zamalek", "Hurghada"] {
+            let (_, scope) = resolve(&acc, Some(typed), None);
+            assert_eq!(
+                scope.unmatched_branch.as_deref(),
+                Some(typed),
+                "{typed} must not be fuzzed into an existing branch"
+            );
+        }
+    }
+
+    /// Regression guard for a bug the tenant-isolation test caught: "Branch b"
+    /// is one edit from "Branch a", so typo tolerance matched the wrong branch
+    /// and reported nothing amiss. Numbered branches are the common real case.
+    #[test]
+    fn branches_differing_only_in_their_discriminator_are_never_confused() {
+        for (names, typed) in [
+            (vec!["Branch a", "Branch c"], "Branch b"),
+            (vec!["Maadi 1", "Maadi 3"], "Maadi 2"),
+            (vec!["Zone 5"], "Zone 6"),
+        ] {
+            let acc: Vec<BranchRef> = names.iter().map(|n| b(n)).collect();
+            let (_, scope) = resolve(&acc, Some(typed), None);
+            assert_eq!(
+                scope.unmatched_branch.as_deref(),
+                Some(typed),
+                "{typed} must not be fuzzed into {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_name_does_not_collapse_into_its_neighbour() {
+        // "Maadi" and "Arkan" are close in length; neither may absorb the other.
+        let acc = vec![b("Maadi"), b("Arkan")];
+        let (ids, _) = resolve(&acc, Some("Maadi"), None);
+        assert_eq!(ids, vec![acc[0].id]);
     }
 
     #[test]

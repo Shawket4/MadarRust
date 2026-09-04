@@ -109,13 +109,54 @@ impl QueryResult {
     /// column metadata plus the rows, truncated to a sample. The model needs
     /// enough to state a takeaway, not the whole table.
     pub fn to_model_json(&self, sample: usize) -> Value {
+        let money: Vec<&str> = self
+            .columns
+            .iter()
+            .filter(|c| c.kind == ColumnKind::Money)
+            .map(|c| c.key)
+            .collect();
+
+        let rows: Vec<Map<String, Value>> = self
+            .rows
+            .iter()
+            .take(sample)
+            .map(|row| {
+                let mut out = row.clone();
+                for key in &money {
+                    if let Some(v) = out.get(*key).and_then(Value::as_i64) {
+                        // Converted to POUNDS here, not by the model.
+                        //
+                        // The prompt used to say "money is in piastres, state it
+                        // in pounds" and left the division to the model. It got
+                        // it wrong by a factor of ten across an entire table —
+                        // every figure in the prose was 10x under the figure in
+                        // the chart beside it, which is worse than no answer
+                        // because both look authoritative.
+                        //
+                        // Arithmetic is not what a language model is for. It now
+                        // receives the number it should say.
+                        let pounds = (v as f64) / 100.0;
+                        out.insert(
+                            (*key).to_string(),
+                            serde_json::Number::from_f64(pounds)
+                                .map(Value::Number)
+                                .unwrap_or(Value::Null),
+                        );
+                    }
+                }
+                out
+            })
+            .collect();
+
         serde_json::json!({
             "columns": self.columns.iter().map(|c| serde_json::json!({
                 "key": c.key, "label": c.label, "kind": c.kind
             })).collect::<Vec<_>>(),
+            // Stated explicitly so the units are never inferred.
+            "money_unit": "pounds (EGP), already converted — quote these figures as they are",
             "row_count": self.row_count,
             "truncated": self.truncated || self.rows.len() > sample,
-            "rows": self.rows.iter().take(sample).collect::<Vec<_>>(),
+            "rows": rows,
         })
     }
 
@@ -305,6 +346,110 @@ fn map_row(row: &sqlx::postgres::PgRow, columns: &[Column]) -> Map<String, Value
 #[cfg(test)]
 mod tests {
     use super::rewrite_named;
+    use super::{ColumnKind, QueryResult, ResolvedPeriod};
+    use crate::analytics::types::{Column, Grain, Viz};
+
+    fn result_of(
+        columns: Vec<Column>,
+        row: serde_json::Map<String, serde_json::Value>,
+    ) -> QueryResult {
+        QueryResult {
+            columns,
+            rows: vec![row],
+            row_count: 1,
+            truncated: false,
+            grain: Grain::Categorical,
+            viz: Viz::Bar,
+            facet_by: None,
+            period: ResolvedPeriod {
+                from: None,
+                to: None,
+            },
+        }
+    }
+
+    /// Money reaches the model in POUNDS, and the client still gets piastres.
+    ///
+    /// Regression test for a real incident: the prose said a waiter earned
+    /// "1,178.30 pounds" while the table beside it said "EGP 11,783" — the model
+    /// had divided by 1000 instead of 100, consistently, across every row. Two
+    /// authoritative-looking figures disagreeing is worse than one missing
+    /// figure, so the conversion is no longer the model's job.
+    #[test]
+    fn money_is_converted_to_pounds_for_the_model_only() {
+        let mut row = serde_json::Map::new();
+        row.insert("waiter".into(), serde_json::json!("Forkesha"));
+        row.insert("tip_total".into(), serde_json::json!(1_178_300i64));
+        row.insert("order_count".into(), serde_json::json!(976i64));
+
+        let result = result_of(
+            vec![
+                Column {
+                    key: "waiter",
+                    label: "Waiter",
+                    kind: ColumnKind::Label,
+                },
+                Column {
+                    key: "tip_total",
+                    label: "Tips",
+                    kind: ColumnKind::Money,
+                },
+                Column {
+                    key: "order_count",
+                    label: "Orders",
+                    kind: ColumnKind::Count,
+                },
+            ],
+            row,
+        );
+
+        let seen = result.to_model_json(40);
+        // The model is handed the number it should say, in pounds.
+        assert_eq!(seen["rows"][0]["tip_total"], serde_json::json!(11_783.0));
+        // Counts are untouched — only money is converted.
+        assert_eq!(seen["rows"][0]["order_count"], serde_json::json!(976));
+        // ...and the units are stated, not left to be inferred.
+        assert!(seen["money_unit"].as_str().unwrap().contains("pounds"));
+
+        // The CLIENT's rows are untouched: the chart formats piastres itself,
+        // and converting here too would double-convert.
+        assert_eq!(result.rows[0]["tip_total"], serde_json::json!(1_178_300i64));
+    }
+
+    #[test]
+    fn a_null_money_value_stays_null_rather_than_becoming_zero() {
+        // A missing cost snapshot means "we do not know", not "it was free".
+        let mut row = serde_json::Map::new();
+        row.insert("item_cost".into(), serde_json::Value::Null);
+        let result = result_of(
+            vec![Column {
+                key: "item_cost",
+                label: "Cost",
+                kind: ColumnKind::Money,
+            }],
+            row,
+        );
+        assert!(result.to_model_json(40)["rows"][0]["item_cost"].is_null());
+    }
+
+    #[test]
+    fn odd_piastre_amounts_keep_their_cents() {
+        // 1 piastre must not round away: 1_178_301 is 11783.01, not 11783.0.
+        let mut row = serde_json::Map::new();
+        row.insert("net".into(), serde_json::json!(1_178_301i64));
+        let result = result_of(
+            vec![Column {
+                key: "net",
+                label: "Net",
+                kind: ColumnKind::Money,
+            }],
+            row,
+        );
+        assert_eq!(
+            result.to_model_json(40)["rows"][0]["net"],
+            serde_json::json!(11_783.01)
+        );
+    }
 
     #[test]
     fn casts_literals_and_repeated_names_survive_the_rewrite() {
