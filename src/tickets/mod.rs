@@ -388,6 +388,33 @@ pub(crate) async fn publish_fired(
     }
 }
 
+/// Publish a table's current status on the Floor topic (post-commit) so every
+/// canvas — teller tills, waiter tills, the dashboard board — updates live.
+pub(crate) async fn publish_table_status(
+    pool: &sqlx::PgPool,
+    hub: &BranchEventHub,
+    branch_id: Uuid,
+    table_id: Uuid,
+) {
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM branch_tables WHERE id = $1")
+            .bind(table_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    if let Some(status) = status {
+        hub.publish(
+            branch_id,
+            BranchEvent::new(
+                Topic::Floor,
+                "table.status_changed",
+                &serde_json::json!({ "branch_id": branch_id, "table_id": table_id, "status": status }),
+            ),
+        );
+    }
+}
+
 /// Mint a human-readable ticket ref `T-<branchcode>-<YYMMDD>-<NNNN>`.
 pub(crate) async fn mint_ticket_ref(
     tx: &mut Transaction<'_, Postgres>,

@@ -1,12 +1,12 @@
 //! Reservations routes.
 //!
 //! - `/floor/*` (managers) — section + table geometry authoring, reservation
-//!   settings, and live table status.
-//! - `/reservations/*` (host/teller) — booking operations.
-//! - `/public/reservations/*` (unauthenticated, per-IP rate-limited) — guest
-//!   self-booking. The guest first verifies their phone via the existing
-//!   `/public/otp/*` delivery endpoints, then posts a booking with the resulting
-//!   device-trust token.
+//!   settings, and live table status. Always mounted: the floor layer is the
+//!   foundation of the held-order/table-canvas feature.
+//! - `/reservations/*` + `/public/reservations/*` — the BOOKING flow, which is
+//!   **deprecated**: unmounted (404) unless `MADAR_ENABLE_RESERVATIONS` is
+//!   truthy. It's being rebuilt from scratch on the new floor/held-order layer;
+//!   the tables/migrations stay untouched so no data is lost.
 
 use actix_governor::{Governor, GovernorConfigBuilder};
 use actix_web::{middleware::Condition, web};
@@ -15,23 +15,14 @@ use crate::auth::middleware::JwtMiddleware;
 use crate::rate_limit::{PeerIpOrLocalhost, rate_limiting_enabled};
 use crate::reservations::{bookings, floor, public};
 
-pub fn configure(cfg: &mut web::ServiceConfig) {
-    // Browsing (branch list, track): ~60/min sustained, burst 30.
-    let browse_gov = GovernorConfigBuilder::default()
-        .key_extractor(PeerIpOrLocalhost)
-        .seconds_per_request(1)
-        .burst_size(30)
-        .finish()
-        .expect("Invalid reservations browse rate limiter");
-    // Intake (create booking): ~10/min per IP, burst 10.
-    let intake_gov = GovernorConfigBuilder::default()
-        .key_extractor(PeerIpOrLocalhost)
-        .seconds_per_request(6)
-        .burst_size(10)
-        .finish()
-        .expect("Invalid reservations intake rate limiter");
-    let limited = rate_limiting_enabled();
+/// The deprecated booking flow only mounts when explicitly revived.
+fn bookings_enabled() -> bool {
+    std::env::var("MADAR_ENABLE_RESERVATIONS")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
 
+pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg
         // ── Floor authoring + settings + live status (managers/host) ─────
         .service(
@@ -58,7 +49,34 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     "/reservation-settings",
                     web::put().to(floor::put_reservation_settings),
                 ),
-        )
+        );
+
+    if bookings_enabled() {
+        configure_bookings(cfg);
+    }
+}
+
+/// The deprecated booking + public self-booking routes. Mounted by
+/// [`configure`] only behind `MADAR_ENABLE_RESERVATIONS`; exposed as its own
+/// function so the booking tests keep exercising the handlers.
+pub fn configure_bookings(cfg: &mut web::ServiceConfig) {
+    // Browsing (branch list, track): ~60/min sustained, burst 30.
+    let browse_gov = GovernorConfigBuilder::default()
+        .key_extractor(PeerIpOrLocalhost)
+        .seconds_per_request(1)
+        .burst_size(30)
+        .finish()
+        .expect("Invalid reservations browse rate limiter");
+    // Intake (create booking): ~10/min per IP, burst 10.
+    let intake_gov = GovernorConfigBuilder::default()
+        .key_extractor(PeerIpOrLocalhost)
+        .seconds_per_request(6)
+        .burst_size(10)
+        .finish()
+        .expect("Invalid reservations intake rate limiter");
+    let limited = rate_limiting_enabled();
+
+    cfg
         // ── Booking host operations ──────────────────────────────────────
         .service(
             web::scope("/reservations")

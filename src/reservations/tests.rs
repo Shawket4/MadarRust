@@ -98,6 +98,9 @@ macro_rules! app {
                 .app_data(web::Data::new(get_secret()))
                 .app_data(web::Data::new(BranchEventHub::new()))
                 .configure(crate::reservations::routes::configure)
+                // The deprecated booking flow is unmounted by default; the
+                // tests keep exercising its handlers directly.
+                .configure(crate::reservations::routes::configure_bookings)
                 .configure(crate::tickets::routes::configure),
         )
         .await
@@ -236,7 +239,7 @@ async fn seat_booking_opens_ticket_then_move_table(pool: PgPool) {
             .await
             .unwrap();
 
-    // Move the ticket to T2 → T1 dirty, T2 seated, booking assignment follows.
+    // Move the ticket to T2 → T1 freed, T2 seated, booking assignment follows.
     let req = test::TestRequest::patch()
         .uri(&format!("/open-tickets/{ticket_id}/table"))
         .insert_header(auth.clone())
@@ -259,7 +262,7 @@ async fn seat_booking_opens_ticket_then_move_table(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(t1_status, "dirty");
+    assert_eq!(t1_status, "free");
     assert_eq!(t2_status, "seated");
     let assigned: Vec<Uuid> =
         sqlx::query_scalar("SELECT table_id FROM booking_tables WHERE booking_id = $1")

@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use super::{
     OpenTicketView, extract_claims, fire_round, mint_ticket_ref, open_ticket_view, publish_fired,
-    require_branch_access,
+    publish_table_status, require_branch_access,
 };
 use crate::errors::{AppError, AppErrorResponse};
 use crate::orders::handlers::{CreateOrderRequest, OrderItemInput, create_order_inner};
@@ -186,10 +186,26 @@ pub(crate) async fn create_open_ticket_inner(
             .await?
             .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
 
-    let label = table_label(pool.get_ref(), body.table_id).await?;
     let now = chrono::Utc::now();
     let mut tx = pool.get_ref().begin().await?;
     let ticket_ref = mint_ticket_ref(&mut tx, body.branch_id, now).await?;
+
+    // Table arbitration (shared with held orders): an occupied — or unknown —
+    // table is DROPPED rather than failing the fire. A queued offline fire must
+    // never dead-letter over a table race; the ticket floats table-less and the
+    // waiter reassigns from the canvas.
+    let table_id = match body.table_id {
+        Some(t)
+            if crate::held_orders::lock_table(&mut tx, t, body.branch_id).await?
+                && crate::held_orders::occupant_of(&mut tx, t, None, None)
+                    .await?
+                    .is_none() =>
+        {
+            Some(t)
+        }
+        _ => None,
+    };
+    let label = table_label(pool.get_ref(), table_id).await?;
 
     let open_ticket_id: Uuid = sqlx::query_scalar(
         "INSERT INTO open_tickets \
@@ -199,7 +215,7 @@ pub(crate) async fn create_open_ticket_inner(
     )
     .bind(org_id)
     .bind(body.branch_id)
-    .bind(body.table_id)
+    .bind(table_id)
     .bind(&ticket_ref)
     .bind(actor.teller_id)
     .bind(&body.customer_name)
@@ -212,6 +228,9 @@ pub(crate) async fn create_open_ticket_inner(
     .fetch_one(&mut *tx)
     .await?;
 
+    if let Some(t) = table_id {
+        crate::held_orders::seat_table(&mut tx, t).await?;
+    }
     let kt_id = fire_round(
         &mut tx,
         pool.get_ref(),
@@ -238,6 +257,9 @@ pub(crate) async fn create_open_ticket_inner(
             "ticket.fired",
         )
         .await;
+        if let Some(t) = table_id {
+            publish_table_status(pool.get_ref(), hub, body.branch_id, t).await;
+        }
     }
     let view = open_ticket_view(pool.get_ref(), open_ticket_id).await?;
     Ok(HttpResponse::Created().json(view))
@@ -463,8 +485,19 @@ pub(crate) async fn void_open_ticket_inner(
     .bind(*id)
     .execute(&mut *tx)
     .await?;
+    // The party left the floor: free its table and drop its transfer wish.
+    //
+    // FREE, not bus. A void is not a checkout -- nobody ate and left plates
+    // behind, so the table is genuinely ready for the next party. Only a
+    // settle buses (see `settle_open_ticket_inner`).
+    if let Some(t) = view.table_id {
+        crate::held_orders::free_table(&mut tx, t).await?;
+    }
+    let cancelled =
+        crate::held_orders::cancel_waiting_transfers(&mut tx, "open_ticket", *id).await?;
     tx.commit().await?;
 
+    let freed_table = view.table_id;
     let view = open_ticket_view(pool.get_ref(), *id).await?;
     if let Some(hub) = hub
         && let Some(v) = &view
@@ -473,6 +506,19 @@ pub(crate) async fn void_open_ticket_inner(
             v.branch_id,
             BranchEvent::new(Topic::Tickets, "ticket.voided", v),
         );
+        if let Some(t) = freed_table {
+            publish_table_status(pool.get_ref(), hub, v.branch_id, t).await;
+        }
+        for tid in cancelled {
+            hub.publish(
+                v.branch_id,
+                BranchEvent::new(
+                    Topic::Floor,
+                    "transfer.changed",
+                    &serde_json::json!({ "branch_id": v.branch_id, "id": tid, "status": "cancelled" }),
+                ),
+            );
+        }
     }
     Ok(HttpResponse::Ok().json(view))
 }
@@ -518,20 +564,21 @@ pub async fn move_ticket_table(
             "Cannot move a settled or voided ticket".into(),
         ));
     }
-    let target_ok: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM branch_tables WHERE id = $1 AND branch_id = $2)",
-    )
-    .bind(body.table_id)
-    .bind(branch_id)
-    .fetch_one(pool.get_ref())
-    .await?;
-    if !target_ok {
+    let mut tx = pool.get_ref().begin().await?;
+    // Shared arbitration: lock the target (the per-table mutex) and reject an
+    // occupied one — this is the INTERACTIVE path, so unlike a queued fire it
+    // fails loudly and the waiter picks another table (or uses the swap op).
+    if !crate::held_orders::lock_table(&mut tx, body.table_id, branch_id).await? {
         return Err(AppError::BadRequest(
             "Target table is not in this branch".into(),
         ));
     }
-
-    let mut tx = pool.get_ref().begin().await?;
+    if crate::held_orders::occupant_of(&mut tx, body.table_id, None, Some(*id))
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Conflict("Table is already occupied".into()));
+    }
     sqlx::query("UPDATE open_tickets SET table_id = $2, updated_at = now() WHERE id = $1")
         .bind(*id)
         .bind(body.table_id)
@@ -540,7 +587,7 @@ pub async fn move_ticket_table(
     if let Some(old) = old_table
         && old != body.table_id
     {
-        sqlx::query("UPDATE branch_tables SET status = 'dirty', updated_at = now() WHERE id = $1")
+        sqlx::query("UPDATE branch_tables SET status = 'free', updated_at = now() WHERE id = $1")
             .bind(old)
             .execute(&mut *tx)
             .await?;
@@ -560,6 +607,10 @@ pub async fn move_ticket_table(
             .execute(&mut *tx)
             .await?;
     }
+    // The move may be exactly what this party's transfer wish asked for.
+    let fulfilled =
+        crate::held_orders::autofulfill_transfers(&mut tx, "open_ticket", *id, body.table_id)
+            .await?;
     tx.commit().await?;
 
     let view = open_ticket_view(pool.get_ref(), *id).await?;
@@ -577,6 +628,22 @@ pub async fn move_ticket_table(
                 &serde_json::json!({ "branch_id": branch_id, "table_id": body.table_id }),
             ),
         );
+        publish_table_status(pool.get_ref(), hub.get_ref(), branch_id, body.table_id).await;
+        if let Some(old) = old_table
+            && old != body.table_id
+        {
+            publish_table_status(pool.get_ref(), hub.get_ref(), branch_id, old).await;
+        }
+        for tid in fulfilled {
+            hub.publish(
+                branch_id,
+                BranchEvent::new(
+                    Topic::Floor,
+                    "transfer.changed",
+                    &serde_json::json!({ "branch_id": branch_id, "id": tid, "status": "fulfilled" }),
+                ),
+            );
+        }
     }
     Ok(HttpResponse::Ok().json(view))
 }
@@ -753,7 +820,7 @@ pub(crate) async fn settle_open_ticket_inner(
             .ok_or(AppError::Internal)?;
 
     // Link ticket → order (idempotent; a concurrent settle that lost the race is a no-op).
-    sqlx::query(
+    let settled = sqlx::query(
         "UPDATE open_tickets SET status = 'settled', settled_at = now(), order_id = $2, \
              settled_by = $3, settled_shift_id = $4, updated_at = now() \
          WHERE id = $1 AND status <> 'settled'",
@@ -765,13 +832,57 @@ pub(crate) async fn settle_open_ticket_inner(
     .execute(pool.get_ref())
     .await?;
 
-    if let Some(hub) = hub
-        && let Ok(Some(view)) = open_ticket_view(pool.get_ref(), *id).await
-    {
-        hub.publish(
-            branch_id,
-            BranchEvent::new(Topic::Tickets, "ticket.settled", &view),
-        );
+    // The winner of the settle race buses the table and drops the party's
+    // transfer wish (best-effort, mirroring the non-transactional link above).
+    // The party CHECKED OUT, so the table lands in `dirty` — it still holds
+    // their plates. A human clears it: the POS prompts the teller right after
+    // the sale, and the tables screen keeps a one-tap clear until they do.
+    let mut freed_table: Option<Uuid> = None;
+    let mut cancelled: Vec<Uuid> = Vec::new();
+    if settled.rows_affected() > 0 {
+        freed_table = sqlx::query_scalar("SELECT table_id FROM open_tickets WHERE id = $1")
+            .bind(*id)
+            .fetch_one(pool.get_ref())
+            .await?;
+        if let Some(t) = freed_table {
+            sqlx::query(
+                "UPDATE branch_tables SET status = 'dirty', updated_at = now() WHERE id = $1",
+            )
+            .bind(t)
+            .execute(pool.get_ref())
+            .await?;
+        }
+        cancelled = sqlx::query_scalar(
+            "UPDATE table_transfer_requests \
+             SET status = 'cancelled', resolved_at = now(), updated_at = now() \
+             WHERE occupant_kind = 'open_ticket' AND occupant_id = $1 AND status = 'waiting' \
+             RETURNING id",
+        )
+        .bind(*id)
+        .fetch_all(pool.get_ref())
+        .await?;
+    }
+
+    if let Some(hub) = hub {
+        if let Ok(Some(view)) = open_ticket_view(pool.get_ref(), *id).await {
+            hub.publish(
+                branch_id,
+                BranchEvent::new(Topic::Tickets, "ticket.settled", &view),
+            );
+        }
+        if let Some(t) = freed_table {
+            publish_table_status(pool.get_ref(), hub, branch_id, t).await;
+        }
+        for tid in cancelled {
+            hub.publish(
+                branch_id,
+                BranchEvent::new(
+                    Topic::Floor,
+                    "transfer.changed",
+                    &serde_json::json!({ "branch_id": branch_id, "id": tid, "status": "cancelled" }),
+                ),
+            );
+        }
     }
     Ok(HttpResponse::Ok().json(created))
 }

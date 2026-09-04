@@ -50,6 +50,12 @@ pub const RESOURCES: &[&str] = &[
     // Reservations & floor plan.
     "reservations",
     "floor_plan",
+    // Held orders (parked carts) + the table-transfer waitlist. Both are
+    // seeded and enforced by the handlers; they belong here so
+    // `GET /auth/permissions` lists them and an admin can actually grant or
+    // revoke them from the dashboard.
+    "held_orders",
+    "table_transfers",
     // Delivery.
     "delivery_orders",
     "delivery_settings",
