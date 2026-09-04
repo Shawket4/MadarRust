@@ -17159,7 +17159,7 @@
         "tags": [
           "metrics"
         ],
-        "operationId": "query",
+        "operationId": "run_metrics_query",
         "requestBody": {
           "content": {
             "application/json": {

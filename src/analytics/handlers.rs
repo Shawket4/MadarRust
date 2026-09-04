@@ -176,6 +176,11 @@ pub async fn schema(req: HttpRequest, db: Db) -> Result<HttpResponse, AppError> 
 #[utoipa::path(
     post,
     path = "/metrics/query",
+    // Named explicitly, because utoipa defaults the operation id to the handler
+    // name and the client generator turns that into a hook name. `query` here
+    // becomes `useQuery`, which collides with React Query's own `useQuery` in
+    // the generated module and fails the dashboard build outright.
+    operation_id = "run_metrics_query",
     tag = "metrics",
     request_body = MetricsQueryRequest,
     responses(
