@@ -47,14 +47,10 @@ pub const RESOURCES: &[&str] = &[
     "kitchen_stations",
     "kitchen_orders",
     "open_tickets",
-    // Reservations & floor plan.
-    "reservations",
+    // Floor plan geometry.
     "floor_plan",
-    // Held orders (parked carts) + the table-transfer waitlist. Both are
-    // seeded and enforced by the handlers; they belong here so
-    // `GET /auth/permissions` lists them and an admin can actually grant or
-    // revoke them from the dashboard.
-    "held_orders",
+    // The table-transfer waitlist. Listed here so `GET /auth/permissions`
+    // surfaces it and an admin can actually grant or revoke it.
     "table_transfers",
     // Delivery.
     "delivery_orders",
@@ -70,6 +66,13 @@ pub const RESOURCES: &[&str] = &[
 
 /// DB enum labels that exist but are intentionally not part of the matrix.
 #[cfg(test)]
-pub const RETIRED_RESOURCES: &[&str] = &["shift_counts"];
+pub const RETIRED_RESOURCES: &[&str] = &[
+    "shift_counts",
+    // The booking flow was removed; the enum label stays because dropping a
+    // value from a Postgres enum needs a table rewrite for no benefit.
+    "reservations",
+    // Parked orders are client-local drafts now, with nothing to permit.
+    "held_orders",
+];
 
 pub const ACTIONS: &[&str] = &["create", "read", "update", "delete"];

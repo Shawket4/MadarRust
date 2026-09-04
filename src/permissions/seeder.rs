@@ -229,29 +229,16 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         ("org_admin", "floor_plan", "read", true),
         ("org_admin", "floor_plan", "update", true),
         ("org_admin", "floor_plan", "delete", true),
-        ("org_admin", "reservations", "create", true),
-        ("org_admin", "reservations", "read", true),
-        ("org_admin", "reservations", "update", true),
-        ("org_admin", "reservations", "delete", true),
         ("branch_manager", "floor_plan", "create", true),
         ("branch_manager", "floor_plan", "read", true),
         ("branch_manager", "floor_plan", "update", true),
         ("branch_manager", "floor_plan", "delete", true),
-        ("branch_manager", "reservations", "create", true),
-        ("branch_manager", "reservations", "read", true),
-        ("branch_manager", "reservations", "update", true),
-        ("branch_manager", "reservations", "delete", true),
         // Teller is the host: seats/moves/arrives/notifies, reads the floor.
         ("teller", "floor_plan", "read", true),
-        ("teller", "reservations", "create", true),
-        ("teller", "reservations", "read", true),
-        ("teller", "reservations", "update", true),
         // Waiter sees the board, and works table STATE (bussing a dirty
         // table, moving a physical table between zones — the host-op gate on
         // PATCH /floor/tables/{id}/state and its replay op).
         ("waiter", "floor_plan", "read", true),
-        ("waiter", "reservations", "read", true),
-        ("waiter", "reservations", "update", true),
         // ── staff / attendance / payroll ──────────────────────────
         // Being an employee is a `staff_profiles` row, not a role, so nothing is
         // granted here to make someone staff. These gate the ADMIN surface only;
@@ -290,32 +277,20 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         ("branch_manager", "attendance", "update", true),
         ("branch_manager", "leave", "read", true),
         ("branch_manager", "leave", "update", true),
-        // ── held orders (teller parked carts) + transfer waitlist ─
-        // held_orders: park=create, claim/release/assign/complete/discard=update.
-        // Waiters only READ (occupied tables show a name on the shared canvas).
-        // table_transfers: tellers work the whole queue; waiters queue and move
-        // their own tickets (the per-occupant gate lives in the handlers).
-        ("org_admin", "held_orders", "create", true),
-        ("org_admin", "held_orders", "read", true),
-        ("org_admin", "held_orders", "update", true),
-        ("org_admin", "held_orders", "delete", true),
+        // ── transfer waitlist ─────────────────────────────────────
+        // Tellers work the whole queue; waiters queue and move their own
+        // tickets. There is no `held_orders` resource: a parked order is a
+        // client-local draft with no server presence to permit.
         ("org_admin", "table_transfers", "create", true),
         ("org_admin", "table_transfers", "read", true),
         ("org_admin", "table_transfers", "update", true),
         ("org_admin", "table_transfers", "delete", true),
-        ("branch_manager", "held_orders", "create", true),
-        ("branch_manager", "held_orders", "read", true),
-        ("branch_manager", "held_orders", "update", true),
         ("branch_manager", "table_transfers", "create", true),
         ("branch_manager", "table_transfers", "read", true),
         ("branch_manager", "table_transfers", "update", true),
-        ("teller", "held_orders", "create", true),
-        ("teller", "held_orders", "read", true),
-        ("teller", "held_orders", "update", true),
         ("teller", "table_transfers", "create", true),
         ("teller", "table_transfers", "read", true),
         ("teller", "table_transfers", "update", true),
-        ("waiter", "held_orders", "read", true),
         ("waiter", "table_transfers", "create", true),
         ("waiter", "table_transfers", "read", true),
         ("waiter", "table_transfers", "update", true),

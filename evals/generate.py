@@ -87,8 +87,6 @@ ROUTING = [
  ("why does stock go missing","ليه المخزون بيضيع","shrinkage_by_reason","last_90_days"),
  ("who do I spend the most with","بصرف على مين أكتر","spend_by_supplier","last_90_days"),
  ("what ingredients cost me most","أنهي مكونات بتكلفني أكتر","spend_by_ingredient","last_90_days"),
- ("how are bookings going","الحجوزات عاملة إيه","bookings_trend","last_30_days"),
- ("how many reservations do not show up","كام حجز مبيجيش","no_show_rate","last_90_days"),
  ("how much did we get in tips","اخدنا كام بقشيش","tips_total","today"),
  ("tips over time","البقشيش على مدار الوقت","tips_by_day","last_30_days"),
  ("which waiter earns the most tips","أنهي ويتر بياخد بقشيش أكتر","tips_by_waiter","last_30_days"),
@@ -108,7 +106,7 @@ ALSO_OK = {
 # Breakdowns a hand-composed query answers exactly as well as the preset.
 CUSTOM_OK = {"sales_by_day","sales_by_weekday","sales_by_branch","sales_by_hour",
              "top_categories","tips_by_day","tips_by_waiter","attendance_by_day",
-             "waste_trend","bookings_trend","refunds_by_day","shift_cash_summary",
+             "waste_trend","refunds_by_day","shift_cash_summary",
              "cash_vs_card_tips","consumption_by_ingredient"}
 
 for i,(en,ar,p,per) in enumerate(ROUTING, 1):
@@ -151,8 +149,6 @@ CUSTOM = [
  ("ar","تكلفة الهالك لكل فرع","inventory",["branch"],["movement_cost"],"last_30_days"),
  ("en","worked minutes per department","attendance",["department"],["worked_minutes"],"last_month"),
  ("ar","ساعات الشغل لكل قسم","attendance",["department"],["worked_minutes"],"last_month"),
- ("en","covers booked per day","bookings",["day"],["covers"],"last_30_days"),
- ("ar","عدد الأفراد المحجوزين يوم بيوم","bookings",["day"],["covers"],"last_30_days"),
  ("en","supplier fill rate","purchasing",["supplier"],["fill_rate"],"last_90_days"),
  ("ar","نسبة توريد كل مورد","purchasing",["supplier"],["fill_rate"],"last_90_days"),
  ("en","shrinkage by reason","stocktakes",["variance_reason"],["shrink_cost"],"last_90_days"),

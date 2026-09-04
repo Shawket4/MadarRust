@@ -196,8 +196,8 @@ pub(crate) async fn create_open_ticket_inner(
     // waiter reassigns from the canvas.
     let table_id = match body.table_id {
         Some(t)
-            if crate::held_orders::lock_table(&mut tx, t, body.branch_id).await?
-                && crate::held_orders::occupant_of(&mut tx, t, None, None)
+            if crate::floor_ops::lock_table(&mut tx, t, body.branch_id).await?
+                && crate::floor_ops::occupant_of(&mut tx, t, None)
                     .await?
                     .is_none() =>
         {
@@ -229,7 +229,7 @@ pub(crate) async fn create_open_ticket_inner(
     .await?;
 
     if let Some(t) = table_id {
-        crate::held_orders::seat_table(&mut tx, t).await?;
+        crate::floor_ops::seat_table(&mut *tx, t).await?;
     }
     let kt_id = fire_round(
         &mut tx,
@@ -491,10 +491,9 @@ pub(crate) async fn void_open_ticket_inner(
     // behind, so the table is genuinely ready for the next party. Only a
     // settle buses (see `settle_open_ticket_inner`).
     if let Some(t) = view.table_id {
-        crate::held_orders::free_table(&mut tx, t).await?;
+        crate::floor_ops::free_table(&mut *tx, t).await?;
     }
-    let cancelled =
-        crate::held_orders::cancel_waiting_transfers(&mut tx, "open_ticket", *id).await?;
+    let cancelled = crate::floor_ops::cancel_waiting_transfers(&mut tx, *id).await?;
     tx.commit().await?;
 
     let freed_table = view.table_id;
@@ -551,13 +550,12 @@ pub async fn move_ticket_table(
     check_permission(pool.get_ref(), &claims, "open_tickets", "update").await?;
     require_ticket_branch_access(pool.get_ref(), &claims, *id).await?;
 
-    let row: Option<(Uuid, Option<Uuid>, String, Option<Uuid>)> = sqlx::query_as(
-        "SELECT branch_id, table_id, status::text, booking_id FROM open_tickets WHERE id = $1",
-    )
-    .bind(*id)
-    .fetch_optional(pool.get_ref())
-    .await?;
-    let (branch_id, old_table, status, booking_id) =
+    let row: Option<(Uuid, Option<Uuid>, String)> =
+        sqlx::query_as("SELECT branch_id, table_id, status::text FROM open_tickets WHERE id = $1")
+            .bind(*id)
+            .fetch_optional(pool.get_ref())
+            .await?;
+    let (branch_id, old_table, status) =
         row.ok_or_else(|| AppError::NotFound("Open ticket not found".into()))?;
     if status == "settled" || status == "voided" {
         return Err(AppError::Conflict(
@@ -568,12 +566,12 @@ pub async fn move_ticket_table(
     // Shared arbitration: lock the target (the per-table mutex) and reject an
     // occupied one — this is the INTERACTIVE path, so unlike a queued fire it
     // fails loudly and the waiter picks another table (or uses the swap op).
-    if !crate::held_orders::lock_table(&mut tx, body.table_id, branch_id).await? {
+    if !crate::floor_ops::lock_table(&mut tx, body.table_id, branch_id).await? {
         return Err(AppError::BadRequest(
             "Target table is not in this branch".into(),
         ));
     }
-    if crate::held_orders::occupant_of(&mut tx, body.table_id, None, Some(*id))
+    if crate::floor_ops::occupant_of(&mut tx, body.table_id, Some(*id))
         .await?
         .is_some()
     {
@@ -587,30 +585,11 @@ pub async fn move_ticket_table(
     if let Some(old) = old_table
         && old != body.table_id
     {
-        sqlx::query("UPDATE branch_tables SET status = 'free', updated_at = now() WHERE id = $1")
-            .bind(old)
-            .execute(&mut *tx)
-            .await?;
+        crate::floor_ops::free_table(&mut *tx, old).await?;
     }
-    sqlx::query("UPDATE branch_tables SET status = 'seated', updated_at = now() WHERE id = $1")
-        .bind(body.table_id)
-        .execute(&mut *tx)
-        .await?;
-    if let Some(bid) = booking_id {
-        sqlx::query("DELETE FROM booking_tables WHERE booking_id = $1")
-            .bind(bid)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("INSERT INTO booking_tables (booking_id, table_id) VALUES ($1, $2)")
-            .bind(bid)
-            .bind(body.table_id)
-            .execute(&mut *tx)
-            .await?;
-    }
+    crate::floor_ops::seat_table(&mut *tx, body.table_id).await?;
     // The move may be exactly what this party's transfer wish asked for.
-    let fulfilled =
-        crate::held_orders::autofulfill_transfers(&mut tx, "open_ticket", *id, body.table_id)
-            .await?;
+    let fulfilled = crate::floor_ops::autofulfill_transfers(&mut tx, *id, body.table_id).await?;
     tx.commit().await?;
 
     let view = open_ticket_view(pool.get_ref(), *id).await?;
@@ -623,7 +602,7 @@ pub async fn move_ticket_table(
         hub.publish(
             v.branch_id,
             BranchEvent::new(
-                Topic::Reservations,
+                Topic::Floor,
                 "table.status_changed",
                 &serde_json::json!({ "branch_id": branch_id, "table_id": body.table_id }),
             ),
@@ -845,12 +824,10 @@ pub(crate) async fn settle_open_ticket_inner(
             .fetch_one(pool.get_ref())
             .await?;
         if let Some(t) = freed_table {
-            sqlx::query(
-                "UPDATE branch_tables SET status = 'dirty', updated_at = now() WHERE id = $1",
-            )
-            .bind(t)
-            .execute(pool.get_ref())
-            .await?;
+            // The shared walk, not a local copy of the UPDATE. This path is
+            // non-transactional (best-effort, mirroring the link above), which
+            // is why the helper is generic over the executor.
+            crate::floor_ops::bus_table(pool.get_ref(), t).await?;
         }
         cancelled = sqlx::query_scalar(
             "UPDATE table_transfer_requests \

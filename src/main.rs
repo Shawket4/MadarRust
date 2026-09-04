@@ -15,7 +15,7 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 use madar_rust::openapi::ApiDoc;
 use madar_rust::{
-    ai, analytics, auth, branches, bundles, costing, delivery, demo, discounts, held_orders,
+    ai, analytics, auth, branches, bundles, costing, delivery, demo, discounts, floor_ops,
     insights, integrations, inventory, kitchen, menu, orders, orgs, payment_methods, permissions,
     purchasing, qr_card, realtime, recipes, reports, reservations, shifts, staff, stocktakes, sync,
     tickets, tills, uploads, users,
@@ -116,12 +116,6 @@ async fn run() -> std::io::Result<()> {
     // provider only when GEMINI_API_KEY is set; otherwise the /ai endpoints
     // report the feature as unavailable and the rest of the server is unaffected.
     let ai_state = web::Data::new(ai::AiState::from_env());
-
-    // The reservations nudge scheduler — flat departure nudges, no-show warns,
-    // table holds, and the OSRM waitlist head-out. Spawned ONCE here (not in the
-    // per-worker closure below) so there's a single instance; idempotent via
-    // booking_nudges. No-op when RESERVATION_NUDGES_ENABLED is falsy.
-    reservations::nudge::spawn(pool.get_ref().clone(), realtime_bus.get_ref().clone());
 
     // The attendance sweep — auto-close forgotten checkouts, mark absences, and
     // apply late penalties. Spawned ONCE here for the same reason as the nudge
@@ -256,7 +250,7 @@ async fn run() -> std::io::Result<()> {
             .configure(staff::routes::configure)
             .configure(tills::routes::configure)
             .configure(reservations::routes::configure)
-            .configure(held_orders::routes::configure)
+            .configure(floor_ops::routes::configure)
             .configure(realtime::routes::configure)
             .configure(kitchen::routes::configure)
             .configure(tickets::routes::configure)

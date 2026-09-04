@@ -1058,60 +1058,6 @@
     {
       "id": "route-en-039",
       "lang": "en",
-      "question": "how are bookings going",
-      "now": "2026-09-03T10:00:00Z",
-      "category": "tool_selection",
-      "confidence": "high",
-      "expect": {
-        "tool": "run_preset",
-        "preset": "bookings_trend",
-        "period": "last_30_days",
-        "accept_custom_query": true
-      }
-    },
-    {
-      "id": "route-ar-039",
-      "lang": "ar",
-      "question": "الحجوزات عاملة إيه",
-      "now": "2026-09-03T10:00:00Z",
-      "category": "tool_selection",
-      "confidence": "high",
-      "expect": {
-        "tool": "run_preset",
-        "preset": "bookings_trend",
-        "period": "last_30_days",
-        "accept_custom_query": true
-      }
-    },
-    {
-      "id": "route-en-040",
-      "lang": "en",
-      "question": "how many reservations do not show up",
-      "now": "2026-09-03T10:00:00Z",
-      "category": "tool_selection",
-      "confidence": "high",
-      "expect": {
-        "tool": "run_preset",
-        "preset": "no_show_rate",
-        "period": "last_90_days"
-      }
-    },
-    {
-      "id": "route-ar-040",
-      "lang": "ar",
-      "question": "كام حجز مبيجيش",
-      "now": "2026-09-03T10:00:00Z",
-      "category": "tool_selection",
-      "confidence": "high",
-      "expect": {
-        "tool": "run_preset",
-        "preset": "no_show_rate",
-        "period": "last_90_days"
-      }
-    },
-    {
-      "id": "route-en-041",
-      "lang": "en",
       "question": "how much did we get in tips",
       "now": "2026-09-03T10:00:00Z",
       "category": "tool_selection",
@@ -1123,7 +1069,7 @@
       }
     },
     {
-      "id": "route-ar-041",
+      "id": "route-ar-039",
       "lang": "ar",
       "question": "اخدنا كام بقشيش",
       "now": "2026-09-03T10:00:00Z",
@@ -1136,7 +1082,7 @@
       }
     },
     {
-      "id": "route-en-042",
+      "id": "route-en-040",
       "lang": "en",
       "question": "tips over time",
       "now": "2026-09-03T10:00:00Z",
@@ -1150,7 +1096,7 @@
       }
     },
     {
-      "id": "route-ar-042",
+      "id": "route-ar-040",
       "lang": "ar",
       "question": "البقشيش على مدار الوقت",
       "now": "2026-09-03T10:00:00Z",
@@ -1164,7 +1110,7 @@
       }
     },
     {
-      "id": "route-en-043",
+      "id": "route-en-041",
       "lang": "en",
       "question": "which waiter earns the most tips",
       "now": "2026-09-03T10:00:00Z",
@@ -1178,7 +1124,7 @@
       }
     },
     {
-      "id": "route-ar-043",
+      "id": "route-ar-041",
       "lang": "ar",
       "question": "أنهي ويتر بياخد بقشيش أكتر",
       "now": "2026-09-03T10:00:00Z",
@@ -1192,7 +1138,7 @@
       }
     },
     {
-      "id": "route-en-044",
+      "id": "route-en-042",
       "lang": "en",
       "question": "how much of the tips is cash",
       "now": "2026-09-03T10:00:00Z",
@@ -1206,7 +1152,7 @@
       }
     },
     {
-      "id": "route-ar-044",
+      "id": "route-ar-042",
       "lang": "ar",
       "question": "كام من البقشيش كاش",
       "now": "2026-09-03T10:00:00Z",
@@ -1220,7 +1166,7 @@
       }
     },
     {
-      "id": "route-en-045",
+      "id": "route-en-043",
       "lang": "en",
       "question": "show me refunds",
       "now": "2026-09-03T10:00:00Z",
@@ -1234,7 +1180,7 @@
       }
     },
     {
-      "id": "route-ar-045",
+      "id": "route-ar-043",
       "lang": "ar",
       "question": "وريني المرتجعات",
       "now": "2026-09-03T10:00:00Z",
@@ -1816,44 +1762,6 @@
     {
       "id": "custom-013",
       "lang": "en",
-      "question": "covers booked per day",
-      "now": "2026-09-03T10:00:00Z",
-      "category": "custom_query",
-      "confidence": "high",
-      "expect": {
-        "tool": "query_metrics",
-        "dataset": "bookings",
-        "dimensions": [
-          "day"
-        ],
-        "measures": [
-          "covers"
-        ],
-        "period": "last_30_days"
-      }
-    },
-    {
-      "id": "custom-014",
-      "lang": "ar",
-      "question": "عدد الأفراد المحجوزين يوم بيوم",
-      "now": "2026-09-03T10:00:00Z",
-      "category": "custom_query",
-      "confidence": "high",
-      "expect": {
-        "tool": "query_metrics",
-        "dataset": "bookings",
-        "dimensions": [
-          "day"
-        ],
-        "measures": [
-          "covers"
-        ],
-        "period": "last_30_days"
-      }
-    },
-    {
-      "id": "custom-015",
-      "lang": "en",
       "question": "supplier fill rate",
       "now": "2026-09-03T10:00:00Z",
       "category": "custom_query",
@@ -1871,7 +1779,7 @@
       }
     },
     {
-      "id": "custom-016",
+      "id": "custom-014",
       "lang": "ar",
       "question": "نسبة توريد كل مورد",
       "now": "2026-09-03T10:00:00Z",
@@ -1890,7 +1798,7 @@
       }
     },
     {
-      "id": "custom-017",
+      "id": "custom-015",
       "lang": "en",
       "question": "shrinkage by reason",
       "now": "2026-09-03T10:00:00Z",
@@ -1909,7 +1817,7 @@
       }
     },
     {
-      "id": "custom-018",
+      "id": "custom-016",
       "lang": "ar",
       "question": "الفاقد حسب السبب",
       "now": "2026-09-03T10:00:00Z",
@@ -1928,7 +1836,7 @@
       }
     },
     {
-      "id": "custom-019",
+      "id": "custom-017",
       "lang": "en",
       "question": "cash variance per teller",
       "now": "2026-09-03T10:00:00Z",
@@ -1947,7 +1855,7 @@
       }
     },
     {
-      "id": "custom-020",
+      "id": "custom-018",
       "lang": "ar",
       "question": "فرق الكاش لكل كاشير",
       "now": "2026-09-03T10:00:00Z",
@@ -1966,7 +1874,7 @@
       }
     },
     {
-      "id": "custom-021",
+      "id": "custom-019",
       "lang": "en",
       "question": "average tip per waiter this month",
       "now": "2026-09-03T10:00:00Z",
@@ -1985,7 +1893,7 @@
       }
     },
     {
-      "id": "custom-022",
+      "id": "custom-020",
       "lang": "ar",
       "question": "متوسط البقشيش لكل ويتر الشهر ده",
       "now": "2026-09-03T10:00:00Z",
@@ -2004,7 +1912,7 @@
       }
     },
     {
-      "id": "custom-023",
+      "id": "custom-021",
       "lang": "en",
       "question": "tip rate per branch",
       "now": "2026-09-03T10:00:00Z",
@@ -2023,7 +1931,7 @@
       }
     },
     {
-      "id": "custom-024",
+      "id": "custom-022",
       "lang": "ar",
       "question": "نسبة البقشيش لكل فرع",
       "now": "2026-09-03T10:00:00Z",

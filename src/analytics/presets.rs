@@ -302,15 +302,6 @@ pub const PRESETS: &[Preset] = &[
         viz: Viz::Bar, period: PeriodPreset::Last90Days, share: false,
         "Purchase spend by ingredient, with quantity received and average unit cost."),
     // ── Reservations ─────────────────────────────────────────────────────────
-    preset!("bookings_trend", "Bookings", "Reservations", "reservations", "bookings",
-        dims: ["day"], measures: ["booking_count", "covers"], filters: [],
-        sort: None, limit: 120, viz: Viz::Line, period: PeriodPreset::Last30Days, share: false,
-        "Bookings and covers per day, across reservations and the waitlist."),
-    preset!("no_show_rate", "No-show rate", "Reservations", "reservations", "bookings",
-        dims: ["branch"], measures: ["no_show_rate", "booking_count", "no_show_count"],
-        filters: [("booking_kind", "reservation")], sort: Some(("no_show_rate", Dir::Desc)), limit: 50,
-        viz: Viz::Bar, period: PeriodPreset::Last90Days, share: false,
-        "Share of reservations that never arrived, by branch."),
 ];
 
 /// A default dashboard: a title and the preset ids it lays out, in order.

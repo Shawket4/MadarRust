@@ -9,10 +9,8 @@ use crate::models::UserRole;
 use crate::realtime::hub::BranchEventHub;
 use crate::sync::ActingContext;
 
-use crate::held_orders::handlers::{
-    ClaimHeldOrderRequest, CompleteHeldOrderRequest, CreateFloorTransferRequest,
-    DiscardHeldOrderRequest, FulfillTransferRequest, ParkHeldOrderRequest, ReleaseHeldOrderRequest,
-    SwapTablesRequest, UpdateTableStateRequest,
+use crate::floor_ops::handlers::{
+    CreateFloorTransferRequest, FulfillTransferRequest, SwapTablesRequest,
 };
 use crate::orders::handlers::{CreateOrderRequest, VoidOrderRequest};
 use crate::shifts::handlers::{CashMovementRequest, CloseShiftRequest, OpenShiftRequest};
@@ -88,30 +86,6 @@ pub enum ReplayOp {
     // Held-order (teller parked-cart) ops. All idempotent on the CLIENT-minted
     // held-order id; a park that loses a table race applies WITHOUT the table
     // (never dead-letters — see held_orders::handlers).
-    ParkHeldOrder {
-        teller_id: Uuid,
-        request: ParkHeldOrderRequest,
-    },
-    ClaimHeldOrder {
-        teller_id: Uuid,
-        held_order_id: Uuid,
-        request: ClaimHeldOrderRequest,
-    },
-    ReleaseHeldOrder {
-        teller_id: Uuid,
-        held_order_id: Uuid,
-        request: ReleaseHeldOrderRequest,
-    },
-    DiscardHeldOrder {
-        teller_id: Uuid,
-        held_order_id: Uuid,
-        request: DiscardHeldOrderRequest,
-    },
-    CompleteHeldOrder {
-        teller_id: Uuid,
-        held_order_id: Uuid,
-        request: CompleteHeldOrderRequest,
-    },
     // Floor ops shared by tellers (held orders) and waiters (their tickets).
     // Per-occupant permissions are enforced inside the cores.
     SwapTables {
@@ -132,11 +106,6 @@ pub enum ReplayOp {
         request: FulfillTransferRequest,
     },
     // Operational table state (status walk / zone move) from the floor staff.
-    UpdateTableState {
-        teller_id: Uuid,
-        table_id: Uuid,
-        request: UpdateTableStateRequest,
-    },
 }
 
 impl ReplayOp {
@@ -153,16 +122,10 @@ impl ReplayOp {
             | ReplayOp::VoidOpenTicket { teller_id, .. }
             | ReplayOp::BumpKitchenItem { teller_id, .. }
             | ReplayOp::UnbumpKitchenItem { teller_id, .. }
-            | ReplayOp::ParkHeldOrder { teller_id, .. }
-            | ReplayOp::ClaimHeldOrder { teller_id, .. }
-            | ReplayOp::ReleaseHeldOrder { teller_id, .. }
-            | ReplayOp::DiscardHeldOrder { teller_id, .. }
-            | ReplayOp::CompleteHeldOrder { teller_id, .. }
             | ReplayOp::SwapTables { teller_id, .. }
             | ReplayOp::CreateTableTransfer { teller_id, .. }
             | ReplayOp::CancelTableTransfer { teller_id, .. }
-            | ReplayOp::FulfillTableTransfer { teller_id, .. }
-            | ReplayOp::UpdateTableState { teller_id, .. } => *teller_id,
+            | ReplayOp::FulfillTableTransfer { teller_id, .. } => *teller_id,
         }
     }
 
@@ -186,19 +149,12 @@ impl ReplayOp {
             ReplayOp::BumpKitchenItem { .. } | ReplayOp::UnbumpKitchenItem { .. } => {
                 matches!(role, Kitchen | Teller)
             }
-            // Held orders are the TELLER's parked carts.
-            ReplayOp::ParkHeldOrder { .. }
-            | ReplayOp::ClaimHeldOrder { .. }
-            | ReplayOp::ReleaseHeldOrder { .. }
-            | ReplayOp::DiscardHeldOrder { .. }
-            | ReplayOp::CompleteHeldOrder { .. } => *role == Teller,
             // Floor ops: a teller works the whole floor; a waiter moves/queues
             // their own tickets (per-occupant permissions gate inside the core).
             ReplayOp::SwapTables { .. }
             | ReplayOp::CreateTableTransfer { .. }
             | ReplayOp::CancelTableTransfer { .. }
-            | ReplayOp::FulfillTableTransfer { .. }
-            | ReplayOp::UpdateTableState { .. } => matches!(role, Teller | Waiter),
+            | ReplayOp::FulfillTableTransfer { .. } => matches!(role, Teller | Waiter),
         }
     }
 
@@ -225,20 +181,12 @@ impl ReplayOp {
             ReplayOp::BumpKitchenItem { .. } | ReplayOp::UnbumpKitchenItem { .. } => {
                 &[("kitchen_orders", "update")]
             }
-            ReplayOp::ParkHeldOrder { .. } => &[("held_orders", "create")],
-            ReplayOp::ClaimHeldOrder { .. }
-            | ReplayOp::ReleaseHeldOrder { .. }
-            | ReplayOp::DiscardHeldOrder { .. }
-            | ReplayOp::CompleteHeldOrder { .. } => &[("held_orders", "update")],
-            // Swap checks the moved occupants' kinds inside the core (a waiter
-            // moving two tickets never needs held_orders access).
+            // Swap checks the moved tickets inside the core.
             ReplayOp::SwapTables { .. } => &[],
             ReplayOp::CreateTableTransfer { .. } => &[("table_transfers", "create")],
             ReplayOp::CancelTableTransfer { .. } => &[("table_transfers", "update")],
             // Fulfill also checks the occupant's kind inside the core.
             ReplayOp::FulfillTableTransfer { .. } => &[("table_transfers", "update")],
-            // Same host-op gate as the live PATCH /floor/tables/{id}/state.
-            ReplayOp::UpdateTableState { .. } => &[("reservations", "update")],
         }
     }
 }
@@ -457,71 +405,14 @@ pub async fn replay(
             )
             .await
         }
-        // Held-order + floor ops: publish (hub = Some) so other tills' canvases
+        // Cross-table floor ops: publish (hub = Some) so other tills' canvases
         // update live; the cores dedup before publishing, same as tickets.
-        ReplayOp::ParkHeldOrder { request, .. } => {
-            crate::held_orders::handlers::park_held_order_inner(
-                pool.clone(),
-                web::Json(request),
-                actor,
-                Some(hub.get_ref()),
-            )
-            .await
-        }
-        ReplayOp::ClaimHeldOrder {
-            held_order_id,
-            request,
-            ..
-        } => {
-            crate::held_orders::handlers::claim_held_order_inner(
-                pool.clone(),
-                held_order_id,
-                web::Json(request),
-                Some(hub.get_ref()),
-            )
-            .await
-        }
-        ReplayOp::ReleaseHeldOrder {
-            held_order_id,
-            request,
-            ..
-        } => {
-            crate::held_orders::handlers::release_held_order_inner(
-                pool.clone(),
-                held_order_id,
-                web::Json(request),
-                Some(hub.get_ref()),
-            )
-            .await
-        }
-        ReplayOp::DiscardHeldOrder {
-            held_order_id,
-            request,
-            ..
-        } => {
-            crate::held_orders::handlers::discard_held_order_inner(
-                pool.clone(),
-                held_order_id,
-                web::Json(request),
-                Some(hub.get_ref()),
-            )
-            .await
-        }
-        ReplayOp::CompleteHeldOrder {
-            held_order_id,
-            request,
-            ..
-        } => {
-            crate::held_orders::handlers::complete_held_order_inner(
-                pool.clone(),
-                held_order_id,
-                web::Json(request),
-                Some(hub.get_ref()),
-            )
-            .await
-        }
+        //
+        // Parking an order is NOT here. A parked order is a client-local draft,
+        // so it has nothing to replay -- which is the point: the offline path
+        // for the commonest POS action is now no path at all.
         ReplayOp::SwapTables { request, .. } => {
-            crate::held_orders::handlers::swap_tables_inner(
+            crate::floor_ops::handlers::swap_tables_inner(
                 pool.clone(),
                 web::Json(request),
                 actor,
@@ -530,7 +421,7 @@ pub async fn replay(
             .await
         }
         ReplayOp::CreateTableTransfer { request, .. } => {
-            crate::held_orders::handlers::create_transfer_inner(
+            crate::floor_ops::handlers::create_transfer_inner(
                 pool.clone(),
                 web::Json(request),
                 actor,
@@ -539,7 +430,7 @@ pub async fn replay(
             .await
         }
         ReplayOp::CancelTableTransfer { transfer_id, .. } => {
-            crate::held_orders::handlers::cancel_transfer_inner(
+            crate::floor_ops::handlers::cancel_transfer_inner(
                 pool.clone(),
                 transfer_id,
                 Some(hub.get_ref()),
@@ -551,22 +442,11 @@ pub async fn replay(
             request,
             ..
         } => {
-            crate::held_orders::handlers::fulfill_transfer_inner(
+            crate::floor_ops::handlers::fulfill_transfer_inner(
                 pool.clone(),
                 transfer_id,
                 web::Json(request),
                 actor,
-                Some(hub.get_ref()),
-            )
-            .await
-        }
-        ReplayOp::UpdateTableState {
-            table_id, request, ..
-        } => {
-            crate::held_orders::handlers::update_table_state_inner(
-                pool.clone(),
-                table_id,
-                web::Json(request),
                 Some(hub.get_ref()),
             )
             .await
@@ -633,21 +513,6 @@ async fn op_branch_must_be_in_org(pool: &PgPool, op: &ReplayOp, org: Uuid) -> Re
             .fetch_optional(pool)
             .await?
         }
-        ReplayOp::ParkHeldOrder { request, .. } => {
-            sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1")
-                .bind(request.branch_id)
-                .fetch_optional(pool)
-                .await?
-        }
-        ReplayOp::ClaimHeldOrder { held_order_id, .. }
-        | ReplayOp::ReleaseHeldOrder { held_order_id, .. }
-        | ReplayOp::DiscardHeldOrder { held_order_id, .. }
-        | ReplayOp::CompleteHeldOrder { held_order_id, .. } => {
-            sqlx::query_scalar("SELECT org_id FROM held_orders WHERE id = $1")
-                .bind(held_order_id)
-                .fetch_optional(pool)
-                .await?
-        }
         ReplayOp::SwapTables { request, .. } => {
             sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1")
                 .bind(request.branch_id)
@@ -664,12 +529,6 @@ async fn op_branch_must_be_in_org(pool: &PgPool, op: &ReplayOp, org: Uuid) -> Re
         | ReplayOp::FulfillTableTransfer { transfer_id, .. } => {
             sqlx::query_scalar("SELECT org_id FROM table_transfer_requests WHERE id = $1")
                 .bind(transfer_id)
-                .fetch_optional(pool)
-                .await?
-        }
-        ReplayOp::UpdateTableState { table_id, .. } => {
-            sqlx::query_scalar("SELECT org_id FROM branch_tables WHERE id = $1")
-                .bind(table_id)
                 .fetch_optional(pool)
                 .await?
         }

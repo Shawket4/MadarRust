@@ -62,22 +62,6 @@ pub struct FloorTable {
 const TABLE_COLS: &str = "id, org_id, branch_id, section_id, label, seats, shape, \
      pos_x, pos_y, width, height, rotation, status, is_active, created_at, updated_at";
 
-#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
-pub struct ReservationSettings {
-    pub branch_id: Uuid,
-    pub accepting_reservations: bool,
-    pub accepting_waitlist: bool,
-    pub lead_minutes: i32,
-    pub hold_lead_minutes: i32,
-    pub grace_minutes: i32,
-    pub max_party_size: Option<i32>,
-    pub slot_minutes: i32,
-    pub updated_at: DateTime<Utc>,
-}
-
-const SETTINGS_COLS: &str = "branch_id, accepting_reservations, accepting_waitlist, \
-     lead_minutes, hold_lead_minutes, grace_minutes, max_party_size, slot_minutes, updated_at";
-
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct BranchQuery {
@@ -187,44 +171,11 @@ pub struct SaveLayoutRequest {
     pub tables: Vec<TablePosition>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
-pub struct UpdateSettingsRequest {
-    #[serde(default)]
-    pub accepting_reservations: Option<bool>,
-    #[serde(default)]
-    pub accepting_waitlist: Option<bool>,
-    #[serde(default)]
-    pub lead_minutes: Option<i32>,
-    #[serde(default)]
-    pub hold_lead_minutes: Option<i32>,
-    #[serde(default)]
-    pub grace_minutes: Option<i32>,
-    #[serde(default)]
-    pub max_party_size: Option<i32>,
-    #[serde(default)]
-    pub slot_minutes: Option<i32>,
-}
-
-#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
-pub struct SetTableStatusRequest {
-    /// One of `free`, `held`, `seated`, `dirty`.
-    pub status: String,
-}
-
 fn validate_shape(shape: &str) -> Result<(), AppError> {
     match shape {
         "rect" | "circle" => Ok(()),
         _ => Err(AppError::BadRequest(
             "shape must be 'rect' or 'circle'".into(),
-        )),
-    }
-}
-
-fn validate_table_status(status: &str) -> Result<(), AppError> {
-    match status {
-        "free" | "held" | "seated" | "dirty" => Ok(()),
-        _ => Err(AppError::BadRequest(
-            "status must be one of free, held, seated, dirty".into(),
         )),
     }
 }
@@ -671,146 +622,10 @@ pub async fn save_layout(
     Ok(HttpResponse::Ok().json(rows))
 }
 
-#[utoipa::path(
-    patch, path = "/floor/tables/{id}/status", tag = "reservations",
-    params(("id" = Uuid, Path, description = "Table ID")),
-    request_body = SetTableStatusRequest,
-    responses((status = 200, description = "Table status set", body = FloorTable), AppErrorResponse),
-    security(("bearer_jwt" = []))
-)]
-pub async fn set_table_status(
-    req: HttpRequest,
-    pool: crate::db::Db,
-    hub: web::Data<crate::realtime::hub::BranchEventHub>,
-    id: web::Path<Uuid>,
-    body: web::Json<SetTableStatusRequest>,
-) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    // Live status is an operational host action, not geometry authoring.
-    check_permission(pool.get_ref(), &claims, "reservations", "update").await?;
-
-    let branch_id = fetch_table_branch(pool.get_ref(), *id).await?;
-    require_branch_access(pool.get_ref(), &claims, branch_id).await?;
-    validate_table_status(&body.status)?;
-
-    let row = sqlx::query_as::<_, FloorTable>(&format!(
-        "UPDATE branch_tables SET status = $2, updated_at = now() WHERE id = $1 RETURNING {TABLE_COLS}"
-    ))
-    .bind(*id)
-    .bind(&body.status)
-    .fetch_one(pool.get_ref())
-    .await?;
-
-    hub.publish(
-        branch_id,
-        crate::realtime::event::BranchEvent::new(
-            crate::realtime::event::Topic::Reservations,
-            "table.status_changed",
-            &row,
-        ),
-    );
-    Ok(HttpResponse::Ok().json(row))
-}
-
-// ── Reservation settings ──────────────────────────────────────
-
-#[utoipa::path(
-    get, path = "/floor/reservation-settings", tag = "reservations",
-    params(BranchQuery),
-    responses((status = 200, description = "Effective settings (defaults if unset)", body = ReservationSettings), AppErrorResponse),
-    security(("bearer_jwt" = []))
-)]
-pub async fn get_reservation_settings(
-    req: HttpRequest,
-    pool: crate::db::Db,
-    query: web::Query<BranchQuery>,
-) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "reservations", "read").await?;
-    require_branch_access(pool.get_ref(), &claims, query.branch_id).await?;
-
-    let settings = load_settings(pool.get_ref(), query.branch_id).await?;
-    Ok(HttpResponse::Ok().json(settings))
-}
-
-#[utoipa::path(
-    put, path = "/floor/reservation-settings", tag = "reservations",
-    params(BranchQuery),
-    request_body = UpdateSettingsRequest,
-    responses((status = 200, description = "Settings saved", body = ReservationSettings), AppErrorResponse),
-    security(("bearer_jwt" = []))
-)]
-pub async fn put_reservation_settings(
-    req: HttpRequest,
-    pool: crate::db::Db,
-    query: web::Query<BranchQuery>,
-    body: web::Json<UpdateSettingsRequest>,
-) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "reservations", "update").await?;
-    require_branch_access(pool.get_ref(), &claims, query.branch_id).await?;
-
-    // Upsert: seed defaults on first write, then COALESCE the partial update.
-    let row = sqlx::query_as::<_, ReservationSettings>(&format!(
-        "INSERT INTO branch_reservation_settings (branch_id) VALUES ($1) \
-         ON CONFLICT (branch_id) DO UPDATE SET \
-             accepting_reservations = COALESCE($2, branch_reservation_settings.accepting_reservations), \
-             accepting_waitlist     = COALESCE($3, branch_reservation_settings.accepting_waitlist), \
-             lead_minutes           = COALESCE($4, branch_reservation_settings.lead_minutes), \
-             hold_lead_minutes      = COALESCE($5, branch_reservation_settings.hold_lead_minutes), \
-             grace_minutes          = COALESCE($6, branch_reservation_settings.grace_minutes), \
-             max_party_size         = COALESCE($7, branch_reservation_settings.max_party_size), \
-             slot_minutes           = COALESCE($8, branch_reservation_settings.slot_minutes), \
-             updated_at             = now() \
-         RETURNING {SETTINGS_COLS}"
-    ))
-    .bind(query.branch_id)
-    .bind(body.accepting_reservations)
-    .bind(body.accepting_waitlist)
-    .bind(body.lead_minutes)
-    .bind(body.hold_lead_minutes)
-    .bind(body.grace_minutes)
-    .bind(body.max_party_size)
-    .bind(body.slot_minutes)
-    .fetch_one(pool.get_ref())
-    .await?;
-    Ok(HttpResponse::Ok().json(row))
-}
-
-// ── Shared helpers ────────────────────────────────────────────
-
 pub(crate) async fn fetch_table_branch(pool: &PgPool, table_id: Uuid) -> Result<Uuid, AppError> {
     sqlx::query_scalar("SELECT branch_id FROM branch_tables WHERE id = $1")
         .bind(table_id)
         .fetch_optional(pool)
         .await?
         .ok_or_else(|| AppError::NotFound("Table not found".into()))
-}
-
-/// Load a branch's reservation settings, falling back to schema defaults when no
-/// row exists yet (so the scheduler and reads never NULL-out on a fresh branch).
-pub(crate) async fn load_settings(
-    pool: &PgPool,
-    branch_id: Uuid,
-) -> Result<ReservationSettings, AppError> {
-    if let Some(row) = sqlx::query_as::<_, ReservationSettings>(&format!(
-        "SELECT {SETTINGS_COLS} FROM branch_reservation_settings WHERE branch_id = $1"
-    ))
-    .bind(branch_id)
-    .fetch_optional(pool)
-    .await?
-    {
-        return Ok(row);
-    }
-    Ok(ReservationSettings {
-        branch_id,
-        accepting_reservations: false,
-        accepting_waitlist: false,
-        lead_minutes: 30,
-        hold_lead_minutes: 120,
-        grace_minutes: 15,
-        max_party_size: None,
-        slot_minutes: 15,
-        updated_at: Utc::now(),
-    })
 }

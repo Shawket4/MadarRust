@@ -83,8 +83,6 @@ fn route(question: &str) -> Option<&'static str> {
         "discount_usage"
     } else if has(&["supplier", "purchas", "spend"]) {
         "spend_by_supplier"
-    } else if has(&["no-show", "no show", "reservation", "booking"]) {
-        "no_show_rate"
     } else if has(&["shrink", "stocktake"]) {
         "shrinkage_by_ingredient"
     } else if has(&["margin", "profit"]) {
@@ -164,23 +162,8 @@ mod tests {
         // Without this, renaming a preset leaves the mock routing to a metric
         // that no longer exists and the pipeline tests fail somewhere far away.
         for q in [
-            "waste",
-            "late",
-            "overtime",
-            "drawer",
-            "void",
-            "discount",
-            "supplier",
-            "reservation",
-            "shrink",
-            "margin",
-            "category",
-            "product",
-            "payment",
-            "hour",
-            "waiter",
-            "branch",
-            "daily",
+            "waste", "late", "overtime", "drawer", "void", "discount", "supplier", "shrink",
+            "margin", "category", "product", "payment", "hour", "waiter", "branch", "daily",
             "revenue",
         ] {
             let id = route(q).unwrap_or_else(|| panic!("'{q}' routed nowhere"));

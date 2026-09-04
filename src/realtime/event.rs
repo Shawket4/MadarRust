@@ -19,21 +19,23 @@ pub enum Topic {
     Tickets,
     Kitchen,
     Orders,
-    Reservations,
-    /// The live floor: held orders, table statuses, and the transfer waitlist.
-    /// Payloads are LEAN invalidation signals (no cart contents ride the bus) —
-    /// devices re-pull via the held-orders/transfers sync endpoints.
+    /// The live floor: table geometry, table status, and the transfer waitlist.
+    /// Payloads are LEAN invalidation signals — devices re-pull via the sync
+    /// endpoints, which stay the single source of truth either way.
+    ///
+    /// Everything floor-shaped rides THIS topic. `table.status_changed` used to
+    /// be split across `floor` and `reservations` depending on which module
+    /// wrote it, so a client subscribed to one silently missed half the events.
     Floor,
 }
 
 impl Topic {
     /// Every topic, for the "subscribe to all I'm allowed to read" default.
-    pub const ALL: [Topic; 6] = [
+    pub const ALL: [Topic; 5] = [
         Topic::Delivery,
         Topic::Tickets,
         Topic::Kitchen,
         Topic::Orders,
-        Topic::Reservations,
         Topic::Floor,
     ];
 
@@ -43,7 +45,6 @@ impl Topic {
             "tickets" => Some(Topic::Tickets),
             "kitchen" => Some(Topic::Kitchen),
             "orders" => Some(Topic::Orders),
-            "reservations" => Some(Topic::Reservations),
             "floor" => Some(Topic::Floor),
             _ => None,
         }
@@ -55,7 +56,6 @@ impl Topic {
             Topic::Tickets => "tickets",
             Topic::Kitchen => "kitchen",
             Topic::Orders => "orders",
-            Topic::Reservations => "reservations",
             Topic::Floor => "floor",
         }
     }
@@ -67,7 +67,6 @@ impl Topic {
             Topic::Tickets => ("open_tickets", "read"),
             Topic::Kitchen => ("kitchen_orders", "read"),
             Topic::Orders => ("orders", "read"),
-            Topic::Reservations => ("reservations", "read"),
             Topic::Floor => ("floor_plan", "read"),
         }
     }

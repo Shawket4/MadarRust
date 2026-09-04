@@ -1,32 +1,22 @@
-//! Reservations & waitlist + the graphical floor plan.
+//! The floor plan: sections, table geometry, and live table status.
 //!
-//! Three concerns, one module:
-//! - [`floor`]  — sections + table geometry + per-branch reservation settings.
-//!   Geometry is dashboard-authored (gated by the `floor_plan` permission); the
-//!   POS renders it and only mutates the operational `status`.
-//! - [`bookings`] — the unified booking entity. A reservation has a
-//!   `reserved_for` time; a waitlist entry has none. One status machine, one set
-//!   of host operations (gated by `reservations`). Seating a party auto-opens an
-//!   `open_ticket` on the assigned table(s) so it joins the existing dine-in flow.
-//! - [`public`] — the unauthenticated self-booking flow, reusing delivery's
-//!   phone-OTP + device-trust token + browser geolocation.
+//! Geometry is dashboard-authored (gated by `floor_plan`); the POS renders it.
+//! Table STATUS is not settable here or anywhere else — it is derived from the
+//! order sitting on the table, so the room cannot claim a table is free while a
+//! ticket is open on it. See `crate::tickets` for the lifecycle that drives it.
 //!
-//! The [`nudge`] scheduler (spawned once from `main`) drives the flat
-//! reservation departure nudge, the no-show warn, table holds, and the
-//! OSRM-driven waitlist "head out" nudge. All sends are idempotent via
-//! `booking_nudges` and ride the shared WhatsApp gateway.
+//! The booking flow (reservations + waitlist + public self-booking) and its
+//! nudge scheduler used to live here. Both are removed: the flow was never
+//! used in production -- zero bookings, ever -- and its replacement is being
+//! built on the floor/ticket layer instead of bolted beside it.
 
-pub mod bookings;
 pub mod floor;
-pub mod nudge;
-pub mod public;
 pub mod routes;
 
 #[cfg(test)]
 mod tests;
 
-/// Resolve a branch's org id (and confirm it's live). Shared by floor + booking
-/// creation, mirroring the pattern in `tills::handlers::create_till`.
+/// Resolve a branch's org id (and confirm it's live).
 pub(crate) async fn resolve_branch_org(
     pool: &sqlx::PgPool,
     branch_id: uuid::Uuid,
