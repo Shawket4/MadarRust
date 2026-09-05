@@ -910,7 +910,7 @@ pub(crate) async fn day_availability(
     Ok(out)
 }
 
-#[utoipa::path(get, path = "/bookings/availability", tag = "bookings", params(AvailabilityQuery),
+#[utoipa::path(get, path = "/bookings/availability", tag = "bookings", operation_id = "booking_availability", params(AvailabilityQuery),
     responses((status = 200, body = AvailabilityResponse), AppErrorResponse),
     security(("bearer_jwt" = [])))]
 pub async fn availability(
@@ -968,7 +968,7 @@ pub struct BookingStats {
     pub no_show_rate: f64,
 }
 
-#[utoipa::path(get, path = "/bookings/stats", tag = "bookings", params(StatsQuery),
+#[utoipa::path(get, path = "/bookings/stats", tag = "bookings", operation_id = "booking_stats", params(StatsQuery),
     responses((status = 200, body = BookingStats), AppErrorResponse),
     security(("bearer_jwt" = [])))]
 pub async fn stats(

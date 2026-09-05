@@ -242,7 +242,7 @@ pub struct BranchQuery {
     pub branch_id: Uuid,
 }
 
-#[utoipa::path(get, path = "/bookings/settings", tag = "bookings", params(BranchQuery),
+#[utoipa::path(get, path = "/bookings/settings", tag = "bookings", operation_id = "get_booking_settings", params(BranchQuery),
     responses((status = 200, body = BookingSettings), AppErrorResponse),
     security(("bearer_jwt" = [])))]
 pub async fn get_settings(
@@ -256,7 +256,7 @@ pub async fn get_settings(
     Ok(HttpResponse::Ok().json(load_settings(pool.get_ref(), query.branch_id).await?))
 }
 
-#[utoipa::path(put, path = "/bookings/settings", tag = "bookings", request_body = BookingSettings,
+#[utoipa::path(put, path = "/bookings/settings", tag = "bookings", operation_id = "put_booking_settings", request_body = BookingSettings,
     responses((status = 200, body = BookingSettings), AppErrorResponse),
     security(("bearer_jwt" = [])))]
 pub async fn put_settings(

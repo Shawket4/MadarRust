@@ -1774,7 +1774,7 @@
         "tags": [
           "bookings"
         ],
-        "operationId": "availability",
+        "operationId": "booking_availability",
         "parameters": [
           {
             "name": "branch_id",
@@ -1906,7 +1906,7 @@
         "tags": [
           "bookings"
         ],
-        "operationId": "get_settings",
+        "operationId": "get_booking_settings",
         "parameters": [
           {
             "name": "branch_id",
@@ -2000,7 +2000,7 @@
         "tags": [
           "bookings"
         ],
-        "operationId": "put_settings",
+        "operationId": "put_booking_settings",
         "requestBody": {
           "content": {
             "application/json": {
@@ -2095,7 +2095,7 @@
         "tags": [
           "bookings"
         ],
-        "operationId": "stats",
+        "operationId": "booking_stats",
         "parameters": [
           {
             "name": "branch_id",
