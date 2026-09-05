@@ -61,16 +61,16 @@ pub fn blend_weighted_cost(
 /// `received_qty` units (in the ingredient's base stock unit) at
 /// `received_unit_cost` piastres/unit.
 ///
-/// MUST be called BEFORE the received stock is added to `branch_inventory` — it
+/// MUST be called BEFORE the received stock is added to `branch_stock` — it
 /// reads the PRIOR on-hand FOR THIS BRANCH to weight the average:
 ///   new = (prior_on_hand × current_cost + received_qty × received_cost)
 ///         / (prior_on_hand + received_qty)
-/// The prior cost is this branch's actual cost (`branch_inventory.cost_per_unit`)
+/// The prior cost is this branch's actual cost (`branch_stock.cost_per_unit`)
 /// or, if it has none yet, the org default (`org_ingredients.cost_per_unit`).
 /// When the prior cost is unknown (NULL) or there is no prior stock, the
 /// received cost becomes the new cost.
 ///
-/// Writes the branch's actual cost (`branch_inventory.cost_per_unit`, upserting
+/// Writes the branch's actual cost (`branch_stock.cost_per_unit`, upserting
 /// the row if needed) and rolls a BRANCH-SCOPED `ingredient_cost_history` epoch.
 /// The org default (`org_ingredients.cost_per_unit`, the standard cost) is NOT
 /// touched by receipts. Returns the new per-unit cost in piastres.
@@ -85,9 +85,9 @@ pub async fn apply_weighted_average_cost(
     // Prior actual cost + on-hand for THIS branch; org default cost as fallback.
     let (branch_cost, branch_stock, org_cost): (Option<Decimal>, Option<Decimal>, Option<Decimal>) =
         sqlx::query_as(
-            "SELECT bi.cost_per_unit, bi.current_stock, oi.cost_per_unit \
+            "SELECT bi.cost_per_unit, bi.on_hand, oi.cost_per_unit \
              FROM org_ingredients oi \
-             LEFT JOIN branch_inventory bi \
+             LEFT JOIN branch_stock bi \
                     ON bi.org_ingredient_id = oi.id AND bi.branch_id = $2 \
              WHERE oi.id = $1 AND oi.deleted_at IS NULL",
         )
@@ -115,9 +115,9 @@ pub async fn apply_weighted_average_cost(
         // Persist the branch's actual cost (creating the row if the branch isn't
         // tracking this ingredient yet; the caller's stock upsert then adds qty).
         sqlx::query(
-            "INSERT INTO branch_inventory \
-                 (branch_id, org_ingredient_id, current_stock, reorder_threshold, cost_per_unit) \
-             VALUES ($1, $2, 0, 0, $3) \
+            "INSERT INTO branch_stock \
+                 (branch_id, org_ingredient_id, on_hand, cost_per_unit) \
+             VALUES ($1, $2, 0, $3) \
              ON CONFLICT (branch_id, org_ingredient_id) \
              DO UPDATE SET cost_per_unit = EXCLUDED.cost_per_unit, updated_at = now()",
         )
@@ -325,7 +325,7 @@ async fn sku_costs_impl(
                 COUNT(*) > 0 AS has_recipe
             FROM menu_item_recipes r
             LEFT JOIN org_ingredients oi ON oi.id = r.org_ingredient_id
-            LEFT JOIN branch_inventory bi
+            LEFT JOIN branch_stock bi
                    ON bi.org_ingredient_id = r.org_ingredient_id
                   AND bi.branch_id = $3
             WHERE r.menu_item_id = e.menu_item_id
@@ -429,7 +429,7 @@ pub async fn org_addon_costs(
                            AS cost_incomplete
             FROM addon_item_ingredients ai
             LEFT JOIN org_ingredients oi ON oi.id = ai.org_ingredient_id
-            LEFT JOIN branch_inventory bi
+            LEFT JOIN branch_stock bi
                    ON bi.org_ingredient_id = ai.org_ingredient_id
                   AND bi.branch_id = $2
             WHERE ai.addon_item_id = a.id

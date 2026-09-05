@@ -131,8 +131,8 @@ async fn seed_addon_item(
 async fn seed_ingredient(pool: &PgPool, org_id: Uuid, name: &str, unit: &str) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO org_ingredients (id, org_id, name, unit, category, description, cost_per_unit) \
-         VALUES ($1, $2, $3, $4::inventory_unit, 'veggies', 'Fresh ingredient', 2.50)"
+        "INSERT INTO org_ingredients (id, org_id, name, unit, category_id, description, cost_per_unit)\
+         VALUES ($1, $2, $3, $4::inventory_unit, ingredient_category_id($2, 'veggies'), 'Fresh ingredient', 2.50)"
     )
     .bind(id)
     .bind(org_id)

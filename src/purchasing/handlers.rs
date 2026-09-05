@@ -686,7 +686,7 @@ pub async fn receive_order(
 
         // Weighted-average cost must read PRIOR on-hand → before adding stock.
         apply_weighted_average_cost(
-            &mut *tx,
+            &mut tx,
             order.branch_id,
             ing_id,
             stock_qty_dec,
@@ -695,34 +695,17 @@ pub async fn receive_order(
         )
         .await?;
 
-        // Upsert branch stock (+received).
-        let (bi_id, balance): (Uuid, f64) = sqlx::query_as(
-            r#"
-            INSERT INTO branch_inventory (branch_id, org_ingredient_id, current_stock, reorder_threshold)
-            VALUES ($1, $2, $3, 0)
-            ON CONFLICT (branch_id, org_ingredient_id)
-            DO UPDATE SET current_stock = branch_inventory.current_stock + EXCLUDED.current_stock
-            RETURNING id, current_stock::float8
-            "#,
-        )
-        .bind(order.branch_id)
-        .bind(ing_id)
-        .bind(stock_qty)
-        .fetch_one(&mut *tx)
-        .await?;
-
+        // Post the receipt to the ledger; the trigger creates/updates the
+        // branch balance (this may be the ingredient's first activity here).
         record_movement(
             &mut *tx,
             MovementParams {
                 branch_id: order.branch_id,
                 org_ingredient_id: ing_id,
-                branch_inventory_id: Some(bi_id),
                 movement_type: "purchase_in",
                 quantity: stock_qty,
-                balance_after: Some(balance),
                 unit_cost: Some(cost_per_stock_unit),
                 reason: None,
-                below_zero: false,
                 source_type: Some("purchase"),
                 source_id: Some(*id),
                 note: Some("Purchase received"),
@@ -917,7 +900,7 @@ pub struct ReorderLine {
     pub org_ingredient_id: Uuid,
     pub ingredient_name: String,
     pub unit: String,
-    pub current_stock: f64,
+    pub on_hand: f64,
     /// Quantity (in base units) to bring stock up to the order-up-to level.
     pub suggested_qty: f64,
 }
@@ -953,20 +936,20 @@ pub async fn reorder_suggestions(
     check_permission(pool.get_ref(), &claims, "purchase_orders", "read").await?;
     require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
 
-    // (supplier_id, supplier_name, org_ingredient_id, name, unit, current, suggested)
+    // (supplier_id, supplier_name, org_ingredient_id, name, unit, on_hand, suggested)
     type Row = (Option<Uuid>, Option<String>, Uuid, String, String, f64, f64);
     let rows: Vec<Row> = sqlx::query_as(
         r#"
         SELECT oi.supplier_id,
                (SELECT name FROM suppliers WHERE id = oi.supplier_id) AS supplier_name,
-               bi.org_ingredient_id, oi.name AS ingredient_name, oi.unit::text AS unit,
-               bi.current_stock::float8,
-               GREATEST(COALESCE(bi.par_max, COALESCE(bi.par_min, bi.reorder_threshold)) - bi.current_stock, 0)::float8 AS suggested_qty
-        FROM branch_inventory bi
-        JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id AND oi.deleted_at IS NULL
-        WHERE bi.branch_id = $1
-          AND COALESCE(bi.par_min, bi.reorder_threshold) > 0
-          AND bi.current_stock <= COALESCE(bi.par_min, bi.reorder_threshold)
+               oi.id AS org_ingredient_id, oi.name AS ingredient_name, oi.unit::text AS unit,
+               COALESCE(bs.on_hand, 0)::float8 AS on_hand,
+               GREATEST(COALESCE(bs.par_max, bs.par_min) - COALESCE(bs.on_hand, 0), 0)::float8 AS suggested_qty
+        FROM org_ingredients oi
+        JOIN branch_stock bs ON bs.org_ingredient_id = oi.id AND bs.branch_id = $1
+        WHERE oi.deleted_at IS NULL
+          AND COALESCE(bs.par_min, 0) > 0
+          AND COALESCE(bs.on_hand, 0) <= bs.par_min
         ORDER BY oi.supplier_id NULLS LAST, oi.name
         "#,
     )
@@ -982,7 +965,7 @@ pub async fn reorder_suggestions(
         org_ingredient_id,
         ingredient_name,
         unit,
-        current_stock,
+        on_hand,
         suggested_qty,
     ) in rows
     {
@@ -990,7 +973,7 @@ pub async fn reorder_suggestions(
             org_ingredient_id,
             ingredient_name,
             unit,
-            current_stock,
+            on_hand,
             suggested_qty,
         };
         match groups.last_mut() {
@@ -1155,48 +1138,39 @@ pub async fn create_return(
         }
         // Lock + validate stock; a return can't take more than is on hand, and
         // resolve the cost (caller-supplied actual, else the branch's cost).
-        let row: Option<(Uuid, f64, Option<i64>)> = sqlx::query_as(
-            "SELECT bi.id, bi.current_stock::float8, \
-                    round(COALESCE(bi.cost_per_unit, oi.cost_per_unit))::bigint \
-             FROM branch_inventory bi JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id \
-             WHERE bi.branch_id = $1 AND bi.org_ingredient_id = $2 FOR UPDATE OF bi",
+        crate::inventory::handlers::ensure_ingredient_in_org(
+            &mut *tx,
+            line.org_ingredient_id,
+            org_id,
         )
-        .bind(*branch_id)
-        .bind(line.org_ingredient_id)
-        .fetch_optional(&mut *tx)
         .await?;
-        let (bi_id, current, branch_cost) = row.ok_or_else(|| {
-            AppError::BadRequest("Ingredient is not tracked at this branch".into())
-        })?;
+        let current =
+            crate::inventory::movements::lock_on_hand(&mut *tx, *branch_id, line.org_ingredient_id)
+                .await?
+                .unwrap_or(0.0);
         if current < line.quantity {
             return Err(AppError::BadRequest(format!(
                 "Cannot return {} — only {} on hand.",
                 line.quantity, current
             )));
         }
-        let unit_cost = line.unit_cost.or(branch_cost);
-
-        let balance: f64 = sqlx::query_scalar(
-            "UPDATE branch_inventory SET current_stock = current_stock - $1, updated_at = now() \
-             WHERE id = $2 RETURNING current_stock::float8",
+        let branch_cost = crate::inventory::handlers::branch_unit_cost(
+            &mut *tx,
+            *branch_id,
+            line.org_ingredient_id,
         )
-        .bind(line.quantity)
-        .bind(bi_id)
-        .fetch_one(&mut *tx)
         .await?;
+        let unit_cost = line.unit_cost.or(branch_cost);
 
         record_movement(
             &mut *tx,
             crate::inventory::movements::MovementParams {
                 branch_id: *branch_id,
                 org_ingredient_id: line.org_ingredient_id,
-                branch_inventory_id: Some(bi_id),
                 movement_type: "purchase_return",
                 quantity: -line.quantity,
-                balance_after: Some(balance),
                 unit_cost,
                 reason: None,
-                below_zero: balance < 0.0,
                 source_type: Some("goods_receipt"),
                 source_id: Some(receipt_id),
                 note: Some("Return to supplier"),
@@ -1441,14 +1415,13 @@ async fn require_branch_access(
     // A teller token is bound to the branch it authenticated for: a token minted
     // for one branch must not act on another, even when the teller is assigned to
     // both. The None guard keeps legacy/non-teller tokens working (V26).
-    if claims.role == UserRole::Teller {
-        if let Some(token_branch) = claims.branch_id()
-            && token_branch != branch_id
-        {
-            return Err(AppError::Forbidden(
-                "This device is signed in to a different branch.".into(),
-            ));
-        }
+    if claims.role == UserRole::Teller
+        && let Some(token_branch) = claims.branch_id()
+        && token_branch != branch_id
+    {
+        return Err(AppError::Forbidden(
+            "This device is signed in to a different branch.".into(),
+        ));
     }
 
     Ok(())

@@ -142,16 +142,17 @@ pub struct BranchSalesReport {
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct StockRow {
-    pub branch_inventory_id: Uuid,
+    pub org_ingredient_id: Uuid,
     pub ingredient_name: String,
     pub unit: String,
-    pub current_stock: f64,
-    pub reorder_threshold: f64,
+    pub on_hand: f64,
+    /// Reorder point; `null` = not set at this branch.
+    pub par_min: Option<f64>,
     /// Piastres per unit; `null` ⟺ cost never entered.
     #[serde(with = "rust_decimal::serde::float_option")]
     #[schema(value_type = Option<f64>)]
     pub cost_per_unit: Option<Decimal>,
-    pub below_reorder: bool,
+    pub below_par: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -342,7 +343,7 @@ pub async fn shift_deductions(
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
     require_shift_branch_access(pool.get_ref(), &claims, *shift_id).await?;
 
-    // Inventory deduction logs no longer exist — deductions happen directly on branch_inventory.
+    // Inventory deduction logs no longer exist — every deduction is a ledger movement.
     // Return empty array to maintain API compatibility.
     let rows: Vec<DeductionLogRow> = Vec::new();
     Ok(HttpResponse::Ok().json(rows))
@@ -582,51 +583,53 @@ pub async fn branch_stock(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
-    let (branch_ids, _org) =
+    let (branch_ids, org) =
         resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
     let branch_name = branch_label(pool.get_ref(), *branch_id).await?;
 
-    // For a single branch each branch_inventory row is kept (its id drives
+    // For a single branch each branch_stock row is kept (its id drives
     // stock adjustments). "All branches" (nil) has no single row id, so it
     // rolls every branch's stock up per ingredient (id = nil placeholder).
     let items = if branch_id.is_nil() {
         sqlx::query_as::<_, StockRow>(
             r#"
             SELECT
-                '00000000-0000-0000-0000-000000000000'::uuid AS branch_inventory_id,
+                oi.id              AS org_ingredient_id,
                 oi.name            AS ingredient_name,
                 oi.unit::text      AS unit,
-                SUM(bi.current_stock)::float8     AS current_stock,
-                SUM(bi.reorder_threshold)::float8 AS reorder_threshold,
+                COALESCE(SUM(bs.on_hand), 0)::float8 AS on_hand,
+                NULLIF(SUM(bs.par_min), 0)::float8   AS par_min,
                 oi.cost_per_unit,
-                (SUM(bi.reorder_threshold) > 0 AND SUM(bi.current_stock) <= SUM(bi.reorder_threshold)) AS below_reorder
-            FROM branch_inventory bi
-            JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id
-            WHERE bi.branch_id = ANY($1)
+                (COALESCE(SUM(bs.par_min), 0) > 0 AND COALESCE(SUM(bs.on_hand), 0) <= SUM(bs.par_min)) AS below_par
+            FROM org_ingredients oi
+            LEFT JOIN branch_stock bs ON bs.org_ingredient_id = oi.id AND bs.branch_id = ANY($1)
+            WHERE oi.org_id = $2 AND oi.deleted_at IS NULL
             GROUP BY oi.id, oi.name, oi.unit, oi.cost_per_unit
-            ORDER BY below_reorder DESC, oi.name ASC
+            ORDER BY below_par DESC, oi.name ASC
             "#,
         )
         .bind(&branch_ids)
+        .bind(org)
         .fetch_all(pool.get_ref()).await?
     } else {
         sqlx::query_as::<_, StockRow>(
             r#"
             SELECT
-                bi.id              AS branch_inventory_id,
+                oi.id              AS org_ingredient_id,
                 oi.name            AS ingredient_name,
                 oi.unit::text      AS unit,
-                bi.current_stock::float8,
-                bi.reorder_threshold::float8,
-                COALESCE(bi.cost_per_unit, oi.cost_per_unit) AS cost_per_unit,
-                (bi.reorder_threshold > 0 AND bi.current_stock <= bi.reorder_threshold) AS below_reorder
-            FROM branch_inventory bi
-            JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id
-            WHERE bi.branch_id = ANY($1)
-            ORDER BY (bi.reorder_threshold > 0 AND bi.current_stock <= bi.reorder_threshold) DESC, oi.name ASC
+                COALESCE(bs.on_hand, 0)::float8 AS on_hand,
+                bs.par_min::float8 AS par_min,
+                COALESCE(bs.cost_per_unit, oi.cost_per_unit) AS cost_per_unit,
+                (COALESCE(bs.par_min, 0) > 0 AND COALESCE(bs.on_hand, 0) <= bs.par_min) AS below_par
+            FROM org_ingredients oi
+            LEFT JOIN branch_stock bs ON bs.org_ingredient_id = oi.id AND bs.branch_id = ANY($1)
+            WHERE oi.org_id = $2 AND oi.deleted_at IS NULL
+            ORDER BY (COALESCE(bs.par_min, 0) > 0 AND COALESCE(bs.on_hand, 0) <= bs.par_min) DESC, oi.name ASC
             "#,
         )
         .bind(&branch_ids)
+        .bind(org)
         .fetch_all(pool.get_ref()).await?
     };
 
@@ -1330,10 +1333,10 @@ pub struct ValuationRow {
     pub org_ingredient_id: Uuid,
     pub ingredient_name: String,
     pub unit: String,
-    pub current_stock: f64,
+    pub on_hand: f64,
     /// Piastres per unit; `null` ⟺ unknown.
     pub cost_per_unit: Option<i64>,
-    /// current_stock × cost_per_unit in piastres; `null` when cost unknown.
+    /// on_hand × cost_per_unit in piastres; `null` when cost unknown.
     pub value: Option<i64>,
 }
 
@@ -1351,10 +1354,13 @@ pub struct LowStockRow {
     pub org_ingredient_id: Uuid,
     pub ingredient_name: String,
     pub unit: String,
-    pub current_stock: f64,
-    pub reorder_threshold: f64,
-    /// reorder_threshold − current_stock: how much to order to reach par.
-    pub deficit: f64,
+    pub on_hand: f64,
+    /// Reorder point the item is at or below.
+    pub par_min: f64,
+    /// Order-up-to level; `null` when only a reorder point is set.
+    pub par_max: Option<f64>,
+    /// Quantity to bring stock back to par_max (or par_min when no max is set).
+    pub suggested_qty: f64,
     /// Default supplier for this ingredient (for one-click "create PO"); may be null.
     pub supplier_id: Option<Uuid>,
     pub supplier_name: Option<String>,
@@ -1406,20 +1412,20 @@ pub async fn branch_inventory_valuation(
     let items = sqlx::query_as::<_, ValuationRow>(
         r#"
         SELECT oi.id AS org_ingredient_id, oi.name AS ingredient_name, oi.unit::text AS unit,
-               SUM(bi.current_stock)::float8 AS current_stock,
+               SUM(bs.on_hand)::float8 AS on_hand,
                -- effective (stock-weighted) cost across the branch(es); each
                -- branch's stock is valued at its OWN actual cost (org default
                -- fallback), so value/qty is the blended cost.
-               round(CASE WHEN SUM(bi.current_stock) <> 0
-                          THEN SUM(bi.current_stock * COALESCE(bi.cost_per_unit, oi.cost_per_unit))
-                               / NULLIF(SUM(bi.current_stock), 0)
+               round(CASE WHEN SUM(bs.on_hand) <> 0
+                          THEN SUM(bs.on_hand * COALESCE(bs.cost_per_unit, oi.cost_per_unit))
+                               / NULLIF(SUM(bs.on_hand), 0)
                           ELSE oi.cost_per_unit END)::bigint AS cost_per_unit,
-               CASE WHEN bool_or(COALESCE(bi.cost_per_unit, oi.cost_per_unit) IS NULL) THEN NULL
-                    ELSE round(SUM(bi.current_stock * COALESCE(bi.cost_per_unit, oi.cost_per_unit)))::bigint
+               CASE WHEN bool_or(COALESCE(bs.cost_per_unit, oi.cost_per_unit) IS NULL) THEN NULL
+                    ELSE round(SUM(bs.on_hand * COALESCE(bs.cost_per_unit, oi.cost_per_unit)))::bigint
                END AS value
-        FROM branch_inventory bi
-        JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id
-        WHERE bi.branch_id = ANY($1)
+        FROM branch_stock bs
+        JOIN org_ingredients oi ON oi.id = bs.org_ingredient_id
+        WHERE bs.branch_id = ANY($1)
         GROUP BY oi.id, oi.name, oi.unit, oi.cost_per_unit
         ORDER BY oi.name ASC
         "#,
@@ -1453,17 +1459,17 @@ pub async fn org_inventory_valuation(
     let items = sqlx::query_as::<_, ValuationRow>(
         r#"
         SELECT oi.id AS org_ingredient_id, oi.name AS ingredient_name, oi.unit::text AS unit,
-               SUM(bi.current_stock)::float8 AS current_stock,
-               round(CASE WHEN SUM(bi.current_stock) <> 0
-                          THEN SUM(bi.current_stock * COALESCE(bi.cost_per_unit, oi.cost_per_unit))
-                               / NULLIF(SUM(bi.current_stock), 0)
+               SUM(bs.on_hand)::float8 AS on_hand,
+               round(CASE WHEN SUM(bs.on_hand) <> 0
+                          THEN SUM(bs.on_hand * COALESCE(bs.cost_per_unit, oi.cost_per_unit))
+                               / NULLIF(SUM(bs.on_hand), 0)
                           ELSE oi.cost_per_unit END)::bigint AS cost_per_unit,
-               CASE WHEN bool_or(COALESCE(bi.cost_per_unit, oi.cost_per_unit) IS NULL) THEN NULL
-                    ELSE round(SUM(bi.current_stock * COALESCE(bi.cost_per_unit, oi.cost_per_unit)))::bigint
+               CASE WHEN bool_or(COALESCE(bs.cost_per_unit, oi.cost_per_unit) IS NULL) THEN NULL
+                    ELSE round(SUM(bs.on_hand * COALESCE(bs.cost_per_unit, oi.cost_per_unit)))::bigint
                END AS value
-        FROM branch_inventory bi
-        JOIN branches b        ON b.id = bi.branch_id AND b.org_id = $1 AND b.deleted_at IS NULL
-        JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id
+        FROM branch_stock bs
+        JOIN branches b        ON b.id = bs.branch_id AND b.org_id = $1 AND b.deleted_at IS NULL
+        JOIN org_ingredients oi ON oi.id = bs.org_ingredient_id
         GROUP BY oi.id, oi.name, oi.unit, oi.cost_per_unit
         ORDER BY oi.name ASC
         "#,
@@ -1496,16 +1502,16 @@ pub async fn org_low_stock(
 
     let rows = sqlx::query_as::<_, LowStockRow>(
         r#"
-        SELECT bi.branch_id, b.name AS branch_name, bi.org_ingredient_id,
+        SELECT bs.branch_id, b.name AS branch_name, bs.org_ingredient_id,
                oi.name AS ingredient_name, oi.unit::text AS unit,
-               bi.current_stock::float8, bi.reorder_threshold::float8,
-               (bi.reorder_threshold - bi.current_stock)::float8 AS deficit,
+               bs.on_hand::float8 AS on_hand, bs.par_min::float8 AS par_min, bs.par_max::float8 AS par_max,
+               GREATEST(COALESCE(bs.par_max, bs.par_min) - bs.on_hand, 0)::float8 AS suggested_qty,
                oi.supplier_id,
                (SELECT name FROM suppliers WHERE id = oi.supplier_id) AS supplier_name
-        FROM branch_inventory bi
-        JOIN branches b        ON b.id = bi.branch_id AND b.org_id = $1 AND b.deleted_at IS NULL
-        JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id
-        WHERE bi.reorder_threshold > 0 AND bi.current_stock <= bi.reorder_threshold
+        FROM branch_stock bs
+        JOIN branches b        ON b.id = bs.branch_id AND b.org_id = $1 AND b.deleted_at IS NULL
+        JOIN org_ingredients oi ON oi.id = bs.org_ingredient_id AND oi.deleted_at IS NULL
+        WHERE bs.par_min > 0 AND bs.on_hand <= bs.par_min
         ORDER BY b.name ASC, oi.name ASC
         "#,
     )
@@ -1541,17 +1547,17 @@ pub async fn branch_low_stock(
     // attributes every below-reorder line to the branch it belongs to.
     let rows = sqlx::query_as::<_, LowStockRow>(
         r#"
-        SELECT bi.branch_id, b.name AS branch_name, bi.org_ingredient_id,
+        SELECT bs.branch_id, b.name AS branch_name, bs.org_ingredient_id,
                oi.name AS ingredient_name, oi.unit::text AS unit,
-               bi.current_stock::float8, bi.reorder_threshold::float8,
-               (bi.reorder_threshold - bi.current_stock)::float8 AS deficit,
+               bs.on_hand::float8 AS on_hand, bs.par_min::float8 AS par_min, bs.par_max::float8 AS par_max,
+               GREATEST(COALESCE(bs.par_max, bs.par_min) - bs.on_hand, 0)::float8 AS suggested_qty,
                oi.supplier_id,
                (SELECT name FROM suppliers WHERE id = oi.supplier_id) AS supplier_name
-        FROM branch_inventory bi
-        JOIN branches b         ON b.id = bi.branch_id AND b.deleted_at IS NULL
-        JOIN org_ingredients oi ON oi.id = bi.org_ingredient_id
-        WHERE bi.branch_id = ANY($1)
-          AND bi.reorder_threshold > 0 AND bi.current_stock <= bi.reorder_threshold
+        FROM branch_stock bs
+        JOIN branches b         ON b.id = bs.branch_id AND b.deleted_at IS NULL
+        JOIN org_ingredients oi ON oi.id = bs.org_ingredient_id AND oi.deleted_at IS NULL
+        WHERE bs.branch_id = ANY($1)
+          AND bs.par_min > 0 AND bs.on_hand <= bs.par_min
         ORDER BY b.name ASC, oi.name ASC
         "#,
     )
@@ -1949,14 +1955,13 @@ async fn require_branch_access(
     // A teller token is bound to the branch it authenticated for: a token minted
     // for one branch must not act on another, even when the teller is assigned to
     // both. The None guard keeps legacy/non-teller tokens working (V26).
-    if claims.role == UserRole::Teller {
-        if let Some(token_branch) = claims.branch_id()
-            && token_branch != branch_id
-        {
-            return Err(AppError::Forbidden(
-                "This device is signed in to a different branch.".into(),
-            ));
-        }
+    if claims.role == UserRole::Teller
+        && let Some(token_branch) = claims.branch_id()
+        && token_branch != branch_id
+    {
+        return Err(AppError::Forbidden(
+            "This device is signed in to a different branch.".into(),
+        ));
     }
 
     Ok(())

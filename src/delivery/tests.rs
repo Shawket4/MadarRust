@@ -483,19 +483,21 @@ mod it {
         stock: f64,
     ) -> Uuid {
         let ing = Uuid::new_v4();
-        sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,'Ing','g'::inventory_unit,100,'general')")
+        sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Ing', 'g'::inventory_unit, 100, ingredient_category_id($2, 'general'))")
             .bind(ing)
             .bind(org)
             .execute(pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO branch_inventory (branch_id, org_ingredient_id, current_stock) VALUES ($1,$2,$3)")
-            .bind(branch)
-            .bind(ing)
-            .bind(stock)
-            .execute(pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO branch_stock (branch_id, org_ingredient_id, on_hand) VALUES ($1, $2, $3)",
+        )
+        .bind(branch)
+        .bind(ing)
+        .bind(stock)
+        .execute(pool)
+        .await
+        .unwrap();
         sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1,$2,$3,'one_size','Ing','g')")
             .bind(item)
             .bind(ing)
@@ -1115,8 +1117,14 @@ mod it {
         assert!(oref.is_some());
 
         // inventory deducted (20g × 2) + a sale movement recorded
-        let stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2")
-            .bind(branch).bind(ing).fetch_one(&pool).await.unwrap();
+        let stock: f64 = sqlx::query_scalar(
+            "SELECT on_hand::float8 FROM branch_stock WHERE branch_id=$1 AND org_ingredient_id=$2",
+        )
+        .bind(branch)
+        .bind(ing)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert!((stock - 960.0).abs() < 1e-6, "stock={stock}");
         let moves: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM inventory_movements WHERE source_id=$1 AND type='sale'",
@@ -1705,8 +1713,14 @@ mod it {
         .await;
         assert_eq!(st, StatusCode::OK);
 
-        let stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2")
-            .bind(branch).bind(ing).fetch_one(&pool).await.unwrap();
+        let stock: f64 = sqlx::query_scalar(
+            "SELECT on_hand::float8 FROM branch_stock WHERE branch_id=$1 AND org_ingredient_id=$2",
+        )
+        .bind(branch)
+        .bind(ing)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert!((stock - 1000.0).abs() < 1e-6);
         let waste: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM inventory_movements WHERE source_id=$1 AND type='waste'",
@@ -1762,8 +1776,14 @@ mod it {
         .await;
         assert_eq!(st, StatusCode::OK);
 
-        let stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2")
-            .bind(branch).bind(ing).fetch_one(&pool).await.unwrap();
+        let stock: f64 = sqlx::query_scalar(
+            "SELECT on_hand::float8 FROM branch_stock WHERE branch_id=$1 AND org_ingredient_id=$2",
+        )
+        .bind(branch)
+        .bind(ing)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert!((stock - 980.0).abs() < 1e-6, "stock={stock}");
         let waste: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM inventory_movements WHERE source_id=$1 AND type='waste'",
@@ -1834,7 +1854,14 @@ mod it {
         .await
         .unwrap();
         assert_eq!(waste, 1, "waste must not be double-deducted");
-        let stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2").bind(branch).bind(ing).fetch_one(&pool).await.unwrap();
+        let stock: f64 = sqlx::query_scalar(
+            "SELECT on_hand::float8 FROM branch_stock WHERE branch_id=$1 AND org_ingredient_id=$2",
+        )
+        .bind(branch)
+        .bind(ing)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert!((stock - 980.0).abs() < 1e-6, "stock={stock}");
     }
 
@@ -2250,7 +2277,7 @@ mod it {
     /// return that ingredient id. Mirrors the POS default-milk base ingredient.
     async fn seed_milk_recipe(pool: &PgPool, org: Uuid, item: Uuid) -> Uuid {
         let ing = Uuid::new_v4();
-        sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,'Milk','ml'::inventory_unit,50,'milk')")
+        sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Milk', 'ml'::inventory_unit, 50, ingredient_category_id($2, 'milk'))")
             .bind(ing)
             .bind(org)
             .execute(pool)
@@ -2563,7 +2590,7 @@ mod it {
             seed_milk_addon_for_ingredient(&pool, org, milk_ing, "Regular Milk").await;
         // A second, unrelated milk addon (different ingredient) must NOT be picked.
         let other_milk_ing = Uuid::new_v4();
-        sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,'OatMilk','ml'::inventory_unit,90,'milk')")
+        sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'OatMilk', 'ml'::inventory_unit, 90, ingredient_category_id($2, 'milk'))")
             .bind(other_milk_ing).bind(org).execute(&pool).await.unwrap();
         seed_milk_addon_for_ingredient(&pool, org, other_milk_ing, "Oat Milk").await;
 

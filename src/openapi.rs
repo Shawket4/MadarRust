@@ -192,6 +192,10 @@ paths(
         // ── uploads ───────────────────────────────────────────────────
         crate::uploads::handlers::upload_menu_item_image,
         // ── inventory ─────────────────────────────────────────────────
+        crate::inventory::handlers::list_ingredient_categories,
+        crate::inventory::handlers::create_ingredient_category,
+        crate::inventory::handlers::update_ingredient_category,
+        crate::inventory::handlers::delete_ingredient_category,
         crate::inventory::handlers::list_catalog,
         crate::inventory::handlers::create_catalog_item,
         crate::inventory::handlers::update_catalog_item,
@@ -199,9 +203,7 @@ paths(
         crate::inventory::handlers::get_inventory_settings,
         crate::inventory::handlers::update_inventory_settings,
         crate::inventory::handlers::list_branch_stock,
-        crate::inventory::handlers::add_to_branch_stock,
-        crate::inventory::handlers::update_branch_stock,
-        crate::inventory::handlers::remove_from_branch_stock,
+        crate::inventory::handlers::set_par_levels,
         crate::inventory::handlers::list_movements,
         crate::inventory::handlers::create_waste,
         crate::inventory::handlers::list_waste,

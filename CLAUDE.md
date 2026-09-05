@@ -132,6 +132,18 @@ Publish **after** `tx.commit()`, never inside the transaction.
 - The booking flow (`/reservations`, `/public/reservations`) is **deprecated** and only
   mounts behind `MADAR_ENABLE_RESERVATIONS`; `/floor/*` is always mounted.
 
+### Inventory (v2, count-first — see `INVENTORY_V2.md`)
+- The org catalog is the only setup; `branch_stock` rows are created lazily and are
+  never a precondition (every read is `org_ingredients LEFT JOIN branch_stock`).
+- `branch_stock.on_hand` is **derived from the ledger**: post an
+  `inventory_movements` row via `inventory::movements::record_movement` and read the
+  balance back. A DB guard trigger rejects any direct `UPDATE … SET on_hand`; the one
+  sanctioned exception is the unit re-denomination in `update_catalog_item`
+  (`SET LOCAL madar.stock_rebase = 'on'`).
+- Stock counts measure variance against live book stock at finalize, never the
+  opening snapshot. Ingredient categories are a table keyed by `slug`; `milk` and
+  `coffee_bean` slugs drive the menu swap logic.
+
 ## Related Projects (Ecosystem)
 - **MadarDashboard**: `/Users/magd/MadarDashboard` — management dashboard. Consumes this
   API via orval-generated hooks; also ships the public ordering + landing bundles.

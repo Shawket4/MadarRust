@@ -145,7 +145,7 @@ async fn seed_menu_item(pool: &PgPool, org_id: Uuid, cat_id: Uuid) -> Uuid {
 
 async fn seed_ingredient(pool: &PgPool, org_id: Uuid, name: &str, unit: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1, $2, $3, $4::inventory_unit, 100, 'general')")
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, $3, $4::inventory_unit, 100, ingredient_category_id($2, 'general'))")
         .bind(id)
         .bind(org_id)
         .bind(name)
@@ -157,13 +157,15 @@ async fn seed_ingredient(pool: &PgPool, org_id: Uuid, name: &str, unit: &str) ->
 }
 
 async fn seed_branch_inventory(pool: &PgPool, branch_id: Uuid, ing_id: Uuid, stock: f64) {
-    sqlx::query("INSERT INTO branch_inventory (branch_id, org_ingredient_id, current_stock) VALUES ($1, $2, $3)")
-        .bind(branch_id)
-        .bind(ing_id)
-        .bind(stock)
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO branch_stock (branch_id, org_ingredient_id, on_hand) VALUES ($1, $2, $3)",
+    )
+    .bind(branch_id)
+    .bind(ing_id)
+    .bind(stock)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 async fn add_menu_item_recipe(pool: &PgPool, menu_item_id: Uuid, ing_id: Uuid, qty: f64) {
@@ -272,13 +274,12 @@ async fn test_create_order_success(pool: PgPool) {
     assert_eq!(order_full.order.status, "completed");
 
     // Verify inventory deduction
-    let new_stock: f64 = sqlx::query_scalar(
-        "SELECT current_stock::float8 FROM branch_inventory WHERE org_ingredient_id = $1",
-    )
-    .bind(ing_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let new_stock: f64 =
+        sqlx::query_scalar("SELECT on_hand::float8 FROM branch_stock WHERE org_ingredient_id = $1")
+            .bind(ing_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(new_stock, 980.0); // 1000 - 20
 }
 
@@ -507,13 +508,12 @@ async fn test_create_order_with_addons_and_discount(pool: PgPool) {
     assert_eq!(order_full.order.discount_amount, 50);
 
     // Verify inventory deduction
-    let new_stock: f64 = sqlx::query_scalar(
-        "SELECT current_stock::float8 FROM branch_inventory WHERE org_ingredient_id = $1",
-    )
-    .bind(ing_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let new_stock: f64 =
+        sqlx::query_scalar("SELECT on_hand::float8 FROM branch_stock WHERE org_ingredient_id = $1")
+            .bind(ing_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(new_stock, 940.0); // 1000 - (30 * 2)
 }
 
@@ -539,10 +539,10 @@ async fn test_milk_swap_converts_units_across_base_units(pool: PgPool) {
 
     // Milk is stocked in GRAMS, almond milk in KILOGRAMS — both category 'milk'.
     let milk = Uuid::new_v4();
-    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,'Milk','g'::inventory_unit,5,'milk')")
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Milk', 'g'::inventory_unit, 5, ingredient_category_id($2, 'milk'))")
         .bind(milk).bind(org_id).execute(&pool).await.unwrap();
     let almond = Uuid::new_v4();
-    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,'Almond Milk','kg'::inventory_unit,8000,'milk')")
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Almond Milk', 'kg'::inventory_unit, 8000, ingredient_category_id($2, 'milk'))")
         .bind(almond).bind(org_id).execute(&pool).await.unwrap();
     seed_branch_inventory(&pool, branch_id, milk, 5000.0).await; // 5000 g
     seed_branch_inventory(&pool, branch_id, almond, 10.0).await; // 10 kg
@@ -599,22 +599,20 @@ async fn test_milk_swap_converts_units_across_base_units(pool: PgPool) {
 
     // The 250 g the recipe called for is converted to the almond-milk base unit:
     // 0.25 kg deducted — NOT 250 (which would be a 1000× over-deduction).
-    let almond_stock: f64 = sqlx::query_scalar(
-        "SELECT current_stock::float8 FROM branch_inventory WHERE org_ingredient_id=$1",
-    )
-    .bind(almond)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let almond_stock: f64 =
+        sqlx::query_scalar("SELECT on_hand::float8 FROM branch_stock WHERE org_ingredient_id=$1")
+            .bind(almond)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(almond_stock, 9.75);
     // Milk was swapped out → its stock is untouched.
-    let milk_stock: f64 = sqlx::query_scalar(
-        "SELECT current_stock::float8 FROM branch_inventory WHERE org_ingredient_id=$1",
-    )
-    .bind(milk)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let milk_stock: f64 =
+        sqlx::query_scalar("SELECT on_hand::float8 FROM branch_stock WHERE org_ingredient_id=$1")
+            .bind(milk)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(milk_stock, 5000.0);
 }
 
@@ -643,17 +641,17 @@ async fn test_standalone_resolver_swap_additive_and_optional(pool: PgPool) {
 
     // Base recipe: 200 g milk (category 'milk'); a milk_type addon swaps to almond (kg).
     let milk = Uuid::new_v4();
-    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,'Milk','g'::inventory_unit,5,'milk')")
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Milk', 'g'::inventory_unit, 5, ingredient_category_id($2, 'milk'))")
         .bind(milk).bind(org_id).execute(&pool).await.unwrap();
     let almond = Uuid::new_v4();
-    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,'Almond','kg'::inventory_unit,8000,'milk')")
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Almond', 'kg'::inventory_unit, 8000, ingredient_category_id($2, 'milk'))")
         .bind(almond).bind(org_id).execute(&pool).await.unwrap();
     // Additive addon ingredient (cream) + optional ingredient (syrup).
     let cream = Uuid::new_v4();
-    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,'Cream','g'::inventory_unit,3,'general')")
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Cream', 'g'::inventory_unit, 3, ingredient_category_id($2, 'general'))")
         .bind(cream).bind(org_id).execute(&pool).await.unwrap();
     let syrup = Uuid::new_v4();
-    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,'Syrup','ml'::inventory_unit,2,'general')")
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Syrup', 'ml'::inventory_unit, 2, ingredient_category_id($2, 'general'))")
         .bind(syrup).bind(org_id).execute(&pool).await.unwrap();
     seed_branch_inventory(&pool, branch_id, milk, 5000.0).await;
     seed_branch_inventory(&pool, branch_id, almond, 10.0).await;
@@ -726,7 +724,7 @@ async fn test_standalone_resolver_swap_additive_and_optional(pool: PgPool) {
         let pool = pool.clone();
         async move {
             sqlx::query_scalar::<_, f64>(
-                "SELECT current_stock::float8 FROM branch_inventory WHERE org_ingredient_id=$1",
+                "SELECT on_hand::float8 FROM branch_stock WHERE org_ingredient_id=$1",
             )
             .bind(ing)
             .fetch_one(&pool)
@@ -1069,13 +1067,12 @@ async fn test_void_order(pool: PgPool) {
     }
 
     // Verify inventory restored
-    let new_stock: f64 = sqlx::query_scalar(
-        "SELECT current_stock::float8 FROM branch_inventory WHERE org_ingredient_id = $1",
-    )
-    .bind(ing_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let new_stock: f64 =
+        sqlx::query_scalar("SELECT on_hand::float8 FROM branch_stock WHERE org_ingredient_id = $1")
+            .bind(ing_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(new_stock, 1000.0); // Restored 20
 }
 
@@ -1164,13 +1161,12 @@ async fn test_void_no_restock_logs_waste(pool: PgPool) {
     assert!(resp.status().is_success());
 
     // Net stock stays consumed (980 = sale −20, void_restock +20, waste −20).
-    let stock: f64 = sqlx::query_scalar(
-        "SELECT current_stock::float8 FROM branch_inventory WHERE org_ingredient_id=$1",
-    )
-    .bind(ing_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let stock: f64 =
+        sqlx::query_scalar("SELECT on_hand::float8 FROM branch_stock WHERE org_ingredient_id=$1")
+            .bind(ing_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(stock, 980.0);
 
     // The discard is logged as WASTE with the dedicated `order_cancelled` reason
@@ -1701,13 +1697,12 @@ async fn test_void_is_idempotent_no_double_restock(pool: PgPool) {
         .await;
         assert!(resp.status().is_success());
     }
-    let stock: f64 = sqlx::query_scalar(
-        "SELECT current_stock::float8 FROM branch_inventory WHERE org_ingredient_id=$1",
-    )
-    .bind(ing_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let stock: f64 =
+        sqlx::query_scalar("SELECT on_hand::float8 FROM branch_stock WHERE org_ingredient_id=$1")
+            .bind(ing_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(
         stock, 1000.0,
         "double void must restore stock only once (1000, not 1020)"
@@ -1916,10 +1911,10 @@ async fn test_bundle_component_swap_converts_units(pool: PgPool) {
 
     // Milk in GRAMS, almond milk in KILOGRAMS — both category 'milk'.
     let milk = Uuid::new_v4();
-    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,'Milk','g'::inventory_unit,5,'milk')")
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Milk', 'g'::inventory_unit, 5, ingredient_category_id($2, 'milk'))")
         .bind(milk).bind(org_id).execute(&pool).await.unwrap();
     let almond = Uuid::new_v4();
-    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,'Almond Milk','kg'::inventory_unit,8000,'milk')")
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Almond Milk', 'kg'::inventory_unit, 8000, ingredient_category_id($2, 'milk'))")
         .bind(almond).bind(org_id).execute(&pool).await.unwrap();
 
     add_menu_item_recipe(&pool, menu_item_id, milk, 250.0).await; // 250 g milk

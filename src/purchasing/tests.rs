@@ -56,7 +56,7 @@ async fn grant(pool: &PgPool, resource: &str, action: &str) {
 /// Ingredient stocked in grams, cost 300 piastres/g.
 async fn seed_ingredient_g(pool: &PgPool, org_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, category, cost_per_unit) VALUES ($1, $2, 'Flour', 'g'::inventory_unit, 'dry', 300)")
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, category_id, cost_per_unit) VALUES ($1, $2, 'Flour', 'g'::inventory_unit, ingredient_category_id($2, 'dry'), 300)")
         .bind(id).bind(org_id).execute(pool).await.unwrap();
     id
 }
@@ -121,8 +121,14 @@ async fn test_receive_purchase_updates_stock_cost_and_movement(pool: PgPool) {
     assert_eq!(received.order.status, "received");
 
     // Stock is now 2000 g.
-    let stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2")
-        .bind(branch_id).bind(ing).fetch_one(&pool).await.unwrap();
+    let stock: f64 = sqlx::query_scalar(
+        "SELECT on_hand::float8 FROM branch_stock WHERE branch_id=$1 AND org_ingredient_id=$2",
+    )
+    .bind(branch_id)
+    .bind(ing)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(stock, 2000.0);
 
     // A purchase_in movement was posted for +2000 g.
@@ -135,7 +141,7 @@ async fn test_receive_purchase_updates_stock_cost_and_movement(pool: PgPool) {
     // cost becomes the purchase price per gram = 5000 / 1000 = 5 piastres/g.
     // The org default (org_ingredients.cost_per_unit) is the standard cost and
     // is left untouched by receipts.
-    let cost: f64 = sqlx::query_scalar("SELECT cost_per_unit::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2")
+    let cost: f64 = sqlx::query_scalar("SELECT cost_per_unit::float8 FROM branch_stock WHERE branch_id=$1 AND org_ingredient_id=$2")
         .bind(branch_id).bind(ing).fetch_one(&pool).await.unwrap();
     assert_eq!(cost, 5.0);
 }
@@ -286,8 +292,14 @@ async fn test_partial_receive_then_complete(pool: PgPool) {
     let r1: PurchaseOrderFull = test::read_body_json(resp).await;
     assert_eq!(r1.order.status, "partially_received");
     assert_eq!(r1.lines[0].quantity_received, 1.0);
-    let stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2")
-        .bind(branch_id).bind(ing).fetch_one(&pool).await.unwrap();
+    let stock: f64 = sqlx::query_scalar(
+        "SELECT on_hand::float8 FROM branch_stock WHERE branch_id=$1 AND org_ingredient_id=$2",
+    )
+    .bind(branch_id)
+    .bind(ing)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(stock, 1000.0);
 
     // Second shipment: remaining 1 kg → received, 2000 g on hand.
@@ -296,8 +308,14 @@ async fn test_partial_receive_then_complete(pool: PgPool) {
     let r2: PurchaseOrderFull = test::read_body_json(resp).await;
     assert_eq!(r2.order.status, "received");
     assert_eq!(r2.lines[0].quantity_received, 2.0);
-    let stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2")
-        .bind(branch_id).bind(ing).fetch_one(&pool).await.unwrap();
+    let stock: f64 = sqlx::query_scalar(
+        "SELECT on_hand::float8 FROM branch_stock WHERE branch_id=$1 AND org_ingredient_id=$2",
+    )
+    .bind(branch_id)
+    .bind(ing)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(stock, 2000.0);
 }
 
@@ -699,7 +717,7 @@ async fn test_receive_weighted_average_cost_blends(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO branch_inventory (branch_id, org_ingredient_id, current_stock, reorder_threshold) VALUES ($1, $2, 1000, 0)")
+    sqlx::query("INSERT INTO branch_stock (branch_id, org_ingredient_id, on_hand, par_min) VALUES ($1, $2, 1000, NULL)")
         .bind(branch_id).bind(ing).execute(&pool).await.unwrap();
     let token = org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
@@ -715,11 +733,17 @@ async fn test_receive_weighted_average_cost_blends(pool: PgPool) {
     assert!(resp.status().is_success());
 
     // (1000*10 + 1000*20) / 2000 = 15, on the RECEIVING BRANCH's cost.
-    let cost: f64 = sqlx::query_scalar("SELECT cost_per_unit::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2").bind(branch_id).bind(ing).fetch_one(&pool).await.unwrap();
+    let cost: f64 = sqlx::query_scalar("SELECT cost_per_unit::float8 FROM branch_stock WHERE branch_id=$1 AND org_ingredient_id=$2").bind(branch_id).bind(ing).fetch_one(&pool).await.unwrap();
     assert_eq!(cost, 15.0);
     // Stock now 2000 g.
-    let stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2")
-        .bind(branch_id).bind(ing).fetch_one(&pool).await.unwrap();
+    let stock: f64 = sqlx::query_scalar(
+        "SELECT on_hand::float8 FROM branch_stock WHERE branch_id=$1 AND org_ingredient_id=$2",
+    )
+    .bind(branch_id)
+    .bind(ing)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(stock, 2000.0);
 }
 
@@ -794,7 +818,7 @@ async fn test_receive_cheap_cost_not_rounded_to_zero(pool: PgPool) {
     }
     // Ingredient stocked in grams, cost UNKNOWN.
     let ing = Uuid::new_v4();
-    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, category, cost_per_unit) VALUES ($1,$2,'Salt','g'::inventory_unit,'dry',NULL)")
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, category_id, cost_per_unit) VALUES ($1, $2, 'Salt', 'g'::inventory_unit, ingredient_category_id($2, 'dry'), NULL)")
         .bind(ing).bind(org_id).execute(&pool).await.unwrap();
     let token = org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
@@ -817,7 +841,7 @@ async fn test_receive_cheap_cost_not_rounded_to_zero(pool: PgPool) {
     .await;
     assert!(resp.status().is_success());
 
-    let cost: f64 = sqlx::query_scalar("SELECT cost_per_unit::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2").bind(branch_id).bind(ing).fetch_one(&pool).await.unwrap();
+    let cost: f64 = sqlx::query_scalar("SELECT cost_per_unit::float8 FROM branch_stock WHERE branch_id=$1 AND org_ingredient_id=$2").bind(branch_id).bind(ing).fetch_one(&pool).await.unwrap();
     assert!(
         (cost - 0.40).abs() < 1e-9,
         "cheap-per-gram cost must persist as 0.40, got {cost}"
@@ -1002,8 +1026,14 @@ async fn test_goods_receipt_and_return(pool: PgPool) {
     assert_eq!(ret.status(), 201);
 
     // Stock dropped to 800, and a purchase_return movement of -200 was posted.
-    let stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2")
-        .bind(branch_id).bind(ing).fetch_one(&pool).await.unwrap();
+    let stock: f64 = sqlx::query_scalar(
+        "SELECT on_hand::float8 FROM branch_stock WHERE branch_id=$1 AND org_ingredient_id=$2",
+    )
+    .bind(branch_id)
+    .bind(ing)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(stock, 800.0);
     let mqty: f64 = sqlx::query_scalar("SELECT quantity::float8 FROM inventory_movements WHERE type='purchase_return' AND org_ingredient_id=$1")
         .bind(ing).fetch_one(&pool).await.unwrap();
@@ -1035,7 +1065,7 @@ async fn test_receive_actual_cost_overrides_ordered(pool: PgPool) {
         .uri(&format!("/purchasing/orders/{}/receive", po.order.id)).insert_header(auth.clone())
         .set_json(serde_json::json!({"lines":[{"line_id":po.lines[0].id,"quantity_received":1000.0,"unit_cost":8}]})).to_request()).await;
     assert!(resp.status().is_success());
-    let cost: f64 = sqlx::query_scalar("SELECT cost_per_unit::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2")
+    let cost: f64 = sqlx::query_scalar("SELECT cost_per_unit::float8 FROM branch_stock WHERE branch_id=$1 AND org_ingredient_id=$2")
         .bind(branch_id).bind(ing).fetch_one(&pool).await.unwrap();
     assert_eq!(
         cost, 8.0,
@@ -1067,9 +1097,9 @@ async fn test_reorder_suggestions(pool: PgPool) {
         .await
         .unwrap();
     let ing = Uuid::new_v4();
-    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, category, cost_per_unit, supplier_id) VALUES ($1,$2,'Sugar','g'::inventory_unit,'dry',2,$3)")
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, category_id, cost_per_unit, supplier_id) VALUES ($1, $2, 'Sugar', 'g'::inventory_unit, ingredient_category_id($2, 'dry'), 2, $3)")
         .bind(ing).bind(org_id).bind(sup).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO branch_inventory (branch_id, org_ingredient_id, current_stock, reorder_threshold, par_min, par_max) VALUES ($1,$2,30,0,50,200)")
+    sqlx::query("INSERT INTO branch_stock (branch_id, org_ingredient_id, on_hand, par_min, par_max) VALUES ($1, $2, 30, 50, 200)")
         .bind(branch_id).bind(ing).execute(&pool).await.unwrap();
 
     let resp = test::call_service(
@@ -1108,8 +1138,8 @@ async fn test_receive_in_named_pack(pool: PgPool) {
         grant(&pool, "purchase_orders", a).await;
     }
     let ing = Uuid::new_v4();
-    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, category, cost_per_unit, pack_unit, pack_size) \
-                 VALUES ($1,$2,'Cola can','pcs'::inventory_unit,'drinks',NULL,'case',24)")
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, category_id, cost_per_unit, pack_unit, pack_size)\
+                 VALUES ($1, $2, 'Cola can', 'pcs'::inventory_unit, ingredient_category_id($2, 'drinks'), NULL, 'case', 24)")
         .bind(ing).bind(org_id).execute(&pool).await.unwrap();
     let token = org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
@@ -1134,8 +1164,14 @@ async fn test_receive_in_named_pack(pool: PgPool) {
     .await;
     assert!(resp.status().is_success());
     // 2 cases × 24 = 48 cans in stock.
-    let stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2")
-        .bind(branch_id).bind(ing).fetch_one(&pool).await.unwrap();
+    let stock: f64 = sqlx::query_scalar(
+        "SELECT on_hand::float8 FROM branch_stock WHERE branch_id=$1 AND org_ingredient_id=$2",
+    )
+    .bind(branch_id)
+    .bind(ing)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(stock, 48.0);
 }
 

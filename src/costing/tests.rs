@@ -79,7 +79,7 @@ async fn test_sku_costs_rollup_and_missing(pool: PgPool) {
     sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price, is_active) VALUES ($1, $2, $3, 'Latte', 7000, true)")
         .bind(costed).bind(org_id).bind(cat_id).execute(&pool).await.unwrap();
     let ing = Uuid::new_v4();
-    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1, $2, 'Beans', 'g'::inventory_unit, 250, 'coffee_bean')")
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Beans', 'g'::inventory_unit, 250, ingredient_category_id($2, 'coffee_bean'))")
         .bind(ing).bind(org_id).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1, $2, 10.0, 'one_size', 'Beans', 'g')")
         .bind(costed).bind(ing).execute(&pool).await.unwrap();
@@ -97,7 +97,7 @@ async fn test_sku_costs_rollup_and_missing(pool: PgPool) {
     sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price, is_active) VALUES ($1, $2, $3, 'Mocha', 9000, true)")
         .bind(partial).bind(org_id).bind(cat_id).execute(&pool).await.unwrap();
     let unpriced = Uuid::new_v4();
-    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1, $2, 'Milk', 'g'::inventory_unit, NULL, 'milk')")
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Milk', 'g'::inventory_unit, NULL, ingredient_category_id($2, 'milk'))")
         .bind(unpriced).bind(org_id).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1, $2, 10.0, 'one_size', 'Beans', 'g')")
         .bind(partial).bind(ing).execute(&pool).await.unwrap();
@@ -143,7 +143,7 @@ async fn test_addon_costs_rollup(pool: PgPool) {
     let (org_id, _user, token) = seed_basics(&pool).await;
 
     let ing = Uuid::new_v4();
-    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1, $2, 'Oat Milk', 'ml'::inventory_unit, 10, 'milk')")
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Oat Milk', 'ml'::inventory_unit, 10, ingredient_category_id($2, 'milk'))")
         .bind(ing).bind(org_id).execute(&pool).await.unwrap();
     let addon = Uuid::new_v4();
     sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price) VALUES ($1, $2, 'Oat', 'milk_type', 1500)")

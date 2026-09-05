@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::{
     auth::jwt::{JwtSecret, create_token},
     branches::handlers::{Branch, PrinterBrand},
-    inventory::handlers::{BranchInventoryItem, OrgIngredient},
+    inventory::handlers::OrgIngredient,
     menu::handlers::{AddonItem, Category, ItemSize, MenuItemFull},
     models::UserRole,
     orders::handlers::Order,
@@ -84,6 +84,34 @@ async fn seed_payment_methods(pool: &PgPool, org_id: Uuid) {
 // -----------------------------------------------------------------------------
 // 1. Scenario A: The Merchant Setup and Operation Workflow (Happy Path)
 // -----------------------------------------------------------------------------
+
+/// Get-or-create an ingredient category by slug (the same DB function the API uses).
+async fn ingredient_cat(pool: &PgPool, org_id: impl std::fmt::Display, slug: &str) -> Uuid {
+    sqlx::query_scalar("SELECT ingredient_category_id($1::uuid, $2)")
+        .bind(org_id.to_string())
+        .bind(slug)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Opening stock arrives through the ledger; the par level is a setting.
+async fn seed_opening_stock(
+    pool: &PgPool,
+    branch_id: impl std::fmt::Display,
+    ing: impl std::fmt::Display,
+    qty: f64,
+    par_min: f64,
+) {
+    let b = Uuid::parse_str(&branch_id.to_string()).unwrap();
+    let i = Uuid::parse_str(&ing.to_string()).unwrap();
+    if qty != 0.0 {
+        sqlx::query("INSERT INTO inventory_movements (branch_id, org_ingredient_id, type, quantity, source_type) VALUES ($1, $2, 'purchase_in', $3, 'seed')")
+            .bind(b).bind(i).bind(qty).execute(pool).await.unwrap();
+    }
+    sqlx::query("INSERT INTO branch_stock (branch_id, org_ingredient_id, on_hand, par_min) VALUES ($1, $2, 0, $3) ON CONFLICT (branch_id, org_ingredient_id) DO UPDATE SET par_min = EXCLUDED.par_min")
+        .bind(b).bind(i).bind(if par_min > 0.0 { Some(par_min) } else { None }).execute(pool).await.unwrap();
+}
 
 #[sqlx::test]
 async fn test_e2e_merchant_setup_and_operation_happy_path(pool: PgPool) {
@@ -562,7 +590,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
                 .set_json(&serde_json::json!({
                     "name": "Espresso Beans",
                     "unit": "g",
-                    "category": "coffee_bean",
+                    "category_id": ingredient_cat(&pool, org_id, "coffee_bean").await,
                     "cost_per_unit": 0.02
                 }))
                 .to_request(),
@@ -580,7 +608,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
                 .set_json(&serde_json::json!({
                     "name": "Whole Milk",
                     "unit": "ml",
-                    "category": "milk",
+                    "category_id": ingredient_cat(&pool, org_id, "milk").await,
                     "cost_per_unit": 0.005
                 }))
                 .to_request(),
@@ -598,7 +626,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
                 .set_json(&serde_json::json!({
                     "name": "Croissant Dough",
                     "unit": "pcs",
-                    "category": "general",
+                    "category_id": ingredient_cat(&pool, org_id, "general").await,
                     "cost_per_unit": 0.50
                 }))
                 .to_request(),
@@ -616,7 +644,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
                 .set_json(&serde_json::json!({
                     "name": "Vanilla Flavor",
                     "unit": "ml",
-                    "category": "general",
+                    "category_id": ingredient_cat(&pool, org_id, "general").await,
                     "cost_per_unit": 0.01
                 }))
                 .to_request(),
@@ -626,73 +654,13 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
     .await;
 
     // STEP 3.4: Add Ingredients to Branch Stock
-    let stock_beans: BranchInventoryItem = test::read_body_json(
-        test::call_service(
-            &app,
-            test::TestRequest::post()
-                .uri(&format!("/inventory/branches/{}/stock", branch_id))
-                .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-                .set_json(&serde_json::json!({
-                    "org_ingredient_id": espresso_beans.id,
-                    "current_stock": 1000.0,
-                    "reorder_threshold": 100.0
-                }))
-                .to_request(),
-        )
-        .await,
-    )
-    .await;
+    seed_opening_stock(&pool, branch_id, espresso_beans.id, 1000.0, 100.0).await;
 
-    let stock_milk: BranchInventoryItem = test::read_body_json(
-        test::call_service(
-            &app,
-            test::TestRequest::post()
-                .uri(&format!("/inventory/branches/{}/stock", branch_id))
-                .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-                .set_json(&serde_json::json!({
-                    "org_ingredient_id": whole_milk.id,
-                    "current_stock": 5000.0,
-                    "reorder_threshold": 500.0
-                }))
-                .to_request(),
-        )
-        .await,
-    )
-    .await;
+    seed_opening_stock(&pool, branch_id, whole_milk.id, 5000.0, 500.0).await;
 
-    let stock_croissant: BranchInventoryItem = test::read_body_json(
-        test::call_service(
-            &app,
-            test::TestRequest::post()
-                .uri(&format!("/inventory/branches/{}/stock", branch_id))
-                .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-                .set_json(&serde_json::json!({
-                    "org_ingredient_id": croissant_dough.id,
-                    "current_stock": 1.0,
-                    "reorder_threshold": 1.0
-                }))
-                .to_request(),
-        )
-        .await,
-    )
-    .await;
+    seed_opening_stock(&pool, branch_id, croissant_dough.id, 1.0, 1.0).await;
 
-    let stock_vanilla: BranchInventoryItem = test::read_body_json(
-        test::call_service(
-            &app,
-            test::TestRequest::post()
-                .uri(&format!("/inventory/branches/{}/stock", branch_id))
-                .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-                .set_json(&serde_json::json!({
-                    "org_ingredient_id": vanilla_flavor.id,
-                    "current_stock": 100.0,
-                    "reorder_threshold": 10.0
-                }))
-                .to_request(),
-        )
-        .await,
-    )
-    .await;
+    seed_opening_stock(&pool, branch_id, vanilla_flavor.id, 100.0, 10.0).await;
 
     // STEP 3.5: Map items to ingredients via Recipes
     // Espresso Macchiato (medium size): 18g beans, 150ml milk
@@ -834,24 +802,30 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
     assert_eq!(order.total_amount, 385);
 
     // Verify stock has been accurately deducted based on the recipes!
-    let beans_stock: sqlx::types::BigDecimal =
-        sqlx::query_scalar("SELECT current_stock FROM branch_inventory WHERE id = $1")
-            .bind(stock_beans.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    let milk_stock: sqlx::types::BigDecimal =
-        sqlx::query_scalar("SELECT current_stock FROM branch_inventory WHERE id = $1")
-            .bind(stock_milk.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    let vanilla_stock: sqlx::types::BigDecimal =
-        sqlx::query_scalar("SELECT current_stock FROM branch_inventory WHERE id = $1")
-            .bind(stock_vanilla.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let beans_stock: sqlx::types::BigDecimal = sqlx::query_scalar(
+        "SELECT on_hand FROM branch_stock WHERE branch_id = $1 AND org_ingredient_id = $2",
+    )
+    .bind(branch_id)
+    .bind(espresso_beans.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let milk_stock: sqlx::types::BigDecimal = sqlx::query_scalar(
+        "SELECT on_hand FROM branch_stock WHERE branch_id = $1 AND org_ingredient_id = $2",
+    )
+    .bind(branch_id)
+    .bind(whole_milk.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let vanilla_stock: sqlx::types::BigDecimal = sqlx::query_scalar(
+        "SELECT on_hand FROM branch_stock WHERE branch_id = $1 AND org_ingredient_id = $2",
+    )
+    .bind(branch_id)
+    .bind(vanilla_flavor.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     assert_eq!(beans_stock, to_bigdecimal(982.0)); // 1000 - 18
     assert_eq!(milk_stock, to_bigdecimal(4850.0)); // 5000 - 150
@@ -888,12 +862,14 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
     let bad_order: Order = test::read_body_json(resp).await;
 
     // Verify stock goes negative to -1.0!
-    let croissant_stock: sqlx::types::BigDecimal =
-        sqlx::query_scalar("SELECT current_stock FROM branch_inventory WHERE id = $1")
-            .bind(stock_croissant.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let croissant_stock: sqlx::types::BigDecimal = sqlx::query_scalar(
+        "SELECT on_hand FROM branch_stock WHERE branch_id = $1 AND org_ingredient_id = $2",
+    )
+    .bind(branch_id)
+    .bind(croissant_dough.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(croissant_stock, to_bigdecimal(-1.0));
 
     // Void the bad order to restore inventory back to 1.0!
@@ -913,12 +889,14 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
     assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
 
     // Croissant stock is successfully rolled back and restored to 1!
-    let croissant_stock: sqlx::types::BigDecimal =
-        sqlx::query_scalar("SELECT current_stock FROM branch_inventory WHERE id = $1")
-            .bind(stock_croissant.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let croissant_stock: sqlx::types::BigDecimal = sqlx::query_scalar(
+        "SELECT on_hand FROM branch_stock WHERE branch_id = $1 AND org_ingredient_id = $2",
+    )
+    .bind(branch_id)
+    .bind(croissant_dough.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(croissant_stock, to_bigdecimal(1.0));
 
     // STEP 3.9: Edge Case - Order Void & Stock Rollback
@@ -952,12 +930,14 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
     let order2: Order = test::read_body_json(resp).await;
 
     // Croissant stock is now 0
-    let croissant_stock: sqlx::types::BigDecimal =
-        sqlx::query_scalar("SELECT current_stock FROM branch_inventory WHERE id = $1")
-            .bind(stock_croissant.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let croissant_stock: sqlx::types::BigDecimal = sqlx::query_scalar(
+        "SELECT on_hand FROM branch_stock WHERE branch_id = $1 AND org_ingredient_id = $2",
+    )
+    .bind(branch_id)
+    .bind(croissant_dough.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(croissant_stock, to_bigdecimal(0.0));
 
     // Void the order and verify stock restores!
@@ -977,12 +957,14 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
     assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
 
     // Croissant stock is successfully rolled back and restored to 1!
-    let croissant_stock: sqlx::types::BigDecimal =
-        sqlx::query_scalar("SELECT current_stock FROM branch_inventory WHERE id = $1")
-            .bind(stock_croissant.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let croissant_stock: sqlx::types::BigDecimal = sqlx::query_scalar(
+        "SELECT on_hand FROM branch_stock WHERE branch_id = $1 AND org_ingredient_id = $2",
+    )
+    .bind(branch_id)
+    .bind(croissant_dough.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(croissant_stock, to_bigdecimal(1.0));
 
     // STEP 3.10: End POS operations - close shift & audit
@@ -1109,20 +1091,26 @@ async fn test_e2e_purchasing_stocktake_reporting_lifecycle(pool: PgPool) {
     // ── B. Ingredients (linked to the supplier) ──
     let (_, v) = jget!(app, test::TestRequest::post()
         .uri(&format!("/inventory/orgs/{org_id}/catalog")).insert_header(("Authorization", abearer.clone()))
-        .set_json(serde_json::json!({"name":"Beans","unit":"g","category":"coffee","cost_per_unit":10,"supplier_id":supplier_id})).to_request());
+        .set_json(serde_json::json!({"name":"Beans","unit":"g","category_id":ingredient_cat(&pool, &org_id, "coffee").await,"cost_per_unit":10,"supplier_id":supplier_id})).to_request());
     let beans = v["id"].as_str().unwrap().to_string();
     assert_eq!(v["supplier_name"], "Beans Co");
     let (_, v) = jget!(app, test::TestRequest::post()
         .uri(&format!("/inventory/orgs/{org_id}/catalog")).insert_header(("Authorization", abearer.clone()))
-        .set_json(serde_json::json!({"name":"Milk","unit":"ml","category":"dairy","cost_per_unit":5,"supplier_id":supplier_id})).to_request());
+        .set_json(serde_json::json!({"name":"Milk","unit":"ml","category_id":ingredient_cat(&pool, &org_id, "dairy").await,"cost_per_unit":5,"supplier_id":supplier_id})).to_request());
     let milk = v["id"].as_str().unwrap().to_string();
 
     // ── C. Branch stock + low-stock levels ──
-    for (ing, stock, reorder) in [(&beans, 1000.0, 100.0), (&milk, 1000.0, 5000.0)] {
-        let st = jstatus!(app, test::TestRequest::post()
-            .uri(&format!("/inventory/branches/{branch_id}/stock")).insert_header(("Authorization", abearer.clone()))
-            .set_json(serde_json::json!({"org_ingredient_id":ing,"current_stock":stock,"reorder_threshold":reorder})).to_request());
-        assert_eq!(st, 201);
+    for (ing, stock, par_min) in [(&beans, 1000.0, 100.0), (&milk, 1000.0, 5000.0)] {
+        let st = jstatus!(
+            app,
+            test::TestRequest::put()
+                .uri(&format!("/inventory/branches/{branch_id}/stock/{ing}/par"))
+                .insert_header(("Authorization", abearer.clone()))
+                .set_json(serde_json::json!({"par_min":par_min}))
+                .to_request()
+        );
+        assert_eq!(st, 200);
+        seed_opening_stock(&pool, branch_id, ing, stock, par_min).await;
     }
 
     // ── D. PO for beans → full receive → weighted-average cost ──
@@ -1143,9 +1131,16 @@ async fn test_e2e_purchasing_stocktake_reporting_lifecycle(pool: PgPool) {
     assert_eq!(st, 200);
     assert_eq!(recv["status"], "received");
     // (1000×10 + 1000×20)/2000 = 15 piastres/g on the BRANCH cost; stock 2000 g.
-    let beans_cost: f64 = sqlx::query_scalar("SELECT cost_per_unit::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2").bind(branch_id).bind(Uuid::parse_str(&beans).unwrap()).fetch_one(&pool).await.unwrap();
+    let beans_cost: f64 = sqlx::query_scalar("SELECT cost_per_unit::float8 FROM branch_stock WHERE branch_id=$1 AND org_ingredient_id=$2").bind(branch_id).bind(Uuid::parse_str(&beans).unwrap()).fetch_one(&pool).await.unwrap();
     assert_eq!(beans_cost, 15.0);
-    let beans_stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2").bind(branch_id).bind(Uuid::parse_str(&beans).unwrap()).fetch_one(&pool).await.unwrap();
+    let beans_stock: f64 = sqlx::query_scalar(
+        "SELECT on_hand::float8 FROM branch_stock WHERE branch_id=$1 AND org_ingredient_id=$2",
+    )
+    .bind(branch_id)
+    .bind(Uuid::parse_str(&beans).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(beans_stock, 2000.0);
 
     // ── E. PO for milk → partial then complete receive ──
@@ -1174,7 +1169,14 @@ async fn test_e2e_purchasing_stocktake_reporting_lifecycle(pool: PgPool) {
             .to_request()
     );
     assert_eq!(r2["status"], "received");
-    let milk_stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2").bind(branch_id).bind(Uuid::parse_str(&milk).unwrap()).fetch_one(&pool).await.unwrap();
+    let milk_stock: f64 = sqlx::query_scalar(
+        "SELECT on_hand::float8 FROM branch_stock WHERE branch_id=$1 AND org_ingredient_id=$2",
+    )
+    .bind(branch_id)
+    .bind(Uuid::parse_str(&milk).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(milk_stock, 3000.0); // 1000 + 1000 + 1000
 
     // ── F. Menu + recipe + a sale that deducts beans ──
@@ -1211,7 +1213,14 @@ async fn test_e2e_purchasing_stocktake_reporting_lifecycle(pool: PgPool) {
             "items":[{"menu_item_id":latte,"size_label":"one_size","quantity":2,"addons":[],"optional_field_ids":[],"bundle_components":[]}]})).to_request());
     assert_eq!(st, 201);
     // Beans: 2000 − 2×18 = 1964; a 'sale' movement was posted.
-    let beans_stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2").bind(branch_id).bind(Uuid::parse_str(&beans).unwrap()).fetch_one(&pool).await.unwrap();
+    let beans_stock: f64 = sqlx::query_scalar(
+        "SELECT on_hand::float8 FROM branch_stock WHERE branch_id=$1 AND org_ingredient_id=$2",
+    )
+    .bind(branch_id)
+    .bind(Uuid::parse_str(&beans).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(beans_stock, 1964.0);
     let sale_qty: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(-quantity),0)::float8 FROM inventory_movements WHERE type='sale' AND org_ingredient_id=$1").bind(Uuid::parse_str(&beans).unwrap()).fetch_one(&pool).await.unwrap();
     assert_eq!(sale_qty, 36.0);
@@ -1275,7 +1284,14 @@ async fn test_e2e_purchasing_stocktake_reporting_lifecycle(pool: PgPool) {
             .to_request()
     );
     assert_eq!(st, 200);
-    let beans_stock: f64 = sqlx::query_scalar("SELECT current_stock::float8 FROM branch_inventory WHERE branch_id=$1 AND org_ingredient_id=$2").bind(branch_id).bind(Uuid::parse_str(&beans).unwrap()).fetch_one(&pool).await.unwrap();
+    let beans_stock: f64 = sqlx::query_scalar(
+        "SELECT on_hand::float8 FROM branch_stock WHERE branch_id=$1 AND org_ingredient_id=$2",
+    )
+    .bind(branch_id)
+    .bind(Uuid::parse_str(&beans).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(beans_stock, 1500.0);
 
     // ── I. Reports reflect everything ──

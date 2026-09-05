@@ -735,9 +735,8 @@ pub async fn apply_snapshot(
     Ok((order, warnings))
 }
 
-/// Deduct a line's frozen ingredient plan from branch stock and record a `sale`
-/// movement per ingredient (negative stock allowed but flagged), mirroring the
-/// POS path exactly.
+/// Post a line's frozen ingredient plan to the ledger as `sale` movements
+/// (negative stock allowed but flagged), mirroring the POS path exactly.
 async fn apply_one_deductions(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     branch_id: Uuid,
@@ -750,37 +749,15 @@ async fn apply_one_deductions(
         let Some(ing_id) = d.org_ingredient_id else {
             continue;
         };
-        let updated: Option<(Uuid, f64)> = sqlx::query_as(
-            "UPDATE branch_inventory SET current_stock = current_stock - $1 \
-             WHERE branch_id = $2 AND org_ingredient_id = $3 RETURNING id, current_stock::float8",
-        )
-        .bind(d.quantity)
-        .bind(branch_id)
-        .bind(ing_id)
-        .fetch_optional(&mut **tx)
-        .await?;
-        let Some((bi_id, balance)) = updated else {
-            continue;
-        };
-        let below_zero = balance < 0.0;
-        if below_zero {
-            warnings.push(format!(
-                "{} is oversold — stock is now {:.3} {}",
-                d.ingredient_name, balance, d.unit
-            ));
-        }
-        crate::inventory::movements::record_movement(
+        let posted = crate::inventory::movements::record_movement(
             &mut **tx,
             crate::inventory::movements::MovementParams {
                 branch_id,
                 org_ingredient_id: ing_id,
-                branch_inventory_id: Some(bi_id),
                 movement_type: "sale",
                 quantity: -d.quantity,
-                balance_after: Some(balance),
                 unit_cost: d.cost_per_unit.map(|c| c.round() as i64),
                 reason: None,
-                below_zero,
                 source_type: Some("order"),
                 source_id: Some(order_id),
                 note: None,
@@ -788,6 +765,12 @@ async fn apply_one_deductions(
             },
         )
         .await?;
+        if posted.below_zero {
+            warnings.push(format!(
+                "{} is oversold — stock is now {:.3} {}",
+                d.ingredient_name, posted.balance_after, d.unit
+            ));
+        }
     }
     Ok(())
 }
@@ -806,30 +789,15 @@ pub async fn record_waste(
         let Some(ing_id) = d.org_ingredient_id else {
             continue;
         };
-        let updated: Option<(Uuid, f64)> = sqlx::query_as(
-            "UPDATE branch_inventory SET current_stock = current_stock - $1 \
-             WHERE branch_id = $2 AND org_ingredient_id = $3 RETURNING id, current_stock::float8",
-        )
-        .bind(d.quantity)
-        .bind(branch_id)
-        .bind(ing_id)
-        .fetch_optional(&mut **tx)
-        .await?;
-        let Some((bi_id, balance)) = updated else {
-            continue;
-        };
         crate::inventory::movements::record_movement(
             &mut **tx,
             crate::inventory::movements::MovementParams {
                 branch_id,
                 org_ingredient_id: ing_id,
-                branch_inventory_id: Some(bi_id),
                 movement_type: "waste",
                 quantity: -d.quantity,
-                balance_after: Some(balance),
                 unit_cost: d.cost_per_unit.map(|c| c.round() as i64),
                 reason: Some("order_cancelled"),
-                below_zero: balance < 0.0,
                 source_type: Some("delivery_order"),
                 source_id: Some(delivery_order_id),
                 note: Some("Delivery order cancelled — made, not restocked"),

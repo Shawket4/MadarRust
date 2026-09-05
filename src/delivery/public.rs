@@ -620,7 +620,7 @@ async fn load_optional_fields(
 /// Resolve each item's base/default milk addon, batched over the item list (no
 /// N+1). Mirrors the canonical swap-base definition (orders::component_resolve):
 /// the item recipe's milk ingredient is the `drink_recipe` deduction whose
-/// `org_ingredients.category = 'milk'`; the base/default milk addon is the
+/// category slug `milk`; the base/default milk addon is the
 /// `milk_type` addon whose `addon_item_ingredients.org_ingredient_id` equals
 /// that ingredient. Items with no recipe milk (or no matching milk addon) are
 /// simply absent from the map → `None`. Uses the one_size / first recipe row,
@@ -634,12 +634,13 @@ async fn load_default_milk(
         return Ok(by_item);
     }
 
-    // For each item: its recipe milk ingredient (category='milk') → the milk_type
+    // For each item: its recipe milk ingredient (category slug 'milk') → the milk_type
     // addon whose ingredient matches. DISTINCT ON keeps one addon per item.
     let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
         "SELECT DISTINCT ON (r.menu_item_id) r.menu_item_id, a.id \
          FROM menu_item_recipes r \
-         JOIN org_ingredients i ON i.id = r.org_ingredient_id AND i.category = 'milk' \
+         JOIN org_ingredients i ON i.id = r.org_ingredient_id \
+         JOIN ingredient_categories ic ON ic.id = i.category_id AND ic.slug = 'milk' \
          JOIN addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id \
          JOIN addon_items a ON a.id = ai.addon_item_id AND a.type = 'milk_type' \
          WHERE r.menu_item_id = ANY($1) \

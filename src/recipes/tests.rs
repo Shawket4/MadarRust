@@ -113,8 +113,8 @@ async fn seed_addon_item(
 async fn seed_ingredient(pool: &PgPool, org_id: Uuid, name: &str, unit: &str) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO org_ingredients (id, org_id, name, unit, category, description, cost_per_unit) \
-         VALUES ($1, $2, $3, $4::inventory_unit, 'veggies', 'Fresh ingredient', 2.50)"
+        "INSERT INTO org_ingredients (id, org_id, name, unit, category_id, description, cost_per_unit)\
+         VALUES ($1, $2, $3, $4::inventory_unit, ingredient_category_id($2, 'veggies'), 'Fresh ingredient', 2.50)"
     )
     .bind(id)
     .bind(org_id)
@@ -463,8 +463,8 @@ async fn test_recipe_density_and_yield_applied_at_save(pool: PgPool) {
 
     // Ingredient bought by WEIGHT (g), density 0.92 g/ml, 50% usable yield.
     let ing = Uuid::new_v4();
-    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, category, cost_per_unit, density_g_per_ml, yield_pct) \
-                 VALUES ($1,$2,'Olive Oil','g'::inventory_unit,'fats',3.0,0.92,50)")
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, category_id, cost_per_unit, density_g_per_ml, yield_pct)\
+                 VALUES ($1, $2, 'Olive Oil', 'g'::inventory_unit, ingredient_category_id($2, 'fats'), 3.0, 0.92, 50)")
         .bind(ing).bind(org_id).execute(&pool).await.unwrap();
     let token = generate_org_admin_token(user_id, org_id);
 

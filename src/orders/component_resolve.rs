@@ -111,7 +111,7 @@ pub async fn resolve_menu_item_configuration(
         sqlx::query_as(
             r#"SELECT r.org_ingredient_id, r.quantity_used::float8,
                           r.ingredient_name, r.ingredient_unit,
-                          COALESCE(i.category, 'general') as category
+                          (SELECT ic.slug FROM ingredient_categories ic WHERE ic.id = i.category_id) as category
                    FROM   menu_item_recipes r
                    LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id
                    WHERE  r.menu_item_id = $1 AND r.size_label = $2"#,
@@ -124,7 +124,7 @@ pub async fn resolve_menu_item_configuration(
         sqlx::query_as(
                 r#"SELECT r.org_ingredient_id, r.quantity_used::float8,
                           r.ingredient_name, r.ingredient_unit,
-                          COALESCE(i.category, 'general') as category
+                          (SELECT ic.slug FROM ingredient_categories ic WHERE ic.id = i.category_id) as category
                    FROM   menu_item_recipes r
                    LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id
                    WHERE  r.menu_item_id = $1

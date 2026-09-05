@@ -10066,7 +10066,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/BranchInventoryMovement"
+                    "$ref": "#/components/schemas/StockMovement"
                   }
                 }
               }
@@ -10160,119 +10160,14 @@
         ],
         "responses": {
           "200": {
-            "description": "List branch stock",
+            "description": "Every catalog ingredient as seen from this branch",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/BranchInventoryItem"
+                    "$ref": "#/components/schemas/BranchStockRow"
                   }
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request — validation failed or malformed input",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized — missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden — insufficient permission or wrong org",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict — FK or domain invariant violation",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_jwt": []
-          }
-        ]
-      },
-      "post": {
-        "tags": [
-          "inventory"
-        ],
-        "operationId": "add_to_branch_stock",
-        "parameters": [
-          {
-            "name": "branch_id",
-            "in": "path",
-            "description": "Branch ID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AddToStockRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "Added to branch stock",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BranchInventoryItem"
                 }
               }
             }
@@ -10345,12 +10240,12 @@
         ]
       }
     },
-    "/inventory/branches/{branch_id}/stock/{id}": {
-      "delete": {
+    "/inventory/branches/{branch_id}/stock/{org_ingredient_id}/par": {
+      "put": {
         "tags": [
           "inventory"
         ],
-        "operationId": "remove_from_branch_stock",
+        "operationId": "set_par_levels",
         "parameters": [
           {
             "name": "branch_id",
@@ -10363,107 +10258,9 @@
             }
           },
           {
-            "name": "id",
+            "name": "org_ingredient_id",
             "in": "path",
-            "description": "Stock ID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Removed from branch stock"
-          },
-          "400": {
-            "description": "Bad request — validation failed or malformed input",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized — missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden — insufficient permission or wrong org",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict — FK or domain invariant violation",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_jwt": []
-          }
-        ]
-      },
-      "patch": {
-        "tags": [
-          "inventory"
-        ],
-        "operationId": "update_branch_stock",
-        "parameters": [
-          {
-            "name": "branch_id",
-            "in": "path",
-            "description": "Branch ID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Stock ID",
+            "description": "Ingredient ID",
             "required": true,
             "schema": {
               "type": "string",
@@ -10475,7 +10272,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/UpdateStockRequest"
+                "$ref": "#/components/schemas/SetParRequest"
               }
             }
           },
@@ -10483,11 +10280,11 @@
         },
         "responses": {
           "200": {
-            "description": "Branch stock updated",
+            "description": "Par levels saved",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BranchInventoryItem"
+                  "$ref": "#/components/schemas/BranchStockRow"
                 }
               }
             }
@@ -10568,6 +10365,16 @@
         "operationId": "list_transfers",
         "parameters": [
           {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
             "name": "direction",
             "in": "query",
             "required": false,
@@ -10592,15 +10399,6 @@
               "type": "integer",
               "format": "int64"
             }
-          },
-          {
-            "name": "branch_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
           }
         ],
         "responses": {
@@ -10611,7 +10409,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/BranchInventoryTransfer"
+                    "$ref": "#/components/schemas/StockTransfer"
                   }
                 }
               }
@@ -10701,6 +10499,24 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           }
         ],
         "responses": {
@@ -10711,7 +10527,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/BranchInventoryMovement"
+                    "$ref": "#/components/schemas/StockMovement"
                   }
                 }
               }
@@ -10817,7 +10633,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BranchInventoryMovement"
+                  "$ref": "#/components/schemas/StockMovement"
                 }
               }
             }
@@ -11310,6 +11126,436 @@
         ]
       }
     },
+    "/inventory/orgs/{org_id}/categories": {
+      "get": {
+        "tags": [
+          "inventory"
+        ],
+        "operationId": "list_ingredient_categories",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ingredient categories",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/IngredientCategory"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "inventory"
+        ],
+        "operationId": "create_ingredient_category",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateIngredientCategoryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Category created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngredientCategory"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/inventory/orgs/{org_id}/categories/{id}": {
+      "delete": {
+        "tags": [
+          "inventory"
+        ],
+        "operationId": "delete_ingredient_category",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Category ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "reassign_to",
+            "in": "query",
+            "description": "Category that ingredients in the deleted one move to. Required when the\ncategory still has ingredients.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Category deleted"
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "inventory"
+        ],
+        "operationId": "update_ingredient_category",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Category ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateIngredientCategoryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Category updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngredientCategory"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/inventory/orgs/{org_id}/settings": {
       "get": {
         "tags": [
@@ -11534,7 +11780,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BranchInventoryTransfer"
+                  "$ref": "#/components/schemas/StockTransfer"
                 }
               }
             }
@@ -11627,7 +11873,7 @@
         ],
         "responses": {
           "204": {
-            "description": "Transfer deleted"
+            "description": "Transfer reversed and deleted"
           },
           "400": {
             "description": "Bad request — validation failed or malformed input",
@@ -11729,7 +11975,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BranchInventoryTransfer"
+                  "$ref": "#/components/schemas/StockTransfer"
                 }
               }
             }
@@ -34452,7 +34698,7 @@
           {
             "name": "branch_id",
             "in": "path",
-            "description": "Branch ID",
+            "description": "Branch ID, or the all-zeros UUID for every branch in the org",
             "required": true,
             "schema": {
               "type": "string",
@@ -36913,46 +37159,6 @@
           }
         }
       },
-      "AddToStockRequest": {
-        "type": "object",
-        "required": [
-          "org_ingredient_id"
-        ],
-        "properties": {
-          "current_stock": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          },
-          "org_ingredient_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "par_max": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          },
-          "par_min": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          },
-          "reorder_threshold": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          }
-        }
-      },
       "AddonCost": {
         "type": "object",
         "description": "Computed cost for one addon item.",
@@ -38493,288 +38699,6 @@
           }
         }
       },
-      "BranchInventoryItem": {
-        "type": "object",
-        "required": [
-          "id",
-          "branch_id",
-          "org_ingredient_id",
-          "ingredient_name",
-          "unit",
-          "current_stock",
-          "reorder_threshold",
-          "below_reorder",
-          "created_at",
-          "updated_at"
-        ],
-        "properties": {
-          "below_reorder": {
-            "type": "boolean"
-          },
-          "branch_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "cost_per_unit": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double",
-            "description": "Piastres per unit; `null` ⟺ cost never entered."
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "current_stock": {
-            "type": "number",
-            "format": "double"
-          },
-          "description": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "ingredient_name": {
-            "type": "string"
-          },
-          "last_counted_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time",
-            "description": "When this item was last reconciled by a finalized stock count; `null` =\nnever counted. Drives the \"count due\" signal on the inventory home."
-          },
-          "org_ingredient_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "par_max": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double",
-            "description": "Order-up-to level (bring stock back up to this when reordering)."
-          },
-          "par_min": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double",
-            "description": "Reorder point (order when on-hand ≤ this). Falls back to reorder_threshold."
-          },
-          "reorder_threshold": {
-            "type": "number",
-            "format": "double"
-          },
-          "unit": {
-            "type": "string"
-          },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time"
-          }
-        }
-      },
-      "BranchInventoryMovement": {
-        "type": "object",
-        "required": [
-          "id",
-          "branch_id",
-          "org_ingredient_id",
-          "ingredient_name",
-          "unit",
-          "movement_type",
-          "quantity",
-          "below_zero",
-          "created_at"
-        ],
-        "properties": {
-          "balance_after": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          },
-          "below_zero": {
-            "type": "boolean"
-          },
-          "branch_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "branch_inventory_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          },
-          "branch_name": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Branch name; only populated by the all-branches waste roll-up (nil\n{branch_id}). `None` for single-branch queries that do not select it."
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "created_by": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          },
-          "created_by_name": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "ingredient_name": {
-            "type": "string"
-          },
-          "movement_type": {
-            "type": "string",
-            "description": "inventory_movement_type: sale | void_restock | adjustment_add |\nadjustment_remove | waste | transfer_out | transfer_in | purchase_in | stock_count"
-          },
-          "note": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "org_ingredient_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "quantity": {
-            "type": "number",
-            "format": "double",
-            "description": "Signed delta applied to stock (consumption negative, replenishment positive)."
-          },
-          "reason": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "source_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          },
-          "source_type": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "unit": {
-            "type": "string"
-          },
-          "unit_cost": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Piastres per unit at movement time; `null` ⟺ unknown."
-          }
-        }
-      },
-      "BranchInventoryTransfer": {
-        "type": "object",
-        "required": [
-          "id",
-          "org_id",
-          "source_branch_id",
-          "source_branch_name",
-          "destination_branch_id",
-          "destination_branch_name",
-          "org_ingredient_id",
-          "ingredient_name",
-          "unit",
-          "quantity",
-          "initiated_by",
-          "initiated_by_name",
-          "initiated_at"
-        ],
-        "properties": {
-          "destination_branch_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "destination_branch_name": {
-            "type": "string"
-          },
-          "id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "ingredient_name": {
-            "type": "string"
-          },
-          "initiated_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "initiated_by": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "initiated_by_name": {
-            "type": "string"
-          },
-          "note": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "org_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "org_ingredient_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "quantity": {
-            "type": "number",
-            "format": "double"
-          },
-          "source_branch_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "source_branch_name": {
-            "type": "string"
-          },
-          "unit": {
-            "type": "string"
-          }
-        }
-      },
       "BranchMenuOverride": {
         "type": "object",
         "required": [
@@ -39137,6 +39061,105 @@
             "items": {
               "$ref": "#/components/schemas/StockRow"
             }
+          }
+        }
+      },
+      "BranchStockRow": {
+        "type": "object",
+        "description": "One catalog ingredient as seen from a branch. Every live catalog ingredient\nappears exactly once; `has_activity = false` means the branch has never\nmoved or counted it (on hand is 0 and every date is null).",
+        "required": [
+          "branch_id",
+          "org_ingredient_id",
+          "ingredient_name",
+          "unit",
+          "category_id",
+          "category_slug",
+          "category_name",
+          "on_hand",
+          "below_par",
+          "has_activity"
+        ],
+        "properties": {
+          "below_par": {
+            "type": "boolean"
+          },
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "category_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "category_name": {
+            "type": "string"
+          },
+          "category_slug": {
+            "type": "string"
+          },
+          "cost_per_unit": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "This branch's actual (weighted-average) cost, falling back to the org\nstandard cost. Piastres per unit; `null` ⟺ unknown."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "has_activity": {
+            "type": "boolean"
+          },
+          "ingredient_name": {
+            "type": "string"
+          },
+          "last_counted_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Last finalized stock count that included this ingredient; `null` = never."
+          },
+          "last_movement_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Last ledger movement of any kind; `null` = never."
+          },
+          "on_hand": {
+            "type": "number",
+            "format": "double",
+            "description": "Book stock in the base unit. May be negative (sold past zero, flagged)."
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "par_max": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Order-up-to level for reorder suggestions."
+          },
+          "par_min": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Reorder point: below-par when `on_hand <= par_min` and `par_min > 0`."
+          },
+          "unit": {
+            "type": "string"
           }
         }
       },
@@ -40901,12 +40924,16 @@
         "type": "object",
         "required": [
           "name",
-          "unit",
-          "category"
+          "unit"
         ],
         "properties": {
-          "category": {
-            "type": "string"
+          "category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Omitted ⟹ the org's `general` category."
           },
           "cost_per_unit": {
             "type": [
@@ -40942,16 +40969,14 @@
             "type": [
               "string",
               "null"
-            ],
-            "description": "Optional named purchase pack and its base-unit size."
+            ]
           },
           "supplier_id": {
             "type": [
               "string",
               "null"
             ],
-            "format": "uuid",
-            "description": "Optional default supplier for reordering."
+            "format": "uuid"
           },
           "unit": {
             "type": "string"
@@ -41276,6 +41301,31 @@
           },
           "sort": {
             "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "CreateIngredientCategoryRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional explicit slug (`[a-z0-9_]`); derived from the name when omitted."
+          },
+          "sort_order": {
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int32"
           }
         }
@@ -42057,12 +42107,13 @@
       "CreateStocktakeRequest": {
         "type": "object",
         "properties": {
-          "category": {
+          "category_id": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Cycle-count scope: snapshot only ingredients in this catalog category.\nOmit (with org_ingredient_ids) for a full-branch count."
+            "format": "uuid",
+            "description": "Cycle-count scope: only ingredients in this category."
           },
           "note": {
             "type": [
@@ -42079,7 +42130,7 @@
               "type": "string",
               "format": "uuid"
             },
-            "description": "Cycle-count scope: snapshot only these specific ingredients."
+            "description": "Cycle-count scope: only these ingredients."
           }
         }
       },
@@ -44499,6 +44550,53 @@
           }
         }
       },
+      "IngredientCategory": {
+        "type": "object",
+        "required": [
+          "id",
+          "org_id",
+          "slug",
+          "name",
+          "sort_order",
+          "ingredient_count",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ingredient_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Live (non-deleted) ingredients in this category."
+          },
+          "name": {
+            "type": "string"
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "slug": {
+            "type": "string",
+            "description": "Stable machine key (`general`, `milk`, `coffee_bean`, …). `milk` and\n`coffee_bean` carry swap semantics in the menu; the slug never changes."
+          },
+          "sort_order": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "InventoryValuationReport": {
         "type": "object",
         "required": [
@@ -44549,7 +44647,7 @@
               "string",
               "null"
             ],
-            "description": "Why the count differs from expected. One of: theft | spoilage | breakage |\nmiscount | supplier_short | transfer_error | other. Required at finalize for\nrows whose difference exceeds the org's variance threshold."
+            "description": "Why the count differs from book stock. One of: theft | spoilage |\nbreakage | miscount | supplier_short | transfer_error | other. Required\nat finalize for rows whose difference exceeds the org's threshold."
           }
         }
       },
@@ -45234,9 +45332,9 @@
           "org_ingredient_id",
           "ingredient_name",
           "unit",
-          "current_stock",
-          "reorder_threshold",
-          "deficit"
+          "on_hand",
+          "par_min",
+          "suggested_qty"
         ],
         "properties": {
           "branch_id": {
@@ -45246,25 +45344,34 @@
           "branch_name": {
             "type": "string"
           },
-          "current_stock": {
-            "type": "number",
-            "format": "double"
-          },
-          "deficit": {
-            "type": "number",
-            "format": "double",
-            "description": "reorder_threshold − current_stock: how much to order to reach par."
-          },
           "ingredient_name": {
             "type": "string"
+          },
+          "on_hand": {
+            "type": "number",
+            "format": "double"
           },
           "org_ingredient_id": {
             "type": "string",
             "format": "uuid"
           },
-          "reorder_threshold": {
+          "par_max": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Order-up-to level; `null` when only a reorder point is set."
+          },
+          "par_min": {
             "type": "number",
-            "format": "double"
+            "format": "double",
+            "description": "Reorder point the item is at or below."
+          },
+          "suggested_qty": {
+            "type": "number",
+            "format": "double",
+            "description": "Quantity to bring stock back to par_max (or par_min when no max is set)."
           },
           "supplier_id": {
             "type": [
@@ -47728,13 +47835,22 @@
           "org_id",
           "name",
           "unit",
-          "category",
+          "category_id",
+          "category_slug",
+          "category_name",
           "is_active",
           "created_at",
           "updated_at"
         ],
         "properties": {
-          "category": {
+          "category_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "category_name": {
+            "type": "string"
+          },
+          "category_slug": {
             "type": "string"
           },
           "cost_per_unit": {
@@ -47743,7 +47859,7 @@
               "null"
             ],
             "format": "double",
-            "description": "Piastres per unit. `null` ⟺ never entered (unknown, NOT free) —\nrecipes using this ingredient are cost-missing everywhere."
+            "description": "Standard (org default) cost, piastres per unit. `null` ⟺ never entered\n(unknown, NOT free) — recipes using this ingredient are cost-missing."
           },
           "created_at": {
             "type": "string",
@@ -47819,7 +47935,7 @@
               "null"
             ],
             "format": "double",
-            "description": "Usable % after trim/cook loss (e.g. 70 = 70%); `null` = 100%. Recipe\nquantities are grossed up by this at save time."
+            "description": "Usable % after trim/cook loss (e.g. 70 = 70%); `null` = 100%."
           }
         }
       },
@@ -47832,7 +47948,7 @@
           "stocktake_variance_threshold_pct": {
             "type": "number",
             "format": "double",
-            "description": "Stock-count variance tolerance (percent). A counted row whose |difference|\nis at least this percent of expected is flagged and needs a reason."
+            "description": "Stock-count variance tolerance (percent). A counted row whose |difference|\nis at least this percent of book stock is flagged and needs a reason."
           }
         }
       },
@@ -50137,16 +50253,16 @@
           "org_ingredient_id",
           "ingredient_name",
           "unit",
-          "current_stock",
+          "on_hand",
           "suggested_qty"
         ],
         "properties": {
-          "current_stock": {
-            "type": "number",
-            "format": "double"
-          },
           "ingredient_name": {
             "type": "string"
+          },
+          "on_hand": {
+            "type": "number",
+            "format": "double"
           },
           "org_ingredient_id": {
             "type": "string",
@@ -50867,6 +50983,26 @@
               "null"
             ],
             "description": "Set when a branch was named but could not be matched. The answer then\nfalls back to the full accessible set, and this flags the mismatch rather\nthan silently answering a different question."
+          }
+        }
+      },
+      "SetParRequest": {
+        "type": "object",
+        "description": "Par levels for one ingredient at one branch. `null` clears a level.",
+        "properties": {
+          "par_max": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "par_min": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
           }
         }
       },
@@ -51812,23 +51948,133 @@
           }
         }
       },
+      "StockMovement": {
+        "type": "object",
+        "required": [
+          "id",
+          "branch_id",
+          "org_ingredient_id",
+          "ingredient_name",
+          "unit",
+          "movement_type",
+          "quantity",
+          "balance_after",
+          "below_zero",
+          "created_at"
+        ],
+        "properties": {
+          "balance_after": {
+            "type": "number",
+            "format": "double"
+          },
+          "below_zero": {
+            "type": "boolean"
+          },
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "branch_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Branch name; only populated by the all-branches waste roll-up (nil\n{branch_id}). `None` for single-branch queries that do not select it."
+          },
+          "branch_stock_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "created_by_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ingredient_name": {
+            "type": "string"
+          },
+          "movement_type": {
+            "type": "string",
+            "description": "inventory_movement_type: sale | void_restock | adjustment_add |\nadjustment_remove | waste | transfer_out | transfer_in | purchase_in |\npurchase_return | stock_count"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "quantity": {
+            "type": "number",
+            "format": "double",
+            "description": "Signed delta applied to stock (consumption negative, replenishment positive)."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "source_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unit": {
+            "type": "string"
+          },
+          "unit_cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Piastres per unit at movement time; `null` ⟺ unknown."
+          }
+        }
+      },
       "StockRow": {
         "type": "object",
         "required": [
-          "branch_inventory_id",
+          "org_ingredient_id",
           "ingredient_name",
           "unit",
-          "current_stock",
-          "reorder_threshold",
-          "below_reorder"
+          "on_hand",
+          "below_par"
         ],
         "properties": {
-          "below_reorder": {
+          "below_par": {
             "type": "boolean"
-          },
-          "branch_inventory_id": {
-            "type": "string",
-            "format": "uuid"
           },
           "cost_per_unit": {
             "type": [
@@ -51838,16 +52084,97 @@
             "format": "double",
             "description": "Piastres per unit; `null` ⟺ cost never entered."
           },
-          "current_stock": {
+          "ingredient_name": {
+            "type": "string"
+          },
+          "on_hand": {
             "type": "number",
             "format": "double"
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "par_min": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Reorder point; `null` = not set at this branch."
+          },
+          "unit": {
+            "type": "string"
+          }
+        }
+      },
+      "StockTransfer": {
+        "type": "object",
+        "required": [
+          "id",
+          "org_id",
+          "source_branch_id",
+          "source_branch_name",
+          "destination_branch_id",
+          "destination_branch_name",
+          "org_ingredient_id",
+          "ingredient_name",
+          "unit",
+          "quantity",
+          "initiated_by",
+          "initiated_by_name",
+          "initiated_at"
+        ],
+        "properties": {
+          "destination_branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "destination_branch_name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
           },
           "ingredient_name": {
             "type": "string"
           },
-          "reorder_threshold": {
+          "initiated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "initiated_by": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "initiated_by_name": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "quantity": {
             "type": "number",
             "format": "double"
+          },
+          "source_branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source_branch_name": {
+            "type": "string"
           },
           "unit": {
             "type": "string"
@@ -51861,6 +52188,7 @@
           "org_id",
           "branch_id",
           "status",
+          "scope",
           "started_by",
           "started_at",
           "created_at"
@@ -51875,7 +52203,15 @@
               "string",
               "null"
             ],
-            "description": "Branch label — only populated by the stocktakes list (so the \"All\nbranches\" view can show which branch each stocktake belongs to). Other\nstocktake endpoints leave it `null`."
+            "description": "Branch label — only populated by the stocktakes list (so the \"All\nbranches\" view can show which branch each stocktake belongs to)."
+          },
+          "counted_items": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Items counted / items in scope; populated by the list endpoint only."
           },
           "created_at": {
             "type": "string",
@@ -51909,6 +52245,10 @@
             "type": "string",
             "format": "uuid"
           },
+          "scope": {
+            "type": "object",
+            "description": "`{\"kind\":\"full\"}`, `{\"kind\":\"category\",\"category_id\":…}` or\n`{\"kind\":\"items\",\"org_ingredient_ids\":[…]}`."
+          },
           "started_at": {
             "type": "string",
             "format": "date-time"
@@ -51925,6 +52265,13 @@
           },
           "status": {
             "type": "string"
+          },
+          "total_items": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
           }
         }
       },
@@ -51949,7 +52296,7 @@
               "variance_threshold_pct": {
                 "type": "number",
                 "format": "double",
-                "description": "Org tolerance: a counted row whose |difference| is >= this percent of the\nexpected quantity (or that appears-from / vanishes-to zero) is flagged and\nrequires a `variance_reason` before the count can be finalized."
+                "description": "Org tolerance: a counted row whose |difference| is >= this percent of\nbook stock (or that appears-from / vanishes-to zero) is flagged and\nrequires a `variance_reason` before the count can be finalized."
               }
             }
           }
@@ -51963,16 +52310,25 @@
           "org_ingredient_id",
           "ingredient_name",
           "unit",
-          "expected_qty",
+          "category_id",
+          "category_name",
+          "opening_qty",
+          "book_qty",
+          "is_new",
           "created_at"
         ],
         "properties": {
-          "branch_inventory_id": {
-            "type": [
-              "string",
-              "null"
-            ],
+          "book_qty": {
+            "type": "number",
+            "format": "double",
+            "description": "The baseline the difference is measured against: live book stock while\nthe count is open, frozen at finalize."
+          },
+          "category_id": {
+            "type": "string",
             "format": "uuid"
+          },
+          "category_name": {
+            "type": "string"
           },
           "counted_by": {
             "type": [
@@ -51992,10 +52348,6 @@
             "type": "string",
             "format": "date-time"
           },
-          "expected_qty": {
-            "type": "number",
-            "format": "double"
-          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -52003,11 +52355,20 @@
           "ingredient_name": {
             "type": "string"
           },
+          "is_new": {
+            "type": "boolean",
+            "description": "True when the branch had no stock activity for this ingredient when the\ncount opened — counting it is what starts tracking it here."
+          },
           "note": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "opening_qty": {
+            "type": "number",
+            "format": "double",
+            "description": "Book stock when the count was opened (reference only)."
           },
           "org_ingredient_id": {
             "type": "string",
@@ -52033,7 +52394,8 @@
               "number",
               "null"
             ],
-            "format": "double"
+            "format": "double",
+            "description": "counted − book; `null` until counted."
           },
           "variance_reason": {
             "type": [
@@ -53084,11 +53446,12 @@
       "UpdateCatalogItemRequest": {
         "type": "object",
         "properties": {
-          "category": {
+          "category_id": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "format": "uuid"
           },
           "cost_per_unit": {
             "type": [
@@ -53141,7 +53504,7 @@
               "null"
             ],
             "format": "uuid",
-            "description": "Set/replace the default supplier. (Omitted = unchanged; clearing to\nnone is not supported via this field.)"
+            "description": "Set/replace the default supplier (omitted = unchanged)."
           },
           "unit": {
             "type": [
@@ -53292,6 +53655,24 @@
               "null"
             ],
             "format": "double"
+          }
+        }
+      },
+      "UpdateIngredientCategoryRequest": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sort_order": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
           }
         }
       },
@@ -53617,39 +53998,6 @@
               "null"
             ],
             "format": "int32"
-          }
-        }
-      },
-      "UpdateStockRequest": {
-        "type": "object",
-        "properties": {
-          "current_stock": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          },
-          "par_max": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          },
-          "par_min": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          },
-          "reorder_threshold": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
           }
         }
       },
@@ -54267,7 +54615,7 @@
           "org_ingredient_id",
           "ingredient_name",
           "unit",
-          "current_stock"
+          "on_hand"
         ],
         "properties": {
           "cost_per_unit": {
@@ -54278,12 +54626,12 @@
             "format": "int64",
             "description": "Piastres per unit; `null` ⟺ unknown."
           },
-          "current_stock": {
-            "type": "number",
-            "format": "double"
-          },
           "ingredient_name": {
             "type": "string"
+          },
+          "on_hand": {
+            "type": "number",
+            "format": "double"
           },
           "org_ingredient_id": {
             "type": "string",
@@ -54298,7 +54646,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "current_stock × cost_per_unit in piastres; `null` when cost unknown."
+            "description": "on_hand × cost_per_unit in piastres; `null` when cost unknown."
           }
         }
       },
@@ -54346,8 +54694,7 @@
           },
           "variance_threshold_pct": {
             "type": "number",
-            "format": "double",
-            "description": "Org tolerance used to compute `is_flagged`."
+            "format": "double"
           }
         }
       },
@@ -54357,19 +54704,25 @@
           "org_ingredient_id",
           "ingredient_name",
           "unit",
-          "expected_qty",
+          "category_name",
+          "opening_qty",
+          "book_qty",
           "is_flagged"
         ],
         "properties": {
+          "book_qty": {
+            "type": "number",
+            "format": "double",
+            "description": "Book stock the difference is measured against (at finalize)."
+          },
+          "category_name": {
+            "type": "string"
+          },
           "counted_qty": {
             "type": [
               "number",
               "null"
             ],
-            "format": "double"
-          },
-          "expected_qty": {
-            "type": "number",
             "format": "double"
           },
           "ingredient_name": {
@@ -54378,6 +54731,11 @@
           "is_flagged": {
             "type": "boolean",
             "description": "True when |difference| exceeds the org threshold (or appears/vanishes from zero)."
+          },
+          "opening_qty": {
+            "type": "number",
+            "format": "double",
+            "description": "Book stock when the count opened."
           },
           "org_ingredient_id": {
             "type": "string",
@@ -54398,14 +54756,14 @@
               "number",
               "null"
             ],
-            "format": "double"
+            "format": "double",
+            "description": "counted − book."
           },
           "variance_reason": {
             "type": [
               "string",
               "null"
-            ],
-            "description": "theft | spoilage | breakage | miscount | supplier_short | transfer_error | other."
+            ]
           },
           "variance_value": {
             "type": [

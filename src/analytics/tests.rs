@@ -188,8 +188,8 @@ pub(crate) async fn seed(pool: &PgPool, label: &str) -> Seeded {
 
     // A wasted ingredient, so the inventory dataset has something to find.
     sqlx::query(
-        "INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) \
-         VALUES ($1,$2,'Milk','l',1200,'Dairy')",
+        "INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id)\
+         VALUES ($1, $2, 'Milk', 'l', 1200, ingredient_category_id($2, 'dairy'))",
     )
     .bind(ingredient)
     .bind(org)
@@ -197,8 +197,8 @@ pub(crate) async fn seed(pool: &PgPool, label: &str) -> Seeded {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO branch_inventory (id, branch_id, org_ingredient_id, current_stock, cost_per_unit) \
-         VALUES ($1,$2,$3,50,1200)",
+        "INSERT INTO branch_stock (id, branch_id, org_ingredient_id, on_hand, cost_per_unit)\
+         VALUES ($1, $2, $3, 50, 1200)",
     )
     .bind(inv)
     .bind(branch)
@@ -207,7 +207,7 @@ pub(crate) async fn seed(pool: &PgPool, label: &str) -> Seeded {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO inventory_movements (branch_id, org_ingredient_id, branch_inventory_id, type, \
+        "INSERT INTO inventory_movements (branch_id, org_ingredient_id, branch_stock_id, type, \
          quantity, balance_after, unit_cost, reason) \
          VALUES ($1,$2,$3,'waste',-3,47,1200,'Spillage')",
     )

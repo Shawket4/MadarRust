@@ -2904,7 +2904,7 @@ async fn fetch_item_recipes(pool: &PgPool, item_id: Uuid) -> Result<Vec<MenuItem
     Ok(sqlx::query_as::<_, MenuItemRecipe>(
         r#"SELECT r.org_ingredient_id, r.quantity_used,
                   r.ingredient_name, r.ingredient_unit,
-                  COALESCE(i.category, 'general') as category,
+                  (SELECT ic.slug FROM ingredient_categories ic WHERE ic.id = i.category_id) as category,
                   r.size_label::text
            FROM   menu_item_recipes r
            LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id

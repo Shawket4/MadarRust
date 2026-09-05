@@ -914,6 +914,10 @@ const INV_JOINS: &[Join] = &[
         sql: "JOIN org_ingredients ing ON ing.id = im.org_ingredient_id",
     },
     Join {
+        id: "ingredient_category",
+        sql: "LEFT JOIN ingredient_categories ingc ON ingc.id = ing.category_id",
+    },
+    Join {
         id: "supplier",
         sql: "LEFT JOIN suppliers sup ON sup.id = ing.supplier_id",
     },
@@ -984,9 +988,9 @@ const INV_DIMS: &[Dim] = dims_with_time!(
         Dim {
             id: "ingredient_category",
             label: "Ingredient category",
-            expr: "COALESCE(ing.category,'Uncategorized')",
+            expr: "COALESCE(ingc.name,\'Uncategorized\')",
             kind: ColumnKind::Label,
-            joins: &["ingredient"],
+            joins: &["ingredient", "ingredient_category"],
             time: false
         },
         Dim {
@@ -1430,6 +1434,10 @@ const PUR_JOINS: &[Join] = &[
         id: "ingredient",
         sql: "LEFT JOIN org_ingredients ing ON ing.id = pol.org_ingredient_id",
     },
+    Join {
+        id: "ingredient_category",
+        sql: "LEFT JOIN ingredient_categories ingc ON ingc.id = ing.category_id",
+    },
 ];
 
 const PUR_MEASURES: &[Meas] = &[
@@ -1529,9 +1537,9 @@ const PUR_DIMS: &[Dim] = dims_with_time!(
         Dim {
             id: "ingredient_category",
             label: "Ingredient category",
-            expr: "COALESCE(ing.category,'Uncategorized')",
+            expr: "COALESCE(ingc.name,\'Uncategorized\')",
             kind: ColumnKind::Label,
-            joins: &["ingredient"],
+            joins: &["ingredient", "ingredient_category"],
             time: false
         },
         Dim {
@@ -1584,6 +1592,10 @@ const ST_JOINS: &[Join] = &[
     Join {
         id: "ingredient",
         sql: "LEFT JOIN org_ingredients ing ON ing.id = si.org_ingredient_id",
+    },
+    Join {
+        id: "ingredient_category",
+        sql: "LEFT JOIN ingredient_categories ingc ON ingc.id = ing.category_id",
     },
 ];
 
@@ -1660,9 +1672,9 @@ const ST_DIMS: &[Dim] = dims_with_time!(
         Dim {
             id: "ingredient_category",
             label: "Ingredient category",
-            expr: "COALESCE(ing.category,'Uncategorized')",
+            expr: "COALESCE(ingc.name,\'Uncategorized\')",
             kind: ColumnKind::Label,
-            joins: &["ingredient"],
+            joins: &["ingredient", "ingredient_category"],
             time: false
         },
         Dim {

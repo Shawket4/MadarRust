@@ -1864,9 +1864,9 @@ pub(crate) async fn create_order_inner(
             optional_rows.push(row);
         }
 
-        // Apply inventory deductions (soft-fail — warn if not tracked).
-        // Negative stock is ALLOWED but FLAGGED: the movement records
-        // below_zero and the sale surfaces a warning (Foodics default).
+        // Apply inventory deductions through the ledger. Negative stock is
+        // ALLOWED but FLAGGED: the movement records below_zero and the sale
+        // surfaces a warning (Foodics default).
         for deduction in &resolved.deductions {
             let Some(ing_id) = deduction.org_ingredient_id else {
                 tracing::warn!(
@@ -1877,48 +1877,18 @@ pub(crate) async fn create_order_inner(
                 continue;
             };
 
-            let updated: Option<(Uuid, f64)> = sqlx::query_as(
-                "UPDATE branch_inventory \
-                 SET current_stock = current_stock - $1 \
-                 WHERE branch_id = $2 AND org_ingredient_id = $3 \
-                 RETURNING id, current_stock::float8",
-            )
-            .bind(deduction.quantity)
-            .bind(body.branch_id)
-            .bind(ing_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-
-            let Some((bi_id, balance)) = updated else {
-                tracing::warn!(
-                    branch_id         = %body.branch_id,
-                    org_ingredient_id = %ing_id,
-                    source            = %deduction.source,
-                    "Ingredient not tracked in branch inventory — skipping"
-                );
-                continue;
-            };
-
-            let below_zero = balance < 0.0;
-            if below_zero {
-                warnings.push(format!(
-                    "{} is oversold — stock is now {:.3} {}",
-                    deduction.ingredient_name, balance, deduction.unit
-                ));
-            }
-
-            crate::inventory::movements::record_movement(
+            // Post the sale to the ledger. The trigger upserts the branch
+            // balance (creating it on an ingredient's first sale here) and
+            // reports the resulting balance; negative is allowed but flagged.
+            let posted = crate::inventory::movements::record_movement(
                 &mut *tx,
                 crate::inventory::movements::MovementParams {
                     branch_id: body.branch_id,
                     org_ingredient_id: ing_id,
-                    branch_inventory_id: Some(bi_id),
                     movement_type: "sale",
                     quantity: -deduction.quantity,
-                    balance_after: Some(balance),
                     unit_cost: deduction.cost_per_unit.map(|c| c.round() as i64),
                     reason: None,
-                    below_zero,
                     source_type: Some("order"),
                     source_id: Some(order.id),
                     note: None,
@@ -1926,6 +1896,12 @@ pub(crate) async fn create_order_inner(
                 },
             )
             .await?;
+            if posted.below_zero {
+                warnings.push(format!(
+                    "{} is oversold — stock is now {:.3} {}",
+                    deduction.ingredient_name, posted.balance_after, deduction.unit
+                ));
+            }
         }
 
         order_items_full.push(OrderItemFull {
@@ -2396,33 +2372,16 @@ pub(crate) async fn void_order_inner(
                 .and_then(|v| v.as_f64())
                 .map(|c| c.round() as i64);
 
-            // Reverse the sale deduction (back into stock).
-            let restored: Option<(Uuid, f64)> = sqlx::query_as(
-                "UPDATE branch_inventory SET current_stock = current_stock + $1 \
-                 WHERE branch_id = $2 AND org_ingredient_id = $3 \
-                 RETURNING id, current_stock::float8",
-            )
-            .bind(qty)
-            .bind(order.branch_id)
-            .bind(ing_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-            let Some((bi_id, balance)) = restored else {
-                continue;
-            };
-
+            // Reverse the sale deduction (back into stock) through the ledger.
             crate::inventory::movements::record_movement(
                 &mut *tx,
                 crate::inventory::movements::MovementParams {
                     branch_id: order.branch_id,
                     org_ingredient_id: ing_id,
-                    branch_inventory_id: Some(bi_id),
                     movement_type: "void_restock",
                     quantity: qty,
-                    balance_after: Some(balance),
                     unit_cost,
                     reason: None,
-                    below_zero: false,
                     source_type: Some("order"),
                     source_id: Some(order.id),
                     note: Some("Void restock"),
@@ -2433,37 +2392,22 @@ pub(crate) async fn void_order_inner(
 
             if !restock {
                 // Made & discarded → re-deduct, logged as waste.
-                let wasted: Option<(Uuid, f64)> = sqlx::query_as(
-                    "UPDATE branch_inventory SET current_stock = current_stock - $1 \
-                     WHERE branch_id = $2 AND org_ingredient_id = $3 \
-                     RETURNING id, current_stock::float8",
+                crate::inventory::movements::record_movement(
+                    &mut *tx,
+                    crate::inventory::movements::MovementParams {
+                        branch_id: order.branch_id,
+                        org_ingredient_id: ing_id,
+                        movement_type: "waste",
+                        quantity: -qty,
+                        unit_cost,
+                        reason: Some("order_cancelled"),
+                        source_type: Some("order"),
+                        source_id: Some(order.id),
+                        note: Some("Order voided — made, not restocked"),
+                        created_by: Some(actor.teller_id),
+                    },
                 )
-                .bind(qty)
-                .bind(order.branch_id)
-                .bind(ing_id)
-                .fetch_optional(&mut *tx)
                 .await?;
-                if let Some((wbi, wbal)) = wasted {
-                    crate::inventory::movements::record_movement(
-                        &mut *tx,
-                        crate::inventory::movements::MovementParams {
-                            branch_id: order.branch_id,
-                            org_ingredient_id: ing_id,
-                            branch_inventory_id: Some(wbi),
-                            movement_type: "waste",
-                            quantity: -qty,
-                            balance_after: Some(wbal),
-                            unit_cost,
-                            reason: Some("order_cancelled"),
-                            below_zero: wbal < 0.0,
-                            source_type: Some("order"),
-                            source_id: Some(order.id),
-                            note: Some("Order voided — made, not restocked"),
-                            created_by: Some(actor.teller_id),
-                        },
-                    )
-                    .await?;
-                }
             }
         }
     }
@@ -2518,12 +2462,13 @@ pub async fn preview_recipe(
     let mut result: Vec<PreviewIngredient> = Vec::new();
 
     // Base recipe
-    let recipe_rows: Vec<(Option<Uuid>, f64, String, String, String)> =
-        if let Some(size) = &body.size_label {
-            sqlx::query_as(
+    let recipe_rows: Vec<(Option<Uuid>, f64, String, String, String)> = if let Some(size) =
+        &body.size_label
+    {
+        sqlx::query_as(
                 r#"SELECT r.org_ingredient_id, r.quantity_used::float8,
                           r.ingredient_name, r.ingredient_unit,
-                          COALESCE(i.category, 'general') as category
+                          (SELECT ic.slug FROM ingredient_categories ic WHERE ic.id = i.category_id) as category
                    FROM   menu_item_recipes r
                    LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id
                    WHERE  r.menu_item_id = $1 AND r.size_label = $2"#,
@@ -2532,11 +2477,11 @@ pub async fn preview_recipe(
             .bind(size)
             .fetch_all(pool.get_ref())
             .await?
-        } else {
-            sqlx::query_as(
+    } else {
+        sqlx::query_as(
                 r#"SELECT r.org_ingredient_id, r.quantity_used::float8,
                           r.ingredient_name, r.ingredient_unit,
-                          COALESCE(i.category, 'general') as category
+                          (SELECT ic.slug FROM ingredient_categories ic WHERE ic.id = i.category_id) as category
                    FROM   menu_item_recipes r
                    LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id
                    WHERE  r.menu_item_id = $1
@@ -2548,7 +2493,7 @@ pub async fn preview_recipe(
             .bind(body.menu_item_id)
             .fetch_all(pool.get_ref())
             .await?
-        };
+    };
 
     for (ing_id, qty, name, unit, category) in recipe_rows {
         result.push(PreviewIngredient {

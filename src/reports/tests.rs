@@ -147,7 +147,7 @@ async fn seed_menu_item(pool: &PgPool, org_id: Uuid, cat_id: Uuid) -> Uuid {
 
 async fn seed_ingredient(pool: &PgPool, org_id: Uuid, name: &str, unit: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1, $2, $3, $4::inventory_unit, 100, 'general')")
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, $3, $4::inventory_unit, 100, ingredient_category_id($2, 'general'))")
         .bind(id)
         .bind(org_id)
         .bind(name)
@@ -160,7 +160,7 @@ async fn seed_ingredient(pool: &PgPool, org_id: Uuid, name: &str, unit: &str) ->
 
 async fn seed_branch_inventory(pool: &PgPool, branch_id: Uuid, ing_id: Uuid, stock: f64) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO branch_inventory (id, branch_id, org_ingredient_id, current_stock) VALUES ($1, $2, $3, $4)")
+    sqlx::query("INSERT INTO branch_stock (id, branch_id, org_ingredient_id, on_hand) VALUES ($1, $2, $3, $4)")
         .bind(id)
         .bind(branch_id)
         .bind(ing_id)
@@ -313,7 +313,7 @@ async fn test_branch_stock(pool: PgPool) {
 
     let stock: BranchStockReport = test::read_body_json(resp).await;
     assert_eq!(stock.items.len(), 1);
-    assert_eq!(stock.items[0].current_stock, 50.0);
+    assert_eq!(stock.items[0].on_hand, 50.0);
 }
 
 #[sqlx::test]
@@ -776,13 +776,13 @@ macro_rules! init_app {
 
 async fn seed_ingredient_nullcost(pool: &PgPool, org_id: Uuid, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category) VALUES ($1,$2,$3,'g'::inventory_unit,NULL,'general')")
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, $3, 'g'::inventory_unit, NULL, ingredient_category_id($2, 'general'))")
         .bind(id).bind(org_id).bind(name).execute(pool).await.unwrap();
     id
 }
 
 async fn seed_stock_lvl(pool: &PgPool, branch_id: Uuid, ing: Uuid, stock: f64, reorder: f64) {
-    sqlx::query("INSERT INTO branch_inventory (branch_id, org_ingredient_id, current_stock, reorder_threshold) VALUES ($1,$2,$3,$4)")
+    sqlx::query("INSERT INTO branch_stock (branch_id, org_ingredient_id, on_hand, par_min) VALUES ($1, $2, $3, NULLIF($4, 0))")
         .bind(branch_id).bind(ing).bind(stock).bind(reorder).execute(pool).await.unwrap();
 }
 
@@ -873,7 +873,8 @@ async fn test_org_low_stock_guard_and_supplier(pool: PgPool) {
     let rows: Vec<LowStockRow> = test::read_body_json(resp).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].org_ingredient_id, low);
-    assert_eq!(rows[0].deficit, 5.0);
+    assert_eq!(rows[0].suggested_qty, 5.0);
+    assert_eq!(rows[0].par_min, 10.0);
     assert_eq!(rows[0].supplier_name.as_deref(), Some("Beans Co"));
 }
 

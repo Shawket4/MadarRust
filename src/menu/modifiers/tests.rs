@@ -138,8 +138,8 @@ async fn seed_ingredient(
 ) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO org_ingredients (id, org_id, name, unit, category, description, cost_per_unit) \
-         VALUES ($1, $2, $3, $4::inventory_unit, 'veggies', 'x', $5)",
+        "INSERT INTO org_ingredients (id, org_id, name, unit, category_id, description, cost_per_unit)\
+         VALUES ($1, $2, $3, $4::inventory_unit, ingredient_category_id($2, 'veggies'), 'x', $5)",
     )
     .bind(id)
     .bind(org_id)

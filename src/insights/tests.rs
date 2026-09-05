@@ -185,8 +185,8 @@ async fn seed_item(pool: &PgPool, org_id: Uuid, cat: Uuid, name: &str, price: i6
 /// DBs) so the SKU's CURRENT cost resolves and `recipe_incomplete` stays quiet.
 async fn seed_costed_recipe(pool: &PgPool, org_id: Uuid, item: Uuid, cost: f64) -> Uuid {
     let ing: Uuid = sqlx::query_scalar(
-        "INSERT INTO org_ingredients (org_id, name, unit, cost_per_unit, category) \
-         VALUES ($1, $2, 'g'::inventory_unit, $3, 'general') RETURNING id",
+        "INSERT INTO org_ingredients (org_id, name, unit, cost_per_unit, category_id)\
+         VALUES ($1, $2, 'g'::inventory_unit, $3, ingredient_category_id($1, 'general')) RETURNING id",
     )
     .bind(org_id)
     .bind(format!("Ing-{item}"))

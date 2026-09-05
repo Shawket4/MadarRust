@@ -64,7 +64,7 @@ pub struct BackfillSummary {
 
 /// Current piastre cost per ingredient on the ORG-DEFAULT (standard) basis:
 /// org-level open history epoch first, catalog value second. NULL ⟺ never
-/// entered. (Per-branch actual cost lives on branch_inventory; this operator
+/// entered. (Per-branch actual cost lives on branch_stock; this operator
 /// backfill deliberately recomputes against the org standard cost so a single
 /// run is branch-agnostic.)
 const CURRENT_COSTS_CTE: &str = r#"
