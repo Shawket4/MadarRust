@@ -32,6 +32,10 @@ pub struct CreateOpenTicketRequest {
     pub notes: Option<String>,
     #[serde(default)]
     pub guest_count: Option<i32>,
+    /// The booking this party arrived under: the ticket links to it and the
+    /// booking moves to `seated` in the same transaction.
+    #[serde(default)]
+    pub booking_id: Option<Uuid>,
     /// Client-minted dedup key for the ticket (exactly-once across LAN + cloud).
     #[serde(default)]
     pub idempotency_key: Option<Uuid>,
@@ -210,8 +214,8 @@ pub(crate) async fn create_open_ticket_inner(
     let open_ticket_id: Uuid = sqlx::query_scalar(
         "INSERT INTO open_tickets \
             (org_id, branch_id, table_id, ticket_ref, opened_by, customer_name, notes, guest_count, \
-             idempotency_key, discount_id, discount_type, discount_value) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id",
+             idempotency_key, discount_id, discount_type, discount_value, booking_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id",
     )
     .bind(org_id)
     .bind(body.branch_id)
@@ -225,11 +229,16 @@ pub(crate) async fn create_open_ticket_inner(
     .bind(body.discount_id)
     .bind(&body.discount_type)
     .bind(body.discount_value)
+    .bind(body.booking_id)
     .fetch_one(&mut *tx)
     .await?;
 
     if let Some(t) = table_id {
         crate::floor_ops::seat_table(&mut *tx, t).await?;
+    }
+    // A booked party sat down: the booking becomes `seated` with this ticket.
+    if let Some(b) = body.booking_id {
+        crate::bookings::handlers::link_ticket(&mut tx, b, body.branch_id, open_ticket_id).await?;
     }
     let kt_id = fire_round(
         &mut tx,
@@ -259,6 +268,9 @@ pub(crate) async fn create_open_ticket_inner(
         .await;
         if let Some(t) = table_id {
             publish_table_status(pool.get_ref(), hub, body.branch_id, t).await;
+        }
+        if let Some(b) = body.booking_id {
+            crate::bookings::publish_booking(pool.get_ref(), hub, "booking.changed", b).await;
         }
     }
     let view = open_ticket_view(pool.get_ref(), open_ticket_id).await?;
@@ -818,7 +830,11 @@ pub(crate) async fn settle_open_ticket_inner(
     // the sale, and the tables screen keeps a one-tap clear until they do.
     let mut freed_table: Option<Uuid> = None;
     let mut cancelled: Vec<Uuid> = Vec::new();
+    let mut completed_booking: Option<Uuid> = None;
     if settled.rows_affected() > 0 {
+        // The booked party paid: their booking is done.
+        completed_booking =
+            crate::bookings::handlers::complete_by_ticket(pool.get_ref(), *id).await?;
         freed_table = sqlx::query_scalar("SELECT table_id FROM open_tickets WHERE id = $1")
             .bind(*id)
             .fetch_one(pool.get_ref())
@@ -849,6 +865,9 @@ pub(crate) async fn settle_open_ticket_inner(
         }
         if let Some(t) = freed_table {
             publish_table_status(pool.get_ref(), hub, branch_id, t).await;
+        }
+        if let Some(b) = completed_booking {
+            crate::bookings::publish_booking(pool.get_ref(), hub, "booking.changed", b).await;
         }
         for tid in cancelled {
             hub.publish(

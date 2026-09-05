@@ -2801,76 +2801,7 @@ mod it {
         assert_eq!(b["fee"], 2500);
     }
 
-    // ── SSE stream endpoint (auth contract only; body is infinite) ──
-
-    #[sqlx::test]
-    async fn stream_requires_auth(pool: PgPool) {
-        let org = seed_org(&pool).await;
-        let branch = seed_branch(&pool, org).await;
-        let app = app!(&pool);
-        // No bearer → JwtMiddleware rejects before the stream opens.
-        let resp = test::call_service(
-            &app,
-            test::TestRequest::get()
-                .uri(&format!("/delivery-orders/stream?branch_id={branch}"))
-                .to_request(),
-        )
-        .await;
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[sqlx::test]
-    async fn stream_requires_permission(pool: PgPool) {
-        // perms NOT seeded → teller has no delivery_orders:read grant.
-        let org = seed_org(&pool).await;
-        let branch = seed_branch(&pool, org).await;
-        let teller = seed_user(&pool, org, "teller").await;
-        assign(&pool, teller, branch).await;
-        let token = teller_token(teller, org, branch);
-        let app = app!(&pool);
-        let resp = test::call_service(
-            &app,
-            auth(
-                test::TestRequest::get()
-                    .uri(&format!("/delivery-orders/stream?branch_id={branch}")),
-                &token,
-            )
-            .to_request(),
-        )
-        .await;
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    }
-
-    #[sqlx::test]
-    async fn stream_opens_for_authorized_teller(pool: PgPool) {
-        perms(&pool).await;
-        let org = seed_org(&pool).await;
-        let branch = seed_branch(&pool, org).await;
-        let teller = seed_user(&pool, org, "teller").await;
-        assign(&pool, teller, branch).await;
-        let token = teller_token(teller, org, branch);
-        let app = app!(&pool);
-        // Do NOT read the body — it's an infinite event-stream. Assert the
-        // response head only (status + content-type).
-        let resp = test::call_service(
-            &app,
-            auth(
-                test::TestRequest::get()
-                    .uri(&format!("/delivery-orders/stream?branch_id={branch}")),
-                &token,
-            )
-            .to_request(),
-        )
-        .await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(
-            resp.headers().get("content-type").unwrap(),
-            "text/event-stream"
-        );
-        // Must opt out of compression so the Compress middleware can't buffer
-        // SSE frames (it skips any response that already has Content-Encoding).
-        assert_eq!(resp.headers().get("content-encoding").unwrap(), "identity");
-    }
+    // The SSE contract lives in `realtime::tests` (the delivery-only stream is gone).
 
     // ── WhatsApp gateway relay (super-admin only) ────────────────
 

@@ -105,7 +105,18 @@ pub enum ReplayOp {
         transfer_id: Uuid,
         request: FulfillTransferRequest,
     },
-    // Operational table state (status walk / zone move) from the floor staff.
+    // Bookings at service time: a waiter/teller seats a booked party or marks
+    // a no-show while the cloud is unreachable. Both idempotent on status.
+    SeatBooking {
+        teller_id: Uuid,
+        booking_id: Uuid,
+        #[serde(default)]
+        request: crate::bookings::handlers::SeatBookingRequest,
+    },
+    NoShowBooking {
+        teller_id: Uuid,
+        booking_id: Uuid,
+    },
 }
 
 impl ReplayOp {
@@ -125,7 +136,9 @@ impl ReplayOp {
             | ReplayOp::SwapTables { teller_id, .. }
             | ReplayOp::CreateTableTransfer { teller_id, .. }
             | ReplayOp::CancelTableTransfer { teller_id, .. }
-            | ReplayOp::FulfillTableTransfer { teller_id, .. } => *teller_id,
+            | ReplayOp::FulfillTableTransfer { teller_id, .. }
+            | ReplayOp::SeatBooking { teller_id, .. }
+            | ReplayOp::NoShowBooking { teller_id, .. } => *teller_id,
         }
     }
 
@@ -155,6 +168,9 @@ impl ReplayOp {
             | ReplayOp::CreateTableTransfer { .. }
             | ReplayOp::CancelTableTransfer { .. }
             | ReplayOp::FulfillTableTransfer { .. } => matches!(role, Teller | Waiter),
+            ReplayOp::SeatBooking { .. } | ReplayOp::NoShowBooking { .. } => {
+                matches!(role, Teller | Waiter)
+            }
         }
     }
 
@@ -187,6 +203,9 @@ impl ReplayOp {
             ReplayOp::CancelTableTransfer { .. } => &[("table_transfers", "update")],
             // Fulfill also checks the occupant's kind inside the core.
             ReplayOp::FulfillTableTransfer { .. } => &[("table_transfers", "update")],
+            ReplayOp::SeatBooking { .. } | ReplayOp::NoShowBooking { .. } => {
+                &[("bookings", "update")]
+            }
         }
     }
 }
@@ -451,6 +470,34 @@ pub async fn replay(
             )
             .await
         }
+        ReplayOp::SeatBooking {
+            booking_id,
+            request,
+            ..
+        } => {
+            let resp =
+                crate::bookings::handlers::seat_inner(pool.get_ref(), booking_id, &request, &actor)
+                    .await?;
+            crate::bookings::publish_booking(
+                pool.get_ref(),
+                hub.get_ref(),
+                "booking.changed",
+                booking_id,
+            )
+            .await;
+            Ok(resp)
+        }
+        ReplayOp::NoShowBooking { booking_id, .. } => {
+            let resp = crate::bookings::handlers::no_show_inner(pool.get_ref(), booking_id).await?;
+            crate::bookings::publish_booking(
+                pool.get_ref(),
+                hub.get_ref(),
+                "booking.changed",
+                booking_id,
+            )
+            .await;
+            Ok(resp)
+        }
     }
 }
 
@@ -529,6 +576,12 @@ async fn op_branch_must_be_in_org(pool: &PgPool, op: &ReplayOp, org: Uuid) -> Re
         | ReplayOp::FulfillTableTransfer { transfer_id, .. } => {
             sqlx::query_scalar("SELECT org_id FROM table_transfer_requests WHERE id = $1")
                 .bind(transfer_id)
+                .fetch_optional(pool)
+                .await?
+        }
+        ReplayOp::SeatBooking { booking_id, .. } | ReplayOp::NoShowBooking { booking_id, .. } => {
+            sqlx::query_scalar("SELECT org_id FROM bookings WHERE id = $1")
+                .bind(booking_id)
                 .fetch_optional(pool)
                 .await?
         }

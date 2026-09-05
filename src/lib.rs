@@ -10,6 +10,7 @@
 pub mod ai;
 pub mod analytics;
 pub mod auth;
+pub mod bookings;
 pub mod branches;
 pub mod bundles;
 pub mod cache;

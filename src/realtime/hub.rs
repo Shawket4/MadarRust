@@ -46,6 +46,13 @@ impl BranchBus {
     }
 }
 
+/// The answer to a `Last-Event-ID` resume: what we still hold, and whether that
+/// is everything the client missed.
+pub struct Replay {
+    pub events: Vec<BranchEvent>,
+    pub complete: bool,
+}
+
 /// Branch-keyed broadcast registry. Cheap to clone (`Arc` inside) so it lives in
 /// `web::Data` and is shared across all actix workers.
 #[derive(Clone, Default)]
@@ -84,19 +91,39 @@ impl BranchEventHub {
     }
 
     /// Buffered events with id strictly greater than `after_id` (oldest first), for a
-    /// reconnecting client's `Last-Event-ID` resume. If `after_id` predates the
-    /// retained window some events were evicted — the caller pairs this with the
-    /// client's snapshot re-seed (belt and braces) to cover that gap.
-    pub fn replay_since(&self, branch_id: Uuid, after_id: u64) -> Vec<BranchEvent> {
+    /// reconnecting client's `Last-Event-ID` resume, plus whether that replay is
+    /// COMPLETE. It is not when the cursor predates the retained window (events
+    /// were evicted), when the cursor is ahead of anything this process issued
+    /// (the server restarted and ids began again), or when this branch has no
+    /// bus yet. The stream turns an incomplete replay into a `resync` frame so
+    /// the client re-seeds instead of silently missing events.
+    pub fn replay_since(&self, branch_id: Uuid, after_id: u64) -> Replay {
         let map = self.inner.lock().expect("realtime hub mutex poisoned");
         match map.get(&branch_id) {
-            Some(bus) => bus
-                .recent
-                .iter()
-                .filter(|e| e.id > after_id)
-                .cloned()
-                .collect(),
-            None => Vec::new(),
+            Some(bus) => {
+                let events: Vec<BranchEvent> = bus
+                    .recent
+                    .iter()
+                    .filter(|e| e.id > after_id)
+                    .cloned()
+                    .collect();
+                let oldest = bus.recent.front().map(|e| e.id);
+                let issued_any = bus.next_id > 1;
+                let complete = if after_id >= bus.next_id {
+                    false // cursor from a previous process lifetime
+                } else if !issued_any {
+                    after_id == 0
+                } else {
+                    // Nothing evicted since the cursor: the cursor is at or after
+                    // the event just before the oldest retained one.
+                    oldest.is_some_and(|o| after_id + 1 >= o)
+                };
+                Replay { events, complete }
+            }
+            None => Replay {
+                events: Vec::new(),
+                complete: after_id == 0,
+            },
         }
     }
 }
@@ -117,7 +144,7 @@ mod tests {
         // No bus yet (nobody subscribed) → publish is a no-op, nothing to replay.
         hub.publish(branch, ev("dropped"));
         assert!(
-            hub.replay_since(branch, 0).is_empty(),
+            hub.replay_since(branch, 0).events.is_empty(),
             "no subscriber → nothing buffered"
         );
 
@@ -127,6 +154,8 @@ mod tests {
         hub.publish(branch, ev("three"));
 
         let all = hub.replay_since(branch, 0);
+        assert!(all.complete, "cursor 0 with a full buffer is complete");
+        let all = all.events;
         assert_eq!(
             all.iter().map(|e| e.id).collect::<Vec<_>>(),
             vec![1, 2, 3],
@@ -141,14 +170,21 @@ mod tests {
         // A reconnecting client replays only what's AFTER its last-seen id.
         assert_eq!(
             hub.replay_since(branch, 2)
+                .events
                 .iter()
                 .map(|e| e.id)
                 .collect::<Vec<_>>(),
             vec![3]
         );
+        let caught_up = hub.replay_since(branch, 3);
         assert!(
-            hub.replay_since(branch, 3).is_empty(),
+            caught_up.events.is_empty() && caught_up.complete,
             "caught up → nothing to replay"
+        );
+        // A cursor AHEAD of anything issued (previous process lifetime) is a gap.
+        assert!(
+            !hub.replay_since(branch, 99).complete,
+            "stale cursor → resync"
         );
     }
 
@@ -160,7 +196,20 @@ mod tests {
         for _ in 0..(REPLAY_BUFFER + 50) {
             hub.publish(branch, ev("x"));
         }
-        let buffered = hub.replay_since(branch, 0);
+        let replay = hub.replay_since(branch, 0);
+        assert!(
+            !replay.complete,
+            "the oldest 50 were evicted → the client must resync"
+        );
+        assert!(
+            hub.replay_since(branch, 50).complete,
+            "cursor at the eviction edge is complete"
+        );
+        assert!(
+            !hub.replay_since(branch, 49).complete,
+            "one before the edge is not"
+        );
+        let buffered = replay.events;
         assert_eq!(buffered.len(), REPLAY_BUFFER, "buffer is bounded");
         // The oldest 50 were evicted; ids stay monotonic, so the window starts at 51.
         assert_eq!(buffered.first().unwrap().id, 51, "oldest evicted");
