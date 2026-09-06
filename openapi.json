@@ -55599,6 +55599,7 @@
           "modifier_groups",
           "options",
           "availability",
+          "recipe_steps",
           "used_in_bundles"
         ],
         "properties": {
@@ -55654,6 +55655,13 @@
           "org_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "recipe_steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecipeStep"
+            },
+            "description": "How the item is made, in order. Edited through `PUT /recipes/steps/{id}`\nand saved by the studio alongside the recipe lines."
           },
           "sizes": {
             "type": "array",
