@@ -1,0 +1,115 @@
+{
+  "_comment": "Each entry is a PRESET STEP: the animation beside it, plus the name and note shown wherever it is used. To add one: drop <slug>.json here (lowercase letters, digits and underscores), add its entry below, commit. The backend picks it up on its next start; no migration and no client release. `order` is the order the library is offered in.",
+  "blend": {
+    "name": "Blend",
+    "name_ar": "خلط في الخلاط",
+    "note": "Blend until smooth",
+    "note_ar": "اخلط حتى يصبح ناعمًا",
+    "order": 10
+  },
+  "dose_powder": {
+    "name": "Add powder",
+    "name_ar": "إضافة بودرة",
+    "note": "Weigh it, don't eyeball it",
+    "note_ar": "زِن الكمية ولا تقدّرها بالنظر",
+    "order": 20
+  },
+  "foam_spoon": {
+    "name": "Spoon foam",
+    "name_ar": "رغوة بالملعقة",
+    "note": "Spoon the foam on top",
+    "note_ar": "ضع الرغوة بالملعقة فوق المشروب",
+    "order": 30
+  },
+  "latte_art": {
+    "name": "Latte art",
+    "name_ar": "رسم اللاتيه",
+    "note": "Pour steadily and finish with the pattern",
+    "note_ar": "صب بثبات وأنهِ بالرسمة",
+    "order": 40
+  },
+  "pour_liquid": {
+    "name": "Pour",
+    "name_ar": "صب",
+    "note": "Pour to the line for this size",
+    "note_ar": "صب حتى علامة هذا الحجم",
+    "order": 50
+  },
+  "pour_sparkling": {
+    "name": "Top with sparkling",
+    "name_ar": "إضافة مياه غازية",
+    "note": "Top up last so it keeps its fizz",
+    "note_ar": "أضفها في النهاية للحفاظ على الفوران",
+    "order": 60
+  },
+  "pour_thick": {
+    "name": "Pour sauce or syrup",
+    "name_ar": "صب صوص أو سيرب",
+    "note": "Sauce or syrup, straight in",
+    "note_ar": "صوص أو سيرب مباشرة",
+    "order": 70
+  },
+  "pull_shot": {
+    "name": "Pull espresso shot",
+    "name_ar": "سحب شوت إسبريسو",
+    "note": "Check the time and the grams",
+    "note_ar": "راجع الوقت والجرامات",
+    "order": 80
+  },
+  "scoop_ice": {
+    "name": "Add ice",
+    "name_ar": "إضافة ثلج",
+    "note": "Fill before the liquids",
+    "note_ar": "املأ قبل السوائل",
+    "order": 90
+  },
+  "shake": {
+    "name": "Shake",
+    "name_ar": "رج في الشيكر",
+    "note": "Shake hard, about ten seconds",
+    "note_ar": "رج بقوة لحوالي عشر ثوانٍ",
+    "order": 100
+  },
+  "spread_sauce": {
+    "name": "Spread sauce",
+    "name_ar": "فرد الصوص",
+    "note": "Spread to the edges",
+    "note_ar": "افرد حتى الأطراف",
+    "order": 110
+  },
+  "stack_bread": {
+    "name": "Bread",
+    "name_ar": "خبز",
+    "note": "Both slices, ready to build",
+    "note_ar": "الشريحتان جاهزتان للتجميع",
+    "order": 120
+  },
+  "stack_slice": {
+    "name": "Add a slice",
+    "name_ar": "إضافة شريحة",
+    "note": "Lay it flat and even",
+    "note_ar": "ضعها مستوية ومنتظمة",
+    "order": 130
+  },
+  "steam_milk": {
+    "name": "Steam milk",
+    "name_ar": "تبخير الحليب",
+    "note": "Heat and texture to the drink's spec",
+    "note_ar": "سخّن واضبط قوام الرغوة حسب المشروب",
+    "order": 140
+  },
+  "stir": {
+    "name": "Stir",
+    "name_ar": "تقليب",
+    "note": "Stir through to the bottom",
+    "note_ar": "قلّب حتى القاع",
+    "order": 150
+  },
+  "whisk_matcha": {
+    "name": "Whisk matcha",
+    "name_ar": "خفق الماتشا",
+    "note": "Whisk until no lumps remain",
+    "note_ar": "اخفق حتى تختفي التكتلات",
+    "order": 160
+  }
+}
