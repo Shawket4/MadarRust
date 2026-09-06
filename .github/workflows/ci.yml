@@ -30,6 +30,14 @@ jobs:
     env:
       # #[sqlx::test] creates an isolated database per test from this connection.
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      # …but that database is EMPTY: nothing migrates it, because every test
+      # migrates its own. The `sqlx::query!` macros check themselves against a
+      # database at COMPILE time, found the empty one, and failed the build with
+      # `relation "users" does not exist` — which is why this gate has been red
+      # on main since it was written. Check them against the committed `.sqlx`
+      # cache instead; runtime still uses DATABASE_URL above. A new `query!`
+      # needs `cargo sqlx prepare` committed with it.
+      SQLX_OFFLINE: "true"
     steps:
       - uses: actions/checkout@v4
       - name: System deps
