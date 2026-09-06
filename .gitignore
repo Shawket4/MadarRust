@@ -27,3 +27,8 @@ INVENTORY_OVERHAUL_FRONTEND_SYNC.md
 # Local agent/tooling scratch directories
 .claude/
 .ua/
+
+# Database dumps never belong in git (the repo is public).
+*.dump
+/full_dump.sql
+/*_dump*.sql

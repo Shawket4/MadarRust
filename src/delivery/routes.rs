@@ -96,7 +96,6 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             web::scope("/delivery-orders")
                 .wrap(JwtMiddleware)
                 .route("", web::get().to(staff::list_delivery_orders))
-                .route("/stream", web::get().to(staff::stream_delivery_orders))
                 .route("/{id}", web::get().to(staff::get_delivery_order))
                 .route("/{id}/status", web::post().to(staff::set_status))
                 .route("/{id}/prep-time", web::post().to(staff::set_prep_time))

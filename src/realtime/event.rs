@@ -27,16 +27,21 @@ pub enum Topic {
     /// be split across `floor` and `reservations` depending on which module
     /// wrote it, so a client subscribed to one silently missed half the events.
     Floor,
+    /// Table bookings: `booking.created|changed|arriving`. Cloud-originated
+    /// (guests book online, hosts on the dashboard) — the POS sees held tables
+    /// and gets its "party arriving" ping through this.
+    Bookings,
 }
 
 impl Topic {
     /// Every topic, for the "subscribe to all I'm allowed to read" default.
-    pub const ALL: [Topic; 5] = [
+    pub const ALL: [Topic; 6] = [
         Topic::Delivery,
         Topic::Tickets,
         Topic::Kitchen,
         Topic::Orders,
         Topic::Floor,
+        Topic::Bookings,
     ];
 
     pub fn parse(s: &str) -> Option<Topic> {
@@ -46,6 +51,7 @@ impl Topic {
             "kitchen" => Some(Topic::Kitchen),
             "orders" => Some(Topic::Orders),
             "floor" => Some(Topic::Floor),
+            "bookings" => Some(Topic::Bookings),
             _ => None,
         }
     }
@@ -57,6 +63,7 @@ impl Topic {
             Topic::Kitchen => "kitchen",
             Topic::Orders => "orders",
             Topic::Floor => "floor",
+            Topic::Bookings => "bookings",
         }
     }
 
@@ -68,6 +75,7 @@ impl Topic {
             Topic::Kitchen => ("kitchen_orders", "read"),
             Topic::Orders => ("orders", "read"),
             Topic::Floor => ("floor_plan", "read"),
+            Topic::Bookings => ("bookings", "read"),
         }
     }
 }

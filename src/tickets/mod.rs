@@ -52,6 +52,8 @@ pub struct OpenTicketView {
     pub guest_count: Option<i32>,
     pub subtotal: i32,
     pub order_id: Option<Uuid>,
+    /// The booking this ticket seated, if the party had one.
+    pub booking_id: Option<Uuid>,
     pub opened_at: DateTime<Utc>,
     pub ready_at: Option<DateTime<Utc>>,
     pub settled_at: Option<DateTime<Utc>>,
@@ -79,13 +81,14 @@ where
         Option<i32>,
         i32,
         Option<Uuid>,
+        Option<Uuid>,
         DateTime<Utc>,
         Option<DateTime<Utc>>,
         Option<DateTime<Utc>>,
     )> = sqlx::query_as(
         "SELECT ot.id, ot.branch_id, ot.table_id, ot.ticket_ref, ot.status::text, \
                     ot.opened_by, u.name, ot.customer_name, ot.notes, ot.guest_count, \
-                    ot.subtotal, ot.order_id, ot.opened_at, ot.ready_at, ot.settled_at \
+                    ot.subtotal, ot.order_id, ot.booking_id, ot.opened_at, ot.ready_at, ot.settled_at \
              FROM open_tickets ot LEFT JOIN users u ON u.id = ot.opened_by WHERE ot.id = $1",
     )
     .bind(ticket_id)
@@ -104,6 +107,7 @@ where
         guest_count,
         subtotal,
         order_id,
+        booking_id,
         opened_at,
         ready_at,
         settled_at,
@@ -147,6 +151,7 @@ where
         guest_count,
         subtotal,
         order_id,
+        booking_id,
         opened_at,
         ready_at,
         settled_at,

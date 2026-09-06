@@ -57,6 +57,77 @@ pub struct FloorTable {
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// The next active booking claiming this table (today's service, or the
+    /// one in progress). The floor renders "held" from `held_from` by its own
+    /// clock; nothing here is written to `status`. Only the list endpoint fills
+    /// it — single-row writes return `null`.
+    #[sqlx(skip)]
+    #[serde(default)]
+    pub next_booking: Option<TableBookingHint>,
+}
+
+/// The slice of a booking the floor needs to show a held/reserved table.
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
+pub struct TableBookingHint {
+    pub booking_id: Uuid,
+    /// `confirmed` | `seated`.
+    pub status: String,
+    pub guest_name: String,
+    pub party_size: i32,
+    pub starts_at: DateTime<Utc>,
+    pub ends_at: DateTime<Utc>,
+    /// `starts_at - hold_minutes`: from here the table reads as held.
+    pub held_from: DateTime<Utc>,
+}
+
+/// Attach each table's next booking (the earliest active claim that has not
+/// ended and starts within the next 24 hours).
+pub(crate) async fn attach_next_bookings(
+    pool: &PgPool,
+    tables: &mut [FloorTable],
+) -> Result<(), AppError> {
+    if tables.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<Uuid> = tables.iter().map(|t| t.id).collect();
+    /// `(table_id, booking_id, status, guest_name, party_size, starts_at, ends_at, hold_minutes)`.
+    type HintRow = (
+        Uuid,
+        Uuid,
+        String,
+        String,
+        i16,
+        DateTime<Utc>,
+        DateTime<Utc>,
+        i16,
+    );
+    let rows: Vec<HintRow> = sqlx::query_as(
+        "SELECT DISTINCT ON (bt.table_id) bt.table_id, b.id, b.status::text, b.guest_name, \
+                b.party_size, b.starts_at, b.ends_at, COALESCE(s.hold_minutes, 15)::smallint \
+         FROM booking_tables bt \
+         JOIN bookings b ON b.id = bt.booking_id \
+         LEFT JOIN branch_booking_settings s ON s.branch_id = b.branch_id \
+         WHERE bt.table_id = ANY($1) AND bt.active \
+           AND b.ends_at > now() AND b.starts_at < now() + interval '24 hours' \
+         ORDER BY bt.table_id, b.starts_at",
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await?;
+    for (table_id, id, status, guest_name, party, starts_at, ends_at, hold) in rows {
+        if let Some(t) = tables.iter_mut().find(|t| t.id == table_id) {
+            t.next_booking = Some(TableBookingHint {
+                booking_id: id,
+                status,
+                guest_name,
+                party_size: party as i32,
+                starts_at,
+                ends_at,
+                held_from: starts_at - chrono::Duration::minutes(hold as i64),
+            });
+        }
+    }
+    Ok(())
 }
 
 const TABLE_COLS: &str = "id, org_id, branch_id, section_id, label, seats, shape, \
@@ -396,12 +467,13 @@ pub async fn list_tables(
     check_permission(pool.get_ref(), &claims, "floor_plan", "read").await?;
     require_branch_access(pool.get_ref(), &claims, query.branch_id).await?;
 
-    let rows = sqlx::query_as::<_, FloorTable>(&format!(
+    let mut rows = sqlx::query_as::<_, FloorTable>(&format!(
         "SELECT {TABLE_COLS} FROM branch_tables WHERE branch_id = $1 ORDER BY lower(label)"
     ))
     .bind(query.branch_id)
     .fetch_all(pool.get_ref())
     .await?;
+    attach_next_bookings(pool.get_ref(), &mut rows).await?;
     Ok(HttpResponse::Ok().json(rows))
 }
 

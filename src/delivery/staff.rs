@@ -1,14 +1,9 @@
 //! Staff delivery API (JWT, branch-scoped): the queue, status transitions,
 //! finalize (snapshot → real sale), and cancel (with optional waste).
 
-use std::time::Duration;
-
-use actix_web::web::Bytes;
 use actix_web::{HttpRequest, HttpResponse, web};
-use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use tokio_stream::wrappers::{BroadcastStream, IntervalStream};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
@@ -168,78 +163,6 @@ pub async fn get_delivery_order(
         .ok_or_else(|| AppError::NotFound("Delivery order not found".into()))?;
     require_branch_access(pool.get_ref(), &claims, order.branch_id).await?;
     Ok(HttpResponse::Ok().json(order))
-}
-
-// ── Live stream (SSE) ─────────────────────────────────────────
-
-#[derive(Deserialize, IntoParams)]
-pub struct StreamQuery {
-    pub branch_id: Uuid,
-}
-
-/// Server-Sent Events stream of delivery-order changes for one branch. Auth is
-/// the same Bearer + `delivery_orders:read` + branch-access trio as the list
-/// endpoint, enforced before the stream opens. The stream is **updates-only**:
-/// the client should `GET /delivery-orders` first to seed the list, then connect.
-/// On any error/disconnect the client re-GETs and reconnects.
-#[utoipa::path(
-    get, path = "/delivery-orders/stream", tag = "delivery", params(StreamQuery),
-    responses(
-        (status = 200, content_type = "text/event-stream",
-         description = "DEPRECATED delivery-only view of the unified bus — prefer \
-            GET /realtime/stream?topics=delivery. Each event is `event: delivery.created|\
-            delivery.updated` + a `data:` DeliveryOrder JSON line. `: ping` every ~20s. On \
-            ANY error/close, re-GET /delivery-orders and reconnect."),
-        AppErrorResponse
-    ),
-    security(("bearer_jwt" = []))
-)]
-pub async fn stream_delivery_orders(
-    req: HttpRequest,
-    pool: crate::db::Db,
-    hub: web::Data<BranchEventHub>,
-    query: web::Query<StreamQuery>,
-) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "delivery_orders", "read").await?;
-    require_branch_access(pool.get_ref(), &claims, query.branch_id).await?;
-
-    let rx = hub.subscribe(query.branch_id);
-
-    // The unified bus carries every topic — keep only Delivery events for this
-    // backward-compatible endpoint. A lagged/closed receiver yields `Err`, surfaced
-    // as a body error so actix drops the connection; the POS reconnects + re-GETs.
-    let events = BroadcastStream::new(rx).filter_map(|res| {
-        let out: Option<Result<Bytes, actix_web::Error>> = match res {
-            Ok(ev) if ev.topic == Topic::Delivery => Some(Ok(Bytes::from(format!(
-                "event: {}\ndata: {}\n\n",
-                ev.event_type, ev.data
-            )))),
-            Ok(_) => None,
-            Err(_) => Some(Err(actix_web::error::ErrorInternalServerError(
-                "delivery stream lagged",
-            ))),
-        };
-        futures::future::ready(out)
-    });
-
-    // Keep-alive comment ticks so idle connections survive proxy timeouts and a
-    // dead peer is detected on the next failed write.
-    let keepalive = IntervalStream::new(tokio::time::interval(Duration::from_secs(20)))
-        .map(|_| Ok::<Bytes, actix_web::Error>(Bytes::from_static(b": ping\n\n")));
-
-    let body = futures::stream::select(events, keepalive);
-
-    Ok(HttpResponse::Ok()
-        .content_type("text/event-stream")
-        .insert_header(("Cache-Control", "no-cache"))
-        // Opt out of the app-wide Compress middleware: a streaming compressor
-        // buffers small SSE frames and stalls events until it flushes. Setting
-        // Content-Encoding makes Compress skip this response entirely. Also tell
-        // nginx not to buffer (X-Accel-Buffering).
-        .insert_header((actix_web::http::header::CONTENT_ENCODING, "identity"))
-        .insert_header(("X-Accel-Buffering", "no"))
-        .streaming(body))
 }
 
 // ── Status transitions ────────────────────────────────────────

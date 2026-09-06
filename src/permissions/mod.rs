@@ -52,6 +52,8 @@ pub const RESOURCES: &[&str] = &[
     // The table-transfer waitlist. Listed here so `GET /auth/permissions`
     // surfaces it and an admin can actually grant or revoke it.
     "table_transfers",
+    // Table bookings (host surfaces; the public site is unauthenticated).
+    "bookings",
     // Delivery.
     "delivery_orders",
     "delivery_settings",

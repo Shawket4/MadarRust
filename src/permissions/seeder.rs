@@ -294,6 +294,22 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         ("waiter", "table_transfers", "create", true),
         ("waiter", "table_transfers", "read", true),
         ("waiter", "table_transfers", "update", true),
+        // ── bookings (floor-layer reservations) ───────────────────
+        // Managers author and operate; tellers and waiters read the day's
+        // arrivals and operate at service time (seat / no-show) — never create
+        // from the POS in v1. The KDS has no business with bookings.
+        ("org_admin", "bookings", "create", true),
+        ("org_admin", "bookings", "read", true),
+        ("org_admin", "bookings", "update", true),
+        ("org_admin", "bookings", "delete", true),
+        ("branch_manager", "bookings", "create", true),
+        ("branch_manager", "bookings", "read", true),
+        ("branch_manager", "bookings", "update", true),
+        ("branch_manager", "bookings", "delete", true),
+        ("teller", "bookings", "read", true),
+        ("teller", "bookings", "update", true),
+        ("waiter", "bookings", "read", true),
+        ("waiter", "bookings", "update", true),
     ];
 
     for &(role, resource, action, granted) in defaults {

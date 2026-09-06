@@ -60,8 +60,10 @@ pub(crate) async fn permitted_topics(
     responses(
         (status = 200, content_type = "text/event-stream",
          description = "SSE stream. Each event is `event: <type>` (e.g. delivery.updated, \
-            ticket.fired, kitchen.item_bumped) followed by a `data:` JSON line. `: ping` \
-            keep-alive comments arrive ~every 20s. On ANY error/close, re-seed and reconnect."),
+            ticket.fired, kitchen.item_bumped, booking.created) followed by a `data:` JSON line \
+            and an `id:` for `Last-Event-ID` resume. `: ping` keep-alive comments arrive ~every \
+            20s. A resume the server cannot fully replay opens with `event: resync` — re-seed \
+            from the list endpoints, then keep reading. On ANY error/close, re-seed and reconnect."),
         AppErrorResponse
     ),
     security(("bearer_jwt" = []))
@@ -95,25 +97,39 @@ pub async fn stream(
 
     let rx = hub.subscribe(query.branch_id);
 
-    let replayed = match last_event_id {
-        Some(id) => hub.replay_since(query.branch_id, id),
-        None => Vec::new(), // a fresh connect seeds from the snapshot endpoint, not replay
+    // A fresh connect seeds from the list endpoints, not from replay. A resume
+    // whose gap we cannot fully cover (buffer evicted, or a cursor from before a
+    // restart) opens with a `resync` frame: the client re-seeds, then keeps
+    // consuming live events from here.
+    let (replayed, complete) = match last_event_id {
+        Some(id) => {
+            let r = hub.replay_since(query.branch_id, id);
+            (r.events, r.complete)
+        }
+        None => (Vec::new(), true),
     };
     let max_replayed = replayed
         .iter()
         .map(|e| e.id)
         .max()
         .unwrap_or_else(|| last_event_id.unwrap_or(0));
-    let replay_frames: Vec<Result<Bytes, actix_web::Error>> = replayed
-        .into_iter()
-        .filter(|e| topics.contains(&e.topic))
-        .map(|e| {
-            Ok(Bytes::from(format!(
-                "id: {}\nevent: {}\ndata: {}\n\n",
-                e.id, e.event_type, e.data
-            )))
-        })
-        .collect();
+    let mut replay_frames: Vec<Result<Bytes, actix_web::Error>> = Vec::new();
+    if !complete {
+        replay_frames.push(Ok(Bytes::from_static(
+            b"event: resync\ndata: {\"reason\":\"gap\"}\n\n",
+        )));
+    }
+    replay_frames.extend(
+        replayed
+            .into_iter()
+            .filter(|e| topics.contains(&e.topic))
+            .map(|e| {
+                Ok(Bytes::from(format!(
+                    "id: {}\nevent: {}\ndata: {}\n\n",
+                    e.id, e.event_type, e.data
+                )))
+            }),
+    );
 
     // Broadcast events → SSE frames, dropping topics the caller isn't permitted for
     // and any id already delivered via replay. A lagged/closed receiver yields `Err`,

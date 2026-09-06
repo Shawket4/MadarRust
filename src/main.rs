@@ -15,10 +15,10 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 use madar_rust::openapi::ApiDoc;
 use madar_rust::{
-    ai, analytics, auth, branches, bundles, costing, delivery, demo, discounts, floor_ops,
-    insights, integrations, inventory, kitchen, menu, orders, orgs, payment_methods, permissions,
-    purchasing, qr_card, realtime, recipes, reports, reservations, shifts, staff, stocktakes, sync,
-    tickets, tills, uploads, users,
+    ai, analytics, auth, bookings, branches, bundles, costing, delivery, demo, discounts,
+    floor_ops, insights, integrations, inventory, kitchen, menu, orders, orgs, payment_methods,
+    permissions, purchasing, qr_card, realtime, recipes, reports, reservations, shifts, staff,
+    stocktakes, sync, tickets, tills, uploads, users,
 };
 
 use utoipa::OpenApi;
@@ -122,6 +122,9 @@ async fn run() -> std::io::Result<()> {
     // scheduler; every step is idempotent. No-op when ATTENDANCE_SWEEP_ENABLED
     // is falsy.
     staff::jobs::spawn(pool.get_ref().clone());
+    // The bookings sweep: reminders, "party arriving" nudges, no-show and
+    // completion roll-overs. Idempotent; publishes on the realtime bus.
+    bookings::jobs::spawn(pool.get_ref().clone(), realtime_bus.get_ref().clone());
 
     // Public demo playground (DEMO_MODE). Throwaway per-visitor orgs with a TTL;
     // the sweeper GCs expired ones. Spawned ONCE (single instance). Off by
@@ -251,6 +254,7 @@ async fn run() -> std::io::Result<()> {
             .configure(tills::routes::configure)
             .configure(reservations::routes::configure)
             .configure(floor_ops::routes::configure)
+            .configure(bookings::routes::configure)
             .configure(realtime::routes::configure)
             .configure(kitchen::routes::configure)
             .configure(tickets::routes::configure)
