@@ -26054,6 +26054,303 @@
         ]
       }
     },
+    "/recipes/step-presets": {
+      "get": {
+        "tags": [
+          "recipes"
+        ],
+        "operationId": "list_step_presets",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RecipeStepPreset"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/recipes/steps/{menu_item_id}": {
+      "get": {
+        "tags": [
+          "recipes"
+        ],
+        "operationId": "list_recipe_steps",
+        "parameters": [
+          {
+            "name": "menu_item_id",
+            "in": "path",
+            "description": "Menu item ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RecipeStep"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "recipes"
+        ],
+        "summary": "Replace an item's steps, in one transaction.",
+        "operationId": "put_recipe_steps",
+        "parameters": [
+          {
+            "name": "menu_item_id",
+            "in": "path",
+            "description": "Menu item ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutRecipeStepsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RecipeStep"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/reports/branches/{branch_id}/addons": {
       "get": {
         "tags": [
@@ -48232,6 +48529,13 @@
                   "$ref": "#/components/schemas/OptionalField"
                 }
               },
+              "recipe_steps": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RecipeStep"
+                },
+                "description": "How the item is made, in order. Each preset step carries its animation's\naddress and fingerprint, so a device downloads only what its own menu\nuses and never the whole library."
+              },
               "recipes": {
                 "type": "array",
                 "items": {
@@ -52489,6 +52793,21 @@
           }
         }
       },
+      "PutRecipeStepsRequest": {
+        "type": "object",
+        "required": [
+          "steps"
+        ],
+        "properties": {
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecipeStepInput"
+            },
+            "description": "The whole list, in order. Replaces what was there."
+          }
+        }
+      },
       "PutSizesRequest": {
         "type": "object",
         "required": [
@@ -52818,6 +53137,148 @@
           },
           "unit": {
             "type": "string"
+          }
+        }
+      },
+      "RecipeStep": {
+        "type": "object",
+        "description": "One step, resolved for display: whatever its kind, it has a name, and a\npreset step also carries its note and the animation to play.",
+        "required": [
+          "position",
+          "kind",
+          "name",
+          "name_ar"
+        ],
+        "properties": {
+          "animation_sha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "animation_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Present only for a preset whose animation still ships. `None` on a\ncustom step, and on a retired preset — clients show the name alone."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`preset` | `custom`."
+          },
+          "name": {
+            "type": "string",
+            "description": "The preset's name, or the typed name of a custom step."
+          },
+          "name_ar": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "note_ar": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "preset_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The preset this step uses, if any."
+          }
+        }
+      },
+      "RecipeStepInput": {
+        "type": "object",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "`preset` | `custom`."
+          },
+          "preset_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required for `preset`."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The typed name, for `custom`. Either language will do."
+          },
+          "title_ar": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "RecipeStepPreset": {
+        "type": "object",
+        "description": "One curated step the dashboard offers.",
+        "required": [
+          "slug",
+          "name",
+          "name_ar",
+          "animation_url",
+          "animation_sha256",
+          "bytes",
+          "sort_order"
+        ],
+        "properties": {
+          "animation_sha256": {
+            "type": "string"
+          },
+          "animation_url": {
+            "type": "string",
+            "description": "Path to the animation, relative to the API base."
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_ar": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "note_ar": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "type": "string"
+          },
+          "sort_order": {
+            "type": "integer",
+            "format": "int32"
           }
         }
       },
@@ -55138,6 +55599,7 @@
           "modifier_groups",
           "options",
           "availability",
+          "recipe_steps",
           "used_in_bundles"
         ],
         "properties": {
@@ -55193,6 +55655,13 @@
           "org_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "recipe_steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecipeStep"
+            },
+            "description": "How the item is made, in order. Edited through `PUT /recipes/steps/{id}`\nand saved by the studio alongside the recipe lines."
           },
           "sizes": {
             "type": "array",

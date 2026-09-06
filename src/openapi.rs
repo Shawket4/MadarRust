@@ -214,6 +214,9 @@ paths(
         crate::inventory::handlers::update_transfer,
         crate::inventory::handlers::delete_transfer,
         // ── recipes ───────────────────────────────────────────────────
+        crate::recipes::steps::list_step_presets,
+        crate::recipes::steps::list_recipe_steps,
+        crate::recipes::steps::put_recipe_steps,
         crate::recipes::handlers::list_drink_recipes,
         crate::recipes::handlers::upsert_drink_recipe,
         crate::recipes::handlers::delete_drink_recipe,

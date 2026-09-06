@@ -20,6 +20,7 @@ chrono             = { version = "0.4", features = ["serde"] }
 # analytics layer converts local period bounds to UTC itself rather than pushing
 # date arithmetic into every query. Pure data, no C dependency.
 chrono-tz          = "0.10"
+sha2               = "0.10"
 jsonwebtoken       = { version = "10", features = ["rust_crypto"] }
 bcrypt             = "0.19"
 argon2             = "0.5"

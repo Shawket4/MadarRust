@@ -497,3 +497,295 @@ async fn test_recipe_density_and_yield_applied_at_save(pool: PgPool) {
         "density bridge + yield gross-up applied at save"
     );
 }
+
+// ──────────────────────────────────────────────────────────────
+// ── Preparation steps + the preset library
+// ──────────────────────────────────────────────────────────────
+
+use crate::recipes::steps::{self, RecipeStep, RecipeStepPreset};
+
+const SHIPPED: &str = "static/step-animations";
+
+/// The library is derived from the files that shipped, so every steps test
+/// starts by reconciling the real folder — the same call `main` makes on boot.
+async fn load_library(pool: &PgPool) {
+    steps::reconcile(pool, std::path::Path::new(SHIPPED))
+        .await
+        .unwrap();
+}
+
+#[sqlx::test]
+async fn reconcile_derives_the_library_and_retires_what_stops_shipping(pool: PgPool) {
+    load_library(&pool).await;
+    let presets = steps::list_presets(&pool, false).await.unwrap();
+    assert!(
+        presets.len() >= 16,
+        "every shipped animation became a preset"
+    );
+    let milk = presets
+        .iter()
+        .find(|p| p.slug == "steam_milk")
+        .expect("steam_milk");
+    assert_eq!(milk.name, "Steam milk");
+    assert!(!milk.name_ar.is_empty() && milk.note.is_some());
+    assert!(
+        milk.animation_url
+            .starts_with("/static/step-animations/steam_milk.json?v=")
+    );
+    assert_eq!(milk.animation_sha256.len(), 64);
+    assert!(milk.bytes > 0);
+    // Offered in manifest order, not alphabetically.
+    let orders: Vec<i16> = presets.iter().map(|p| p.sort_order).collect();
+    assert!(
+        orders.windows(2).all(|w| w[0] <= w[1]),
+        "sorted by the manifest's order"
+    );
+
+    // Running it again changes nothing — boot happens on every deploy.
+    load_library(&pool).await;
+    assert_eq!(
+        steps::list_presets(&pool, false).await.unwrap().len(),
+        presets.len()
+    );
+
+    // A folder holding only ONE of them retires the rest without deleting them:
+    // an item still using a retired preset keeps its name.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(format!("{SHIPPED}/stir.json"), dir.path().join("stir.json")).unwrap();
+    std::fs::write(
+        dir.path().join("manifest.json"),
+        r#"{"stir":{"name":"Stir","name_ar":"تقليب","order":10}}"#.as_bytes(),
+    )
+    .unwrap();
+    steps::reconcile(&pool, dir.path()).await.unwrap();
+    let live = steps::list_presets(&pool, false).await.unwrap();
+    assert_eq!(live.len(), 1, "only the shipped one is offered");
+    assert_eq!(live[0].slug, "stir");
+    let kept = steps::list_presets(&pool, true).await.unwrap();
+    assert_eq!(
+        kept.len(),
+        presets.len(),
+        "retired presets are kept, never deleted"
+    );
+
+    // Shipping them again brings them back.
+    load_library(&pool).await;
+    assert_eq!(
+        steps::list_presets(&pool, false).await.unwrap().len(),
+        presets.len()
+    );
+}
+
+#[sqlx::test]
+async fn steps_are_presets_or_typed_names_and_ride_the_menu_payload(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+            .configure(crate::menu::routes::configure),
+    )
+    .await;
+    load_library(&pool).await;
+    let org_id = seed_org(&pool).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    for a in ["create", "read", "update", "delete"] {
+        grant_permission(&pool, "org_admin", "recipes", a).await;
+        grant_permission(&pool, "org_admin", "menu_items", a).await;
+    }
+    let cat_id = seed_category(&pool, org_id, "Drinks").await;
+    let item_id = seed_menu_item(&pool, org_id, cat_id, "Iced Latte", 500).await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    // The dashboard's gallery.
+    let presets: Vec<RecipeStepPreset> = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri("/recipes/step-presets")
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
+    assert!(presets.iter().any(|p| p.slug == "scoop_ice"));
+
+    // Three presets and one typed step.
+    let body = serde_json::json!({ "steps": [
+        { "kind": "preset", "preset_slug": "scoop_ice" },
+        { "kind": "preset", "preset_slug": "pour_liquid" },
+        { "kind": "preset", "preset_slug": "pull_shot" },
+        { "kind": "custom", "title": "  Serve with the branded straw  " }
+    ]});
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::put()
+            .uri(&format!("/recipes/steps/{item_id}"))
+            .insert_header(auth.clone())
+            .set_json(&body)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let saved: Vec<RecipeStep> = test::read_body_json(resp).await;
+    assert_eq!(
+        saved.iter().map(|s| s.position).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+
+    // A preset step is named by the LIBRARY and carries its animation.
+    assert_eq!(saved[0].kind, "preset");
+    assert_eq!(saved[0].name, "Add ice");
+    assert!(!saved[0].name_ar.is_empty());
+    assert!(
+        saved[0]
+            .animation_url
+            .as_deref()
+            .is_some_and(|u| u.contains("scoop_ice.json?v="))
+    );
+    assert!(saved[0].animation_sha256.is_some());
+
+    // A typed step is named by whoever typed it, and has no animation.
+    assert_eq!(saved[3].kind, "custom");
+    assert_eq!(saved[3].name, "Serve with the branded straw", "trimmed");
+    assert_eq!(
+        saved[3].name_ar, saved[3].name,
+        "one language fills both rather than showing blank"
+    );
+    assert!(saved[3].animation_url.is_none() && saved[3].preset_slug.is_none());
+
+    // The POS reads them inside the menu payload it already syncs — the list
+    // endpoint, not just the single item.
+    let list: serde_json::Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/menu-items?org_id={org_id}&full=true"))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
+    let steps = &list[0]["recipe_steps"];
+    assert_eq!(steps.as_array().map(|a| a.len()), Some(4));
+    assert_eq!(steps[1]["preset_slug"], "pour_liquid");
+    assert!(
+        steps[1]["animation_url"]
+            .as_str()
+            .is_some_and(|u| u.contains("pour_liquid"))
+    );
+    assert_eq!(steps[3]["animation_url"], serde_json::Value::Null);
+
+    // A retired preset keeps its name on the item but loses its animation.
+    sqlx::query("UPDATE recipe_step_presets SET is_active = false WHERE slug = 'pull_shot'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let after: Vec<RecipeStep> = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/recipes/steps/{item_id}"))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        after[2].name, "Pull espresso shot",
+        "the step still reads correctly"
+    );
+    assert!(
+        after[2].animation_url.is_none(),
+        "but nothing is served for it"
+    );
+    load_library(&pool).await;
+}
+
+#[sqlx::test]
+async fn a_rejected_step_list_leaves_the_saved_one_alone(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    load_library(&pool).await;
+    let org_id = seed_org(&pool).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    for a in ["read", "update"] {
+        grant_permission(&pool, "org_admin", "recipes", a).await;
+    }
+    let cat_id = seed_category(&pool, org_id, "Drinks").await;
+    let item_id = seed_menu_item(&pool, org_id, cat_id, "Latte", 500).await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let auth = ("Authorization", format!("Bearer {token}"));
+    let put = |body: serde_json::Value| {
+        test::TestRequest::put()
+            .uri(&format!("/recipes/steps/{item_id}"))
+            .insert_header(auth.clone())
+            .set_json(body)
+            .to_request()
+    };
+
+    let good = serde_json::json!({ "steps": [{ "kind": "preset", "preset_slug": "steam_milk" }] });
+    assert_eq!(test::call_service(&app, put(good)).await.status(), 200);
+
+    for bad in [
+        serde_json::json!({ "steps": [{ "kind": "preset", "preset_slug": "levitate" }] }),
+        serde_json::json!({ "steps": [{ "kind": "preset" }] }),
+        serde_json::json!({ "steps": [{ "kind": "custom" }] }),
+        serde_json::json!({ "steps": [{ "kind": "custom", "title": "   " }] }),
+        serde_json::json!({ "steps": [{ "kind": "video", "title": "x" }] }),
+    ] {
+        let resp = test::call_service(&app, put(bad.clone())).await;
+        assert_eq!(resp.status(), 400, "{bad}");
+    }
+    let still: Vec<RecipeStep> = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/recipes/steps/{item_id}"))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        still.len(),
+        1,
+        "every rejection left the saved list untouched"
+    );
+    assert_eq!(still[0].preset_slug.as_deref(), Some("steam_milk"));
+
+    // An empty list clears them.
+    assert_eq!(
+        test::call_service(&app, put(serde_json::json!({ "steps": [] })))
+            .await
+            .status(),
+        200
+    );
+    let cleared: Vec<RecipeStep> = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/recipes/steps/{item_id}"))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
+    assert!(cleared.is_empty());
+
+    // Another org cannot read or write this item's steps.
+    let other_org = seed_org(&pool).await;
+    let other_admin = seed_user(&pool, other_org, "org_admin").await;
+    let other = generate_org_admin_token(other_admin, other_org);
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/recipes/steps/{item_id}"))
+            .insert_header(("Authorization", format!("Bearer {other}")))
+            .to_request(),
+    )
+    .await;
+    // 404 rather than 403: the pool is tenant-scoped, so another org does not
+    // even learn the item exists. Same expectation as the recipe-line tests.
+    assert!(
+        matches!(resp.status().as_u16(), 403 | 404),
+        "{}",
+        resp.status()
+    );
+}

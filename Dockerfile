@@ -28,5 +28,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/madar-rust /usr/local/bin/madar-rust
 WORKDIR /app
+# The step-animation library ships WITH the binary rather than in a volume: it
+# is curated in git, so the running image and the repo can never disagree, and
+# adding one is a commit plus the deploy that already happens.
+COPY static ./static
 EXPOSE 8081
 CMD ["madar-rust"]

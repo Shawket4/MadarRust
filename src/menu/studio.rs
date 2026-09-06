@@ -176,6 +176,9 @@ pub struct StudioAggregate {
     pub modifier_groups: Vec<ModifierGroupOut>,
     pub options: Vec<ItemOptionOut>,
     pub availability: AvailabilityOut,
+    /// How the item is made, in order. Edited through `PUT /recipes/steps/{id}`
+    /// and saved by the studio alongside the recipe lines.
+    pub recipe_steps: Vec<crate::recipes::steps::RecipeStep>,
     pub used_in_bundles: Vec<UsedInBundleOut>,
 }
 
@@ -607,6 +610,7 @@ async fn build_studio_aggregate(
         .collect();
 
     let catalog_revision = current_catalog_revision(pool, org_id).await?;
+    let recipe_steps = crate::recipes::steps::fetch_item_steps(pool, item_id).await?;
 
     Ok(StudioAggregate {
         id: basics.id,
@@ -622,6 +626,7 @@ async fn build_studio_aggregate(
         modifier_groups,
         options,
         availability,
+        recipe_steps,
         used_in_bundles,
     })
 }

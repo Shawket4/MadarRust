@@ -410,7 +410,7 @@ pub async fn normalize_recipe_unit(
 /// Verify the menu item belongs to the caller's org and return its org id (the
 /// recipe's org, used to scope linked-ingredient lookups). Super-admins pass the
 /// org check but still get the item's real org back.
-async fn require_menu_item_org(
+pub(crate) async fn require_menu_item_org(
     pool: &PgPool,
     claims: &Claims,
     menu_item_id: Uuid,

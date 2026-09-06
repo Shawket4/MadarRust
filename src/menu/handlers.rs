@@ -146,6 +146,11 @@ pub struct MenuItemFull {
     pub addon_slots: Vec<AddonSlot>,
     pub optional_fields: Vec<OptionalField>,
     pub recipes: Vec<MenuItemRecipe>,
+    /// How the item is made, in order. Each preset step carries its animation's
+    /// address and fingerprint, so a device downloads only what its own menu
+    /// uses and never the whole library.
+    #[serde(default)]
+    pub recipe_steps: Vec<crate::recipes::steps::RecipeStep>,
     /// Explicit per-item addon allowlist. Empty = no restriction (use org catalog).
     pub allowed_addon_ids: Vec<Uuid>,
 }
@@ -675,8 +680,13 @@ pub async fn list_menu_items(
     .fetch_all(pool.get_ref())
     .await?;
 
-    // ?full=true embeds sizes + addon_slots + optionals + recipes per item.
+    // ?full=true embeds sizes + addon_slots + optionals + recipes + steps per item.
     if query.full.unwrap_or(false) {
+        // Steps for the whole org in ONE query, then handed out per item: this
+        // endpoint is what the POS syncs, and a query per item would grow with
+        // the menu.
+        let mut steps_by_item =
+            crate::recipes::steps::fetch_org_steps(pool.get_ref(), query.org_id).await?;
         let mut result: Vec<MenuItemFull> = vec![];
         for item in items {
             let mut sizes = fetch_sizes(pool.get_ref(), item.id).await?;
@@ -689,12 +699,14 @@ pub async fn list_menu_items(
             let optional_fields = fetch_optional_fields(pool.get_ref(), item.id).await?;
             let recipes = fetch_item_recipes(pool.get_ref(), item.id).await?;
             let allowed_addon_ids = fetch_allowed_addon_ids(pool.get_ref(), item.id).await?;
+            let recipe_steps = steps_by_item.remove(&item.id).unwrap_or_default();
             result.push(MenuItemFull {
                 item,
                 sizes,
                 addon_slots,
                 optional_fields,
                 recipes,
+                recipe_steps,
                 allowed_addon_ids,
             });
         }
@@ -858,6 +870,7 @@ pub async fn get_menu_item(
     let optional_fields = fetch_optional_fields(pool.get_ref(), *id).await?;
     let recipes = fetch_item_recipes(pool.get_ref(), *id).await?;
     let allowed_addon_ids = fetch_allowed_addon_ids(pool.get_ref(), *id).await?;
+    let recipe_steps = crate::recipes::steps::fetch_item_steps(pool.get_ref(), *id).await?;
 
     Ok(HttpResponse::Ok().json(MenuItemFull {
         item,
@@ -865,6 +878,7 @@ pub async fn get_menu_item(
         addon_slots,
         optional_fields,
         recipes,
+        recipe_steps,
         allowed_addon_ids,
     }))
 }
@@ -947,6 +961,7 @@ pub async fn create_menu_item(
         addon_slots: vec![],
         optional_fields: vec![],
         recipes: vec![],
+        recipe_steps: vec![],
         allowed_addon_ids: vec![],
     }))
 }

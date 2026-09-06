@@ -94,6 +94,17 @@ async fn run() -> std::io::Result<()> {
         .await
         .expect("Failed to apply database migrations");
 
+    // The step-animation library is derived from the files that shipped inside
+    // this image: reconcile it now so a newly added animation is offered by the
+    // dashboard the moment this build is live, with no migration to write.
+    let step_animations_dir = recipes::steps::animations_dir();
+    if let Err(e) =
+        recipes::steps::reconcile(&pool, std::path::Path::new(&step_animations_dir)).await
+    {
+        // Never fail boot over it: the previously reconciled library stays live.
+        tracing::error!("step animation reconcile failed: {e}");
+    }
+
     tracing::info!("Seeding default role permissions into database...");
     permissions::seeder::seed_role_permissions(&pool)
         .await
@@ -143,6 +154,7 @@ async fn run() -> std::io::Result<()> {
     // Shlink short-URL provider (reads env vars on each call; degrade-safe).
     let qr_provider = qr_card::routes::make_provider();
     let uploads_clone = uploads_dir.clone();
+    let step_animations_clone = step_animations_dir.clone();
     let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     let https_port = env::var("HTTPS_PORT").unwrap_or_else(|_| "8443".to_string());
     let https_addr = format!("0.0.0.0:{}", https_port);
@@ -290,6 +302,20 @@ async fn run() -> std::io::Result<()> {
         }
 
         app.service(Files::new("/uploads", &uploads_clone).use_last_modified(true))
+            // Step animations. Their addresses carry a fingerprint of the file,
+            // so a year of caching is safe and a replaced file is a new address.
+            .service(
+                web::scope(recipes::steps::STATIC_URL_PREFIX)
+                    .wrap(
+                        actix_web::middleware::DefaultHeaders::new()
+                            .add(("Cache-Control", "public, max-age=31536000, immutable")),
+                    )
+                    .service(
+                        Files::new("", &step_animations_clone)
+                            .use_etag(true)
+                            .use_last_modified(true),
+                    ),
+            )
     })
     // Drop slow/stalled clients so a resource-tight box can't be tied up.
     .client_request_timeout(std::time::Duration::from_secs(30))
