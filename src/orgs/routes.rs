@@ -12,6 +12,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/{id}", web::delete().to(handlers::delete_org))
             .route("/{id}/logo", web::put().to(handlers::upload_org_logo))
             .route(
+                "/{id}/card-image",
+                web::put().to(handlers::upload_org_card_image),
+            )
+            .route(
                 "/{id}/offline-auth-bundle",
                 web::get().to(handlers::offline_auth_bundle),
             )

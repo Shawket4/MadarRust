@@ -45,6 +45,8 @@ pub struct Org {
     /// True when the logo is a shape on transparency, so a card may repaint it
     /// for contrast (`branding::is_mark`). NULL until it has been looked at.
     pub brand_logo_is_mark: Option<bool>,
+    /// A wide photograph for the loyalty card. Own-org editable, like the logo.
+    pub brand_card_image: Option<String>,
     /// The branding tier. Super admin only — see `UpdateOrgRequest`.
     pub custom_branding: bool,
     pub is_active: bool,
@@ -137,6 +139,13 @@ pub struct UploadLogoMultipart {
     /// Logo image file. PNG, JPEG, or WebP. Required.
     #[schema(format = Binary, content_media_type = "image/*")]
     pub logo: String,
+}
+
+#[derive(ToSchema)]
+pub struct UploadCardImageMultipart {
+    /// A wide photograph for the loyalty card. PNG, JPEG or WebP. Required.
+    #[schema(format = Binary, content_media_type = "image/*")]
+    pub image: String,
 }
 
 // ── POST /orgs  (super_admin only, multipart/form-data) ──────
@@ -267,7 +276,7 @@ pub async fn create_org(
         r#"
         INSERT INTO organizations (name, slug, logo_url, currency_code, tax_rate, receipt_footer, timezone)
         VALUES ($1, $2, $3, $4, $5, $6, $7::timezone_name)
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, custom_branding, is_active, timezone::text AS timezone
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, is_active, timezone::text AS timezone
         "#,
     )
     .bind(&name)
@@ -320,7 +329,7 @@ pub async fn list_orgs(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResp
 
     let orgs = sqlx::query_as::<_, Org>(
         r#"
-        SELECT id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, custom_branding, is_active, timezone::text AS timezone
+        SELECT id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, is_active, timezone::text AS timezone
         FROM organizations
         WHERE deleted_at IS NULL
         ORDER BY name
@@ -524,7 +533,7 @@ pub async fn update_org(
             custom_branding = COALESCE($11, custom_branding),
             updated_at     = NOW()
         WHERE id = $1 AND deleted_at IS NULL
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, custom_branding, is_active, timezone::text AS timezone
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, is_active, timezone::text AS timezone
         "#,
     )
     .bind(*org_id)
@@ -681,7 +690,7 @@ pub async fn upload_org_logo(
             brand_background = $3, brand_foreground = $4, brand_accent = $5,
             brand_logo_source = $2, brand_logo_is_mark = $6
         WHERE id = $1 AND deleted_at IS NULL
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, custom_branding, is_active, timezone::text AS timezone
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, is_active, timezone::text AS timezone
         "#,
     )
     .bind(*org_id)
@@ -696,6 +705,128 @@ pub async fn upload_org_logo(
 
     if let Some(old_url) = existing.logo_url {
         delete_old_image(&old_url, &base_url, &uploads_dir, None).await;
+    }
+
+    Ok(HttpResponse::Ok().json(org))
+}
+
+// ── PUT /orgs/:id/card-image ─────────────────────────────────
+
+/// The photograph across the loyalty card — Apple's strip, Google's hero image.
+///
+/// Own-org, like the logo: it is the shop's own picture of its own coffee, and
+/// waiting on a super admin to change it helps nobody. It is stored whatever
+/// the branding tier says; whether it REACHES a card is decided later, by the
+/// same gate as the logo and the palette.
+///
+/// No palette is derived from it. A photograph has no dominant colour worth
+/// painting a card with — that is what the logo is for — and a card whose
+/// scheme changed because someone swapped the picture would be a surprise
+/// nobody asked for.
+#[utoipa::path(
+    put,
+    path = "/orgs/{id}/card-image",
+    tag = "orgs",
+    params(("id" = Uuid, Path, description = "Organization ID")),
+    request_body(
+        content = UploadCardImageMultipart,
+        content_type = "multipart/form-data",
+        description = "Multipart form with a single `image` file field."
+    ),
+    responses(
+        (status = 200, description = "Card image replaced; updated organization returned", body = Org),
+        AppErrorResponse,
+    ),
+    security(("bearer_jwt" = []))
+)]
+pub async fn upload_org_card_image(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    org_id: web::Path<Uuid>,
+    mut mp: Multipart,
+) -> Result<HttpResponse, AppError> {
+    if crate::demo::config::demo_mode() {
+        return Err(AppError::BadRequest(
+            "Image uploads are disabled in the demo.".into(),
+        ));
+    }
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "orgs", "update").await?;
+    if claims.role != crate::models::UserRole::SuperAdmin && claims.org_id() != Some(*org_id) {
+        return Err(AppError::Forbidden(
+            "You can only change your own organisation's card image".into(),
+        ));
+    }
+
+    let existing = fetch_org(pool.get_ref(), *org_id).await?;
+    let uploads_dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
+    let base_url = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
+
+    let mut new_url: Option<String> = None;
+    while let Some(mut field) = mp
+        .try_next()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Multipart error: {e}")))?
+    {
+        if field.name().unwrap_or("") != "image" {
+            drain_field(&mut field).await?;
+            continue;
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = field
+            .try_next()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Upload read error: {e}")))?
+        {
+            bytes.extend_from_slice(chunk.as_ref());
+        }
+        if bytes.is_empty() {
+            continue;
+        }
+        // Decoded before it is stored. A file the wallets cannot read would be
+        // a card that silently loses its band, and the upload is where someone
+        // is still watching.
+        image::load_from_memory(&bytes)
+            .map_err(|_| AppError::BadRequest("That file is not an image we can read".into()))?;
+
+        let ct = field
+            .content_type()
+            .map(|m| m.to_string())
+            .unwrap_or_default();
+        let ext = match ct.as_str() {
+            "image/png" => "png",
+            "image/webp" => "webp",
+            _ => "jpg",
+        };
+        let filename = format!("{}.{}", Uuid::new_v4(), ext);
+        let dir = format!("{uploads_dir}/card");
+        std::fs::create_dir_all(&dir).map_err(|_| AppError::Internal)?;
+        std::fs::write(format!("{dir}/{filename}"), &bytes).map_err(|_| AppError::Internal)?;
+        new_url = Some(format!(
+            "{}/card/{}",
+            base_url.trim_end_matches('/'),
+            filename
+        ));
+    }
+
+    let new_url =
+        new_url.ok_or_else(|| AppError::BadRequest("No file received in field 'image'".into()))?;
+
+    let org = sqlx::query_as::<_, Org>(
+        r#"
+        UPDATE organizations SET brand_card_image = $2, updated_at = NOW()
+        WHERE id = $1 AND deleted_at IS NULL
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, is_active, timezone::text AS timezone
+        "#,
+    )
+    .bind(*org_id)
+    .bind(&new_url)
+    .fetch_optional(pool.get_ref())
+    .await?
+    .ok_or_else(|| AppError::NotFound("Org not found".into()))?;
+
+    if let Some(old) = existing.brand_card_image {
+        delete_old_image(&old, &base_url, &uploads_dir, None).await;
     }
 
     Ok(HttpResponse::Ok().json(org))
@@ -756,7 +887,7 @@ pub(crate) fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 
 async fn fetch_org(pool: &PgPool, id: Uuid) -> Result<Org, AppError> {
     sqlx::query_as::<_, Org>(
-        "SELECT id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, custom_branding, is_active, timezone::text AS timezone
+        "SELECT id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, is_active, timezone::text AS timezone
          FROM organizations
          WHERE id = $1 AND deleted_at IS NULL",
     )

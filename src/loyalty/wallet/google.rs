@@ -229,6 +229,7 @@ pub fn loyalty_object(
     member: &MemberRow,
     settings: &LoyaltySettings,
     locations: &[super::PassLocation],
+    rewards: &[String],
 ) -> serde_json::Value {
     let program = settings.program_name.clone();
     let mode = settings.mode();
@@ -270,7 +271,30 @@ pub fn loyalty_object(
                 "longitude": l.longitude,
             }))
             .collect::<Vec<_>>(),
+        // What Apple puts on the BACK of the card. Google shows these under it
+        // rather than behind it, which is the same content in the same order —
+        // built by `wallet::back_of_card`, once, so the two cannot drift into
+        // telling a customer different things about one programme.
+        "textModulesData": super::back_of_card(member, settings, locations, rewards)
+            .into_iter()
+            .map(|l| json!({ "id": l.key, "header": l.label, "body": l.value }))
+            .collect::<Vec<_>>(),
     })
+}
+
+/// The shop's photograph, as Google's banner — Apple's strip, by another name.
+///
+/// Google FETCHES this, so it needs an absolute URL and the file has to be
+/// publicly reachable. It is applied AFTER the object exists rather than inside
+/// it: Google validates an image when it accepts a resource, and an image it
+/// dislikes would fail the whole insert — which is a decoration taking down the
+/// card it decorates. That already happened once.
+pub fn hero_image(brand: &OrgBrand) -> Option<serde_json::Value> {
+    let uri = brand
+        .card_image_url
+        .as_deref()
+        .filter(|s| s.starts_with("http://") || s.starts_with("https://"))?;
+    Some(json!({ "sourceUri": { "uri": uri } }))
 }
 
 /// The stepper, in text, at whatever density the field can hold.
@@ -364,6 +388,7 @@ pub async fn save_url(
     settings: &LoyaltySettings,
     brand: &OrgBrand,
     locations: &[super::PassLocation],
+    rewards: &[String],
 ) -> Result<Option<String>, AppError> {
     let (Some(issuer), Some(email), Some(key)) = (issuer_id(), sa_email(), sa_key()) else {
         // Silence here is how "no Add to Google Wallet button" came to look
@@ -387,7 +412,8 @@ pub async fn save_url(
     // two requests on a page a customer opens rarely.
     let token = access_token().await?;
     ensure_class(&token, &issuer, member.org_id, brand, settings).await?;
-    let object_id = ensure_object(&token, &issuer, member, settings, locations).await?;
+    let object_id =
+        ensure_object(&token, &issuer, member, settings, locations, rewards, brand).await?;
     if member.google_object_id.as_deref() != Some(object_id.as_str()) {
         // Recorded so `push_balance` has something to PATCH — it reads this
         // column, which nothing used to write, so no Google pass ever saw a
@@ -463,22 +489,28 @@ async fn ensure_class(
 }
 
 /// Create the member's object. Returns its id either way.
+#[allow(clippy::too_many_arguments)]
 async fn ensure_object(
     token: &str,
     issuer: &str,
     member: &MemberRow,
     settings: &LoyaltySettings,
     locations: &[super::PassLocation],
+    rewards: &[String],
+    brand: &OrgBrand,
 ) -> Result<String, AppError> {
     let id = object_id(issuer, member);
     let resp = reqwest::Client::new()
         .post(format!("{WALLET_API}/loyaltyObject"))
         .bearer_auth(token)
-        .json(&loyalty_object(issuer, member, settings, locations))
+        .json(&loyalty_object(
+            issuer, member, settings, locations, rewards,
+        ))
         .send()
         .await
         .map_err(|e| AppError::ServiceUnavailable(format!("Google Wallet object: {e}")))?;
     if resp.status().is_success() {
+        decorate(token, &id, brand).await;
         return Ok(id);
     }
     if resp.status() != reqwest::StatusCode::CONFLICT {
@@ -493,14 +525,46 @@ async fn ensure_object(
     let resp = reqwest::Client::new()
         .patch(format!("{WALLET_API}/loyaltyObject/{id}"))
         .bearer_auth(token)
-        .json(&loyalty_object(issuer, member, settings, locations))
+        .json(&loyalty_object(
+            issuer, member, settings, locations, rewards,
+        ))
         .send()
         .await
         .map_err(|e| AppError::ServiceUnavailable(format!("Google Wallet object: {e}")))?;
     if resp.status().is_success() {
+        decorate(token, &id, brand).await;
         return Ok(id);
     }
     Err(google_error("updating the loyalty object", resp).await)
+}
+
+/// Put the shop's photograph on an object that already exists.
+///
+/// Best effort by construction: it returns nothing, so no caller can make a
+/// customer's card depend on it. An image Google will not take costs the band
+/// and nothing else.
+async fn decorate(token: &str, id: &str, brand: &OrgBrand) {
+    let Some(hero) = hero_image(brand) else {
+        return;
+    };
+    let resp = reqwest::Client::new()
+        .patch(format!("{WALLET_API}/loyaltyObject/{id}"))
+        .bearer_auth(token)
+        .json(&json!({ "heroImage": hero }))
+        .send()
+        .await;
+    match resp {
+        Ok(r) if r.status().is_success() => {}
+        Ok(r) => {
+            let status = r.status();
+            let body = r.text().await.unwrap_or_default();
+            tracing::warn!(
+                status = %status, body = %body,
+                "loyalty: Google would not take the card image; the card is fine without it"
+            );
+        }
+        Err(e) => tracing::warn!(error = %e, "loyalty: could not send the card image"),
+    }
 }
 
 /// Google's own words for why it refused, in the log.
@@ -674,6 +738,7 @@ mod tests {
             palette: crate::orgs::branding::Palette::default(),
             logo_is_mark: true,
             custom_branding: true,
+            card_image_url: None,
         };
         let m = super::super::apple::tests::member();
         let locs: Vec<super::super::PassLocation> = (0..6)
@@ -703,7 +768,7 @@ mod tests {
         // reason for the REST provisioning is checkable rather than folklore.
         let embedded = json!({
             "loyaltyClasses": [loyalty_class("3388000000022345678", uuid::Uuid::nil(), &brand, &s)],
-            "loyaltyObjects": [loyalty_object("3388000000022345678", &m, &s, &locs)],
+            "loyaltyObjects": [loyalty_object("3388000000022345678", &m, &s, &locs, &[])],
         });
         assert!(
             as_jwt(&embedded) > MAX_SAVE_JWT,
@@ -725,6 +790,7 @@ mod tests {
                 foreground: "#EFF3F4".into(),
                 accent: "#C8607F".into(),
             },
+            card_image_url: None,
             logo_is_mark: true,
             custom_branding: true,
         };
@@ -814,7 +880,7 @@ mod tests {
         let mut s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
         s.mode = "visits".into();
         s.default_reward_cost = 5;
-        let obj = loyalty_object("338", &super::super::apple::tests::member(), &s, &[]);
+        let obj = loyalty_object("338", &super::super::apple::tests::member(), &s, &[], &[]);
 
         // `loyaltyPoints` and `secondaryLoyaltyPoints` render on the card face.
         assert_eq!(obj["loyaltyPoints"]["balance"]["int"], 3);
@@ -824,13 +890,29 @@ mod tests {
             "●─●─●─○─○   3 / 5"
         );
 
-        // `textModulesData` does NOT — it renders in the details list below the
-        // card, which is where the progress used to be: a customer opening
-        // their wallet saw a balance and had to scroll past the card to find
-        // out how close they were.
+        // `textModulesData` does NOT render on the face — it is the list below
+        // the card, which is Google's version of Apple's BACK. The same content
+        // belongs there, and it comes from the same `back_of_card` so the two
+        // wallets cannot describe one programme differently.
+        let modules = obj["textModulesData"].as_array().expect("a back of card");
+        let headers: Vec<&str> = modules
+            .iter()
+            .map(|m| m["header"].as_str().unwrap_or(""))
+            .collect();
+        assert!(headers.contains(&"How it works"), "{headers:?}");
+        assert!(headers.contains(&"Member"), "{headers:?}");
+
+        // What must NOT be down there is the progress. That is the whole
+        // complaint: a customer opening their wallet saw a balance and had to
+        // scroll past the card to find out how close they were.
+        let bodies = modules
+            .iter()
+            .map(|m| m["body"].as_str().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(
-            obj.get("textModulesData").is_none(),
-            "nothing belongs under the card that belongs on it: {obj}"
+            !bodies.contains('●') && !bodies.contains("3 / 5"),
+            "the progress belongs on the card, not under it: {bodies}"
         );
     }
 

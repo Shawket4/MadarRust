@@ -175,6 +175,92 @@ pub fn absolute_api_url(path: &str) -> Option<String> {
 }
 
 /// Build both "add to wallet" links for a member.
+/// The org's rewards, phrased once for both wallets.
+///
+/// Shared so an espresso does not read "Espresso — 5 visits" on one card and
+/// something else on the other; the two are meant to be the same card.
+pub async fn reward_lines(pool: &PgPool, org_id: Uuid) -> Vec<String> {
+    crate::loyalty::settings::load_effective_rewards_org(pool, org_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| format!("{} — {} {}", r.name, r.cost_amount, r.cost_currency))
+        .collect()
+}
+
+/// One line on the back of the card: a heading and what it says.
+///
+/// Apple calls these back fields and Google calls them text modules, and both
+/// are the same thing — what you see after turning the card over. Built once,
+/// here, so the two wallets cannot drift into telling a customer different
+/// things about the same programme, which is exactly what happened while each
+/// assembled its own.
+pub struct BackLine {
+    pub key: &'static str,
+    pub label: String,
+    pub value: String,
+}
+
+pub fn back_of_card(
+    member: &MemberRow,
+    settings: &LoyaltySettings,
+    locations: &[PassLocation],
+    rewards: &[String],
+) -> Vec<BackLine> {
+    let threshold = settings.default_reward_cost;
+    let mut out = vec![
+        BackLine {
+            key: "howitworks",
+            label: "How it works".into(),
+            // The two programs are explained in their own terms — a stamp card
+            // that talked about EGP per point would be a card nobody could
+            // follow at the counter.
+            value: match settings.mode() {
+                crate::loyalty::earn::Mode::Points => format!(
+                    "Show this card when you pay. You earn a point for every {} EGP you spend, \
+                     and a reward costs {threshold} points.",
+                    settings.earn_piastres_per_point / 100,
+                ),
+                crate::loyalty::earn::Mode::Visits => format!(
+                    "Show this card when you pay. Every order earns a stamp, \
+                     and a reward costs {threshold} of them."
+                ),
+            },
+        },
+        BackLine {
+            key: "member",
+            label: "Member".into(),
+            value: format!("{} · {}", member.name, member.phone),
+        },
+    ];
+    if !rewards.is_empty() {
+        out.push(BackLine {
+            key: "rewards",
+            label: "Rewards you can claim".into(),
+            value: rewards.join("\n"),
+        });
+    }
+    if !locations.is_empty() {
+        out.push(BackLine {
+            key: "branches",
+            label: "Where it works".into(),
+            value: locations
+                .iter()
+                .map(|l| l.name.clone())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        });
+    }
+    if let Some(terms) = settings.terms.as_deref().filter(|t| !t.trim().is_empty()) {
+        out.push(BackLine {
+            key: "terms",
+            label: "Terms".into(),
+            value: terms.to_string(),
+        });
+    }
+    out
+}
+
 /// Where a member's `.pkpass` is downloaded, when Apple is configured.
 ///
 /// Relative to the site root, and under `/api/` — which is what nginx proxies
@@ -203,17 +289,20 @@ pub async fn links_for(
     locations: &[PassLocation],
 ) -> PassLinks {
     let apple_url = apple_link(member);
+    // The same lines Apple prints on the back of its pass.
+    let rewards = reward_lines(pool, member.org_id).await;
     // Provisioning talks to Google, so it can fail in ways a signup must
     // survive: an unlinked service account, a refused class, a network blip.
     // The customer gets the Apple badge and the code on their card either way,
     // and the reason lands in the log rather than in their face.
-    let google_url = match google::save_url(pool, member, settings, brand, locations).await {
-        Ok(url) => url,
-        Err(e) => {
-            tracing::warn!(error = %e, "loyalty: could not build the Google Wallet save link");
-            None
-        }
-    };
+    let google_url =
+        match google::save_url(pool, member, settings, brand, locations, &rewards).await {
+            Ok(url) => url,
+            Err(e) => {
+                tracing::warn!(error = %e, "loyalty: could not build the Google Wallet save link");
+                None
+            }
+        };
     PassLinks {
         any: apple_url.is_some() || google_url.is_some(),
         apple_url,
@@ -325,6 +414,86 @@ mod tests {
         }
         // Nothing configured: the pass still issues, it simply never self-updates.
         assert!(web_service_url().is_none());
+    }
+
+    /// The two cards are meant to be one card. This is what stops them drifting.
+    #[test]
+    fn both_wallets_are_given_the_same_card() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: the lock makes this the only thread touching the environment.
+        unsafe {
+            std::env::set_var("LOYALTY_APPLE_PASS_TYPE_ID", "pass.example");
+            std::env::set_var("LOYALTY_APPLE_TEAM_ID", "TEAM123456");
+        }
+        let mut s = LoyaltySettings::defaults(Uuid::nil(), None);
+        s.mode = "visits".into();
+        s.default_reward_cost = 5;
+        s.terms = Some("One per visit".into());
+        let m = apple::tests::member();
+        let locs = [PassLocation {
+            name: "Maadi".into(),
+            latitude: 30.0,
+            longitude: 31.0,
+        }];
+        let rewards = ["Espresso — 5 visits".to_string()];
+
+        let apple =
+            apple::pass_json(&m, &s, &locs, &rewards, &apple::PassBrand::default(), false).unwrap();
+        let google = google::loyalty_object("338", &m, &s, &locs, &rewards);
+
+        // The balance, with the same word for it.
+        assert_eq!(
+            apple["storeCard"]["headerFields"][0]["value"],
+            google["loyaltyPoints"]["balance"]["int"]
+        );
+        assert_eq!(
+            apple["storeCard"]["headerFields"][0]["label"],
+            google["loyaltyPoints"]["label"]
+        );
+
+        // The progress, in the same words, on the face of both.
+        assert_eq!(
+            apple["storeCard"]["secondaryFields"][0]["value"],
+            google["secondaryLoyaltyPoints"]["balance"]["string"]
+        );
+
+        // The barcode carries the same thing.
+        assert_eq!(apple["barcodes"][0]["message"], google["barcode"]["value"]);
+
+        // And the back of the card is the same list, in the same order, saying
+        // the same things — Apple behind it, Google beneath it.
+        let apple_back: Vec<(String, String)> = apple["storeCard"]["backFields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| {
+                (
+                    f["label"].as_str().unwrap().to_string(),
+                    f["value"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        let google_back: Vec<(String, String)> = google["textModulesData"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| {
+                (
+                    m["header"].as_str().unwrap().to_string(),
+                    m["body"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(apple_back, google_back);
+        assert!(
+            apple_back.iter().any(|(l, _)| l == "Terms"),
+            "the shop's terms reach both: {apple_back:?}"
+        );
+
+        unsafe {
+            std::env::remove_var("LOYALTY_APPLE_PASS_TYPE_ID");
+            std::env::remove_var("LOYALTY_APPLE_TEAM_ID");
+        }
     }
 
     #[test]

@@ -297,6 +297,11 @@ pub struct OrgBrand {
     /// card, Google Wallet). Apple embeds bytes instead — see
     /// `loyalty::wallet::apple::pass_brand`.
     pub logo_url: Option<String>,
+    /// A wide photograph for the card — Apple's strip, Google's hero image.
+    ///
+    /// Absent is the normal case and is a finished card, not a broken one: the
+    /// pass simply has no band, which is what every card looked like until now.
+    pub card_image_url: Option<String>,
     /// Derived from the logo when it was uploaded; Madar's own until then, and
     /// Madar's own regardless when the org is not on the branding tier.
     pub palette: Palette,
@@ -327,11 +332,12 @@ pub async fn load(pool: &sqlx::PgPool, org_id: uuid::Uuid) -> Result<OrgBrand, s
         brand_foreground: Option<String>,
         brand_accent: Option<String>,
         brand_logo_is_mark: Option<bool>,
+        brand_card_image: Option<String>,
         custom_branding: bool,
     }
     let row: Option<Row> = sqlx::query_as(
         "SELECT name, logo_url, brand_background, brand_foreground, brand_accent, \
-                brand_logo_is_mark, custom_branding \
+                brand_logo_is_mark, brand_card_image, custom_branding \
            FROM organizations WHERE id = $1",
     )
     .bind(org_id)
@@ -373,6 +379,7 @@ pub async fn load(pool: &sqlx::PgPool, org_id: uuid::Uuid) -> Result<OrgBrand, s
     Ok(OrgBrand {
         name: row.name,
         logo_url: row.logo_url,
+        card_image_url: row.brand_card_image,
         palette: Palette {
             background: row.brand_background.unwrap_or(d.background),
             foreground: row.brand_foreground.unwrap_or(d.foreground),
@@ -389,13 +396,28 @@ pub async fn load(pool: &sqlx::PgPool, org_id: uuid::Uuid) -> Result<OrgBrand, s
 /// call while a customer waits and no server-side request to an address someone
 /// else supplied. Returns `None` for anything unreadable, which every caller
 /// treats as "no logo" rather than as an error.
-pub fn read_logo(logo_url: &str) -> Option<image::DynamicImage> {
-    let file = logo_url.rsplit_once("/logos/")?.1;
-    if file.is_empty() || file.contains('/') || file.contains("..") {
+pub fn read_logo(url: &str) -> Option<image::DynamicImage> {
+    read_upload(url)
+}
+
+/// Decode an uploaded image from the uploads directory.
+///
+/// From DISK, never fetched: the file is already local, so there is no network
+/// call while a customer waits and no server-side request to an address someone
+/// else supplied. Returns `None` for anything unreadable, which every caller
+/// treats as "no image" rather than as an error.
+///
+/// Only the last two segments of the URL are used — the subdirectory and the
+/// file — and neither may climb out of the uploads directory.
+pub fn read_upload(url: &str) -> Option<image::DynamicImage> {
+    let (rest, file) = url.rsplit_once('/')?;
+    let sub = rest.rsplit_once('/').map(|(_, s)| s).unwrap_or(rest);
+    let unsafe_part = |s: &str| s.is_empty() || s.contains("..") || s.contains('\\');
+    if unsafe_part(sub) || unsafe_part(file) {
         return None;
     }
     let dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".into());
-    let bytes = std::fs::read(format!("{dir}/logos/{file}")).ok()?;
+    let bytes = std::fs::read(format!("{dir}/{sub}/{file}")).ok()?;
     image::load_from_memory(&bytes).ok()
 }
 

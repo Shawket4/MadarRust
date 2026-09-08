@@ -77,6 +77,42 @@ pub struct PassBrand {
     pub images: Vec<(String, Vec<u8>)>,
 }
 
+/// Apple's strip sizes for a store card, at 1×/2×/3×.
+///
+/// Roughly 2.6:1. A photograph is cover-cropped to it rather than letterboxed —
+/// a band with bars down the sides looks like a mistake, and the middle of a
+/// photograph is where the subject is.
+const STRIP_SIZES: [(&str, u32, u32); 3] = [
+    ("strip.png", 375, 144),
+    ("strip@2x.png", 750, 288),
+    ("strip@3x.png", 1125, 432),
+];
+
+/// The shop's photograph, sized for the pass's strip.
+///
+/// Empty when there is no picture, which is the ordinary case and a finished
+/// card — every pass looked like that until now.
+pub fn strip_images(brand: &crate::orgs::branding::OrgBrand) -> Vec<(String, Vec<u8>)> {
+    let Some(img) = brand
+        .card_image_url
+        .as_deref()
+        .and_then(crate::orgs::branding::read_upload)
+    else {
+        return Vec::new();
+    };
+    STRIP_SIZES
+        .iter()
+        .filter_map(|(name, w, h)| {
+            let scaled = img.resize_to_fill(*w, *h, image::imageops::FilterType::Lanczos3);
+            let mut buf = std::io::Cursor::new(Vec::new());
+            scaled
+                .write_to(&mut buf, image::ImageFormat::Png)
+                .ok()
+                .map(|_| ((*name).to_string(), buf.into_inner()))
+        })
+        .collect()
+}
+
 impl Default for PassBrand {
     fn default() -> Self {
         let p = crate::orgs::branding::Palette::default();
@@ -230,6 +266,9 @@ pub fn pass_json(
     locations: &[PassLocation],
     rewards: &[String],
     brand: &PassBrand,
+    // True when the pass carries a strip image. Apple draws the primary fields
+    // ON the strip, so a card with a photograph has to make room for it.
+    strip: bool,
 ) -> Result<serde_json::Value, AppError> {
     let (Some(pass_type), Some(team)) = (pass_type_id(), team_id()) else {
         return Err(AppError::ServiceUnavailable(
@@ -241,48 +280,10 @@ pub fn pass_json(
     let threshold = settings.default_reward_cost;
     let balance = member.balance_in(mode);
 
-    let mut back = vec![
-        json!({
-            "key": "howitworks",
-            "label": "How it works",
-            // The two programs are explained in their own terms — a stamp card
-            // that talked about EGP per point would be a card nobody could
-            // follow at the counter.
-            "value": match mode {
-                crate::loyalty::earn::Mode::Points => format!(
-                    "Show this card when you pay. You earn a point for every {} EGP you spend, \
-                     and a reward costs {threshold} points.",
-                    settings.earn_piastres_per_point / 100,
-                ),
-                crate::loyalty::earn::Mode::Visits => format!(
-                    "Show this card when you pay. Every order earns a stamp, \
-                     and a reward costs {threshold} of them."
-                ),
-            }
-        }),
-        json!({
-            "key": "member",
-            "label": "Member",
-            "value": format!("{} · {}", member.name, member.phone)
-        }),
-    ];
-    if !rewards.is_empty() {
-        back.push(json!({
-            "key": "rewards",
-            "label": "Rewards you can claim",
-            "value": rewards.join("\n")
-        }));
-    }
-    if !locations.is_empty() {
-        back.push(json!({
-            "key": "branches",
-            "label": "Where it works",
-            "value": locations.iter().map(|l| l.name.clone()).collect::<Vec<_>>().join("\n")
-        }));
-    }
-    if let Some(terms) = &settings.terms {
-        back.push(json!({ "key": "terms", "label": "Terms", "value": terms }));
-    }
+    let back: Vec<serde_json::Value> = super::back_of_card(member, settings, locations, rewards)
+        .into_iter()
+        .map(|l| json!({ "key": l.key, "label": l.label, "value": l.value }))
+        .collect();
 
     let mut pass = json!({
         "formatVersion": 1,
@@ -308,11 +309,20 @@ pub fn pass_json(
                 "label": super::google::balance_label(mode),
                 "value": balance
             }],
-            "primaryFields": [{
-                "key": "balance",
-                "label": super::google::balance_label(mode),
-                "value": balance
-            }],
+            // Apple renders the primary fields OVER the strip. With a
+            // photograph behind them the balance is a large numeral on an
+            // arbitrary picture, which is unreadable about as often as not — so
+            // a card with a photograph leaves them empty and the header strip
+            // carries the balance instead. It is on the card either way.
+            "primaryFields": if strip {
+                json!([])
+            } else {
+                json!([{
+                    "key": "balance",
+                    "label": super::google::balance_label(mode),
+                    "value": balance
+                }])
+            },
             "secondaryFields": [{
                 "key": "progress",
                 "label": program,
@@ -506,16 +516,24 @@ pub async fn build_pass_for(pool: &PgPool, member: &MemberRow) -> Result<Vec<u8>
         .await?
         .unwrap_or_else(|| LoyaltySettings::defaults(member.org_id, None));
     let locations = locations_for_org(pool, member.org_id).await?;
-    let rewards: Vec<String> =
-        crate::loyalty::settings::load_effective_rewards_org(pool, member.org_id)
-            .await?
-            .into_iter()
-            .map(|r| format!("{} — {} {}", r.name, r.cost_amount, r.cost_currency))
-            .collect();
+    let rewards = super::reward_lines(pool, member.org_id).await;
     let org = crate::orgs::branding::load(pool, member.org_id).await?;
     let brand = pass_brand(&org);
-    let pass = pass_json(member, &settings, &locations, &rewards, &brand)?;
-    build_pkpass(&pass, &brand.images)
+    let strip = strip_images(&org);
+    let pass = pass_json(
+        member,
+        &settings,
+        &locations,
+        &rewards,
+        &brand,
+        !strip.is_empty(),
+    )?;
+    // One list for the archive AND the manifest, so an image cannot end up in
+    // the zip unhashed — which invalidates the signature and makes iOS refuse
+    // the pass with no explanation at all.
+    let mut images = brand.images.clone();
+    images.extend(strip);
+    build_pkpass(&pass, &images)
 }
 
 /// Tell every device holding this member's pass to come back for a new copy.
@@ -619,7 +637,7 @@ pub(crate) mod tests {
         let _guard = env_guard();
         configured();
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
+        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default(), false).unwrap();
         assert_eq!(p["storeCard"]["primaryFields"][0]["value"], 30);
         // A hundred is past the point where dots are worth counting, so the
         // field carries the bare ratio — the label above it already says which
@@ -641,6 +659,7 @@ pub(crate) mod tests {
             &[],
             &["Free espresso — 5 visits".to_string()],
             &PassBrand::default(),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -658,7 +677,7 @@ pub(crate) mod tests {
         let mut s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
         s.mode = "visits".into();
         s.default_reward_cost = 5;
-        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
+        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default(), false).unwrap();
         // The stamps balance leads, not the points one.
         assert_eq!(p["storeCard"]["primaryFields"][0]["value"], 3);
         assert_eq!(p["storeCard"]["primaryFields"][0]["label"], "Orders");
@@ -689,7 +708,7 @@ pub(crate) mod tests {
             label: "#C8607F".into(),
             ..PassBrand::default()
         };
-        let p = pass_json(&member(), &s, &[], &[], &brand).unwrap();
+        let p = pass_json(&member(), &s, &[], &[], &brand, false).unwrap();
 
         // The colours reach the pass. They used to be read from
         // `loyalty_settings`, which stopped being written when branding moved
@@ -709,7 +728,7 @@ pub(crate) mod tests {
         configured();
         let _guard = env_guard();
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
+        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default(), false).unwrap();
         assert_eq!(p["organizationName"], s.program_name);
         // Madar's palette, not an absent one — a pass with no colours is grey.
         assert_eq!(p["backgroundColor"], "rgb(13, 98, 115)");
@@ -792,7 +811,7 @@ pub(crate) mod tests {
         let _guard = env_guard();
         configured();
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
+        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default(), false).unwrap();
         assert_eq!(p["barcodes"][0]["message"], "Mabcdefghijklmnopqrstuv");
         assert_eq!(p["barcodes"][0]["format"], "PKBarcodeFormatQR");
         // The member id must never be the scannable value — it is guessable
@@ -810,7 +829,7 @@ pub(crate) mod tests {
             longitude: 31.2357,
             name: "Zamalek".into(),
         }];
-        let p = pass_json(&member(), &s, &locs, &[], &PassBrand::default()).unwrap();
+        let p = pass_json(&member(), &s, &locs, &[], &PassBrand::default(), false).unwrap();
         assert_eq!(p["locations"][0]["latitude"], 30.0444);
         assert!(
             p["locations"][0]["relevantText"]
@@ -833,7 +852,7 @@ pub(crate) mod tests {
         let _guard = env_guard();
         configured();
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
+        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default(), false).unwrap();
         // With no certificate configured, building an archive must fail loudly.
         // An unsigned .pkpass is rejected by iOS with no explanation at all, so
         // serving one would look to the customer like a broken link.
@@ -886,7 +905,7 @@ pub(crate) mod tests {
         }
 
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        let pass = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
+        let pass = pass_json(&member(), &s, &[], &[], &PassBrand::default(), false).unwrap();
         let bytes = build_pkpass(&pass, &PassBrand::default().images).unwrap();
 
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();

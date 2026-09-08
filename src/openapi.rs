@@ -116,6 +116,7 @@ paths(
         crate::orgs::handlers::create_org,
         crate::orgs::handlers::update_org,
         crate::orgs::handlers::upload_org_logo,
+        crate::orgs::handlers::upload_org_card_image,
         crate::orgs::handlers::delete_org,
         crate::orgs::handlers::list_public_orgs,
         // ── users ───────────────────────────────────────────────────

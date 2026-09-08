@@ -136,6 +136,10 @@ pub struct CardBrand {
     /// baked in, which gets a plate to sit on instead — repainting that one
     /// would give a solid rectangle. See `orgs::branding::is_mark`.
     pub logo_is_mark: bool,
+    /// The wide photograph across the card — Apple's strip, Google's hero
+    /// image, and the band at the top of the web card. Absent is a finished
+    /// card, not a broken one.
+    pub card_image_url: Option<String>,
     /// `#RRGGBB`, validated on write.
     pub background_color: Option<String>,
     pub foreground_color: Option<String>,
@@ -160,6 +164,7 @@ fn card_brand(
         program_name_ar: s.program_name_ar.clone(),
         logo_url: org.logo_url.clone(),
         logo_is_mark: org.logo_is_mark,
+        card_image_url: org.card_image_url.clone(),
         background_color: Some(org.palette.background.clone()),
         foreground_color: Some(org.palette.foreground.clone()),
         label_color: Some(org.palette.accent.clone()),

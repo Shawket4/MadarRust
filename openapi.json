@@ -22116,6 +22116,116 @@
         ]
       }
     },
+    "/orgs/{id}/card-image": {
+      "put": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "The photograph across the loyalty card — Apple's strip, Google's hero image.",
+        "description": "Own-org, like the logo: it is the shop's own picture of its own coffee, and\nwaiting on a super admin to change it helps nobody. It is stored whatever\nthe branding tier says; whether it REACHES a card is decided later, by the\nsame gate as the logo and the palette.\n\nNo palette is derived from it. A photograph has no dominant colour worth\npainting a card with — that is what the logo is for — and a card whose\nscheme changed because someone swapped the picture would be a surprise\nnobody asked for.",
+        "operationId": "upload_org_card_image",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Multipart form with a single `image` file field.",
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadCardImageMultipart"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Card image replaced; updated organization returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Org"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/orgs/{id}/logo": {
       "put": {
         "tags": [
@@ -44529,6 +44639,13 @@
             ],
             "description": "`#RRGGBB`, validated on write."
           },
+          "card_image_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The wide photograph across the card — Apple's strip, Google's hero\nimage, and the band at the top of the web card. Absent is a finished\ncard, not a broken one."
+          },
           "foreground_color": {
             "type": [
               "string",
@@ -53589,6 +53706,13 @@
             ],
             "description": "The card palette derived from `logo_url` when it was uploaded\n(`orgs::branding`). Read-only over the API: there is nothing to set, and\nnothing a client may set — the point of deriving is that a shop cannot\nchoose two colours nobody can read."
           },
+          "brand_card_image": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A wide photograph for the loyalty card. Own-org editable, like the logo."
+          },
           "brand_foreground": {
             "type": [
               "string",
@@ -60813,6 +60937,20 @@
                 "description": "Only org-admins and above can change roles. Promoting to\n`super_admin` requires the caller to be a super-admin."
               }
             ]
+          }
+        }
+      },
+      "UploadCardImageMultipart": {
+        "type": "object",
+        "required": [
+          "image"
+        ],
+        "properties": {
+          "image": {
+            "type": "string",
+            "format": "binary",
+            "description": "A wide photograph for the loyalty card. PNG, JPEG or WebP. Required.",
+            "contentMediaType": "image/*"
           }
         }
       },
