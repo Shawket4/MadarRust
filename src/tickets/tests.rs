@@ -831,7 +831,11 @@ async fn a_reward_on_a_ticket_covers_the_line_it_names(pool: PgPool) {
             .to_request(),
     )
     .await;
-    assert!(resp.status().is_success(), "second round: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "second round: {}",
+        resp.status()
+    );
 
     // The latte's LINE id — what the till would send.
     let latte_line: Uuid = sqlx::query_scalar(

@@ -193,9 +193,14 @@ pub async fn wallet_status(
             require_branch_access(pool.get_ref(), &claims, b).await?;
             resolve_branch_org(pool.get_ref(), b).await?
         }
+        // A super admin's token carries no org of its own — the dashboard pins
+        // one with `X-Org-Id`. Reading only the token meant the one role
+        // allowed to open this panel was the one role it always refused.
         None => claims
-            .org_id()
-            .ok_or_else(|| AppError::BadRequest("No organisation in scope".into()))?,
+            .scope_org(crate::auth::middleware::header_org_id(&req))
+            .ok_or_else(|| {
+                AppError::BadRequest("Pick an organisation to check its wallets".into())
+            })?,
     };
 
     let apple_missing = wallet::apple::missing_env();

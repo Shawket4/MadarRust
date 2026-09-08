@@ -498,17 +498,31 @@ async fn ensure_class(
     if resp.status() != reqwest::StatusCode::CONFLICT {
         return Err(google_error("creating the loyalty class", resp).await);
     }
+    // CONFLICT means the class is already there, which is all a save link
+    // actually needs. What follows is a REFRESH — new colours, a new logo — and
+    // a refresh that fails must leave the card it was refreshing alone. Letting
+    // it fail the whole call is how a shop's button disappeared from the card
+    // page over an image Google would not take.
     let resp = http
         .patch(format!("{WALLET_API}/loyaltyClass/{id}"))
         .bearer_auth(token)
         .json(&body)
         .send()
-        .await
-        .map_err(|e| AppError::ServiceUnavailable(format!("Google Wallet class: {e}")))?;
-    if resp.status().is_success() {
-        return Ok(());
+        .await;
+    match resp {
+        Ok(r) if r.status().is_success() => {}
+        Ok(r) => {
+            let status = r.status();
+            let detail = first_reason(&r.text().await.unwrap_or_default());
+            tracing::warn!(
+                status = %status, detail = %detail, class = %id,
+                "loyalty: Google would not update the card class; \
+                 customers keep the one it already has"
+            );
+        }
+        Err(e) => tracing::warn!(error = %e, "loyalty: could not refresh the card class"),
     }
-    Err(google_error("updating the loyalty class", resp).await)
+    Ok(())
 }
 
 /// Create the member's object. Returns its id either way.
@@ -546,20 +560,38 @@ async fn ensure_object(
     // change permanently on the old fields: the progress stayed in the details
     // list below the card long after it moved onto the face, and nothing short
     // of a balance change would ever have moved it.
+    //
+    // PUT, not PATCH. A patch MERGES, and `loyaltyPoints.balance` is a union —
+    // Google takes exactly one of `int` / `string` / `double` / `money`. Moving
+    // that field from an int to a string therefore left BOTH set on any object
+    // saved before the change, which Google rejects. A put replaces the
+    // resource with the body, and the body below is the whole card.
     let resp = reqwest::Client::new()
-        .patch(format!("{WALLET_API}/loyaltyObject/{id}"))
+        .put(format!("{WALLET_API}/loyaltyObject/{id}"))
         .bearer_auth(token)
         .json(&loyalty_object(
             issuer, member, settings, locations, rewards, headline,
         ))
         .send()
-        .await
-        .map_err(|e| AppError::ServiceUnavailable(format!("Google Wallet object: {e}")))?;
-    if resp.status().is_success() {
-        decorate(token, &id, member.org_id, brand).await;
-        return Ok(id);
+        .await;
+    // And, as with the class: this is a refresh of something that already
+    // exists. If Google will not take the new shape, the customer keeps the
+    // card they have — which is stale, not missing. Hiding the button instead
+    // takes away a card that works.
+    match resp {
+        Ok(r) if r.status().is_success() => {}
+        Ok(r) => {
+            let status = r.status();
+            let detail = first_reason(&r.text().await.unwrap_or_default());
+            tracing::warn!(
+                status = %status, detail = %detail, object = %id,
+                "loyalty: Google would not update this card; the customer keeps the older one"
+            );
+        }
+        Err(e) => tracing::warn!(error = %e, "loyalty: could not refresh the card"),
     }
-    Err(google_error("updating the loyalty object", resp).await)
+    decorate(token, &id, member.org_id, brand).await;
+    Ok(id)
 }
 
 /// Put the shop's photograph on an object that already exists.
@@ -740,8 +772,6 @@ pub async fn push_balance(pool: &PgPool, member: &MemberRow) -> Result<(), AppEr
         .unwrap_or_else(|| LoyaltySettings::defaults(member.org_id, None));
 
     let token = access_token().await?;
-    let mode = settings.mode();
-    let balance = member.balance_in(mode);
     // The branches too, not just the balance. The refresh sweep exists to tell
     // cards about a branch that opened after they were issued, and patching
     // only the figures would have fixed Apple and left every Android card
@@ -750,39 +780,27 @@ pub async fn push_balance(pool: &PgPool, member: &MemberRow) -> Result<(), AppEr
         .await
         .unwrap_or_default();
     let headline = super::reward_headline(pool, member.org_id, &settings).await;
-    let body = json!({
-        // Exactly the shape the object was created with. Patching a different
-        // one would change what the card looks like on the customer's first
-        // sale, which is a strange moment for a card to rearrange itself.
-        "loyaltyPoints": {
-            "label": balance_label(mode),
-            "balance": { "string": progress_line(balance, settings.default_reward_cost) }
-        },
-        "locations": locations
-            .iter()
-            .map(|l| json!({
-                "kind": "walletobjects#latLongPoint",
-                "latitude": l.latitude,
-                "longitude": l.longitude,
-            }))
-            .collect::<Vec<_>>(),
-        "secondaryLoyaltyPoints": {
-            "label": "Reward",
-            "balance": { "string": headline }
-        }
-    });
+    let rewards = super::reward_lines(pool, member.org_id).await;
+    // The whole card, through the same builder the save path uses, and PUT
+    // rather than PATCH — for both of the reasons `ensure_object` gives. One
+    // writer and one shape: a card that changed on a sale and a card that
+    // changed on a save cannot end up different objects.
+    let body = loyalty_object(&issuer, member, &settings, &locations, &rewards, &headline);
     let http = reqwest::Client::new();
     let resp = http
-        .patch(format!("{WALLET_API}/loyaltyObject/{object_id}"))
+        .put(format!("{WALLET_API}/loyaltyObject/{object_id}"))
         .bearer_auth(&token)
         .json(&body)
         .send()
         .await
-        .map_err(|e| AppError::ServiceUnavailable(format!("Google Wallet PATCH: {e}")))?;
+        .map_err(|e| AppError::ServiceUnavailable(format!("Google Wallet PUT: {e}")))?;
     if !resp.status().is_success() {
         return Err(google_error("updating the loyalty object", resp).await);
     }
-    let _ = issuer;
+    // A put replaces the resource, so the photograph goes back on after it.
+    if let Ok(brand) = crate::orgs::branding::load(pool, member.org_id).await {
+        decorate(&token, &object_id, member.org_id, &brand).await;
+    }
     Ok(())
 }
 

@@ -801,7 +801,11 @@ async fn the_whole_floor_scope_is_reachable(pool: PgPool) {
         serde_json::json!({ "branch_id": branch, "table_a": table, "table_b": table })
     );
     assert_ne!(r.status(), 404, "/floor/tables/swap");
-    assert_ne!(r.status(), 405, "/floor/tables/swap: /tables/{{id}} swallowed it");
+    assert_ne!(
+        r.status(),
+        405,
+        "/floor/tables/swap: /tables/{{id}} swallowed it"
+    );
 }
 
 /// Bussing a table is the one floor transition a server cannot observe, and it

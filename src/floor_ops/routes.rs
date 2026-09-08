@@ -28,7 +28,10 @@ pub fn register(cfg: &mut web::ServiceConfig) {
         // The one human act status cannot derive: "the plates are gone".
         .route("/tables/{id}/clear", web::post().to(handlers::clear_table))
         .route("/transfers", web::get().to(handlers::list_floor_transfers))
-        .route("/transfers", web::post().to(handlers::create_floor_transfer))
+        .route(
+            "/transfers",
+            web::post().to(handlers::create_floor_transfer),
+        )
         .route(
             "/transfers/{id}/cancel",
             web::post().to(handlers::cancel_transfer),

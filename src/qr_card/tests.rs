@@ -847,7 +847,10 @@ mod http {
     async fn booking_qr_points_at_the_reservations_app(pool: PgPool) {
         // Safety: test process is single-threaded at this point.
         unsafe {
-            std::env::set_var("PUBLIC_RESERVATIONS_BASE_URL", "https://reservations.example.com")
+            std::env::set_var(
+                "PUBLIC_RESERVATIONS_BASE_URL",
+                "https://reservations.example.com",
+            )
         };
         let org_id = seed_org(&pool).await;
         let branch_id = seed_branch(&pool, org_id).await;
@@ -887,7 +890,10 @@ mod http {
         assert_eq!(resp.status(), 200);
         let qr: QrResponse = test::read_body_json(resp).await;
         assert_eq!(qr.kind, "org_booking");
-        assert_eq!(qr.long_url, format!("https://reservations.example.com/{org_id}"));
+        assert_eq!(
+            qr.long_url,
+            format!("https://reservations.example.com/{org_id}")
+        );
     }
 
     /// A card leading to "we don't take bookings" is worse than no card, and a
@@ -897,7 +903,10 @@ mod http {
     async fn booking_qr_refuses_a_branch_with_bookings_off(pool: PgPool) {
         // Safety: test process is single-threaded at this point.
         unsafe {
-            std::env::set_var("PUBLIC_RESERVATIONS_BASE_URL", "https://reservations.example.com")
+            std::env::set_var(
+                "PUBLIC_RESERVATIONS_BASE_URL",
+                "https://reservations.example.com",
+            )
         };
         let org_id = seed_org(&pool).await;
         let branch_id = seed_branch(&pool, org_id).await;
@@ -922,5 +931,4 @@ mod http {
             assert_eq!(resp.status(), 409, "{uri} with bookings off");
         }
     }
-
 }
