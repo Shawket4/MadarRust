@@ -122,6 +122,43 @@ pub async fn brand_logo() -> HttpResponse {
         .body(LOGO)
 }
 
+/// The member's stepper, drawn — for Google, which shows a card's progress as a
+/// fetched banner rather than as text it can lay out.
+///
+/// Public and unauthenticated because GOOGLE fetches it, from its own servers,
+/// on a schedule we do not control. It reveals nothing the card page behind the
+/// same token does not already show, and it renders the balance as it is now —
+/// the `v` in the URL is a cache key, not an input.
+pub async fn card_steps(
+    pool: web::Data<PgPool>,
+    token: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    let member = model::find_by_token(pool.get_ref(), token.trim())
+        .await?
+        .ok_or_else(|| AppError::NotFound("No card for that link".into()))?;
+    let settings = super::settings::load_scope(pool.get_ref(), member.org_id, None)
+        .await?
+        .unwrap_or_else(|| super::settings::LoyaltySettings::defaults(member.org_id, None));
+    let brand = crate::orgs::branding::load(pool.get_ref(), member.org_id).await?;
+    let mode = settings.mode();
+    let png = super::wallet::stepper::render(
+        member.balance_in(mode),
+        settings.default_reward_cost,
+        1032,
+        336,
+        &brand.palette.foreground,
+        &brand.palette.accent,
+        &brand.palette.background,
+    )
+    .ok_or_else(|| AppError::NotFound("This program has no steps to draw".into()))?;
+    Ok(HttpResponse::Ok()
+        .content_type("image/png")
+        // Cached hard against the `v` in the URL, which changes with the
+        // balance — so a stale banner is impossible and a fetch is rare.
+        .insert_header(("Cache-Control", "public, max-age=31536000, immutable"))
+        .body(png))
+}
+
 /// A reward as the signup page lists it: what it is, and what it costs.
 #[derive(Serialize, ToSchema)]
 pub struct PublicReward {

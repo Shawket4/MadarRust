@@ -63,6 +63,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route(web::get().to(public::card)),
         )
         .service(
+            web::resource("/public/loyalty/card/{token}/steps.png")
+                .wrap(Condition::new(limited, Governor::new(&browse_gov)))
+                .route(web::get().to(public::card_steps)),
+        )
+        .service(
             web::resource("/public/loyalty/card/{token}/qr.png")
                 .wrap(Condition::new(limited, Governor::new(&browse_gov)))
                 .route(web::get().to(public::card_qr)),

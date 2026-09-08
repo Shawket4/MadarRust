@@ -15,6 +15,7 @@
 pub mod apns;
 pub mod apple;
 pub mod google;
+pub mod stepper;
 pub mod web_service;
 
 use serde::Serialize;

@@ -140,7 +140,7 @@ pub fn loyalty_object(
     let program = settings.program_name.clone();
     let mode = settings.mode();
     let balance = member.balance_in(mode);
-    json!({
+    let mut obj = json!({
         "id": object_id(issuer, member),
         "classId": class_id(issuer, member.org_id),
         "state": "ACTIVE",
@@ -174,7 +174,32 @@ pub fn loyalty_object(
                 "longitude": l.longitude,
             }))
             .collect::<Vec<_>>(),
-    })
+    });
+    if let Some(uri) = steps_image_url(member, settings) {
+        obj["heroImage"] = json!({ "sourceUri": { "uri": uri } });
+    }
+    obj
+}
+
+/// The banner Google fetches for this member's progress.
+///
+/// Google lays out text; it does not draw a stepper. So the stepper is drawn
+/// here and handed over as a picture, the same one the Apple pass carries on
+/// its strip and the web card draws in the browser — one shape, three surfaces.
+///
+/// The balance rides in the URL because Google caches by URI: without it, a
+/// customer's banner would freeze at whatever it showed the first time Google
+/// fetched it and never move again.
+pub fn steps_image_url(member: &MemberRow, settings: &LoyaltySettings) -> Option<String> {
+    let mode = settings.mode();
+    if !super::stepper::drawable(settings.default_reward_cost) {
+        return None;
+    }
+    super::absolute_api_url(&format!(
+        "/public/loyalty/card/{}/steps.png?v={}",
+        member.member_token,
+        member.balance_in(mode)
+    ))
 }
 
 /// The stepper, drawn in text, when the target is small enough to read as one.
@@ -209,6 +234,17 @@ pub fn stepper(balance: i32, threshold: i32) -> Option<String> {
         out.push_str(step(i));
     }
     Some(out)
+}
+
+/// The bare figures, for a card whose progress is DRAWN above them.
+///
+/// "3 / 5" — the fact, with nothing describing it, because the picture directly
+/// above already says what it means.
+pub fn figures_only(balance: i32, threshold: i32) -> String {
+    if threshold > 0 && balance >= threshold {
+        return "Reward earned — ask at the counter".to_string();
+    }
+    format!("{balance} / {threshold}")
 }
 
 /// "30 / 100 to your next reward", or the earned line once it is reached. A
@@ -443,7 +479,7 @@ pub async fn push_balance(pool: &PgPool, member: &MemberRow) -> Result<(), AppEr
     let token = access_token().await?;
     let mode = settings.mode();
     let balance = member.balance_in(mode);
-    let body = json!({
+    let mut body = json!({
         "loyaltyPoints": {
             "label": balance_label(mode),
             "balance": { "int": balance }
@@ -454,6 +490,11 @@ pub async fn push_balance(pool: &PgPool, member: &MemberRow) -> Result<(), AppEr
             "id": "progress"
         }]
     });
+    // The banner too: its URL carries the balance, so leaving it out here would
+    // freeze a customer's stepper at the figure it held when they saved the card.
+    if let Some(uri) = steps_image_url(member, &settings) {
+        body["heroImage"] = json!({ "sourceUri": { "uri": uri } });
+    }
     let resp = reqwest::Client::new()
         .patch(format!("{WALLET_API}/loyaltyObject/{object_id}"))
         .bearer_auth(token)
@@ -620,6 +661,50 @@ mod tests {
             progress_line(130, 100),
             "Reward earned — ask at the counter"
         );
+    }
+
+    #[test]
+    fn the_card_carries_a_drawn_stepper_whose_url_moves_with_the_balance() {
+        let _guard = super::super::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // SAFETY: the lock makes this the only thread touching the environment.
+        unsafe {
+            std::env::set_var("PUBLIC_LOYALTY_BASE_URL", "https://loyalty.madar-pos.cloud");
+        }
+        let mut s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
+        s.mode = "visits".into();
+        s.default_reward_cost = 5;
+        let mut m = super::super::apple::tests::member();
+
+        let obj = loyalty_object("338", &m, &s, &[]);
+        assert_eq!(
+            obj["heroImage"]["sourceUri"]["uri"],
+            "https://loyalty.madar-pos.cloud/api/public/loyalty/card/Mabcdefghijklmnopqrstuv/steps.png?v=3"
+        );
+
+        // Google caches by URI. Without the balance in it, a customer's banner
+        // would freeze at the figure it held when the card was first saved.
+        m.visits_balance = 4;
+        let moved = loyalty_object("338", &m, &s, &[]);
+        assert_ne!(obj["heroImage"], moved["heroImage"]);
+        assert!(
+            moved["heroImage"]["sourceUri"]["uri"]
+                .as_str()
+                .unwrap()
+                .ends_with("v=4")
+        );
+
+        // A points programme has nothing countable to draw, so no banner.
+        let points = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
+        assert!(
+            loyalty_object("338", &m, &points, &[])
+                .get("heroImage")
+                .is_none()
+        );
+        unsafe {
+            std::env::remove_var("PUBLIC_LOYALTY_BASE_URL");
+        }
     }
 
     #[test]
