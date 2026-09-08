@@ -15557,6 +15557,105 @@
         ]
       }
     },
+    "/loyalty/members/{id}/google-object": {
+      "get": {
+        "tags": [
+          "loyalty"
+        ],
+        "summary": "What Google is actually holding for one member's card. **Super admin only.**",
+        "description": "The nearby-notification question has been answered three times by reasoning\nand never by looking: either the `locations` are on the object Google holds\nand the gap is in what Google does with them, or they never arrived and the\ngap is ours. Both stories fit every symptom from the outside; only the object\nseparates them. This returns it verbatim, unsummarised, because a summary\nwould be one more layer of my guessing between the evidence and the reader.\n\nSuper admin for the same reason as `wallet_status`: it is Madar's plumbing,\nnamed in Google's vocabulary, and there is nothing an org manager could do\nwith it.",
+        "operationId": "get_loyalty_google_object",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Loyalty member id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoogleObjectDump"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/loyalty/reward-items": {
       "get": {
         "tags": [
@@ -49633,6 +49732,40 @@
             ],
             "format": "int64",
             "description": "Piastres per base stock unit (actual)."
+          }
+        }
+      },
+      "GoogleObjectDump": {
+        "type": "object",
+        "description": "The card Google holds, plus the two counts that make it readable at a glance.",
+        "required": [
+          "expected_locations",
+          "stored_locations"
+        ],
+        "properties": {
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why there is no object, in Google's words."
+          },
+          "expected_locations": {
+            "type": "integer",
+            "description": "Branches this member's card should be pinned to, from our own side.",
+            "minimum": 0
+          },
+          "object": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Google's object, untouched. `None` when the read itself failed."
+          },
+          "stored_locations": {
+            "type": "integer",
+            "description": "Branches Google says are on it. A gap between the two is the answer.",
+            "minimum": 0
           }
         }
       },

@@ -591,6 +591,38 @@ async fn decorate(token: &str, id: &str, org_id: uuid::Uuid, brand: &OrgBrand) {
     }
 }
 
+/// What Google is actually holding for this member, verbatim.
+///
+/// Every question about this feature so far has been answered by guessing, and
+/// twice by guessing wrong. The object is the fact: either the locations are on
+/// it and the problem is what Google does with them, or they are not and the
+/// problem is ours. One request settles which.
+///
+/// Returns Google's own response body on failure rather than a status code —
+/// the reason for a refusal is only ever in the body.
+pub async fn read_object(member: &MemberRow) -> Result<serde_json::Value, String> {
+    let Some(issuer) = issuer_id() else {
+        return Err("LOYALTY_GOOGLE_ISSUER_ID is not set".into());
+    };
+    let id = member
+        .google_object_id
+        .clone()
+        .unwrap_or_else(|| object_id(&issuer, member));
+    let token = access_token().await.map_err(|e| e.to_string())?;
+    let resp = reqwest::Client::new()
+        .get(format!("{WALLET_API}/loyaltyObject/{id}"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| format!("Could not reach Google: {e}"))?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("Google returned {status}: {}", first_reason(&body)));
+    }
+    serde_json::from_str(&body).map_err(|e| format!("Google sent something unreadable: {e}"))
+}
+
 /// Google's own words for why it refused, in the log.
 ///
 /// Worth the round trip: the alternative is a status code, and every failure

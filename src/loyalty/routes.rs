@@ -46,7 +46,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 // Makes live calls to Google, so it is asked for, never polled.
                 .route("/wallet-status", web::get().to(handlers::wallet_status))
                 .route("/members", web::get().to(handlers::list_members))
-                .route("/members/{id}", web::get().to(handlers::get_member)),
+                .route("/members/{id}", web::get().to(handlers::get_member))
+                // Also a live call to Google, and also super-admin only.
+                .route(
+                    "/members/{id}/google-object",
+                    web::get().to(handlers::google_object),
+                ),
         )
         // ── Public: the counter QR's signup form and the customer's card ──
         .service(

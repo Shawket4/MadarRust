@@ -233,6 +233,79 @@ pub async fn wallet_status(
     }))
 }
 
+/// What Google is actually holding for one member's card. **Super admin only.**
+///
+/// The nearby-notification question has been answered three times by reasoning
+/// and never by looking: either the `locations` are on the object Google holds
+/// and the gap is in what Google does with them, or they never arrived and the
+/// gap is ours. Both stories fit every symptom from the outside; only the object
+/// separates them. This returns it verbatim, unsummarised, because a summary
+/// would be one more layer of my guessing between the evidence and the reader.
+///
+/// Super admin for the same reason as `wallet_status`: it is Madar's plumbing,
+/// named in Google's vocabulary, and there is nothing an org manager could do
+/// with it.
+#[utoipa::path(get, path = "/loyalty/members/{id}/google-object", tag = "loyalty",
+    operation_id = "get_loyalty_google_object",
+    params(("id" = Uuid, Path, description = "Loyalty member id")),
+    responses((status = 200, body = GoogleObjectDump), AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn google_object(
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
+    id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "loyalty", "update").await?;
+    require_super_admin(&claims)?;
+    let member = model::find_by_id(pool.get_ref(), *id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Member not found".into()))?;
+
+    // What we BELIEVE we sent, computed the same way the writer computes it. If
+    // this is empty the object was always going to be location-less and Google
+    // is not the suspect.
+    let expected = wallet::locations_for_member(pool.get_ref(), &member)
+        .await
+        .unwrap_or_default()
+        .len();
+
+    match wallet::google::read_object(&member).await {
+        Ok(object) => {
+            let stored = object
+                .get("locations")
+                .and_then(|l| l.as_array())
+                .map_or(0, |a| a.len());
+            Ok(HttpResponse::Ok().json(GoogleObjectDump {
+                expected_locations: expected,
+                stored_locations: stored,
+                object: Some(object),
+                error: None,
+            }))
+        }
+        Err(e) => Ok(HttpResponse::Ok().json(GoogleObjectDump {
+            expected_locations: expected,
+            stored_locations: 0,
+            object: None,
+            error: Some(e),
+        })),
+    }
+}
+
+/// The card Google holds, plus the two counts that make it readable at a glance.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GoogleObjectDump {
+    /// Branches this member's card should be pinned to, from our own side.
+    pub expected_locations: usize,
+    /// Branches Google says are on it. A gap between the two is the answer.
+    pub stored_locations: usize,
+    /// Google's object, untouched. `None` when the read itself failed.
+    #[schema(value_type = Option<Object>)]
+    pub object: Option<serde_json::Value>,
+    /// Why there is no object, in Google's words.
+    pub error: Option<String>,
+}
+
 /// The member a lookup names, checked against the branch's org.
 ///
 /// A token is globally unique and carries no org of its own, so a member from
