@@ -95,7 +95,7 @@ pub fn missing_env() -> Vec<String> {
 /// Two questions, in the order they fail: can the service account get a token
 /// at all, and will Google let it read this org's class? Anything else that
 /// goes wrong at save time is downstream of these two.
-pub async fn check(org_id: uuid::Uuid) -> Result<String, String> {
+pub async fn check(org_id: Option<uuid::Uuid>) -> Result<String, String> {
     let Some(issuer) = issuer_id() else {
         return Err("LOYALTY_GOOGLE_ISSUER_ID is not set".into());
     };
@@ -107,6 +107,17 @@ pub async fn check(org_id: uuid::Uuid) -> Result<String, String> {
     let token = access_token()
         .await
         .map_err(|e| format!("The service account could not get a token from Google. {e}"))?;
+    // Everything above is Madar's, and the same answer for every shop on the
+    // box: the keys, the issuer, the service account. Only what follows is
+    // per-shop, because a card class belongs to one. Refusing the whole check
+    // for want of an org gated three answers on the one that was optional.
+    let Some(org_id) = org_id else {
+        return Ok(
+            "Ready. The service account can talk to Google. Pick a shop to check \
+             its card class."
+                .into(),
+        );
+    };
     let id = class_id(&issuer, org_id);
     let resp = reqwest::Client::new()
         .get(format!("{WALLET_API}/loyaltyClass/{id}"))

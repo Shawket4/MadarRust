@@ -188,19 +188,21 @@ pub async fn wallet_status(
     // "LOYALTY_GOOGLE_SA_KEY_FILE is not set" tells them nothing they can act
     // on and everything about plumbing they never asked to know.
     require_super_admin(&claims)?;
+    // Optional, and that is the point. Three of the four things reported here
+    // are pure environment — Apple's signing keys, the APNs keys, Google's
+    // service account — and are the same answer for every shop on the box.
+    // Only the card class belongs to one org. Requiring one up front gated the
+    // whole panel on its one optional line, which is how a super admin with no
+    // org pinned got a 400 instead of an answer.
+    //
+    // A super admin's token carries no org of its own; the dashboard pins one
+    // with `X-Org-Id`, which is what `scope_org` reads.
     let org_id = match query.branch_id {
         Some(b) => {
             require_branch_access(pool.get_ref(), &claims, b).await?;
-            resolve_branch_org(pool.get_ref(), b).await?
+            Some(resolve_branch_org(pool.get_ref(), b).await?)
         }
-        // A super admin's token carries no org of its own — the dashboard pins
-        // one with `X-Org-Id`. Reading only the token meant the one role
-        // allowed to open this panel was the one role it always refused.
-        None => claims
-            .scope_org(crate::auth::middleware::header_org_id(&req))
-            .ok_or_else(|| {
-                AppError::BadRequest("Pick an organisation to check its wallets".into())
-            })?,
+        None => claims.scope_org(crate::auth::middleware::header_org_id(&req)),
     };
 
     let apple_missing = wallet::apple::missing_env();
