@@ -77,13 +77,33 @@ pub struct PassBrand {
     pub images: Vec<(String, Vec<u8>)>,
 }
 
-/// How near a branch the card starts surfacing on the lock screen.
+/// How near a branch the card starts surfacing on the lock screen, in metres.
 ///
 /// This is the whole proximity feature: neither wallet can send a push when a
 /// customer is nearby — the phone does it locally, from the coordinates baked
-/// into the pass, and no server is involved or told. The only lever we have is
-/// how wide the circle is.
-const PROXIMITY_METERS: u32 = 150;
+/// into the pass, and no server is involved or told. How wide the circle is, is
+/// the only lever there is.
+///
+/// It is a setting because the right answer is a property of the SHOP, not of
+/// this code: a kiosk on a busy street wants a tighter circle than a unit in a
+/// mall you approach across a car park, and finding out means walking around
+/// with a phone. `LOYALTY_PROXIMITY_METERS` overrides it without a deploy.
+///
+/// Wider is not automatically better. A card that surfaces while someone drives
+/// past is noise, and a customer who deletes the pass over it is not coming
+/// back to it.
+const DEFAULT_PROXIMITY_METERS: u32 = 500;
+
+fn proximity_meters() -> u32 {
+    std::env::var("LOYALTY_PROXIMITY_METERS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        // Zero would be a circle nobody can be inside — a typo that silently
+        // switches the feature off. Anything unparseable or absurd falls back
+        // rather than shipping into every pass in the estate.
+        .filter(|m| (1..=100_000).contains(m))
+        .unwrap_or(DEFAULT_PROXIMITY_METERS)
+}
 
 /// Apple's strip sizes for a store card, at 1×/2×/3×.
 ///
@@ -499,7 +519,7 @@ pub fn pass_json(
                     // card and not is showing it while they are still down the
                     // street. Not larger: a card that surfaces while someone
                     // drives past is noise, and noise gets passes deleted.
-                    "maxDistance": PROXIMITY_METERS,
+                    "maxDistance": proximity_meters(),
                     "relevantText": format!("{program} — you're near {}", l.name)
                 }))
                 .collect::<Vec<_>>()
@@ -1044,6 +1064,39 @@ pub(crate) mod tests {
         // The member id must never be the scannable value — it is guessable
         // from any other API response that carries one.
         assert_ne!(p["barcodes"][0]["message"], uuid::Uuid::nil().to_string());
+    }
+
+    #[test]
+    fn the_proximity_radius_is_a_setting_with_a_sane_default() {
+        let _guard = env_guard();
+        // SAFETY: the guard makes this the only thread touching the environment.
+        unsafe {
+            std::env::remove_var("LOYALTY_PROXIMITY_METERS");
+        }
+        assert_eq!(proximity_meters(), 500, "the default a shop gets untouched");
+
+        unsafe {
+            std::env::set_var("LOYALTY_PROXIMITY_METERS", "150");
+        }
+        assert_eq!(proximity_meters(), 150);
+
+        // A typo must not ship into every pass in the estate. Zero especially:
+        // a circle nobody can stand inside switches the feature off silently.
+        for bad in ["0", "-40", "abc", "", "  ", "99999999"] {
+            unsafe {
+                std::env::set_var("LOYALTY_PROXIMITY_METERS", bad);
+            }
+            assert_eq!(proximity_meters(), 500, "{bad:?} should fall back");
+        }
+
+        // Whitespace around a real number is an operator, not a mistake.
+        unsafe {
+            std::env::set_var("LOYALTY_PROXIMITY_METERS", " 250 ");
+        }
+        assert_eq!(proximity_meters(), 250);
+        unsafe {
+            std::env::remove_var("LOYALTY_PROXIMITY_METERS");
+        }
     }
 
     #[test]
