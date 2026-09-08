@@ -394,7 +394,17 @@ pub async fn update_branch(
                                       WHEN $15 THEN $16
                                       ELSE longitude
                                     END,
-                geo_radius_meters = COALESCE($17, geo_radius_meters)
+                geo_radius_meters = COALESCE($17, geo_radius_meters),
+                -- Editing a branch has to MOVE this, and it did not.
+                --
+                -- The loyalty pass refresh decides a card is stale by comparing
+                -- a member's pass against the newest branch change in their
+                -- org. With this frozen at creation, adding coordinates to an
+                -- existing branch — the commonest edit there is, since a branch
+                -- is opened first and located afterwards — told the sweep
+                -- nothing had happened, and every card in people's wallets kept
+                -- a branch list that could never surface the new shop.
+                updated_at        = NOW()
             WHERE id = $1 AND deleted_at IS NULL
             RETURNING id, org_id, code, name, address, phone, timezone,
                       printer_brand, printer_ip, printer_port,

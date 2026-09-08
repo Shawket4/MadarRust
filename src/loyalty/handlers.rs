@@ -17,6 +17,7 @@ use super::settings::{
     LoyaltySettings, RewardItem, ScopeQuery, load_effective, load_effective_rewards,
 };
 use super::{resolve_branch_org, wallet};
+use crate::auth::guards::require_super_admin;
 use crate::delivery::{normalize_phone, require_branch_access};
 use crate::errors::{AppError, AppErrorResponse};
 use crate::models::UserRole;
@@ -160,7 +161,7 @@ pub struct WalletStatus {
     pub apns: WalletProvider,
 }
 
-/// Why there is no "Add to Wallet" button.
+/// Why there is no "Add to Wallet" button. **Super admin only.**
 ///
 /// Every failure in this feature has looked the same from the outside — a
 /// missing button, or a save that says "something went wrong" — while the cause
@@ -181,11 +182,12 @@ pub async fn wallet_status(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "loyalty", "update").await?;
-    if !matches!(claims.role, UserRole::OrgAdmin | UserRole::SuperAdmin) {
-        return Err(AppError::Forbidden(
-            "Only an admin may inspect the wallet configuration".into(),
-        ));
-    }
+    // Super admin ONLY, and not because it is dangerous — because it is not the
+    // shop's business. It names Madar's environment variables and reports what
+    // Apple and Google said about our service accounts. Handing an org manager
+    // "LOYALTY_GOOGLE_SA_KEY_FILE is not set" tells them nothing they can act
+    // on and everything about plumbing they never asked to know.
+    require_super_admin(&claims)?;
     let org_id = match query.branch_id {
         Some(b) => {
             require_branch_access(pool.get_ref(), &claims, b).await?;

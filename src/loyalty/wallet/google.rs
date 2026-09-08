@@ -202,18 +202,25 @@ pub fn loyalty_class(
     });
     // REQUIRED by Google, and the cause of "Something went wrong" on a save
     // that still routed to the app: a loyalty class without a `programLogo` is
-    // rejected, and a shop with no logo produced exactly that. Madar's own mark
-    // stands in, so a class is always valid.
+    // rejected, and a shop with no logo produced exactly that.
     //
-    // Absolute, because Google fetches this from its own servers — a
-    // site-relative path resolves against nothing there.
+    // Composed for Google's slot rather than handed the raw upload. Google
+    // masks this to a CIRCLE, so a wide wordmark loses its ends and a
+    // transparent mark gets whatever backing Google chooses — which is how a
+    // shop's logo came to read as a pale sticker on its own card. Madar's own
+    // mark stands in for a shop that has none, so a class is always valid.
     let logo = brand
         .logo_url
         .as_deref()
-        .filter(|s| s.starts_with("http://") || s.starts_with("https://"))
-        .map(|s| s.to_string())
-        .or_else(|| super::absolute_api_url(MADAR_LOGO_PATH));
-    if let Some(uri) = logo {
+        .map(|u| {
+            format!(
+                "/public/loyalty/brand/{}/logo/{}.png",
+                org_id,
+                crate::orgs::branding::asset_key(u)
+            )
+        })
+        .unwrap_or_else(|| MADAR_LOGO_PATH.to_string());
+    if let Some(uri) = super::absolute_api_url(&logo) {
         class["programLogo"] = json!({ "sourceUri": { "uri": uri } });
     }
     class
@@ -221,7 +228,7 @@ pub fn loyalty_class(
 
 /// The loyalty object as Google models it.
 ///
-/// `loyaltyPoints.balance.int` is the number the customer sees on the pass, and
+/// `loyaltyPoints` is how far along, in the slot Google renders largest, and
 /// `accountId` is the member token — so the barcode and the account agree, and
 /// a scan resolves the same member whichever wallet produced it.
 pub fn loyalty_object(
@@ -230,8 +237,8 @@ pub fn loyalty_object(
     settings: &LoyaltySettings,
     locations: &[super::PassLocation],
     rewards: &[String],
+    headline: &str,
 ) -> serde_json::Value {
-    let program = settings.program_name.clone();
     let mode = settings.mode();
     let balance = member.balance_in(mode);
     json!({
@@ -246,13 +253,14 @@ pub fn loyalty_object(
         // scroll past the card to find out how close they were.
         "loyaltyPoints": {
             "label": balance_label(mode),
-            "balance": { "int": balance }
-        },
-        "secondaryLoyaltyPoints": {
-            "label": program,
-            // A string, not an int: "3 / 5" is the whole point, and the int
-            // field would only carry one of the two numbers.
             "balance": { "string": progress_line(balance, settings.default_reward_cost) }
+        },
+        // What they are working towards, not how far along they are — the
+        // figures are already in the slot above. "Get a free drink" is the
+        // thing a customer opens the card to be reminded of.
+        "secondaryLoyaltyPoints": {
+            "label": "Reward",
+            "balance": { "string": headline }
         },
         "barcode": {
             "type": "QR_CODE",
@@ -275,8 +283,13 @@ pub fn loyalty_object(
         // rather than behind it, which is the same content in the same order —
         // built by `wallet::back_of_card`, once, so the two cannot drift into
         // telling a customer different things about one programme.
+        // Google renders `accountName` and `accountId` as rows of its own, so
+        // the shared "Member" line would appear a third time — and it carries a
+        // phone number, which is the last thing to print twice. Apple keeps it:
+        // it has no automatic equivalent.
         "textModulesData": super::back_of_card(member, settings, locations, rewards)
             .into_iter()
+            .filter(|l| l.key != "member")
             .map(|l| json!({ "id": l.key, "header": l.label, "body": l.value }))
             .collect::<Vec<_>>(),
     })
@@ -289,11 +302,13 @@ pub fn loyalty_object(
 /// it: Google validates an image when it accepts a resource, and an image it
 /// dislikes would fail the whole insert — which is a decoration taking down the
 /// card it decorates. That already happened once.
-pub fn hero_image(brand: &OrgBrand) -> Option<serde_json::Value> {
-    let uri = brand
-        .card_image_url
-        .as_deref()
-        .filter(|s| s.starts_with("http://") || s.starts_with("https://"))?;
+pub fn hero_image(org_id: uuid::Uuid, brand: &OrgBrand) -> Option<serde_json::Value> {
+    let url = brand.card_image_url.as_deref()?;
+    let uri = super::absolute_api_url(&format!(
+        "/public/loyalty/brand/{}/banner/{}.png",
+        org_id,
+        crate::orgs::branding::asset_key(url)
+    ))?;
     Some(json!({ "sourceUri": { "uri": uri } }))
 }
 
@@ -340,13 +355,18 @@ pub fn stepper(balance: i32, threshold: i32) -> Option<String> {
 /// and a font that substitutes a glyph must still leave a readable card.
 pub fn progress_line(balance: i32, threshold: i32) -> String {
     if threshold > 0 && balance >= threshold {
-        return "Reward earned — ask at the counter".to_string();
+        // Short, because this shares a row with the reward's name. The full
+        // stepper is filled anyway, which says the same thing in pictures.
+        return "Reward earned".to_string();
     }
     match stepper(balance, threshold) {
-        Some(steps) => format!("{steps}   {balance} / {threshold}"),
-        // The fallback for a programme too big to draw: the bare ratio. The
-        // field's label already says which programme it is, so a sentence here
-        // only costs width the figures need.
+        // The steps ALONE. Printing "3 / 5" beside three filled circles and two
+        // empty ones says the same thing twice, in a field whose width is the
+        // scarce thing — and the doubling is most of what made the line look
+        // cramped.
+        Some(steps) => steps,
+        // Only where there are no steps to show: past the countable cap the
+        // figures are all there is, and they are enough.
         None => format!("{balance} / {threshold}"),
     }
 }
@@ -389,6 +409,7 @@ pub async fn save_url(
     brand: &OrgBrand,
     locations: &[super::PassLocation],
     rewards: &[String],
+    headline: &str,
 ) -> Result<Option<String>, AppError> {
     let (Some(issuer), Some(email), Some(key)) = (issuer_id(), sa_email(), sa_key()) else {
         // Silence here is how "no Add to Google Wallet button" came to look
@@ -412,8 +433,10 @@ pub async fn save_url(
     // two requests on a page a customer opens rarely.
     let token = access_token().await?;
     ensure_class(&token, &issuer, member.org_id, brand, settings).await?;
-    let object_id =
-        ensure_object(&token, &issuer, member, settings, locations, rewards, brand).await?;
+    let object_id = ensure_object(
+        &token, &issuer, member, settings, locations, rewards, headline, brand,
+    )
+    .await?;
     if member.google_object_id.as_deref() != Some(object_id.as_str()) {
         // Recorded so `push_balance` has something to PATCH — it reads this
         // column, which nothing used to write, so no Google pass ever saw a
@@ -497,6 +520,7 @@ async fn ensure_object(
     settings: &LoyaltySettings,
     locations: &[super::PassLocation],
     rewards: &[String],
+    headline: &str,
     brand: &OrgBrand,
 ) -> Result<String, AppError> {
     let id = object_id(issuer, member);
@@ -504,13 +528,13 @@ async fn ensure_object(
         .post(format!("{WALLET_API}/loyaltyObject"))
         .bearer_auth(token)
         .json(&loyalty_object(
-            issuer, member, settings, locations, rewards,
+            issuer, member, settings, locations, rewards, headline,
         ))
         .send()
         .await
         .map_err(|e| AppError::ServiceUnavailable(format!("Google Wallet object: {e}")))?;
     if resp.status().is_success() {
-        decorate(token, &id, brand).await;
+        decorate(token, &id, member.org_id, brand).await;
         return Ok(id);
     }
     if resp.status() != reqwest::StatusCode::CONFLICT {
@@ -526,13 +550,13 @@ async fn ensure_object(
         .patch(format!("{WALLET_API}/loyaltyObject/{id}"))
         .bearer_auth(token)
         .json(&loyalty_object(
-            issuer, member, settings, locations, rewards,
+            issuer, member, settings, locations, rewards, headline,
         ))
         .send()
         .await
         .map_err(|e| AppError::ServiceUnavailable(format!("Google Wallet object: {e}")))?;
     if resp.status().is_success() {
-        decorate(token, &id, brand).await;
+        decorate(token, &id, member.org_id, brand).await;
         return Ok(id);
     }
     Err(google_error("updating the loyalty object", resp).await)
@@ -543,8 +567,8 @@ async fn ensure_object(
 /// Best effort by construction: it returns nothing, so no caller can make a
 /// customer's card depend on it. An image Google will not take costs the band
 /// and nothing else.
-async fn decorate(token: &str, id: &str, brand: &OrgBrand) {
-    let Some(hero) = hero_image(brand) else {
+async fn decorate(token: &str, id: &str, org_id: uuid::Uuid, brand: &OrgBrand) {
+    let Some(hero) = hero_image(org_id, brand) else {
         return;
     };
     let resp = reqwest::Client::new()
@@ -693,10 +717,14 @@ pub async fn push_balance(pool: &PgPool, member: &MemberRow) -> Result<(), AppEr
     let locations = super::locations_for_member(pool, member)
         .await
         .unwrap_or_default();
+    let headline = super::reward_headline(pool, member.org_id, &settings).await;
     let body = json!({
+        // Exactly the shape the object was created with. Patching a different
+        // one would change what the card looks like on the customer's first
+        // sale, which is a strange moment for a card to rearrange itself.
         "loyaltyPoints": {
             "label": balance_label(mode),
-            "balance": { "int": balance }
+            "balance": { "string": progress_line(balance, settings.default_reward_cost) }
         },
         "locations": locations
             .iter()
@@ -706,12 +734,9 @@ pub async fn push_balance(pool: &PgPool, member: &MemberRow) -> Result<(), AppEr
                 "longitude": l.longitude,
             }))
             .collect::<Vec<_>>(),
-        // The same two card-face fields the object was created with. Patching
-        // `textModulesData` here instead would leave a stale progress line
-        // under the card and a card face that never moved.
         "secondaryLoyaltyPoints": {
-            "label": settings.program_name,
-            "balance": { "string": progress_line(balance, settings.default_reward_cost) }
+            "label": "Reward",
+            "balance": { "string": headline }
         }
     });
     let http = reqwest::Client::new();
@@ -783,7 +808,7 @@ mod tests {
         // reason for the REST provisioning is checkable rather than folklore.
         let embedded = json!({
             "loyaltyClasses": [loyalty_class("3388000000022345678", uuid::Uuid::nil(), &brand, &s)],
-            "loyaltyObjects": [loyalty_object("3388000000022345678", &m, &s, &locs, &[])],
+            "loyaltyObjects": [loyalty_object("3388000000022345678", &m, &s, &locs, &[], "Free espresso")],
         });
         assert!(
             as_jwt(&embedded) > MAX_SAVE_JWT,
@@ -796,6 +821,13 @@ mod tests {
     /// like. Sent over REST before the first save, not embedded in the link.
     #[test]
     fn the_class_carries_the_shop_and_a_review_status_google_accepts() {
+        let _guard = super::super::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // SAFETY: the lock makes this the only thread touching the environment.
+        unsafe {
+            std::env::set_var("PUBLIC_LOYALTY_BASE_URL", "https://loyalty.madar-pos.cloud");
+        }
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
         let brand = OrgBrand {
             name: "RUE Coffee".into(),
@@ -820,18 +852,32 @@ mod tests {
         // `loyalty_settings`, which nothing writes any more, so the class went
         // out with no logo and no colour.
         assert_eq!(class["hexBackgroundColor"], "#7B1E3A");
+        unsafe {
+            std::env::remove_var("PUBLIC_LOYALTY_BASE_URL");
+        }
+        // Composed by us for Google's circular slot, not the raw upload —
+        // Google masks this to a circle, and a file made for a web page comes
+        // out as a pale sticker. The key in the path is the uploaded file's
+        // own name, so swapping the logo changes the URL and Google refetches.
         assert_eq!(
             class["programLogo"]["sourceUri"]["uri"],
-            "https://api.madar-pos.cloud/api/uploads/logos/rue.png"
+            format!(
+                "https://loyalty.madar-pos.cloud/api/public/loyalty/brand/{}/logo/rue.png",
+                uuid::Uuid::nil()
+            )
         );
     }
 
     #[test]
     fn google_is_never_pointed_at_a_relative_logo() {
         // Google FETCHES the logo from its own servers, so a site-relative path
-        // resolves against nothing — and a class with NO logo is rejected
+        // would resolve against nothing — and a class with NO logo is rejected
         // outright, which is what "something went wrong" on an otherwise
-        // working save link turned out to be. Madar's mark stands in.
+        // working save link turned out to be.
+        //
+        // Both are now impossible by construction: Google is handed OUR badge
+        // endpoint, which is absolute whatever the stored URL looks like, and a
+        // shop with no logo at all gets Madar's mark.
         let _guard = super::super::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -849,8 +895,23 @@ mod tests {
         let class = loyalty_class("338", uuid::Uuid::nil(), &brand, &s);
         assert_eq!(
             class["programLogo"]["sourceUri"]["uri"],
+            format!(
+                "https://loyalty.madar-pos.cloud/api/public/loyalty/brand/{}/logo/rue.png",
+                uuid::Uuid::nil()
+            ),
+            "a stored URL of any shape becomes our own absolute badge"
+        );
+
+        // A shop with no logo at all still gets one, or the class is refused.
+        let bare = OrgBrand {
+            name: "RUE".into(),
+            custom_branding: true,
+            ..OrgBrand::default()
+        };
+        assert_eq!(
+            loyalty_class("338", uuid::Uuid::nil(), &bare, &s)["programLogo"]["sourceUri"]["uri"],
             format!("https://loyalty.madar-pos.cloud/api{MADAR_LOGO_PATH}"),
-            "a relative logo falls back to Madar's, never to no logo at all"
+            "never no logo at all"
         );
         unsafe {
             std::env::remove_var("PUBLIC_LOYALTY_BASE_URL");
@@ -895,14 +956,23 @@ mod tests {
         let mut s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
         s.mode = "visits".into();
         s.default_reward_cost = 5;
-        let obj = loyalty_object("338", &super::super::apple::tests::member(), &s, &[], &[]);
+        let obj = loyalty_object(
+            "338",
+            &super::super::apple::tests::member(),
+            &s,
+            &[],
+            &[],
+            "Free espresso",
+        );
 
-        // `loyaltyPoints` and `secondaryLoyaltyPoints` render on the card face.
-        assert_eq!(obj["loyaltyPoints"]["balance"]["int"], 3);
+        // `loyaltyPoints` and `secondaryLoyaltyPoints` render on the card face:
+        // how far along in the larger slot, and what it is FOR in the other.
         assert_eq!(obj["loyaltyPoints"]["label"], "Orders");
+        assert_eq!(obj["loyaltyPoints"]["balance"]["string"], "●─●─●─○─○");
+        assert_eq!(obj["secondaryLoyaltyPoints"]["label"], "Reward");
         assert_eq!(
             obj["secondaryLoyaltyPoints"]["balance"]["string"],
-            "●─●─●─○─○   3 / 5"
+            "Free espresso"
         );
 
         // `textModulesData` does NOT render on the face — it is the list below
@@ -915,7 +985,10 @@ mod tests {
             .map(|m| m["header"].as_str().unwrap_or(""))
             .collect();
         assert!(headers.contains(&"How it works"), "{headers:?}");
-        assert!(headers.contains(&"Member"), "{headers:?}");
+        // NOT "Member": Google renders `accountName` and `accountId` as rows of
+        // its own, so the shared line would be a third copy — and it carries a
+        // phone number, which is the last thing to print twice.
+        assert!(!headers.contains(&"Member"), "{headers:?}");
 
         // What must NOT be down there is the progress. That is the whole
         // complaint: a customer opening their wallet saw a balance and had to
@@ -926,7 +999,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(
-            !bodies.contains('●') && !bodies.contains("3 / 5"),
+            !bodies.contains('●'),
             "the progress belongs on the card, not under it: {bodies}"
         );
     }
@@ -977,19 +1050,22 @@ mod tests {
     #[test]
     fn a_programme_too_big_to_draw_falls_back_to_the_bare_ratio() {
         // Counting a hundred dots is not quicker than reading the figures, and
-        // a sentence beside them only costs the width they need — the field's
-        // label already says which programme this is.
+        // the label already says which programme this is.
         assert_eq!(progress_line(30, 100), "30 / 100");
         assert_eq!(progress_line(7, 20), "7 / 20");
-        // And the figures never leave the small cards either.
-        assert_eq!(progress_line(3, 5), "●─●─●─○─○   3 / 5");
-        assert_eq!(progress_line(3, 8), "●●●○○○○○   3 / 8");
-        // Reaching the target is said in words, at every size.
-        assert_eq!(
-            progress_line(100, 100),
-            "Reward earned — ask at the counter"
-        );
-        assert_eq!(progress_line(5, 5), "Reward earned — ask at the counter");
+
+        // Where there ARE steps, the steps are the whole line. Printing "3 / 5"
+        // beside three filled circles and two empty ones says the same thing
+        // twice, in a field whose width is the scarce thing — and the doubling
+        // is most of what made the line look cramped.
+        assert_eq!(progress_line(3, 5), "●─●─●─○─○");
+        assert_eq!(progress_line(3, 8), "●●●○○○○○");
+
+        // Reaching the target is said in words, and kept short because it
+        // shares a row with the reward's name.
+        assert_eq!(progress_line(100, 100), "Reward earned");
+        assert_eq!(progress_line(5, 5), "Reward earned");
+        assert_eq!(progress_line(130, 100), "Reward earned");
     }
 
     #[test]

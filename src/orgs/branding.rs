@@ -400,6 +400,62 @@ pub fn read_logo(url: &str) -> Option<image::DynamicImage> {
     read_upload(url)
 }
 
+/// A cache key for an uploaded file, from its name.
+///
+/// Google caches an image by its URL and will not re-fetch one it has seen. A
+/// shop that swaps its logo would keep the old one on every card forever, so
+/// the URL has to change when the file does — and the upload already mints a
+/// fresh uuid per file, which is exactly that.
+pub fn asset_key(url: &str) -> String {
+    url.rsplit('/')
+        .next()
+        .and_then(|f| f.split('.').next())
+        .filter(|k| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        .unwrap_or("v1")
+        .to_string()
+}
+
+/// The shop's mark as a square, opaque badge.
+///
+/// Google masks a programme logo to a CIRCLE and we cannot change that — but we
+/// can decide what is inside it. Handed a raw upload it produces a pale sticker
+/// on a coloured card: a wide wordmark gets its ends cut off, and a transparent
+/// mark gets whatever backing Google chooses to put behind it.
+///
+/// So the badge is composed here instead: the shop's own ground, the mark
+/// tinted to read on it, centred inside the circle's safe area. Fully opaque,
+/// which sidesteps the question of what Google does with transparency.
+pub fn logo_badge(brand: &OrgBrand, size: u32) -> Option<image::DynamicImage> {
+    let logo = brand.logo_url.as_deref().and_then(read_upload)?;
+    let (br, bg, bb) = parse_hex(&brand.palette.background).unwrap_or((13, 98, 115));
+    let mut canvas = image::RgbaImage::from_pixel(size, size, image::Rgba([br, bg, bb, 255]));
+
+    // A circle's inscribed square is about 0.707 of its diameter, so anything
+    // inside 70% of the canvas survives the mask whatever shape it is.
+    let inner = (size as f64 * 0.70) as u32;
+    let logo = if brand.logo_is_mark {
+        tint_mark(&logo, &brand.palette.foreground)
+    } else {
+        logo
+    };
+    let fitted = logo.resize(inner, inner, image::imageops::FilterType::Lanczos3);
+    let x = ((size - fitted.width()) / 2) as i64;
+    let y = ((size - fitted.height()) / 2) as i64;
+    image::imageops::overlay(&mut canvas, &fitted.to_rgba8(), x, y);
+    Some(image::DynamicImage::ImageRgba8(canvas))
+}
+
+/// The shop's photograph, cropped to a banner.
+///
+/// Cover-cropped, because a band with bars down the sides looks like a mistake
+/// and the middle of a photograph is where the subject is. Handed the raw
+/// upload instead, Google renders a portrait photograph at full width and it
+/// swallows half the card.
+pub fn card_banner(brand: &OrgBrand, w: u32, h: u32) -> Option<image::DynamicImage> {
+    let img = brand.card_image_url.as_deref().and_then(read_upload)?;
+    Some(img.resize_to_fill(w, h, image::imageops::FilterType::Lanczos3))
+}
+
 /// Decode an uploaded image from the uploads directory.
 ///
 /// From DISK, never fetched: the file is already local, so there is no network

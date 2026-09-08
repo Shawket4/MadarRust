@@ -72,6 +72,17 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         // Madar's mark. Static bytes, no rate limit: Google fetches it from its
         // own servers on a schedule we do not control, and throttling it would
         // show up as a class with a broken logo.
+        // Composed for Google's own slots, and fetched by Google. No rate
+        // limit: it pulls these on a schedule we do not control, and throttling
+        // shows up as a card with a broken image.
+        .service(
+            web::resource("/public/loyalty/brand/{org_id}/logo/{v}.png")
+                .route(web::get().to(public::org_logo_badge)),
+        )
+        .service(
+            web::resource("/public/loyalty/brand/{org_id}/banner/{v}.png")
+                .route(web::get().to(public::org_card_banner)),
+        )
         .service(
             web::resource(super::wallet::google::MADAR_LOGO_PATH)
                 .route(web::get().to(public::brand_logo)),

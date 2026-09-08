@@ -239,6 +239,47 @@ async fn load_for_scope(
     }
 }
 
+/// One organisation's logo, composed for Google's circular slot.
+///
+/// Public and unauthenticated because GOOGLE fetches it, from its own servers,
+/// on a schedule we do not control. It reveals nothing a customer's card does
+/// not already show. The `{v}` segment is a cache key, not an input — Google
+/// will not re-fetch a URL it has seen, so a shop swapping its logo needs a
+/// different address or the old one lives on every card forever.
+pub async fn org_logo_badge(
+    pool: web::Data<PgPool>,
+    path: web::Path<(Uuid, String)>,
+) -> Result<HttpResponse, AppError> {
+    let brand = crate::orgs::branding::load(pool.get_ref(), path.0).await?;
+    let img = crate::orgs::branding::logo_badge(&brand, 512)
+        .ok_or_else(|| AppError::NotFound("That shop has no logo".into()))?;
+    png_response(img)
+}
+
+/// One organisation's card photograph, cropped to a banner.
+pub async fn org_card_banner(
+    pool: web::Data<PgPool>,
+    path: web::Path<(Uuid, String)>,
+) -> Result<HttpResponse, AppError> {
+    let brand = crate::orgs::branding::load(pool.get_ref(), path.0).await?;
+    // Google's hero is about 3:1 and much wider than Apple's strip; each wallet
+    // gets a crop made for its own slot rather than one shape squeezed into both.
+    let img = crate::orgs::branding::card_banner(&brand, 1032, 336)
+        .ok_or_else(|| AppError::NotFound("That shop has no card image".into()))?;
+    png_response(img)
+}
+
+fn png_response(img: image::DynamicImage) -> Result<HttpResponse, AppError> {
+    let mut buf = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut buf, image::ImageFormat::Png)
+        .map_err(|_| AppError::Internal)?;
+    Ok(HttpResponse::Ok()
+        .content_type("image/png")
+        // Immutable against the key in the URL, which changes with the file.
+        .insert_header(("Cache-Control", "public, max-age=31536000, immutable"))
+        .body(buf.into_inner()))
+}
+
 /// A reward as the signup page lists it: what it is, and what it costs.
 #[derive(Serialize, ToSchema)]
 pub struct PublicReward {

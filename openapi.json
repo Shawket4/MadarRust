@@ -16030,7 +16030,7 @@
         "tags": [
           "loyalty"
         ],
-        "summary": "Why there is no \"Add to Wallet\" button.",
+        "summary": "Why there is no \"Add to Wallet\" button. **Super admin only.**",
         "description": "Every failure in this feature has looked the same from the outside — a\nmissing button, or a save that says \"something went wrong\" — while the cause\nwas a variable nobody set, a key file the code never read, a service account\nGoogle had not been told about, or a link over a size limit. None of those\nreach a customer's screen, and only some reach a log.\n\nThis asks, on demand, and reports what it finds. It makes live calls to\nGoogle, so it is deliberately not part of any page load.",
         "operationId": "get_loyalty_wallet_status",
         "parameters": [

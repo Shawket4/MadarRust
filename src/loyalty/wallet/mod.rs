@@ -323,6 +323,31 @@ pub async fn reward_lines(pool: &PgPool, org_id: Uuid) -> Vec<String> {
         .collect()
 }
 
+/// What the customer is working towards, in their own shop's words.
+///
+/// "Get a free drink" tells someone what the card is FOR in a way a stepper and
+/// a ratio never do — those say how far, not what for. The cheapest reward is
+/// the honest headline: a customer who can afford the espresso HAS earned
+/// something, whatever the cake costs.
+///
+/// Falls back to the bare price when a shop has curated nothing yet, which at
+/// least names the target.
+pub async fn reward_headline(pool: &PgPool, org_id: Uuid, settings: &LoyaltySettings) -> String {
+    let cheapest = crate::loyalty::settings::load_effective_rewards_org(pool, org_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .min_by_key(|r| r.cost_amount);
+    match cheapest {
+        Some(r) => r.name,
+        None => format!(
+            "{} {}",
+            settings.default_reward_cost,
+            google::balance_label(settings.mode()).to_lowercase()
+        ),
+    }
+}
+
 /// One line on the back of the card: a heading and what it says.
 ///
 /// Apple calls these back fields and Google calls them text modules, and both
@@ -426,18 +451,22 @@ pub async fn links_for(
     let apple_url = apple_link(member);
     // The same lines Apple prints on the back of its pass.
     let rewards = reward_lines(pool, member.org_id).await;
+    let headline = reward_headline(pool, member.org_id, settings).await;
     // Provisioning talks to Google, so it can fail in ways a signup must
     // survive: an unlinked service account, a refused class, a network blip.
     // The customer gets the Apple badge and the code on their card either way,
     // and the reason lands in the log rather than in their face.
-    let google_url =
-        match google::save_url(pool, member, settings, brand, locations, &rewards).await {
-            Ok(url) => url,
-            Err(e) => {
-                tracing::warn!(error = %e, "loyalty: could not build the Google Wallet save link");
-                None
-            }
-        };
+    let google_url = match google::save_url(
+        pool, member, settings, brand, locations, &rewards, &headline,
+    )
+    .await
+    {
+        Ok(url) => url,
+        Err(e) => {
+            tracing::warn!(error = %e, "loyalty: could not build the Google Wallet save link");
+            None
+        }
+    };
     PassLinks {
         any: apple_url.is_some() || google_url.is_some(),
         apple_url,
@@ -582,24 +611,39 @@ mod tests {
         }];
         let rewards = ["Espresso — 5 visits".to_string()];
 
-        let apple =
-            apple::pass_json(&m, &s, &locs, &rewards, &apple::PassBrand::default()).unwrap();
-        let google = google::loyalty_object("338", &m, &s, &locs, &rewards);
+        let apple = apple::pass_json(
+            &m,
+            &s,
+            &locs,
+            &rewards,
+            "Free espresso",
+            &apple::PassBrand::default(),
+        )
+        .unwrap();
+        let google = google::loyalty_object("338", &m, &s, &locs, &rewards, "Free espresso");
 
-        // The balance, with the same word for it.
+        // Google gives a card TWO face slots where Apple gives four, so parity
+        // is about which words land where, not about a field-for-field copy.
+        //
+        // How far along, in each wallet's largest slot, with the same label.
         assert_eq!(
-            apple["storeCard"]["headerFields"][0]["value"],
-            google["loyaltyPoints"]["balance"]["int"]
+            apple["storeCard"]["secondaryFields"][0]["value"],
+            google["loyaltyPoints"]["balance"]["string"]
         );
         assert_eq!(
             apple["storeCard"]["headerFields"][0]["label"],
             google["loyaltyPoints"]["label"]
         );
 
-        // The progress, in the same words, on the face of both.
+        // And what it is FOR, in the other — the same words on both, or a
+        // customer comparing two phones sees two different promises.
         assert_eq!(
-            apple["storeCard"]["secondaryFields"][0]["value"],
+            apple["storeCard"]["secondaryFields"][1]["value"],
             google["secondaryLoyaltyPoints"]["balance"]["string"]
+        );
+        assert_eq!(
+            apple["storeCard"]["secondaryFields"][1]["label"],
+            google["secondaryLoyaltyPoints"]["label"]
         );
 
         // The barcode carries the same thing.
@@ -618,6 +662,13 @@ mod tests {
                 )
             })
             .collect();
+        // Google renders `accountName` and `accountId` as rows of its own, so
+        // the Member line is dropped there rather than printed a third time —
+        // it carries a phone number.
+        let apple_back: Vec<(String, String)> = apple_back
+            .into_iter()
+            .filter(|(l, _)| l != "Member")
+            .collect();
         let google_back: Vec<(String, String)> = google["textModulesData"]
             .as_array()
             .unwrap()
@@ -633,6 +684,10 @@ mod tests {
         assert!(
             apple_back.iter().any(|(l, _)| l == "Terms"),
             "the shop's terms reach both: {apple_back:?}"
+        );
+        assert!(
+            google["accountName"].as_str() == Some(m.name.as_str()),
+            "Google shows the member itself, which is why we do not repeat it"
         );
 
         unsafe {

@@ -414,6 +414,8 @@ pub fn pass_json(
     settings: &LoyaltySettings,
     locations: &[PassLocation],
     rewards: &[String],
+    // What they are working towards, in the shop's own words.
+    headline: &str,
     brand: &PassBrand,
 ) -> Result<serde_json::Value, AppError> {
     let (Some(pass_type), Some(team)) = (pass_type_id(), team_id()) else {
@@ -464,23 +466,22 @@ pub fn pass_json(
                 "label": super::google::balance_label(mode),
                 "value": balance
             }],
-            "secondaryFields": [{
-                "key": "progress",
-                "label": program,
-                "value": progress_line(balance, threshold)
-            }],
-            // What they are working towards. This row used to repeat the
-            // member's name, which is already under the barcode and on the
-            // back — three times on one card, and none of them the thing a
-            // customer is actually counting for.
-            "auxiliaryFields": [{
-                "key": "reward",
-                "label": "Next reward",
-                "value": rewards.first().cloned().unwrap_or_else(|| format!(
-                    "{threshold} {}",
-                    super::google::balance_label(mode).to_lowercase()
-                ))
-            }],
+            // Progress and reward SHARE a row. Apple lays several fields in
+            // one row side by side, and having them as separate secondary and
+            // auxiliary rows cost the card a whole band of height for two
+            // short strings — which is most of why it read as tall and empty.
+            "secondaryFields": [
+                {
+                    "key": "progress",
+                    "label": program,
+                    "value": progress_line(balance, threshold)
+                },
+                {
+                    "key": "reward",
+                    "label": "Reward",
+                    "value": headline
+                }
+            ],
             "backFields": back
         },
         "barcodes": [{
@@ -669,7 +670,8 @@ pub async fn build_pass_for(pool: &PgPool, member: &MemberRow) -> Result<Vec<u8>
     let org = crate::orgs::branding::load(pool, member.org_id).await?;
     let brand = pass_brand(&org);
     let strip = strip_images(&org, &brand.foreground);
-    let pass = pass_json(member, &settings, &locations, &rewards, &brand)?;
+    let headline = super::reward_headline(pool, member.org_id, &settings).await;
+    let pass = pass_json(member, &settings, &locations, &rewards, &headline, &brand)?;
     // One list for the archive AND the manifest, so an image cannot end up in
     // the zip unhashed — which invalidates the signature and makes iOS refuse
     // the pass with no explanation at all.
@@ -780,33 +782,35 @@ pub(crate) mod tests {
         let _guard = env_guard();
         configured();
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
+        let p = pass_json(
+            &member(),
+            &s,
+            &[],
+            &[],
+            "Free espresso",
+            &PassBrand::default(),
+        )
+        .unwrap();
         assert_eq!(p["storeCard"]["primaryFields"][0]["value"], 30);
         // A hundred is past the point where dots are worth counting, so the
-        // field carries the bare ratio — the label above it already says which
-        // programme this is.
+        // field carries the bare ratio — the only case where figures appear.
         assert_eq!(p["storeCard"]["secondaryFields"][0]["value"], "30 / 100");
         // Wallet stacks cards and shows only the header strip. Without this a
         // customer cannot see their balance without tapping the pass open.
         assert_eq!(p["storeCard"]["headerFields"][0]["value"], 30);
         assert_eq!(p["storeCard"]["headerFields"][0]["label"], "Points");
-        // The auxiliary row names what they are counting FOR. It used to repeat
-        // the member's name, which is already under the barcode and on the back.
+        // Progress and reward share ONE row: two short strings did not need a
+        // band of card height each, which is most of why it read as tall.
+        assert_eq!(p["storeCard"]["secondaryFields"][1]["label"], "Reward");
         assert_eq!(
-            p["storeCard"]["auxiliaryFields"][0]["value"], "100 points",
-            "with no reward catalogue, the target stands in"
+            p["storeCard"]["secondaryFields"][1]["value"],
+            "Free espresso"
         );
-        let with = pass_json(
-            &member(),
-            &s,
-            &[],
-            &["Free espresso — 5 visits".to_string()],
-            &PassBrand::default(),
-        )
-        .unwrap();
-        assert_eq!(
-            with["storeCard"]["auxiliaryFields"][0]["value"],
-            "Free espresso — 5 visits"
+        assert!(
+            p["storeCard"]["auxiliaryFields"]
+                .as_array()
+                .is_none_or(|a| a.is_empty()),
+            "nothing left below it: {p}"
         );
         // And the name is still on the card, once, where a teller reads it.
         assert_eq!(p["barcodes"][0]["altText"], "Ali Hassan");
@@ -819,17 +823,22 @@ pub(crate) mod tests {
         let mut s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
         s.mode = "visits".into();
         s.default_reward_cost = 5;
-        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
+        let p = pass_json(
+            &member(),
+            &s,
+            &[],
+            &[],
+            "Free espresso",
+            &PassBrand::default(),
+        )
+        .unwrap();
         // The stamps balance leads, not the points one.
         assert_eq!(p["storeCard"]["primaryFields"][0]["value"], 3);
         assert_eq!(p["storeCard"]["primaryFields"][0]["label"], "Orders");
         // A stamp card reads as a STEPPER, not as arithmetic: five orders is
         // few enough to count at a glance, and joining the steps shows the
         // direction of travel the way loose dots do not.
-        assert_eq!(
-            p["storeCard"]["secondaryFields"][0]["value"],
-            "●─●─●─○─○   3 / 5"
-        );
+        assert_eq!(p["storeCard"]["secondaryFields"][0]["value"], "●─●─●─○─○");
         let how = p["storeCard"]["backFields"][0]["value"].as_str().unwrap();
         assert!(how.contains("stamp"), "{how}");
         assert!(
@@ -850,7 +859,7 @@ pub(crate) mod tests {
             label: "#C8607F".into(),
             ..PassBrand::default()
         };
-        let p = pass_json(&member(), &s, &[], &[], &brand).unwrap();
+        let p = pass_json(&member(), &s, &[], &[], "Free espresso", &brand).unwrap();
 
         // The colours reach the pass. They used to be read from
         // `loyalty_settings`, which stopped being written when branding moved
@@ -870,7 +879,15 @@ pub(crate) mod tests {
         configured();
         let _guard = env_guard();
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
+        let p = pass_json(
+            &member(),
+            &s,
+            &[],
+            &[],
+            "Free espresso",
+            &PassBrand::default(),
+        )
+        .unwrap();
         assert_eq!(p["organizationName"], s.program_name);
         // Madar's palette, not an absent one — a pass with no colours is grey.
         assert_eq!(p["backgroundColor"], "rgb(13, 98, 115)");
@@ -1058,7 +1075,15 @@ pub(crate) mod tests {
         let _guard = env_guard();
         configured();
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
+        let p = pass_json(
+            &member(),
+            &s,
+            &[],
+            &[],
+            "Free espresso",
+            &PassBrand::default(),
+        )
+        .unwrap();
         assert_eq!(p["barcodes"][0]["message"], "Mabcdefghijklmnopqrstuv");
         assert_eq!(p["barcodes"][0]["format"], "PKBarcodeFormatQR");
         // The member id must never be the scannable value — it is guessable
@@ -1109,7 +1134,15 @@ pub(crate) mod tests {
             longitude: 31.2357,
             name: "Zamalek".into(),
         }];
-        let p = pass_json(&member(), &s, &locs, &[], &PassBrand::default()).unwrap();
+        let p = pass_json(
+            &member(),
+            &s,
+            &locs,
+            &[],
+            "Free espresso",
+            &PassBrand::default(),
+        )
+        .unwrap();
         assert_eq!(p["locations"][0]["latitude"], 30.0444);
         assert!(
             p["locations"][0]["relevantText"]
@@ -1132,7 +1165,15 @@ pub(crate) mod tests {
         let _guard = env_guard();
         configured();
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
+        let p = pass_json(
+            &member(),
+            &s,
+            &[],
+            &[],
+            "Free espresso",
+            &PassBrand::default(),
+        )
+        .unwrap();
         // With no certificate configured, building an archive must fail loudly.
         // An unsigned .pkpass is rejected by iOS with no explanation at all, so
         // serving one would look to the customer like a broken link.
@@ -1185,7 +1226,15 @@ pub(crate) mod tests {
         }
 
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        let pass = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
+        let pass = pass_json(
+            &member(),
+            &s,
+            &[],
+            &[],
+            "Free espresso",
+            &PassBrand::default(),
+        )
+        .unwrap();
         let bytes = build_pkpass(&pass, &PassBrand::default().images).unwrap();
 
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
