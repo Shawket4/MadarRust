@@ -495,6 +495,84 @@ async fn a_shop_can_hand_out_one_code_for_the_whole_organisation(pool: PgPool) {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+/// Every birthday the form can produce occurs every year — except one.
+///
+/// A (month, day) pair that survives `valid_birthday` is a real calendar day in
+/// any year, because the impossible ones are refused at the door. The single
+/// exception is the 29th of February, which exists in three years out of four,
+/// and matching it exactly would mean a leap-day customer hears from the shop
+/// once every four years. This exercises the sweep's own predicate against
+/// known dates rather than trusting the reasoning above.
+#[sqlx::test]
+async fn a_leap_day_birthday_is_greeted_every_year(pool: PgPool) {
+    // The sweep's match, with the date lifted out so it can be asked about a
+    // day that is not today. Kept character-for-character in step with
+    // `birthdays::run_tick` — if that changes and this does not, this test is
+    // asserting about nothing.
+    let matches = |month: i16, day: i16, on: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "WITH t(d) AS (SELECT $3::date) \
+                 SELECT ( \
+                     ($1::smallint = EXTRACT(MONTH FROM t.d)::smallint \
+                      AND $2::smallint = EXTRACT(DAY FROM t.d)::smallint) \
+                     OR ($1::smallint = 2 AND $2::smallint = 29 \
+                         AND EXTRACT(MONTH FROM t.d) = 2 AND EXTRACT(DAY FROM t.d) = 28 \
+                         AND NOT (EXTRACT(DAY FROM (date_trunc('month', t.d) \
+                                  + interval '1 month - 1 day')) = 29)) \
+                 ) FROM t",
+            )
+            .bind(month)
+            .bind(day)
+            .bind(on)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+
+    // 2024 is a leap year: the 29th exists, so it is greeted on the 29th and
+    // NOT on the 28th — otherwise they would hear from the shop twice.
+    assert!(
+        matches(2, 29, "2024-02-29").await,
+        "greeted on the real day"
+    );
+    assert!(
+        !matches(2, 29, "2024-02-28").await,
+        "not also greeted the day before, in a year that has a 29th"
+    );
+
+    // 2025 is not: the 29th never arrives, so the 28th stands in.
+    assert!(
+        matches(2, 29, "2025-02-28").await,
+        "a leap-day customer must not wait four years"
+    );
+    assert!(
+        !matches(2, 29, "2025-03-01").await,
+        "and not on the 1st too"
+    );
+
+    // 1900 was not a leap year despite being divisible by 4. Postgres knows;
+    // arithmetic on the year alone would not.
+    assert!(matches(2, 29, "1900-02-28").await);
+    assert!(matches(2, 29, "2000-02-29").await, "2000 WAS a leap year");
+    assert!(!matches(2, 29, "2000-02-28").await);
+
+    // Someone born on the 28th is greeted on the 28th, in both kinds of year,
+    // and exactly once.
+    for on in ["2024-02-28", "2025-02-28"] {
+        assert!(matches(2, 28, on).await, "{on}");
+    }
+    assert!(!matches(2, 28, "2024-02-29").await);
+
+    // And an ordinary birthday is unaffected by any of this.
+    assert!(matches(3, 17, "2025-03-17").await);
+    assert!(!matches(3, 17, "2025-03-16").await);
+    assert!(matches(12, 31, "2025-12-31").await);
+    assert!(matches(1, 1, "2026-01-01").await);
+}
+
 /// A field the shop turned off must not be storable by posting past the form.
 #[sqlx::test]
 async fn a_birthday_is_only_kept_where_the_shop_asked_for_one(pool: PgPool) {

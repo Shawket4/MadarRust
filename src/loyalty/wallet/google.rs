@@ -380,24 +380,24 @@ pub async fn save_url(
         tracing::error!("loyalty: {problem}");
         return Ok(None);
     }
-    let object_id = match &member.google_object_id {
-        // Already provisioned: nothing to do but sign.
-        Some(id) => id.clone(),
-        None => {
-            let token = access_token().await?;
-            ensure_class(&token, &issuer, member.org_id, brand, settings).await?;
-            let id = ensure_object(&token, &issuer, member, settings, locations).await?;
-            // Remembered so this is a one-time cost, and so `push_balance` has
-            // something to PATCH — it reads this column, which nothing used to
-            // write, so no Google pass ever saw a balance change.
-            sqlx::query("UPDATE loyalty_customers SET google_object_id = $2 WHERE id = $1")
-                .bind(member.id)
-                .bind(&id)
-                .execute(pool)
-                .await?;
-            id
-        }
-    };
+    // Always, rather than only the first time. A save link points at something
+    // Google is holding, and that thing is only as current as the last time we
+    // wrote it — so a card saved before any change to its shape stayed on the
+    // old one forever. The token is cached, so the cost of being right here is
+    // two requests on a page a customer opens rarely.
+    let token = access_token().await?;
+    ensure_class(&token, &issuer, member.org_id, brand, settings).await?;
+    let object_id = ensure_object(&token, &issuer, member, settings, locations).await?;
+    if member.google_object_id.as_deref() != Some(object_id.as_str()) {
+        // Recorded so `push_balance` has something to PATCH — it reads this
+        // column, which nothing used to write, so no Google pass ever saw a
+        // balance change.
+        sqlx::query("UPDATE loyalty_customers SET google_object_id = $2 WHERE id = $1")
+            .bind(member.id)
+            .bind(&object_id)
+            .execute(pool)
+            .await?;
+    }
 
     let claims = SaveClaims {
         iss: email,
@@ -478,11 +478,29 @@ async fn ensure_object(
         .send()
         .await
         .map_err(|e| AppError::ServiceUnavailable(format!("Google Wallet object: {e}")))?;
-    // A member re-opening their card already has one; that is a success.
-    if resp.status().is_success() || resp.status() == reqwest::StatusCode::CONFLICT {
+    if resp.status().is_success() {
         return Ok(id);
     }
-    Err(google_error("creating the loyalty object", resp).await)
+    if resp.status() != reqwest::StatusCode::CONFLICT {
+        return Err(google_error("creating the loyalty object", resp).await);
+    }
+
+    // The member already has one — and it is whatever shape this code produced
+    // the day they saved it. Returning here left every card issued before a
+    // change permanently on the old fields: the progress stayed in the details
+    // list below the card long after it moved onto the face, and nothing short
+    // of a balance change would ever have moved it.
+    let resp = reqwest::Client::new()
+        .patch(format!("{WALLET_API}/loyaltyObject/{id}"))
+        .bearer_auth(token)
+        .json(&loyalty_object(issuer, member, settings, locations))
+        .send()
+        .await
+        .map_err(|e| AppError::ServiceUnavailable(format!("Google Wallet object: {e}")))?;
+    if resp.status().is_success() {
+        return Ok(id);
+    }
+    Err(google_error("updating the loyalty object", resp).await)
 }
 
 /// Google's own words for why it refused, in the log.
@@ -498,8 +516,32 @@ async fn google_error(what: &str, resp: reqwest::Response) -> AppError {
     AppError::ServiceUnavailable(format!("Google Wallet refused {what} ({status})"))
 }
 
+/// Google's tokens last an hour; refreshed early so a request never races the
+/// expiry it was checked against.
+const TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(50 * 60);
+static CACHED_TOKEN: std::sync::Mutex<Option<(String, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
 /// Exchange the service-account key for an access token (the JWT bearer grant).
+///
+/// Cached in process, like the APNs one. Without it, keeping a customer's card
+/// up to date would cost a token exchange on every view — which is why it was
+/// not kept up to date at all.
 async fn access_token() -> Result<String, AppError> {
+    if let Ok(guard) = CACHED_TOKEN.lock()
+        && let Some((token, minted)) = guard.as_ref()
+        && minted.elapsed() < TOKEN_TTL
+    {
+        return Ok(token.clone());
+    }
+    let token = mint_access_token().await?;
+    if let Ok(mut guard) = CACHED_TOKEN.lock() {
+        *guard = Some((token.clone(), std::time::Instant::now()));
+    }
+    Ok(token)
+}
+
+async fn mint_access_token() -> Result<String, AppError> {
     let (Some(email), Some(key)) = (sa_email(), sa_key()) else {
         return Err(AppError::ServiceUnavailable(
             "Google Wallet is not configured".into(),
