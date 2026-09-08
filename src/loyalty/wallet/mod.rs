@@ -438,7 +438,7 @@ mod tests {
         let rewards = ["Espresso — 5 visits".to_string()];
 
         let apple =
-            apple::pass_json(&m, &s, &locs, &rewards, &apple::PassBrand::default(), false).unwrap();
+            apple::pass_json(&m, &s, &locs, &rewards, &apple::PassBrand::default()).unwrap();
         let google = google::loyalty_object("338", &m, &s, &locs, &rewards);
 
         // The balance, with the same word for it.

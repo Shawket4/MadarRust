@@ -58,7 +58,7 @@ pub fn luminance(r: u8, g: u8, b: u8) -> f64 {
 }
 
 /// Contrast ratio between two luminances, per WCAG. 1.0 = identical, 21.0 = max.
-fn contrast(a: f64, b: f64) -> f64 {
+pub fn contrast(a: f64, b: f64) -> f64 {
     let (hi, lo) = if a > b { (a, b) } else { (b, a) };
     (hi + 0.05) / (lo + 0.05)
 }
@@ -81,7 +81,7 @@ pub fn readable_on(r: u8, g: u8, b: u8) -> String {
 
 /// The AA floor for body text. A brand colour is not worth a card nobody can
 /// read off a phone in daylight.
-const MIN_CONTRAST: f64 = 4.5;
+pub const MIN_CONTRAST: f64 = 4.5;
 
 /// Move a ground until its best text colour clears [`MIN_CONTRAST`], keeping the
 /// hue.

@@ -88,11 +88,128 @@ const STRIP_SIZES: [(&str, u32, u32); 3] = [
     ("strip@3x.png", 1125, 432),
 ];
 
+/// The share of the strip's width the primary field is drawn across.
+///
+/// Apple lays the primary field out from the leading edge; the value is large
+/// and the label sits with it. Two thirds is generous — being wrong here means
+/// scrimming slightly more of the photograph than strictly needed, which costs
+/// nothing, where being wrong the other way costs legibility.
+const TEXT_ZONE: f64 = 0.66;
+
+/// How far the scrim fades past the text before it is gone entirely.
+const FADE: f64 = 0.20;
+
+/// The contrast the balance needs against the photograph.
+///
+/// WCAG's LARGE-text threshold, not the body-text one. The primary field is the
+/// biggest thing on the pass — Apple renders it at a size where 3:1 is the
+/// published bar — and holding a photograph to 4.5 costs it a great deal of
+/// itself for contrast nobody needs. The shop chose that picture.
+const STRIP_CONTRAST: f64 = 3.0;
+
+/// Darken (or lighten) a photograph until text can be read on it.
+///
+/// Apple draws the primary fields ON the strip, in the pass's foreground
+/// colour, over whatever the photograph happens to be — so a shop with a bright
+/// photo and a white balance gets an unreadable card, and one with a dark photo
+/// and dark ink gets the same. Emptying the fields avoids it at the cost of the
+/// number a customer opens the card to see.
+///
+/// Since we render the strip, the photograph can simply be made safe to write
+/// on. The strength is MEASURED rather than guessed: the scrim deepens until
+/// the WORST pixel under the text clears AA against the foreground. A picture
+/// that is already dark enough is left alone.
+fn scrim(img: &mut image::RgbaImage, foreground: &str) {
+    let (fr, fg_, fb) = crate::orgs::branding::parse_hex(foreground).unwrap_or((255, 255, 255));
+    let fg_lum = crate::orgs::branding::luminance(fr, fg_, fb);
+    // Toward the opposite end from the text, which is the direction that buys
+    // contrast: a dark veil under white text, a light one under dark ink.
+    let veil: f64 = if fg_lum > 0.5 { 0.0 } else { 255.0 };
+
+    let (w, h) = (img.width(), img.height());
+    let zone_w = (w as f64 * TEXT_ZONE).ceil() as u32;
+    if zone_w == 0 {
+        return;
+    }
+
+    // The hardest pixel to write on, per channel.
+    //
+    // Sampling a grid and hoping would miss exactly the pixel that matters — a
+    // highlight one column wide is still a hole in the text. Instead each
+    // channel's extreme across the whole zone is taken, and the scrim is solved
+    // for the pixel made of those extremes. That pixel may not exist in the
+    // photograph, and it is at least as hard to write on as any that does,
+    // because luminance rises with every channel independently. Slightly
+    // stronger than strictly needed, never weaker.
+    let dark_veil = veil == 0.0;
+    let mut extreme = if dark_veil { [0u8; 3] } else { [255u8; 3] };
+    for y in 0..h {
+        for x in 0..zone_w {
+            let p = img.get_pixel(x, y).0;
+            for c in 0..3 {
+                extreme[c] = if dark_veil {
+                    extreme[c].max(p[c])
+                } else {
+                    extreme[c].min(p[c])
+                };
+            }
+        }
+    }
+
+    let reads_at = |alpha: f64| {
+        let blend = |c: u8| (c as f64 * (1.0 - alpha) + veil * alpha).round() as u8;
+        let l = crate::orgs::branding::luminance(
+            blend(extreme[0]),
+            blend(extreme[1]),
+            blend(extreme[2]),
+        );
+        crate::orgs::branding::contrast(l, fg_lum) >= STRIP_CONTRAST
+    };
+
+    // Already safe: leave the photograph alone. Dimming one that needed no
+    // dimming is a worse photograph for no gain — the shop chose it.
+    if reads_at(0.0) {
+        return;
+    }
+    let mut alpha = 0.95;
+    let mut a = 0.05;
+    while a <= 0.95 {
+        if reads_at(a) {
+            alpha = a;
+            break;
+        }
+        a += 0.05;
+    }
+
+    // Full strength across the text, then faded out, so the photograph is only
+    // dimmed where something is written on it.
+    let fade_end = ((TEXT_ZONE + FADE) * w as f64).min(w as f64);
+    for (x, _y, px) in img.enumerate_pixels_mut() {
+        let x = x as f64;
+        let a = if x <= zone_w as f64 {
+            alpha
+        } else if x >= fade_end {
+            0.0
+        } else {
+            alpha * (1.0 - (x - zone_w as f64) / (fade_end - zone_w as f64))
+        };
+        if a <= 0.0 {
+            continue;
+        }
+        for c in 0..3 {
+            px.0[c] = (px.0[c] as f64 * (1.0 - a) + veil * a).round() as u8;
+        }
+    }
+}
+
 /// The shop's photograph, sized for the pass's strip.
 ///
 /// Empty when there is no picture, which is the ordinary case and a finished
 /// card — every pass looked like that until now.
-pub fn strip_images(brand: &crate::orgs::branding::OrgBrand) -> Vec<(String, Vec<u8>)> {
+pub fn strip_images(
+    brand: &crate::orgs::branding::OrgBrand,
+    foreground: &str,
+) -> Vec<(String, Vec<u8>)> {
     let Some(img) = brand
         .card_image_url
         .as_deref()
@@ -103,9 +220,13 @@ pub fn strip_images(brand: &crate::orgs::branding::OrgBrand) -> Vec<(String, Vec
     STRIP_SIZES
         .iter()
         .filter_map(|(name, w, h)| {
-            let scaled = img.resize_to_fill(*w, *h, image::imageops::FilterType::Lanczos3);
+            let mut scaled = img
+                .resize_to_fill(*w, *h, image::imageops::FilterType::Lanczos3)
+                .to_rgba8();
+            // Apple writes the balance across this. Make it safe to write on.
+            scrim(&mut scaled, foreground);
             let mut buf = std::io::Cursor::new(Vec::new());
-            scaled
+            image::DynamicImage::ImageRgba8(scaled)
                 .write_to(&mut buf, image::ImageFormat::Png)
                 .ok()
                 .map(|_| ((*name).to_string(), buf.into_inner()))
@@ -266,9 +387,6 @@ pub fn pass_json(
     locations: &[PassLocation],
     rewards: &[String],
     brand: &PassBrand,
-    // True when the pass carries a strip image. Apple draws the primary fields
-    // ON the strip, so a card with a photograph has to make room for it.
-    strip: bool,
 ) -> Result<serde_json::Value, AppError> {
     let (Some(pass_type), Some(team)) = (pass_type_id(), team_id()) else {
         return Err(AppError::ServiceUnavailable(
@@ -309,20 +427,15 @@ pub fn pass_json(
                 "label": super::google::balance_label(mode),
                 "value": balance
             }],
-            // Apple renders the primary fields OVER the strip. With a
-            // photograph behind them the balance is a large numeral on an
-            // arbitrary picture, which is unreadable about as often as not — so
-            // a card with a photograph leaves them empty and the header strip
-            // carries the balance instead. It is on the card either way.
-            "primaryFields": if strip {
-                json!([])
-            } else {
-                json!([{
-                    "key": "balance",
-                    "label": super::google::balance_label(mode),
-                    "value": balance
-                }])
-            },
+            // Apple renders these OVER the strip. That used to mean a card
+            // with a photograph had to give up its balance — but the strip is
+            // scrimmed until the worst pixel under the text clears AA, so
+            // there is nothing left to give up.
+            "primaryFields": [{
+                "key": "balance",
+                "label": super::google::balance_label(mode),
+                "value": balance
+            }],
             "secondaryFields": [{
                 "key": "progress",
                 "label": program,
@@ -519,15 +632,8 @@ pub async fn build_pass_for(pool: &PgPool, member: &MemberRow) -> Result<Vec<u8>
     let rewards = super::reward_lines(pool, member.org_id).await;
     let org = crate::orgs::branding::load(pool, member.org_id).await?;
     let brand = pass_brand(&org);
-    let strip = strip_images(&org);
-    let pass = pass_json(
-        member,
-        &settings,
-        &locations,
-        &rewards,
-        &brand,
-        !strip.is_empty(),
-    )?;
+    let strip = strip_images(&org, &brand.foreground);
+    let pass = pass_json(member, &settings, &locations, &rewards, &brand)?;
     // One list for the archive AND the manifest, so an image cannot end up in
     // the zip unhashed — which invalidates the signature and makes iOS refuse
     // the pass with no explanation at all.
@@ -637,7 +743,7 @@ pub(crate) mod tests {
         let _guard = env_guard();
         configured();
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default(), false).unwrap();
+        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
         assert_eq!(p["storeCard"]["primaryFields"][0]["value"], 30);
         // A hundred is past the point where dots are worth counting, so the
         // field carries the bare ratio — the label above it already says which
@@ -659,7 +765,6 @@ pub(crate) mod tests {
             &[],
             &["Free espresso — 5 visits".to_string()],
             &PassBrand::default(),
-            false,
         )
         .unwrap();
         assert_eq!(
@@ -677,7 +782,7 @@ pub(crate) mod tests {
         let mut s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
         s.mode = "visits".into();
         s.default_reward_cost = 5;
-        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default(), false).unwrap();
+        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
         // The stamps balance leads, not the points one.
         assert_eq!(p["storeCard"]["primaryFields"][0]["value"], 3);
         assert_eq!(p["storeCard"]["primaryFields"][0]["label"], "Orders");
@@ -708,7 +813,7 @@ pub(crate) mod tests {
             label: "#C8607F".into(),
             ..PassBrand::default()
         };
-        let p = pass_json(&member(), &s, &[], &[], &brand, false).unwrap();
+        let p = pass_json(&member(), &s, &[], &[], &brand).unwrap();
 
         // The colours reach the pass. They used to be read from
         // `loyalty_settings`, which stopped being written when branding moved
@@ -728,7 +833,7 @@ pub(crate) mod tests {
         configured();
         let _guard = env_guard();
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default(), false).unwrap();
+        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
         assert_eq!(p["organizationName"], s.program_name);
         // Madar's palette, not an absent one — a pass with no colours is grey.
         assert_eq!(p["backgroundColor"], "rgb(13, 98, 115)");
@@ -806,12 +911,117 @@ pub(crate) mod tests {
         ));
     }
 
+    /// The claim the whole scrim exists to make: whatever photograph a shop
+    /// uploads, the balance Apple writes across it can be read.
+    #[test]
+    fn a_photograph_is_made_safe_to_write_the_balance_on() {
+        use crate::orgs::branding::{contrast, luminance, parse_hex};
+
+        // The worst pixel in the text zone, against the pass's foreground.
+        let worst = |img: &image::RgbaImage, fg: &str| {
+            let (r, g, b) = parse_hex(fg).unwrap();
+            let fl = luminance(r, g, b);
+            let zone = (img.width() as f64 * TEXT_ZONE) as u32;
+            let mut worst = f64::MAX;
+            for y in 0..img.height() {
+                for x in 0..zone {
+                    let p = img.get_pixel(x, y).0;
+                    worst = worst.min(contrast(luminance(p[0], p[1], p[2]), fl));
+                }
+            }
+            worst
+        };
+
+        // A blinding white photograph under white text — the case that made
+        // emptying the primary fields look like the only option.
+        let mut white = image::RgbaImage::from_pixel(300, 120, image::Rgba([255, 255, 255, 255]));
+        assert!(
+            worst(&white, "#EFF3F4") < STRIP_CONTRAST,
+            "starts unreadable"
+        );
+        scrim(&mut white, "#EFF3F4");
+        assert!(
+            worst(&white, "#EFF3F4") >= STRIP_CONTRAST,
+            "white text must read on it after the scrim"
+        );
+
+        // And the mirror image: a near-black photograph under dark ink, where
+        // the veil has to go the other way.
+        let mut black = image::RgbaImage::from_pixel(300, 120, image::Rgba([8, 8, 10, 255]));
+        assert!(worst(&black, "#12222A") < STRIP_CONTRAST);
+        scrim(&mut black, "#12222A");
+        assert!(worst(&black, "#12222A") >= STRIP_CONTRAST);
+
+        // A busy photograph: every pixel different, including the worst ones.
+        let mut busy = image::RgbaImage::new(300, 120);
+        for (x, y, p) in busy.enumerate_pixels_mut() {
+            *p = image::Rgba([
+                (x % 256) as u8,
+                (y * 2 % 256) as u8,
+                ((x + y) % 256) as u8,
+                255,
+            ]);
+        }
+        scrim(&mut busy, "#EFF3F4");
+        assert!(
+            worst(&busy, "#EFF3F4") >= STRIP_CONTRAST,
+            "no pixel is exempt"
+        );
+    }
+
+    /// Renders the real strip from a real photograph, to be LOOKED at. No
+    /// assertion tells you whether a scrim is heavy-handed.
+    ///
+    ///     MADAR_STRIP_PREVIEW=photo.jpg \
+    ///       cargo test --lib apple::tests::preview_strip -- --ignored --nocapture
+    #[test]
+    #[ignore = "writes a preview to look at"]
+    fn preview_strip() {
+        let Some(path) = std::env::var("MADAR_STRIP_PREVIEW").ok() else {
+            println!("set MADAR_STRIP_PREVIEW=/path/to/photo.jpg to render one");
+            return;
+        };
+        let src = image::open(&path).expect("a readable photo");
+        for (name, fg) in [("light-text", "#EFF3F4"), ("dark-text", "#12222A")] {
+            let mut band = src
+                .resize_to_fill(750, 288, image::imageops::FilterType::Lanczos3)
+                .to_rgba8();
+            scrim(&mut band, fg);
+            let at = std::env::temp_dir().join(format!("madar-strip-{name}.png"));
+            band.save(&at).unwrap();
+            println!("wrote {}", at.display());
+        }
+    }
+
+    #[test]
+    fn a_photograph_that_already_reads_is_left_alone() {
+        // Dimming a picture that needed no dimming is a worse photograph for
+        // no gain — the shop chose it.
+        let dark = image::RgbaImage::from_pixel(200, 80, image::Rgba([12, 14, 18, 255]));
+        let mut copy = dark.clone();
+        scrim(&mut copy, "#EFF3F4");
+        assert_eq!(dark, copy);
+    }
+
+    #[test]
+    fn the_scrim_fades_out_rather_than_ending_in_a_line() {
+        // A hard edge down the middle of a photograph reads as damage.
+        let mut img = image::RgbaImage::from_pixel(400, 100, image::Rgba([255, 255, 255, 255]));
+        scrim(&mut img, "#EFF3F4");
+        let at = |x: u32| img.get_pixel(x, 50).0[0];
+        let text_end = (400.0 * TEXT_ZONE) as u32;
+        let fade_end = (400.0 * (TEXT_ZONE + FADE)) as u32;
+        assert!(at(10) < at(text_end + 20), "it lightens across the fade");
+        assert!(at(text_end + 20) < at(fade_end + 5), "and keeps lightening");
+        assert_eq!(at(399), 255, "the far side is the photograph, untouched");
+    }
+
     #[test]
     fn the_barcode_carries_the_token_not_the_id() {
         let _guard = env_guard();
         configured();
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default(), false).unwrap();
+        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
         assert_eq!(p["barcodes"][0]["message"], "Mabcdefghijklmnopqrstuv");
         assert_eq!(p["barcodes"][0]["format"], "PKBarcodeFormatQR");
         // The member id must never be the scannable value — it is guessable
@@ -829,7 +1039,7 @@ pub(crate) mod tests {
             longitude: 31.2357,
             name: "Zamalek".into(),
         }];
-        let p = pass_json(&member(), &s, &locs, &[], &PassBrand::default(), false).unwrap();
+        let p = pass_json(&member(), &s, &locs, &[], &PassBrand::default()).unwrap();
         assert_eq!(p["locations"][0]["latitude"], 30.0444);
         assert!(
             p["locations"][0]["relevantText"]
@@ -852,7 +1062,7 @@ pub(crate) mod tests {
         let _guard = env_guard();
         configured();
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default(), false).unwrap();
+        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
         // With no certificate configured, building an archive must fail loudly.
         // An unsigned .pkpass is rejected by iOS with no explanation at all, so
         // serving one would look to the customer like a broken link.
@@ -905,7 +1115,7 @@ pub(crate) mod tests {
         }
 
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        let pass = pass_json(&member(), &s, &[], &[], &PassBrand::default(), false).unwrap();
+        let pass = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
         let bytes = build_pkpass(&pass, &PassBrand::default().images).unwrap();
 
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
