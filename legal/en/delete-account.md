@@ -1,7 +1,7 @@
 ---
 title: Delete your account
-version: 1.0
-effective: 2026-09-01
+version: 1.1
+effective: 2026-09-08
 ---
 
 # Delete your account and data
@@ -36,6 +36,17 @@ ordered from, which is the controller of that data.
 **Contact that restaurant** to have your details removed; when they instruct us, we act. If
 you cannot reach them, write to **privacy@madar-pos.cloud** and we will help you reach the
 right party.
+
+## Loyalty members
+
+Ask the restaurant whose programme you joined. Deleting the membership removes your name,
+phone number, membership code and balance, and every wallet card registered to it stops
+working.
+
+**Deleting the pass from your phone is not the same thing.** It removes the card from your
+wallet; the membership stays until the restaurant deletes it. If you added the card to Google
+Wallet, also remove it there — Google stores that copy on its own servers, as described in
+the **[Privacy Policy](/privacy-policy.html)**.
 
 ## Employees using the Dawam staff app
 

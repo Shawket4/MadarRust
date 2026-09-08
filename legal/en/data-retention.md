@@ -1,7 +1,7 @@
 ---
 title: Data Retention Schedule
-version: 1.0
-effective: 2026-09-01
+version: 1.1
+effective: 2026-09-08
 ---
 
 # Data Retention Schedule
@@ -15,6 +15,10 @@ Periods run from the trigger in the third column.
 | Orders, order items, payments | 5 years — accounting and tax records | order date |
 | Delivery details — name, phone, address | 5 years, as part of the order record | delivery |
 | Reservations and waitlist entries | 12 months | booking date |
+| Dine-in bill — table, guest name if given, guest count, notes | 5 years, as part of the order record | settlement |
+| Loyalty membership — name, phone, membership code, balances | life of the membership | deletion request |
+| Loyalty points ledger — each earning and reward | 5 years, with the order it belongs to | transaction |
+| Wallet pass device registrations — device identifier, notification token | until the pass is removed from the device or the membership is deleted | registration |
 | WhatsApp one-time codes | minutes — expire on use | issue |
 
 ## Employee data
@@ -34,6 +38,14 @@ is settled, the latitude and longitude have served their only purpose. After 90 
 are erased automatically. What remains is the punch time, the method, and the geofence
 result — the distance in metres between the employee and the branch — which records that the
 punch was valid **without recording where the employee was**.
+
+**On loyalty memberships.** Deleting a membership removes the name, phone number and
+membership code, and every device registration with it, so the card stops working and stops
+updating. The *orders* remain — they are the restaurant's accounting records and are kept for
+the same five years as any other order. What is left no longer identifies the member.
+
+Removing a pass from a phone is not a deletion request. It stops the card being displayed;
+the membership continues until the restaurant deletes it.
 
 ## Account and technical data
 

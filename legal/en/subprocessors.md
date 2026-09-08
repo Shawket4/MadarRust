@@ -1,7 +1,7 @@
 ---
 title: Sub-processors
-version: 1.1
-effective: 2026-09-03
+version: 1.2
+effective: 2026-09-08
 ---
 
 # Sub-processors
@@ -15,6 +15,8 @@ notified at least **30 days** before a new one is added.
 | Google Cloud Translation | Translating menu item names | **Menu item names only** — no customer data | Outside Egypt |
 | WhatsApp / Meta | Delivering one-time codes and order updates | Customer phone number, message text | Outside Egypt |
 | Google (Gemini) | Answering managers' plain-language questions about their own business | The manager's question and aggregated business figures — **no customer data**; staff names are replaced with codes before sending | Outside Egypt |
+| Apple | Delivering loyalty-card updates to a customer's iPhone | A device notification token and an **empty** push — no name, number or balance. The card file itself is built and signed by us and never passes through Apple | Outside Egypt |
+| Google Wallet | Holding a customer's loyalty card, **only if that customer chooses to add one** | Customer name, membership code, current balance, and the restaurant's branch coordinates | Outside Egypt |
 
 ### Current configuration (as of 3 September 2026)
 
@@ -66,6 +68,24 @@ send is bounded by construction rather than by policy:
 
 An operator can turn the assistant off entirely for a deployment by removing the provider
 credential, in which case nothing is sent to any AI service at all.
+
+## Wallet passes, in detail
+
+A loyalty card can be added to Apple Wallet or Google Wallet. The two are not equivalent in
+what they disclose, and a customer who cares should be able to choose knowingly.
+
+- **Apple** does not receive the card. We build and sign the file ourselves and the phone
+  downloads it from us. What reaches Apple is a push notification with **no payload** — it
+  only tells the phone to come back and ask us for a fresh copy. We hold a device identifier
+  and a notification token per registered device, and nothing else about the device.
+- **Google** does receive the card, because Google Wallet stores it server-side. The
+  customer's name, membership code, balance and the branch coordinates are sent when the
+  card is added and again on each balance change.
+- **Neither receives a customer's location, and neither do we.** A card that surfaces near a
+  branch does so because the branch coordinates travel *to* the phone and the phone does the
+  comparison locally.
+- A restaurant that configures neither still has a working programme: the card is a web page
+  with the same barcode.
 
 ## Not used
 

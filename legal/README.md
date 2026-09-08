@@ -5,7 +5,7 @@ Source for **https://legal.madar-pos.cloud**. Markdown in git → rendered to st
 ## ⚠️ Status: DRAFTS. Not reviewed by a lawyer.
 
 These were drafted from the actual database schema and code, so the *factual* claims about
-what data Madar collects and where it flows are accurate as of 2026-08-31. The *legal*
+what data Madar collects and where it flows are accurate as of 2026-09-08. The *legal*
 framing has not been reviewed by an Egyptian lawyer and must be before publication.
 
 Specifically needing counsel:
@@ -14,6 +14,12 @@ Specifically needing counsel:
   live obligations today.
 - Cross-border transfer basis for Google (Gemini + Translate) — see `subprocessors.md`.
 - Retention minimums under Egyptian tax and labour law (payroll records especially).
+- Cross-border transfer basis for **Google Wallet**, which is materially different from the
+  other Google entries: adding a loyalty card sends a named customer's identity and balance
+  to Google and stores it there, where Gemini and Translate receive no customer data at all.
+  Whether that needs its own consent step, rather than riding on the restaurant's, is a
+  question for counsel — the policy currently describes it plainly and offers the customer a
+  wallet-free alternative.
 - Whether the controller/processor split described in `dpa.md` matches how contracts read.
 
 ## Why git

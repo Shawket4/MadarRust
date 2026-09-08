@@ -204,9 +204,14 @@ footer a{color:var(--muted)}
 """
 
 def page(title, body, toc, current, meta=None):
-    nav = "".join(
-        f'<a href="/{s}.html"{" aria-current=\"page\"" if s == current else ""}>{t}</a>'
-        for s, t, _ in ORDER)
+    # The `aria-current` attribute is built outside the f-string: a backslash in
+    # an f-string expression is a syntax error before Python 3.12, and this file
+    # has to run on whatever python3 the VPS happens to have.
+    def nav_link(s, t):
+        current_attr = ' aria-current="page"' if s == current else ""
+        return f'<a href="/{s}.html"{current_attr}>{t}</a>'
+
+    nav = "".join(nav_link(s, t) for s, t, _ in ORDER)
     tocs = ""
     if toc:
         tocs = '<div class="toc"><h4>On this page</h4>' + "".join(
