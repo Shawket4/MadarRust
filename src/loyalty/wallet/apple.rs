@@ -425,20 +425,7 @@ pub fn pass_json(
             "headerFields": [{
                 "key": "header",
                 "label": super::google::balance_label(mode),
-                "value": balance,
-                // What makes the phone SAY something. An APNs push for a pass
-                // is content-free by design — it tells the device to come back
-                // for a new copy and shows nothing. iOS raises a notification
-                // only when a field carrying `changeMessage` changes value, so
-                // without this the balance updated silently and a customer
-                // learned about their points by opening their wallet.
-                //
-                // On ONE field, deliberately: put it on several and a single
-                // sale produces a small pile of notifications.
-                "changeMessage": format!(
-                    "You now have %@ {}.",
-                    super::google::balance_label(mode).to_lowercase()
-                )
+                "value": balance
             }],
             // Apple renders these OVER the strip. That used to mean a card
             // with a photograph had to give up its balance — but the strip is

@@ -686,7 +686,7 @@ pub async fn push_balance(pool: &PgPool, member: &MemberRow) -> Result<(), AppEr
     let token = access_token().await?;
     let mode = settings.mode();
     let balance = member.balance_in(mode);
-    let mut body = json!({
+    let body = json!({
         "loyaltyPoints": {
             "label": balance_label(mode),
             "balance": { "int": balance }
@@ -699,20 +699,6 @@ pub async fn push_balance(pool: &PgPool, member: &MemberRow) -> Result<(), AppEr
             "balance": { "string": progress_line(balance, settings.default_reward_cost) }
         }
     });
-    // What makes the phone SAY something. Google does not notify on an object
-    // update either; a `TEXT_AND_NOTIFY` message is the documented way to ask
-    // it to, and it is the counterpart of Apple's `changeMessage`.
-    //
-    // The id carries the balance, so Google treats "you now have 4" as one
-    // message however many times we write it. Without that, every patch — and
-    // opening the card page is a patch — would notify again.
-    body["messages"] = json!([{
-        "id": format!("balance-{balance}"),
-        "header": settings.program_name,
-        "body": format!("You now have {balance} {}.", balance_label(mode).to_lowercase()),
-        "messageType": "TEXT_AND_NOTIFY",
-    }]);
-
     let http = reqwest::Client::new();
     let resp = http
         .patch(format!("{WALLET_API}/loyaltyObject/{object_id}"))
