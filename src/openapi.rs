@@ -334,6 +334,7 @@ paths(
         crate::loyalty::public::apple_pass,
         crate::loyalty::public::card_qr,
         crate::qr_card::handlers::branch_loyalty_qr,
+        crate::qr_card::handlers::org_loyalty_qr,
         // ── staff: directory ──────────────────────────────────────────
         crate::staff::directory::list_departments,
         crate::staff::directory::create_department,

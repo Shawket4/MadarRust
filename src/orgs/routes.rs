@@ -27,6 +27,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route(
                 "/{id}/booking-qr",
                 web::get().to(qr_handlers::org_booking_qr),
+            )
+            .route(
+                "/{id}/loyalty-qr",
+                web::get().to(qr_handlers::org_loyalty_qr),
             ),
     );
 

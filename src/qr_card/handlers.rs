@@ -226,6 +226,17 @@ fn branch_loyalty_url(branch_id: Uuid) -> Result<String, AppError> {
     Ok(format!("{}/join/{}", loyalty_base()?, branch_id))
 }
 
+/// Build `{PUBLIC_LOYALTY_BASE_URL}/join/org/{org_id}` — one code for the whole
+/// shop, for a poster, a receipt footer or a link in a bio.
+///
+/// A distinct PATH rather than the same one carrying either kind of id: a
+/// public link that means different things depending on what a uuid turns out
+/// to be is a link nobody can reason about, and the branch cards already
+/// printed keep working untouched.
+fn org_loyalty_url(org_id: Uuid) -> Result<String, AppError> {
+    Ok(format!("{}/join/org/{}", loyalty_base()?, org_id))
+}
+
 /// Build `{PUBLIC_RESERVATIONS_BASE_URL}/{org_id}` — the guest picks the branch.
 fn org_booking_url(org_id: Uuid) -> Result<String, AppError> {
     Ok(format!("{}/{}", reservations_base()?, org_id))
@@ -921,6 +932,78 @@ pub async fn list_marketing_links(
     .await?;
 
     Ok(HttpResponse::Ok().json(links))
+}
+
+// ── GET /orgs/{id}/loyalty-qr ────────────────────────────────────────────────
+
+/// The shop's join QR: one code for the whole organisation.
+///
+/// A membership belongs to the SHOP, not to a branch — which is why the wallet
+/// pass has always carried the org's programme and every branch's location. The
+/// only thing that was ever per-branch was the way IN, so a shop that wants one
+/// code on a poster had to pick a branch and pretend.
+#[utoipa::path(
+    get,
+    path = "/orgs/{id}/loyalty-qr",
+    tag = "qr",
+    params(
+        ("id" = Uuid, Path, description = "Organization ID"),
+        QrRenderQuery,
+        SlugQuery,
+    ),
+    responses(
+        (status = 200, description = "Organisation loyalty join QR", body = QrResponse),
+        AppErrorResponse,
+    ),
+    security(("bearer_jwt" = []))
+)]
+pub async fn org_loyalty_qr(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    provider: web::Data<Arc<dyn ShortLinkProvider>>,
+    id: web::Path<Uuid>,
+    q: web::Query<QrRenderQuery>,
+    slug_q: web::Query<SlugQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "loyalty", "read").await?;
+    let org_id = *id;
+    require_same_org(&claims, Some(org_id))?;
+
+    // The org card carries the ORG's programme, so that is the one that has to
+    // be switched on. Refusing here beats printing a card that leads to "we run
+    // no program" — the same guard the branch card has.
+    let settings = crate::loyalty::settings::load_scope(pool.get_ref(), org_id, None)
+        .await?
+        .unwrap_or_else(|| crate::loyalty::settings::LoyaltySettings::defaults(org_id, None));
+    if !settings.enabled {
+        return Err(AppError::Conflict(
+            "The loyalty program is switched off for this organisation".into(),
+        ));
+    }
+
+    let long_url = org_loyalty_url(org_id)?;
+    let row = db::get_or_create_short_link(
+        pool.get_ref(),
+        provider.get_ref().as_ref(),
+        org_id,
+        None,
+        "org_loyalty",
+        &org_id.to_string(),
+        &long_url,
+        slug_q.slug.as_deref(),
+        None,
+    )
+    .await?;
+
+    let qr_data_url = render_data_url(&row.short_url, &q)?;
+    Ok(HttpResponse::Ok().json(QrResponse {
+        kind: "org_loyalty".into(),
+        long_url: row.long_url,
+        short_url: row.short_url,
+        short_code: row.short_code,
+        qr_data_url,
+    }))
 }
 
 // ── GET /branches/{id}/loyalty-qr ────────────────────────────────────────────

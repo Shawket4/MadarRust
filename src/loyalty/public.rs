@@ -27,14 +27,68 @@ use crate::errors::{AppError, AppErrorResponse};
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct BranchQuery {
-    pub branch_id: Uuid,
+    /// The counter QR of one branch. Its settings and its catalogue apply.
+    pub branch_id: Option<Uuid>,
+    /// The organisation's own code, for a shop that wants ONE card to hand out
+    /// — a poster, a receipt footer, a link in a bio. The programme's org-level
+    /// settings apply, which is also what the wallet pass has always used.
+    pub org_id: Option<Uuid>,
+}
+
+/// Which programme a public link is asking about.
+///
+/// A branch link carries that branch's overrides; an org link carries the org's
+/// defaults. Both end at the same membership — a member belongs to the SHOP,
+/// never to a branch, which is why the pass has always been org-wide and only
+/// the way in was not.
+struct Scope {
+    org_id: Uuid,
+    branch_id: Option<Uuid>,
+    /// The branch's name, for a page that wants to say where you are.
+    branch_name: Option<String>,
+}
+
+async fn resolve_scope(
+    pool: &PgPool,
+    branch_id: Option<Uuid>,
+    org_id: Option<Uuid>,
+) -> Result<Scope, AppError> {
+    if let Some(b) = branch_id {
+        let name: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM branches WHERE id = $1 AND is_active AND deleted_at IS NULL",
+        )
+        .bind(b)
+        .fetch_optional(pool)
+        .await?;
+        let branch_name = name.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+        return Ok(Scope {
+            org_id: resolve_branch_org(pool, b).await?,
+            branch_id: Some(b),
+            branch_name: Some(branch_name),
+        });
+    }
+    let o =
+        org_id.ok_or_else(|| AppError::BadRequest("Name a branch or an organisation".into()))?;
+    let exists: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM organizations WHERE id = $1 AND deleted_at IS NULL")
+            .bind(o)
+            .fetch_optional(pool)
+            .await?;
+    exists.ok_or_else(|| AppError::NotFound("Organisation not found".into()))?;
+    Ok(Scope {
+        org_id: o,
+        branch_id: None,
+        branch_name: None,
+    })
 }
 
 /// What the signup page needs to render itself before anyone types anything.
 #[derive(Serialize, ToSchema)]
 pub struct JoinInfo {
-    pub branch_id: Uuid,
-    pub branch_name: String,
+    /// Absent for an org-wide code — the customer has not told us where they
+    /// are, and nothing in the programme needs to know.
+    pub branch_id: Option<Uuid>,
+    pub branch_name: Option<String>,
     /// Whose programme this is, and how the page should look.
     pub brand: CardBrand,
     /// False when the program is off here — the page says so instead of taking
@@ -128,6 +182,37 @@ pub async fn brand_logo() -> HttpResponse {
         .body(LOGO)
 }
 
+/// The settings and catalogue in force for a scope.
+///
+/// A branch reads its own overrides; an org reads its defaults — the same ones
+/// the wallet pass has always used, so an org-wide signup and the card it
+/// produces cannot describe different programmes.
+async fn load_for_scope(
+    pool: &PgPool,
+    scope: &Scope,
+) -> Result<
+    (
+        super::settings::LoyaltySettings,
+        Vec<super::settings::RewardItem>,
+    ),
+    AppError,
+> {
+    match scope.branch_id {
+        Some(b) => {
+            let settings = load_effective(pool, scope.org_id, b).await?;
+            let (rewards, _) = load_effective_rewards(pool, scope.org_id, b).await?;
+            Ok((settings, rewards))
+        }
+        None => {
+            let settings = super::settings::load_scope(pool, scope.org_id, None)
+                .await?
+                .unwrap_or_else(|| super::settings::LoyaltySettings::defaults(scope.org_id, None));
+            let rewards = super::settings::load_effective_rewards_org(pool, scope.org_id).await?;
+            Ok((settings, rewards))
+        }
+    }
+}
+
 /// A reward as the signup page lists it: what it is, and what it costs.
 #[derive(Serialize, ToSchema)]
 pub struct PublicReward {
@@ -142,23 +227,13 @@ pub async fn join_info(
     pool: web::Data<PgPool>,
     query: web::Query<BranchQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let org_id = resolve_branch_org(pool.get_ref(), query.branch_id).await?;
-    let names: Option<(String, String)> = sqlx::query_as(
-        "SELECT b.name, o.name FROM branches b JOIN organizations o ON o.id = b.org_id \
-         WHERE b.id = $1 AND b.is_active AND b.deleted_at IS NULL",
-    )
-    .bind(query.branch_id)
-    .fetch_optional(pool.get_ref())
-    .await?;
-    let (branch_name, _org_name) =
-        names.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
-
-    let settings = load_effective(pool.get_ref(), org_id, query.branch_id).await?;
-    let (rewards, _) = load_effective_rewards(pool.get_ref(), org_id, query.branch_id).await?;
+    let scope = resolve_scope(pool.get_ref(), query.branch_id, query.org_id).await?;
+    let org_id = scope.org_id;
+    let (settings, rewards) = load_for_scope(pool.get_ref(), &scope).await?;
 
     Ok(HttpResponse::Ok().json(JoinInfo {
-        branch_id: query.branch_id,
-        branch_name,
+        branch_id: scope.branch_id,
+        branch_name: scope.branch_name,
         brand: card_brand(
             &crate::orgs::branding::load(pool.get_ref(), org_id).await?,
             &settings,
@@ -185,7 +260,12 @@ pub async fn join_info(
 
 #[derive(Deserialize, ToSchema)]
 pub struct JoinInput {
-    pub branch_id: Uuid,
+    /// The branch whose counter code was scanned, when one was. Absent for an
+    /// org-wide code — see [`BranchQuery`].
+    #[serde(default)]
+    pub branch_id: Option<Uuid>,
+    #[serde(default)]
+    pub org_id: Option<Uuid>,
     pub name: String,
     pub phone: String,
     /// Date of birth, `YYYY-MM-DD`. Accepted ONLY where the org asked for one:
@@ -225,8 +305,9 @@ pub async fn join(
     secret: web::Data<JwtSecret>,
     body: web::Json<JoinInput>,
 ) -> Result<HttpResponse, AppError> {
-    let org_id = resolve_branch_org(pool.get_ref(), body.branch_id).await?;
-    let settings = load_effective(pool.get_ref(), org_id, body.branch_id).await?;
+    let scope = resolve_scope(pool.get_ref(), body.branch_id, body.org_id).await?;
+    let org_id = scope.org_id;
+    let (settings, _) = load_for_scope(pool.get_ref(), &scope).await?;
     if !settings.enabled {
         return Err(AppError::Conflict(
             "This branch is not running a loyalty program".into(),
@@ -277,7 +358,10 @@ pub async fn join(
                 .bind(&phone)
                 .bind(name)
                 .bind(mint_member_token())
-                .bind(body.branch_id)
+                // Reporting only, and honestly null for an org-wide code: we
+                // do not know where they were, and a membership belongs to the
+                // shop rather than to a branch.
+                .bind(scope.branch_id)
                 .bind(locale)
                 // Apple authenticates pass updates with this; minted now so a
                 // pass issued later needs no second write.
@@ -291,7 +375,7 @@ pub async fn join(
             }
         };
 
-    let (rewards, _) = load_effective_rewards(pool.get_ref(), org_id, body.branch_id).await?;
+    let (_, rewards) = load_for_scope(pool.get_ref(), &scope).await?;
     let mode = settings.mode();
     let org = crate::orgs::branding::load(pool.get_ref(), org_id).await?;
     let brand = card_brand(&org, &settings);

@@ -22224,6 +22224,181 @@
         ]
       }
     },
+    "/orgs/{id}/loyalty-qr": {
+      "get": {
+        "tags": [
+          "qr"
+        ],
+        "summary": "The shop's join QR: one code for the whole organisation.",
+        "description": "A membership belongs to the SHOP, not to a branch — which is why the wallet\npass has always carried the org's programme and every branch's location. The\nonly thing that was ever per-branch was the way IN, so a shop that wants one\ncode on a poster had to pick a branch and pretend.",
+        "operationId": "org_loyalty_qr",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "card",
+            "in": "query",
+            "description": "`true` (default) → branded A6 card PNG; `false` → plain receipt QR PNG.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "caption",
+            "in": "query",
+            "description": "Dynamic caption line beneath the tagline (A6 card only).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dpi",
+            "in": "query",
+            "description": "Raster DPI for the A6 card (clamped 72–2400). Default 600.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "bleed_mm",
+            "in": "query",
+            "description": "Print bleed in mm (A6 card only). Default 0.",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "format": "float"
+            }
+          },
+          {
+            "name": "crop_marks",
+            "in": "query",
+            "description": "Draw crop marks (A6 card, only meaningful when `bleed_mm > 0`).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "svg",
+            "in": "query",
+            "description": "Return the A6 card as SVG (`data:image/svg+xml;base64,…`). Default false.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "module_px",
+            "in": "query",
+            "description": "Pixels per module for the plain receipt QR (1–40). Default 16.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "slug",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Organisation loyalty join QR",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QrResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/orgs/{id}/offline-auth-bundle": {
       "get": {
         "tags": [
@@ -25442,7 +25617,18 @@
           {
             "name": "branch_id",
             "in": "query",
-            "required": true,
+            "description": "The counter QR of one branch. Its settings and its catalogue apply.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "org_id",
+            "in": "query",
+            "description": "The organisation's own code, for a shop that wants ONE card to hand out\n— a poster, a receipt footer, a link in a bio. The programme's org-level\nsettings apply, which is also what the wallet pass has always used.",
+            "required": false,
             "schema": {
               "type": "string",
               "format": "uuid"
@@ -49902,8 +50088,6 @@
         "type": "object",
         "description": "What the signup page needs to render itself before anyone types anything.",
         "required": [
-          "branch_id",
-          "branch_name",
           "brand",
           "enabled",
           "require_otp",
@@ -49927,11 +50111,18 @@
             "description": "What the birthday is worth here, so the page can say what it is FOR\nrather than asking for a date of birth and explaining nothing."
           },
           "branch_id": {
-            "type": "string",
-            "format": "uuid"
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Absent for an org-wide code — the customer has not told us where they\nare, and nothing in the programme needs to know."
           },
           "branch_name": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "brand": {
             "$ref": "#/components/schemas/CardBrand",
@@ -49983,7 +50174,6 @@
       "JoinInput": {
         "type": "object",
         "required": [
-          "branch_id",
           "name",
           "phone"
         ],
@@ -49997,8 +50187,12 @@
             "description": "Date of birth, `YYYY-MM-DD`. Accepted ONLY where the org asked for one:\na field the shop turned off must not be storable by posting past the\nform, and the year is kept because a date without one is not a date."
           },
           "branch_id": {
-            "type": "string",
-            "format": "uuid"
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The branch whose counter code was scanned, when one was. Absent for an\norg-wide code — see [`BranchQuery`]."
           },
           "device_token": {
             "type": [
@@ -50016,6 +50210,13 @@
           },
           "name": {
             "type": "string"
+          },
+          "org_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           },
           "phone": {
             "type": "string"

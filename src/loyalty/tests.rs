@@ -406,6 +406,95 @@ async fn a_shop_wears_madar_until_it_is_on_the_branding_tier(pool: PgPool) {
     );
 }
 
+/// One code for the whole shop.
+///
+/// A membership belongs to the SHOP — which is why the wallet pass has always
+/// carried the org's programme and every branch's location. The only thing that
+/// was ever per-branch was the way in, so a shop wanting one code on a poster
+/// had to pick a branch and pretend.
+#[sqlx::test]
+async fn a_shop_can_hand_out_one_code_for_the_whole_organisation(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    enable_program(&pool, org, 1000, 100, false).await;
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(super::routes::configure),
+    )
+    .await;
+
+    // The org code names no branch, and the page is told there is none rather
+    // than being handed one it did not ask about.
+    let body: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/public/loyalty/join-info?org_id={org}"))
+            .to_request(),
+    )
+    .await;
+    assert!(body["branch_id"].is_null(), "{body}");
+    assert!(body["branch_name"].is_null());
+    assert_eq!(body["enabled"], true);
+    assert_eq!(body["next_reward_cost"], 100);
+
+    // Signing up through it makes a member of the SHOP.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/loyalty/join")
+            .set_json(json!({ "org_id": org, "name": "Ali", "phone": "201000000061" }))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success());
+
+    let (member_org, joined_branch): (Uuid, Option<Uuid>) =
+        sqlx::query_as("SELECT org_id, joined_branch_id FROM loyalty_customers WHERE phone = $1")
+            .bind("201000000061")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(member_org, org);
+    assert!(
+        joined_branch.is_none(),
+        "we do not know where they were, and the membership does not need to"
+    );
+
+    // The branch code still works, and still records where they joined — the
+    // cards already printed keep working untouched.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/loyalty/join")
+            .set_json(json!({ "branch_id": branch, "name": "Sara", "phone": "201000000062" }))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let joined_branch: Option<Uuid> =
+        sqlx::query_scalar("SELECT joined_branch_id FROM loyalty_customers WHERE phone = $1")
+            .bind("201000000062")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(joined_branch, Some(branch));
+
+    // Naming neither is refused rather than guessed at.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/public/loyalty/join-info")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
 /// A field the shop turned off must not be storable by posting past the form.
 #[sqlx::test]
 async fn a_birthday_is_only_kept_where_the_shop_asked_for_one(pool: PgPool) {
