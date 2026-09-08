@@ -44276,6 +44276,8 @@
           "balance",
           "mode",
           "next_reward_cost",
+          "rewards_ready",
+          "progress_to_next",
           "points_to_next_reward",
           "can_redeem",
           "member_token",
@@ -44316,11 +44318,21 @@
             "type": "integer",
             "format": "int32"
           },
+          "progress_to_next": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Progress towards the next one, after the earned ones are set aside."
+          },
           "rewards": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/PublicReward"
             }
+          },
+          "rewards_ready": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Rewards the balance has already earned — a card does not stop at full."
           }
         }
       },
@@ -50672,6 +50684,10 @@
             "type": "boolean",
             "description": "Verify the signup phone by WhatsApp code, like bookings and ordering."
           },
+          "reward_any_item": {
+            "type": "boolean",
+            "description": "Any menu item may be taken as a reward, at `default_reward_cost`.\n\nOff by default. A curated catalogue is the safer shape — it offers an\nespresso for five stamps without also offering the steak — and this is\nfor the shops whose programme genuinely is \"collect five, get anything\",\nwhich a catalogue can only express by listing the entire menu and\nkeeping that list in step with it forever.\n\nThe two are alternatives, not layers: with this on, the catalogue's\nper-item prices no longer apply, because an item's cost can no longer\ndepend on which item it is.\n\nDefaulted on the way in, because this type is the REQUEST body as well\nas the response: every till and dashboard already in the field sends a\nsettings object without this key, and rejecting those would switch the\nprogramme off for everyone who had not updated yet."
+          },
           "terms": {
             "type": [
               "string",
@@ -51105,6 +51121,8 @@
           "mode",
           "balance",
           "next_reward_cost",
+          "rewards_ready",
+          "progress_to_next",
           "points_to_next_reward",
           "can_redeem",
           "locale",
@@ -51165,7 +51183,17 @@
           "points_to_next_reward": {
             "type": "integer",
             "format": "int32",
-            "description": "`next_reward_cost - balance`, floored at zero."
+            "description": "What that next reward still needs. Equals `next_reward_cost` on an exact\nmultiple, because a fresh card is the honest thing to show there."
+          },
+          "progress_to_next": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Progress towards the NEXT reward, after the earned ones are set aside.\n`balance % next_reward_cost`."
+          },
+          "rewards_ready": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many rewards the balance has ALREADY earned.\n\nA card does not stop at full. Six stamps against a five-stamp reward is\none reward earned and one stamp towards the next, not \"five and a bit\nwasted\" — and a customer who has been in eleven times is owed two\nrewards, whether or not they claimed the first."
           },
           "visits_balance": {
             "type": "integer",
@@ -56877,9 +56905,20 @@
         "required": [
           "member",
           "rewards",
-          "recent"
+          "recent",
+          "any_item",
+          "any_item_cost"
         ],
         "properties": {
+          "any_item": {
+            "type": "boolean",
+            "description": "The whole menu is claimable, not just `rewards`.\n\nWhen on, `rewards` stops being the list of what MAY be claimed — it is\nonly what happens to be curated — and the till offers every line at\n`any_item_cost`. Sent rather than inferred, because a till cannot tell\n\"no catalogue\" apart from \"any item\" without being told."
+          },
+          "any_item_cost": {
+            "type": "integer",
+            "format": "int32",
+            "description": "What one line costs when `any_item` is on, in the branch's currency."
+          },
           "member": {
             "$ref": "#/components/schemas/MemberView"
           },

@@ -10,7 +10,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::earn::{self, EarnRule, Mode, OrderAmounts};
-use super::settings::{RewardItem, load_effective, load_effective_rewards};
+use super::settings::{LoyaltySettings, RewardItem, load_effective, load_effective_rewards};
 use crate::errors::AppError;
 
 /// A member as the teller, the admin and the pass all see them.
@@ -37,7 +37,18 @@ pub struct MemberView {
     /// progress line counts towards. Falls back to the scope's default cost
     /// when no rewards have been curated.
     pub next_reward_cost: i32,
-    /// `next_reward_cost - balance`, floored at zero.
+    /// How many rewards the balance has ALREADY earned.
+    ///
+    /// A card does not stop at full. Six stamps against a five-stamp reward is
+    /// one reward earned and one stamp towards the next, not "five and a bit
+    /// wasted" — and a customer who has been in eleven times is owed two
+    /// rewards, whether or not they claimed the first.
+    pub rewards_ready: i32,
+    /// Progress towards the NEXT reward, after the earned ones are set aside.
+    /// `balance % next_reward_cost`.
+    pub progress_to_next: i32,
+    /// What that next reward still needs. Equals `next_reward_cost` on an exact
+    /// multiple, because a fresh card is the honest thing to show there.
     pub points_to_next_reward: i32,
     /// The balance affords at least one reward on offer here.
     pub can_redeem: bool,
@@ -83,12 +94,15 @@ impl MemberRow {
     /// asked for.
     pub fn view(self, mode: Mode, next_reward_cost: i32) -> MemberView {
         let balance = self.balance_in(mode);
+        let (rewards_ready, progress_to_next) = earned_and_progress(balance, next_reward_cost);
         MemberView {
             balance,
             mode: mode.as_str().into(),
             next_reward_cost,
-            points_to_next_reward: (next_reward_cost - balance).max(0),
-            can_redeem: balance >= next_reward_cost,
+            rewards_ready,
+            progress_to_next,
+            points_to_next_reward: (next_reward_cost - progress_to_next).max(0),
+            can_redeem: rewards_ready > 0,
             id: self.id,
             org_id: self.org_id,
             name: self.name,
@@ -101,6 +115,36 @@ impl MemberRow {
             enrolled_at: self.enrolled_at,
         }
     }
+}
+
+/// What the card counts towards, for this scope.
+///
+/// Normally the cheapest reward on offer: a customer who can afford the espresso
+/// HAS earned a reward, whatever the cake costs. With `reward_any_item` on there
+/// is no cheapest — every item costs the same — so the scope's default is the
+/// answer, and reading the catalogue there would aim the card at a price that no
+/// longer applies to anything.
+pub fn reward_target(settings: &LoyaltySettings, rewards: &[RewardItem]) -> i32 {
+    if settings.reward_any_item {
+        return settings.default_reward_cost;
+    }
+    cheapest_cost(rewards).unwrap_or(settings.default_reward_cost)
+}
+
+/// Split a balance into rewards already earned and progress towards the next.
+///
+/// The card does not stop at full, which is the whole point: six stamps against
+/// a five-stamp reward is ONE earned and ONE towards the next. Showing that as a
+/// full card and nothing else tells a customer their sixth visit did not count.
+///
+/// A zero or negative cost earns nothing rather than dividing by it — the column
+/// is `CHECK (> 0)`, but a card telling every customer they had infinite rewards
+/// would be a poor way to discover otherwise.
+pub fn earned_and_progress(balance: i32, cost: i32) -> (i32, i32) {
+    if cost <= 0 || balance <= 0 {
+        return (0, balance.max(0));
+    }
+    (balance / cost, balance % cost)
 }
 
 /// The cheapest reward on offer, or `None` when the catalogue is empty.
@@ -174,7 +218,7 @@ pub async fn member_with_context(
     let settings = load_effective(pool, row.org_id, branch_id).await?;
     let (rewards, _) = load_effective_rewards(pool, row.org_id, branch_id).await?;
     let mode = settings.mode();
-    let target = cheapest_cost(&rewards).unwrap_or(settings.default_reward_cost);
+    let target = reward_target(&settings, &rewards);
     Ok((row.view(mode, target), rewards))
 }
 
@@ -312,4 +356,83 @@ pub async fn ledger(
     .bind(limit)
     .fetch_all(pool)
     .await?)
+}
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+
+    #[test]
+    fn a_full_card_starts_the_next_one() {
+        // The report this exists for: six orders against a five-order reward.
+        // One earned, one towards the next — not "five and a bit wasted".
+        assert_eq!(earned_and_progress(6, 5), (1, 1));
+        // Exactly full: one earned, and a FRESH card rather than a stuck one.
+        assert_eq!(earned_and_progress(5, 5), (1, 0));
+        // Someone who has not claimed in a while is owed more than one.
+        assert_eq!(earned_and_progress(11, 5), (2, 1));
+        assert_eq!(earned_and_progress(20, 5), (4, 0));
+        // Below the first target, nothing is earned yet.
+        assert_eq!(earned_and_progress(3, 5), (0, 3));
+        assert_eq!(earned_and_progress(0, 5), (0, 0));
+    }
+
+    #[test]
+    fn a_broken_target_earns_nothing_rather_than_everything() {
+        // The column is CHECK (> 0), but dividing by it anyway would tell every
+        // customer they had infinite rewards, which is a poor way to find out.
+        assert_eq!(earned_and_progress(9, 0), (0, 9));
+        assert_eq!(earned_and_progress(9, -5), (0, 9));
+        // A negative balance is an adjustment gone past zero, not a reward.
+        assert_eq!(earned_and_progress(-3, 5), (0, 0));
+    }
+
+    #[test]
+    fn the_view_counts_earned_cards_not_just_a_full_one() {
+        let m = MemberRow {
+            id: Uuid::nil(),
+            org_id: Uuid::nil(),
+            name: "Ali".into(),
+            phone: "201000000001".into(),
+            member_token: "Mtoken".into(),
+            points_balance: 0,
+            visits_balance: 6,
+            lifetime_points: 0,
+            lifetime_visits: 6,
+            locale: "en".into(),
+            apple_serial: None,
+            apple_auth_token: None,
+            google_object_id: None,
+            pass_updated_at: None,
+            enrolled_at: chrono::Utc::now(),
+        };
+        let v = m.view(Mode::Visits, 5);
+        assert_eq!(v.balance, 6);
+        assert_eq!(v.rewards_ready, 1, "the sixth order did not vanish");
+        assert_eq!(v.progress_to_next, 1);
+        assert_eq!(v.points_to_next_reward, 4);
+        assert!(v.can_redeem);
+    }
+
+    #[test]
+    fn any_item_mode_aims_the_card_at_the_flat_price() {
+        let mut s = LoyaltySettings::defaults(Uuid::nil(), None);
+        s.default_reward_cost = 8;
+        let catalogue = vec![RewardItem {
+            menu_item_id: Uuid::nil(),
+            name: "Espresso".into(),
+            image_url: None,
+            base_price: 5000,
+            cost_currency: "visits".into(),
+            cost_amount: 3,
+            sort_order: 0,
+        }];
+        // Normally the cheapest thing on offer is what the card counts towards.
+        assert_eq!(reward_target(&s, &catalogue), 3);
+        // With any item claimable there is no cheapest — everything costs the
+        // same — and aiming at 3 would point the card at a price that no longer
+        // applies to anything.
+        s.reward_any_item = true;
+        assert_eq!(reward_target(&s, &catalogue), 8);
+        assert_eq!(reward_target(&s, &[]), 8);
+    }
 }

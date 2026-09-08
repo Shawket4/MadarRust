@@ -50,6 +50,24 @@ pub struct LoyaltySettings {
     pub default_reward_cost: i32,
     /// Verify the signup phone by WhatsApp code, like bookings and ordering.
     pub require_otp: bool,
+    /// Any menu item may be taken as a reward, at `default_reward_cost`.
+    ///
+    /// Off by default. A curated catalogue is the safer shape — it offers an
+    /// espresso for five stamps without also offering the steak — and this is
+    /// for the shops whose programme genuinely is "collect five, get anything",
+    /// which a catalogue can only express by listing the entire menu and
+    /// keeping that list in step with it forever.
+    ///
+    /// The two are alternatives, not layers: with this on, the catalogue's
+    /// per-item prices no longer apply, because an item's cost can no longer
+    /// depend on which item it is.
+    ///
+    /// Defaulted on the way in, because this type is the REQUEST body as well
+    /// as the response: every till and dashboard already in the field sends a
+    /// settings object without this key, and rejecting those would switch the
+    /// programme off for everyone who had not updated yet.
+    #[serde(default)]
+    pub reward_any_item: bool,
 
     pub terms: Option<String>,
     pub terms_ar: Option<String>,
@@ -69,6 +87,7 @@ impl LoyaltySettings {
             earn_include_tax: false,
             default_reward_cost: 100,
             require_otp: true,
+            reward_any_item: false,
             terms: None,
             terms_ar: None,
         }
@@ -125,13 +144,14 @@ struct Row {
     earn_include_tax: bool,
     default_reward_cost: i32,
     require_otp: bool,
+    reward_any_item: bool,
     terms: Option<String>,
     terms_ar: Option<String>,
 }
 
 const COLS: &str = "org_id, branch_id, enabled, program_name, program_name_ar, mode, \
     earn_piastres_per_point, earn_on_discounted, earn_include_tax, \
-    default_reward_cost, require_otp, terms, terms_ar";
+    default_reward_cost, require_otp, reward_any_item, terms, terms_ar";
 
 impl From<Row> for LoyaltySettings {
     fn from(r: Row) -> Self {
@@ -147,6 +167,7 @@ impl From<Row> for LoyaltySettings {
             earn_include_tax: r.earn_include_tax,
             default_reward_cost: r.default_reward_cost,
             require_otp: r.require_otp,
+            reward_any_item: r.reward_any_item,
             terms: r.terms,
             terms_ar: r.terms_ar,
         }
@@ -273,8 +294,8 @@ pub async fn put_settings(
     let row: Row = sqlx::query_as(&format!(
         "INSERT INTO loyalty_settings (org_id, branch_id, enabled, program_name, program_name_ar, \
             mode, earn_piastres_per_point, earn_on_discounted, earn_include_tax, default_reward_cost, \
-            require_otp, terms, terms_ar) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) \
+            require_otp, reward_any_item, terms, terms_ar) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) \
          ON CONFLICT (org_id, COALESCE(branch_id, '00000000-0000-0000-0000-000000000000'::uuid)) \
          DO UPDATE SET enabled = EXCLUDED.enabled, program_name = EXCLUDED.program_name, \
             program_name_ar = EXCLUDED.program_name_ar, mode = EXCLUDED.mode, \
@@ -282,7 +303,8 @@ pub async fn put_settings(
             earn_on_discounted = EXCLUDED.earn_on_discounted, \
             earn_include_tax = EXCLUDED.earn_include_tax, \
             default_reward_cost = EXCLUDED.default_reward_cost, \
-            require_otp = EXCLUDED.require_otp, terms = EXCLUDED.terms, \
+            require_otp = EXCLUDED.require_otp, \
+            reward_any_item = EXCLUDED.reward_any_item, terms = EXCLUDED.terms, \
             terms_ar = EXCLUDED.terms_ar, updated_at = now() \
          RETURNING {COLS}"
     ))
@@ -297,6 +319,7 @@ pub async fn put_settings(
     .bind(incoming.earn_include_tax)
     .bind(incoming.default_reward_cost)
     .bind(incoming.require_otp)
+    .bind(incoming.reward_any_item)
     .bind(&incoming.terms)
     .bind(&incoming.terms_ar)
     .fetch_one(pool.get_ref())

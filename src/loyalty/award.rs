@@ -98,6 +98,8 @@ struct OrderFacts {
     subtotal: i32,
     discount_amount: i32,
     tax_amount: i32,
+    /// The member whose card was scanned at the till, if one was.
+    member_id: Option<Uuid>,
 }
 
 async fn load_order(
@@ -110,9 +112,22 @@ async fn load_order(
             "Name the order by order_id or order_key".into(),
         ));
     }
-    let row: Option<(Uuid, Uuid, Uuid, DateTime<Utc>, bool, i32, i32, i32)> = sqlx::query_as(
-        "SELECT o.id, o.branch_id, b.org_id, o.created_at, (o.voided_at IS NOT NULL), \
-                o.subtotal, o.discount_amount, o.tax_amount \
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        id: Uuid,
+        branch_id: Uuid,
+        org_id: Uuid,
+        created_at: DateTime<Utc>,
+        voided: bool,
+        subtotal: i32,
+        discount_amount: i32,
+        tax_amount: i32,
+        loyalty_customer_id: Option<Uuid>,
+    }
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT o.id, o.branch_id, b.org_id, o.created_at, \
+                (o.voided_at IS NOT NULL) AS voided, \
+                o.subtotal, o.discount_amount, o.tax_amount, o.loyalty_customer_id \
            FROM orders o JOIN branches b ON b.id = o.branch_id \
           WHERE ($1::uuid IS NOT NULL AND o.id = $1) \
              OR ($1::uuid IS NULL AND o.idempotency_key = $2)",
@@ -122,23 +137,23 @@ async fn load_order(
     .fetch_optional(pool)
     .await?;
 
-    let (id, branch_id, org_id, created_at, voided, subtotal, discount_amount, tax_amount) = row
-        .ok_or_else(|| {
-            // A till whose order has not drained yet lands here. The op stays
-            // queued and is retried, which is why this is a 404 and not a
-            // dead-letter: the order is coming.
-            AppError::NotFound("That sale is not on the server yet".into())
-        })?;
+    let r = row.ok_or_else(|| {
+        // A till whose order has not drained yet lands here. The op stays
+        // queued and is retried, which is why this is a 404 and not a
+        // dead-letter: the order is coming.
+        AppError::NotFound("That sale is not on the server yet".into())
+    })?;
 
     Ok(OrderFacts {
-        id,
-        branch_id,
-        org_id,
-        created_at,
-        voided,
-        subtotal,
-        discount_amount,
-        tax_amount,
+        id: r.id,
+        branch_id: r.branch_id,
+        org_id: r.org_id,
+        created_at: r.created_at,
+        voided: r.voided,
+        subtotal: r.subtotal,
+        discount_amount: r.discount_amount,
+        tax_amount: r.tax_amount,
+        member_id: r.loyalty_customer_id,
     })
 }
 
@@ -218,7 +233,7 @@ pub async fn award_inner(
         ));
     }
 
-    let member = resolve_member(pool, order.org_id, &body).await?;
+    let member = resolve_member(pool, order.org_id, &body, order.member_id).await?;
 
     let mut tx = pool.begin().await?;
     let points = model::award_for_order(
@@ -269,7 +284,7 @@ pub async fn award_inner(
         crate::loyalty::settings::load_effective_rewards(pool, order.org_id, order.branch_id)
             .await?;
     let mode = settings.mode();
-    let target = model::cheapest_cost(&rewards).unwrap_or(settings.default_reward_cost);
+    let target = model::reward_target(&settings, &rewards);
     let fresh = model::find_by_id(pool, member.id)
         .await?
         .ok_or_else(|| AppError::NotFound("Member not found".into()))?;
@@ -290,6 +305,7 @@ async fn resolve_member(
     pool: &PgPool,
     org_id: Uuid,
     body: &AwardRequest,
+    on_order: Option<Uuid>,
 ) -> Result<MemberRow, AppError> {
     let found = match (&body.customer_id, &body.token, &body.phone) {
         (Some(id), _, _) => model::find_by_id(pool, *id).await?,
@@ -299,11 +315,19 @@ async fn resolve_member(
         (_, _, Some(phone)) if !phone.trim().is_empty() => {
             model::find_by_phone(pool, org_id, &normalize_phone(phone)?).await?
         }
-        _ => {
-            return Err(AppError::BadRequest(
-                "Scan a card or supply a phone number".into(),
-            ));
-        }
+        // Nobody named, so the card scanned at the till stands. This is the
+        // ordinary path: the teller scanned once before payment, and the
+        // button on the receipt awards to that same customer. Naming someone
+        // explicitly still overrides it — a card scanned at the till can be the
+        // wrong one, and the 24-hour window exists to fix exactly that.
+        _ => match on_order {
+            Some(id) => model::find_by_id(pool, id).await?,
+            None => {
+                return Err(AppError::BadRequest(
+                    "Scan a card or supply a phone number".into(),
+                ));
+            }
+        },
     };
     match found {
         Some(m) if m.org_id == org_id => Ok(m),

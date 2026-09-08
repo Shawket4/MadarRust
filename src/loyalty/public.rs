@@ -160,7 +160,7 @@ pub async fn join_info(
         enabled: settings.enabled,
         require_otp: settings.require_otp,
         mode: settings.mode.clone(),
-        next_reward_cost: model::cheapest_cost(&rewards).unwrap_or(settings.default_reward_cost),
+        next_reward_cost: model::reward_target(&settings, &rewards),
         earn_piastres_per_point: settings.earn_piastres_per_point,
         rewards: rewards
             .into_iter()
@@ -286,7 +286,7 @@ pub async fn join(
         name: member.name.clone(),
         balance: member.balance_in(mode),
         mode: settings.mode.clone(),
-        next_reward_cost: model::cheapest_cost(&rewards).unwrap_or(settings.default_reward_cost),
+        next_reward_cost: model::reward_target(&settings, &rewards),
         brand,
         passes,
         already_member,
@@ -304,6 +304,10 @@ pub struct CardView {
     pub balance: i32,
     pub mode: String,
     pub next_reward_cost: i32,
+    /// Rewards the balance has already earned — a card does not stop at full.
+    pub rewards_ready: i32,
+    /// Progress towards the next one, after the earned ones are set aside.
+    pub progress_to_next: i32,
     pub points_to_next_reward: i32,
     pub can_redeem: bool,
     pub member_token: String,
@@ -331,7 +335,7 @@ pub async fn card(
     let catalogue =
         super::settings::load_effective_rewards_org(pool.get_ref(), member.org_id).await?;
     let mode = settings.mode();
-    let target = model::cheapest_cost(&catalogue).unwrap_or(settings.default_reward_cost);
+    let target = model::reward_target(&settings, &catalogue);
     let org = crate::orgs::branding::load(pool.get_ref(), member.org_id).await?;
     let brand = card_brand(&org, &settings);
     let locations = wallet::locations_for_org(pool.get_ref(), member.org_id).await?;
@@ -342,6 +346,8 @@ pub async fn card(
         balance: view.balance,
         mode: view.mode,
         next_reward_cost: view.next_reward_cost,
+        rewards_ready: view.rewards_ready,
+        progress_to_next: view.progress_to_next,
         points_to_next_reward: view.points_to_next_reward,
         can_redeem: view.can_redeem,
         brand,

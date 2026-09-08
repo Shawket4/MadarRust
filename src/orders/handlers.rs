@@ -1553,10 +1553,10 @@ pub(crate) async fn create_order_inner(
              amount_tendered, change_given, tip_amount, tip_payment_method,
              discount_id, customer_name, notes, status,
              idempotency_key, created_at, tip_is_cash, order_ref,
-             price_flagged, price_expected_total, waiter_id)
+             price_flagged, price_expected_total, waiter_id, loyalty_customer_id)
         VALUES ($1, $2, $3, $4, $5, $6, $7::discount_type, $8,
                 $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'completed', $19, $20, $21, $22,
-                $23, $24, $25)
+                $23, $24, $25, $26)
         RETURNING
             id, branch_id, shift_id, teller_id,
             (SELECT name FROM users WHERE id = $3) AS teller_name,
@@ -1600,6 +1600,13 @@ pub(crate) async fn create_order_inner(
     .bind(price_flagged)
     .bind(expected_total)
     .bind(waiter_id)
+    // Whose card was scanned at the till, whether or not they spent anything.
+    //
+    // Recorded here so collecting points afterwards does NOT need a second
+    // scan: the teller scanned once, before payment, and the button on the
+    // receipt already knows who. Scanning twice for one customer is the part of
+    // this that read as two unrelated features.
+    .bind(body.loyalty_customer_id)
     .fetch_one(&mut *tx)
     .await
     {

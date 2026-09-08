@@ -723,6 +723,103 @@ async fn a_sale_earns_nothing_until_the_button_is_pressed(pool: PgPool) {
     assert_eq!(balance_of(&pool, member).await, 13);
 }
 
+/// Scanning once, before payment, is enough.
+///
+/// The card was scanned at the till to spend a reward, and then had to be
+/// scanned AGAIN to collect points for the same sale — two scans, two screens,
+/// for one customer standing at one counter. The order now remembers who was
+/// scanned, so the button on the receipt already knows.
+#[sqlx::test]
+async fn a_card_scanned_at_the_till_needs_no_second_scan_to_collect(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    seed_cash_method(&pool, org).await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    enable_program(&pool, org, 1000, 100, false).await;
+    let member = seed_member(&pool, org, "201000000041", "Mscanoncetoken0000001").await;
+    let item = seed_menu_item(&pool, org, "Feast", 13_000).await;
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(crate::orders::routes::configure)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let jwt = token(teller, org, UserRole::Teller, Some(branch));
+
+    // The teller scans the card at tender. Nothing is redeemed — most sales
+    // redeem nothing — but the customer has been identified.
+    let key = Uuid::new_v4();
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .set_json(json!({
+            "branch_id": branch, "shift_id": shift, "payment_method": "cash",
+            "idempotency_key": key,
+            "loyalty_customer_id": member,
+            "items": [{ "menu_item_id": item, "quantity": 1 }]
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+    let body: Value = test::read_body_json(resp).await;
+    let order_id = Uuid::parse_str(body["id"].as_str().unwrap()).unwrap();
+
+    // Checkout still awards nothing on its own.
+    assert_eq!(balance_of(&pool, member).await, 0);
+
+    // The button, naming NO member — the order carries one.
+    let req = test::TestRequest::post()
+        .uri("/loyalty/award")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .set_json(json!({ "branch_id": branch, "order_id": order_id }))
+        .to_request();
+    let body: Value = test::call_and_read_body_json(&app, req).await;
+    assert_eq!(body["points_awarded"], 13, "{body}");
+    assert_eq!(body["member"]["id"], member.to_string());
+    assert_eq!(balance_of(&pool, member).await, 13);
+}
+
+/// A sale nobody scanned still has to say so, rather than awarding to whoever.
+#[sqlx::test]
+async fn a_sale_with_no_card_scanned_still_asks_for_one(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    seed_cash_method(&pool, org).await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    enable_program(&pool, org, 1000, 100, false).await;
+    let item = seed_menu_item(&pool, org, "Feast", 13_000).await;
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(crate::orders::routes::configure)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let jwt = token(teller, org, UserRole::Teller, Some(branch));
+    let (order_id, _) = place_order(&app, &jwt, branch, shift, item).await;
+
+    let req = test::TestRequest::post()
+        .uri("/loyalty/award")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .set_json(json!({ "branch_id": branch, "order_id": order_id }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
 #[sqlx::test]
 async fn the_server_refuses_an_award_after_the_window_even_if_the_client_asks(pool: PgPool) {
     perms(&pool).await;

@@ -132,16 +132,24 @@ pub async fn plan(
             .menu_item_id
             .ok_or_else(|| AppError::BadRequest("A bundle cannot be taken as a reward".into()))?;
 
-        let reward = catalogue
-            .iter()
-            // Priced in this branch's currency by the loader, so the item id
-            // is the whole question.
-            .find(|c| c.menu_item_id == menu_item_id)
-            .ok_or_else(|| {
-                AppError::BadRequest("That item is not a reward at this branch".into())
-            })?;
+        // Priced in this branch's currency by the loader, so the item id is the
+        // whole question.
+        let listed = catalogue.iter().find(|c| c.menu_item_id == menu_item_id);
+        let unit_cost = match listed {
+            Some(reward) => reward.cost_amount,
+            // "Collect five, get anything." The catalogue stops being a list of
+            // what may be claimed and the scope's default cost applies to
+            // everything — per-item pricing is what the catalogue is FOR, so
+            // the two are alternatives rather than layers.
+            None if settings.reward_any_item => settings.default_reward_cost,
+            None => {
+                return Err(AppError::BadRequest(
+                    "That item is not a reward at this branch".into(),
+                ));
+            }
+        };
 
-        let cost = reward.cost_amount.saturating_mul(units);
+        let cost = unit_cost.saturating_mul(units);
         spent = spent.saturating_add(cost);
         lines.push(PlannedRedemption {
             item_index: index,
