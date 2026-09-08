@@ -188,6 +188,17 @@ jobs:
 
           docker pull "$DEPLOY_IMAGE"
 
+          # Point `:latest` at what is actually deployed.
+          #
+          # The compose file falls back to `:latest` when BACKEND_IMAGE is unset,
+          # and every deploy pins a `sha-` tag instead — so `:latest` on the box
+          # stayed at whatever it was months ago. Any `docker compose up` run by
+          # hand then silently swapped the running backend for that stale image,
+          # which is a binary older than the migrations the database has already
+          # applied: sqlx refuses to start and the container crash-loops, with
+          # nothing about the real cause anywhere in the message.
+          docker tag "$DEPLOY_IMAGE" ghcr.io/shawket4/madarrust:latest
+
           # Restart only the backend — other services keep running
           BACKEND_IMAGE="$DEPLOY_IMAGE" \
             docker compose -f /opt/madar-rust/docker-compose.yml \

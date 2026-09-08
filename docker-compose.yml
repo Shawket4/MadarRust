@@ -16,6 +16,10 @@
 
 services:
   madar-backend:
+    # `:latest` is retagged to the deployed image by the deploy workflow, so a
+    # `docker compose up` run by hand starts what is actually running rather
+    # than an image from whenever `:latest` was last pushed. Deploys still pin
+    # an exact `sha-` tag through BACKEND_IMAGE.
     image: ${BACKEND_IMAGE:-ghcr.io/shawket4/madarrust:latest}
     restart: unless-stopped
     extra_hosts:
