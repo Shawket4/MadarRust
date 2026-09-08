@@ -336,6 +336,12 @@ pub async fn save_url(
     locations: &[super::PassLocation],
 ) -> Result<Option<String>, AppError> {
     let (Some(issuer), Some(email), Some(key)) = (issuer_id(), sa_email(), sa_key()) else {
+        // Silence here is how "no Add to Google Wallet button" came to look
+        // identical to a wallet that was configured and refusing.
+        tracing::warn!(
+            missing = ?missing_env(),
+            "loyalty: Google Wallet is not configured, so no button is offered"
+        );
         return Ok(None);
     };
     let object_id = match &member.google_object_id {
@@ -489,9 +495,31 @@ async fn access_token() -> Result<String, AppError> {
         .await
         .map_err(|e| AppError::ServiceUnavailable(format!("Google token endpoint: {e}")))?;
     if !resp.status().is_success() {
+        // Google's OAuth errors say exactly what is wrong — `invalid_grant` for
+        // a key that does not match the account, `unauthorized_client` for one
+        // that is not allowed the scope. Reporting the status alone turned all
+        // of them into "400", which is how this took four rounds to place.
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let reason = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .map(|v| {
+                format!(
+                    "{} {}",
+                    v["error"].as_str().unwrap_or(""),
+                    v["error_description"].as_str().unwrap_or("")
+                )
+                .trim()
+                .to_string()
+            })
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| body.chars().take(300).collect());
+        tracing::error!(
+            status = %status, reason = %reason,
+            "loyalty: Google would not issue a token for the service account"
+        );
         return Err(AppError::ServiceUnavailable(format!(
-            "Google token endpoint returned {}",
-            resp.status()
+            "Google refused the service account ({status}): {reason}"
         )));
     }
     let body: serde_json::Value = resp.json().await.map_err(|_| AppError::Internal)?;
