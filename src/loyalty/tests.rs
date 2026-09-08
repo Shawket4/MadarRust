@@ -1848,6 +1848,97 @@ async fn a_new_branch_makes_existing_cards_stale(pool: PgPool) {
     assert!(!out.contains(&no_pass), "{out:?}");
 }
 
+/// Where a member SHOPS beats where they signed up, and both beat guessing.
+///
+/// The org-wide sign-up code names no branch at all, and a counter code can
+/// name one the customer was only passing. The branch they keep buying at is
+/// the one whose card should surface — and because this is recomputed on every
+/// pass refresh, a card that started on a poor guess corrects itself after the
+/// first visit without the customer noticing anything happened.
+#[sqlx::test]
+async fn the_card_follows_where_they_actually_shop(pool: PgPool) {
+    let org = seed_org(&pool).await;
+    let cairo = seed_branch(&pool, org, "Cairo").await;
+    let alex = seed_branch(&pool, org, "Alexandria").await;
+    let aswan = seed_branch(&pool, org, "Aswan").await;
+    for (b, lat, lng) in [
+        (cairo, 30.04, 31.23),
+        (alex, 31.20, 29.92),
+        (aswan, 24.09, 32.90),
+    ] {
+        sqlx::query("UPDATE branches SET latitude = $2, longitude = $3 WHERE id = $1")
+            .bind(b)
+            .bind(lat)
+            .bind(lng)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    // Joined through the shop's own code: no branch, nothing to measure from.
+    let id = seed_member(&pool, org, "201000000091", "Manchortoken00000001").await;
+    let load = |pool: PgPool, id: Uuid| async move {
+        let m = crate::loyalty::model::find_by_id(&pool, id)
+            .await
+            .unwrap()
+            .unwrap();
+        crate::loyalty::wallet::locations_for_member(&pool, &m)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|l| l.name)
+            .collect::<Vec<_>>()
+    };
+
+    // Cold start: busiest first. Nothing has happened anywhere, so it falls
+    // through to a stable order rather than an arbitrary one.
+    assert_eq!(load(pool.clone(), id).await.len(), 3);
+
+    // They sign up at Cairo instead — now there is something to measure from.
+    sqlx::query("UPDATE loyalty_customers SET joined_branch_id = $2 WHERE id = $1")
+        .bind(id)
+        .bind(cairo)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(load(pool.clone(), id).await[0], "Cairo");
+
+    // But they actually shop in Aswan, twice. Where they buy beats where they
+    // joined, and the card follows them.
+    for _ in 0..2 {
+        sqlx::query(
+            "INSERT INTO loyalty_transactions \
+                (org_id, customer_id, branch_id, kind, currency, points) \
+             VALUES ($1,$2,$3,'adjust','points',1)",
+        )
+        .bind(org)
+        .bind(id)
+        .bind(aswan)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        load(pool.clone(), id).await[0],
+        "Aswan",
+        "the card follows the counter they actually use"
+    );
+
+    // A branch with no coordinates cannot anchor anything, and must not throw
+    // the ordering away — it simply is not the anchor.
+    let unmapped = seed_branch(&pool, org, "Unmapped").await;
+    let id2 = seed_member(&pool, org, "201000000092", "Munmappedtoken000001").await;
+    sqlx::query("UPDATE loyalty_customers SET joined_branch_id = $2 WHERE id = $1")
+        .bind(id2)
+        .bind(unmapped)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let names = load(pool.clone(), id2).await;
+    assert_eq!(names.len(), 3, "the located branches are all still there");
+    assert!(!names.contains(&"Unmapped".to_string()));
+}
+
 /// The ten branches a card carries are the ten NEAREST, not the first ten
 /// alphabetically.
 ///

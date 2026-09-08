@@ -64,40 +64,100 @@ pub async fn locations_for_member(
     member: &MemberRow,
 ) -> Result<Vec<PassLocation>, AppError> {
     let mut all = all_located_branches(pool, member.org_id).await?;
-    let home: Option<(f64, f64)> = match member.joined_branch_id {
-        Some(b) => {
-            sqlx::query_as(
-                "SELECT latitude, longitude FROM branches \
-              WHERE id = $1 AND latitude IS NOT NULL AND longitude IS NOT NULL",
-            )
-            .bind(b)
-            .fetch_optional(pool)
-            .await?
+    match anchor_for(pool, member).await? {
+        Some(from) => all.sort_by(|a, b| {
+            let d = |l: &PassLocation| {
+                crate::geo::osrm::haversine_meters(
+                    from,
+                    crate::geo::osrm::LatLng {
+                        lat: l.latitude,
+                        lng: l.longitude,
+                    },
+                )
+            };
+            d(a).partial_cmp(&d(b)).unwrap_or(std::cmp::Ordering::Equal)
+        }),
+        // Nothing to measure from: a brand-new member who joined through the
+        // shop's own code has told us nothing about where they are. The
+        // busiest branches are the best prior available — they are where most
+        // people are — and this corrects itself the moment they buy something.
+        None => {
+            let busiest = branch_popularity(pool, member.org_id).await?;
+            all.sort_by(|a, b| {
+                let rank = |l: &PassLocation| {
+                    busiest
+                        .iter()
+                        .position(|n| n == &l.name)
+                        .unwrap_or(usize::MAX)
+                };
+                rank(a).cmp(&rank(b)).then_with(|| a.name.cmp(&b.name))
+            });
         }
-        None => None,
-    };
-    if let Some((lat, lng)) = home {
-        let from = crate::geo::osrm::LatLng { lat, lng };
-        all.sort_by(|a, b| {
-            let da = crate::geo::osrm::haversine_meters(
-                from,
-                crate::geo::osrm::LatLng {
-                    lat: a.latitude,
-                    lng: a.longitude,
-                },
-            );
-            let db = crate::geo::osrm::haversine_meters(
-                from,
-                crate::geo::osrm::LatLng {
-                    lat: b.latitude,
-                    lng: b.longitude,
-                },
-            );
-            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-        });
     }
     all.truncate(MAX_LOCATIONS);
     Ok(all)
+}
+
+/// Where to measure "nearest" from, for one member.
+///
+/// Where they actually SHOP, before where they signed up. A member who joined
+/// through the shop's org-wide code named no branch at all, and one who joined
+/// at a counter may have been passing through — but the branch they keep buying
+/// at is the one whose card should surface. Most frequent, then most recent,
+/// because a person who moves should not be anchored to last year forever.
+///
+/// Recomputed on every pass refresh, so a card that started on a poor guess
+/// quietly corrects itself after the first visit.
+async fn anchor_for(
+    pool: &PgPool,
+    member: &MemberRow,
+) -> Result<Option<crate::geo::osrm::LatLng>, AppError> {
+    let shopped: Option<(f64, f64)> = sqlx::query_as(
+        "SELECT b.latitude, b.longitude \
+           FROM loyalty_transactions t \
+           JOIN branches b ON b.id = t.branch_id \
+          WHERE t.customer_id = $1 \
+            AND b.latitude IS NOT NULL AND b.longitude IS NOT NULL \
+            AND b.deleted_at IS NULL \
+          GROUP BY b.id, b.latitude, b.longitude \
+          ORDER BY count(*) DESC, max(t.created_at) DESC \
+          LIMIT 1",
+    )
+    .bind(member.id)
+    .fetch_optional(pool)
+    .await?;
+    if let Some((lat, lng)) = shopped {
+        return Ok(Some(crate::geo::osrm::LatLng { lat, lng }));
+    }
+
+    // Never bought anything yet: the counter they signed up at, if it has
+    // coordinates. A branch nobody has located cannot anchor anything.
+    let Some(b) = member.joined_branch_id else {
+        return Ok(None);
+    };
+    let joined: Option<(f64, f64)> = sqlx::query_as(
+        "SELECT latitude, longitude FROM branches \
+          WHERE id = $1 AND latitude IS NOT NULL AND longitude IS NOT NULL",
+    )
+    .bind(b)
+    .fetch_optional(pool)
+    .await?;
+    Ok(joined.map(|(lat, lng)| crate::geo::osrm::LatLng { lat, lng }))
+}
+
+/// Branch names, busiest first, for a member we know nothing about yet.
+async fn branch_popularity(pool: &PgPool, org_id: Uuid) -> Result<Vec<String>, AppError> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT b.name FROM branches b \
+           LEFT JOIN loyalty_transactions t ON t.branch_id = b.id \
+          WHERE b.org_id = $1 AND b.is_active AND b.deleted_at IS NULL \
+          GROUP BY b.id, b.name \
+          ORDER BY count(t.id) DESC, b.name",
+    )
+    .bind(org_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(n,)| n).collect())
 }
 
 /// Every branch with coordinates, unsorted and uncapped.

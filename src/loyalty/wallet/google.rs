@@ -686,11 +686,26 @@ pub async fn push_balance(pool: &PgPool, member: &MemberRow) -> Result<(), AppEr
     let token = access_token().await?;
     let mode = settings.mode();
     let balance = member.balance_in(mode);
+    // The branches too, not just the balance. The refresh sweep exists to tell
+    // cards about a branch that opened after they were issued, and patching
+    // only the figures would have fixed Apple and left every Android card
+    // listing the shops that existed the day it was saved.
+    let locations = super::locations_for_member(pool, member)
+        .await
+        .unwrap_or_default();
     let body = json!({
         "loyaltyPoints": {
             "label": balance_label(mode),
             "balance": { "int": balance }
         },
+        "locations": locations
+            .iter()
+            .map(|l| json!({
+                "kind": "walletobjects#latLongPoint",
+                "latitude": l.latitude,
+                "longitude": l.longitude,
+            }))
+            .collect::<Vec<_>>(),
         // The same two card-face fields the object was created with. Patching
         // `textModulesData` here instead would leave a stale progress line
         // under the card and a card face that never moved.

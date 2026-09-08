@@ -77,6 +77,14 @@ pub struct PassBrand {
     pub images: Vec<(String, Vec<u8>)>,
 }
 
+/// How near a branch the card starts surfacing on the lock screen.
+///
+/// This is the whole proximity feature: neither wallet can send a push when a
+/// customer is nearby — the phone does it locally, from the coordinates baked
+/// into the pass, and no server is involved or told. The only lever we have is
+/// how wide the circle is.
+const PROXIMITY_METERS: u32 = 150;
+
 /// Apple's strip sizes for a store card, at 1×/2×/3×.
 ///
 /// Roughly 2.6:1. A photograph is cover-cropped to it rather than letterboxed —
@@ -484,6 +492,14 @@ pub fn pass_json(
                 .map(|l| json!({
                     "latitude": l.latitude,
                     "longitude": l.longitude,
+                    // How far away the card starts surfacing. Apple's own
+                    // default is tight enough that the card appears at the
+                    // door, by which point the customer is already deciding —
+                    // most of the practical difference between noticing your
+                    // card and not is showing it while they are still down the
+                    // street. Not larger: a card that surfaces while someone
+                    // drives past is noise, and noise gets passes deleted.
+                    "maxDistance": PROXIMITY_METERS,
                     "relevantText": format!("{program} — you're near {}", l.name)
                 }))
                 .collect::<Vec<_>>()
