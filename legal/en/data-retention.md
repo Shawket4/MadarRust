@@ -1,7 +1,7 @@
 ---
 title: Data Retention Schedule
-version: 1.1
-effective: 2026-09-08
+version: 1.2
+effective: 2026-09-09
 ---
 
 # Data Retention Schedule
@@ -17,6 +17,8 @@ Periods run from the trigger in the third column.
 | Reservations and waitlist entries | 12 months | booking date |
 | Dine-in bill — table, guest name if given, guest count, notes | 5 years, as part of the order record | settlement |
 | Loyalty membership — name, phone, membership code, balances | life of the membership | deletion request |
+| Loyalty birthday — **day and month only, never the year** | life of the membership | deletion request |
+| Birthday greetings sent — which member, which year | 2 years | greeting |
 | Loyalty points ledger — each earning and reward | 5 years, with the order it belongs to | transaction |
 | Wallet pass device registrations — device identifier, notification token | until the pass is removed from the device or the membership is deleted | registration |
 | WhatsApp one-time codes | minutes — expire on use | issue |
@@ -38,6 +40,12 @@ is settled, the latitude and longitude have served their only purpose. After 90 
 are erased automatically. What remains is the punch time, the method, and the geofence
 result — the distance in metres between the employee and the branch — which records that the
 punch was valid **without recording where the employee was**.
+
+**On birthdays.** Only the day and month are stored. The year is not collected
+at all — a greeting needs to know when, not how old someone is, and a full date
+of birth is a different category of data from a calendar day. A record that a
+greeting was sent is kept so nobody is messaged twice in one year; it holds the
+member, the year and what was given, and nothing about the message.
 
 **On loyalty memberships.** Deleting a membership removes the name, phone number and
 membership code, and every device registration with it, so the card stops working and stops

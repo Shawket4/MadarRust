@@ -182,6 +182,27 @@ pub async fn brand_logo() -> HttpResponse {
         .body(LOGO)
 }
 
+/// A month and a day that could actually be someone's birthday.
+///
+/// Both or neither, both in range, and the day real for that month — 31
+/// February is a typo, and one stored would be a greeting that never fires.
+/// Bad input is DROPPED rather than refused: a signup is not worth failing over
+/// an optional field, and the customer keeps their card.
+fn valid_birthday(month: Option<i16>, day: Option<i16>) -> Option<(i16, i16)> {
+    let (m, d) = (month?, day?);
+    if !(1..=12).contains(&m) || d < 1 {
+        return None;
+    }
+    // February is given 29 so that someone born on the 29th can say so; the
+    // sweep decides what to do about it in a common year.
+    let longest = match m {
+        2 => 29,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    (d <= longest).then_some((m, d))
+}
+
 /// The settings and catalogue in force for a scope.
 ///
 /// A branch reads its own overrides; an org reads its defaults — the same ones
@@ -268,11 +289,17 @@ pub struct JoinInput {
     pub org_id: Option<Uuid>,
     pub name: String,
     pub phone: String,
-    /// Date of birth, `YYYY-MM-DD`. Accepted ONLY where the org asked for one:
-    /// a field the shop turned off must not be storable by posting past the
-    /// form, and the year is kept because a date without one is not a date.
+    /// The day of their birthday, 1–12 and 1–31. Accepted ONLY where the org
+    /// asked for one: a field the shop turned off must not be storable by
+    /// posting past the form.
+    ///
+    /// No year, deliberately. A greeting needs to know WHEN, not how old — and
+    /// a full date of birth is an identity credential, which is a great deal
+    /// more than an annual message needs.
     #[serde(default)]
-    pub birthday: Option<chrono::NaiveDate>,
+    pub birth_month: Option<i16>,
+    #[serde(default)]
+    pub birth_day: Option<i16>,
     /// Device-trust token from `/public/otp/verify`. Required only when the
     /// branch's `require_otp` is on.
     #[serde(default)]
@@ -308,6 +335,10 @@ pub async fn join(
     let scope = resolve_scope(pool.get_ref(), body.branch_id, body.org_id).await?;
     let org_id = scope.org_id;
     let (settings, _) = load_for_scope(pool.get_ref(), &scope).await?;
+    let birthday = settings
+        .birthday_enabled
+        .then(|| valid_birthday(body.birth_month, body.birth_day))
+        .flatten();
     if !settings.enabled {
         return Err(AppError::Conflict(
             "This branch is not running a loyalty program".into(),
@@ -350,8 +381,8 @@ pub async fn join(
                 let row: MemberRow = sqlx::query_as(&format!(
                     "INSERT INTO loyalty_customers \
                         (org_id, phone, name, member_token, joined_branch_id, locale, \
-                         apple_auth_token, birthday) \
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING {}",
+                         apple_auth_token, birth_month, birth_day) \
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING {}",
                     model::MEMBER_COLS
                 ))
                 .bind(org_id)
@@ -366,9 +397,11 @@ pub async fn join(
                 // Apple authenticates pass updates with this; minted now so a
                 // pass issued later needs no second write.
                 .bind(mint_member_token())
-                // Dropped unless the shop asked for one. A field the org turned
-                // off must not become storable by posting past the form.
-                .bind(settings.birthday_enabled.then_some(body.birthday).flatten())
+                // Dropped unless the shop asked for one, and only ever as a
+                // valid PAIR — a month with no day greets nobody, a day with no
+                // month greets everybody twelve times.
+                .bind(birthday.map(|(m, _)| m))
+                .bind(birthday.map(|(_, d)| d))
                 .fetch_one(pool.get_ref())
                 .await?;
                 (row, false)
@@ -533,4 +566,49 @@ pub async fn card_qr(
         // stale cached QR is indistinguishable from a broken card.
         .append_header(("Cache-Control", "private, max-age=3600"))
         .body(png))
+}
+
+#[cfg(test)]
+mod birthday_tests {
+    use super::valid_birthday;
+
+    #[test]
+    fn a_real_day_is_kept() {
+        assert_eq!(valid_birthday(Some(3), Some(17)), Some((3, 17)));
+        assert_eq!(valid_birthday(Some(1), Some(1)), Some((1, 1)));
+        assert_eq!(valid_birthday(Some(12), Some(31)), Some((12, 31)));
+        // A leap-day birthday is a real birthday. The sweep decides what to do
+        // about it in a common year; refusing to record it is not the answer.
+        assert_eq!(valid_birthday(Some(2), Some(29)), Some((2, 29)));
+    }
+
+    #[test]
+    fn a_day_that_month_does_not_have_is_dropped() {
+        // 31 February is a typo, and one stored would be a greeting that never
+        // fires — the worst kind, because nothing ever reports it.
+        assert_eq!(valid_birthday(Some(2), Some(30)), None);
+        assert_eq!(valid_birthday(Some(4), Some(31)), None);
+        assert_eq!(valid_birthday(Some(6), Some(31)), None);
+        assert_eq!(valid_birthday(Some(9), Some(31)), None);
+        assert_eq!(valid_birthday(Some(11), Some(31)), None);
+    }
+
+    #[test]
+    fn half_a_birthday_is_no_birthday() {
+        // A month with no day greets nobody; a day with no month greets
+        // everybody, twelve times a year.
+        assert_eq!(valid_birthday(Some(5), None), None);
+        assert_eq!(valid_birthday(None, Some(5)), None);
+        assert_eq!(valid_birthday(None, None), None);
+    }
+
+    #[test]
+    fn nonsense_is_dropped_rather_than_clamped() {
+        // Clamping would silently move someone's birthday.
+        assert_eq!(valid_birthday(Some(0), Some(10)), None);
+        assert_eq!(valid_birthday(Some(13), Some(10)), None);
+        assert_eq!(valid_birthday(Some(3), Some(0)), None);
+        assert_eq!(valid_birthday(Some(3), Some(32)), None);
+        assert_eq!(valid_birthday(Some(-1), Some(-1)), None);
+    }
 }

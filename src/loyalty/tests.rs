@@ -517,9 +517,23 @@ async fn a_birthday_is_only_kept_where_the_shop_asked_for_one(pool: PgPool) {
             .uri("/public/loyalty/join")
             .set_json(json!({
                 "branch_id": branch, "name": "Ali", "phone": phone,
-                "birthday": "1994-03-17"
+                "birth_month": 3, "birth_day": 17
             }))
             .to_request()
+    };
+    let stored = |phone: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (Option<i16>, Option<i16>)>(
+                "SELECT birth_month, birth_day FROM loyalty_customers \
+                  WHERE org_id = $1 AND phone = $2",
+            )
+            .bind(org)
+            .bind(phone)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
     };
 
     // Birthdays are off, so the date is dropped however it arrived.
@@ -529,17 +543,10 @@ async fn a_birthday_is_only_kept_where_the_shop_asked_for_one(pool: PgPool) {
             .status()
             .is_success()
     );
-    let stored: Option<chrono::NaiveDate> = sqlx::query_scalar(
-        "SELECT birthday FROM loyalty_customers WHERE org_id = $1 AND phone = $2",
-    )
-    .bind(org)
-    .bind("201000000051")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert!(
-        stored.is_none(),
-        "a date of birth nobody asked for was kept"
+    assert_eq!(
+        stored("201000000051").await,
+        (None, None),
+        "a birthday nobody asked for was kept"
     );
 
     // Switched on, the same post is honoured.
@@ -554,18 +561,43 @@ async fn a_birthday_is_only_kept_where_the_shop_asked_for_one(pool: PgPool) {
             .status()
             .is_success()
     );
-    let stored: Option<chrono::NaiveDate> = sqlx::query_scalar(
-        "SELECT birthday FROM loyalty_customers WHERE org_id = $1 AND phone = $2",
-    )
-    .bind(org)
-    .bind("201000000052")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        stored,
-        Some(chrono::NaiveDate::from_ymd_opt(1994, 3, 17).unwrap())
-    );
+    assert_eq!(stored("201000000052").await, (Some(3), Some(17)));
+
+    // A day that cannot exist is dropped rather than stored — 31 February is a
+    // typo, and one kept would be a greeting that never fires. The signup still
+    // succeeds: an optional field is not worth failing a signup over.
+    let bad = test::TestRequest::post()
+        .uri("/public/loyalty/join")
+        .set_json(json!({
+            "branch_id": branch, "name": "Sara", "phone": "201000000053",
+            "birth_month": 2, "birth_day": 31
+        }))
+        .to_request();
+    assert!(test::call_service(&app, bad).await.status().is_success());
+    assert_eq!(stored("201000000053").await, (None, None));
+
+    // Half a birthday is no birthday: a month with no day greets nobody, a day
+    // with no month greets everybody twelve times.
+    let half = test::TestRequest::post()
+        .uri("/public/loyalty/join")
+        .set_json(json!({
+            "branch_id": branch, "name": "Omar", "phone": "201000000054",
+            "birth_month": 5
+        }))
+        .to_request();
+    assert!(test::call_service(&app, half).await.status().is_success());
+    assert_eq!(stored("201000000054").await, (None, None));
+
+    // The 29th of February is a real birthday and is kept as one.
+    let leap = test::TestRequest::post()
+        .uri("/public/loyalty/join")
+        .set_json(json!({
+            "branch_id": branch, "name": "Nour", "phone": "201000000055",
+            "birth_month": 2, "birth_day": 29
+        }))
+        .to_request();
+    assert!(test::call_service(&app, leap).await.status().is_success());
+    assert_eq!(stored("201000000055").await, (Some(2), Some(29)));
 
     // And the page is told whether to show the field at all.
     let body: Value = test::call_and_read_body_json(

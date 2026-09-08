@@ -69,23 +69,39 @@ struct Greetable {
 async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
     // Today in the ORG's timezone, not the server's. A shop in Cairo greeting
     // its customers on UTC's calendar would send some of them a day early.
+    // Today in the ORG's timezone, not the server's. A shop in Cairo greeting
+    // its customers on UTC's calendar would send some of them a day early.
+    //
+    // The 29th of February is greeted on the 28th in a common year. Matching it
+    // exactly would mean a leap-day customer hears from the shop once every
+    // four years, which is not a birthday programme — and the alternative,
+    // storing them as the 1st of March, would be us quietly changing when their
+    // birthday is.
     let due: Vec<Greetable> = sqlx::query_as(
-        "SELECT c.id, c.org_id, c.name, c.phone, c.locale, \
-                EXTRACT(YEAR FROM (now() AT TIME ZONE o.timezone))::int AS year \
+        "WITH today AS ( \
+             SELECT o.id AS org_id, \
+                    (now() AT TIME ZONE o.timezone)::date AS d \
+               FROM organizations o WHERE o.deleted_at IS NULL) \
+         SELECT c.id, c.org_id, c.name, c.phone, c.locale, \
+                EXTRACT(YEAR FROM t.d)::int AS year \
            FROM loyalty_customers c \
-           JOIN organizations o ON o.id = c.org_id \
+           JOIN today t ON t.org_id = c.org_id \
            JOIN loyalty_settings s ON s.org_id = c.org_id AND s.branch_id IS NULL \
-          WHERE c.birthday IS NOT NULL \
+          WHERE c.birth_month IS NOT NULL \
             AND s.enabled AND s.birthday_enabled \
-            AND o.deleted_at IS NULL \
-            AND EXTRACT(MONTH FROM c.birthday) \
-                = EXTRACT(MONTH FROM (now() AT TIME ZONE o.timezone)) \
-            AND EXTRACT(DAY FROM c.birthday) \
-                = EXTRACT(DAY FROM (now() AT TIME ZONE o.timezone)) \
+            AND ( \
+                (c.birth_month = EXTRACT(MONTH FROM t.d)::smallint \
+                 AND c.birth_day = EXTRACT(DAY FROM t.d)::smallint) \
+                -- A leap-day birthday, in a year that has no leap day. \
+                OR (c.birth_month = 2 AND c.birth_day = 29 \
+                    AND EXTRACT(MONTH FROM t.d) = 2 AND EXTRACT(DAY FROM t.d) = 28 \
+                    AND NOT (EXTRACT(DAY FROM (date_trunc('month', t.d) \
+                             + interval '1 month - 1 day')) = 29)) \
+            ) \
             AND NOT EXISTS ( \
                 SELECT 1 FROM loyalty_birthday_greetings g \
                  WHERE g.customer_id = c.id \
-                   AND g.year = EXTRACT(YEAR FROM (now() AT TIME ZONE o.timezone))::int) \
+                   AND g.year = EXTRACT(YEAR FROM t.d)::int) \
           LIMIT 500",
     )
     .fetch_all(pool)

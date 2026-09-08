@@ -50178,13 +50178,20 @@
           "phone"
         ],
         "properties": {
-          "birthday": {
+          "birth_day": {
             "type": [
-              "string",
+              "integer",
               "null"
             ],
-            "format": "date",
-            "description": "Date of birth, `YYYY-MM-DD`. Accepted ONLY where the org asked for one:\na field the shop turned off must not be storable by posting past the\nform, and the year is kept because a date without one is not a date."
+            "format": "int32"
+          },
+          "birth_month": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The day of their birthday, 1–12 and 1–31. Accepted ONLY where the org\nasked for one: a field the shop turned off must not be storable by\nposting past the form.\n\nNo year, deliberately. A greeting needs to know WHEN, not how old — and\na full date of birth is an identity credential, which is a great deal\nmore than an annual message needs."
           },
           "branch_id": {
             "type": [

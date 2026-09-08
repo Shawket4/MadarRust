@@ -1,7 +1,7 @@
 ---
 title: Privacy Policy
-version: 1.2
-effective: 2026-09-08
+version: 1.3
+effective: 2026-09-09
 ---
 
 # Privacy Policy
@@ -62,6 +62,14 @@ to be verified with a one-time WhatsApp code, the same way ordering does.
 | Points or stamps, and lifetime totals | to work out what you have earned |
 | Each earning and each reward, with the order it belonged to | so a balance can be explained, checked and corrected |
 | The branch whose code you scanned | reporting for the restaurant |
+| Your birthday — the **day and month only** | to wish you a happy birthday, where the restaurant does that |
+
+**We do not ask for the year you were born.** A birthday greeting needs to know *when*,
+not how old you are — and a full date of birth is an identity credential, the thing a bank
+asks for to prove who you are. The field is optional, it appears only where the restaurant
+runs birthday rewards, and where they do not it is not shown and nothing is stored. On the
+day, the restaurant's programme sends you a WhatsApp greeting and, if they have set one,
+adds a reward to your card.
 
 **A loyalty membership is, by design, a record of how often you visit and what you spend,
 linked to your name and phone number.** That is what makes rewards possible, and it is the
