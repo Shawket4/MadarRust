@@ -425,7 +425,20 @@ pub fn pass_json(
             "headerFields": [{
                 "key": "header",
                 "label": super::google::balance_label(mode),
-                "value": balance
+                "value": balance,
+                // What makes the phone SAY something. An APNs push for a pass
+                // is content-free by design — it tells the device to come back
+                // for a new copy and shows nothing. iOS raises a notification
+                // only when a field carrying `changeMessage` changes value, so
+                // without this the balance updated silently and a customer
+                // learned about their points by opening their wallet.
+                //
+                // On ONE field, deliberately: put it on several and a single
+                // sale produces a small pile of notifications.
+                "changeMessage": format!(
+                    "You now have %@ {}.",
+                    super::google::balance_label(mode).to_lowercase()
+                )
             }],
             // Apple renders these OVER the strip. That used to mean a card
             // with a photograph had to give up its balance — but the strip is
@@ -628,7 +641,7 @@ pub async fn build_pass_for(pool: &PgPool, member: &MemberRow) -> Result<Vec<u8>
     let settings = crate::loyalty::settings::load_scope(pool, member.org_id, None)
         .await?
         .unwrap_or_else(|| LoyaltySettings::defaults(member.org_id, None));
-    let locations = locations_for_org(pool, member.org_id).await?;
+    let locations = super::locations_for_member(pool, member).await?;
     let rewards = super::reward_lines(pool, member.org_id).await;
     let org = crate::orgs::branding::load(pool, member.org_id).await?;
     let brand = pass_brand(&org);
@@ -717,6 +730,7 @@ pub(crate) mod tests {
             apple_auth_token: Some("tok".into()),
             google_object_id: None,
             pass_updated_at: None,
+            joined_branch_id: None,
             enrolled_at: chrono::Utc::now(),
         }
     }

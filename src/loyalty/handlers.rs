@@ -152,6 +152,12 @@ pub struct WalletProvider {
 pub struct WalletStatus {
     pub apple: WalletProvider,
     pub google: WalletProvider,
+    /// Apple's push channel, which is SEPARATE from pass signing.
+    ///
+    /// A pass can be issued perfectly and never change on anyone's phone,
+    /// because the two are configured independently — and this panel used to
+    /// report Apple as fine while every balance update went nowhere.
+    pub apns: WalletProvider,
 }
 
 /// Why there is no "Add to Wallet" button.
@@ -191,6 +197,7 @@ pub async fn wallet_status(
     };
 
     let apple_missing = wallet::apple::missing_env();
+    let apns_missing = wallet::apns::missing_env();
     let google_missing = wallet::google::missing_env();
     // Only worth asking Google when there is something to ask with.
     let (reachable, detail) = if google_missing.is_empty() {
@@ -206,6 +213,12 @@ pub async fn wallet_status(
         apple: WalletProvider {
             configured: apple_missing.is_empty(),
             missing: apple_missing,
+            reachable: None,
+            detail: None,
+        },
+        apns: WalletProvider {
+            configured: apns_missing.is_empty(),
+            missing: apns_missing,
             reachable: None,
             detail: None,
         },

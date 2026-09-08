@@ -15,6 +15,7 @@
 pub mod apns;
 pub mod apple;
 pub mod google;
+pub mod refresh;
 pub mod web_service;
 
 use serde::Serialize;
@@ -46,6 +47,80 @@ pub struct PassLocation {
 /// These are the columns the staff-geofencing work already added and the branch
 /// dialog already edits — the program needed no new location UI, only a reason
 /// to read them.
+/// The branches to put on ONE member's card, nearest first.
+///
+/// Apple allows ten locations per pass and Google is similar, so a chain with
+/// more branches than that has to choose — and choosing ALPHABETICALLY, which
+/// is what taking the first ten by name did, hands a customer in Alexandria ten
+/// Cairo branches because they sort earlier. The card then never surfaces at
+/// the shop they actually use.
+///
+/// Nearest to where they joined is the best guess available: we do not know
+/// where a customer is, and the counter they signed up at is the one they were
+/// standing in. Sorted here rather than in SQL so the distance is the same
+/// `haversine_meters` the geofence uses.
+pub async fn locations_for_member(
+    pool: &PgPool,
+    member: &MemberRow,
+) -> Result<Vec<PassLocation>, AppError> {
+    let mut all = all_located_branches(pool, member.org_id).await?;
+    let home: Option<(f64, f64)> = match member.joined_branch_id {
+        Some(b) => {
+            sqlx::query_as(
+                "SELECT latitude, longitude FROM branches \
+              WHERE id = $1 AND latitude IS NOT NULL AND longitude IS NOT NULL",
+            )
+            .bind(b)
+            .fetch_optional(pool)
+            .await?
+        }
+        None => None,
+    };
+    if let Some((lat, lng)) = home {
+        let from = crate::geo::osrm::LatLng { lat, lng };
+        all.sort_by(|a, b| {
+            let da = crate::geo::osrm::haversine_meters(
+                from,
+                crate::geo::osrm::LatLng {
+                    lat: a.latitude,
+                    lng: a.longitude,
+                },
+            );
+            let db = crate::geo::osrm::haversine_meters(
+                from,
+                crate::geo::osrm::LatLng {
+                    lat: b.latitude,
+                    lng: b.longitude,
+                },
+            );
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+    all.truncate(MAX_LOCATIONS);
+    Ok(all)
+}
+
+/// Every branch with coordinates, unsorted and uncapped.
+async fn all_located_branches(pool: &PgPool, org_id: Uuid) -> Result<Vec<PassLocation>, AppError> {
+    let rows: Vec<(f64, f64, String)> = sqlx::query_as(
+        "SELECT latitude, longitude, name FROM branches \
+          WHERE org_id = $1 AND is_active AND deleted_at IS NULL \
+            AND latitude IS NOT NULL AND longitude IS NOT NULL \
+          ORDER BY name",
+    )
+    .bind(org_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(latitude, longitude, name)| PassLocation {
+            latitude,
+            longitude,
+            name,
+        })
+        .collect())
+}
+
 pub async fn locations_for_org(pool: &PgPool, org_id: Uuid) -> Result<Vec<PassLocation>, AppError> {
     let rows: Vec<(f64, f64, String)> = sqlx::query_as(
         "SELECT latitude, longitude, name FROM branches \
@@ -350,6 +425,15 @@ async fn push_update_inner(pool: &PgPool, customer_id: Uuid) -> Result<(), AppEr
     Ok(())
 }
 
+/// Bring one member's pass up to date and wait for it.
+///
+/// `push_update` is fire-and-forget, which is right at a till and wrong in a
+/// sweep: a loop that does not wait would launch a task per member and hand
+/// APNs the entire estate at once.
+pub async fn refresh_pass(pool: &PgPool, customer_id: Uuid) -> Result<(), AppError> {
+    push_update_inner(pool, customer_id).await
+}
+
 /// Serialises the tests that read and write the wallet environment.
 ///
 /// Env is process-global: two tests toggling `LOYALTY_APPLE_*` race, and the
@@ -380,6 +464,7 @@ mod tests {
             apple_auth_token: None,
             google_object_id: None,
             pass_updated_at: None,
+            joined_branch_id: None,
             enrolled_at: chrono::Utc::now(),
         }
     }

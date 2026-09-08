@@ -46,9 +46,27 @@ fn key_material() -> Option<Vec<u8>> {
 }
 
 pub fn is_configured() -> bool {
-    key_material().is_some()
-        && env_nonempty("LOYALTY_APNS_KEY_ID").is_some()
-        && super::apple::team_id().is_some()
+    missing_env().is_empty()
+}
+
+/// What the push channel still needs, by name.
+///
+/// Separate from pass signing, and reported separately: a pass can be issued
+/// perfectly and never change on anyone's phone, and "no notification arrived"
+/// looks identical whether the key is missing, the key id is, or the whole
+/// thing is fine and nothing has changed.
+pub fn missing_env() -> Vec<String> {
+    let mut out = Vec::new();
+    if key_material().is_none() {
+        out.push("LOYALTY_APNS_KEY (or LOYALTY_APNS_KEY_FILE)".into());
+    }
+    if env_nonempty("LOYALTY_APNS_KEY_ID").is_none() {
+        out.push("LOYALTY_APNS_KEY_ID".into());
+    }
+    if super::apple::team_id().is_none() {
+        out.push("LOYALTY_APPLE_TEAM_ID".into());
+    }
+    out
 }
 
 /// Passes live on the production APNs host. The sandbox exists for a pass built

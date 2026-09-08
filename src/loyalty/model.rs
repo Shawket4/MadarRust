@@ -63,6 +63,10 @@ pub struct MemberRow {
     pub name: String,
     pub phone: String,
     pub member_token: String,
+    /// The branch whose counter code recruited them. Reporting — and the best
+    /// guess at where they actually shop, for choosing which branches fit on
+    /// their card.
+    pub joined_branch_id: Option<Uuid>,
     pub points_balance: i32,
     pub visits_balance: i32,
     pub lifetime_points: i32,
@@ -79,7 +83,7 @@ pub struct MemberRow {
 
 pub const MEMBER_COLS: &str = "id, org_id, name, phone, member_token, points_balance, \
     visits_balance, lifetime_points, lifetime_visits, locale, apple_serial, apple_auth_token, \
-    google_object_id, pass_updated_at, enrolled_at";
+    google_object_id, pass_updated_at, joined_branch_id, enrolled_at";
 
 impl MemberRow {
     /// The balance that counts under `mode`.
@@ -403,6 +407,7 @@ mod overflow_tests {
             apple_auth_token: None,
             google_object_id: None,
             pass_updated_at: None,
+            joined_branch_id: None,
             enrolled_at: chrono::Utc::now(),
         };
         let v = m.view(Mode::Visits, 5);

@@ -1768,6 +1768,182 @@ async fn a_stamp_card_earns_one_per_order_whatever_the_bill(pool: PgPool) {
 /// `org_id` filter is the whole boundary. Getting it wrong would put a rival
 /// shop's address on a customer's lock screen — quiet, and only visible to the
 /// customer standing outside the wrong door.
+/// Opening a branch reaches the cards already in people's wallets.
+///
+/// A pass is a copy, and the wallets only fetch a new one when told. We told
+/// them on a balance change and nowhere else — so a shop opening a branch, or
+/// filling in coordinates for one it opened last month, changed nothing for
+/// anybody already carrying a card. A customer who did not come back kept the
+/// old branch list forever, and the prompt at the new shop never appeared.
+#[sqlx::test]
+async fn a_new_branch_makes_existing_cards_stale(pool: PgPool) {
+    let org = seed_org(&pool).await;
+    let first = seed_branch(&pool, org, "Maadi").await;
+    sqlx::query("UPDATE branches SET latitude = 30.04, longitude = 31.23 WHERE id = $1")
+        .bind(first)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let member = seed_member(&pool, org, "201000000081", "Mstalepasstoken000001").await;
+    // Carrying a card, and up to date as of now.
+    sqlx::query(
+        "UPDATE loyalty_customers SET google_object_id = 'obj-1', pass_updated_at = now() \
+          WHERE id = $1",
+    )
+    .bind(member)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let stale = |pool: PgPool| async move {
+        crate::loyalty::wallet::refresh::stale_passes(&pool, 50)
+            .await
+            .unwrap()
+    };
+    assert!(
+        stale(pool.clone()).await.is_empty(),
+        "nothing has changed yet"
+    );
+
+    // The shop opens a second branch.
+    let second = seed_branch(&pool, org, "Zamalek").await;
+    sqlx::query("UPDATE branches SET latitude = 30.06, longitude = 31.22 WHERE id = $1")
+        .bind(second)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        stale(pool.clone()).await,
+        vec![member],
+        "the card in their wallet still lists one branch"
+    );
+
+    // Refreshing stamps the card, and it stops being stale.
+    sqlx::query("UPDATE loyalty_customers SET pass_updated_at = now() WHERE id = $1")
+        .bind(member)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(stale(pool.clone()).await.is_empty());
+
+    // Filling in coordinates for a branch that already existed counts too —
+    // that is the commoner case, since a branch is created first and located
+    // afterwards.
+    sqlx::query(
+        "UPDATE branches SET latitude = 30.07, longitude = 31.21, updated_at = now() \
+                  WHERE id = $1",
+    )
+    .bind(second)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stale(pool.clone()).await, vec![member]);
+
+    // A member with no pass is not chased. There is nothing to refresh, and a
+    // push would be a round trip that always finds no devices.
+    let no_pass = seed_member(&pool, org, "201000000082", "Mnopasstoken00000001").await;
+    let out = stale(pool.clone()).await;
+    assert!(!out.contains(&no_pass), "{out:?}");
+}
+
+/// The ten branches a card carries are the ten NEAREST, not the first ten
+/// alphabetically.
+///
+/// Apple allows ten locations per pass, so a chain with more has to choose. By
+/// name meant a customer in Alexandria got ten Cairo branches because they sort
+/// earlier, and their card never surfaced at the shop they actually use.
+#[sqlx::test]
+async fn a_card_carries_the_branches_nearest_the_one_they_joined(pool: PgPool) {
+    let org = seed_org(&pool).await;
+    // Alexandria, where they joined. The near branches are named to sort LAST,
+    // so alphabetical ordering could not produce this answer by accident.
+    let home = seed_branch(&pool, org, "Zzz Alexandria").await;
+    let mut near = vec![home];
+    for i in 0..4 {
+        near.push(seed_branch(&pool, org, &format!("Zz Alex {i}")).await);
+    }
+    // Twelve in Cairo, ~180km away, named to sort first.
+    let mut far = Vec::new();
+    for i in 0..12 {
+        far.push(seed_branch(&pool, org, &format!("Aaa Cairo {i:02}")).await);
+    }
+    for (i, b) in near.iter().enumerate() {
+        sqlx::query("UPDATE branches SET latitude = $2, longitude = $3 WHERE id = $1")
+            .bind(b)
+            .bind(31.20 + i as f64 * 0.001)
+            .bind(29.92)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    for (i, b) in far.iter().enumerate() {
+        sqlx::query("UPDATE branches SET latitude = $2, longitude = $3 WHERE id = $1")
+            .bind(b)
+            .bind(30.04 + i as f64 * 0.001)
+            .bind(31.23)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    let member_id = seed_member(&pool, org, "201000000071", "Mnearesttoken0000001").await;
+    sqlx::query("UPDATE loyalty_customers SET joined_branch_id = $2 WHERE id = $1")
+        .bind(member_id)
+        .bind(home)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let member = crate::loyalty::model::find_by_id(&pool, member_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let locs = crate::loyalty::wallet::locations_for_member(&pool, &member)
+        .await
+        .unwrap();
+    assert_eq!(locs.len(), 10, "Apple's cap still applies");
+    let names: Vec<&str> = locs.iter().map(|l| l.name.as_str()).collect();
+    // Every Alexandria branch is on the card, ahead of every Cairo one.
+    for n in [
+        "Zzz Alexandria",
+        "Zz Alex 0",
+        "Zz Alex 1",
+        "Zz Alex 2",
+        "Zz Alex 3",
+    ] {
+        assert!(names.contains(&n), "{n} missing from {names:?}");
+    }
+    assert_eq!(
+        &names[..5],
+        &[
+            "Zzz Alexandria",
+            "Zz Alex 0",
+            "Zz Alex 1",
+            "Zz Alex 2",
+            "Zz Alex 3"
+        ],
+        "nearest first: {names:?}"
+    );
+
+    // With nowhere to measure from, the old alphabetical order is the fallback
+    // — an answer, rather than an arbitrary one.
+    sqlx::query("UPDATE loyalty_customers SET joined_branch_id = NULL WHERE id = $1")
+        .bind(member_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let member = crate::loyalty::model::find_by_id(&pool, member_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let locs = crate::loyalty::wallet::locations_for_member(&pool, &member)
+        .await
+        .unwrap();
+    assert_eq!(locs[0].name, "Aaa Cairo 00");
+}
+
 #[sqlx::test]
 async fn pass_locations_are_scoped_to_the_org(pool: PgPool) {
     let org = seed_org(&pool).await;

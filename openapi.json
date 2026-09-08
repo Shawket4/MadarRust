@@ -61785,9 +61785,14 @@
         "type": "object",
         "required": [
           "apple",
-          "google"
+          "google",
+          "apns"
         ],
         "properties": {
+          "apns": {
+            "$ref": "#/components/schemas/WalletProvider",
+            "description": "Apple's push channel, which is SEPARATE from pass signing.\n\nA pass can be issued perfectly and never change on anyone's phone,\nbecause the two are configured independently — and this panel used to\nreport Apple as fine while every balance update went nowhere."
+          },
           "apple": {
             "$ref": "#/components/schemas/WalletProvider"
           },

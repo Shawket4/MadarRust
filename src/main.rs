@@ -134,6 +134,7 @@ async fn run() -> std::io::Result<()> {
     // is falsy.
     staff::jobs::spawn(pool.get_ref().clone());
     loyalty::birthdays::spawn(pool.get_ref().clone());
+    loyalty::wallet::refresh::spawn(pool.get_ref().clone());
     // The bookings sweep: reminders, "party arriving" nudges, no-show and
     // completion roll-overs. Idempotent; publishes on the realtime bus.
     bookings::jobs::spawn(pool.get_ref().clone(), realtime_bus.get_ref().clone());
