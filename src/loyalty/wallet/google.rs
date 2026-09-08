@@ -29,7 +29,29 @@ const WALLET_API: &str = "https://walletobjects.googleapis.com/walletobjects/v1"
 fn issuer_id() -> Option<String> {
     std::env::var("LOYALTY_GOOGLE_ISSUER_ID")
         .ok()
-        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// A Wallet issuer id is NUMERIC.
+///
+/// The Google Pay & Wallet Console shows a MERCHANT id too — `BCR2DN6…` — on a
+/// neighbouring page, and the two are not interchangeable. Paste the merchant
+/// id here and Google answers "Invalid resource ID:
+/// BCR2DN6DVK7MJ3IV.madar-685f…", naming the resource rather than the setting,
+/// which is a long way from "you copied the wrong number". Every card in the
+/// estate silently loses its Google button until someone works that out.
+fn issuer_format_problem(issuer: &str) -> Option<String> {
+    if issuer.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!(
+        "LOYALTY_GOOGLE_ISSUER_ID is \"{issuer}\", which is not a Wallet issuer id — \
+         those are numeric, like 3388000000022345678. A value starting \"BCR2DN6\" is \
+         the Google Pay MERCHANT id, which the same console shows on another page. \
+         Copy the Issuer ID from the Google Wallet API page of the Google Pay & \
+         Wallet Console."
+    ))
 }
 
 fn sa_email() -> Option<String> {
@@ -77,6 +99,11 @@ pub async fn check(org_id: uuid::Uuid) -> Result<String, String> {
     let Some(issuer) = issuer_id() else {
         return Err("LOYALTY_GOOGLE_ISSUER_ID is not set".into());
     };
+    // Answerable without asking Google, and a far more useful answer than the
+    // one Google gives for it.
+    if let Some(problem) = issuer_format_problem(&issuer) {
+        return Err(problem);
+    }
     let token = access_token()
         .await
         .map_err(|e| format!("The service account could not get a token from Google. {e}"))?;
@@ -344,6 +371,12 @@ pub async fn save_url(
         );
         return Ok(None);
     };
+    if let Some(problem) = issuer_format_problem(&issuer) {
+        // Every save under this would be refused, so there is nothing to gain
+        // by asking Google once per card view to be told so.
+        tracing::error!("loyalty: {problem}");
+        return Ok(None);
+    }
     let object_id = match &member.google_object_id {
         // Already provisioned: nothing to do but sign.
         Some(id) => id.clone(),
@@ -703,6 +736,27 @@ mod tests {
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
         let class = loyalty_class("338", uuid::Uuid::nil(), &OrgBrand::default(), &s);
         assert_eq!(class["issuerName"], s.program_name);
+    }
+
+    #[test]
+    fn a_merchant_id_pasted_as_an_issuer_id_is_named_as_such() {
+        // The real one, from the shop this cost an evening. Google's own answer
+        // was "Invalid resource ID: BCR2DN6DVK7MJ3IV.madar-685f…" — the
+        // resource, not the setting, and no hint that a different number was
+        // wanted.
+        let problem = issuer_format_problem("BCR2DN6DVK7MJ3IV").expect("not a wallet issuer");
+        assert!(problem.contains("LOYALTY_GOOGLE_ISSUER_ID"), "{problem}");
+        assert!(problem.contains("numeric"), "{problem}");
+        assert!(problem.contains("MERCHANT"), "{problem}");
+
+        // A real issuer id passes without comment.
+        assert_eq!(issuer_format_problem("3388000000022345678"), None);
+        assert_eq!(issuer_format_problem("338"), None);
+
+        // Anything else that is not a number is caught the same way, including
+        // a value someone quoted or left a stray character in.
+        assert!(issuer_format_problem("\"3388000000022345678\"").is_some());
+        assert!(issuer_format_problem("3388000000022345678 ").is_some());
     }
 
     #[test]

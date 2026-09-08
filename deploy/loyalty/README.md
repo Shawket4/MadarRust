@@ -59,7 +59,7 @@ and the customer is shown their QR on the page instead of dead buttons.
 | `LOYALTY_APNS_KEY_FILE` | APNs `.p8` auth key. | Passes issue but never update themselves. |
 | `LOYALTY_APNS_KEY_ID` | That key's id. | Same. |
 | `LOYALTY_APNS_SANDBOX` | `1` for a development-profile pass. | Production APNs host. |
-| `LOYALTY_GOOGLE_ISSUER_ID` | Google Wallet issuer. | No Google button. |
+| `LOYALTY_GOOGLE_ISSUER_ID` | Google Wallet issuer id — **numeric**, like `3388000000022345678`. Take it from the *Google Wallet API* page of the Google Pay & Wallet Console. It is **not** the merchant id (`BCR2DN6…`) the same console shows on another page; Google answers that one with "Invalid resource ID", naming the resource rather than the setting. | No Google button. |
 | `LOYALTY_GOOGLE_SA_EMAIL` | Service account email. | No Google button. |
 | `LOYALTY_GOOGLE_SA_KEY` | Service account RSA private key (PEM). | No Google button. |
 
