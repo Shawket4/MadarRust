@@ -343,6 +343,152 @@ async fn a_catalogue_priced_before_the_mode_changed_is_still_claimable(pool: PgP
     assert_eq!(body["member"]["can_redeem"], true);
 }
 
+/// A shop's colours are a paid tier, and the gate is not per-surface.
+///
+/// The brand columns can be populated — a logo upload writes them whatever the
+/// tier — so "has colours stored" must not mean "shows colours". Without the
+/// gate in `orgs::branding::load` this would have to be remembered on the web
+/// card, the signup page and two wallet passes, which is a rule that gets
+/// missed exactly once and then ships a shop's branding to a tier it did not buy.
+#[sqlx::test]
+async fn a_shop_wears_madar_until_it_is_on_the_branding_tier(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    enable_program(&pool, org, 1000, 100, false).await;
+    sqlx::query(
+        "UPDATE organizations SET logo_url = 'https://cdn.example/logos/rue.png', \
+             brand_background = '#7B1E3A', brand_foreground = '#EFF3F4', \
+             brand_accent = '#C8607F' WHERE id = $1",
+    )
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(super::routes::configure),
+    )
+    .await;
+
+    let info = |()| {
+        test::TestRequest::get()
+            .uri(&format!("/public/loyalty/join-info?branch_id={branch}"))
+            .to_request()
+    };
+    let body: Value = test::call_and_read_body_json(&app, info(())).await;
+    assert_eq!(
+        body["brand"]["background_color"], "#0D6273",
+        "off the tier, the card is Madar's: {body}"
+    );
+    assert!(
+        body["brand"]["logo_url"].is_null(),
+        "and wears Madar's mark"
+    );
+    // The shop's NAME is always its own — that is not what anyone is paying for,
+    // and a card that does not say whose it is helps nobody.
+    assert_eq!(body["brand"]["org_name"], "Org");
+
+    sqlx::query("UPDATE organizations SET custom_branding = true WHERE id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let body: Value = test::call_and_read_body_json(&app, info(())).await;
+    assert_eq!(body["brand"]["background_color"], "#7B1E3A");
+    assert_eq!(
+        body["brand"]["logo_url"],
+        "https://cdn.example/logos/rue.png"
+    );
+}
+
+/// A field the shop turned off must not be storable by posting past the form.
+#[sqlx::test]
+async fn a_birthday_is_only_kept_where_the_shop_asked_for_one(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    enable_program(&pool, org, 1000, 100, false).await;
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(super::routes::configure),
+    )
+    .await;
+
+    let join = |phone: &str| {
+        test::TestRequest::post()
+            .uri("/public/loyalty/join")
+            .set_json(json!({
+                "branch_id": branch, "name": "Ali", "phone": phone,
+                "birthday": "1994-03-17"
+            }))
+            .to_request()
+    };
+
+    // Birthdays are off, so the date is dropped however it arrived.
+    assert!(
+        test::call_service(&app, join("201000000051"))
+            .await
+            .status()
+            .is_success()
+    );
+    let stored: Option<chrono::NaiveDate> = sqlx::query_scalar(
+        "SELECT birthday FROM loyalty_customers WHERE org_id = $1 AND phone = $2",
+    )
+    .bind(org)
+    .bind("201000000051")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        stored.is_none(),
+        "a date of birth nobody asked for was kept"
+    );
+
+    // Switched on, the same post is honoured.
+    sqlx::query("UPDATE loyalty_settings SET birthday_enabled = true WHERE org_id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        test::call_service(&app, join("201000000052"))
+            .await
+            .status()
+            .is_success()
+    );
+    let stored: Option<chrono::NaiveDate> = sqlx::query_scalar(
+        "SELECT birthday FROM loyalty_customers WHERE org_id = $1 AND phone = $2",
+    )
+    .bind(org)
+    .bind("201000000052")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        stored,
+        Some(chrono::NaiveDate::from_ymd_opt(1994, 3, 17).unwrap())
+    );
+
+    // And the page is told whether to show the field at all.
+    let body: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/public/loyalty/join-info?branch_id={branch}"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(body["birthday_enabled"], true);
+}
+
 // ── Public signup ────────────────────────────────────────────────────────────
 
 #[sqlx::test]

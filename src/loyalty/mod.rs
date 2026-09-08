@@ -18,6 +18,7 @@
 //!   maintains the balance from the ledger by trigger, so it cannot drift.
 
 pub mod award;
+pub mod birthdays;
 pub mod earn;
 pub mod handlers;
 pub mod model;

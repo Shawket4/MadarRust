@@ -626,6 +626,7 @@ mod tests {
             ),
             palette: crate::orgs::branding::Palette::default(),
             logo_is_mark: true,
+            custom_branding: true,
         };
         let m = super::super::apple::tests::member();
         let locs: Vec<super::super::PassLocation> = (0..6)
@@ -678,6 +679,7 @@ mod tests {
                 accent: "#C8607F".into(),
             },
             logo_is_mark: true,
+            custom_branding: true,
         };
         let class = loyalty_class("3388000000000000000", uuid::Uuid::nil(), &brand, &s);
         assert_eq!(class["issuerName"], "RUE Coffee");
@@ -713,6 +715,7 @@ mod tests {
         let brand = OrgBrand {
             name: "RUE".into(),
             logo_url: Some("/api/uploads/logos/rue.png".into()),
+            custom_branding: true,
             ..OrgBrand::default()
         };
         let class = loyalty_class("338", uuid::Uuid::nil(), &brand, &s);

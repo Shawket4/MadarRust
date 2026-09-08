@@ -297,8 +297,17 @@ pub struct OrgBrand {
     /// card, Google Wallet). Apple embeds bytes instead — see
     /// `loyalty::wallet::apple::pass_brand`.
     pub logo_url: Option<String>,
-    /// Derived from the logo when it was uploaded; Madar's own until then.
+    /// Derived from the logo when it was uploaded; Madar's own until then, and
+    /// Madar's own regardless when the org is not on the branding tier.
     pub palette: Palette,
+    /// This organisation may wear its own mark and colours.
+    ///
+    /// A paid tier, set by a super admin. When it is off, `logo_url` and
+    /// `palette` are ALREADY Madar's — the gate is applied in [`load`] rather
+    /// than left to each caller, because "remember to check the flag" across a
+    /// web card, a signup page and two wallet passes is a rule that gets missed
+    /// exactly once and then ships a shop's colours to a tier it did not buy.
+    pub custom_branding: bool,
     /// True when [`is_mark`] says the logo can be recoloured for contrast.
     /// False for an opaque tile, and for no logo at all.
     pub logo_is_mark: bool,
@@ -318,10 +327,11 @@ pub async fn load(pool: &sqlx::PgPool, org_id: uuid::Uuid) -> Result<OrgBrand, s
         brand_foreground: Option<String>,
         brand_accent: Option<String>,
         brand_logo_is_mark: Option<bool>,
+        custom_branding: bool,
     }
     let row: Option<Row> = sqlx::query_as(
         "SELECT name, logo_url, brand_background, brand_foreground, brand_accent, \
-                brand_logo_is_mark \
+                brand_logo_is_mark, custom_branding \
            FROM organizations WHERE id = $1",
     )
     .bind(org_id)
@@ -330,6 +340,17 @@ pub async fn load(pool: &sqlx::PgPool, org_id: uuid::Uuid) -> Result<OrgBrand, s
     let Some(row) = row else {
         return Ok(OrgBrand::default());
     };
+
+    // The tier gate, applied once and here. The shop's NAME is always its own —
+    // a card that does not say whose it is helps nobody, and the name is not
+    // what anyone is paying for.
+    if !row.custom_branding {
+        return Ok(OrgBrand {
+            name: row.name,
+            custom_branding: false,
+            ..OrgBrand::default()
+        });
+    }
 
     // Healed on first read, not backfilled by an operator. The column arrived
     // after these logos did, and a shop should not have to re-upload its mark
@@ -358,6 +379,7 @@ pub async fn load(pool: &sqlx::PgPool, org_id: uuid::Uuid) -> Result<OrgBrand, s
             accent: row.brand_accent.unwrap_or(d.accent),
         },
         logo_is_mark,
+        custom_branding: true,
     })
 }
 

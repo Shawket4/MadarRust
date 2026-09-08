@@ -45,6 +45,8 @@ pub struct Org {
     /// True when the logo is a shape on transparency, so a card may repaint it
     /// for contrast (`branding::is_mark`). NULL until it has been looked at.
     pub brand_logo_is_mark: Option<bool>,
+    /// The branding tier. Super admin only — see `UpdateOrgRequest`.
+    pub custom_branding: bool,
     pub is_active: bool,
     /// IANA timezone name. The org-level default that branches inherit when
     /// their own timezone is unset. Defaults to `Africa/Cairo`.
@@ -89,6 +91,11 @@ pub struct UpdateOrgRequest {
     )]
     #[schema(nullable, value_type = Option<String>)]
     pub logo_url: Option<Option<String>>,
+    /// May this organisation wear its own mark and colours on the customer's
+    /// card and signup page? A paid tier, and this endpoint is already
+    /// super-admin only — which is the whole reason it lives here rather than
+    /// with the other branding controls an org manager can reach.
+    pub custom_branding: Option<bool>,
 }
 
 // ── OpenAPI-only multipart schemas ────────────────────────────
@@ -260,7 +267,7 @@ pub async fn create_org(
         r#"
         INSERT INTO organizations (name, slug, logo_url, currency_code, tax_rate, receipt_footer, timezone)
         VALUES ($1, $2, $3, $4, $5, $6, $7::timezone_name)
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, is_active, timezone::text AS timezone
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, custom_branding, is_active, timezone::text AS timezone
         "#,
     )
     .bind(&name)
@@ -313,7 +320,7 @@ pub async fn list_orgs(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResp
 
     let orgs = sqlx::query_as::<_, Org>(
         r#"
-        SELECT id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, is_active, timezone::text AS timezone
+        SELECT id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, custom_branding, is_active, timezone::text AS timezone
         FROM organizations
         WHERE deleted_at IS NULL
         ORDER BY name
@@ -514,9 +521,10 @@ pub async fn update_org(
             is_active      = COALESCE($7, is_active),
             logo_url       = CASE WHEN $9 THEN $8 ELSE logo_url END,
             timezone       = COALESCE(NULLIF($10, '')::timezone_name, timezone),
+            custom_branding = COALESCE($11, custom_branding),
             updated_at     = NOW()
         WHERE id = $1 AND deleted_at IS NULL
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, is_active, timezone::text AS timezone
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, custom_branding, is_active, timezone::text AS timezone
         "#,
     )
     .bind(*org_id)
@@ -529,6 +537,7 @@ pub async fn update_org(
     .bind(&logo_url_val)
     .bind(logo_url_is_present)
     .bind(&body.timezone)
+    .bind(body.custom_branding)
     .fetch_optional(pool.get_ref())
     .await?
     .ok_or_else(|| AppError::NotFound("Org not found".into()))?;
@@ -672,7 +681,7 @@ pub async fn upload_org_logo(
             brand_background = $3, brand_foreground = $4, brand_accent = $5,
             brand_logo_source = $2, brand_logo_is_mark = $6
         WHERE id = $1 AND deleted_at IS NULL
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, is_active, timezone::text AS timezone
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, custom_branding, is_active, timezone::text AS timezone
         "#,
     )
     .bind(*org_id)
@@ -747,7 +756,7 @@ pub(crate) fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 
 async fn fetch_org(pool: &PgPool, id: Uuid) -> Result<Org, AppError> {
     sqlx::query_as::<_, Org>(
-        "SELECT id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, is_active, timezone::text AS timezone
+        "SELECT id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, custom_branding, is_active, timezone::text AS timezone
          FROM organizations
          WHERE id = $1 AND deleted_at IS NULL",
     )

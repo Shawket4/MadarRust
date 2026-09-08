@@ -49797,9 +49797,22 @@
           "mode",
           "next_reward_cost",
           "earn_piastres_per_point",
-          "rewards"
+          "rewards",
+          "birthday_enabled"
         ],
         "properties": {
+          "birthday_enabled": {
+            "type": "boolean",
+            "description": "Ask for a date of birth. False means the form does not show the field —\na shop that does not run birthday rewards is not given one to hold."
+          },
+          "birthday_reward_amount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "What the birthday is worth here, so the page can say what it is FOR\nrather than asking for a date of birth and explaining nothing."
+          },
           "branch_id": {
             "type": "string",
             "format": "uuid"
@@ -49862,6 +49875,14 @@
           "phone"
         ],
         "properties": {
+          "birthday": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date",
+            "description": "Date of birth, `YYYY-MM-DD`. Accepted ONLY where the org asked for one:\na field the shop turned off must not be storable by posting past the\nform, and the year is kept because a date without one is not a date."
+          },
           "branch_id": {
             "type": "string",
             "format": "uuid"
@@ -50633,6 +50654,31 @@
           "require_otp"
         ],
         "properties": {
+          "birthday_enabled": {
+            "type": "boolean",
+            "description": "Ask for a birthday at signup, and greet them on the day.\n\nOff means the form does not ASK — not that it asks and ignores. A date of\nbirth is the most sensitive thing this feature collects, and a shop that\ndoes not run birthday rewards has no business holding one."
+          },
+          "birthday_message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Overrides the built-in greeting. `{name}` is substituted; nothing else is."
+          },
+          "birthday_message_ar": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "birthday_reward_amount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Points or stamps given on the day. `None` is a greeting and nothing else,\nwhich is deliberately the default: plenty of shops want to say happy\nbirthday without giving away a drink."
+          },
           "branch_id": {
             "type": [
               "string",
@@ -53204,6 +53250,7 @@
           "slug",
           "currency_code",
           "tax_rate",
+          "custom_branding",
           "is_active",
           "timezone"
         ],
@@ -53237,6 +53284,10 @@
           "currency_code": {
             "type": "string",
             "example": "EGP"
+          },
+          "custom_branding": {
+            "type": "boolean",
+            "description": "The branding tier. Super admin only — see `UpdateOrgRequest`."
           },
           "id": {
             "type": "string",
@@ -60123,6 +60174,13 @@
               "string",
               "null"
             ]
+          },
+          "custom_branding": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "May this organisation wear its own mark and colours on the customer's\ncard and signup page? A paid tier, and this endpoint is already\nsuper-admin only — which is the whole reason it lives here rather than\nwith the other branding controls an org manager can reach."
           },
           "is_active": {
             "type": [

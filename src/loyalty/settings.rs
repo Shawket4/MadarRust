@@ -50,6 +50,24 @@ pub struct LoyaltySettings {
     pub default_reward_cost: i32,
     /// Verify the signup phone by WhatsApp code, like bookings and ordering.
     pub require_otp: bool,
+    /// Ask for a birthday at signup, and greet them on the day.
+    ///
+    /// Off means the form does not ASK — not that it asks and ignores. A date of
+    /// birth is the most sensitive thing this feature collects, and a shop that
+    /// does not run birthday rewards has no business holding one.
+    #[serde(default)]
+    pub birthday_enabled: bool,
+    /// Points or stamps given on the day. `None` is a greeting and nothing else,
+    /// which is deliberately the default: plenty of shops want to say happy
+    /// birthday without giving away a drink.
+    #[serde(default)]
+    pub birthday_reward_amount: Option<i32>,
+    /// Overrides the built-in greeting. `{name}` is substituted; nothing else is.
+    #[serde(default)]
+    pub birthday_message: Option<String>,
+    #[serde(default)]
+    pub birthday_message_ar: Option<String>,
+
     /// Any menu item may be taken as a reward, at `default_reward_cost`.
     ///
     /// Off by default. A curated catalogue is the safer shape — it offers an
@@ -87,6 +105,10 @@ impl LoyaltySettings {
             earn_include_tax: false,
             default_reward_cost: 100,
             require_otp: true,
+            birthday_enabled: false,
+            birthday_reward_amount: None,
+            birthday_message: None,
+            birthday_message_ar: None,
             reward_any_item: false,
             terms: None,
             terms_ar: None,
@@ -127,6 +149,11 @@ impl LoyaltySettings {
         if self.program_name.trim().is_empty() {
             return Err(AppError::BadRequest("program_name is required".into()));
         }
+        if self.birthday_reward_amount.is_some_and(|a| a <= 0) {
+            return Err(AppError::BadRequest(
+                "a birthday reward must be worth more than nothing".into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -144,6 +171,10 @@ struct Row {
     earn_include_tax: bool,
     default_reward_cost: i32,
     require_otp: bool,
+    birthday_enabled: bool,
+    birthday_reward_amount: Option<i32>,
+    birthday_message: Option<String>,
+    birthday_message_ar: Option<String>,
     reward_any_item: bool,
     terms: Option<String>,
     terms_ar: Option<String>,
@@ -151,7 +182,8 @@ struct Row {
 
 const COLS: &str = "org_id, branch_id, enabled, program_name, program_name_ar, mode, \
     earn_piastres_per_point, earn_on_discounted, earn_include_tax, \
-    default_reward_cost, require_otp, reward_any_item, terms, terms_ar";
+    default_reward_cost, require_otp, birthday_enabled, birthday_reward_amount, \
+    birthday_message, birthday_message_ar, reward_any_item, terms, terms_ar";
 
 impl From<Row> for LoyaltySettings {
     fn from(r: Row) -> Self {
@@ -167,6 +199,10 @@ impl From<Row> for LoyaltySettings {
             earn_include_tax: r.earn_include_tax,
             default_reward_cost: r.default_reward_cost,
             require_otp: r.require_otp,
+            birthday_enabled: r.birthday_enabled,
+            birthday_reward_amount: r.birthday_reward_amount,
+            birthday_message: r.birthday_message,
+            birthday_message_ar: r.birthday_message_ar,
             reward_any_item: r.reward_any_item,
             terms: r.terms,
             terms_ar: r.terms_ar,
@@ -294,8 +330,9 @@ pub async fn put_settings(
     let row: Row = sqlx::query_as(&format!(
         "INSERT INTO loyalty_settings (org_id, branch_id, enabled, program_name, program_name_ar, \
             mode, earn_piastres_per_point, earn_on_discounted, earn_include_tax, default_reward_cost, \
-            require_otp, reward_any_item, terms, terms_ar) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) \
+            require_otp, birthday_enabled, birthday_reward_amount, birthday_message, \
+            birthday_message_ar, reward_any_item, terms, terms_ar) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) \
          ON CONFLICT (org_id, COALESCE(branch_id, '00000000-0000-0000-0000-000000000000'::uuid)) \
          DO UPDATE SET enabled = EXCLUDED.enabled, program_name = EXCLUDED.program_name, \
             program_name_ar = EXCLUDED.program_name_ar, mode = EXCLUDED.mode, \
@@ -304,6 +341,10 @@ pub async fn put_settings(
             earn_include_tax = EXCLUDED.earn_include_tax, \
             default_reward_cost = EXCLUDED.default_reward_cost, \
             require_otp = EXCLUDED.require_otp, \
+            birthday_enabled = EXCLUDED.birthday_enabled, \
+            birthday_reward_amount = EXCLUDED.birthday_reward_amount, \
+            birthday_message = EXCLUDED.birthday_message, \
+            birthday_message_ar = EXCLUDED.birthday_message_ar, \
             reward_any_item = EXCLUDED.reward_any_item, terms = EXCLUDED.terms, \
             terms_ar = EXCLUDED.terms_ar, updated_at = now() \
          RETURNING {COLS}"
@@ -319,6 +360,10 @@ pub async fn put_settings(
     .bind(incoming.earn_include_tax)
     .bind(incoming.default_reward_cost)
     .bind(incoming.require_otp)
+    .bind(incoming.birthday_enabled)
+    .bind(incoming.birthday_reward_amount)
+    .bind(&incoming.birthday_message)
+    .bind(&incoming.birthday_message_ar)
     .bind(incoming.reward_any_item)
     .bind(&incoming.terms)
     .bind(&incoming.terms_ar)

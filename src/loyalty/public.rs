@@ -53,6 +53,12 @@ pub struct JoinInfo {
     pub earn_piastres_per_point: i32,
     /// The rewards on offer, each with what it costs.
     pub rewards: Vec<PublicReward>,
+    /// Ask for a date of birth. False means the form does not show the field —
+    /// a shop that does not run birthday rewards is not given one to hold.
+    pub birthday_enabled: bool,
+    /// What the birthday is worth here, so the page can say what it is FOR
+    /// rather than asking for a date of birth and explaining nothing.
+    pub birthday_reward_amount: Option<i32>,
     pub terms: Option<String>,
     pub terms_ar: Option<String>,
 }
@@ -159,6 +165,8 @@ pub async fn join_info(
         ),
         enabled: settings.enabled,
         require_otp: settings.require_otp,
+        birthday_enabled: settings.birthday_enabled,
+        birthday_reward_amount: settings.birthday_reward_amount,
         mode: settings.mode.clone(),
         next_reward_cost: model::reward_target(&settings, &rewards),
         earn_piastres_per_point: settings.earn_piastres_per_point,
@@ -180,6 +188,11 @@ pub struct JoinInput {
     pub branch_id: Uuid,
     pub name: String,
     pub phone: String,
+    /// Date of birth, `YYYY-MM-DD`. Accepted ONLY where the org asked for one:
+    /// a field the shop turned off must not be storable by posting past the
+    /// form, and the year is kept because a date without one is not a date.
+    #[serde(default)]
+    pub birthday: Option<chrono::NaiveDate>,
     /// Device-trust token from `/public/otp/verify`. Required only when the
     /// branch's `require_otp` is on.
     #[serde(default)]
@@ -249,15 +262,15 @@ pub async fn join(
     // Joining twice from the same phone is a normal thing to do — a customer who
     // lost their pass rescans the counter QR. Return the existing card rather
     // than a duplicate member or an error.
-    let (member, already_member) = match model::find_by_phone(pool.get_ref(), org_id, &phone)
-        .await?
-    {
-        Some(existing) => (existing, true),
-        None => {
-            let row: MemberRow = sqlx::query_as(&format!(
+    let (member, already_member) =
+        match model::find_by_phone(pool.get_ref(), org_id, &phone).await? {
+            Some(existing) => (existing, true),
+            None => {
+                let row: MemberRow = sqlx::query_as(&format!(
                     "INSERT INTO loyalty_customers \
-                        (org_id, phone, name, member_token, joined_branch_id, locale, apple_auth_token) \
-                     VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING {}",
+                        (org_id, phone, name, member_token, joined_branch_id, locale, \
+                         apple_auth_token, birthday) \
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING {}",
                     model::MEMBER_COLS
                 ))
                 .bind(org_id)
@@ -269,11 +282,14 @@ pub async fn join(
                 // Apple authenticates pass updates with this; minted now so a
                 // pass issued later needs no second write.
                 .bind(mint_member_token())
+                // Dropped unless the shop asked for one. A field the org turned
+                // off must not become storable by posting past the form.
+                .bind(settings.birthday_enabled.then_some(body.birthday).flatten())
                 .fetch_one(pool.get_ref())
                 .await?;
-            (row, false)
-        }
-    };
+                (row, false)
+            }
+        };
 
     let (rewards, _) = load_effective_rewards(pool.get_ref(), org_id, body.branch_id).await?;
     let mode = settings.mode();
