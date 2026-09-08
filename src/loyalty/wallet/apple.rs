@@ -413,7 +413,7 @@ pub fn pass_json(
     member: &MemberRow,
     settings: &LoyaltySettings,
     locations: &[PassLocation],
-    rewards: &[String],
+    copy: &super::CardCopy,
     // What they are working towards, in the shop's own words.
     headline: &str,
     brand: &PassBrand,
@@ -428,7 +428,7 @@ pub fn pass_json(
     let threshold = settings.default_reward_cost;
     let balance = member.balance_in(mode);
 
-    let back: Vec<serde_json::Value> = super::back_of_card(member, settings, locations, rewards)
+    let back: Vec<serde_json::Value> = super::back_of_card(member, settings, copy)
         .into_iter()
         .map(|l| json!({ "key": l.key, "label": l.label, "value": l.value }))
         .collect();
@@ -666,12 +666,12 @@ pub async fn build_pass_for(pool: &PgPool, member: &MemberRow) -> Result<Vec<u8>
         .await?
         .unwrap_or_else(|| LoyaltySettings::defaults(member.org_id, None));
     let locations = super::locations_for_member(pool, member).await?;
-    let rewards = super::reward_lines(pool, member.org_id).await;
+    let copy = super::card_copy(pool, member.org_id).await;
     let org = crate::orgs::branding::load(pool, member.org_id).await?;
     let brand = pass_brand(&org);
     let strip = strip_images(&org, &brand.foreground);
     let headline = super::reward_headline(pool, member.org_id, &settings).await;
-    let pass = pass_json(member, &settings, &locations, &rewards, &headline, &brand)?;
+    let pass = pass_json(member, &settings, &locations, &copy, &headline, &brand)?;
     // One list for the archive AND the manifest, so an image cannot end up in
     // the zip unhashed — which invalidates the signature and makes iOS refuse
     // the pass with no explanation at all.
@@ -786,7 +786,7 @@ pub(crate) mod tests {
             &member(),
             &s,
             &[],
-            &[],
+            &crate::loyalty::wallet::CardCopy::default(),
             "Free espresso",
             &PassBrand::default(),
         )
@@ -827,7 +827,7 @@ pub(crate) mod tests {
             &member(),
             &s,
             &[],
-            &[],
+            &crate::loyalty::wallet::CardCopy::default(),
             "Free espresso",
             &PassBrand::default(),
         )
@@ -859,7 +859,15 @@ pub(crate) mod tests {
             label: "#C8607F".into(),
             ..PassBrand::default()
         };
-        let p = pass_json(&member(), &s, &[], &[], "Free espresso", &brand).unwrap();
+        let p = pass_json(
+            &member(),
+            &s,
+            &[],
+            &crate::loyalty::wallet::CardCopy::default(),
+            "Free espresso",
+            &brand,
+        )
+        .unwrap();
 
         // The colours reach the pass. They used to be read from
         // `loyalty_settings`, which stopped being written when branding moved
@@ -883,7 +891,7 @@ pub(crate) mod tests {
             &member(),
             &s,
             &[],
-            &[],
+            &crate::loyalty::wallet::CardCopy::default(),
             "Free espresso",
             &PassBrand::default(),
         )
@@ -1079,7 +1087,7 @@ pub(crate) mod tests {
             &member(),
             &s,
             &[],
-            &[],
+            &crate::loyalty::wallet::CardCopy::default(),
             "Free espresso",
             &PassBrand::default(),
         )
@@ -1138,7 +1146,7 @@ pub(crate) mod tests {
             &member(),
             &s,
             &locs,
-            &[],
+            &crate::loyalty::wallet::CardCopy::default(),
             "Free espresso",
             &PassBrand::default(),
         )
@@ -1169,7 +1177,7 @@ pub(crate) mod tests {
             &member(),
             &s,
             &[],
-            &[],
+            &crate::loyalty::wallet::CardCopy::default(),
             "Free espresso",
             &PassBrand::default(),
         )
@@ -1230,7 +1238,7 @@ pub(crate) mod tests {
             &member(),
             &s,
             &[],
-            &[],
+            &crate::loyalty::wallet::CardCopy::default(),
             "Free espresso",
             &PassBrand::default(),
         )

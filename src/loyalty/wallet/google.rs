@@ -236,7 +236,7 @@ pub fn loyalty_object(
     member: &MemberRow,
     settings: &LoyaltySettings,
     locations: &[super::PassLocation],
-    rewards: &[String],
+    copy: &super::CardCopy,
     headline: &str,
 ) -> serde_json::Value {
     let mode = settings.mode();
@@ -287,7 +287,7 @@ pub fn loyalty_object(
         // the shared "Member" line would appear a third time — and it carries a
         // phone number, which is the last thing to print twice. Apple keeps it:
         // it has no automatic equivalent.
-        "textModulesData": super::back_of_card(member, settings, locations, rewards)
+        "textModulesData": super::back_of_card(member, settings, copy)
             .into_iter()
             .filter(|l| l.key != "member")
             .map(|l| json!({ "id": l.key, "header": l.label, "body": l.value }))
@@ -408,7 +408,7 @@ pub async fn save_url(
     settings: &LoyaltySettings,
     brand: &OrgBrand,
     locations: &[super::PassLocation],
-    rewards: &[String],
+    copy: &super::CardCopy,
     headline: &str,
 ) -> Result<Option<String>, AppError> {
     let (Some(issuer), Some(email), Some(key)) = (issuer_id(), sa_email(), sa_key()) else {
@@ -434,7 +434,7 @@ pub async fn save_url(
     let token = access_token().await?;
     ensure_class(&token, &issuer, member.org_id, brand, settings).await?;
     let object_id = ensure_object(
-        &token, &issuer, member, settings, locations, rewards, headline, brand,
+        &token, &issuer, member, settings, locations, copy, headline, brand,
     )
     .await?;
     if member.google_object_id.as_deref() != Some(object_id.as_str()) {
@@ -533,7 +533,7 @@ async fn ensure_object(
     member: &MemberRow,
     settings: &LoyaltySettings,
     locations: &[super::PassLocation],
-    rewards: &[String],
+    copy: &super::CardCopy,
     headline: &str,
     brand: &OrgBrand,
 ) -> Result<String, AppError> {
@@ -542,7 +542,7 @@ async fn ensure_object(
         .post(format!("{WALLET_API}/loyaltyObject"))
         .bearer_auth(token)
         .json(&loyalty_object(
-            issuer, member, settings, locations, rewards, headline,
+            issuer, member, settings, locations, copy, headline,
         ))
         .send()
         .await
@@ -570,7 +570,7 @@ async fn ensure_object(
         .put(format!("{WALLET_API}/loyaltyObject/{id}"))
         .bearer_auth(token)
         .json(&loyalty_object(
-            issuer, member, settings, locations, rewards, headline,
+            issuer, member, settings, locations, copy, headline,
         ))
         .send()
         .await;
@@ -780,12 +780,12 @@ pub async fn push_balance(pool: &PgPool, member: &MemberRow) -> Result<(), AppEr
         .await
         .unwrap_or_default();
     let headline = super::reward_headline(pool, member.org_id, &settings).await;
-    let rewards = super::reward_lines(pool, member.org_id).await;
+    let copy = super::card_copy(pool, member.org_id).await;
     // The whole card, through the same builder the save path uses, and PUT
     // rather than PATCH — for both of the reasons `ensure_object` gives. One
     // writer and one shape: a card that changed on a sale and a card that
     // changed on a save cannot end up different objects.
-    let body = loyalty_object(&issuer, member, &settings, &locations, &rewards, &headline);
+    let body = loyalty_object(&issuer, member, &settings, &locations, &copy, &headline);
     let http = reqwest::Client::new();
     let resp = http
         .put(format!("{WALLET_API}/loyaltyObject/{object_id}"))
@@ -858,7 +858,7 @@ mod tests {
         // reason for the REST provisioning is checkable rather than folklore.
         let embedded = json!({
             "loyaltyClasses": [loyalty_class("3388000000022345678", uuid::Uuid::nil(), &brand, &s)],
-            "loyaltyObjects": [loyalty_object("3388000000022345678", &m, &s, &locs, &[], "Free espresso")],
+            "loyaltyObjects": [loyalty_object("3388000000022345678", &m, &s, &locs, &crate::loyalty::wallet::CardCopy::default(), "Free espresso")],
         });
         assert!(
             as_jwt(&embedded) > MAX_SAVE_JWT,
@@ -1011,7 +1011,7 @@ mod tests {
             &super::super::apple::tests::member(),
             &s,
             &[],
-            &[],
+            &crate::loyalty::wallet::CardCopy::default(),
             "Free espresso",
         );
 

@@ -309,6 +309,50 @@ pub fn absolute_api_url(path: &str) -> Option<String> {
     Some(format!("{}{path}", origin_of(&uploads)?))
 }
 
+/// The org-level lines both wallets print on the back of the card.
+///
+/// Gathered once and carried as one value rather than as a widening row of
+/// `&[String]` parameters — the two wallets must print the same words, and the
+/// surest way to keep them printing the same words is to hand them the same
+/// thing.
+#[derive(Debug, Default, Clone)]
+pub struct CardCopy {
+    /// Rewards a member can claim, already phrased.
+    pub rewards: Vec<String>,
+    /// EVERY branch the card works at.
+    ///
+    /// Deliberately not the geofence list. That one is capped at ten, sorted by
+    /// distance, and holds only branches somebody has put coordinates on — all
+    /// correct for deciding where a phone should wake the card up, and all
+    /// wrong for a heading that says "Where it works". Reusing it meant a shop
+    /// with six branches and two sets of coordinates advertised two branches.
+    pub branches: Vec<String>,
+}
+
+/// Everything the back of the card says about the shop, in one round trip each.
+pub async fn card_copy(pool: &PgPool, org_id: Uuid) -> CardCopy {
+    CardCopy {
+        rewards: reward_lines(pool, org_id).await,
+        branches: branch_names(pool, org_id).await,
+    }
+}
+
+/// Every branch that is open, whether or not anyone has located it.
+async fn branch_names(pool: &PgPool, org_id: Uuid) -> Vec<String> {
+    sqlx::query_as::<_, (String,)>(
+        "SELECT name FROM branches \
+          WHERE org_id = $1 AND is_active AND deleted_at IS NULL \
+          ORDER BY name",
+    )
+    .bind(org_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(n,)| n)
+    .collect()
+}
+
 /// Build both "add to wallet" links for a member.
 /// The org's rewards, phrased once for both wallets.
 ///
@@ -361,11 +405,17 @@ pub struct BackLine {
     pub value: String,
 }
 
+/// How many branches the back of the card lists before it stops.
+///
+/// A back field is read, not scanned, and forty names is not a list anyone
+/// reads. Past this it says how many more there are, which is honest about
+/// being partial in a way a silently truncated list is not.
+const BRANCHES_SHOWN: usize = 12;
+
 pub fn back_of_card(
     member: &MemberRow,
     settings: &LoyaltySettings,
-    locations: &[PassLocation],
-    rewards: &[String],
+    copy: &CardCopy,
 ) -> Vec<BackLine> {
     let threshold = settings.default_reward_cost;
     let mut out = vec![
@@ -393,22 +443,30 @@ pub fn back_of_card(
             value: format!("{} · {}", member.name, member.phone),
         },
     ];
-    if !rewards.is_empty() {
+    if !copy.rewards.is_empty() {
         out.push(BackLine {
             key: "rewards",
             label: "Rewards you can claim".into(),
-            value: rewards.join("\n"),
+            value: copy.rewards.join("\n"),
         });
     }
-    if !locations.is_empty() {
+    if !copy.branches.is_empty() {
+        let mut value = copy
+            .branches
+            .iter()
+            .take(BRANCHES_SHOWN)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some(rest) = copy.branches.len().checked_sub(BRANCHES_SHOWN)
+            && rest > 0
+        {
+            value.push_str(&format!("\nand {rest} more"));
+        }
         out.push(BackLine {
             key: "branches",
             label: "Where it works".into(),
-            value: locations
-                .iter()
-                .map(|l| l.name.clone())
-                .collect::<Vec<_>>()
-                .join("\n"),
+            value,
         });
     }
     if let Some(terms) = settings.terms.as_deref().filter(|t| !t.trim().is_empty()) {
@@ -450,23 +508,20 @@ pub async fn links_for(
 ) -> PassLinks {
     let apple_url = apple_link(member);
     // The same lines Apple prints on the back of its pass.
-    let rewards = reward_lines(pool, member.org_id).await;
+    let copy = card_copy(pool, member.org_id).await;
     let headline = reward_headline(pool, member.org_id, settings).await;
     // Provisioning talks to Google, so it can fail in ways a signup must
     // survive: an unlinked service account, a refused class, a network blip.
     // The customer gets the Apple badge and the code on their card either way,
     // and the reason lands in the log rather than in their face.
-    let google_url = match google::save_url(
-        pool, member, settings, brand, locations, &rewards, &headline,
-    )
-    .await
-    {
-        Ok(url) => url,
-        Err(e) => {
-            tracing::warn!(error = %e, "loyalty: could not build the Google Wallet save link");
-            None
-        }
-    };
+    let google_url =
+        match google::save_url(pool, member, settings, brand, locations, &copy, &headline).await {
+            Ok(url) => url,
+            Err(e) => {
+                tracing::warn!(error = %e, "loyalty: could not build the Google Wallet save link");
+                None
+            }
+        };
     PassLinks {
         any: apple_url.is_some() || google_url.is_some(),
         apple_url,
@@ -590,6 +645,43 @@ mod tests {
         assert!(web_service_url().is_none());
     }
 
+    /// "Where it works" is the shop's branches, not the ones we can geofence.
+    ///
+    /// It used to be built from the same array as the geofence — which is
+    /// capped at ten, sorted by distance, and holds only branches somebody had
+    /// put coordinates on. A shop with six branches and two sets of
+    /// coordinates therefore told its customers it had two.
+    #[test]
+    fn the_back_of_the_card_lists_branches_nobody_has_located() {
+        let s = LoyaltySettings::defaults(Uuid::nil(), None);
+        let copy = CardCopy {
+            rewards: vec![],
+            branches: vec!["Maadi".into(), "Zamalek".into(), "Alexandria".into()],
+        };
+        // One located branch, three open ones.
+        let lines = back_of_card(&apple::tests::member(), &s, &copy);
+        let branches = lines.iter().find(|l| l.key == "branches").unwrap();
+        assert_eq!(branches.value, "Maadi\nZamalek\nAlexandria");
+    }
+
+    /// A back field is read, not scanned; past a dozen it says how many more.
+    #[test]
+    fn a_long_list_of_branches_says_how_many_it_left_out() {
+        let s = LoyaltySettings::defaults(Uuid::nil(), None);
+        let copy = CardCopy {
+            rewards: vec![],
+            branches: (1..=15).map(|i| format!("Branch {i}")).collect(),
+        };
+        let lines = back_of_card(&apple::tests::member(), &s, &copy);
+        let branches = lines.iter().find(|l| l.key == "branches").unwrap();
+        assert_eq!(branches.value.lines().count(), BRANCHES_SHOWN + 1);
+        assert!(
+            branches.value.ends_with("and 3 more"),
+            "a truncated list must admit it is truncated: {}",
+            branches.value
+        );
+    }
+
     /// The two cards are meant to be one card. This is what stops them drifting.
     #[test]
     fn both_wallets_are_given_the_same_card() {
@@ -609,18 +701,21 @@ mod tests {
             latitude: 30.0,
             longitude: 31.0,
         }];
-        let rewards = ["Espresso — 5 visits".to_string()];
+        let copy = CardCopy {
+            rewards: vec!["Espresso — 5 visits".to_string()],
+            branches: vec!["Maadi".into(), "Zamalek".into()],
+        };
 
         let apple = apple::pass_json(
             &m,
             &s,
             &locs,
-            &rewards,
+            &copy,
             "Free espresso",
             &apple::PassBrand::default(),
         )
         .unwrap();
-        let google = google::loyalty_object("338", &m, &s, &locs, &rewards, "Free espresso");
+        let google = google::loyalty_object("338", &m, &s, &locs, &copy, "Free espresso");
 
         // Google gives a card TWO face slots where Apple gives four, so parity
         // is about which words land where, not about a field-for-field copy.
