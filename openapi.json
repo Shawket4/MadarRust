@@ -15105,6 +15105,103 @@
         ]
       }
     },
+    "/loyalty/birthday-preview": {
+      "post": {
+        "tags": [
+          "loyalty"
+        ],
+        "summary": "Render the greeting for settings that have NOT been saved yet.",
+        "description": "Rendered by the server, from the same `message_for` the sweep uses, because\na preview reimplemented in the dashboard is a preview that drifts — and the\nthing it would drift from is a message sent once a year to a customer, where\nnobody would ever catch it.\n\nTakes the settings being edited rather than reading the stored ones: the\npoint is to see what you are about to save.",
+        "operationId": "preview_loyalty_birthday_message",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoyaltySettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BirthdayPreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/loyalty/lookup": {
       "post": {
         "tags": [
@@ -42602,6 +42699,22 @@
             "type": "integer",
             "format": "int32",
             "description": "Points this sale earned. 0 when it was too small to reach one point."
+          }
+        }
+      },
+      "BirthdayPreview": {
+        "type": "object",
+        "description": "The birthday greeting as it would actually be sent, in both languages.",
+        "required": [
+          "en",
+          "ar"
+        ],
+        "properties": {
+          "ar": {
+            "type": "string"
+          },
+          "en": {
+            "type": "string"
           }
         }
       },

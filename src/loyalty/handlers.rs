@@ -13,7 +13,9 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use super::model::{self, LedgerEntry, MemberRow, MemberView};
-use super::settings::{RewardItem, ScopeQuery, load_effective, load_effective_rewards};
+use super::settings::{
+    LoyaltySettings, RewardItem, ScopeQuery, load_effective, load_effective_rewards,
+};
 use super::{resolve_branch_org, wallet};
 use crate::delivery::{normalize_phone, require_branch_access};
 use crate::errors::{AppError, AppErrorResponse};
@@ -94,6 +96,42 @@ pub async fn lookup(
         recent,
         any_item: settings.reward_any_item,
         any_item_cost: settings.default_reward_cost,
+    }))
+}
+
+/// The birthday greeting as it would actually be sent, in both languages.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BirthdayPreview {
+    pub en: String,
+    pub ar: String,
+}
+
+/// Render the greeting for settings that have NOT been saved yet.
+///
+/// Rendered by the server, from the same `message_for` the sweep uses, because
+/// a preview reimplemented in the dashboard is a preview that drifts — and the
+/// thing it would drift from is a message sent once a year to a customer, where
+/// nobody would ever catch it.
+///
+/// Takes the settings being edited rather than reading the stored ones: the
+/// point is to see what you are about to save.
+#[utoipa::path(post, path = "/loyalty/birthday-preview", tag = "loyalty",
+    operation_id = "preview_loyalty_birthday_message", request_body = LoyaltySettings,
+    responses((status = 200, body = BirthdayPreview), AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn birthday_preview(
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
+    body: web::Json<LoyaltySettings>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "loyalty", "update").await?;
+    let settings = body.into_inner();
+    // A stand-in name, so the placeholder is visibly a placeholder.
+    let sample = "Sara";
+    Ok(HttpResponse::Ok().json(BirthdayPreview {
+        en: crate::loyalty::birthdays::message_for(&settings, sample, "en"),
+        ar: crate::loyalty::birthdays::message_for(&settings, sample, "ar"),
     }))
 }
 
