@@ -239,17 +239,20 @@ pub fn loyalty_object(
         "state": "ACTIVE",
         "accountId": member.member_token,
         "accountName": member.name,
+        // Both of these render ON THE CARD. `textModulesData` does not — it
+        // renders in the details list BELOW it, which is where the progress
+        // used to sit: a customer opening their wallet saw a balance and had to
+        // scroll past the card to find out how close they were.
         "loyaltyPoints": {
             "label": balance_label(mode),
             "balance": { "int": balance }
         },
-        // The progress line, mirroring the Apple pass's secondary field so the
-        // two wallets say the same thing.
-        "textModulesData": [{
-            "header": program,
-            "body": progress_line(balance, settings.default_reward_cost),
-            "id": "progress"
-        }],
+        "secondaryLoyaltyPoints": {
+            "label": program,
+            // A string, not an int: "3 / 5" is the whole point, and the int
+            // field would only carry one of the two numbers.
+            "balance": { "string": progress_line(balance, settings.default_reward_cost) }
+        },
         "barcode": {
             "type": "QR_CODE",
             "value": member.member_token,
@@ -582,11 +585,13 @@ pub async fn push_balance(pool: &PgPool, member: &MemberRow) -> Result<(), AppEr
             "label": balance_label(mode),
             "balance": { "int": balance }
         },
-        "textModulesData": [{
-            "header": settings.program_name,
-            "body": progress_line(balance, settings.default_reward_cost),
-            "id": "progress"
-        }]
+        // The same two card-face fields the object was created with. Patching
+        // `textModulesData` here instead would leave a stale progress line
+        // under the card and a card face that never moved.
+        "secondaryLoyaltyPoints": {
+            "label": settings.program_name,
+            "balance": { "string": progress_line(balance, settings.default_reward_cost) }
+        }
     });
     let http = reqwest::Client::new();
     let resp = http
@@ -760,6 +765,31 @@ mod tests {
         // a value someone quoted or left a stray character in.
         assert!(issuer_format_problem("\"3388000000022345678\"").is_some());
         assert!(issuer_format_problem("3388000000022345678 ").is_some());
+    }
+
+    #[test]
+    fn the_progress_is_on_the_card_not_in_the_list_under_it() {
+        let mut s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
+        s.mode = "visits".into();
+        s.default_reward_cost = 5;
+        let obj = loyalty_object("338", &super::super::apple::tests::member(), &s, &[]);
+
+        // `loyaltyPoints` and `secondaryLoyaltyPoints` render on the card face.
+        assert_eq!(obj["loyaltyPoints"]["balance"]["int"], 3);
+        assert_eq!(obj["loyaltyPoints"]["label"], "Orders");
+        assert_eq!(
+            obj["secondaryLoyaltyPoints"]["balance"]["string"],
+            "●─●─●─○─○   3 / 5"
+        );
+
+        // `textModulesData` does NOT — it renders in the details list below the
+        // card, which is where the progress used to be: a customer opening
+        // their wallet saw a balance and had to scroll past the card to find
+        // out how close they were.
+        assert!(
+            obj.get("textModulesData").is_none(),
+            "nothing belongs under the card that belongs on it: {obj}"
+        );
     }
 
     #[test]
