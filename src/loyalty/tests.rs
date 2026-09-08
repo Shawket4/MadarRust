@@ -1344,9 +1344,15 @@ async fn pass_locations_are_scoped_to_the_org(pool: PgPool) {
             .unwrap();
     }
 
-    let locs = crate::loyalty::wallet::locations_for_org(&pool, org).await.unwrap();
+    let locs = crate::loyalty::wallet::locations_for_org(&pool, org)
+        .await
+        .unwrap();
     let names: Vec<&str> = locs.iter().map(|l| l.name.as_str()).collect();
-    assert_eq!(names, ["Maadi"], "only this org's mapped branches: {names:?}");
+    assert_eq!(
+        names,
+        ["Maadi"],
+        "only this org's mapped branches: {names:?}"
+    );
     let _ = no_coords; // present, unmapped, and correctly absent from the pass.
 
     // A soft-deleted or deactivated branch stops surfacing — a customer should

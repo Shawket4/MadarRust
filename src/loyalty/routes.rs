@@ -43,6 +43,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/lookup", web::post().to(handlers::lookup))
                 .route("/award", web::post().to(award::award))
                 .route("/adjust", web::post().to(handlers::adjust))
+                // Makes live calls to Google, so it is asked for, never polled.
+                .route("/wallet-status", web::get().to(handlers::wallet_status))
                 .route("/members", web::get().to(handlers::list_members))
                 .route("/members/{id}", web::get().to(handlers::get_member)),
         )
@@ -61,11 +63,6 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             web::resource("/public/loyalty/card/{token}")
                 .wrap(Condition::new(limited, Governor::new(&browse_gov)))
                 .route(web::get().to(public::card)),
-        )
-        .service(
-            web::resource("/public/loyalty/card/{token}/steps.png")
-                .wrap(Condition::new(limited, Governor::new(&browse_gov)))
-                .route(web::get().to(public::card_steps)),
         )
         .service(
             web::resource("/public/loyalty/card/{token}/qr.png")

@@ -15928,6 +15928,105 @@
         ]
       }
     },
+    "/loyalty/wallet-status": {
+      "get": {
+        "tags": [
+          "loyalty"
+        ],
+        "summary": "Why there is no \"Add to Wallet\" button.",
+        "description": "Every failure in this feature has looked the same from the outside — a\nmissing button, or a save that says \"something went wrong\" — while the cause\nwas a variable nobody set, a key file the code never read, a service account\nGoogle had not been told about, or a link over a size limit. None of those\nreach a customer's screen, and only some reach a log.\n\nThis asks, on demand, and reports what it finds. It makes live calls to\nGoogle, so it is deliberately not part of any page load.",
+        "operationId": "get_loyalty_wallet_status",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "query",
+            "description": "Omit for the org-wide default; supply a branch for its override.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WalletStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/menu-item-sizes/{size_id}/recipe": {
       "put": {
         "tags": [
@@ -61089,6 +61188,55 @@
         "properties": {
           "reason": {
             "type": "string"
+          }
+        }
+      },
+      "WalletProvider": {
+        "type": "object",
+        "description": "What a wallet needs before it will offer a button, and whether it has it.",
+        "required": [
+          "configured",
+          "missing"
+        ],
+        "properties": {
+          "configured": {
+            "type": "boolean",
+            "description": "Everything present. False means the button is not offered at all."
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "missing": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The settings still missing, by name. Empty when `configured`."
+          },
+          "reachable": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Google only: what Google itself said when asked. `None` for Apple, which\nsigns locally and has nobody to ask."
+          }
+        }
+      },
+      "WalletStatus": {
+        "type": "object",
+        "required": [
+          "apple",
+          "google"
+        ],
+        "properties": {
+          "apple": {
+            "$ref": "#/components/schemas/WalletProvider"
+          },
+          "google": {
+            "$ref": "#/components/schemas/WalletProvider"
           }
         }
       },

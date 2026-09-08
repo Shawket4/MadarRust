@@ -13,7 +13,7 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use super::model::{self, LedgerEntry, MemberRow, MemberView};
-use super::settings::{RewardItem, load_effective, load_effective_rewards};
+use super::settings::{RewardItem, ScopeQuery, load_effective, load_effective_rewards};
 use super::{resolve_branch_org, wallet};
 use crate::delivery::{normalize_phone, require_branch_access};
 use crate::errors::{AppError, AppErrorResponse};
@@ -83,6 +83,89 @@ pub async fn lookup(
         member: view,
         rewards,
         recent,
+    }))
+}
+
+/// What a wallet needs before it will offer a button, and whether it has it.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WalletProvider {
+    /// Everything present. False means the button is not offered at all.
+    pub configured: bool,
+    /// The settings still missing, by name. Empty when `configured`.
+    pub missing: Vec<String>,
+    /// Google only: what Google itself said when asked. `None` for Apple, which
+    /// signs locally and has nobody to ask.
+    pub reachable: Option<bool>,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WalletStatus {
+    pub apple: WalletProvider,
+    pub google: WalletProvider,
+}
+
+/// Why there is no "Add to Wallet" button.
+///
+/// Every failure in this feature has looked the same from the outside — a
+/// missing button, or a save that says "something went wrong" — while the cause
+/// was a variable nobody set, a key file the code never read, a service account
+/// Google had not been told about, or a link over a size limit. None of those
+/// reach a customer's screen, and only some reach a log.
+///
+/// This asks, on demand, and reports what it finds. It makes live calls to
+/// Google, so it is deliberately not part of any page load.
+#[utoipa::path(get, path = "/loyalty/wallet-status", tag = "loyalty",
+    operation_id = "get_loyalty_wallet_status", params(ScopeQuery),
+    responses((status = 200, body = WalletStatus), AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn wallet_status(
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
+    query: web::Query<ScopeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "loyalty", "update").await?;
+    if !matches!(claims.role, UserRole::OrgAdmin | UserRole::SuperAdmin) {
+        return Err(AppError::Forbidden(
+            "Only an admin may inspect the wallet configuration".into(),
+        ));
+    }
+    let org_id = match query.branch_id {
+        Some(b) => {
+            require_branch_access(pool.get_ref(), &claims, b).await?;
+            resolve_branch_org(pool.get_ref(), b).await?
+        }
+        None => claims
+            .org_id()
+            .ok_or_else(|| AppError::BadRequest("No organisation in scope".into()))?,
+    };
+
+    let apple_missing = wallet::apple::missing_env();
+    let google_missing = wallet::google::missing_env();
+    // Only worth asking Google when there is something to ask with.
+    let (reachable, detail) = if google_missing.is_empty() {
+        match wallet::google::check(org_id).await {
+            Ok(ok) => (Some(true), Some(ok)),
+            Err(e) => (Some(false), Some(e)),
+        }
+    } else {
+        (None, None)
+    };
+
+    Ok(HttpResponse::Ok().json(WalletStatus {
+        apple: WalletProvider {
+            configured: apple_missing.is_empty(),
+            missing: apple_missing,
+            reachable: None,
+            detail: None,
+        },
+        google: WalletProvider {
+            configured: google_missing.is_empty(),
+            missing: google_missing,
+            reachable,
+            detail,
+        },
     }))
 }
 

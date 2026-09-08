@@ -192,11 +192,29 @@ pub fn team_id() -> Option<String> {
 }
 
 pub fn is_configured() -> bool {
-    pass_type_id().is_some()
-        && team_id().is_some()
-        && pem_material("LOYALTY_APPLE_CERT_PEM").is_some()
-        && pem_material("LOYALTY_APPLE_KEY_PEM").is_some()
-        && pem_material("LOYALTY_APPLE_WWDR_PEM").is_some()
+    missing_env().is_empty()
+}
+
+/// Which settings Apple still needs, by name. See [`super::google::missing_env`]
+/// for why this is reported rather than merely counted.
+pub fn missing_env() -> Vec<String> {
+    let mut out = Vec::new();
+    if pass_type_id().is_none() {
+        out.push("LOYALTY_APPLE_PASS_TYPE_ID".into());
+    }
+    if team_id().is_none() {
+        out.push("LOYALTY_APPLE_TEAM_ID".into());
+    }
+    for key in [
+        "LOYALTY_APPLE_CERT_PEM",
+        "LOYALTY_APPLE_KEY_PEM",
+        "LOYALTY_APPLE_WWDR_PEM",
+    ] {
+        if pem_material(key).is_none() {
+            out.push(format!("{key} (or {key}_FILE)"));
+        }
+    }
+    out
 }
 
 /// The pass as Apple models it.
@@ -212,9 +230,6 @@ pub fn pass_json(
     locations: &[PassLocation],
     rewards: &[String],
     brand: &PassBrand,
-    // True when the stepper is DRAWN onto the pass's strip image. The strip
-    // changes the layout, so the fields have to make room for it.
-    strip: bool,
 ) -> Result<serde_json::Value, AppError> {
     let (Some(pass_type), Some(team)) = (pass_type_id(), team_id()) else {
         return Err(AppError::ServiceUnavailable(
@@ -293,30 +308,15 @@ pub fn pass_json(
                 "label": super::google::balance_label(mode),
                 "value": balance
             }],
-            // Apple draws the primary fields ON the strip, so a card with a
-            // drawn stepper leaves them empty rather than stamping a large
-            // numeral across it. The balance is still on the card twice — in
-            // the header strip, and as the figures beside the progress.
-            "primaryFields": if strip {
-                json!([])
-            } else {
-                json!([{
-                    "key": "balance",
-                    "label": super::google::balance_label(mode),
-                    "value": balance
-                }])
-            },
+            "primaryFields": [{
+                "key": "balance",
+                "label": super::google::balance_label(mode),
+                "value": balance
+            }],
             "secondaryFields": [{
                 "key": "progress",
                 "label": program,
-                // The text stepper is the FALLBACK. Where the strip draws it,
-                // repeating it in characters is the cramped version of the
-                // thing sitting directly above.
-                "value": if strip {
-                    json!(super::google::figures_only(balance, threshold))
-                } else {
-                    json!(progress_line(balance, threshold))
-                }
+                "value": progress_line(balance, threshold)
             }],
             // What they are working towards. This row used to repeat the
             // member's name, which is already under the barcode and on the
@@ -514,62 +514,8 @@ pub async fn build_pass_for(pool: &PgPool, member: &MemberRow) -> Result<Vec<u8>
             .collect();
     let org = crate::orgs::branding::load(pool, member.org_id).await?;
     let brand = pass_brand(&org);
-    let strip = strip_images(member, &settings, &brand);
-    let pass = pass_json(
-        member,
-        &settings,
-        &locations,
-        &rewards,
-        &brand,
-        !strip.is_empty(),
-    )?;
-    // One list for the archive AND the manifest, so a drawn strip cannot end up
-    // in the zip unhashed — which invalidates the signature and makes iOS
-    // refuse the pass with no explanation at all.
-    let mut images = brand.images.clone();
-    images.extend(strip);
-    build_pkpass(&pass, &images)
-}
-
-/// The stepper, drawn at Apple's three strip scales.
-///
-/// Only for a stamp card small enough to count. A points programme has nothing
-/// to draw — a hundred discs is texture, not a stepper — and gets the plain
-/// figures it always had. Empty means "no strip", which the field layout reads
-/// to keep its big primary numeral.
-fn strip_images(
-    member: &MemberRow,
-    settings: &LoyaltySettings,
-    brand: &PassBrand,
-) -> Vec<(String, Vec<u8>)> {
-    let mode = settings.mode();
-    let target = settings.default_reward_cost;
-    if mode != crate::loyalty::earn::Mode::Visits || !super::stepper::drawable(target) {
-        return Vec::new();
-    }
-    let balance = member.balance_in(mode);
-    // Apple's store-card strip, at 1×/2×/3×. Drawn at each size rather than
-    // scaled from one, so the thin track and the checkmarks stay crisp instead
-    // of going soft at the sizes nobody rendered for.
-    [
-        ("strip.png", 375, 144),
-        ("strip@2x.png", 750, 288),
-        ("strip@3x.png", 1125, 432),
-    ]
-    .into_iter()
-    .filter_map(|(name, w, h)| {
-        super::stepper::render(
-            balance,
-            target,
-            w,
-            h,
-            &brand.foreground,
-            &brand.label,
-            &brand.background,
-        )
-        .map(|png| (name.to_string(), png))
-    })
-    .collect()
+    let pass = pass_json(member, &settings, &locations, &rewards, &brand)?;
+    build_pkpass(&pass, &brand.images)
 }
 
 /// Tell every device holding this member's pass to come back for a new copy.
@@ -673,12 +619,12 @@ pub(crate) mod tests {
         let _guard = env_guard();
         configured();
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default(), false).unwrap();
+        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
         assert_eq!(p["storeCard"]["primaryFields"][0]["value"], 30);
-        assert_eq!(
-            p["storeCard"]["secondaryFields"][0]["value"],
-            "30 / 100 to your next reward"
-        );
+        // A hundred is past the point where dots are worth counting, so the
+        // field carries the bare ratio — the label above it already says which
+        // programme this is.
+        assert_eq!(p["storeCard"]["secondaryFields"][0]["value"], "30 / 100");
         // Wallet stacks cards and shows only the header strip. Without this a
         // customer cannot see their balance without tapping the pass open.
         assert_eq!(p["storeCard"]["headerFields"][0]["value"], 30);
@@ -695,7 +641,6 @@ pub(crate) mod tests {
             &[],
             &["Free espresso — 5 visits".to_string()],
             &PassBrand::default(),
-            false,
         )
         .unwrap();
         assert_eq!(
@@ -713,7 +658,7 @@ pub(crate) mod tests {
         let mut s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
         s.mode = "visits".into();
         s.default_reward_cost = 5;
-        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default(), false).unwrap();
+        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
         // The stamps balance leads, not the points one.
         assert_eq!(p["storeCard"]["primaryFields"][0]["value"], 3);
         assert_eq!(p["storeCard"]["primaryFields"][0]["label"], "Orders");
@@ -744,7 +689,7 @@ pub(crate) mod tests {
             label: "#C8607F".into(),
             ..PassBrand::default()
         };
-        let p = pass_json(&member(), &s, &[], &[], &brand, false).unwrap();
+        let p = pass_json(&member(), &s, &[], &[], &brand).unwrap();
 
         // The colours reach the pass. They used to be read from
         // `loyalty_settings`, which stopped being written when branding moved
@@ -764,7 +709,7 @@ pub(crate) mod tests {
         configured();
         let _guard = env_guard();
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default(), false).unwrap();
+        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
         assert_eq!(p["organizationName"], s.program_name);
         // Madar's palette, not an absent one — a pass with no colours is grey.
         assert_eq!(p["backgroundColor"], "rgb(13, 98, 115)");
@@ -843,60 +788,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_stamp_card_carries_a_drawn_stepper_and_makes_room_for_it() {
-        let _guard = env_guard();
-        configured();
-        let mut s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        s.mode = "visits".into();
-        s.default_reward_cost = 5;
-        let brand = PassBrand::default();
-
-        let strip = strip_images(&member(), &s, &brand);
-        assert_eq!(
-            strip.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
-            ["strip.png", "strip@2x.png", "strip@3x.png"],
-            "Apple wants all three scales"
-        );
-        assert!(strip.iter().all(|(_, b)| !b.is_empty()));
-
-        let p = pass_json(&member(), &s, &[], &[], &brand, true).unwrap();
-        // Apple draws the primary fields ON the strip. Leaving the balance
-        // there would stamp a large numeral across the stepper.
-        assert_eq!(p["storeCard"]["primaryFields"], json!([]));
-        // The figures, without the text stepper — the picture above already
-        // says what they mean, and repeating it is the cramped version.
-        assert_eq!(p["storeCard"]["secondaryFields"][0]["value"], "3 / 5");
-        // The balance is still readable without opening the pass.
-        assert_eq!(p["storeCard"]["headerFields"][0]["value"], 3);
-        assert_eq!(p["storeCard"]["headerFields"][0]["label"], "Orders");
-    }
-
-    #[test]
-    fn a_points_card_has_nothing_to_draw() {
-        let _guard = env_guard();
-        configured();
-        // A hundred discs is texture, not a stepper.
-        let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        assert_eq!(s.mode, "points");
-        assert!(strip_images(&member(), &s, &PassBrand::default()).is_empty());
-
-        // And a stamp programme whose target is past the countable cap.
-        let mut big = s.clone();
-        big.mode = "visits".into();
-        big.default_reward_cost = super::super::stepper::MAX_STEPS + 1;
-        assert!(strip_images(&member(), &big, &PassBrand::default()).is_empty());
-
-        // Without a strip the card keeps its big primary numeral.
-        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default(), false).unwrap();
-        assert_eq!(p["storeCard"]["primaryFields"][0]["value"], 30);
-    }
-
-    #[test]
     fn the_barcode_carries_the_token_not_the_id() {
         let _guard = env_guard();
         configured();
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default(), false).unwrap();
+        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
         assert_eq!(p["barcodes"][0]["message"], "Mabcdefghijklmnopqrstuv");
         assert_eq!(p["barcodes"][0]["format"], "PKBarcodeFormatQR");
         // The member id must never be the scannable value — it is guessable
@@ -914,7 +810,7 @@ pub(crate) mod tests {
             longitude: 31.2357,
             name: "Zamalek".into(),
         }];
-        let p = pass_json(&member(), &s, &locs, &[], &PassBrand::default(), false).unwrap();
+        let p = pass_json(&member(), &s, &locs, &[], &PassBrand::default()).unwrap();
         assert_eq!(p["locations"][0]["latitude"], 30.0444);
         assert!(
             p["locations"][0]["relevantText"]
@@ -937,7 +833,7 @@ pub(crate) mod tests {
         let _guard = env_guard();
         configured();
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default(), false).unwrap();
+        let p = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
         // With no certificate configured, building an archive must fail loudly.
         // An unsigned .pkpass is rejected by iOS with no explanation at all, so
         // serving one would look to the customer like a broken link.
@@ -989,17 +885,9 @@ pub(crate) mod tests {
             );
         }
 
-        // A STAMP card, so the drawn stepper rides in the archive too — the
-        // manifest assertion below is what proves a strip cannot ship unhashed,
-        // which would invalidate the signature and make iOS refuse the pass.
-        let mut s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        s.mode = "visits".into();
-        s.default_reward_cost = 5;
-        let brand = PassBrand::default();
-        let mut images = brand.images.clone();
-        images.extend(strip_images(&member(), &s, &brand));
-        let pass = pass_json(&member(), &s, &[], &[], &brand, true).unwrap();
-        let bytes = build_pkpass(&pass, &images).unwrap();
+        let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
+        let pass = pass_json(&member(), &s, &[], &[], &PassBrand::default()).unwrap();
+        let bytes = build_pkpass(&pass, &PassBrand::default().images).unwrap();
 
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
         let mut names: Vec<String> = (0..zip.len())
@@ -1026,9 +914,6 @@ pub(crate) mod tests {
                 "manifest.json",
                 "pass.json",
                 "signature",
-                "strip.png",
-                "strip@2x.png",
-                "strip@3x.png",
             ]
         );
 

@@ -45,7 +45,73 @@ fn sa_key() -> Option<Vec<u8>> {
 }
 
 pub fn is_configured() -> bool {
-    issuer_id().is_some() && sa_email().is_some() && sa_key().is_some()
+    missing_env().is_empty()
+}
+
+/// Which settings Google still needs, by name.
+///
+/// Reported rather than merely counted: "no Add to Google Wallet button"
+/// currently looks identical whether a variable is unset, a key file is
+/// unreadable, or Google refused the service account — and every one of those
+/// was a real afternoon.
+pub fn missing_env() -> Vec<String> {
+    let mut out = Vec::new();
+    if issuer_id().is_none() {
+        out.push("LOYALTY_GOOGLE_ISSUER_ID".into());
+    }
+    if sa_email().is_none() {
+        out.push("LOYALTY_GOOGLE_SA_EMAIL".into());
+    }
+    if sa_key().is_none() {
+        out.push("LOYALTY_GOOGLE_SA_KEY (or LOYALTY_GOOGLE_SA_KEY_FILE)".into());
+    }
+    out
+}
+
+/// Ask Google whether this issuer will actually answer for us.
+///
+/// Two questions, in the order they fail: can the service account get a token
+/// at all, and will Google let it read this org's class? Anything else that
+/// goes wrong at save time is downstream of these two.
+pub async fn check(org_id: uuid::Uuid) -> Result<String, String> {
+    let Some(issuer) = issuer_id() else {
+        return Err("LOYALTY_GOOGLE_ISSUER_ID is not set".into());
+    };
+    let token = access_token()
+        .await
+        .map_err(|e| format!("The service account could not get a token from Google. {e}"))?;
+    let id = class_id(&issuer, org_id);
+    let resp = reqwest::Client::new()
+        .get(format!("{WALLET_API}/loyaltyClass/{id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .map_err(|e| format!("Could not reach Google: {e}"))?;
+    match resp.status() {
+        s if s.is_success() => Ok(format!("Ready. This shop's card class ({id}) exists.")),
+        // Nothing wrong: the class is made when the first customer saves a card.
+        reqwest::StatusCode::NOT_FOUND => Ok(format!(
+            "Ready. No card class yet ({id}) — it is created when the first \
+             customer saves their card."
+        )),
+        s => {
+            let body = resp.text().await.unwrap_or_default();
+            Err(format!(
+                "Google refused this service account ({s}). Check that it is \
+                 granted access to issuer {issuer} in the Google Wallet \
+                 console. {}",
+                first_reason(&body)
+            ))
+        }
+    }
+}
+
+/// Google's own reason, out of the error envelope it wraps everything in.
+fn first_reason(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
+        .unwrap_or_else(|| body.chars().take(300).collect())
 }
 
 /// The Wallet object id for a member. Google requires `<issuer>.<suffix>` with
@@ -140,7 +206,7 @@ pub fn loyalty_object(
     let program = settings.program_name.clone();
     let mode = settings.mode();
     let balance = member.balance_in(mode);
-    let mut obj = json!({
+    json!({
         "id": object_id(issuer, member),
         "classId": class_id(issuer, member.org_id),
         "state": "ACTIVE",
@@ -174,53 +240,29 @@ pub fn loyalty_object(
                 "longitude": l.longitude,
             }))
             .collect::<Vec<_>>(),
-    });
-    if let Some(uri) = steps_image_url(member, settings) {
-        obj["heroImage"] = json!({ "sourceUri": { "uri": uri } });
-    }
-    obj
+    })
 }
 
-/// The banner Google fetches for this member's progress.
+/// The stepper, in text, at whatever density the field can hold.
 ///
-/// Google lays out text; it does not draw a stepper. So the stepper is drawn
-/// here and handed over as a picture, the same one the Apple pass carries on
-/// its strip and the web card draws in the browser — one shape, three surfaces.
+/// A pass field is one line that iOS SHRINKS to fit its width, so the only way
+/// to stay legible is to stay short. The row therefore thins out in two stages
+/// rather than being drawn one way until it stops working:
 ///
-/// The balance rides in the URL because Google caches by URI: without it, a
-/// customer's banner would freeze at whatever it showed the first time Google
-/// fetched it and never move again.
-pub fn steps_image_url(member: &MemberRow, settings: &LoyaltySettings) -> Option<String> {
-    let mode = settings.mode();
-    if !super::stepper::drawable(settings.default_reward_cost) {
-        return None;
-    }
-    super::absolute_api_url(&format!(
-        "/public/loyalty/card/{}/steps.png?v={}",
-        member.member_token,
-        member.balance_in(mode)
-    ))
-}
-
-/// The stepper, drawn in text, when the target is small enough to read as one.
+///   * up to [`CONNECTED_UP_TO`] — `●─●─●─○─○`, joined, so it reads as a
+///     journey and not a handful of dots;
+///   * up to [`MAX_STEPS`] — `●●●○○○○○○`, unjoined. The connectors are what
+///     make it long (they nearly double the character count), and they are the
+///     part worth losing first: the order still reads left to right without
+///     them.
 ///
-/// `●─●─●─○─○` rather than `●●●○○`. Loose dots are a paper punch card: they say
-/// how many, and nothing about direction. Joining them makes a JOURNEY — the
-/// eye reads left to right, sees where it is and how far is left, which is the
-/// question a customer actually asks of a stamp card. It is the same object the
-/// web card draws with real geometry (`stamp-row.tsx`), reduced to the only
-/// thing a Wallet field can hold, which is a line of text.
-///
-/// The two glyphs are chosen to survive a pass: `●`/`○` (U+25CF/U+25CB) and the
-/// box-drawing `─` (U+2500) are in the system fonts on both platforms, and the
-/// connector is the one character designed to meet its neighbours with no gap.
-/// State is never carried by the drawing alone — [`progress_line`] always puts
-/// the figures beside it, so a font that substitutes still reads.
-///
-/// Above [`MAX_STEPS`] the steps stop being countable and become texture, so a
-/// points programme (100, 250…) keeps the plain figure. The cap matches the web
-/// card's, so the card in the phone and the card on the page never disagree.
+/// Past that it is not drawn at all and [`progress_line`] shows the figures
+/// alone. Twelve dots is the point where counting them stops being quicker
+/// than reading "9 / 12", and a hundred is not a stepper at any density.
 const MAX_STEPS: i32 = 12;
+
+/// Past this many, the joins cost more width than they earn.
+const CONNECTED_UP_TO: i32 = 6;
 
 pub fn stepper(balance: i32, threshold: i32) -> Option<String> {
     if threshold <= 0 || threshold > MAX_STEPS {
@@ -230,33 +272,28 @@ pub fn stepper(balance: i32, threshold: i32) -> Option<String> {
     let step = |i: i32| if i < filled { "●" } else { "○" };
     let mut out = String::from(step(0));
     for i in 1..threshold {
-        out.push('\u{2500}');
+        if threshold <= CONNECTED_UP_TO {
+            out.push('\u{2500}');
+        }
         out.push_str(step(i));
     }
     Some(out)
 }
 
-/// The bare figures, for a card whose progress is DRAWN above them.
+/// "3 / 5" beside the steps, or on its own once there are too many to draw.
 ///
-/// "3 / 5" — the fact, with nothing describing it, because the picture directly
-/// above already says what it means.
-pub fn figures_only(balance: i32, threshold: i32) -> String {
-    if threshold > 0 && balance >= threshold {
-        return "Reward earned — ask at the counter".to_string();
-    }
-    format!("{balance} / {threshold}")
-}
-
-/// "30 / 100 to your next reward", or the earned line once it is reached. A
-/// small target gets the stepper as well as the arithmetic, never instead of
-/// it: the drawing is the glance, the figures are the fact.
+/// The figures are never dropped. They are the fact; the dots are the glance,
+/// and a font that substitutes a glyph must still leave a readable card.
 pub fn progress_line(balance: i32, threshold: i32) -> String {
     if threshold > 0 && balance >= threshold {
         return "Reward earned — ask at the counter".to_string();
     }
     match stepper(balance, threshold) {
         Some(steps) => format!("{steps}   {balance} / {threshold}"),
-        None => format!("{balance} / {threshold} to your next reward"),
+        // The fallback for a programme too big to draw: the bare ratio. The
+        // field's label already says which programme it is, so a sentence here
+        // only costs width the figures need.
+        None => format!("{balance} / {threshold}"),
     }
 }
 
@@ -479,7 +516,7 @@ pub async fn push_balance(pool: &PgPool, member: &MemberRow) -> Result<(), AppEr
     let token = access_token().await?;
     let mode = settings.mode();
     let balance = member.balance_in(mode);
-    let mut body = json!({
+    let body = json!({
         "loyaltyPoints": {
             "label": balance_label(mode),
             "balance": { "int": balance }
@@ -490,23 +527,16 @@ pub async fn push_balance(pool: &PgPool, member: &MemberRow) -> Result<(), AppEr
             "id": "progress"
         }]
     });
-    // The banner too: its URL carries the balance, so leaving it out here would
-    // freeze a customer's stepper at the figure it held when they saved the card.
-    if let Some(uri) = steps_image_url(member, &settings) {
-        body["heroImage"] = json!({ "sourceUri": { "uri": uri } });
-    }
-    let resp = reqwest::Client::new()
+    let http = reqwest::Client::new();
+    let resp = http
         .patch(format!("{WALLET_API}/loyaltyObject/{object_id}"))
-        .bearer_auth(token)
+        .bearer_auth(&token)
         .json(&body)
         .send()
         .await
         .map_err(|e| AppError::ServiceUnavailable(format!("Google Wallet PATCH: {e}")))?;
     if !resp.status().is_success() {
-        return Err(AppError::ServiceUnavailable(format!(
-            "Google Wallet PATCH returned {}",
-            resp.status()
-        )));
+        return Err(google_error("updating the loyalty object", resp).await);
     }
     let _ = issuer;
     Ok(())
@@ -648,78 +678,42 @@ mod tests {
     }
 
     #[test]
-    fn progress_counts_down_then_announces() {
-        assert_eq!(progress_line(30, 100), "30 / 100 to your next reward");
-        // The stepper never replaces the figures — a font that substitutes a
-        // glyph must still leave a readable card.
-        assert_eq!(progress_line(3, 5), "●─●─●─○─○   3 / 5");
-        assert_eq!(
-            progress_line(100, 100),
-            "Reward earned — ask at the counter"
-        );
-        assert_eq!(
-            progress_line(130, 100),
-            "Reward earned — ask at the counter"
-        );
-    }
+    fn the_stepper_thins_out_before_it_gets_squeezed() {
+        // A pass field is one line that iOS shrinks to fit, so the row has to
+        // stay short rather than stay pretty.
 
-    #[test]
-    fn the_card_carries_a_drawn_stepper_whose_url_moves_with_the_balance() {
-        let _guard = super::super::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        // SAFETY: the lock makes this the only thread touching the environment.
-        unsafe {
-            std::env::set_var("PUBLIC_LOYALTY_BASE_URL", "https://loyalty.madar-pos.cloud");
-        }
-        let mut s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        s.mode = "visits".into();
-        s.default_reward_cost = 5;
-        let mut m = super::super::apple::tests::member();
-
-        let obj = loyalty_object("338", &m, &s, &[]);
-        assert_eq!(
-            obj["heroImage"]["sourceUri"]["uri"],
-            "https://loyalty.madar-pos.cloud/api/public/loyalty/card/Mabcdefghijklmnopqrstuv/steps.png?v=3"
-        );
-
-        // Google caches by URI. Without the balance in it, a customer's banner
-        // would freeze at the figure it held when the card was first saved.
-        m.visits_balance = 4;
-        let moved = loyalty_object("338", &m, &s, &[]);
-        assert_ne!(obj["heroImage"], moved["heroImage"]);
-        assert!(
-            moved["heroImage"]["sourceUri"]["uri"]
-                .as_str()
-                .unwrap()
-                .ends_with("v=4")
-        );
-
-        // A points programme has nothing countable to draw, so no banner.
-        let points = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        assert!(
-            loyalty_object("338", &m, &points, &[])
-                .get("heroImage")
-                .is_none()
-        );
-        unsafe {
-            std::env::remove_var("PUBLIC_LOYALTY_BASE_URL");
-        }
-    }
-
-    #[test]
-    fn the_stepper_joins_its_steps_and_knows_when_to_stop() {
-        // Joined, so it reads as a journey rather than a handful of dots.
+        // Small: joined, so it reads as a journey.
         assert_eq!(stepper(3, 5).as_deref(), Some("●─●─●─○─○"));
         assert_eq!(stepper(0, 3).as_deref(), Some("○─○─○"));
-        assert_eq!(stepper(3, 3).as_deref(), Some("●─●─●"));
-        // A single step has nothing to join to.
-        assert_eq!(stepper(0, 1).as_deref(), Some("○"));
-        // Clamped both ways: a redemption leaves a remainder and an adjustment
+        assert_eq!(
+            stepper(0, 1).as_deref(),
+            Some("○"),
+            "one step joins nothing"
+        );
+        assert_eq!(stepper(6, 6).as_deref(), Some("●─●─●─●─●─●"));
+
+        // Bigger: the joins go first. They nearly double the width and the
+        // order still reads left to right without them.
+        assert_eq!(stepper(3, 7).as_deref(), Some("●●●○○○○"));
+        assert_eq!(stepper(9, 12).as_deref(), Some("●●●●●●●●●○○○"));
+
+        // Whatever the density, it fits the field it has to live in. The old
+        // row was 23 characters at twelve steps, plus the figures.
+        for target in 1..=MAX_STEPS {
+            let row = stepper(target / 2, target).unwrap();
+            assert!(
+                row.chars().count() <= 12,
+                "target {target} drew {} characters: {row}",
+                row.chars().count()
+            );
+        }
+
+        // Clamped both ways: redemption leaves a remainder and an adjustment
         // can overshoot; neither should draw a broken row.
         assert_eq!(stepper(9, 3).as_deref(), Some("●─●─●"));
         assert_eq!(stepper(-4, 3).as_deref(), Some("○─○─○"));
-        // Past the cap the steps stop being countable, so the figures stand alone.
+
+        // Past the cap there is nothing worth drawing.
         assert_eq!(stepper(30, 100), None);
         assert_eq!(stepper(1, MAX_STEPS + 1), None);
         assert!(stepper(1, MAX_STEPS).is_some());
@@ -727,9 +721,27 @@ mod tests {
     }
 
     #[test]
+    fn a_programme_too_big_to_draw_falls_back_to_the_bare_ratio() {
+        // Counting a hundred dots is not quicker than reading the figures, and
+        // a sentence beside them only costs the width they need — the field's
+        // label already says which programme this is.
+        assert_eq!(progress_line(30, 100), "30 / 100");
+        assert_eq!(progress_line(7, 20), "7 / 20");
+        // And the figures never leave the small cards either.
+        assert_eq!(progress_line(3, 5), "●─●─●─○─○   3 / 5");
+        assert_eq!(progress_line(3, 8), "●●●○○○○○   3 / 8");
+        // Reaching the target is said in words, at every size.
+        assert_eq!(
+            progress_line(100, 100),
+            "Reward earned — ask at the counter"
+        );
+        assert_eq!(progress_line(5, 5), "Reward earned — ask at the counter");
+    }
+
+    #[test]
     fn a_zero_threshold_never_claims_a_reward_is_ready() {
         // Defensive: the column is CHECK (> 0), but a pass that told every
         // customer their reward was ready would be a bad way to find out.
-        assert_eq!(progress_line(0, 0), "0 / 0 to your next reward");
+        assert_eq!(progress_line(0, 0), "0 / 0");
     }
 }
