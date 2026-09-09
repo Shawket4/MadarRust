@@ -51,6 +51,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route(
                     "/members/{id}/google-object",
                     web::get().to(handlers::google_object),
+                )
+                // Writes, so a POST — it provisions for real and reports every
+                // word of it. Super-admin only, like its read-only sibling.
+                .route(
+                    "/members/{id}/google-refresh",
+                    web::post().to(handlers::google_refresh),
                 ),
         )
         // ── Public: the counter QR's signup form and the customer's card ──

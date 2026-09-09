@@ -15656,6 +15656,105 @@
         ]
       }
     },
+    "/loyalty/members/{id}/google-refresh": {
+      "post": {
+        "tags": [
+          "loyalty"
+        ],
+        "summary": "Provision this member's Google card and report every word of it.\n**Super admin only.**",
+        "description": "Reading the object back says what Google HOLDS. It does not say why, and by\nthe time you are reading it the write that mattered is over — a refused\nclass refresh is deliberately only a warning, because a customer must keep\nthe card they have, so the reason goes to a log rather than to the person\nasking the question.\n\nThis runs the real provisioning through the real code path, keeping a\ntranscript: every request, its status, and Google's answer verbatim. Then it\nreads both resources back, so the transcript and the outcome sit together.\n\nIt WRITES, which is why it is a POST and why it is not part of any page\nload. Everything it does, opening a customer's card page does too.",
+        "operationId": "refresh_loyalty_google_pass",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Loyalty member id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoogleRefreshReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/loyalty/reward-items": {
       "get": {
         "tags": [
@@ -49769,6 +49868,61 @@
           }
         }
       },
+      "GoogleRefreshReport": {
+        "type": "object",
+        "description": "A provisioning run, in full.",
+        "required": [
+          "sent_locations",
+          "class_locations",
+          "object_locations",
+          "steps"
+        ],
+        "properties": {
+          "class": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The class as Google holds it now."
+          },
+          "class_locations": {
+            "type": "integer",
+            "description": "Branches Google kept on the shop's class.",
+            "minimum": 0
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The first thing that went wrong, if anything did."
+          },
+          "object": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The object as Google holds it now."
+          },
+          "object_locations": {
+            "type": "integer",
+            "description": "Branches Google kept on this member's object.",
+            "minimum": 0
+          },
+          "sent_locations": {
+            "type": "integer",
+            "description": "Branches this member's card was sent, from our side.",
+            "minimum": 0
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WalletStep"
+            },
+            "description": "Every request and Google's answer, in order."
+          }
+        }
+      },
       "Grain": {
         "type": "string",
         "description": "The *shape* of a result set, derived from the dimensions a query groups by.\nThis is what lets a dashboard render any metric with no per-metric code: a\nscalar becomes a KPI card, a series becomes a line, a breakdown becomes a\nbar or pie.",
@@ -61931,6 +62085,31 @@
           },
           "google": {
             "$ref": "#/components/schemas/WalletProvider"
+          }
+        }
+      },
+      "WalletStep": {
+        "type": "object",
+        "description": "One request to Google and what it answered, kept verbatim.\n\nProvisioning is four requests deep and every one of them can fail in a way\nthe customer never sees: a refused class, an image Google will not fetch, a\nfield it silently drops. A failed REFRESH is deliberately only a warning —\nthe customer keeps the card they have — which means the reason lands in a\nlog nobody is reading at the moment it matters.\n\nSo the same code path can be asked to keep a transcript. `save_url` throws\nit away; the super-admin diagnostic returns it. One path, so what the\ndiagnostic reports is what actually happens, rather than a second\nimplementation that agrees with the first until it doesn't.",
+        "required": [
+          "step",
+          "status",
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "Google's answer, as it came. Truncated only if it is enormous."
+          },
+          "status": {
+            "type": "integer",
+            "format": "int32",
+            "description": "HTTP status, or 0 when the request never reached Google.",
+            "minimum": 0
+          },
+          "step": {
+            "type": "string",
+            "description": "What was attempted, in words: \"insert the class\", \"update the object\"."
           }
         }
       },

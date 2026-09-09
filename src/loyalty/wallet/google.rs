@@ -458,6 +458,35 @@ pub async fn save_url(
     copy: &super::CardCopy,
     headline: &str,
 ) -> Result<Option<String>, AppError> {
+    save_url_recorded(
+        pool,
+        member,
+        settings,
+        brand,
+        locations,
+        copy,
+        headline,
+        &mut Vec::new(),
+    )
+    .await
+}
+
+/// The same, keeping a transcript of everything Google was asked and answered.
+///
+/// See [`WalletStep`]. The customer-facing path throws the transcript away; the
+/// diagnostic keeps it, and because it is the SAME path, what it reports is
+/// what actually happened.
+#[allow(clippy::too_many_arguments)]
+pub async fn save_url_recorded(
+    pool: &PgPool,
+    member: &MemberRow,
+    settings: &LoyaltySettings,
+    brand: &OrgBrand,
+    locations: &[super::PassLocation],
+    copy: &super::CardCopy,
+    headline: &str,
+    steps: &mut Vec<WalletStep>,
+) -> Result<Option<String>, AppError> {
     let (Some(issuer), Some(email), Some(key)) = (issuer_id(), sa_email(), sa_key()) else {
         // Silence here is how "no Add to Google Wallet button" came to look
         // identical to a wallet that was configured and refusing.
@@ -491,10 +520,11 @@ pub async fn save_url(
         brand,
         settings,
         &org_locations,
+        steps,
     )
     .await?;
     let object_id = ensure_object(
-        &token, &issuer, member, settings, locations, copy, headline, brand,
+        &token, &issuer, member, settings, locations, copy, headline, brand, steps,
     )
     .await?;
     if member.google_object_id.as_deref() != Some(object_id.as_str()) {
@@ -535,6 +565,7 @@ pub async fn save_url(
 /// PATCH on conflict rather than leaving it: a class created once and never
 /// touched again would keep a shop's first logo and colours forever, and there
 /// is no other moment that would notice the branding had changed.
+#[allow(clippy::too_many_arguments)]
 async fn ensure_class(
     token: &str,
     issuer: &str,
@@ -542,6 +573,7 @@ async fn ensure_class(
     brand: &OrgBrand,
     settings: &LoyaltySettings,
     locations: &[super::PassLocation],
+    steps: &mut Vec<WalletStep>,
 ) -> Result<(), AppError> {
     let body = loyalty_class(issuer, org_id, brand, settings, locations);
     let id = class_id(issuer, org_id);
@@ -558,13 +590,36 @@ async fn ensure_class(
         .json(&insert)
         .send()
         .await
-        .map_err(|e| AppError::ServiceUnavailable(format!("Google Wallet class: {e}")))?;
-    if resp.status().is_success() {
+        .map_err(|e| {
+            steps.push(WalletStep::new("insert the class", 0, e.to_string()));
+            AppError::ServiceUnavailable(format!("Google Wallet class: {e}"))
+        })?;
+    let created = resp.status();
+    if created.is_success() {
+        steps.push(WalletStep::new(
+            "insert the class",
+            created.as_u16(),
+            resp.text().await.unwrap_or_default(),
+        ));
         return Ok(());
     }
-    if resp.status() != reqwest::StatusCode::CONFLICT {
-        return Err(google_error("creating the loyalty class", resp).await);
+    if created != reqwest::StatusCode::CONFLICT {
+        let body = resp.text().await.unwrap_or_default();
+        steps.push(WalletStep::new(
+            "insert the class",
+            created.as_u16(),
+            body.clone(),
+        ));
+        return Err(AppError::ServiceUnavailable(format!(
+            "Google refused the loyalty class ({created}): {}",
+            first_reason(&body)
+        )));
     }
+    steps.push(WalletStep::new(
+        "insert the class",
+        created.as_u16(),
+        "already exists — updating it instead".into(),
+    ));
     // CONFLICT means the class is already there, which is all a save link
     // actually needs. What follows is a REFRESH — new colours, a new logo — and
     // a refresh that fails must leave the card it was refreshing alone. Letting
@@ -577,17 +632,26 @@ async fn ensure_class(
         .send()
         .await;
     match resp {
-        Ok(r) if r.status().is_success() => {}
         Ok(r) => {
             let status = r.status();
-            let detail = first_reason(&r.text().await.unwrap_or_default());
-            tracing::warn!(
-                status = %status, detail = %detail, class = %id,
-                "loyalty: Google would not update the card class; \
-                 customers keep the one it already has"
-            );
+            let body = r.text().await.unwrap_or_default();
+            steps.push(WalletStep::new(
+                "update the class",
+                status.as_u16(),
+                body.clone(),
+            ));
+            if !status.is_success() {
+                tracing::warn!(
+                    status = %status, detail = %first_reason(&body), class = %id,
+                    "loyalty: Google would not update the card class; \
+                     customers keep the one it already has"
+                );
+            }
         }
-        Err(e) => tracing::warn!(error = %e, "loyalty: could not refresh the card class"),
+        Err(e) => {
+            steps.push(WalletStep::new("update the class", 0, e.to_string()));
+            tracing::warn!(error = %e, "loyalty: could not refresh the card class");
+        }
     }
     Ok(())
 }
@@ -603,6 +667,7 @@ async fn ensure_object(
     copy: &super::CardCopy,
     headline: &str,
     brand: &OrgBrand,
+    steps: &mut Vec<WalletStep>,
 ) -> Result<String, AppError> {
     let id = object_id(issuer, member);
     let resp = reqwest::Client::new()
@@ -613,14 +678,37 @@ async fn ensure_object(
         ))
         .send()
         .await
-        .map_err(|e| AppError::ServiceUnavailable(format!("Google Wallet object: {e}")))?;
-    if resp.status().is_success() {
-        decorate(token, &id, member.org_id, brand).await;
+        .map_err(|e| {
+            steps.push(WalletStep::new("insert the object", 0, e.to_string()));
+            AppError::ServiceUnavailable(format!("Google Wallet object: {e}"))
+        })?;
+    let created = resp.status();
+    if created.is_success() {
+        steps.push(WalletStep::new(
+            "insert the object",
+            created.as_u16(),
+            resp.text().await.unwrap_or_default(),
+        ));
+        decorate(token, &id, member.org_id, brand, steps).await;
         return Ok(id);
     }
-    if resp.status() != reqwest::StatusCode::CONFLICT {
-        return Err(google_error("creating the loyalty object", resp).await);
+    if created != reqwest::StatusCode::CONFLICT {
+        let body = resp.text().await.unwrap_or_default();
+        steps.push(WalletStep::new(
+            "insert the object",
+            created.as_u16(),
+            body.clone(),
+        ));
+        return Err(AppError::ServiceUnavailable(format!(
+            "Google refused the loyalty object ({created}): {}",
+            first_reason(&body)
+        )));
     }
+    steps.push(WalletStep::new(
+        "insert the object",
+        created.as_u16(),
+        "already exists — updating it instead".into(),
+    ));
 
     // The member already has one — and it is whatever shape this code produced
     // the day they saved it. Returning here left every card issued before a
@@ -646,18 +734,27 @@ async fn ensure_object(
     // card they have — which is stale, not missing. Hiding the button instead
     // takes away a card that works.
     match resp {
-        Ok(r) if r.status().is_success() => {}
         Ok(r) => {
             let status = r.status();
-            let detail = first_reason(&r.text().await.unwrap_or_default());
-            tracing::warn!(
-                status = %status, detail = %detail, object = %id,
-                "loyalty: Google would not update this card; the customer keeps the older one"
-            );
+            let body = r.text().await.unwrap_or_default();
+            steps.push(WalletStep::new(
+                "update the object",
+                status.as_u16(),
+                body.clone(),
+            ));
+            if !status.is_success() {
+                tracing::warn!(
+                    status = %status, detail = %first_reason(&body), object = %id,
+                    "loyalty: Google would not update this card; the customer keeps the older one"
+                );
+            }
         }
-        Err(e) => tracing::warn!(error = %e, "loyalty: could not refresh the card"),
+        Err(e) => {
+            steps.push(WalletStep::new("update the object", 0, e.to_string()));
+            tracing::warn!(error = %e, "loyalty: could not refresh the card");
+        }
     }
-    decorate(token, &id, member.org_id, brand).await;
+    decorate(token, &id, member.org_id, brand, steps).await;
     Ok(id)
 }
 
@@ -666,8 +763,19 @@ async fn ensure_object(
 /// Best effort by construction: it returns nothing, so no caller can make a
 /// customer's card depend on it. An image Google will not take costs the band
 /// and nothing else.
-async fn decorate(token: &str, id: &str, org_id: uuid::Uuid, brand: &OrgBrand) {
+async fn decorate(
+    token: &str,
+    id: &str,
+    org_id: uuid::Uuid,
+    brand: &OrgBrand,
+    steps: &mut Vec<WalletStep>,
+) {
     let Some(hero) = hero_image(org_id, brand) else {
+        steps.push(WalletStep::new(
+            "add the card image",
+            0,
+            "skipped — this shop has no card image".into(),
+        ));
         return;
     };
     let resp = reqwest::Client::new()
@@ -677,16 +785,65 @@ async fn decorate(token: &str, id: &str, org_id: uuid::Uuid, brand: &OrgBrand) {
         .send()
         .await;
     match resp {
-        Ok(r) if r.status().is_success() => {}
         Ok(r) => {
             let status = r.status();
             let body = r.text().await.unwrap_or_default();
-            tracing::warn!(
-                status = %status, body = %body,
-                "loyalty: Google would not take the card image; the card is fine without it"
-            );
+            steps.push(WalletStep::new(
+                "add the card image",
+                status.as_u16(),
+                body.clone(),
+            ));
+            if !status.is_success() {
+                tracing::warn!(
+                    status = %status, body = %body,
+                    "loyalty: Google would not take the card image; the card is fine without it"
+                );
+            }
         }
-        Err(e) => tracing::warn!(error = %e, "loyalty: could not send the card image"),
+        Err(e) => {
+            steps.push(WalletStep::new("add the card image", 0, e.to_string()));
+            tracing::warn!(error = %e, "loyalty: could not send the card image");
+        }
+    }
+}
+
+/// One request to Google and what it answered, kept verbatim.
+///
+/// Provisioning is four requests deep and every one of them can fail in a way
+/// the customer never sees: a refused class, an image Google will not fetch, a
+/// field it silently drops. A failed REFRESH is deliberately only a warning —
+/// the customer keeps the card they have — which means the reason lands in a
+/// log nobody is reading at the moment it matters.
+///
+/// So the same code path can be asked to keep a transcript. `save_url` throws
+/// it away; the super-admin diagnostic returns it. One path, so what the
+/// diagnostic reports is what actually happens, rather than a second
+/// implementation that agrees with the first until it doesn't.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct WalletStep {
+    /// What was attempted, in words: "insert the class", "update the object".
+    pub step: String,
+    /// HTTP status, or 0 when the request never reached Google.
+    pub status: u16,
+    /// Google's answer, as it came. Truncated only if it is enormous.
+    pub body: String,
+}
+
+/// Bodies echo the whole resource back, so they are long but not unbounded.
+const MAX_STEP_BODY: usize = 8_000;
+
+impl WalletStep {
+    fn new(step: &str, status: u16, body: String) -> Self {
+        let body = if body.len() > MAX_STEP_BODY {
+            format!("{}… [truncated]", &body[..MAX_STEP_BODY])
+        } else {
+            body
+        };
+        Self {
+            step: step.to_string(),
+            status,
+            body,
+        }
     }
 }
 
@@ -710,6 +867,32 @@ pub async fn read_object(member: &MemberRow) -> Result<serde_json::Value, String
     let token = access_token().await.map_err(|e| e.to_string())?;
     let resp = reqwest::Client::new()
         .get(format!("{WALLET_API}/loyaltyObject/{id}"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| format!("Could not reach Google: {e}"))?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("Google returned {status}: {}", first_reason(&body)));
+    }
+    serde_json::from_str(&body).map_err(|e| format!("Google sent something unreadable: {e}"))
+}
+
+/// The shop's class as Google holds it — the other half of the picture.
+///
+/// The object says what one member's card is; the class says what the shop's
+/// cards ARE, and that is where the review status and (now) the branches live.
+pub async fn read_class(org_id: uuid::Uuid) -> Result<serde_json::Value, String> {
+    let Some(issuer) = issuer_id() else {
+        return Err("LOYALTY_GOOGLE_ISSUER_ID is not set".into());
+    };
+    let token = access_token().await.map_err(|e| e.to_string())?;
+    let resp = reqwest::Client::new()
+        .get(format!(
+            "{WALLET_API}/loyaltyClass/{}",
+            class_id(&issuer, org_id)
+        ))
         .bearer_auth(token)
         .send()
         .await
@@ -866,7 +1049,7 @@ pub async fn push_balance(pool: &PgPool, member: &MemberRow) -> Result<(), AppEr
     }
     // A put replaces the resource, so the photograph goes back on after it.
     if let Ok(brand) = crate::orgs::branding::load(pool, member.org_id).await {
-        decorate(&token, &object_id, member.org_id, &brand).await;
+        decorate(&token, &object_id, member.org_id, &brand, &mut Vec::new()).await;
     }
     Ok(())
 }

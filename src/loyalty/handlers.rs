@@ -313,6 +313,107 @@ pub struct GoogleObjectDump {
     pub error: Option<String>,
 }
 
+/// Provision this member's Google card and report every word of it.
+/// **Super admin only.**
+///
+/// Reading the object back says what Google HOLDS. It does not say why, and by
+/// the time you are reading it the write that mattered is over — a refused
+/// class refresh is deliberately only a warning, because a customer must keep
+/// the card they have, so the reason goes to a log rather than to the person
+/// asking the question.
+///
+/// This runs the real provisioning through the real code path, keeping a
+/// transcript: every request, its status, and Google's answer verbatim. Then it
+/// reads both resources back, so the transcript and the outcome sit together.
+///
+/// It WRITES, which is why it is a POST and why it is not part of any page
+/// load. Everything it does, opening a customer's card page does too.
+#[utoipa::path(post, path = "/loyalty/members/{id}/google-refresh", tag = "loyalty",
+    operation_id = "refresh_loyalty_google_pass",
+    params(("id" = Uuid, Path, description = "Loyalty member id")),
+    responses((status = 200, body = GoogleRefreshReport), AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn google_refresh(
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
+    id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "loyalty", "update").await?;
+    require_super_admin(&claims)?;
+    let member = model::find_by_id(pool.get_ref(), *id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Member not found".into()))?;
+
+    let settings = super::settings::load_scope(pool.get_ref(), member.org_id, None)
+        .await?
+        .unwrap_or_else(|| LoyaltySettings::defaults(member.org_id, None));
+    let brand = crate::orgs::branding::load(pool.get_ref(), member.org_id).await?;
+    let locations = wallet::locations_for_member(pool.get_ref(), &member).await?;
+    let copy = wallet::card_copy(pool.get_ref(), member.org_id).await;
+    let headline = wallet::reward_headline(pool.get_ref(), member.org_id, &settings).await;
+
+    let mut steps = Vec::new();
+    let outcome = wallet::google::save_url_recorded(
+        pool.get_ref(),
+        &member,
+        &settings,
+        &brand,
+        &locations,
+        &copy,
+        &headline,
+        &mut steps,
+    )
+    .await;
+
+    // Read both back AFTER the write, so what is reported is what Google kept —
+    // which is not always what it was sent, and that difference is the whole
+    // reason this endpoint exists.
+    let class = wallet::google::read_class(member.org_id).await;
+    let object = wallet::google::read_object(&member).await;
+    let count = |v: &Result<serde_json::Value, String>| {
+        v.as_ref()
+            .ok()
+            .and_then(|v| v["locations"].as_array().map(|a| a.len()))
+            .unwrap_or(0)
+    };
+
+    Ok(HttpResponse::Ok().json(GoogleRefreshReport {
+        sent_locations: locations.len(),
+        class_locations: count(&class),
+        object_locations: count(&object),
+        steps,
+        class: class.clone().ok(),
+        object: object.clone().ok(),
+        error: outcome
+            .err()
+            .map(|e| e.to_string())
+            .or_else(|| class.err())
+            .or_else(|| object.err()),
+    }))
+}
+
+/// A provisioning run, in full.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GoogleRefreshReport {
+    /// Branches this member's card was sent, from our side.
+    pub sent_locations: usize,
+    /// Branches Google kept on the shop's class.
+    pub class_locations: usize,
+    /// Branches Google kept on this member's object.
+    pub object_locations: usize,
+    /// Every request and Google's answer, in order.
+    pub steps: Vec<wallet::google::WalletStep>,
+    /// The class as Google holds it now.
+    #[schema(value_type = Option<Object>)]
+    pub class: Option<serde_json::Value>,
+    /// The object as Google holds it now.
+    #[schema(value_type = Option<Object>)]
+    pub object: Option<serde_json::Value>,
+    /// The first thing that went wrong, if anything did.
+    pub error: Option<String>,
+}
+
 /// The member a lookup names, checked against the branch's org.
 ///
 /// A token is globally unique and carries no org of its own, so a member from
