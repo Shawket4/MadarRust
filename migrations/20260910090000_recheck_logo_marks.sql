@@ -1,0 +1,13 @@
+-- Re-ask a question we were answering wrongly, and cached.
+--
+-- `brand_logo_is_mark` records whether a logo may be REPAINTED for contrast.
+-- It used to be decided by transparency alone, and nearly every uploaded logo
+-- is drawn on transparency — so nearly every logo was marked repaintable, and
+-- full-colour ones came back from the pass as a flat white shape.
+--
+-- The rule now also requires the artwork to be a single colour. The stored
+-- answers predate that, so they are cleared rather than trusted: NULL means
+-- "not looked at yet", and `orgs::branding::load` recomputes and re-caches it
+-- the next time the shop's brand is read. Nothing is lost — the source of
+-- truth is the logo file, and this column only ever held a conclusion about it.
+UPDATE organizations SET brand_logo_is_mark = NULL;

@@ -260,22 +260,36 @@ pub struct ScopeQuery {
     pub branch_id: Option<Uuid>,
 }
 
-/// The org of the caller, or of the branch they named. Super admins act on the
-/// branch's org; everyone else is pinned to their own.
-async fn scope_org(
+/// Which shop this request is about, and who is asking.
+///
+/// Three sources, in this order:
+///
+///  1. **The branch named in the request.** A branch belongs to exactly one org,
+///     so when there is one it settles the question — and `require_branch_access`
+///     guards who may name it. Asking it first also means a super admin reading
+///     a branch cannot end up holding one org's id and another org's rows.
+///  2. **The scope.** An org-bound token carries its org; a super admin's carries
+///     none and the dashboard pins one with `X-Org-Id`, which is what
+///     [`Claims::scope_org`] reads. Missing that step is what made the whole
+///     loyalty page report "the programme is off" and no members to the one role
+///     entitled to look at every shop: the org id was simply absent, so the
+///     request was refused and the form fell back to its defaults.
+///  3. **Nothing** — a super admin who has picked no shop. That is a question
+///     about the person, not about a query parameter, so it says so.
+///
+/// Shared by the settings, rewards and members handlers. Three copies of this is
+/// how two of them came to disagree with the third.
+pub(super) async fn scope_org(
     pool: &PgPool,
     req: &HttpRequest,
     branch_id: Option<Uuid>,
 ) -> Result<(Uuid, crate::auth::jwt::Claims), AppError> {
     let claims = extract_claims(req)?;
-    let org_id = match (claims.org_id(), branch_id) {
-        (Some(o), _) => o,
-        (None, Some(b)) => resolve_branch_org(pool, b).await?,
-        (None, None) => {
-            return Err(AppError::BadRequest(
-                "branch_id is required for a super admin".into(),
-            ));
-        }
+    let org_id = match branch_id {
+        Some(b) => resolve_branch_org(pool, b).await?,
+        None => claims
+            .scope_org(crate::auth::middleware::header_org_id(req))
+            .ok_or_else(|| AppError::BadRequest("Pick an organisation first".into()))?,
     };
     Ok((org_id, claims))
 }

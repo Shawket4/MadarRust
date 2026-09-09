@@ -215,15 +215,6 @@ pub struct PassLinks {
     /// False when neither wallet is configured — the site shows the member's
     /// QR on the page instead of dead buttons.
     pub any: bool,
-    /// This pass carries at least one branch location, so the phone CAN surface
-    /// it near a shop — if the customer has let their wallet app do that.
-    ///
-    /// The permission belongs to the wallet app and no web page can grant it,
-    /// so the card page can only explain where it lives. Explaining it to
-    /// someone whose shop has no coordinates on any branch would be worse than
-    /// saying nothing: the steps would work and the card still would not
-    /// appear. Hence a flag rather than an assumption.
-    pub nearby: bool,
 }
 
 /// Read PEM/key material from `KEY_FILE` (a path) or `KEY` (inline).
@@ -533,7 +524,6 @@ pub async fn links_for(
         };
     PassLinks {
         any: apple_url.is_some() || google_url.is_some(),
-        nearby: !locations.is_empty(),
         apple_url,
         google_url,
     }

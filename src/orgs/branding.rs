@@ -241,13 +241,33 @@ pub fn palette_from_image(img: &image::DynamicImage) -> Option<Palette> {
 /// opaque, so the silhouette is a solid rectangle. That one gets a plate to sit
 /// on instead.
 ///
-/// The test is transparency, measured over the whole image rather than guessed
-/// at from the corners: a mark leaves a lot of the frame empty, and a photo or
-/// a baked tile leaves almost none.
+/// Two things have to be true, and for a long time this asked only one of them.
+///
+///  * **A transparent frame.** A mark leaves a lot of the image empty; a photo
+///    or a baked tile leaves almost none. Measured over the whole image rather
+///    than guessed at from the corners.
+///  * **One colour.** This is the half that was missing, and it is the half that
+///    matters, because recolouring is destructive: `tint_mark` overwrites every
+///    pixel and keeps only the alpha. On a silhouette that changes its colour;
+///    on a full-colour logo it DELETES the logo and leaves a flat white shape.
+///    Nearly every logo anyone uploads is drawn on transparency, so asking only
+///    about the frame classified nearly every logo as repaintable — and that is
+///    exactly what shops saw on their passes.
+///
+/// Colour is judged over strongly-opaque pixels only: a soft edge is a blend
+/// with the background and says nothing about the artwork. When the interior
+/// spans more than a hair's width of any channel, the logo is drawn as
+/// uploaded, and a contrast problem is solved with a plate instead — which
+/// costs a plate, where repainting costs the logo. In doubt, don't repaint.
 pub fn is_mark(img: &image::DynamicImage) -> bool {
     const CLEAR: u8 = 16;
     /// A mark's frame is mostly empty. A tile's is not remotely.
     const ENOUGH: f64 = 0.10;
+    /// Ignore anti-aliased edges: they are blends, not the artist's colour.
+    const SOLID: u8 = 250;
+    /// How far one colour may wander and still be one colour. Wide enough for
+    /// compression noise in a flat fill, far too narrow for a second hue.
+    const SPREAD: u8 = 24;
 
     let rgba = img.to_rgba8();
     let total = (rgba.width() as u64) * (rgba.height() as u64);
@@ -255,7 +275,23 @@ pub fn is_mark(img: &image::DynamicImage) -> bool {
         return false;
     }
     let clear = rgba.pixels().filter(|p| p.0[3] < CLEAR).count() as f64;
-    clear / total as f64 > ENOUGH
+    if clear / total as f64 <= ENOUGH {
+        return false;
+    }
+
+    let mut lo = [u8::MAX; 3];
+    let mut hi = [u8::MIN; 3];
+    let mut seen = false;
+    for p in rgba.pixels().filter(|p| p.0[3] >= SOLID) {
+        seen = true;
+        for c in 0..3 {
+            lo[c] = lo[c].min(p.0[c]);
+            hi[c] = hi[c].max(p.0[c]);
+        }
+    }
+    // Nothing solid at all: an all-edge wisp of a logo. Not something to repaint
+    // on the strength of no evidence.
+    seen && (0..3).all(|c| hi[c].saturating_sub(lo[c]) <= SPREAD)
 }
 
 /// Repaint a mark in one colour, keeping its alpha.
@@ -488,6 +524,72 @@ mod tests {
             *p = Rgba(px);
         }
         DynamicImage::ImageRgba8(img)
+    }
+
+    /// Draw `shapes` (x range, y range, colour) onto a transparent field.
+    fn on_transparency(size: u32, shapes: &[((u32, u32), (u32, u32), [u8; 4])]) -> DynamicImage {
+        let mut img = RgbaImage::new(size, size);
+        for p in img.pixels_mut() {
+            *p = Rgba([0, 0, 0, 0]);
+        }
+        for ((x0, x1), (y0, y1), px) in shapes {
+            for y in *y0..*y1 {
+                for x in *x0..*x1 {
+                    img.put_pixel(x, y, Rgba(*px));
+                }
+            }
+        }
+        DynamicImage::ImageRgba8(img)
+    }
+
+    /// The bug shops actually saw: their logo came back a flat white shape.
+    ///
+    /// Being drawn on transparency was taken as permission to repaint, and
+    /// almost every uploaded logo is drawn on transparency. Repainting is
+    /// destructive — it keeps the alpha and throws the colours away — so the
+    /// question is not "does this have a transparent frame" but "is there only
+    /// one colour here to lose".
+    #[test]
+    fn a_two_colour_logo_is_never_repainted() {
+        let img = on_transparency(
+            64,
+            &[
+                ((16, 32), (16, 48), [200, 32, 40, 255]),
+                ((32, 48), (16, 48), [20, 40, 190, 255]),
+            ],
+        );
+        assert!(
+            !is_mark(&img),
+            "red beside blue is not a silhouette; repainting it would erase the logo"
+        );
+    }
+
+    #[test]
+    fn a_single_colour_silhouette_may_be_repainted() {
+        let img = on_transparency(64, &[((16, 48), (16, 48), [17, 17, 17, 255])]);
+        assert!(is_mark(&img), "one colour on transparency is a mark");
+        // And repainting it is what a mark is for.
+        let white = tint_mark(&img, "#FFFFFF").to_rgba8();
+        assert_eq!(white.get_pixel(24, 24).0, [255, 255, 255, 255]);
+        assert_eq!(white.get_pixel(0, 0).0[3], 0, "the empty frame stays empty");
+    }
+
+    #[test]
+    fn a_baked_tile_is_not_a_mark() {
+        assert!(
+            !is_mark(&solid(64, 64, [13, 98, 115, 255])),
+            "an opaque tile has no silhouette to draw"
+        );
+    }
+
+    #[test]
+    fn a_flat_fill_survives_its_own_compression_noise() {
+        // A PNG round-trip leaves a flat fill a shade off in places. That is
+        // still one colour, and a mark it must remain.
+        let mut img = on_transparency(64, &[((16, 48), (16, 48), [17, 17, 17, 255])]).to_rgba8();
+        img.put_pixel(20, 20, Rgba([21, 15, 19, 255]));
+        img.put_pixel(30, 30, Rgba([14, 20, 16, 255]));
+        assert!(is_mark(&DynamicImage::ImageRgba8(img)));
     }
 
     #[test]

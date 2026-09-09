@@ -428,17 +428,12 @@ pub async fn list_members(
     pool: web::Data<PgPool>,
     query: web::Query<MembersQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    // The same resolution the settings and rewards handlers use, from the same
+    // place — this list used to answer a super admin with a 400 while the two
+    // tabs beside it answered with defaults, for one cause.
+    let (org_id, claims) =
+        super::settings::scope_org(pool.get_ref(), &req, query.branch_id).await?;
     check_permission(pool.get_ref(), &claims, "loyalty", "read").await?;
-    let org_id = match (claims.org_id(), query.branch_id) {
-        (Some(o), _) => o,
-        (None, Some(b)) => resolve_branch_org(pool.get_ref(), b).await?,
-        (None, None) => {
-            return Err(AppError::BadRequest(
-                "branch_id is required for a super admin".into(),
-            ));
-        }
-    };
 
     let scope = match query.branch_id {
         Some(b) => {

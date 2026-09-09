@@ -18,6 +18,20 @@ fn token(uid: Uuid, org: Uuid, role: UserRole, branch: Option<Uuid>) -> String {
     create_token(&secret(), uid, Some(org), role, branch, 24).unwrap()
 }
 
+/// A super admin's token, which carries NO org — that is the whole point of the
+/// role, and the reason the dashboard has to pin one with `X-Org-Id`.
+fn super_admin_token() -> String {
+    create_token(
+        &secret(),
+        Uuid::new_v4(),
+        None,
+        UserRole::SuperAdmin,
+        None,
+        24,
+    )
+    .unwrap()
+}
+
 async fn seed_org(pool: &PgPool) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Org', $2)")
@@ -160,6 +174,65 @@ async fn seed_member(pool: &PgPool, org: Uuid, phone: &str, token: &str) -> Uuid
 
 fn app_data(pool: &PgPool) -> (web::Data<PgPool>, web::Data<JwtSecret>) {
     (web::Data::new(pool.clone()), web::Data::new(secret()))
+}
+
+/// A super admin has no org of their own, and the dashboard pins one.
+///
+/// The loyalty module resolved the org from the token alone, so the one role
+/// entitled to look at every shop was answered with a 400 on the two reads the
+/// page opens with — and the form, falling back to its defaults, told them the
+/// programme was switched off while the members list came back empty. Both were
+/// true of nothing: the settings and the members were there the whole time,
+/// under an org id nobody had read off the header.
+#[sqlx::test]
+async fn a_super_admin_reads_the_shop_they_pinned(pool: PgPool) {
+    let org = seed_org(&pool).await;
+    seed_branch(&pool, org, "Maadi").await;
+    enable_program(&pool, org, 1000, 100, true).await;
+    seed_member(&pool, org, "+201000000001", "tok-super-admin-read").await;
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let jwt = super_admin_token();
+
+    // No shop pinned: a question about the person, not about a query parameter.
+    let req = test::TestRequest::get()
+        .uri("/loyalty/settings")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::BAD_REQUEST,
+        "with no org pinned there is nothing to report on"
+    );
+
+    // Pinned: the shop's own programme, not the defaults.
+    let req = test::TestRequest::get()
+        .uri("/loyalty/settings")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .insert_header(("X-Org-Id", org.to_string()))
+        .to_request();
+    let body: Value = test::call_and_read_body_json(&app, req).await;
+    assert_eq!(
+        body["enabled"], true,
+        "the programme is on, and must say so"
+    );
+    assert_eq!(body["default_reward_cost"], 100);
+
+    // And its members, which the same missing org id had emptied.
+    let req = test::TestRequest::get()
+        .uri("/loyalty/members")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .insert_header(("X-Org-Id", org.to_string()))
+        .to_request();
+    let body: Value = test::call_and_read_body_json(&app, req).await;
+    assert_eq!(body["total"], 1, "the shop's members belong to the shop");
 }
 
 // ── Settings: the org default and the branch override ────────────────────────
