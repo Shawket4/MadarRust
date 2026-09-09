@@ -126,7 +126,24 @@ pub async fn check(org_id: Option<uuid::Uuid>) -> Result<String, String> {
         .await
         .map_err(|e| format!("Could not reach Google: {e}"))?;
     match resp.status() {
-        s if s.is_success() => Ok(format!("Ready. This shop's card class ({id}) exists.")),
+        s if s.is_success() => {
+            // Not just "it exists". Two things about a class decide whether a
+            // saved card behaves, and neither is visible from the outside: a
+            // class stuck UNDER_REVIEW does not get everything an approved one
+            // does, and a class with no locations cannot anchor a card to a
+            // shop. Both were invisible while this reported existence alone.
+            let body = resp.text().await.unwrap_or_default();
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let review = v["reviewStatus"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_lowercase();
+            let places = v["locations"].as_array().map_or(0, |a| a.len());
+            Ok(format!(
+                "Ready. This shop's card class ({id}) exists — review status \
+                 {review}, {places} branch location(s) on it."
+            ))
+        }
         // Nothing wrong: the class is made when the first customer saves a card.
         reqwest::StatusCode::NOT_FOUND => Ok(format!(
             "Ready. No card class yet ({id}) — it is created when the first \
@@ -190,11 +207,19 @@ pub const MADAR_LOGO_PATH: &str = "/public/loyalty/brand/logo.png";
 /// `loyalty_settings`, whose UI was removed when branding moved to the org — so
 /// the class carried no logo and no colour, and every Android card came back in
 /// Google's default white.
+/// The shop's card template.
+///
+/// Deliberately carries no `reviewStatus`. It used to carry `UNDER_REVIEW` on
+/// every write, and `ensure_class` sends this body on the update as well as the
+/// create — so any class Google had promoted to approved was demoted again by
+/// the next customer who opened their card. A class can only ever walk forwards
+/// now: `ensure_class` states it once, at creation, and never mentions it again.
 pub fn loyalty_class(
     issuer: &str,
     org_id: uuid::Uuid,
     brand: &OrgBrand,
     settings: &LoyaltySettings,
+    locations: &[super::PassLocation],
 ) -> serde_json::Value {
     let mut class = json!({
         "id": class_id(issuer, org_id),
@@ -203,13 +228,24 @@ pub fn loyalty_class(
         // wallet entry with no owner on it.
         "issuerName": if brand.name.trim().is_empty() { settings.program_name.as_str() } else { brand.name.as_str() },
         "programName": settings.program_name,
-        // `UNDER_REVIEW` is what a class inserted through a save JWT must carry;
-        // Google promotes it when the issuer account is approved. `APPROVED`
-        // here is rejected outright.
-        "reviewStatus": "UNDER_REVIEW",
         // Google FETCHES this, so it must be absolute and publicly reachable —
         // unlike Apple's, which is packed into the archive as bytes.
         "hexBackgroundColor": brand.palette.background,
+        // The shop's branches, on the shop's template.
+        //
+        // The object carries locations too — the member's own nearest ten —
+        // and which of the two Google reads for a nearby prompt is not
+        // something I could establish by reasoning about it. So both carry
+        // them, which is cheap and is true either way: "where this shop is" is
+        // a fact about the shop, and this is the resource that describes one.
+        "locations": locations
+            .iter()
+            .map(|l| json!({
+                "kind": "walletobjects#latLongPoint",
+                "latitude": l.latitude,
+                "longitude": l.longitude,
+            }))
+            .collect::<Vec<_>>(),
     });
     // REQUIRED by Google, and the cause of "Something went wrong" on a save
     // that still routed to the app: a loyalty class without a `programLogo` is
@@ -443,7 +479,20 @@ pub async fn save_url(
     // old one forever. The token is cached, so the cost of being right here is
     // two requests on a page a customer opens rarely.
     let token = access_token().await?;
-    ensure_class(&token, &issuer, member.org_id, brand, settings).await?;
+    // The class describes the SHOP, so it gets the shop's branches — not this
+    // member's nearest ten, which is what the object carries.
+    let org_locations = super::locations_for_org(pool, member.org_id)
+        .await
+        .unwrap_or_default();
+    ensure_class(
+        &token,
+        &issuer,
+        member.org_id,
+        brand,
+        settings,
+        &org_locations,
+    )
+    .await?;
     let object_id = ensure_object(
         &token, &issuer, member, settings, locations, copy, headline, brand,
     )
@@ -492,14 +541,21 @@ async fn ensure_class(
     org_id: uuid::Uuid,
     brand: &OrgBrand,
     settings: &LoyaltySettings,
+    locations: &[super::PassLocation],
 ) -> Result<(), AppError> {
-    let body = loyalty_class(issuer, org_id, brand, settings);
+    let body = loyalty_class(issuer, org_id, brand, settings, locations);
     let id = class_id(issuer, org_id);
     let http = reqwest::Client::new();
+    // `UNDER_REVIEW` is what a class inserted through the API must carry, and
+    // Google promotes it once the issuer is approved. It belongs to the INSERT
+    // alone: repeating it on the update is what kept demoting an approved class
+    // back under review, every time anyone opened their card.
+    let mut insert = body.clone();
+    insert["reviewStatus"] = json!("UNDER_REVIEW");
     let resp = http
         .post(format!("{WALLET_API}/loyaltyClass"))
         .bearer_auth(token)
-        .json(&body)
+        .json(&insert)
         .send()
         .await
         .map_err(|e| AppError::ServiceUnavailable(format!("Google Wallet class: {e}")))?;
@@ -868,7 +924,7 @@ mod tests {
         // What we used to send, on the same shop. Kept as a measurement, so the
         // reason for the REST provisioning is checkable rather than folklore.
         let embedded = json!({
-            "loyaltyClasses": [loyalty_class("3388000000022345678", uuid::Uuid::nil(), &brand, &s)],
+            "loyaltyClasses": [loyalty_class("3388000000022345678", uuid::Uuid::nil(), &brand, &s, &[])],
             "loyaltyObjects": [loyalty_object("3388000000022345678", &m, &s, &locs, &crate::loyalty::wallet::CardCopy::default(), "Free espresso")],
         });
         assert!(
@@ -902,9 +958,31 @@ mod tests {
             logo_is_mark: true,
             custom_branding: true,
         };
-        let class = loyalty_class("3388000000000000000", uuid::Uuid::nil(), &brand, &s);
+        let places = [super::super::PassLocation {
+            latitude: 30.06,
+            longitude: 31.22,
+            name: "Maadi".into(),
+        }];
+        let class = loyalty_class(
+            "3388000000000000000",
+            uuid::Uuid::nil(),
+            &brand,
+            &s,
+            &places,
+        );
         assert_eq!(class["issuerName"], "RUE Coffee");
-        assert_eq!(class["reviewStatus"], "UNDER_REVIEW");
+        // No review status in the body. `ensure_class` states it on the INSERT
+        // and never again — this body is also what the UPDATE sends, and every
+        // update carrying UNDER_REVIEW walked an approved class backwards, on
+        // every card view, forever.
+        assert!(
+            class["reviewStatus"].is_null(),
+            "an update must not be able to demote an approved class"
+        );
+        // The shop's branches ride on the shop's template, as well as on each
+        // member's object.
+        assert_eq!(class["locations"][0]["latitude"], 30.06);
+        assert_eq!(class["locations"][0]["kind"], "walletobjects#latLongPoint");
         assert_eq!(
             class["id"],
             format!("3388000000000000000.madar-{}", uuid::Uuid::nil())
@@ -953,7 +1031,7 @@ mod tests {
             custom_branding: true,
             ..OrgBrand::default()
         };
-        let class = loyalty_class("338", uuid::Uuid::nil(), &brand, &s);
+        let class = loyalty_class("338", uuid::Uuid::nil(), &brand, &s, &[]);
         assert_eq!(
             class["programLogo"]["sourceUri"]["uri"],
             format!(
@@ -970,7 +1048,7 @@ mod tests {
             ..OrgBrand::default()
         };
         assert_eq!(
-            loyalty_class("338", uuid::Uuid::nil(), &bare, &s)["programLogo"]["sourceUri"]["uri"],
+            loyalty_class("338", uuid::Uuid::nil(), &bare, &s, &[])["programLogo"]["sourceUri"]["uri"],
             format!("https://loyalty.madar-pos.cloud/api{MADAR_LOGO_PATH}"),
             "never no logo at all"
         );
@@ -987,7 +1065,7 @@ mod tests {
     #[test]
     fn a_nameless_org_still_gets_an_issuer_on_the_card() {
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
-        let class = loyalty_class("338", uuid::Uuid::nil(), &OrgBrand::default(), &s);
+        let class = loyalty_class("338", uuid::Uuid::nil(), &OrgBrand::default(), &s, &[]);
         assert_eq!(class["issuerName"], s.program_name);
     }
 
