@@ -1521,6 +1521,76 @@ async fn place_with_rewards(
     (status, test::read_body_json(resp).await)
 }
 
+/// The till's own arithmetic must not be able to charge for a free coffee.
+///
+/// Pricing is client-authoritative everywhere else — the till computes what it
+/// charged and the server records it verbatim — but a REWARD is priced here,
+/// and a till that sends totals computed before the reduction is sending
+/// numbers that were never right. They were being stored anyway: the line came
+/// back marked as covered and the total still contained its price, so the
+/// customer paid for the free item and the receipt told them it was free.
+#[sqlx::test]
+async fn a_till_cannot_charge_for_what_a_reward_covered(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    seed_cash_method(&pool, org).await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    enable_program_mode(&pool, org, "visits", 1000, 5, false).await;
+    let member = seed_member(&pool, org, "201000000009", "Mtillcannotcharge001").await;
+    let latte = seed_menu_item(&pool, org, "Latte", 5_000).await;
+    let cake = seed_menu_item(&pool, org, "Cake", 9_000).await;
+    seed_reward(&pool, org, latte, "visits", 5).await;
+    grant(&pool, org, member, branch, "visits", 6).await;
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(crate::orders::routes::configure)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let jwt = token(teller, org, UserRole::Teller, Some(branch));
+
+    // Exactly what an un-updated till sends: both lines priced, the reward
+    // claimed, and totals that never heard about it.
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .set_json(json!({
+            "branch_id": branch, "shift_id": shift, "payment_method": "cash",
+            "idempotency_key": Uuid::new_v4(),
+            "loyalty_customer_id": member,
+            "loyalty_redemptions": [{ "item_index": 0 }],
+            "subtotal": 14_000,
+            "total_amount": 14_000,
+            "items": [
+                { "menu_item_id": latte, "quantity": 1 },
+                { "menu_item_id": cake, "quantity": 1 }
+            ]
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+    let body: Value = test::read_body_json(resp).await;
+
+    // The cake, and only the cake.
+    assert_eq!(
+        body["subtotal"], 9_000,
+        "the till's 14,000 was not the price"
+    );
+    // 9,000 plus 14% — and the TAX follows the reduction too, which is the
+    // sharper half: taking the till's subtotal and reducing it would have left
+    // tax computed over a basket that included the free coffee.
+    assert_eq!(
+        body["total_amount"], 10_260,
+        "the customer is not charged for the free coffee, nor taxed on it"
+    );
+}
+
 #[sqlx::test]
 async fn a_reward_covers_one_line_of_a_mixed_basket(pool: PgPool) {
     perms(&pool).await;

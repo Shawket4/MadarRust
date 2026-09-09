@@ -1377,16 +1377,48 @@ pub(crate) async fn create_order_inner(
     // RECORDED breakdown — the POS's charged numbers are the source of truth; any field
     // the POS omits falls back to a server computation over the charged subtotal
     // (legacy / pre-update POS builds / tests).
-    let subtotal = body.subtotal.unwrap_or(subtotal);
-    let discount_amount = body
-        .discount_amount
-        .unwrap_or_else(|| calc_discount(subtotal))
-        .clamp(0, subtotal);
+    // A REWARD is the one thing on this bill the till did not price.
+    //
+    // Pricing is client-authoritative everywhere else, and rightly so: the till
+    // computed what it charged and the server records it verbatim. But a
+    // redemption is priced HERE — `loyalty::redeem::plan` says so, and it is the
+    // only way two offline tills cannot each honour the last reward — and a till
+    // that sends a total computed before that reduction is sending a number that
+    // was never right.
+    //
+    // It was being stored anyway. The line came back marked as covered and the
+    // total still contained its price, so the customer was charged for the free
+    // coffee and the receipt said it was free. The mismatch was even detected —
+    // it set `price_flagged` — and then kept.
+    //
+    // So when a reward is claimed the money is the server's, all of it: taking
+    // the till's subtotal and reducing it would be reducing a figure whose
+    // discount and tax were computed over the un-reduced one.
+    let claimed = !redemption_plan.is_empty();
+    let subtotal = if claimed {
+        subtotal
+    } else {
+        body.subtotal.unwrap_or(subtotal)
+    };
+    let discount_amount = if claimed {
+        calc_discount(subtotal).clamp(0, subtotal)
+    } else {
+        body.discount_amount
+            .unwrap_or_else(|| calc_discount(subtotal))
+            .clamp(0, subtotal)
+    };
     let taxable = subtotal - discount_amount;
-    let tax_amount = body
-        .tax_amount
-        .unwrap_or_else(|| (taxable as f64 * tax_rate_f64).round() as i32);
-    let total_amount = body.total_amount.unwrap_or(taxable + tax_amount);
+    let tax_amount = if claimed {
+        (taxable as f64 * tax_rate_f64).round() as i32
+    } else {
+        body.tax_amount
+            .unwrap_or_else(|| (taxable as f64 * tax_rate_f64).round() as i32)
+    };
+    let total_amount = if claimed {
+        taxable + tax_amount
+    } else {
+        body.total_amount.unwrap_or(taxable + tax_amount)
+    };
     let change_given = body
         .change_given
         .or_else(|| body.amount_tendered.map(|t| (t - total_amount).max(0)));
@@ -1398,8 +1430,16 @@ pub(crate) async fn create_order_inner(
     if let Some(splits) = &body.payment_splits {
         let split_total: i64 = splits.iter().map(|s| s.amount as i64).sum();
         if split_total != total_amount as i64 {
+            // Naming the cause, because on a reward the till's arithmetic and
+            // ours disagree BY DESIGN until the till is updated, and "splits do
+            // not add up" would send a teller hunting for a fault in the split.
+            let why = if claimed {
+                " The reward has been taken off the total; collect the reduced amount."
+            } else {
+                ""
+            };
             return Err(AppError::BadRequest(format!(
-                "Split payments ({split_total}) must sum to the order total ({total_amount})."
+                "Split payments ({split_total}) must sum to the order total ({total_amount}).{why}"
             )));
         }
     }

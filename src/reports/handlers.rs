@@ -445,7 +445,11 @@ pub async fn branch_sales(
     .fetch_one(pool.get_ref())
     .await?;
 
-    let item_limit = query.limit.unwrap_or(20).clamp(1, 100);
+    // The screen wants a leaderboard and a spreadsheet wants the whole ranking,
+    // and both come through here. A hundred was low enough that an export asking
+    // for everything got the top hundred and no indication there was more; the
+    // default is unchanged, so nothing that did not ask is affected.
+    let item_limit = query.limit.unwrap_or(20).clamp(1, 1000);
 
     let top_items = sqlx::query_as::<_, ItemSales>(
         r#"
