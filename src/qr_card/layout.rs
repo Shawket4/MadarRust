@@ -67,11 +67,6 @@ const CAPTION_OPACITY: f32 = 0.72;
 // has to be good enough to pick between a handful of sizes. Past the point
 // where even the smallest size fits, the name is cut — an elided name is a
 // card, an overflowing one is a reprint.
-const NAME_MAX_W: f32 = 80.0;
-const NAME_SIZE_MAX: f32 = 8.0;
-const NAME_SIZE_MIN: f32 = 4.0;
-const NAME_AVG_ADVANCE: f32 = 0.58;
-const NAME_MAX_CHARS: usize = 34;
 
 // Madar's attribution on a branded card. It stays on every card either way —
 // what changes is that it stops being the lockup and becomes a line of type,
@@ -80,6 +75,12 @@ const POWERED_TEXT: &str = "Powered by Madar";
 const POWERED_BASELINE: f32 = 137.0;
 const POWERED_SIZE: f32 = 3.2;
 const POWERED_OPACITY: f32 = 0.6;
+/// The mark above the words, and the air between them.
+const POWERED_MARK_H: f32 = 4.0;
+const POWERED_MARK_GAP: f32 = 1.6;
+/// As the font's own `name` table spells it — fontsource folds the weight into
+/// the family on its subset builds, and the renderer matches on that string.
+const POWERED_FAMILY: &str = "IBM Plex Sans Arabic Medium";
 
 /// The Madar mark — embedded verbatim, the single source of truth.
 const MARK_SVG: &str = include_str!("../../assets/madar-mark.svg");
@@ -140,13 +141,16 @@ pub fn build_card_svg(m: &Matrix, opts: &QrCardOptions) -> Result<String, QrCard
         mark_secondary,
         brand.and_then(|br| br.logo.as_ref()),
     )?;
-    match brand {
-        Some(br) => push_name(&mut s, &br.name, ink),
-        None => push_label(&mut s)?,
+    // Madar's wordmark on Madar's card, and nothing at all on a shop's. The
+    // shop's name used to be typeset here, and it earned its place on neither
+    // count: the shop's own mark is already at the top of the card, and anyone
+    // holding one is standing in the shop.
+    if brand.is_none() {
+        push_label(&mut s)?;
     }
     push_caption(&mut s, opts.caption.as_deref(), ink);
     if brand.is_some() {
-        push_powered_by(&mut s, ink);
+        push_powered_by(&mut s, ink)?;
     }
 
     s.push_str("</g>");
@@ -286,58 +290,41 @@ fn push_label(s: &mut String) -> Result<(), QrCardError> {
     Ok(())
 }
 
-/// The shop's name, typeset in the slot Madar's wordmark occupies otherwise.
-///
-/// An organisation with no name at all is a row that has gone missing rather
-/// than a shop that chose anonymity, and a card with a gap where the name goes
-/// looks broken — so the slot is simply left empty and the card reads as a
-/// mark, a code and an attribution, which is a finished card.
-fn push_name(s: &mut String, name: &str, ink: &str) {
-    let name = name.trim();
-    if name.is_empty() {
-        return;
-    }
-    let mut shown: String = name.chars().take(NAME_MAX_CHARS).collect();
-    if name.chars().count() > NAME_MAX_CHARS {
-        shown.push('…');
-    }
-    let size = (NAME_MAX_W / (NAME_AVG_ADVANCE * shown.chars().count() as f32))
-        .clamp(NAME_SIZE_MIN, NAME_SIZE_MAX);
-    let arabic = shown.chars().any(is_arabic);
-    let (family, dir) = if arabic {
-        ("Cairo", r#" direction="rtl""#)
-    } else {
-        ("Manrope", "")
-    };
-    // `LABEL_CENTER_Y` is the wordmark's centre, and text is placed by its
-    // baseline, so the name would ride high if it were used directly. Manrope's
-    // cap height is a shade over 0.7 em, and dropping the baseline by 0.35 em
-    // puts the caps either side of the same line the wordmark straddles.
-    let _ = write!(
-        s,
-        r#"<text x="{cx}" y="{y}" font-family="{family}" font-weight="600" font-size="{fs}" fill="{ink}" text-anchor="middle"{dir}>{t}</text>"#,
-        cx = f(QR_CX),
-        y = f(LABEL_CENTER_Y + 0.35 * size),
-        fs = f(size),
-        t = xml_escape(&shown),
-    );
-}
-
-/// Madar's credit on a branded card.
+/// Madar's credit on a branded card: the mark, and the words under it.
 ///
 /// Small, low, and under the caption. It is not negotiable — the card is a
 /// Madar product whoever's mark is on the front — but it is also not the point
 /// of the card, and setting it at wordmark size on a shop's card would read as
 /// Madar branding a shop rather than a shop being served by Madar.
-fn push_powered_by(s: &mut String, ink: &str) {
+///
+/// The MARK rather than the wordmark, for the same reason it is small: the
+/// wordmark is a claim to the card and the mark is a signature on it. Stacked
+/// rather than set side by side, because centring a horizontal lockup means
+/// measuring the text, and a measurement that is a shade wrong puts a symbol
+/// off-centre on something a shop is about to print five hundred of.
+///
+/// The words are IBM Plex, which is the only place on this card that is ours
+/// rather than the shop's, and reads as such against the Manrope everywhere
+/// else.
+fn push_powered_by(s: &mut String, ink: &str) -> Result<(), QrCardError> {
+    s.push_str(&embed_asset(
+        MARK_SVG,
+        QR_CX,
+        POWERED_BASELINE - POWERED_MARK_GAP - POWERED_MARK_H / 2.0,
+        POWERED_MARK_H,
+        POWERED_MARK_H,
+        ink,
+        ink,
+    )?);
     let _ = write!(
         s,
-        r#"<text x="{cx}" y="{y}" font-family="Manrope" font-weight="500" font-size="{fs}" fill="{ink}" fill-opacity="{op}" text-anchor="middle">{POWERED_TEXT}</text>"#,
+        r#"<text x="{cx}" y="{y}" font-family="{POWERED_FAMILY}" font-size="{fs}" fill="{ink}" fill-opacity="{op}" text-anchor="middle">{POWERED_TEXT}</text>"#,
         cx = f(QR_CX),
         y = f(POWERED_BASELINE),
         fs = f(POWERED_SIZE),
         op = f(POWERED_OPACITY),
     );
+    Ok(())
 }
 
 fn push_caption(s: &mut String, caption: Option<&str>, ink: &str) {

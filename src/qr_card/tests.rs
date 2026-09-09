@@ -1102,7 +1102,14 @@ mod branded {
         );
         assert!(!svg.contains(TEAL_LIGHT));
         assert!(!svg.contains(PAPER));
-        assert!(svg.contains("Qahwa &amp; Co"), "the shop's name, escaped");
+        // And the shop's NAME is not on it. It was typeset where Madar's
+        // wordmark sits, and earned its place on neither count: the shop's own
+        // mark is already at the top of the card, and anyone holding one is
+        // standing in the shop.
+        assert!(
+            !svg.contains("Qahwa"),
+            "the card is a mark, a code and a credit — not a nameplate"
+        );
     }
 
     /// Madar's credit is on both cards. It is the lockup on an unbranded one
@@ -1236,28 +1243,42 @@ mod branded {
         assert!(big.height < MAX_LOGO_PX, "aspect preserved");
     }
 
-    /// SVG text does not wrap, so a long name is a name that runs off the card
-    /// unless something stops it. Something stops it.
+    /// Whatever the shop is called, the card says the same thing: a mark, a
+    /// code, and whose product it is. A name would be the only line on it that
+    /// could be too long, and it is not there to be.
     #[test]
-    fn a_long_shop_name_is_cut_rather_than_left_to_overflow() {
-        let mut o = org(GOLD);
-        o.name = "The Extremely Long Coffee House Of Heliopolis".into();
-        let svg =
-            render_qr_card_svg(&opts(Some(card_brand(&o).expect("on the tier")))).expect("svg");
-        assert!(svg.contains('…'), "elided");
-        assert!(!svg.contains("Heliopolis"));
+    fn the_card_carries_no_name_however_the_shop_is_called() {
+        for name in [
+            "   ",
+            "Qahwa & Co",
+            "The Extremely Long Coffee House Of Heliopolis",
+        ] {
+            let mut o = org(GOLD);
+            o.name = name.into();
+            let svg =
+                render_qr_card_svg(&opts(Some(card_brand(&o).expect("on the tier")))).expect("svg");
+            assert!(svg.contains("Powered by Madar"));
+            assert_eq!(svg.matches("<text").count(), 1, "only the Madar line");
+            assert!(!svg.contains("Heliopolis"));
+        }
     }
 
-    /// An org row that has gone missing has no name, and a card with a gap
-    /// where the name goes reads as a rendering fault. It simply has no name
-    /// line, which is a finished card.
+    /// Madar's credit is a lockup now, not a line of type: the MARK above the
+    /// words, and the words in a face that is ours rather than the shop's.
     #[test]
-    fn a_nameless_org_gets_a_card_without_a_name_line() {
-        let mut o = org(GOLD);
-        o.name = "   ".into();
-        let svg =
-            render_qr_card_svg(&opts(Some(card_brand(&o).expect("on the tier")))).expect("svg");
+    fn the_credit_is_the_mark_and_madars_own_type() {
+        let svg = render_qr_card_svg(&opts(Some(card_brand(&org(GOLD)).expect("on the tier"))))
+            .expect("svg");
+        assert!(
+            svg.contains("IBM Plex Sans Arabic Medium"),
+            "the credit is set in Madar's face, not the shop's"
+        );
+        assert!(
+            !svg.contains(r#"font-family="Manrope""#),
+            "nothing on a branded card is typeset in Manrope any more"
+        );
+        // The mark is embedded as paths, so what proves it is there is a group
+        // that is neither the QR nor the shop's logo.
         assert!(svg.contains("Powered by Madar"));
-        assert_eq!(svg.matches("<text").count(), 1, "only the Madar line");
     }
 }
