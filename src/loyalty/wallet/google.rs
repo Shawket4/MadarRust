@@ -321,25 +321,54 @@ pub fn loyalty_object(
         // renders in the details list BELOW it, which is where the progress
         // used to sit: a customer opening their wallet saw a balance and had to
         // scroll past the card to find out how close they were.
-        "loyaltyPoints": with_localized(
-            json!({
-                "label": balance_label(mode),
-                "balance": { "string": progress_line(balance, settings.default_reward_cost) }
+        // Google gives two slots, so the earned rewards take the first when
+        // there are any and the live stepper drops to the second — a card does
+        // not stop at full, and six against a reward every five is one waiting
+        // AND one step towards the next.
+        "loyaltyPoints": match earned_line(balance, settings.default_reward_cost) {
+            Some(earned) => json!({
+                "label": earned_label(balance, settings.default_reward_cost),
+                "balance": { "string": earned }
             }),
-            "localizedLabel",
-            balance_label(mode),
-        ),
+            None => with_localized(
+                json!({
+                    "label": balance_label(mode),
+                    "balance": { "string": progress_line(balance, settings.default_reward_cost) }
+                }),
+                "localizedLabel",
+                balance_label(mode),
+            ),
+        },
         // What they are working towards, not how far along they are — the
         // figures are already in the slot above. "Get a free drink" is the
         // thing a customer opens the card to be reminded of.
-        "secondaryLoyaltyPoints": with_localized(
-            json!({
-                "label": "Reward",
-                "balance": { "string": headline }
-            }),
-            "localizedLabel",
-            "Reward",
-        ),
+        // The second slot: the live stepper when the first is showing earned
+        // rewards, otherwise the reward's own name — and NOTHING when a shop
+        // has curated none. It used to print the cost there under a heading
+        // reading "Reward", which says the reward is five orders. It is the
+        // price of one.
+        "secondaryLoyaltyPoints": match (
+            earned_line(balance, settings.default_reward_cost),
+            headline.trim().is_empty(),
+        ) {
+            (Some(_), _) => with_localized(
+                json!({
+                    "label": balance_label(mode),
+                    "balance": { "string": progress_line(balance, settings.default_reward_cost) }
+                }),
+                "localizedLabel",
+                balance_label(mode),
+            ),
+            (None, false) => with_localized(
+                json!({
+                    "label": "Reward",
+                    "balance": { "string": headline }
+                }),
+                "localizedLabel",
+                "Reward",
+            ),
+            (None, true) => serde_json::Value::Null,
+        },
         "barcode": {
             "type": "QR_CODE",
             "value": member.member_token,
@@ -450,13 +479,18 @@ pub fn stepper(balance: i32, threshold: i32) -> Option<String> {
 ///
 /// The figures are never dropped. They are the fact; the dots are the glance,
 /// and a font that substitutes a glyph must still leave a readable card.
+/// Where they are on the CURRENT card, not on the whole history.
+///
+/// A card does not stop at full. Someone who has bought six with a reward every
+/// five has one reward waiting and one step towards the next, and a stepper
+/// clamped at five could only say "finished" — losing the fact that the sixth
+/// order counted for something. So the progress shown is what is left after the
+/// earned ones are set aside, which is the same arithmetic the web card has
+/// always done (`model::earned_and_progress`), and the earned ones get a row of
+/// their own.
 pub fn progress_line(balance: i32, threshold: i32) -> String {
-    if threshold > 0 && balance >= threshold {
-        // Short, because this shares a row with the reward's name. The full
-        // stepper is filled anyway, which says the same thing in pictures.
-        return "Reward earned".to_string();
-    }
-    match stepper(balance, threshold) {
+    let (_, progress) = crate::loyalty::model::earned_and_progress(balance, threshold);
+    match stepper(progress, threshold) {
         // The steps ALONE. Printing "3 / 5" beside three filled circles and two
         // empty ones says the same thing twice, in a field whose width is the
         // scarce thing — and the doubling is most of what made the line look
@@ -464,7 +498,39 @@ pub fn progress_line(balance: i32, threshold: i32) -> String {
         Some(steps) => steps,
         // Only where there are no steps to show: past the countable cap the
         // figures are all there is, and they are enough.
-        None => format!("{balance} / {threshold}"),
+        None => format!("{progress} / {threshold}"),
+    }
+}
+
+/// The rewards already sitting on the card, as a filled row.
+///
+/// `None` when there are none, which is the usual case and must render as no
+/// row at all rather than as an empty one.
+pub fn earned_line(balance: i32, threshold: i32) -> Option<String> {
+    let (earned, _) = crate::loyalty::model::earned_and_progress(balance, threshold);
+    if earned <= 0 {
+        return None;
+    }
+    // A full row of filled steps, which is what "earned" looks like — and for
+    // more than one, the count, because five identical full rows would be a
+    // worse way of saying "five".
+    let full = stepper(threshold, threshold).unwrap_or_default();
+    Some(if earned == 1 {
+        full
+    } else if full.is_empty() {
+        format!("×{earned}")
+    } else {
+        format!("{full}  ×{earned}")
+    })
+}
+
+/// What to call the earned row.
+pub fn earned_label(balance: i32, threshold: i32) -> &'static str {
+    let (earned, _) = crate::loyalty::model::earned_and_progress(balance, threshold);
+    if earned > 1 {
+        "Rewards ready"
+    } else {
+        "Reward ready"
     }
 }
 
@@ -1545,11 +1611,22 @@ mod tests {
         assert_eq!(progress_line(3, 5), "●─●─●─○─○");
         assert_eq!(progress_line(3, 8), "●●●○○○○○");
 
-        // Reaching the target is said in words, and kept short because it
-        // shares a row with the reward's name.
-        assert_eq!(progress_line(100, 100), "Reward earned");
-        assert_eq!(progress_line(5, 5), "Reward earned");
-        assert_eq!(progress_line(130, 100), "Reward earned");
+        // Reaching the target does not end the card. The progress line shows
+        // what is left AFTER the earned rewards are set aside, and the earned
+        // ones get a row of their own — so a customer who has bought six with a
+        // reward every five sees one waiting and one step towards the next,
+        // rather than a card that has simply stopped.
+        assert_eq!(progress_line(5, 5), "○─○─○─○─○", "a fresh card underneath");
+        assert_eq!(progress_line(6, 5), "●─○─○─○─○", "and the sixth counted");
+        assert_eq!(progress_line(130, 100), "30 / 100");
+
+        assert_eq!(earned_line(4, 5), None, "nothing earned yet, so no row");
+        assert_eq!(earned_line(5, 5).unwrap(), "●─●─●─●─●");
+        assert_eq!(earned_line(6, 5).unwrap(), "●─●─●─●─●");
+        // Five identical full rows would be a worse way of saying "five".
+        assert_eq!(earned_line(26, 5).unwrap(), "●─●─●─●─●  ×5");
+        assert_eq!(earned_label(5, 5), "Reward ready");
+        assert_eq!(earned_label(12, 5), "Rewards ready");
     }
 
     #[test]

@@ -382,9 +382,9 @@ pub async fn reward_lines(pool: &PgPool, org_id: Uuid) -> Vec<String> {
 /// the honest headline: a customer who can afford the espresso HAS earned
 /// something, whatever the cake costs.
 ///
-/// Falls back to the bare price when a shop has curated nothing yet, which at
-/// least names the target.
-pub async fn reward_headline(pool: &PgPool, org_id: Uuid, settings: &LoyaltySettings) -> String {
+/// Empty when a shop has curated nothing, and the callers then print no reward
+/// row at all — see the note on the fallback below.
+pub async fn reward_headline(pool: &PgPool, org_id: Uuid, _settings: &LoyaltySettings) -> String {
     let cheapest = crate::loyalty::settings::load_effective_rewards_org(pool, org_id)
         .await
         .unwrap_or_default()
@@ -392,11 +392,13 @@ pub async fn reward_headline(pool: &PgPool, org_id: Uuid, settings: &LoyaltySett
         .min_by_key(|r| r.cost_amount);
     match cheapest {
         Some(r) => r.name,
-        None => format!(
-            "{} {}",
-            settings.default_reward_cost,
-            google::balance_label(settings.mode()).to_lowercase()
-        ),
+        // Nothing curated. The old fallback printed the COST here — "5 orders"
+        // under a heading that said "Reward" — which reads as though the reward
+        // IS five orders. It is not; it is the price of one, and the stepper
+        // beside it already says that. Saying nothing is better than saying
+        // something false, so the slot is left empty and the callers drop the
+        // row.
+        None => String::new(),
     }
 }
 

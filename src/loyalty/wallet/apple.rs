@@ -443,6 +443,26 @@ pub fn pass_json(
         })
         .unwrap_or_default();
 
+    // Where they are, and — only when there is something to say — what it is
+    // for.
+    //
+    // The reward slot used to print the COST when a shop had curated nothing:
+    // "Reward / 5 orders", which reads as though the reward IS five orders. It
+    // is the price of one, and the stepper beside it already says that. An
+    // empty headline now means no row rather than a false one.
+    let mut secondary = vec![json!({
+        "key": "progress",
+        "label": program,
+        "value": progress_line(balance, threshold)
+    })];
+    if !headline.trim().is_empty() {
+        secondary.push(json!({
+            "key": "reward",
+            "label": "Reward",
+            "value": headline
+        }));
+    }
+
     let mut back: Vec<serde_json::Value> = super::back_of_card(member, settings, copy)
         .into_iter()
         .map(|l| json!({ "key": l.key, "label": l.label, "value": l.value }))
@@ -558,6 +578,19 @@ pub fn pass_json(
     // `loyalty_settings`, which stopped being written when branding moved to
     // the org — so every pass came back in Apple's default grey however the
     // shop's card looked on the web.
+    // A card does not stop at full. Six orders against a reward every five is
+    // one reward waiting AND one step towards the next, so the earned row goes
+    // above and the live stepper below it — which is Apple's own order, since
+    // auxiliary fields are drawn under secondary ones.
+    if let Some(earned) = super::google::earned_line(balance, threshold) {
+        pass["storeCard"]["secondaryFields"] = json!([json!({
+            "key": "earned",
+            "label": super::google::earned_label(balance, threshold),
+            "value": earned
+        })]);
+        pass["storeCard"]["auxiliaryFields"] = json!(secondary);
+    }
+
     // Added only when there is something to say, and left OUT entirely
     // otherwise — not as an empty array.
     //
@@ -566,8 +599,14 @@ pub fn pass_json(
     // nothing in it: a band of empty colour between the balance and the row
     // below, on every card that had no message. Which is every card, almost
     // always.
+    //
+    // Appended rather than assigned: the overflow row may already be there, and
+    // a message must not cost the customer the sight of their own progress.
     if !notice.is_empty() {
-        pass["storeCard"]["auxiliaryFields"] = json!(notice);
+        match pass["storeCard"]["auxiliaryFields"].as_array_mut() {
+            Some(rows) => rows.extend(notice),
+            None => pass["storeCard"]["auxiliaryFields"] = json!(notice),
+        }
     }
 
     pass["backgroundColor"] = json!(hex_to_rgb_css(&brand.background));
@@ -1166,6 +1205,56 @@ pub(crate) mod tests {
     /// `changeMessage`. The notice field exists only while there is something
     /// to say — an empty row on every card would be a permanent blank line, and
     /// removing a field notifies nobody, which is what makes it disposable.
+    /// A card does not stop at full, and it does not lie about the reward.
+    #[test]
+    fn a_full_card_starts_another_underneath_it() {
+        let _guard = super::super::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // SAFETY: the lock makes this the only thread touching the environment.
+        unsafe {
+            std::env::set_var("LOYALTY_APPLE_PASS_TYPE_ID", "pass.example");
+            std::env::set_var("LOYALTY_APPLE_TEAM_ID", "TEAM123456");
+        }
+        let mut s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
+        s.mode = "visits".into();
+        s.default_reward_cost = 5;
+        let copy = crate::loyalty::wallet::CardCopy::default();
+
+        // Six orders against a reward every five: one waiting, one step made.
+        let mut m = member();
+        m.visits_balance = 6;
+        let p = pass_json(&m, &s, &[], &copy, "", &PassBrand::default()).unwrap();
+        assert_eq!(
+            p["storeCard"]["secondaryFields"][0]["label"],
+            "Reward ready"
+        );
+        assert_eq!(
+            p["storeCard"]["secondaryFields"][0]["value"], "●─●─●─●─●",
+            "the one they finished"
+        );
+        assert_eq!(
+            p["storeCard"]["auxiliaryFields"][0]["value"], "●─○─○─○─○",
+            "and the one they have started, below it"
+        );
+
+        // No curated reward means NO reward row. It used to print the cost
+        // under a heading reading "Reward", which says the reward is five
+        // orders; it is the price of one.
+        let rows = p["storeCard"]["auxiliaryFields"].as_array().unwrap();
+        assert!(
+            !rows.iter().any(|f| f["key"] == "reward"),
+            "an empty headline is not a reward"
+        );
+
+        // And with one named, it is there and says what it is.
+        let told = pass_json(&m, &s, &[], &copy, "Free espresso", &PassBrand::default()).unwrap();
+        assert_eq!(
+            told["storeCard"]["auxiliaryFields"][1]["value"],
+            "Free espresso"
+        );
+    }
+
     #[test]
     fn a_notice_rides_on_the_card_as_a_field_that_can_be_notified_on() {
         let _guard = super::super::ENV_LOCK
