@@ -537,7 +537,6 @@ pub fn pass_json(
             //
             // Deliberately its own field and never the balance: a card that
             // announced every point earned would be a card people mute.
-            "auxiliaryFields": notice,
             "backFields": back
         },
         "barcodes": [{
@@ -559,6 +558,18 @@ pub fn pass_json(
     // `loyalty_settings`, which stopped being written when branding moved to
     // the org — so every pass came back in Apple's default grey however the
     // shop's card looked on the web.
+    // Added only when there is something to say, and left OUT entirely
+    // otherwise — not as an empty array.
+    //
+    // Apple lays a store card out from the field groups that are PRESENT.
+    // `"auxiliaryFields": []` is present, so it reserved a row and drew
+    // nothing in it: a band of empty colour between the balance and the row
+    // below, on every card that had no message. Which is every card, almost
+    // always.
+    if !notice.is_empty() {
+        pass["storeCard"]["auxiliaryFields"] = json!(notice);
+    }
+
     pass["backgroundColor"] = json!(hex_to_rgb_css(&brand.background));
     pass["foregroundColor"] = json!(hex_to_rgb_css(&brand.foreground));
     pass["labelColor"] = json!(hex_to_rgb_css(&brand.label));
