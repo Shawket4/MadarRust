@@ -32,6 +32,11 @@ pub enum AppError {
     #[error("Service unavailable: {0}")]
     ServiceUnavailable(String),
 
+    /// Asked for too much, too fast. Distinct from `Conflict` because a client
+    /// should retry this one and only this one.
+    #[error("{0}")]
+    TooManyRequests(String),
+
     #[error("Internal error")]
     Internal,
 }
@@ -84,6 +89,9 @@ impl AppError {
     fn code(&self) -> Option<String> {
         match self {
             AppError::OrgSuspended => Some("ORG_SUSPENDED".to_string()),
+            // The dashboard branches on this to say "wait a moment" rather
+            // than showing a raw error for something that is not a fault.
+            AppError::TooManyRequests(_) => Some("EXPORT_RATE_LIMITED".to_string()),
             _ => None,
         }
     }
@@ -159,6 +167,7 @@ impl actix_web::ResponseError for AppError {
             AppError::Conflict(_) => HttpResponse::Conflict().json(body),
             AppError::Db(e) => HttpResponse::build(Self::db_status(e)).json(body),
             AppError::ServiceUnavailable(_) => HttpResponse::ServiceUnavailable().json(body),
+            AppError::TooManyRequests(_) => HttpResponse::TooManyRequests().json(body),
             AppError::Internal => HttpResponse::InternalServerError().json(body),
         }
     }

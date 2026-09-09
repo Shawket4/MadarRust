@@ -223,6 +223,10 @@ async fn run() -> std::io::Result<()> {
         let mut app = App::new()
             .wrap(cors)
             .wrap(Compress::default())
+            // Whole-dataset reads, and only those — see `rate_limit::throttle_exports`.
+            .wrap(actix_web::middleware::from_fn(
+                madar_rust::rate_limit::throttle_exports,
+            ))
             // Outermost middleware (actix runs the LAST `wrap` first), as
             // sentry-actix requires: every downstream handler then runs on this
             // request's Hub, so anything they capture carries the request
