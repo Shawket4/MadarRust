@@ -56,6 +56,10 @@ const LABEL_MAX_H: f32 = 15.0;
 
 // Optional caption sits just under the wordmark.
 const CAPTION_BASELINE: f32 = 128.0;
+/// What the code opens, set above the caption and a shade larger: it is the
+/// first thing a person needs and the caption ("Table 5") only qualifies it.
+const PURPOSE_BASELINE: f32 = 121.5;
+const PURPOSE_SIZE: f32 = 4.6;
 const CAPTION_SIZE: f32 = 4.0;
 const CAPTION_OPACITY: f32 = 0.72;
 
@@ -71,16 +75,17 @@ const CAPTION_OPACITY: f32 = 0.72;
 // Madar's attribution on a branded card. It stays on every card either way —
 // what changes is that it stops being the lockup and becomes a line of type,
 // low in the frame and under the caption, where it credits without competing.
-const POWERED_TEXT: &str = "Powered by Madar";
+const POWERED_TEXT: &str = "Powered by";
 const POWERED_BASELINE: f32 = 137.0;
 const POWERED_SIZE: f32 = 3.2;
 const POWERED_OPACITY: f32 = 0.6;
-/// The mark above the words, and the air between them.
-const POWERED_MARK_H: f32 = 4.0;
-const POWERED_MARK_GAP: f32 = 1.6;
-/// As the font's own `name` table spells it — fontsource folds the weight into
-/// the family on its subset builds, and the renderer matches on that string.
-const POWERED_FAMILY: &str = "IBM Plex Sans Arabic Medium";
+/// The wordmark beside the words: how tall against the type, how far from it,
+/// and how wide the asset is for its height (its viewBox is 322 × 92).
+const POWERED_MARK_RATIO: f32 = 1.5;
+const POWERED_GAP: f32 = 1.2;
+const LABEL_ASPECT: f32 = 322.0 / 92.0;
+/// Manrope's average advance across "Powered by", as a share of the em.
+const POWERED_ADVANCE: f32 = 0.5;
 
 /// The Madar mark — embedded verbatim, the single source of truth.
 const MARK_SVG: &str = include_str!("../../assets/madar-mark.svg");
@@ -148,7 +153,24 @@ pub fn build_card_svg(m: &Matrix, opts: &QrCardOptions) -> Result<String, QrCard
     if brand.is_none() {
         push_label(&mut s)?;
     }
-    push_caption(&mut s, opts.caption.as_deref(), ink);
+    push_line(
+        &mut s,
+        opts.purpose.as_deref(),
+        ink,
+        PURPOSE_BASELINE,
+        PURPOSE_SIZE,
+        1.0,
+        600,
+    );
+    push_line(
+        &mut s,
+        opts.caption.as_deref(),
+        ink,
+        CAPTION_BASELINE,
+        CAPTION_SIZE,
+        CAPTION_OPACITY,
+        500,
+    );
     if brand.is_some() {
         push_powered_by(&mut s, ink)?;
     }
@@ -290,45 +312,70 @@ fn push_label(s: &mut String) -> Result<(), QrCardError> {
     Ok(())
 }
 
-/// Madar's credit on a branded card: the mark, and the words under it.
+/// Madar's credit on a branded card: the words, then the wordmark.
 ///
 /// Small, low, and under the caption. It is not negotiable — the card is a
 /// Madar product whoever's mark is on the front — but it is also not the point
 /// of the card, and setting it at wordmark size on a shop's card would read as
 /// Madar branding a shop rather than a shop being served by Madar.
 ///
-/// The MARK rather than the wordmark, for the same reason it is small: the
-/// wordmark is a claim to the card and the mark is a signature on it. Stacked
-/// rather than set side by side, because centring a horizontal lockup means
-/// measuring the text, and a measurement that is a shade wrong puts a symbol
-/// off-centre on something a shop is about to print five hundred of.
+/// The WORDMARK, not the mark, and not the word "Madar" set in type: the logo
+/// is the logo, and a name typed out beside it in a different face reads as a
+/// near-miss of the real thing. The words that precede it are Manrope, which is
+/// the face the rest of this card is set in — a third family for two words
+/// would be the same near-miss in the other direction.
 ///
-/// The words are IBM Plex, which is the only place on this card that is ours
-/// rather than the shop's, and reads as such against the Manrope everywhere
-/// else.
+/// Laid out horizontally and centred as one unit, which needs the text's width.
+/// That is an estimate — 0.5 em per character across "Powered by" in Manrope —
+/// and being wrong by a little puts the lockup a hair off centre rather than
+/// breaking anything, which is the trade a fixed string makes safe.
 fn push_powered_by(s: &mut String, ink: &str) -> Result<(), QrCardError> {
-    s.push_str(&embed_asset(
-        MARK_SVG,
-        QR_CX,
-        POWERED_BASELINE - POWERED_MARK_GAP - POWERED_MARK_H / 2.0,
-        POWERED_MARK_H,
-        POWERED_MARK_H,
-        ink,
-        ink,
-    )?);
+    let text_w = POWERED_TEXT.chars().count() as f32 * POWERED_SIZE * POWERED_ADVANCE;
+    let mark_h = POWERED_SIZE * POWERED_MARK_RATIO;
+    let mark_w = mark_h * LABEL_ASPECT;
+    let total = text_w + POWERED_GAP + mark_w;
+    let left = QR_CX - total / 2.0;
+
     let _ = write!(
         s,
-        r#"<text x="{cx}" y="{y}" font-family="{POWERED_FAMILY}" font-size="{fs}" fill="{ink}" fill-opacity="{op}" text-anchor="middle">{POWERED_TEXT}</text>"#,
-        cx = f(QR_CX),
+        r#"<text x="{x}" y="{y}" font-family="Manrope" font-weight="500" font-size="{fs}" fill="{ink}" fill-opacity="{op}" text-anchor="start">{POWERED_TEXT}</text>"#,
+        x = f(left),
         y = f(POWERED_BASELINE),
         fs = f(POWERED_SIZE),
         op = f(POWERED_OPACITY),
     );
+
+    // The wordmark sits on the text's optical centre, not its baseline: type is
+    // placed by the baseline and a logo by its middle, so aligning the two by
+    // the same number would hang the mark below the words.
+    s.push_str(&embed_asset(
+        LABEL_SVG,
+        left + text_w + POWERED_GAP + mark_w / 2.0,
+        POWERED_BASELINE - POWERED_SIZE * 0.35,
+        mark_w,
+        mark_h,
+        ink,
+        ink,
+    )?);
     Ok(())
 }
 
-fn push_caption(s: &mut String, caption: Option<&str>, ink: &str) {
-    let Some(text) = caption.map(str::trim).filter(|t| !t.is_empty()) else {
+/// One centred line of type, in whichever script it turns out to be written in.
+///
+/// Shared by the purpose and the caption, which differ only in where they sit
+/// and how loudly: the purpose says what scanning does and the caption
+/// qualifies it, so the purpose is set first, larger and at full strength.
+#[allow(clippy::too_many_arguments)]
+fn push_line(
+    s: &mut String,
+    text: Option<&str>,
+    ink: &str,
+    baseline: f32,
+    size: f32,
+    opacity: f32,
+    weight: u16,
+) {
+    let Some(text) = text.map(str::trim).filter(|t| !t.is_empty()) else {
         return;
     };
     let arabic = text.chars().any(is_arabic);
@@ -339,11 +386,11 @@ fn push_caption(s: &mut String, caption: Option<&str>, ink: &str) {
     };
     let _ = write!(
         s,
-        r#"<text x="{cx}" y="{y}" font-family="{family}" font-weight="500" font-size="{fs}" fill="{ink}" fill-opacity="{op}" text-anchor="middle"{dir}>{t}</text>"#,
+        r#"<text x="{cx}" y="{y}" font-family="{family}" font-weight="{weight}" font-size="{fs}" fill="{ink}" fill-opacity="{op}" text-anchor="middle"{dir}>{t}</text>"#,
         cx = f(QR_CX),
-        y = f(CAPTION_BASELINE),
-        fs = f(CAPTION_SIZE),
-        op = f(CAPTION_OPACITY),
+        y = f(baseline),
+        fs = f(size),
+        op = f(opacity),
         t = xml_escape(text),
     );
 }

@@ -52,6 +52,14 @@ pub struct QrCardOptions {
     pub short_url: String,
     /// Dynamic line under the tagline, e.g. "Table 5" / "امسح للقائمة".
     pub caption: Option<String>,
+    /// What this code DOES, in three or four words.
+    ///
+    /// A printed card is found on a counter months later by someone who was not
+    /// there when it was made, and every one of ours looks identical: a mark, a
+    /// square and a caption that might say "Table 5". Whether scanning it opens
+    /// a menu, books a table or joins a rewards programme was knowable only by
+    /// scanning it.
+    pub purpose: Option<String>,
     /// Raster resolution in DPI. Default 600 (print quality; clamped 72–2400).
     pub dpi: u32,
     /// Print bleed in mm added on every side. Default 0.0; use 3.0 for print.
@@ -72,6 +80,7 @@ impl Default for QrCardOptions {
         Self {
             short_url: String::new(),
             caption: None,
+            purpose: None,
             dpi: DEFAULT_DPI,
             bleed_mm: 0.0,
             crop_marks: false,

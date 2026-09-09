@@ -21,12 +21,6 @@ use super::brand::CardLogo;
 pub const MANROPE_SEMIBOLD: &[u8] = include_bytes!("../../assets/fonts/Manrope-SemiBold.ttf");
 pub const MANROPE_MEDIUM: &[u8] = include_bytes!("../../assets/fonts/Manrope-Medium.ttf");
 pub const CAIRO_MEDIUM: &[u8] = include_bytes!("../../assets/fonts/Cairo-Medium.ttf");
-/// Madar's own credit line, and only that — see `layout::POWERED_FAMILY`. A
-/// second family for one small line is worth it: it is the one thing on a
-/// branded card that is ours rather than the shop's, and it should not be
-/// wearing the same type as the shop's own name.
-pub const IBM_PLEX_MEDIUM: &[u8] =
-    include_bytes!("../../assets/fonts/IBMPlexSansArabic-Medium.ttf");
 
 /// A square QR matrix as row-major dark/light booleans (`true` == dark module).
 pub struct Matrix {
@@ -64,7 +58,6 @@ fn fontdb() -> Arc<usvg::fontdb::Database> {
         db.load_font_data(MANROPE_SEMIBOLD.to_vec());
         db.load_font_data(MANROPE_MEDIUM.to_vec());
         db.load_font_data(CAIRO_MEDIUM.to_vec());
-        db.load_font_data(IBM_PLEX_MEDIUM.to_vec());
         Arc::new(db)
     })
     .clone()

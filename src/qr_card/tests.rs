@@ -1119,7 +1119,10 @@ mod branded {
     fn powered_by_madar_is_on_the_branded_card_and_the_lockup_on_the_other() {
         let branded = render_qr_card_svg(&opts(Some(card_brand(&org(GOLD)).expect("on the tier"))))
             .expect("svg");
-        assert!(branded.contains("Powered by Madar"));
+        assert!(
+            branded.contains(">Powered by</text>"),
+            "the words, with the WORDMARK after them — not the name set in type"
+        );
 
         let plain = render_qr_card_svg(&opts(None)).expect("svg");
         assert!(
@@ -1257,8 +1260,10 @@ mod branded {
             o.name = name.into();
             let svg =
                 render_qr_card_svg(&opts(Some(card_brand(&o).expect("on the tier")))).expect("svg");
-            assert!(svg.contains("Powered by Madar"));
-            assert_eq!(svg.matches("<text").count(), 1, "only the Madar line");
+            assert!(svg.contains(">Powered by</text>"));
+            // The credit, the purpose and the caption are the only type on a
+            // branded card — never the shop's name.
+            assert!(!svg.contains("Heliopolis"));
             assert!(!svg.contains("Heliopolis"));
         }
     }
@@ -1269,16 +1274,14 @@ mod branded {
     fn the_credit_is_the_mark_and_madars_own_type() {
         let svg = render_qr_card_svg(&opts(Some(card_brand(&org(GOLD)).expect("on the tier"))))
             .expect("svg");
+        // The words in the card's own face, and the LOGO after them rather than
+        // the name set in type — a name typed beside a wordmark reads as a
+        // near-miss of the real thing.
+        assert!(svg.contains(r#"font-family="Manrope""#));
+        assert!(svg.contains(">Powered by</text>"));
         assert!(
-            svg.contains("IBM Plex Sans Arabic Medium"),
-            "the credit is set in Madar's face, not the shop's"
+            !svg.contains("Powered by Madar"),
+            "the word Madar is the wordmark's job"
         );
-        assert!(
-            !svg.contains(r#"font-family="Manrope""#),
-            "nothing on a branded card is typeset in Manrope any more"
-        );
-        // The mark is embedded as paths, so what proves it is there is a group
-        // that is neither the QR nor the shop's logo.
-        assert!(svg.contains("Powered by Madar"));
     }
 }
