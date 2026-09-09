@@ -483,26 +483,67 @@ async fn test_upload_org_logo(pool: PgPool) {
 
     let token = generate_super_admin_token();
 
-    // Simulate image upload
-    let mut body = String::new();
-    body.push_str("--boundary\r\n");
-    body.push_str("Content-Disposition: form-data; name=\"logo\"; filename=\"test.png\"\r\n");
-    body.push_str("Content-Type: image/png\r\n\r\n");
-    body.push_str("fake-image-bytes");
-    body.push_str("\r\n--boundary--\r\n");
-
+    // A real PNG, because the handler decodes what it is given now: it has to
+    // look at the alpha channel to decide the stored format and the
+    // `brand_logo_is_mark` flag, so bytes that are not an image cannot get
+    // through here any more.
     let req = test::TestRequest::put()
         .uri(&format!("/orgs/{}/logo", org_id))
         .insert_header(("Content-Type", "multipart/form-data; boundary=boundary"))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_payload(body)
+        .set_payload(logo_multipart(&tiny_transparent_png()))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert!(resp.status().is_success());
+    assert!(resp.status().is_success(), "got {}", resp.status());
 
     let org: Org = test::read_body_json(resp).await;
-    assert!(org.logo_url.is_some());
+    let logo_url = org.logo_url.expect("a logo url");
+    // Transparency survives, so the file is a PNG and the card may still
+    // repaint the mark.
+    assert!(
+        logo_url.ends_with(".png"),
+        "a transparent logo must stay a PNG, got {logo_url}"
+    );
+
+    // And the same route now refuses a file that is not an image at all,
+    // rather than writing it to disk and serving it as a logo.
+    let req = test::TestRequest::put()
+        .uri(&format!("/orgs/{}/logo", org_id))
+        .insert_header(("Content-Type", "multipart/form-data; boundary=boundary"))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_payload(logo_multipart(b"fake-image-bytes"))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 400);
+}
+
+/// A 64x64 PNG that is mostly clear — the shape of a real uploaded mark.
+fn tiny_transparent_png() -> Vec<u8> {
+    let mut img = image::RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 0]));
+    for y in 24..40 {
+        for x in 24..40 {
+            img.put_pixel(x, y, image::Rgba([17, 17, 17, 255]));
+        }
+    }
+    let mut buf = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut buf, image::ImageFormat::Png)
+        .unwrap();
+    buf.into_inner()
+}
+
+/// Wrap file bytes as the `logo` field of a multipart body. Binary, so it is
+/// built as bytes rather than as a `String`.
+fn logo_multipart(file: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(b"--boundary\r\n");
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"logo\"; filename=\"test.png\"\r\n",
+    );
+    body.extend_from_slice(b"Content-Type: image/png\r\n\r\n");
+    body.extend_from_slice(file);
+    body.extend_from_slice(b"\r\n--boundary--\r\n");
+    body
 }
 
 // ═══════════════════════════════════════════════════════════════════

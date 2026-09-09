@@ -3,16 +3,13 @@ use crate::{
     errors::{AppError, AppErrorResponse},
     models::UserRole,
     permissions::checker::check_permission,
+    uploads::image::{MAX_PHOTO_EDGE, MAX_RAW_BYTES, process_upload},
 };
 use actix_multipart::Multipart;
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use futures::StreamExt;
-use image::ImageReader;
 use serde::{Deserialize, Serialize};
-use std::{
-    io::Cursor,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -25,7 +22,6 @@ const ALLOWED_MIME: &[&str] = &[
     "image/x-bmp",
     "image/x-ms-bmp",
 ];
-const MAX_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct UploadResponse {
@@ -122,7 +118,7 @@ pub async fn upload_menu_item_image(
         while let Some(chunk) = field.next().await {
             let chunk = chunk.map_err(|_| AppError::BadRequest("Failed reading upload".into()))?;
             bytes.extend_from_slice(&chunk);
-            if bytes.len() > 20 * 1024 * 1024 {
+            if bytes.len() > MAX_RAW_BYTES {
                 return Err(AppError::BadRequest(
                     "File too large (max 20 MB raw)".into(),
                 ));
@@ -135,9 +131,14 @@ pub async fn upload_menu_item_image(
     let raw_bytes =
         file_bytes.ok_or_else(|| AppError::BadRequest("No image field found in upload".into()))?;
 
-    let jpeg_bytes = compress_to_jpeg(&raw_bytes)?;
+    // A menu photograph is a photograph, so this almost always comes back JPEG
+    // — but a plated-dish cut-out on transparency is a real thing shops upload,
+    // and flattening it would print a white rectangle behind the plate on the
+    // public menu. The pixels decide, not the route.
+    let processed = process_upload(&raw_bytes, MAX_PHOTO_EDGE)?;
+    let stored_bytes = processed.bytes;
 
-    let filename = format!("{}.jpg", Uuid::new_v4());
+    let filename = format!("{}.{}", Uuid::new_v4(), processed.extension);
     let dir_path = Path::new(&uploads_dir)
         .join(org_id.to_string())
         .join("menu-items");
@@ -148,7 +149,7 @@ pub async fn upload_menu_item_image(
     let file_path: PathBuf = dir_path.join(&filename);
 
     // 1. Write new file to disk first
-    tokio::fs::write(&file_path, &jpeg_bytes)
+    tokio::fs::write(&file_path, &stored_bytes)
         .await
         .map_err(|e| {
             tracing::error!("Failed to write image: {}", e);
@@ -179,35 +180,10 @@ pub async fn upload_menu_item_image(
         "Uploaded image for menu_item {} → {} ({} KB)",
         menu_item_id,
         image_url,
-        jpeg_bytes.len() / 1024
+        stored_bytes.len() / 1024
     );
 
     Ok(HttpResponse::Ok().json(UploadResponse { image_url }))
-}
-
-fn compress_to_jpeg(raw: &[u8]) -> Result<Vec<u8>, AppError> {
-    let img = ImageReader::new(Cursor::new(raw))
-        .with_guessed_format()
-        .map_err(|_| AppError::BadRequest("Could not decode image".into()))?
-        .decode()
-        .map_err(|e| AppError::BadRequest(format!("Invalid image: {}", e)))?;
-
-    let qualities: &[u8] = if raw.len() <= MAX_BYTES {
-        &[85]
-    } else {
-        &[85, 75, 65, 50, 40]
-    };
-    for &quality in qualities {
-        let mut buf = Cursor::new(Vec::new());
-        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
-        enc.encode_image(&img)
-            .map_err(|e| AppError::BadRequest(format!("Encoding failed: {}", e)))?;
-        let bytes = buf.into_inner();
-        if bytes.len() <= MAX_BYTES || quality == 40 {
-            return Ok(bytes);
-        }
-    }
-    Err(AppError::Internal)
 }
 
 /// Delete a stored image. `org_scope = Some(org)` constrains the deletion to

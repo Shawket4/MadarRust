@@ -14,7 +14,10 @@ use crate::{
     branches::handlers::validate_timezone,
     errors::{AppError, AppErrorResponse},
     permissions::checker::check_permission,
-    uploads::handlers::delete_old_image,
+    uploads::{
+        handlers::delete_old_image,
+        image::{MAX_LOGO_EDGE, MAX_PHOTO_EDGE, MAX_RAW_BYTES, process_upload},
+    },
 };
 
 // ── Models ────────────────────────────────────────────────────
@@ -198,29 +201,18 @@ pub async fn create_org(
 
         match name.as_str() {
             "logo" => {
-                let mut bytes = Vec::new();
-                while let Some(chunk) = field
-                    .try_next()
-                    .await
-                    .map_err(|e| AppError::BadRequest(format!("Upload read error: {e}")))?
-                {
-                    bytes.extend_from_slice(chunk.as_ref());
-                }
+                let bytes = read_capped(&mut field).await?;
                 if !bytes.is_empty() {
-                    let ct = field
-                        .content_type()
-                        .map(|m| m.to_string())
-                        .unwrap_or_default();
-                    let ext = match ct.as_str() {
-                        "image/png" => "png",
-                        "image/webp" => "webp",
-                        _ => "jpg",
-                    };
-                    let filename = format!("{}.{}", Uuid::new_v4(), ext);
+                    // Capped, stripped and re-encoded like every other upload —
+                    // and the extension comes from the processed bytes, not from
+                    // the client's Content-Type, because the old mapping wrote a
+                    // `.jpg` name onto whatever it had just been handed.
+                    let processed = process_upload(&bytes, MAX_LOGO_EDGE)?;
+                    let filename = format!("{}.{}", Uuid::new_v4(), processed.extension);
                     let file_path = format!("{}/logos/{}", uploads_dir, filename);
                     std::fs::create_dir_all(format!("{}/logos", uploads_dir))
                         .map_err(|_| AppError::Internal)?;
-                    std::fs::write(&file_path, &bytes).map_err(|_| AppError::Internal)?;
+                    std::fs::write(&file_path, &processed.bytes).map_err(|_| AppError::Internal)?;
                     logo_url = Some(format!(
                         "{}/logos/{}",
                         base_url.trim_end_matches('/'),
@@ -661,7 +653,7 @@ pub async fn upload_org_logo(
     let base_url = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
 
     let mut new_logo_url: Option<String> = None;
-    let mut logo_bytes: Vec<u8> = Vec::new();
+    let mut decoded: Option<image::DynamicImage> = None;
 
     while let Some(mut field) = mp
         .try_next()
@@ -672,47 +664,43 @@ pub async fn upload_org_logo(
             drain_field(&mut field).await?;
             continue;
         }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = field
-            .try_next()
-            .await
-            .map_err(|e| AppError::BadRequest(format!("Upload read error: {e}")))?
-        {
-            bytes.extend_from_slice(chunk.as_ref());
-        }
+        let bytes = read_capped(&mut field).await?;
         if !bytes.is_empty() {
-            let ct = field
-                .content_type()
-                .map(|m| m.to_string())
-                .unwrap_or_default();
-            let ext = match ct.as_str() {
-                "image/png" => "png",
-                "image/webp" => "webp",
-                _ => "jpg",
-            };
-            let filename = format!("{}.{}", Uuid::new_v4(), ext);
+            // A logo is the one upload that must NOT become a JPEG just because
+            // JPEG is smaller: `is_mark` reads the alpha channel to decide
+            // whether a card may repaint the mark, and a flattened logo is 0%
+            // clear, so every shop's pass and printed card would show its mark
+            // inside a black or white box. `process_upload` keeps a transparent
+            // logo as PNG for exactly that reason.
+            let processed = process_upload(&bytes, MAX_LOGO_EDGE)?;
+            let filename = format!("{}.{}", Uuid::new_v4(), processed.extension);
             let dir = format!("{}/logos", uploads_dir);
             std::fs::create_dir_all(&dir).map_err(|_| AppError::Internal)?;
-            std::fs::write(format!("{}/{}", dir, filename), &bytes)
+            std::fs::write(format!("{}/{}", dir, filename), &processed.bytes)
                 .map_err(|_| AppError::Internal)?;
             new_logo_url = Some(format!(
                 "{}/logos/{}",
                 base_url.trim_end_matches('/'),
                 filename,
             ));
-            logo_bytes = bytes;
+            decoded = Some(processed.image);
         }
     }
 
     let new_logo_url = new_logo_url
         .ok_or_else(|| AppError::BadRequest("No logo file received in field 'logo'".into()))?;
 
-    // Read the brand palette straight out of the bytes we were just handed: no
+    // Read the brand palette straight out of the pixels we were just handed: no
     // fetch, so no stale cache and no server-side request to an address someone
-    // else supplied. A logo we cannot decode, or one with no colour in it (a
-    // plain black mark is common), leaves the columns NULL and the card falls
-    // back to Madar's palette — a finished card, not a broken one.
-    let decoded = image::load_from_memory(&logo_bytes).ok();
+    // else supplied. A logo we cannot decode never reaches here at all now —
+    // `process_upload` turns that into a 400 — and one with no colour in it (a
+    // plain black mark is common) leaves the columns NULL and the card falls
+    // back to Madar's palette: a finished card, not a broken one.
+    //
+    // These are the SCALED pixels that were just written to disk, not the
+    // upload. The card renderers re-read the stored file later, so deriving the
+    // flag from anything else would let `brand_logo_is_mark` disagree with the
+    // image it describes.
     let palette = decoded
         .as_ref()
         .and_then(crate::orgs::branding::palette_from_image);
@@ -812,36 +800,23 @@ pub async fn upload_org_card_image(
             drain_field(&mut field).await?;
             continue;
         }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = field
-            .try_next()
-            .await
-            .map_err(|e| AppError::BadRequest(format!("Upload read error: {e}")))?
-        {
-            bytes.extend_from_slice(chunk.as_ref());
-        }
+        let bytes = read_capped(&mut field).await?;
         if bytes.is_empty() {
             continue;
         }
         // Decoded before it is stored. A file the wallets cannot read would be
         // a card that silently loses its band, and the upload is where someone
-        // is still watching.
-        image::load_from_memory(&bytes)
-            .map_err(|_| AppError::BadRequest("That file is not an image we can read".into()))?;
+        // is still watching. It is also capped and re-encoded here: this is a
+        // photograph off a phone, so it arrives at 4000 px with the GPS
+        // coordinates of the shop in its EXIF, and it is served to every
+        // customer who opens the card.
+        let processed = process_upload(&bytes, MAX_PHOTO_EDGE)?;
 
-        let ct = field
-            .content_type()
-            .map(|m| m.to_string())
-            .unwrap_or_default();
-        let ext = match ct.as_str() {
-            "image/png" => "png",
-            "image/webp" => "webp",
-            _ => "jpg",
-        };
-        let filename = format!("{}.{}", Uuid::new_v4(), ext);
+        let filename = format!("{}.{}", Uuid::new_v4(), processed.extension);
         let dir = format!("{uploads_dir}/card");
         std::fs::create_dir_all(&dir).map_err(|_| AppError::Internal)?;
-        std::fs::write(format!("{dir}/{filename}"), &bytes).map_err(|_| AppError::Internal)?;
+        std::fs::write(format!("{dir}/{filename}"), &processed.bytes)
+            .map_err(|_| AppError::Internal)?;
         new_url = Some(format!(
             "{}/card/{}",
             base_url.trim_end_matches('/'),
@@ -945,6 +920,29 @@ async fn drain_field(field: &mut actix_multipart::Field) -> Result<(), AppError>
         .is_some()
     {}
     Ok(())
+}
+
+/// Read one uploaded file field into memory, refusing an absurd one.
+///
+/// The bytes have to be buffered whole before anything can decode them, so
+/// without a ceiling a single POST is an out-of-memory on a 4 GB VPS. The limit
+/// is on what we will HOLD, not on what we will keep — `process_upload` caps
+/// the stored file far below this.
+async fn read_capped(field: &mut actix_multipart::Field) -> Result<Vec<u8>, AppError> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = field
+        .try_next()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Upload read error: {e}")))?
+    {
+        bytes.extend_from_slice(chunk.as_ref());
+        if bytes.len() > MAX_RAW_BYTES {
+            return Err(AppError::BadRequest(
+                "File too large (max 20 MB raw)".into(),
+            ));
+        }
+    }
+    Ok(bytes)
 }
 
 async fn text_field(field: &mut actix_multipart::Field) -> Result<Option<String>, AppError> {
