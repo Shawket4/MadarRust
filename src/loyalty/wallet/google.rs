@@ -675,33 +675,67 @@ async fn ensure_class(
     // a refresh that fails must leave the card it was refreshing alone. Letting
     // it fail the whole call is how a shop's button disappeared from the card
     // page over an image Google would not take.
-    let resp = http
-        .patch(format!("{WALLET_API}/loyaltyClass/{id}"))
-        .bearer_auth(token)
-        .json(&body)
-        .send()
-        .await;
-    match resp {
-        Ok(r) => {
-            let status = r.status();
-            let body = r.text().await.unwrap_or_default();
-            steps.push(WalletStep::new(
-                "update the class",
-                status.as_u16(),
-                body.clone(),
-            ));
-            if !status.is_success() {
-                tracing::warn!(
-                    status = %status, detail = %first_reason(&body), class = %id,
-                    "loyalty: Google would not update the card class; \
-                     customers keep the one it already has"
-                );
+    let attempt =
+        async |what: &str, sent: &serde_json::Value, steps: &mut Vec<WalletStep>| match http
+            .patch(format!("{WALLET_API}/loyaltyClass/{id}"))
+            .bearer_auth(token)
+            .json(sent)
+            .send()
+            .await
+        {
+            Ok(r) => {
+                let status = r.status();
+                let answer = r.text().await.unwrap_or_default();
+                steps.push(WalletStep::new(what, status.as_u16(), answer.clone()));
+                (!status.is_success()).then_some(answer)
             }
+            Err(e) => {
+                steps.push(WalletStep::new(what, 0, e.to_string()));
+                Some(e.to_string())
+            }
+        };
+
+    let mut refused = attempt("update the class", &body, steps).await;
+
+    // Then again without the branches.
+    //
+    // They are on the class as insurance: the member's own object carries
+    // branches too, and which of the two Google reads for a nearby prompt was
+    // never something I could establish by reasoning. But insurance that voids
+    // the policy is not insurance. If Google will not accept a class carrying
+    // `locations`, then adding them stopped EVERY class update — colours,
+    // programme name, logo, all frozen at whatever they were the day it was
+    // created, on a resource otherwise rewritten on every card view. Which is
+    // exactly what a shop saw: an Android card still wearing Madar's teal weeks
+    // after it had been given its own.
+    //
+    // So the branches are the part we give up, never the shop's identity. And
+    // because both attempts are in the transcript, production tells us which it
+    // was rather than another round of guessing.
+    if refused.is_some() && body.get("locations").is_some() {
+        let mut without = body.clone();
+        if let Some(o) = without.as_object_mut() {
+            o.remove("locations");
         }
-        Err(e) => {
-            steps.push(WalletStep::new("update the class", 0, e.to_string()));
-            tracing::warn!(error = %e, "loyalty: could not refresh the card class");
+        if attempt("update the class without branches", &without, steps)
+            .await
+            .is_none()
+        {
+            tracing::warn!(
+                class = %id,
+                "loyalty: Google refuses branch locations on a card class — the class \
+                 updated without them, and the member's own card carries them instead"
+            );
+            refused = None;
         }
+    }
+
+    if let Some(answer) = refused {
+        tracing::warn!(
+            detail = %first_reason(&answer), class = %id,
+            "loyalty: Google would not update the card class; \
+             customers keep the one it already has"
+        );
     }
     Ok(())
 }
