@@ -105,31 +105,9 @@ fn proximity_meters() -> u32 {
         .unwrap_or(DEFAULT_PROXIMITY_METERS)
 }
 
-/// Apple's strip sizes for a store card, at 1×/2×/3×.
+/// The contrast the card's text needs against the photograph.
 ///
-/// Roughly 2.6:1. A photograph is cover-cropped to it rather than letterboxed —
-/// a band with bars down the sides looks like a mistake, and the middle of a
-/// photograph is where the subject is.
-const STRIP_SIZES: [(&str, u32, u32); 3] = [
-    ("strip.png", 375, 144),
-    ("strip@2x.png", 750, 288),
-    ("strip@3x.png", 1125, 432),
-];
-
-/// The share of the strip's width the primary field is drawn across.
-///
-/// Apple lays the primary field out from the leading edge; the value is large
-/// and the label sits with it. Two thirds is generous — being wrong here means
-/// scrimming slightly more of the photograph than strictly needed, which costs
-/// nothing, where being wrong the other way costs legibility.
-const TEXT_ZONE: f64 = 0.66;
-
-/// How far the scrim fades past the text before it is gone entirely.
-const FADE: f64 = 0.20;
-
-/// The contrast the balance needs against the photograph.
-///
-/// WCAG's LARGE-text threshold, not the body-text one. The primary field is the
+/// WCAG's LARGE-text threshold, not the body-text one. The balance is the
 /// biggest thing on the pass — Apple renders it at a size where 3:1 is the
 /// published bar — and holding a photograph to 4.5 costs it a great deal of
 /// itself for contrast nobody needs. The shop chose that picture.
@@ -155,8 +133,7 @@ fn scrim(img: &mut image::RgbaImage, foreground: &str) {
     let veil: f64 = if fg_lum > 0.5 { 0.0 } else { 255.0 };
 
     let (w, h) = (img.width(), img.height());
-    let zone_w = (w as f64 * TEXT_ZONE).ceil() as u32;
-    if zone_w == 0 {
+    if w == 0 || h == 0 {
         return;
     }
 
@@ -172,7 +149,7 @@ fn scrim(img: &mut image::RgbaImage, foreground: &str) {
     let dark_veil = veil == 0.0;
     let mut extreme = if dark_veil { [0u8; 3] } else { [255u8; 3] };
     for y in 0..h {
-        for x in 0..zone_w {
+        for x in 0..w {
             let p = img.get_pixel(x, y).0;
             for c in 0..3 {
                 extreme[c] = if dark_veil {
@@ -209,23 +186,13 @@ fn scrim(img: &mut image::RgbaImage, foreground: &str) {
         a += 0.05;
     }
 
-    // Full strength across the text, then faded out, so the photograph is only
-    // dimmed where something is written on it.
-    let fade_end = ((TEXT_ZONE + FADE) * w as f64).min(w as f64);
-    for (x, _y, px) in img.enumerate_pixels_mut() {
-        let x = x as f64;
-        let a = if x <= zone_w as f64 {
-            alpha
-        } else if x >= fade_end {
-            0.0
-        } else {
-            alpha * (1.0 - (x - zone_w as f64) / (fade_end - zone_w as f64))
-        };
-        if a <= 0.0 {
-            continue;
-        }
+    // Evenly, over the whole picture. There is writing from the logo at the
+    // top of this layout to the last field at the bottom, so there is no
+    // corner the photograph could be left brighter in without something
+    // eventually being written there.
+    for px in img.pixels_mut() {
         for c in 0..3 {
-            px.0[c] = (px.0[c] as f64 * (1.0 - a) + veil * a).round() as u8;
+            px.0[c] = (px.0[c] as f64 * (1.0 - alpha) + veil * alpha).round() as u8;
         }
     }
 }
@@ -234,7 +201,30 @@ fn scrim(img: &mut image::RgbaImage, foreground: &str) {
 ///
 /// Empty when there is no picture, which is the ordinary case and a finished
 /// card — every pass looked like that until now.
-pub fn strip_images(
+/// Apple's background art for an `eventTicket`, at 180×220pt.
+///
+/// This is the ONLY Apple layout where the shop's picture reaches the top edge
+/// of the card with the logo over it. A `storeCard`'s strip begins below the
+/// logo row and cannot be moved: that row is always the pass's background
+/// colour, whatever the artwork does.
+///
+/// iOS scales and blurs this heavily, so it reads as a wash of the photograph
+/// rather than the photograph. That is the trade for a full bleed, and it is
+/// worth knowing before wondering why the picture looks soft.
+const BACKGROUND_SIZES: [(&str, u32, u32); 3] = [
+    ("background.png", 180, 220),
+    ("background@2x.png", 360, 440),
+    ("background@3x.png", 540, 660),
+];
+
+/// The shop's picture, filling the card.
+///
+/// Scrimmed over its WHOLE area rather than over a text zone: on this layout
+/// there is writing from the logo at the top to the last field at the bottom,
+/// so there is nowhere the photograph is safe to leave alone. Everything else
+/// is the strip's solver — dim only as far as the worst pixel demands, and
+/// leave an already-readable picture untouched.
+pub fn background_images(
     brand: &crate::orgs::branding::OrgBrand,
     foreground: &str,
 ) -> Vec<(String, Vec<u8>)> {
@@ -245,13 +235,12 @@ pub fn strip_images(
     else {
         return Vec::new();
     };
-    STRIP_SIZES
+    BACKGROUND_SIZES
         .iter()
         .filter_map(|(name, w, h)| {
             let mut scaled = img
                 .resize_to_fill(*w, *h, image::imageops::FilterType::Lanczos3)
                 .to_rgba8();
-            // Apple writes the balance across this. Make it safe to write on.
             scrim(&mut scaled, foreground);
             let mut buf = std::io::Cursor::new(Vec::new());
             image::DynamicImage::ImageRgba8(scaled)
@@ -336,18 +325,57 @@ fn images_from_logo(
 /// The logo is read from DISK, not fetched: uploads are written locally, so the
 /// file is already there — no network call while a customer waits, and no
 /// server-side request to an address someone else supplied.
+/// White or black, whichever the shop's picture can be read against.
+///
+/// On the full-bleed layout everything sits ON the photograph — the logo, the
+/// balance, every label — so the pass's colours stop being a brand decision and
+/// become a legibility one. A palette derived from the logo is exactly the
+/// wrong answer here: it is, by construction, close to the colours already in
+/// the picture.
+///
+/// `None` when the shop has no picture, in which case the brand palette is
+/// right again: there is a flat colour to sit on and it is the shop's own.
+fn ink_over_picture(brand: &crate::orgs::branding::OrgBrand) -> Option<&'static str> {
+    let img = brand
+        .card_image_url
+        .as_deref()
+        .and_then(crate::orgs::branding::read_upload)?;
+    // A coarse sample is plenty: this decides between two opposite ends, and
+    // the scrim afterwards guarantees the margin whichever way it goes.
+    let small = img.resize_exact(32, 32, image::imageops::FilterType::Triangle);
+    let rgba = small.to_rgba8();
+    let mut sum = 0.0;
+    let mut n = 0.0;
+    for p in rgba.pixels() {
+        sum += crate::orgs::branding::luminance(p.0[0], p.0[1], p.0[2]);
+        n += 1.0;
+    }
+    if n == 0.0 {
+        return None;
+    }
+    Some(if sum / n > 0.5 {
+        crate::orgs::branding::MADAR_INK
+    } else {
+        crate::orgs::branding::MADAR_PAPER
+    })
+}
+
 pub fn pass_brand(brand: &crate::orgs::branding::OrgBrand) -> PassBrand {
     let d = PassBrand::default();
+    // Over a picture the card's ink is decided by the picture; over a flat
+    // brand colour it is decided by the brand.
+    let over_picture = ink_over_picture(brand);
+    let foreground = over_picture.unwrap_or(brand.palette.foreground.as_str());
     let images = brand
         .logo_url
         .as_deref()
         .and_then(crate::orgs::branding::read_logo)
         .and_then(|img| {
-            // A mark is repainted in the pass's own foreground; a baked tile is
-            // left alone, because a silhouette of it is just a rectangle.
-            let tint = brand
-                .logo_is_mark
-                .then_some(brand.palette.foreground.as_str());
+            // A mark is repainted in the pass's own foreground — which, on a
+            // card with a picture, is white or black for contrast against it.
+            // Anything that is not a mark keeps its colours: repainting a
+            // multi-colour logo does not recolour it, it erases it.
+            let tint = brand.logo_is_mark.then_some(foreground);
             images_from_logo(&img, tint)
         })
         .unwrap_or(d.images);
@@ -355,8 +383,14 @@ pub fn pass_brand(brand: &crate::orgs::branding::OrgBrand) -> PassBrand {
     PassBrand {
         org_name: brand.name.clone(),
         background: brand.palette.background.clone(),
-        foreground: brand.palette.foreground.clone(),
-        label: brand.palette.accent.clone(),
+        foreground: foreground.to_string(),
+        // The accent is a third colour picked to sit on the brand ground. On a
+        // photograph it has no such guarantee, so labels take the same ink as
+        // the values and simply read.
+        label: match over_picture {
+            Some(ink) => ink.to_string(),
+            None => brand.palette.accent.clone(),
+        },
         images,
     }
 }
@@ -448,15 +482,23 @@ pub fn pass_json(
         // The web service that serves updates. Apple only calls it when the
         // pass carries an auth token, which is minted at signup.
         "authenticationToken": member.apple_auth_token,
-        "storeCard": {
-            // The strip a customer sees WITHOUT opening the pass. Wallet stacks
-            // cards and shows only this row, so a pass with no header fields
-            // answers "how many do I have?" with nothing until you tap it.
-            "headerFields": [{
-                "key": "header",
-                "label": super::google::balance_label(mode),
-                "value": balance
-            }],
+        // An eventTicket, not a storeCard, for ONE reason: it is the only
+        // Apple layout whose artwork reaches the top edge of the card with the
+        // logo over it. A storeCard's strip begins below the logo row, and that
+        // row is always the pass's flat background colour — no arrangement of
+        // images moves it.
+        "eventTicket": {
+            // No header fields. They sit beside the logo at the top and were
+            // showing the balance a second time, in small type, directly above
+            // the same number in large type — the card said "2" twice and
+            // looked cluttered for it.
+            //
+            // The cost is real and worth stating: header fields are the only
+            // part of a pass visible in Wallet's stacked view, so the sliver
+            // now shows the shop and nothing else. The card has to be opened to
+            // read the balance. That is the trade the duplication was paying
+            // for, and it was not worth the top of the card.
+            //
             // Apple renders these OVER the strip. That used to mean a card
             // with a photograph had to give up its balance — but the strip is
             // scrimmed until the worst pixel under the text clears AA, so
@@ -669,14 +711,16 @@ pub async fn build_pass_for(pool: &PgPool, member: &MemberRow) -> Result<Vec<u8>
     let copy = super::card_copy(pool, member.org_id).await;
     let org = crate::orgs::branding::load(pool, member.org_id).await?;
     let brand = pass_brand(&org);
-    let strip = strip_images(&org, &brand.foreground);
+    // Full bleed, so background art rather than a strip. Supplying both would
+    // put iOS back on the strip layout and undo the whole point.
+    let art = background_images(&org, &brand.foreground);
     let headline = super::reward_headline(pool, member.org_id, &settings).await;
     let pass = pass_json(member, &settings, &locations, &copy, &headline, &brand)?;
     // One list for the archive AND the manifest, so an image cannot end up in
     // the zip unhashed — which invalidates the signature and makes iOS refuse
     // the pass with no explanation at all.
     let mut images = brand.images.clone();
-    images.extend(strip);
+    images.extend(art);
     build_pkpass(&pass, &images)
 }
 
@@ -791,23 +835,27 @@ pub(crate) mod tests {
             &PassBrand::default(),
         )
         .unwrap();
-        assert_eq!(p["storeCard"]["primaryFields"][0]["value"], 30);
+        assert_eq!(p["eventTicket"]["primaryFields"][0]["value"], 30);
         // A hundred is past the point where dots are worth counting, so the
         // field carries the bare ratio — the only case where figures appear.
-        assert_eq!(p["storeCard"]["secondaryFields"][0]["value"], "30 / 100");
-        // Wallet stacks cards and shows only the header strip. Without this a
-        // customer cannot see their balance without tapping the pass open.
-        assert_eq!(p["storeCard"]["headerFields"][0]["value"], 30);
-        assert_eq!(p["storeCard"]["headerFields"][0]["label"], "Points");
+        assert_eq!(p["eventTicket"]["secondaryFields"][0]["value"], "30 / 100");
+        // No header fields. They sat beside the logo showing the same balance
+        // in small type directly above the same number in large type.
+        assert!(
+            p["eventTicket"]["headerFields"]
+                .as_array()
+                .is_none_or(|a| a.is_empty()),
+            "the balance belongs on the card once"
+        );
         // Progress and reward share ONE row: two short strings did not need a
         // band of card height each, which is most of why it read as tall.
-        assert_eq!(p["storeCard"]["secondaryFields"][1]["label"], "Reward");
+        assert_eq!(p["eventTicket"]["secondaryFields"][1]["label"], "Reward");
         assert_eq!(
-            p["storeCard"]["secondaryFields"][1]["value"],
+            p["eventTicket"]["secondaryFields"][1]["value"],
             "Free espresso"
         );
         assert!(
-            p["storeCard"]["auxiliaryFields"]
+            p["eventTicket"]["auxiliaryFields"]
                 .as_array()
                 .is_none_or(|a| a.is_empty()),
             "nothing left below it: {p}"
@@ -833,13 +881,13 @@ pub(crate) mod tests {
         )
         .unwrap();
         // The stamps balance leads, not the points one.
-        assert_eq!(p["storeCard"]["primaryFields"][0]["value"], 3);
-        assert_eq!(p["storeCard"]["primaryFields"][0]["label"], "Orders");
+        assert_eq!(p["eventTicket"]["primaryFields"][0]["value"], 3);
+        assert_eq!(p["eventTicket"]["primaryFields"][0]["label"], "Orders");
         // A stamp card reads as a STEPPER, not as arithmetic: five orders is
         // few enough to count at a glance, and joining the steps shows the
         // direction of travel the way loose dots do not.
-        assert_eq!(p["storeCard"]["secondaryFields"][0]["value"], "●─●─●─○─○");
-        let how = p["storeCard"]["backFields"][0]["value"].as_str().unwrap();
+        assert_eq!(p["eventTicket"]["secondaryFields"][0]["value"], "●─●─●─○─○");
+        let how = p["eventTicket"]["backFields"][0]["value"].as_str().unwrap();
         assert!(how.contains("stamp"), "{how}");
         assert!(
             !how.contains("EGP"),
@@ -979,14 +1027,13 @@ pub(crate) mod tests {
     fn a_photograph_is_made_safe_to_write_the_balance_on() {
         use crate::orgs::branding::{contrast, luminance, parse_hex};
 
-        // The worst pixel in the text zone, against the pass's foreground.
+        // The worst pixel anywhere, against the pass's foreground.
         let worst = |img: &image::RgbaImage, fg: &str| {
             let (r, g, b) = parse_hex(fg).unwrap();
             let fl = luminance(r, g, b);
-            let zone = (img.width() as f64 * TEXT_ZONE) as u32;
             let mut worst = f64::MAX;
             for y in 0..img.height() {
-                for x in 0..zone {
+                for x in 0..img.width() {
                     let p = img.get_pixel(x, y).0;
                     worst = worst.min(contrast(luminance(p[0], p[1], p[2]), fl));
                 }
@@ -1031,26 +1078,26 @@ pub(crate) mod tests {
         );
     }
 
-    /// Renders the real strip from a real photograph, to be LOOKED at. No
+    /// Renders the real card art from a real photograph, to be LOOKED at. No
     /// assertion tells you whether a scrim is heavy-handed.
     ///
-    ///     MADAR_STRIP_PREVIEW=photo.jpg \
-    ///       cargo test --lib apple::tests::preview_strip -- --ignored --nocapture
+    ///     MADAR_CARD_PREVIEW=photo.jpg \
+    ///       cargo test --lib apple::tests::preview_card_art -- --ignored --nocapture
     #[test]
     #[ignore = "writes a preview to look at"]
-    fn preview_strip() {
-        let Some(path) = std::env::var("MADAR_STRIP_PREVIEW").ok() else {
-            println!("set MADAR_STRIP_PREVIEW=/path/to/photo.jpg to render one");
+    fn preview_card_art() {
+        let Some(path) = std::env::var("MADAR_CARD_PREVIEW").ok() else {
+            println!("set MADAR_CARD_PREVIEW=/path/to/photo.jpg to render one");
             return;
         };
         let src = image::open(&path).expect("a readable photo");
         for (name, fg) in [("light-text", "#EFF3F4"), ("dark-text", "#12222A")] {
-            let mut band = src
-                .resize_to_fill(750, 288, image::imageops::FilterType::Lanczos3)
+            let mut art = src
+                .resize_to_fill(360, 440, image::imageops::FilterType::Lanczos3)
                 .to_rgba8();
-            scrim(&mut band, fg);
-            let at = std::env::temp_dir().join(format!("madar-strip-{name}.png"));
-            band.save(&at).unwrap();
+            scrim(&mut art, fg);
+            let at = std::env::temp_dir().join(format!("madar-card-{name}.png"));
+            art.save(&at).unwrap();
             println!("wrote {}", at.display());
         }
     }
@@ -1065,17 +1112,50 @@ pub(crate) mod tests {
         assert_eq!(dark, copy);
     }
 
+    /// The shop's picture reaches the top edge, with the logo over it.
+    ///
+    /// A `storeCard`'s strip begins BELOW the logo row and that row is always
+    /// the pass's flat background colour, so no arrangement of images gets a
+    /// photograph to the top of one. An `eventTicket` with background art is
+    /// the only Apple layout that does.
     #[test]
-    fn the_scrim_fades_out_rather_than_ending_in_a_line() {
-        // A hard edge down the middle of a photograph reads as damage.
+    fn the_card_is_the_layout_whose_art_reaches_the_edge() {
+        let _guard = super::super::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // SAFETY: the lock makes this the only thread touching the environment.
+        unsafe {
+            std::env::set_var("LOYALTY_APPLE_PASS_TYPE_ID", "pass.example");
+            std::env::set_var("LOYALTY_APPLE_TEAM_ID", "TEAM123456");
+        }
+        let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
+        let p = pass_json(
+            &member(),
+            &s,
+            &[],
+            &crate::loyalty::wallet::CardCopy::default(),
+            "Free espresso",
+            &PassBrand::default(),
+        )
+        .unwrap();
+        assert!(p["eventTicket"].is_object());
+        assert!(
+            p["storeCard"].is_null(),
+            "a store card cannot put art above its logo"
+        );
+    }
+
+    #[test]
+    fn the_scrim_covers_the_whole_picture() {
+        // The old scrim dimmed the leading two thirds and faded out, because
+        // only the primary field was written on the strip. On a full-bleed card
+        // there is writing from the logo at the top to the last field at the
+        // bottom, so a bright far corner is a hole in something.
         let mut img = image::RgbaImage::from_pixel(400, 100, image::Rgba([255, 255, 255, 255]));
         scrim(&mut img, "#EFF3F4");
         let at = |x: u32| img.get_pixel(x, 50).0[0];
-        let text_end = (400.0 * TEXT_ZONE) as u32;
-        let fade_end = (400.0 * (TEXT_ZONE + FADE)) as u32;
-        assert!(at(10) < at(text_end + 20), "it lightens across the fade");
-        assert!(at(text_end + 20) < at(fade_end + 5), "and keeps lightening");
-        assert_eq!(at(399), 255, "the far side is the photograph, untouched");
+        assert_eq!(at(10), at(399), "evenly, corner to corner");
+        assert!(at(399) < 255, "and the far corner is not left as it was");
     }
 
     #[test]
