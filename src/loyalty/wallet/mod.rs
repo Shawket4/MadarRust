@@ -15,6 +15,7 @@
 pub mod apns;
 pub mod apple;
 pub mod google;
+pub mod notices;
 pub mod refresh;
 pub mod web_service;
 
@@ -611,6 +612,7 @@ mod tests {
             joined_branch_id: None,
             enrolled_at: chrono::Utc::now(),
             marketing_opt_out: false,
+            pass_notice: None,
         }
     }
 

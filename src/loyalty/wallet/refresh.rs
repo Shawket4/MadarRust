@@ -29,6 +29,7 @@ use std::time::Duration;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use super::notices;
 use crate::errors::AppError;
 
 /// How many cards one tick refreshes.
@@ -66,6 +67,11 @@ pub fn spawn(pool: PgPool) {
 }
 
 async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
+    // A message we put on a card that the card never came back for. Riding this
+    // tick rather than owning one: both are about passes that have not caught
+    // up, and one sweep is one thing to reason about.
+    notices::sweep_undelivered(pool).await?;
+
     let stale = stale_passes(pool, BATCH).await?;
     if stale.is_empty() {
         return Ok(());

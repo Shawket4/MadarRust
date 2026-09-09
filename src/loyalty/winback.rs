@@ -91,7 +91,6 @@ struct Lapsed {
     id: Uuid,
     org_id: Uuid,
     name: String,
-    phone: String,
     locale: String,
     member_token: String,
     /// Their last attributable visit — the spell's name, and the idempotency key.
@@ -117,7 +116,7 @@ async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
     // this one, and sending them this one would be a lie.
     let due: Vec<Lapsed> = sqlx::query_as(
         "WITH seen AS ( \
-             SELECT c.id, c.org_id, c.name, c.phone, c.locale, c.member_token, \
+             SELECT c.id, c.org_id, c.name, c.locale, c.member_token, \
                     GREATEST( \
                       (SELECT max(t.created_at) FROM loyalty_transactions t \
                         WHERE t.customer_id = c.id), \
@@ -139,7 +138,7 @@ async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
               WHERE since IS NOT NULL \
                 AND now() - since >= make_interval(days => $1::int) \
                 AND now() - since <= make_interval(days => $3::int)) \
-         SELECT id, org_id, name, phone, locale, member_token, since, seq \
+         SELECT id, org_id, name, locale, member_token, since, seq \
            FROM ranked r \
           WHERE rn <= $4 \
             AND NOT EXISTS ( \
@@ -217,7 +216,18 @@ async fn nudge(pool: &PgPool, m: &Lapsed) -> Result<(), AppError> {
     }
 
     let text = message_for(&settings, &m.name, &m.locale, &m.member_token);
-    crate::delivery::whatsapp::send_message(pool.clone(), m.phone.clone(), text);
+    // The card first, WhatsApp only where there is no card — see
+    // `wallet::notices`. A nudge that arrives as the shop's own pass is both
+    // cheaper and less like being marketed at.
+    let member = crate::loyalty::model::find_by_id(pool, m.id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Member vanished mid-nudge".into()))?;
+    let line = if m.locale.starts_with("ar") {
+        "وحشتنا! 🤍".to_string()
+    } else {
+        "We've missed you!".to_string()
+    };
+    crate::loyalty::wallet::notices::announce(pool, &member, &line, &text).await?;
     tracing::info!(customer_id = %m.id, seq = m.seq, "loyalty: win-back sent");
     Ok(())
 }

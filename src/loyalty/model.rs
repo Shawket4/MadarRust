@@ -82,11 +82,16 @@ pub struct MemberRow {
     /// They have asked this shop to stop sending them things. One flag for
     /// every unprompted message, not one per campaign.
     pub marketing_opt_out: bool,
+    /// A message riding on the card itself — see `wallet::notices`. Present
+    /// only while one is outstanding; the pass grows a row for it and loses the
+    /// row again once it has been delivered or given up on.
+    pub pass_notice: Option<String>,
 }
 
 pub const MEMBER_COLS: &str = "id, org_id, name, phone, member_token, points_balance, \
     visits_balance, lifetime_points, lifetime_visits, locale, apple_serial, apple_auth_token, \
-    google_object_id, pass_updated_at, joined_branch_id, enrolled_at, marketing_opt_out";
+    google_object_id, pass_updated_at, joined_branch_id, enrolled_at, marketing_opt_out, \
+    pass_notice";
 
 impl MemberRow {
     /// The balance that counts under `mode`.
@@ -413,6 +418,7 @@ mod overflow_tests {
             joined_branch_id: None,
             enrolled_at: chrono::Utc::now(),
             marketing_opt_out: false,
+            pass_notice: None,
         };
         let v = m.view(Mode::Visits, 5);
         assert_eq!(v.balance, 6);

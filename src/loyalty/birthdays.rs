@@ -61,7 +61,6 @@ struct Greetable {
     id: Uuid,
     org_id: Uuid,
     name: String,
-    phone: String,
     locale: String,
     year: i32,
 }
@@ -82,7 +81,7 @@ async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
              SELECT o.id AS org_id, \
                     (now() AT TIME ZONE o.timezone)::date AS d \
                FROM organizations o WHERE o.deleted_at IS NULL) \
-         SELECT c.id, c.org_id, c.name, c.phone, c.locale, \
+         SELECT c.id, c.org_id, c.name, c.locale, \
                 EXTRACT(YEAR FROM t.d)::int AS year \
            FROM loyalty_customers c \
            JOIN today t ON t.org_id = c.org_id \
@@ -174,7 +173,18 @@ async fn greet(pool: &PgPool, m: &Greetable) -> Result<(), AppError> {
     }
 
     let text = message_for(&settings, &m.name, &m.locale);
-    crate::delivery::whatsapp::send_message(pool.clone(), m.phone.clone(), text);
+    // The card first. A greeting on the lock screen from the shop's own pass is
+    // better than a WhatsApp among a hundred others, and it costs nothing —
+    // WhatsApp is the fallback for someone with no card to reach.
+    let member = crate::loyalty::model::find_by_id(pool, m.id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Member vanished mid-greeting".into()))?;
+    let line = if m.locale.starts_with("ar") {
+        format!("كل سنة وأنت طيب يا {} 🎂", m.name)
+    } else {
+        format!("Happy birthday, {} 🎂", m.name)
+    };
+    crate::loyalty::wallet::notices::announce(pool, &member, &line, &text).await?;
     tracing::info!(customer_id = %m.id, "loyalty: birthday greeting sent");
     Ok(())
 }

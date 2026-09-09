@@ -209,6 +209,10 @@ pub async fn latest_pass(
         return Ok(HttpResponse::NotModified().finish());
     }
 
+    // The device came back for the pass, which is as close to a read receipt as
+    // this feature gets. It is what makes the WhatsApp fallback evidence.
+    super::notices::mark_seen(pool.get_ref(), &member).await;
+
     let bytes = apple::build_pass_for(pool.get_ref(), &member).await?;
     let mut resp = HttpResponse::Ok();
     resp.content_type("application/vnd.apple.pkpass");

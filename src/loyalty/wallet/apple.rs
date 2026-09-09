@@ -428,6 +428,21 @@ pub fn pass_json(
     let threshold = settings.default_reward_cost;
     let balance = member.balance_in(mode);
 
+    // Empty unless something is outstanding, and an empty array is no row.
+    let notice: Vec<serde_json::Value> = member
+        .pass_notice
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+        .map(|text| {
+            vec![json!({
+                "key": "notice",
+                "label": "",
+                "value": text,
+                "changeMessage": "%@"
+            })]
+        })
+        .unwrap_or_default();
+
     let back: Vec<serde_json::Value> = super::back_of_card(member, settings, copy)
         .into_iter()
         .map(|l| json!({ "key": l.key, "label": l.label, "value": l.value }))
@@ -484,6 +499,18 @@ pub fn pass_json(
                     "value": headline
                 }
             ],
+            // A message riding on the card — see `wallet::notices`.
+            //
+            // Apple has no way to push text. iOS notifies when a FIELD's value
+            // changes and that field's definition carries a `changeMessage`, so
+            // a message has to BE a field: it appears on the card with the
+            // notification and is dropped on the next update, which notifies
+            // nobody. `%@` is the new value, so the notification reads as
+            // whatever we wrote.
+            //
+            // Deliberately its own field and never the balance: a card that
+            // announced every point earned would be a card people mute.
+            "auxiliaryFields": notice,
             "backFields": back
         },
         "barcodes": [{
@@ -760,6 +787,7 @@ pub(crate) mod tests {
             joined_branch_id: None,
             enrolled_at: chrono::Utc::now(),
             marketing_opt_out: false,
+            pass_notice: None,
         }
     }
 
@@ -1083,6 +1111,55 @@ pub(crate) mod tests {
         assert!(at(10) < at(text_end + 20), "it lightens across the fade");
         assert!(at(text_end + 20) < at(fade_end + 5), "and keeps lightening");
         assert_eq!(at(399), 255, "the far side is the photograph, untouched");
+    }
+
+    /// Apple cannot be sent a message, so a message has to be a field.
+    ///
+    /// iOS notifies when a field's value changes AND its definition carries a
+    /// `changeMessage`. The notice field exists only while there is something
+    /// to say — an empty row on every card would be a permanent blank line, and
+    /// removing a field notifies nobody, which is what makes it disposable.
+    #[test]
+    fn a_notice_rides_on_the_card_as_a_field_that_can_be_notified_on() {
+        let _guard = super::super::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // SAFETY: the lock makes this the only thread touching the environment.
+        unsafe {
+            std::env::set_var("LOYALTY_APPLE_PASS_TYPE_ID", "pass.example");
+            std::env::set_var("LOYALTY_APPLE_TEAM_ID", "TEAM123456");
+        }
+        let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
+        let copy = crate::loyalty::wallet::CardCopy::default();
+
+        let quiet = pass_json(
+            &member(),
+            &s,
+            &[],
+            &copy,
+            "Free espresso",
+            &PassBrand::default(),
+        )
+        .unwrap();
+        assert!(
+            quiet["storeCard"]["auxiliaryFields"]
+                .as_array()
+                .is_none_or(|a| a.is_empty()),
+            "no message, no row"
+        );
+
+        let mut m = member();
+        m.pass_notice = Some("Happy birthday, Ali 🎂".into());
+        let told = pass_json(&m, &s, &[], &copy, "Free espresso", &PassBrand::default()).unwrap();
+        let field = &told["storeCard"]["auxiliaryFields"][0];
+        assert_eq!(field["value"], "Happy birthday, Ali 🎂");
+        assert_eq!(
+            field["changeMessage"], "%@",
+            "without this iOS shows nothing at all"
+        );
+        // Never the balance: a card that announced every point earned is a card
+        // people mute, and then the messages that matter go with it.
+        assert!(told["storeCard"]["primaryFields"][0]["changeMessage"].is_null());
     }
 
     #[test]

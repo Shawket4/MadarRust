@@ -879,6 +879,53 @@ pub async fn read_object(member: &MemberRow) -> Result<serde_json::Value, String
     serde_json::from_str(&body).map_err(|e| format!("Google sent something unreadable: {e}"))
 }
 
+/// Put a message on the member's card, and notify their phone.
+///
+/// Google's direct equivalent of Apple's field trick, and a much better fit:
+/// arbitrary text, pushed and shown on the card, with no pretending it is a
+/// balance that changed.
+///
+/// `TEXT_AND_NOTIFY` is throttled by Google and meant to be used sparingly — a
+/// birthday and a win-back are exactly what it is for. The response body says
+/// what Google made of it, and that is what goes in the log rather than a
+/// status code.
+pub async fn add_message(member: &MemberRow, body: &str) -> Result<(), AppError> {
+    let Some(issuer) = issuer_id() else {
+        return Err(AppError::ServiceUnavailable(
+            "Google Wallet is not configured".into(),
+        ));
+    };
+    let id = member
+        .google_object_id
+        .clone()
+        .unwrap_or_else(|| object_id(&issuer, member));
+    let token = access_token().await?;
+    let resp = reqwest::Client::new()
+        .post(format!("{WALLET_API}/loyaltyObject/{id}/addMessage"))
+        .bearer_auth(token)
+        .json(&json!({
+            "message": {
+                // Its own id, so a retry replaces the message rather than
+                // stacking a second copy of it on the card.
+                "id": format!("notice-{}", member.id),
+                "header": "",
+                "body": body,
+                "messageType": "TEXT_AND_NOTIFY"
+            }
+        }))
+        .send()
+        .await
+        .map_err(|e| AppError::ServiceUnavailable(format!("Google Wallet message: {e}")))?;
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let detail = first_reason(&resp.text().await.unwrap_or_default());
+    Err(AppError::ServiceUnavailable(format!(
+        "Google refused the message ({status}): {detail}"
+    )))
+}
+
 /// The shop's class as Google holds it — the other half of the picture.
 ///
 /// The object says what one member's card is; the class says what the shop's
