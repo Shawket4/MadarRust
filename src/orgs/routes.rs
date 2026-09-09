@@ -41,6 +41,4 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 web::get().to(qr_handlers::org_loyalty_qr),
             ),
     );
-
-    cfg.service(web::scope("/public/orgs").route("", web::get().to(handlers::list_public_orgs)));
 }

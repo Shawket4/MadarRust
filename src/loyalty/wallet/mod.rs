@@ -307,8 +307,22 @@ pub fn absolute_api_url(path: &str) -> Option<String> {
     if let Some(base) = loyalty_base() {
         return Some(format!("{base}/api{path}"));
     }
+    // The fallback stays, because a pass that cannot self-update is better than
+    // no pass — but it is now LOUD. What this function returns is written into
+    // an issued pass and cannot be changed afterwards: Apple keeps calling the
+    // host in `webServiceURL` and Google keeps fetching images from the host in
+    // the URL it stored. So an unset variable does not degrade a feature, it
+    // permanently commits every pass minted while it was unset to whichever
+    // host `UPLOADS_BASE_URL` happened to name.
     let uploads = std::env::var("UPLOADS_BASE_URL").ok()?;
-    Some(format!("{}{path}", origin_of(&uploads)?))
+    let origin = origin_of(&uploads)?;
+    tracing::error!(
+        falling_back_to = %origin,
+        "PUBLIC_LOYALTY_BASE_URL is not set — every pass issued now will point at \
+         this host FOR EVER, because a pass's update address cannot be changed \
+         after it is issued. Set it before issuing passes."
+    );
+    Some(format!("{origin}{path}"))
 }
 
 /// The org-level lines both wallets print on the back of the card.

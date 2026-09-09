@@ -342,7 +342,12 @@ async fn test_delete_branch(pool: PgPool) {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert!(resp.status().is_success());
+    assert!(
+        resp.status().is_success(),
+        "{}: {}",
+        resp.status(),
+        String::from_utf8_lossy(&test::read_body(resp).await)
+    );
 
     // Verify it is deleted
     grant_permission(&pool, "org_admin", "branches", "read").await;
@@ -352,6 +357,81 @@ async fn test_delete_branch(pool: PgPool) {
         .to_request();
     let resp2 = test::call_service(&app, req2).await;
     assert_eq!(resp2.status(), actix_web::http::StatusCode::NOT_FOUND);
+}
+
+/// Deleting a branch that is still trading is refused, and the refusal names
+/// what is in the way. An open shift is the important case: its Z-report has
+/// not been taken and its float has not been counted, so nothing may close it
+/// on the branch's behalf.
+#[sqlx::test]
+async fn test_delete_branch_refused_while_a_shift_is_open(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    grant_permission(&pool, "org_admin", "branches", "delete").await;
+
+    let branch_id = Uuid::new_v4();
+    sqlx::query!(
+        "INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'Still Trading')",
+        branch_id,
+        org_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let teller_id = Uuid::new_v4();
+    sqlx::query!(
+        "INSERT INTO users (id, org_id, name, pin_hash, role) \
+         VALUES ($1, $2, 'Teller On Shift', 'x', 'teller')",
+        teller_id,
+        org_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // `closed_at IS NULL` — the shift is still running. (The default till is
+    // filled in by a trigger.)
+    sqlx::query("INSERT INTO shifts (branch_id, teller_id) VALUES ($1, $2)")
+        .bind(branch_id)
+        .bind(teller_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let token = generate_org_admin_token(Uuid::new_v4(), org_id);
+    let req = test::TestRequest::delete()
+        .uri(&format!("/branches/{}", branch_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::CONFLICT);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let message = body["error"].as_str().unwrap_or_default().to_string();
+    assert!(
+        message.contains("1 open shift"),
+        "the refusal should name the shift, got: {message}"
+    );
+
+    // And the branch is still there.
+    let alive: bool = sqlx::query_scalar("SELECT deleted_at IS NULL FROM branches WHERE id = $1")
+        .bind(branch_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        alive,
+        "a refused delete must not have soft-deleted the branch"
+    );
 }
 
 #[sqlx::test]

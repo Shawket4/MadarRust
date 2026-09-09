@@ -86,6 +86,12 @@ Notes:
   inherit correct DB-error → HTTP mapping.
 - `migrations/` — `sqlx` migrations, applied on boot. **Never edit an applied
   migration** (checksums; live DBs fail to start).
+- **A table with `deleted_at` expresses uniqueness as a PARTIAL index**
+  (`... WHERE deleted_at IS NULL`), never a plain `UNIQUE`. A plain one keeps a
+  deleted row's name reserved for ever, so deleting something and creating it
+  again — the most ordinary correction there is — fails with a conflict against
+  a row the person cannot see. Five tables had this wrong and three had it
+  right; assume the next one will get it wrong unless someone checks.
 - `tests/`, `api_dumps/`, `scripts/`, `loadtest/`.
 
 ### Module map (`src/<module>/{mod,handlers,routes,tests}.rs`)

@@ -469,12 +469,90 @@ pub async fn delete_branch(
     let existing = fetch_branch(pool.get_ref(), *id).await?;
     require_same_org(&claims, Some(existing.org_id))?;
 
+    // Refuse while anything is still live here.
+    //
+    // Deleting used to be one UPDATE, which left an open shift, unsettled
+    // tickets and seated tables all pointing at a branch that no longer
+    // existed. Nothing then closed the shift — so its Z-report was never taken,
+    // its float was never counted, and the sales inside it belonged to a branch
+    // the reports no longer list.
+    //
+    // Cascading would be worse than refusing. Closing a shift on a branch's
+    // behalf invents a cash count nobody performed, and that is a money
+    // document. So this says what is in the way and leaves it to a person —
+    // and says ALL of it, because being told about the shift, closing it, and
+    // then being told about the tickets is a worse afternoon than being told
+    // once.
+    let blockers = live_at_branch(pool.get_ref(), *id).await?;
+    if !blockers.is_empty() {
+        return Err(AppError::Conflict(format!(
+            "This branch still has {}. Close or clear them first — or switch the \
+             branch off instead, which keeps its history and stops it being used.",
+            crate::branches::handlers::join_with_and(&blockers)
+        )));
+    }
+
     sqlx::query("UPDATE branches SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL")
         .bind(*id)
         .execute(pool.get_ref())
         .await?;
 
     Ok(HttpResponse::NoContent().finish())
+}
+
+/// Everything still live at a branch, phrased for a person.
+///
+/// Counted in one round trip because the answer is a sentence, not a decision
+/// tree: a manager wants to know what is in the way, all of it, once.
+async fn live_at_branch(pool: &PgPool, branch_id: Uuid) -> Result<Vec<String>, AppError> {
+    // No held orders here: that table was dropped when the floor moved to open
+    // tickets, and a parked cart is now a ticket like any other.
+    let row: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+           (SELECT count(*) FROM shifts WHERE branch_id = $1 AND closed_at IS NULL), \
+           (SELECT count(*) FROM open_tickets WHERE branch_id = $1 \
+             AND status NOT IN ('settled','voided')), \
+           (SELECT count(*) FROM branch_tables WHERE branch_id = $1 \
+             AND status <> 'free'), \
+           (SELECT count(*) FROM bookings WHERE branch_id = $1 \
+             AND status IN ('confirmed','seated') AND starts_at > now())",
+    )
+    .bind(branch_id)
+    .fetch_one(pool)
+    .await?;
+
+    let plural = |n: i64, one: &str, many: &str| {
+        if n == 1 {
+            format!("{n} {one}")
+        } else {
+            format!("{n} {many}")
+        }
+    };
+    let mut out = Vec::new();
+    if row.0 > 0 {
+        out.push(plural(row.0, "open shift", "open shifts"));
+    }
+    if row.1 > 0 {
+        out.push(plural(row.1, "unsettled ticket", "unsettled tickets"));
+    }
+    // `dirty` counts: a table nobody has cleared is still this branch's
+    // problem, and deleting the branch takes the instruction to clear it away.
+    if row.2 > 0 {
+        out.push(plural(row.2, "table in use", "tables in use"));
+    }
+    if row.3 > 0 {
+        out.push(plural(row.3, "upcoming booking", "upcoming bookings"));
+    }
+    Ok(out)
+}
+
+/// "a, b and c" — the list reads as a sentence because it is one.
+pub fn join_with_and(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// The full set of selectable IANA timezones — the labels of the `timezone_name`

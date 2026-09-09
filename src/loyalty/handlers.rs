@@ -535,6 +535,20 @@ pub async fn list_members(
     let (org_id, claims) =
         super::settings::scope_org(pool.get_ref(), &req, query.branch_id).await?;
     check_permission(pool.get_ref(), &claims, "loyalty", "read").await?;
+    // `loyalty:read` is granted to TELLERS, because a till needs it to scan a
+    // card — and that is a different act from reading out the whole customer
+    // list, names and phone numbers included, which is what this endpoint is
+    // and what the dashboard turns into a spreadsheet. The till never calls
+    // this one: it calls `lookup`, which answers about the person in front of
+    // it and nobody else.
+    if !matches!(
+        claims.role,
+        UserRole::OrgAdmin | UserRole::SuperAdmin | UserRole::BranchManager
+    ) {
+        return Err(AppError::Forbidden(
+            "Listing members is for managers — scan or look up the customer in front of you".into(),
+        ));
+    }
 
     let scope = match query.branch_id {
         Some(b) => {

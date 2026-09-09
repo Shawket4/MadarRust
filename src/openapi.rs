@@ -118,7 +118,6 @@ paths(
         crate::orgs::handlers::upload_org_logo,
         crate::orgs::handlers::upload_org_card_image,
         crate::orgs::handlers::delete_org,
-        crate::orgs::handlers::list_public_orgs,
         // ── users ───────────────────────────────────────────────────
         crate::users::handlers::list_users,
         crate::users::handlers::get_user,
