@@ -209,11 +209,9 @@ pub const MADAR_LOGO_PATH: &str = "/public/loyalty/brand/logo.png";
 /// Google's default white.
 /// The shop's card template.
 ///
-/// Deliberately carries no `reviewStatus`. It used to carry `UNDER_REVIEW` on
-/// every write, and `ensure_class` sends this body on the update as well as the
-/// create — so any class Google had promoted to approved was demoted again by
-/// the next customer who opened their card. A class can only ever walk forwards
-/// now: `ensure_class` states it once, at creation, and never mentions it again.
+/// Deliberately carries no `reviewStatus`: `ensure_class` sets it on both the
+/// insert and the update, for a reason that only shows up on an approved class
+/// and is written down there.
 pub fn loyalty_class(
     issuer: &str,
     org_id: uuid::Uuid,
@@ -694,12 +692,28 @@ async fn ensure_class(
     let body = loyalty_class(issuer, org_id, brand, settings, locations);
     let id = class_id(issuer, org_id);
     let http = reqwest::Client::new();
-    // `UNDER_REVIEW` is what a class inserted through the API must carry, and
-    // Google promotes it once the issuer is approved. It belongs to the INSERT
-    // alone: repeating it on the update is what kept demoting an approved class
-    // back under review, every time anyone opened their card.
-    let mut insert = body.clone();
-    insert["reviewStatus"] = json!("UNDER_REVIEW");
+    // `UNDER_REVIEW` is what a class written through the API must carry, on the
+    // update as well as the insert — and it is not optional, which cost this
+    // feature a fortnight to learn.
+    //
+    // A PATCH MERGES. Omitting the field does not leave it alone; it leaves
+    // Google's own value in place, and Google then rejects its own value:
+    //
+    //     400 Invalid review status "APPROVED". Use "UNDER_REVIEW" instead.
+    //
+    // `approved` is a status Google grants and an issuer may not send, so an
+    // approved class simply cannot be updated without restating `UNDER_REVIEW`.
+    // I removed it once on the theory that repeating it demoted approved
+    // classes back under review. It does not — the classes that have been sent
+    // it on every write for months are approved today, because an approved
+    // issuer's classes are re-approved automatically. What removing it actually
+    // did was fail every class update with that 400, silently, for every shop:
+    // colours, programme name, logo and branches all frozen at whatever they
+    // were the day the class was created, while the web card and the Apple pass
+    // moved on without it.
+    let mut sent = body.clone();
+    sent["reviewStatus"] = json!("UNDER_REVIEW");
+    let insert = sent.clone();
     let resp = http
         .post(format!("{WALLET_API}/loyaltyClass"))
         .bearer_auth(token)
@@ -761,7 +775,7 @@ async fn ensure_class(
             }
         };
 
-    let mut refused = attempt("update the class", &body, steps).await;
+    let mut refused = attempt("update the class", &sent, steps).await;
 
     // Then again without the branches.
     //
@@ -778,8 +792,8 @@ async fn ensure_class(
     // So the branches are the part we give up, never the shop's identity. And
     // because both attempts are in the transcript, production tells us which it
     // was rather than another round of guessing.
-    if refused.is_some() && body.get("locations").is_some() {
-        let mut without = body.clone();
+    if refused.is_some() && sent.get("locations").is_some() {
+        let mut without = sent.clone();
         if let Some(o) = without.as_object_mut() {
             o.remove("locations");
         }
@@ -1384,9 +1398,14 @@ mod tests {
         // and never again — this body is also what the UPDATE sends, and every
         // update carrying UNDER_REVIEW walked an approved class backwards, on
         // every card view, forever.
+        // The BODY carries none; `ensure_class` puts `UNDER_REVIEW` on both the
+        // insert and the update. Which is not a style choice: a PATCH merges,
+        // so omitting it leaves Google's own `approved` in place and Google
+        // then refuses its own value — "Invalid review status APPROVED. Use
+        // UNDER_REVIEW instead" — and every class update fails silently.
         assert!(
             class["reviewStatus"].is_null(),
-            "an update must not be able to demote an approved class"
+            "the status belongs to the writer, not the body"
         );
         // The shop's branches ride on the shop's template, as well as on each
         // member's object.
