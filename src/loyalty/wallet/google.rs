@@ -1268,7 +1268,7 @@ pub async fn push_balance(pool: &PgPool, member: &MemberRow) -> Result<(), AppEr
         .await
         .unwrap_or_default();
     let headline = super::reward_headline(pool, member.org_id, &settings).await;
-    let copy = super::card_copy(pool, member.org_id).await;
+    let copy = super::card_copy(pool, member.org_id, &settings).await;
     // The whole card, through the same builder the save path uses, and PUT
     // rather than PATCH — for both of the reasons `ensure_object` gives. One
     // writer and one shape: a card that changed on a sale and a card that

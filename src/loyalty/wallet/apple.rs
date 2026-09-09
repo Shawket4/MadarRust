@@ -772,7 +772,7 @@ pub async fn build_pass_for(pool: &PgPool, member: &MemberRow) -> Result<Vec<u8>
         .await?
         .unwrap_or_else(|| LoyaltySettings::defaults(member.org_id, None));
     let locations = super::locations_for_member(pool, member).await?;
-    let copy = super::card_copy(pool, member.org_id).await;
+    let copy = super::card_copy(pool, member.org_id, &settings).await;
     let org = crate::orgs::branding::load(pool, member.org_id).await?;
     let brand = pass_brand(&org);
     let strip = strip_images(&org, &brand.foreground);

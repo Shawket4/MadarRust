@@ -64,6 +64,18 @@ pub fn unit_in_a_sentence(mode: Mode, n: i32) -> Pair {
     }
 }
 
+/// "Anything on the menu", and what it costs.
+///
+/// The shape avoids Arabic's number agreement for the same reason
+/// [`unit_in_a_sentence`] does — see the note there.
+pub fn any_item(mode: Mode, cost: i32) -> Pair {
+    let unit = unit_in_a_sentence(mode, cost);
+    pair(
+        format!("Anything on the menu — {}", unit.en),
+        format!("أي صنف من المنيو — {}", unit.ar),
+    )
+}
+
 /// Every fixed label a card prints.
 pub fn labels() -> Vec<Pair> {
     vec![
@@ -125,6 +137,9 @@ pub fn description(program: &str) -> Pair {
 /// strings file that maps a string to itself is noise in a signed archive.
 pub fn strings_for(settings: &LoyaltySettings, program_ar: Option<&str>) -> Vec<Pair> {
     let mut out = labels();
+    if settings.reward_any_item {
+        out.push(any_item(settings.mode(), settings.default_reward_cost));
+    }
     out.push(balance_label(settings.mode()));
     out.push(how_it_works(settings));
     out.push(description(&settings.program_name));
@@ -186,6 +201,21 @@ mod tests {
         let mut kept = vec![pair("same", "same"), pair("Terms", "الشروط")];
         kept.retain(|p| p.en != p.ar);
         assert_eq!(kept.len(), 1);
+    }
+
+    /// "Collect five, get anything" has to reach the card, or the card
+    /// understates the programme it describes.
+    #[test]
+    fn everything_claimable_is_said_as_everything() {
+        let mut s = LoyaltySettings::defaults(Uuid::nil(), None);
+        s.mode = "visits".into();
+        s.default_reward_cost = 5;
+        s.reward_any_item = true;
+        let p = any_item(s.mode(), s.default_reward_cost);
+        assert_eq!(p.en, "Anything on the menu — 5 stamps");
+        assert!(p.ar.contains("أي صنف"));
+        // And it reaches the pass's Arabic, so a phone set to Arabic reads it.
+        assert!(strings_for(&s, None).iter().any(|q| q.en == p.en));
     }
 
     #[test]

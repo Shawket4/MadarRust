@@ -334,9 +334,16 @@ pub struct CardCopy {
 }
 
 /// Everything the back of the card says about the shop, in one round trip each.
-pub async fn card_copy(pool: &PgPool, org_id: Uuid) -> CardCopy {
+pub async fn card_copy(pool: &PgPool, org_id: Uuid, settings: &LoyaltySettings) -> CardCopy {
     CardCopy {
-        rewards: reward_lines(pool, org_id).await,
+        // One line rather than a catalogue when everything is claimable: the
+        // list would be the entire menu, and keeping it in step with the menu
+        // forever is exactly what this mode exists to avoid.
+        rewards: if settings.reward_any_item {
+            vec![i18n::any_item(settings.mode(), settings.default_reward_cost).en]
+        } else {
+            reward_lines(pool, org_id).await
+        },
         branches: branch_names(pool, org_id).await,
         social: crate::orgs::branding::load(pool, org_id)
             .await
@@ -384,7 +391,14 @@ pub async fn reward_lines(pool: &PgPool, org_id: Uuid) -> Vec<String> {
 ///
 /// Empty when a shop has curated nothing, and the callers then print no reward
 /// row at all — see the note on the fallback below.
-pub async fn reward_headline(pool: &PgPool, org_id: Uuid, _settings: &LoyaltySettings) -> String {
+pub async fn reward_headline(pool: &PgPool, org_id: Uuid, settings: &LoyaltySettings) -> String {
+    // "Collect five, get anything." When the whole menu is claimable the
+    // catalogue stops being the list of what MAY be had — it is only what
+    // happens to be curated — so naming one item off it would understate the
+    // offer, and naming none would hide it. The card said nothing at all.
+    if settings.reward_any_item {
+        return super::wallet::i18n::any_item(settings.mode(), settings.default_reward_cost).en;
+    }
     let cheapest = crate::loyalty::settings::load_effective_rewards_org(pool, org_id)
         .await
         .unwrap_or_default()
@@ -518,7 +532,7 @@ pub async fn links_for(
 ) -> PassLinks {
     let apple_url = apple_link(member);
     // The same lines Apple prints on the back of its pass.
-    let copy = card_copy(pool, member.org_id).await;
+    let copy = card_copy(pool, member.org_id, settings).await;
     let headline = reward_headline(pool, member.org_id, settings).await;
     // Provisioning talks to Google, so it can fail in ways a signup must
     // survive: an unlinked service account, a refused class, a network blip.

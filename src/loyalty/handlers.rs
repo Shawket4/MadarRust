@@ -350,7 +350,7 @@ pub async fn google_refresh(
         .unwrap_or_else(|| LoyaltySettings::defaults(member.org_id, None));
     let brand = crate::orgs::branding::load(pool.get_ref(), member.org_id).await?;
     let locations = wallet::locations_for_member(pool.get_ref(), &member).await?;
-    let copy = wallet::card_copy(pool.get_ref(), member.org_id).await;
+    let copy = wallet::card_copy(pool.get_ref(), member.org_id, &settings).await;
     let headline = wallet::reward_headline(pool.get_ref(), member.org_id, &settings).await;
 
     let mut steps = Vec::new();
