@@ -610,6 +610,7 @@ mod tests {
             pass_updated_at: None,
             joined_branch_id: None,
             enrolled_at: chrono::Utc::now(),
+            marketing_opt_out: false,
         }
     }
 
@@ -722,25 +723,25 @@ mod tests {
         //
         // How far along, in each wallet's largest slot, with the same label.
         assert_eq!(
-            apple["eventTicket"]["secondaryFields"][0]["value"],
+            apple["storeCard"]["secondaryFields"][0]["value"],
             google["loyaltyPoints"]["balance"]["string"]
         );
         // The balance's own label. Apple puts it on the big number and Google
         // on its largest slot; the words must match, or one phone calls them
         // orders while the other calls them points.
         assert_eq!(
-            apple["eventTicket"]["primaryFields"][0]["label"],
+            apple["storeCard"]["primaryFields"][0]["label"],
             google["loyaltyPoints"]["label"]
         );
 
         // And what it is FOR, in the other — the same words on both, or a
         // customer comparing two phones sees two different promises.
         assert_eq!(
-            apple["eventTicket"]["secondaryFields"][1]["value"],
+            apple["storeCard"]["secondaryFields"][1]["value"],
             google["secondaryLoyaltyPoints"]["balance"]["string"]
         );
         assert_eq!(
-            apple["eventTicket"]["secondaryFields"][1]["label"],
+            apple["storeCard"]["secondaryFields"][1]["label"],
             google["secondaryLoyaltyPoints"]["label"]
         );
 
@@ -749,7 +750,7 @@ mod tests {
 
         // And the back of the card is the same list, in the same order, saying
         // the same things — Apple behind it, Google beneath it.
-        let apple_back: Vec<(String, String)> = apple["eventTicket"]["backFields"]
+        let apple_back: Vec<(String, String)> = apple["storeCard"]["backFields"]
             .as_array()
             .unwrap()
             .iter()

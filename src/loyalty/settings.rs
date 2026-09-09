@@ -68,6 +68,28 @@ pub struct LoyaltySettings {
     #[serde(default)]
     pub birthday_message_ar: Option<String>,
 
+    /// Nudge a member who has not been in for a while. Off by default, like
+    /// everything here that speaks to a customer unprompted.
+    ///
+    /// The timing is not a per-shop setting: how long "a while" is, whether it
+    /// repeats, and how stale is too stale are one operational judgement across
+    /// the estate, and they live in the environment
+    /// (`LOYALTY_WINBACK_*`) rather than in a form where a shop could set it to
+    /// a day and burn its own list down.
+    #[serde(default)]
+    pub winback_enabled: bool,
+    /// ONE override, in whichever language the shop writes it, replacing the
+    /// built-in English and Arabic both. `{name}` is substituted; nothing else.
+    ///
+    /// Unset is the better default: the built-ins are written in each language
+    /// rather than translated into one, so a customer reads a sentence that was
+    /// composed for them.
+    #[serde(default)]
+    pub winback_message: Option<String>,
+    /// Points or stamps to arrive with the nudge. `None` is words only.
+    #[serde(default)]
+    pub winback_reward_amount: Option<i32>,
+
     /// Any menu item may be taken as a reward, at `default_reward_cost`.
     ///
     /// Off by default. A curated catalogue is the safer shape — it offers an
@@ -109,6 +131,9 @@ impl LoyaltySettings {
             birthday_reward_amount: None,
             birthday_message: None,
             birthday_message_ar: None,
+            winback_enabled: false,
+            winback_message: None,
+            winback_reward_amount: None,
             reward_any_item: false,
             terms: None,
             terms_ar: None,
@@ -149,6 +174,11 @@ impl LoyaltySettings {
         if self.program_name.trim().is_empty() {
             return Err(AppError::BadRequest("program_name is required".into()));
         }
+        if self.winback_reward_amount.is_some_and(|a| a <= 0) {
+            return Err(AppError::BadRequest(
+                "a win-back reward must be worth more than nothing".into(),
+            ));
+        }
         if self.birthday_reward_amount.is_some_and(|a| a <= 0) {
             return Err(AppError::BadRequest(
                 "a birthday reward must be worth more than nothing".into(),
@@ -175,6 +205,9 @@ struct Row {
     birthday_reward_amount: Option<i32>,
     birthday_message: Option<String>,
     birthday_message_ar: Option<String>,
+    winback_enabled: bool,
+    winback_message: Option<String>,
+    winback_reward_amount: Option<i32>,
     reward_any_item: bool,
     terms: Option<String>,
     terms_ar: Option<String>,
@@ -183,7 +216,8 @@ struct Row {
 const COLS: &str = "org_id, branch_id, enabled, program_name, program_name_ar, mode, \
     earn_piastres_per_point, earn_on_discounted, earn_include_tax, \
     default_reward_cost, require_otp, birthday_enabled, birthday_reward_amount, \
-    birthday_message, birthday_message_ar, reward_any_item, terms, terms_ar";
+    birthday_message, birthday_message_ar, winback_enabled, winback_message, \
+    winback_reward_amount, reward_any_item, terms, terms_ar";
 
 impl From<Row> for LoyaltySettings {
     fn from(r: Row) -> Self {
@@ -203,6 +237,9 @@ impl From<Row> for LoyaltySettings {
             birthday_reward_amount: r.birthday_reward_amount,
             birthday_message: r.birthday_message,
             birthday_message_ar: r.birthday_message_ar,
+            winback_enabled: r.winback_enabled,
+            winback_message: r.winback_message,
+            winback_reward_amount: r.winback_reward_amount,
             reward_any_item: r.reward_any_item,
             terms: r.terms,
             terms_ar: r.terms_ar,
@@ -345,8 +382,9 @@ pub async fn put_settings(
         "INSERT INTO loyalty_settings (org_id, branch_id, enabled, program_name, program_name_ar, \
             mode, earn_piastres_per_point, earn_on_discounted, earn_include_tax, default_reward_cost, \
             require_otp, birthday_enabled, birthday_reward_amount, birthday_message, \
-            birthday_message_ar, reward_any_item, terms, terms_ar) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) \
+            birthday_message_ar, winback_enabled, winback_message, winback_reward_amount, \
+            reward_any_item, terms, terms_ar) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) \
          ON CONFLICT (org_id, COALESCE(branch_id, '00000000-0000-0000-0000-000000000000'::uuid)) \
          DO UPDATE SET enabled = EXCLUDED.enabled, program_name = EXCLUDED.program_name, \
             program_name_ar = EXCLUDED.program_name_ar, mode = EXCLUDED.mode, \
@@ -359,6 +397,9 @@ pub async fn put_settings(
             birthday_reward_amount = EXCLUDED.birthday_reward_amount, \
             birthday_message = EXCLUDED.birthday_message, \
             birthday_message_ar = EXCLUDED.birthday_message_ar, \
+            winback_enabled = EXCLUDED.winback_enabled, \
+            winback_message = EXCLUDED.winback_message, \
+            winback_reward_amount = EXCLUDED.winback_reward_amount, \
             reward_any_item = EXCLUDED.reward_any_item, terms = EXCLUDED.terms, \
             terms_ar = EXCLUDED.terms_ar, updated_at = now() \
          RETURNING {COLS}"
@@ -378,6 +419,9 @@ pub async fn put_settings(
     .bind(incoming.birthday_reward_amount)
     .bind(&incoming.birthday_message)
     .bind(&incoming.birthday_message_ar)
+    .bind(incoming.winback_enabled)
+    .bind(&incoming.winback_message)
+    .bind(incoming.winback_reward_amount)
     .bind(incoming.reward_any_item)
     .bind(&incoming.terms)
     .bind(&incoming.terms_ar)

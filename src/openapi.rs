@@ -334,6 +334,7 @@ paths(
         crate::loyalty::public::join_info,
         crate::loyalty::public::join,
         crate::loyalty::public::card,
+        crate::loyalty::public::set_preferences,
         crate::loyalty::public::apple_pass,
         crate::loyalty::public::card_qr,
         crate::qr_card::handlers::branch_loyalty_qr,

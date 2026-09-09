@@ -494,6 +494,65 @@ pub struct CardView {
     pub passes: PassLinks,
     /// Whose card this is, and how it should look.
     pub brand: CardBrand,
+    /// They have asked this shop to stop sending them things.
+    pub marketing_opt_out: bool,
+}
+
+/// What a customer can change about their own card, without an account.
+///
+/// The token in the URL is the credential — the same one their pass carries and
+/// the till scans. That is deliberate: a person who has just been messaged must
+/// be able to stop the messages by tapping the link in the message, not by
+/// remembering a password they never made.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CardPreferences {
+    /// Stop sending marketing. Covers the birthday greeting as well as the
+    /// win-back: someone asking us to stop is asking the SHOP to stop, not to
+    /// be excluded from one campaign.
+    #[serde(default)]
+    pub marketing_opt_out: Option<bool>,
+    /// The language they are reading this page in.
+    ///
+    /// Sent by the page itself rather than chosen in a form. We stored whatever
+    /// their phone said at signup, and a phone that has since changed language
+    /// is a customer still being written to in the wrong one. Opening their own
+    /// card is the moment we can tell.
+    #[serde(default)]
+    pub locale: Option<String>,
+}
+
+#[utoipa::path(post, path = "/public/loyalty/card/{token}/preferences", tag = "loyalty-public",
+    operation_id = "set_loyalty_card_preferences",
+    params(("token" = String, Path, description = "Member token from the pass barcode")),
+    request_body = CardPreferences,
+    responses((status = 204, description = "Saved"), AppErrorResponse))]
+pub async fn set_preferences(
+    pool: web::Data<PgPool>,
+    token: web::Path<String>,
+    body: web::Json<CardPreferences>,
+) -> Result<HttpResponse, AppError> {
+    let member = model::find_by_token(pool.get_ref(), token.as_str())
+        .await?
+        .ok_or_else(|| AppError::NotFound("Card not found".into()))?;
+    let locale = match body.locale.as_deref() {
+        Some(l) if l.starts_with("ar") => Some("ar"),
+        Some(_) => Some("en"),
+        None => None,
+    };
+    // COALESCE so a page that only reports its language cannot silently switch
+    // marketing back on for someone who turned it off.
+    sqlx::query(
+        "UPDATE loyalty_customers \
+            SET marketing_opt_out = COALESCE($2, marketing_opt_out), \
+                locale = COALESCE($3, locale) \
+          WHERE id = $1",
+    )
+    .bind(member.id)
+    .bind(body.marketing_opt_out)
+    .bind(locale)
+    .execute(pool.get_ref())
+    .await?;
+    Ok(HttpResponse::NoContent().finish())
 }
 
 #[utoipa::path(get, path = "/public/loyalty/card/{token}", tag = "loyalty-public", operation_id = "loyalty_card",
@@ -519,6 +578,7 @@ pub async fn card(
     let brand = card_brand(&org, &settings);
     let locations = wallet::locations_for_member(pool.get_ref(), &member).await?;
     let passes = wallet::links_for(pool.get_ref(), &member, &settings, &org, &locations).await;
+    let marketing_opt_out = member.marketing_opt_out;
     let view = member.view(mode, target);
     Ok(HttpResponse::Ok().json(CardView {
         name: view.name,
@@ -530,6 +590,7 @@ pub async fn card(
         points_to_next_reward: view.points_to_next_reward,
         can_redeem: view.can_redeem,
         brand,
+        marketing_opt_out,
         member_token: token.into_inner(),
         rewards: catalogue
             .into_iter()

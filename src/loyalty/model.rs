@@ -79,11 +79,14 @@ pub struct MemberRow {
     /// devices ask "has anything changed since?" against.
     pub pass_updated_at: Option<chrono::DateTime<chrono::Utc>>,
     pub enrolled_at: chrono::DateTime<chrono::Utc>,
+    /// They have asked this shop to stop sending them things. One flag for
+    /// every unprompted message, not one per campaign.
+    pub marketing_opt_out: bool,
 }
 
 pub const MEMBER_COLS: &str = "id, org_id, name, phone, member_token, points_balance, \
     visits_balance, lifetime_points, lifetime_visits, locale, apple_serial, apple_auth_token, \
-    google_object_id, pass_updated_at, joined_branch_id, enrolled_at";
+    google_object_id, pass_updated_at, joined_branch_id, enrolled_at, marketing_opt_out";
 
 impl MemberRow {
     /// The balance that counts under `mode`.
@@ -409,6 +412,7 @@ mod overflow_tests {
             pass_updated_at: None,
             joined_branch_id: None,
             enrolled_at: chrono::Utc::now(),
+            marketing_opt_out: false,
         };
         let v = m.view(Mode::Visits, 5);
         assert_eq!(v.balance, 6);

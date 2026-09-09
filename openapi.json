@@ -25739,6 +25739,100 @@
         }
       }
     },
+    "/public/loyalty/card/{token}/preferences": {
+      "post": {
+        "tags": [
+          "loyalty-public"
+        ],
+        "operationId": "set_loyalty_card_preferences",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "description": "Member token from the pass barcode",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CardPreferences"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Saved"
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/public/loyalty/card/{token}/qr.png": {
       "get": {
         "tags": [
@@ -44882,6 +44976,26 @@
           }
         }
       },
+      "CardPreferences": {
+        "type": "object",
+        "description": "What a customer can change about their own card, without an account.\n\nThe token in the URL is the credential — the same one their pass carries and\nthe till scans. That is deliberate: a person who has just been messaged must\nbe able to stop the messages by tapping the link in the message, not by\nremembering a password they never made.",
+        "properties": {
+          "locale": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The language they are reading this page in.\n\nSent by the page itself rather than chosen in a form. We stored whatever\ntheir phone said at signup, and a phone that has since changed language\nis a customer still being written to in the wrong one. Opening their own\ncard is the moment we can tell."
+          },
+          "marketing_opt_out": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Stop sending marketing. Covers the birthday greeting as well as the\nwin-back: someone asking us to stop is asking the SHOP to stop, not to\nbe excluded from one campaign."
+          }
+        }
+      },
       "CardView": {
         "type": "object",
         "description": "The member's own card page — what they see when they open the link again.\n\nThe token in the path is the member's secret, which is why this returns only\nwhat the pass already shows and never the phone number in full.",
@@ -44897,7 +45011,8 @@
           "member_token",
           "rewards",
           "passes",
-          "brand"
+          "brand",
+          "marketing_opt_out"
         ],
         "properties": {
           "balance": {
@@ -44911,6 +45026,10 @@
           },
           "can_redeem": {
             "type": "boolean"
+          },
+          "marketing_opt_out": {
+            "type": "boolean",
+            "description": "They have asked this shop to stop sending them things."
           },
           "member_token": {
             "type": "string"
@@ -51470,6 +51589,25 @@
               "string",
               "null"
             ]
+          },
+          "winback_enabled": {
+            "type": "boolean",
+            "description": "Nudge a member who has not been in for a while. Off by default, like\neverything here that speaks to a customer unprompted.\n\nThe timing is not a per-shop setting: how long \"a while\" is, whether it\nrepeats, and how stale is too stale are one operational judgement across\nthe estate, and they live in the environment\n(`LOYALTY_WINBACK_*`) rather than in a form where a shop could set it to\na day and burn its own list down."
+          },
+          "winback_message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "ONE override, in whichever language the shop writes it, replacing the\nbuilt-in English and Arabic both. `{name}` is substituted; nothing else.\n\nUnset is the better default: the built-ins are written in each language\nrather than translated into one, so a customer reads a sentence that was\ncomposed for them."
+          },
+          "winback_reward_amount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Points or stamps to arrive with the nudge. `None` is words only."
           }
         }
       },

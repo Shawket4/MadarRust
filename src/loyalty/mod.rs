@@ -27,6 +27,7 @@ pub mod redeem;
 pub mod routes;
 pub mod settings;
 pub mod wallet;
+pub mod winback;
 
 #[cfg(test)]
 mod tests;
