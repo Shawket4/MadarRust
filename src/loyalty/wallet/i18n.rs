@@ -64,6 +64,16 @@ pub fn unit_in_a_sentence(mode: Mode, n: i32) -> Pair {
     }
 }
 
+/// "Any item" — short enough for the face of a card.
+///
+/// The face has two slots and they are narrow. The full sentence with the
+/// price in it overflowed on Android, so the face says the short thing and the
+/// details list below carries [`any_item`] in full. A customer reading a card
+/// wants to know WHAT they get; how much it costs is on the row underneath.
+pub fn any_item_short() -> Pair {
+    pair("Any item", "أي صنف")
+}
+
 /// "Anything on the menu", and what it costs.
 ///
 /// The shape avoids Arabic's number agreement for the same reason
@@ -139,6 +149,7 @@ pub fn strings_for(settings: &LoyaltySettings, program_ar: Option<&str>) -> Vec<
     let mut out = labels();
     if settings.reward_any_item {
         out.push(any_item(settings.mode(), settings.default_reward_cost));
+        out.push(any_item_short());
     }
     out.push(balance_label(settings.mode()));
     out.push(how_it_works(settings));
@@ -159,6 +170,23 @@ pub fn strings_for(settings: &LoyaltySettings, program_ar: Option<&str>) -> Vec<
     ));
     out.retain(|p| p.en != p.ar && !p.en.is_empty());
     out
+}
+
+/// The same strings, mapped to themselves.
+///
+/// A `.pkpass` with one `.lproj` folder speaks one language, whatever the text
+/// inside it says — iOS reads that folder as THE localisation and hands it to
+/// every device. Shipping an English file that maps each key to itself is what
+/// makes English a language the pass has, rather than merely the language its
+/// keys are written in, so an English phone gets English.
+pub fn identity(pairs: &[Pair]) -> Vec<Pair> {
+    pairs
+        .iter()
+        .map(|p| Pair {
+            en: p.en.clone(),
+            ar: p.en.clone(),
+        })
+        .collect()
 }
 
 /// The pairs as an Apple `.strings` file.

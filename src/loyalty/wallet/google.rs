@@ -396,7 +396,15 @@ pub fn loyalty_object(
         // details row — it renders them as buttons and they open in the app the
         // shop actually wants them opened in.
         "linksModuleData": {
-            "uris": copy
+            "uris": super::card_link(member)
+                .map(|url| json!({
+                    "kind": "walletobjects#uri",
+                    "uri": url,
+                    "description": "Your card online",
+                    "id": "mycard"
+                }))
+                .into_iter()
+                .chain(copy
                 .social
                 .iter()
                 .map(|l| json!({
@@ -404,7 +412,7 @@ pub fn loyalty_object(
                     "uri": l.url,
                     "description": l.label,
                     "id": l.key
-                }))
+                })))
                 .collect::<Vec<_>>()
         },
         "textModulesData": super::back_of_card(member, settings, copy)

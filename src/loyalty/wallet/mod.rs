@@ -397,7 +397,10 @@ pub async fn reward_headline(pool: &PgPool, org_id: Uuid, settings: &LoyaltySett
     // happens to be curated — so naming one item off it would understate the
     // offer, and naming none would hide it. The card said nothing at all.
     if settings.reward_any_item {
-        return super::wallet::i18n::any_item(settings.mode(), settings.default_reward_cost).en;
+        // The SHORT form: this lands in a narrow slot on the face of the card,
+        // and the sentence with the price in it overflowed there on Android.
+        // The full line is in the details list — see `card_copy`.
+        return i18n::any_item_short().en;
     }
     let cheapest = crate::loyalty::settings::load_effective_rewards_org(pool, org_id)
         .await
@@ -414,6 +417,19 @@ pub async fn reward_headline(pool: &PgPool, org_id: Uuid, settings: &LoyaltySett
         // row.
         None => String::new(),
     }
+}
+
+/// The customer's own page, when there is a public base to build one on.
+///
+/// The same address the win-back message uses, so a member who follows either
+/// arrives at the same place.
+pub fn card_link(member: &MemberRow) -> Option<String> {
+    let base = std::env::var("PUBLIC_LOYALTY_BASE_URL").ok()?;
+    Some(format!(
+        "{}/card/{}",
+        base.trim_end_matches('/'),
+        member.member_token
+    ))
 }
 
 /// One line on the back of the card: a heading and what it says.
@@ -493,6 +509,18 @@ pub fn back_of_card(
             value,
         });
     }
+    // Where the rest of it lives: their orders, their language, and the switch
+    // that stops us messaging them. A wallet card is a barcode and a balance;
+    // everything else a member might want is on a page, and until now nothing
+    // on the card said the page existed.
+    if let Some(link) = card_link(member) {
+        out.push(BackLine {
+            key: "mycard",
+            label: "Your card online".into(),
+            value: link,
+        });
+    }
+
     if let Some(terms) = settings.terms.as_deref().filter(|t| !t.trim().is_empty()) {
         out.push(BackLine {
             key: "terms",

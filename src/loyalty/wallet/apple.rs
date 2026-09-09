@@ -478,7 +478,7 @@ pub fn pass_json(
         let anchors = copy
             .social
             .iter()
-            .map(|l| format!("<a href='{}'>{}</a>", l.url, l.label))
+            .map(|l| format!(r#"<a href="{}">{}</a>"#, l.url, l.label))
             .collect::<Vec<_>>()
             .join("   ");
         let plain = copy
@@ -783,11 +783,22 @@ pub async fn build_pass_for(pool: &PgPool, member: &MemberRow) -> Result<Vec<u8>
     // the pass with no explanation at all.
     let mut images = brand.images.clone();
     images.extend(strip);
-    // The Arabic, as a file inside the pass rather than a decision we made for
-    // them. iOS looks every string up here before drawing it, so a phone set to
-    // Arabic reads an Arabic card and everyone else reads exactly what they
-    // read before — see `wallet::i18n`.
+    // BOTH languages, as files inside the pass — and the English one is not
+    // redundant.
+    //
+    // A `.pkpass` carrying a single `.lproj` is a pass that speaks one language,
+    // and iOS gives it to everyone: an English phone found only `ar.lproj`,
+    // took it as the pass's localisation, and drew an Arabic card for someone
+    // who reads English. The English file maps every key to itself, which looks
+    // like a no-op and is the thing that makes English a language the pass HAS
+    // rather than the text it happens to contain.
+    //
+    // See `wallet::i18n` for why the English text is the key.
     let pairs = super::i18n::strings_for(&settings, settings.program_name_ar.as_deref());
+    images.push((
+        "en.lproj/pass.strings".to_string(),
+        super::i18n::strings_file(&super::i18n::identity(&pairs)).into_bytes(),
+    ));
     images.push((
         "ar.lproj/pass.strings".to_string(),
         super::i18n::strings_file(&pairs).into_bytes(),
@@ -1197,6 +1208,33 @@ pub(crate) mod tests {
         assert!(at(10) < at(text_end + 20), "it lightens across the fade");
         assert!(at(text_end + 20) < at(fade_end + 5), "and keeps lightening");
         assert_eq!(at(399), 255, "the far side is the photograph, untouched");
+    }
+
+    /// A pass with ONE `.lproj` speaks one language to everybody.
+    ///
+    /// iOS reads a single localisation folder as THE localisation, so an
+    /// English phone that found only `ar.lproj` drew an Arabic card for someone
+    /// who reads English. The English file maps each key to itself, which looks
+    /// like a no-op and is exactly what makes English a language the pass has.
+    #[test]
+    fn a_pass_carries_both_languages_or_it_carries_one() {
+        let mut s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
+        s.default_reward_cost = 5;
+        let pairs = crate::loyalty::wallet::i18n::strings_for(&s, None);
+        assert!(!pairs.is_empty());
+
+        let english = crate::loyalty::wallet::i18n::identity(&pairs);
+        assert_eq!(english.len(), pairs.len(), "every key, in both files");
+        assert!(
+            english.iter().all(|p| p.en == p.ar),
+            "the English file says what the key says"
+        );
+        let file = crate::loyalty::wallet::i18n::strings_file(&english);
+        assert!(file.contains(r#""How it works" = "How it works";"#));
+
+        // And the Arabic file genuinely differs, or there was no point.
+        let arabic = crate::loyalty::wallet::i18n::strings_file(&pairs);
+        assert!(arabic.contains("طريقة الاستخدام"));
     }
 
     /// Apple cannot be sent a message, so a message has to be a field.
