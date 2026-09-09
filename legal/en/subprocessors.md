@@ -1,7 +1,7 @@
 ---
 title: Sub-processors
-version: 1.3
-effective: 2026-09-09
+version: 1.4
+effective: 2026-09-10
 ---
 
 # Sub-processors
@@ -13,10 +13,10 @@ notified at least **30 days** before a new one is added.
 |---|---|---|---|
 | Hostinger | Application and database hosting | All platform data | European Union |
 | Google Cloud Translation | Translating menu item names | **Menu item names only** — no customer data | Outside Egypt |
-| WhatsApp / Meta | Delivering one-time codes, order updates and birthday greetings | Customer phone number, message text | Outside Egypt |
+| WhatsApp / Meta | Delivering one-time codes, order updates, and the loyalty programme's birthday and "we've missed you" messages where a customer has no wallet card to reach | Customer phone number, message text | Outside Egypt |
 | Google (Gemini) | Answering managers' plain-language questions about their own business | The manager's question and aggregated business figures — **no customer data**; staff names are replaced with codes before sending | Outside Egypt |
-| Apple | Delivering loyalty-card updates to a customer's iPhone | A device notification token and an **empty** push — no name, number or balance. The card file itself is built and signed by us and never passes through Apple | Outside Egypt |
-| Google Wallet | Holding a customer's loyalty card, **only if that customer chooses to add one** | Customer name, membership code, current balance, and the restaurant's branch coordinates | Outside Egypt |
+| Apple | Delivering loyalty-card updates to a customer's iPhone | A device notification token and an **empty** push — no name, number, balance or message text. The card file itself, including any message written onto it, is built and signed by us and never passes through Apple | Outside Egypt |
+| Google Wallet | Holding a customer's loyalty card, **only if that customer chooses to add one** | Customer name, membership code, current balance, the restaurant's branch coordinates, and the **text of any message the restaurant puts on the card** | Outside Egypt |
 
 ### Current configuration (as of 3 September 2026)
 
@@ -81,6 +81,17 @@ what they disclose, and a customer who cares should be able to choose knowingly.
 - **Google** does receive the card, because Google Wallet stores it server-side. The
   customer's name, membership code, balance and the branch coordinates are sent when the
   card is added and again on each balance change.
+- **A message put on the card is a further disclosure, and only for Google.** The loyalty
+  programme delivers a birthday greeting or a "we've missed you" through the card itself.
+  Apple has no way to send text to a pass — a notification is a *field* whose value changed
+  — so the words are written onto the card on our servers and the push stays empty; Apple
+  never sees them. Google's card is held by Google, so the words are sent to Google's Wallet
+  API to be put on it. There is no way to put a message on a Google card without sending it
+  to Google.
+- **Only Apple reports delivery.** A device fetching the updated pass is the one delivery
+  signal either wallet gives us. Where a card was reached on Apple and no device has come
+  back after about 8 hours, the message is sent on WhatsApp instead; a card saved only in
+  Google Wallet gets no such fallback, because Google reports nothing back.
 - **Neither receives a customer's location, and neither do we.** A card that surfaces near a
   branch does so because the branch coordinates travel *to* the phone and the phone does the
   comparison locally.

@@ -1,7 +1,7 @@
 ---
 title: Privacy Policy
-version: 1.3
-effective: 2026-09-09
+version: 1.4
+effective: 2026-09-10
 ---
 
 # Privacy Policy
@@ -62,20 +62,66 @@ to be verified with a one-time WhatsApp code, the same way ordering does.
 | Points or stamps, and lifetime totals | to work out what you have earned |
 | Each earning and each reward, with the order it belonged to | so a balance can be explained, checked and corrected |
 | The branch whose code you scanned | reporting for the restaurant |
+| The language you read in — English or Arabic | so the restaurant writes to you in the language you read. Your card page reports whichever your browser is set to, and we store it against the membership |
 | Your birthday — the **day and month only** | to wish you a happy birthday, where the restaurant does that |
 
 **We do not ask for the year you were born.** A birthday greeting needs to know *when*,
 not how old you are — and a full date of birth is an identity credential, the thing a bank
 asks for to prove who you are. The field is optional, it appears only where the restaurant
 runs birthday rewards, and where they do not it is not shown and nothing is stored. On the
-day, the restaurant's programme sends you a WhatsApp greeting and, if they have set one,
-adds a reward to your card.
+day, the restaurant's programme sends you a greeting and, if they have set one, adds a
+reward to your card. How that message reaches you, and how to stop it, is set out below.
 
 **A loyalty membership is, by design, a record of how often you visit and what you spend,
 linked to your name and phone number.** That is what makes rewards possible, and it is the
 one place in Madar where a customer's purchases are deliberately connected over time. It is
 the restaurant's record. It is not shared with other restaurants on Madar, it is not sold,
 and it is not used for advertising. You can leave at any time — see section 9.
+
+#### Your card page
+
+The membership code your barcode carries is also the address of your own card page. Opening
+it shows your balance, the rewards on offer, the buttons that put the card in a wallet — and
+**your past orders at that restaurant: the date, the branch, the total, and the items on
+each one.**
+
+**The link is the only credential.** There is no password and no login, deliberately:
+someone who has just been sent a message has to be able to act on it by tapping it, not by
+remembering a password they never made. The consequence is just as plain, and we would
+rather state it than dress it up — **anyone holding that link, or a clear photograph of your
+barcode, can open the page and read that history.** It is the trade a paper stamp card
+already makes, with more written on it. Keep the link the way you would keep the card. If
+you would rather the history were not reachable at all, ask the restaurant to delete the
+membership; see section 9.
+
+#### Messages from the restaurant
+
+Where the restaurant switches them on, the programme sends two kinds of message and no
+others:
+
+- **A birthday greeting**, on the day, where you gave a day and month.
+- **"We've missed you"**, when you have not been in for **7 days**, and once more at **14**.
+  After **60 days** it stops for good — a message from a shop you have forgotten is a list
+  being worked through, not a greeting. Two per absence, never a third.
+
+Either can add points or stamps to your balance, where the restaurant has set an amount.
+That addition goes through the same ledger as every other movement, so it appears in your
+history with a reason rather than as a balance that changed by itself.
+
+"Not been in" means the later of your last order and your last points movement, as they were
+attributed to your membership. A visit nobody attached to your card — a walk-in paid in cash,
+with no card and no number — is invisible to this, and always will be.
+
+These are the only messages the programme sends unasked. An order confirmation and a
+one-time code are not marketing; they are how an order works.
+
+#### Stopping them
+
+Every one of these messages carries a link to your card page, and that page carries the
+switch. One switch stops both kinds at once: a birthday greeting and a "we've missed you"
+are the same restaurant talking to you, and asking one to stop is asking the restaurant to
+stop. It takes effect immediately and needs no account, no reply and no reason. It does not
+touch the card — your balance, your barcode and your rewards carry on exactly as before.
 
 ### Madar accounts (restaurant staff and managers)
 
@@ -94,7 +140,7 @@ numbers** — only which method was used and the amount.
   surfacing near a branch — is decided by your own phone and sends us nothing.
 - No selling or renting of personal data.
 - No storage of card numbers.
-- **No customer data is sent to any AI service.** See section 6.
+- **No customer data is sent to any AI service.** See section 5.
 
 ## 4. Who we share data with
 
@@ -161,6 +207,30 @@ your balance changes. If you would rather Google did not hold that, use the web 
 Apple Wallet — the programme works identically either way. Google is listed under
 **[Sub-processors](/subprocessors.html)**.
 
+**Messages sent through the card.** A greeting or a "we've missed you" goes to your wallet
+card where you have one, and to WhatsApp only where you do not. The two wallets do this
+differently, and the difference is the same one as above.
+
+*Apple.* There is no way to send text to a pass. iOS raises a notification when a **field on
+the card** changes, so the message has to be a field: we write it onto your card here, send
+the same **empty** push as for a balance change, and your phone comes back to us for the card
+and shows the new line. **The words themselves never pass through Apple.** They are printed
+on the card and stay there until the next message replaces them. Whether you have switched
+notifications off for that particular pass is between you and your phone — Apple does not
+tell us, which is one reason for the fallback below.
+
+*Google.* Your card lives on Google's servers, so a message can only get onto it by being
+sent there. **The text of the message goes to Google's Wallet API**, alongside the name and
+balance Google already holds. There is no version of this that keeps the words from Google.
+If you would rather Google did not receive them, use the web card or Apple Wallet.
+
+*The WhatsApp fallback.* When a phone comes back for the updated pass, we know the message
+landed — that fetch is the only delivery signal either wallet gives us, and only Apple gives
+it. If no phone has come back after about **8 hours**, we send the message on WhatsApp
+instead, so a card sitting muted in a drawer does not silently swallow it. A card saved in
+Google Wallet gets no fallback at all, because Google reports nothing back and the only
+alternatives would be messaging you twice or never.
+
 **On the card appearing when you are near the shop.** The card carries the coordinates of
 the restaurant's branches, and your phone compares them against where it is. **That
 comparison happens on your phone. Your location is never sent to us. We do not receive it,
@@ -191,6 +261,10 @@ the card stops working. The orders themselves stay in the restaurant's accountin
 the period in the retention schedule. Note that **removing the pass from your phone stops
 the card being shown but does not, by itself, delete the membership** — ask the restaurant
 for that.
+
+**To stop the messages without leaving**, use the switch on your card page — see section 2.
+That is a preference and not a deletion: the membership, the balance and the card go on
+working exactly as before.
 
 To delete a Madar account, see **[Delete your account](/delete-account.html)**.
 

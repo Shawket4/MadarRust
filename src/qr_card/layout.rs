@@ -9,9 +9,21 @@
 //! embedded verbatim — never reconstructed in code. Each asset is parsed for its
 //! own `viewBox`, then scaled-to-fit and centred on its target point, so dropping
 //! in a redrawn asset of any dimensions just works.
+//!
+//! A shop on the branding tier gets its own colours and its own mark in those
+//! same slots, supplied as a resolved [`super::brand::CardBrand`]. Nothing here
+//! decides whether that is allowed or whether those colours are safe — by the
+//! time a `CardBrand` exists both questions have been answered — so the whole
+//! difference between the two cards is which strings get written and whether the
+//! mark slot holds a vector asset or a raster one. With no `CardBrand` the
+//! functions below emit precisely the bytes they emitted before shops could be
+//! branded at all, which is a property the tests assert rather than hope for.
 
 use std::fmt::Write as _;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+
+use super::brand::CardLogo;
 use super::render::Matrix;
 use super::{PAPER, QrCardError, QrCardOptions, TEAL, TEAL_LIGHT};
 
@@ -27,12 +39,15 @@ const QR_SIZE: f32 = 70.0;
 const QR_TOP: f32 = 24.0;
 const QR_X: f32 = (TRIM_W - QR_SIZE) / 2.0; // 17.5
 const QR_CX: f32 = TRIM_W / 2.0; // 52.5
-const QR_CY: f32 = QR_TOP + QR_SIZE / 2.0; // 57.0
+const QR_CY: f32 = QR_TOP + QR_SIZE / 2.0; // 59.0
 const QUIET: u32 = 4; // modules of quiet zone, drawn in cream
 
 const PLAQUE_SIDE: f32 = 21.0;
 const PLAQUE_RADIUS: f32 = 4.5;
-const MARK_SIZE: f32 = 15.0; // ≤ 22% of QR width (15.4 mm); ≥3 mm cream clear space each side
+/// The mark slot, square. `≤ 22%` of QR width (15.4 mm); `≥3` mm cream clear
+/// space each side. `brand::MIN_LOGO_PX` is derived from this, so a change here
+/// changes which uploads are printable.
+pub(super) const MARK_SIZE: f32 = 15.0;
 
 // "madar" wordmark asset, centred in the space below the QR.
 const LABEL_CENTER_Y: f32 = 112.0;
@@ -43,6 +58,28 @@ const LABEL_MAX_H: f32 = 15.0;
 const CAPTION_BASELINE: f32 = 128.0;
 const CAPTION_SIZE: f32 = 4.0;
 const CAPTION_OPACITY: f32 = 0.72;
+
+// ── branded footer ──────────────────────────────────────────────────────────
+// A shop's name is typeset where Madar's wordmark sits, because there is no
+// asset to embed for it. SVG text does not wrap, so the size is chosen to make
+// the name fit rather than letting a long one run off the card: Manrope's
+// average advance is close enough to 0.58 em for that, and the estimate only
+// has to be good enough to pick between a handful of sizes. Past the point
+// where even the smallest size fits, the name is cut — an elided name is a
+// card, an overflowing one is a reprint.
+const NAME_MAX_W: f32 = 80.0;
+const NAME_SIZE_MAX: f32 = 8.0;
+const NAME_SIZE_MIN: f32 = 4.0;
+const NAME_AVG_ADVANCE: f32 = 0.58;
+const NAME_MAX_CHARS: usize = 34;
+
+// Madar's attribution on a branded card. It stays on every card either way —
+// what changes is that it stops being the lockup and becomes a line of type,
+// low in the frame and under the caption, where it credits without competing.
+const POWERED_TEXT: &str = "Powered by Madar";
+const POWERED_BASELINE: f32 = 137.0;
+const POWERED_SIZE: f32 = 3.2;
+const POWERED_OPACITY: f32 = 0.6;
 
 /// The Madar mark — embedded verbatim, the single source of truth.
 const MARK_SVG: &str = include_str!("../../assets/madar-mark.svg");
@@ -55,6 +92,23 @@ pub fn build_card_svg(m: &Matrix, opts: &QrCardOptions) -> Result<String, QrCard
     let canvas_w = TRIM_W + 2.0 * b;
     let canvas_h = TRIM_H + 2.0 * b;
 
+    // Madar's tokens are not a default that a brand overrides piecemeal — they
+    // are what these three names resolve to when there is no brand at all, and
+    // every write below goes through them so the two paths cannot diverge by
+    // one forgotten literal.
+    let brand = opts.brand.as_ref();
+    let ground = brand.map_or(PAPER, |br| br.ground.as_str());
+    let ink = brand.map_or(TEAL, |br| br.ink.as_str());
+    let frame = brand.map_or(TEAL, |br| br.accent.as_str());
+    // The Madar mark ships hardcoded in the two teals, and it is still the
+    // fallback for a shop whose logo is missing or unprintable — so on a
+    // branded card those two literals have to become the card's own pair.
+    // Unbranded they map to themselves, which is what keeps the asset verbatim.
+    let (mark_primary, mark_secondary) = match brand {
+        Some(br) => (br.ink.as_str(), br.accent.as_str()),
+        None => (TEAL, TEAL_LIGHT),
+    };
+
     let mut s = String::with_capacity(16 * 1024);
     let _ = write!(
         s,
@@ -64,9 +118,12 @@ pub fn build_card_svg(m: &Matrix, opts: &QrCardOptions) -> Result<String, QrCard
     );
 
     // Cream bleed background across the whole canvas (also the QR quiet zone).
+    // The quiet zone being the card ground is why a brand's two colours have to
+    // be ordered dark-on-light before they get here: there is no separate field
+    // behind the QR that could be made safe on its own.
     let _ = write!(
         s,
-        r#"<rect x="0" y="0" width="{cw}" height="{ch}" fill="{PAPER}"/>"#,
+        r#"<rect x="0" y="0" width="{cw}" height="{ch}" fill="{ground}"/>"#,
         cw = f(canvas_w),
         ch = f(canvas_h),
     );
@@ -74,26 +131,38 @@ pub fn build_card_svg(m: &Matrix, opts: &QrCardOptions) -> Result<String, QrCard
     // Trim-relative content, shifted into the bleed.
     let _ = write!(s, r#"<g transform="translate({b},{b})">"#, b = f(b));
 
-    push_frame(&mut s);
-    push_qr_modules(&mut s, m);
-    push_centre(&mut s)?;
-    push_label(&mut s)?;
-    push_caption(&mut s, opts.caption.as_deref());
+    push_frame(&mut s, frame);
+    push_qr_modules(&mut s, m, ink);
+    push_centre(
+        &mut s,
+        ground,
+        mark_primary,
+        mark_secondary,
+        brand.and_then(|br| br.logo.as_ref()),
+    )?;
+    match brand {
+        Some(br) => push_name(&mut s, &br.name, ink),
+        None => push_label(&mut s)?,
+    }
+    push_caption(&mut s, opts.caption.as_deref(), ink);
+    if brand.is_some() {
+        push_powered_by(&mut s, ink);
+    }
 
     s.push_str("</g>");
 
     if opts.crop_marks && b > 0.0 {
-        push_crop_marks(&mut s, b);
+        push_crop_marks(&mut s, b, ink);
     }
 
     s.push_str("</svg>");
     Ok(s)
 }
 
-fn push_frame(s: &mut String) {
+fn push_frame(s: &mut String, stroke: &str) {
     let _ = write!(
         s,
-        r#"<rect x="{x}" y="{x}" width="{w}" height="{h}" rx="{r}" ry="{r}" fill="none" stroke="{TEAL}" stroke-width="{sw}"/>"#,
+        r#"<rect x="{x}" y="{x}" width="{w}" height="{h}" rx="{r}" ry="{r}" fill="none" stroke="{stroke}" stroke-width="{sw}"/>"#,
         x = f(FRAME_INSET),
         w = f(TRIM_W - 2.0 * FRAME_INSET),
         h = f(TRIM_H - 2.0 * FRAME_INSET),
@@ -104,11 +173,11 @@ fn push_frame(s: &mut String) {
 
 /// Dark modules as grid-snapped navy rects. One module =
 /// `70 mm / (matrix + 2*quiet)`; the quiet zone is left as cream background.
-fn push_qr_modules(s: &mut String, m: &Matrix) {
+fn push_qr_modules(s: &mut String, m: &Matrix, ink: &str) {
     let n = m.size as u32;
     let module = QR_SIZE / (n + 2 * QUIET) as f32;
     s.push_str(r#"<g fill=""#);
-    s.push_str(TEAL);
+    s.push_str(ink);
     s.push_str(r#"" shape-rendering="crispEdges">"#);
     for row in 0..n {
         for col in 0..n {
@@ -128,21 +197,78 @@ fn push_qr_modules(s: &mut String, m: &Matrix) {
     s.push_str("</g>");
 }
 
-/// Centre cream plaque + embedded mark (drawn over the QR centre; ECC High
-/// recovers the obscured ~9% of module area).
-fn push_centre(s: &mut String) -> Result<(), QrCardError> {
+/// Centre plaque in the card ground + the mark (drawn over the QR centre; ECC
+/// High recovers the obscured ~9% of module area).
+///
+/// The plaque is the ground colour rather than a fixed cream so that a scanner
+/// still reads it as a light region on a branded card — it sits inside the
+/// matrix, and a dark patch there is a hole in the code rather than a plaque.
+fn push_centre(
+    s: &mut String,
+    ground: &str,
+    mark_primary: &str,
+    mark_secondary: &str,
+    logo: Option<&CardLogo>,
+) -> Result<(), QrCardError> {
     let px = QR_CX - PLAQUE_SIDE / 2.0;
     let py = QR_CY - PLAQUE_SIDE / 2.0;
     let _ = write!(
         s,
-        r#"<rect x="{x}" y="{y}" width="{side}" height="{side}" rx="{r}" ry="{r}" fill="{PAPER}"/>"#,
+        r#"<rect x="{x}" y="{y}" width="{side}" height="{side}" rx="{r}" ry="{r}" fill="{ground}"/>"#,
         x = f(px),
         y = f(py),
         side = f(PLAQUE_SIDE),
         r = f(PLAQUE_RADIUS),
     );
-    s.push_str(&embed_asset(MARK_SVG, QR_CX, QR_CY, MARK_SIZE, MARK_SIZE)?);
+    match logo {
+        Some(l) => push_logo(s, l),
+        None => s.push_str(&embed_asset(
+            MARK_SVG,
+            QR_CX,
+            QR_CY,
+            MARK_SIZE,
+            MARK_SIZE,
+            mark_primary,
+            mark_secondary,
+        )?),
+    }
     Ok(())
+}
+
+/// Where a shop's logo lands in the mark slot, in trim-relative millimetres.
+///
+/// Shared with the raster path in [`super::render_qr_card_png`], which has to
+/// paint the same logo onto the same pixels after resvg has been through the
+/// document. One function, so a change to the fit cannot land in one output and
+/// not the other.
+pub(super) fn logo_rect_mm(logo: &CardLogo) -> (f32, f32, f32, f32) {
+    let (w, h) = (logo.width.max(1) as f32, logo.height.max(1) as f32);
+    let scale = (MARK_SIZE / w).min(MARK_SIZE / h);
+    let (dw, dh) = (w * scale, h * scale);
+    (QR_CX - dw / 2.0, QR_CY - dh / 2.0, dw, dh)
+}
+
+/// A shop's mark, as a `data:` URI inside an `<image>`.
+///
+/// Uploads are raster where Madar's mark is vector, so there is no markup to
+/// splice in the way [`embed_asset`] does — and a file reference would make the
+/// SVG depend on a path that whoever we hand it to cannot resolve, since these
+/// documents are returned inline in a JSON response and printed elsewhere. The
+/// element is given the exact fitted rectangle rather than a square and a
+/// `preserveAspectRatio` to sort out, so a wide wordmark is not letterboxed into
+/// a shape it was never drawn for; the attribute is still written, because a
+/// consumer that decides to letterbox anyway should at least centre it.
+fn push_logo(s: &mut String, logo: &CardLogo) {
+    let (x, y, w, h) = logo_rect_mm(logo);
+    let _ = write!(
+        s,
+        r#"<image x="{x}" y="{y}" width="{w}" height="{h}" preserveAspectRatio="xMidYMid meet" href="data:image/png;base64,{d}"/>"#,
+        x = f(x),
+        y = f(y),
+        w = f(w),
+        h = f(h),
+        d = B64.encode(&logo.png),
+    );
 }
 
 /// The "madar" wordmark, embedded from the brand asset (not font-rendered).
@@ -154,11 +280,67 @@ fn push_label(s: &mut String) -> Result<(), QrCardError> {
         LABEL_CENTER_Y,
         LABEL_MAX_W,
         LABEL_MAX_H,
+        TEAL,
+        TEAL_LIGHT,
     )?);
     Ok(())
 }
 
-fn push_caption(s: &mut String, caption: Option<&str>) {
+/// The shop's name, typeset in the slot Madar's wordmark occupies otherwise.
+///
+/// An organisation with no name at all is a row that has gone missing rather
+/// than a shop that chose anonymity, and a card with a gap where the name goes
+/// looks broken — so the slot is simply left empty and the card reads as a
+/// mark, a code and an attribution, which is a finished card.
+fn push_name(s: &mut String, name: &str, ink: &str) {
+    let name = name.trim();
+    if name.is_empty() {
+        return;
+    }
+    let mut shown: String = name.chars().take(NAME_MAX_CHARS).collect();
+    if name.chars().count() > NAME_MAX_CHARS {
+        shown.push('…');
+    }
+    let size = (NAME_MAX_W / (NAME_AVG_ADVANCE * shown.chars().count() as f32))
+        .clamp(NAME_SIZE_MIN, NAME_SIZE_MAX);
+    let arabic = shown.chars().any(is_arabic);
+    let (family, dir) = if arabic {
+        ("Cairo", r#" direction="rtl""#)
+    } else {
+        ("Manrope", "")
+    };
+    // `LABEL_CENTER_Y` is the wordmark's centre, and text is placed by its
+    // baseline, so the name would ride high if it were used directly. Manrope's
+    // cap height is a shade over 0.7 em, and dropping the baseline by 0.35 em
+    // puts the caps either side of the same line the wordmark straddles.
+    let _ = write!(
+        s,
+        r#"<text x="{cx}" y="{y}" font-family="{family}" font-weight="600" font-size="{fs}" fill="{ink}" text-anchor="middle"{dir}>{t}</text>"#,
+        cx = f(QR_CX),
+        y = f(LABEL_CENTER_Y + 0.35 * size),
+        fs = f(size),
+        t = xml_escape(&shown),
+    );
+}
+
+/// Madar's credit on a branded card.
+///
+/// Small, low, and under the caption. It is not negotiable — the card is a
+/// Madar product whoever's mark is on the front — but it is also not the point
+/// of the card, and setting it at wordmark size on a shop's card would read as
+/// Madar branding a shop rather than a shop being served by Madar.
+fn push_powered_by(s: &mut String, ink: &str) {
+    let _ = write!(
+        s,
+        r#"<text x="{cx}" y="{y}" font-family="Manrope" font-weight="500" font-size="{fs}" fill="{ink}" fill-opacity="{op}" text-anchor="middle">{POWERED_TEXT}</text>"#,
+        cx = f(QR_CX),
+        y = f(POWERED_BASELINE),
+        fs = f(POWERED_SIZE),
+        op = f(POWERED_OPACITY),
+    );
+}
+
+fn push_caption(s: &mut String, caption: Option<&str>, ink: &str) {
     let Some(text) = caption.map(str::trim).filter(|t| !t.is_empty()) else {
         return;
     };
@@ -170,7 +352,7 @@ fn push_caption(s: &mut String, caption: Option<&str>) {
     };
     let _ = write!(
         s,
-        r#"<text x="{cx}" y="{y}" font-family="{family}" font-weight="500" font-size="{fs}" fill="{TEAL}" fill-opacity="{op}" text-anchor="middle"{dir}>{t}</text>"#,
+        r#"<text x="{cx}" y="{y}" font-family="{family}" font-weight="500" font-size="{fs}" fill="{ink}" fill-opacity="{op}" text-anchor="middle"{dir}>{t}</text>"#,
         cx = f(QR_CX),
         y = f(CAPTION_BASELINE),
         fs = f(CAPTION_SIZE),
@@ -181,13 +363,13 @@ fn push_caption(s: &mut String, caption: Option<&str>) {
 
 /// Thin navy hairlines at the four trim corners, living only in the bleed
 /// margin (never crossing into the trim area).
-fn push_crop_marks(s: &mut String, b: f32) {
+fn push_crop_marks(s: &mut String, b: f32, ink: &str) {
     let len = b * 0.8;
     let hair = 0.15_f32;
     let xs = [b, b + TRIM_W];
     let ys = [b, b + TRIM_H];
     s.push_str(r#"<g stroke=""#);
-    s.push_str(TEAL);
+    s.push_str(ink);
     let _ = write!(s, r#"" stroke-width="{}">"#, f(hair));
     for (ci, &cx) in xs.iter().enumerate() {
         for (ri, &cy) in ys.iter().enumerate() {
@@ -212,12 +394,20 @@ fn push_crop_marks(s: &mut String, b: f32) {
 /// scale to fit `max_w × max_h` (preserving aspect), and centre on `(cx, cy)`.
 /// Brand CSS classes are inlined to fills so multiple assets can share one
 /// document without `<style>`/id collisions.
+///
+/// `primary`/`secondary` are what Madar's two teals become. The mark is the
+/// fallback for a shop with no usable logo, so on a branded card it lands on
+/// the shop's plaque — and a teal mark on a gold ground is not a fallback, it
+/// is two brands arguing. Passing Madar's own tokens back in is the identity
+/// substitution, which is exactly what the unbranded card does.
 fn embed_asset(
     asset: &str,
     cx: f32,
     cy: f32,
     max_w: f32,
     max_h: f32,
+    primary: &str,
+    secondary: &str,
 ) -> Result<String, QrCardError> {
     let (vx, vy, vw, vh) = parse_viewbox(asset)?;
     if vw <= 0.0 || vh <= 0.0 {
@@ -226,7 +416,7 @@ fn embed_asset(
     let scale = (max_w / vw).min(max_h / vh);
     let tx = cx - scale * (vx + vw / 2.0);
     let ty = cy - scale * (vy + vh / 2.0);
-    let inner = inline_brand_classes(extract_svg_inner(asset)?);
+    let inner = inline_brand_classes(extract_svg_inner(asset)?, primary, secondary);
     Ok(format!(
         r#"<g transform="translate({tx},{ty}) scale({s})">{inner}</g>"#,
         tx = f(tx),
@@ -255,10 +445,40 @@ fn parse_viewbox(svg: &str) -> Result<(f32, f32, f32, f32), QrCardError> {
     Ok((nums[0], nums[1], nums[2], nums[3]))
 }
 
-/// Replace the brand CSS classes used by the assets with inline fills.
-fn inline_brand_classes(svg: &str) -> String {
-    svg.replace(r#"class="cls-1""#, &format!(r#"fill="{TEAL}""#))
-        .replace(r#"class="cls-2""#, &format!(r#"fill="{TEAL_LIGHT}""#))
+/// Recolour an asset to the card's palette: Madar's two teals wherever the
+/// asset writes them literally, then the brand CSS classes resolved to inline
+/// fills so several assets can share one document without `<style>`/id
+/// collisions.
+///
+/// The literal swap runs FIRST, and in one pass. Run after the class
+/// substitution it would re-examine the colours it had itself just inserted,
+/// and a shop whose ink happened to be one of Madar's teals would have it
+/// swapped a second time into the other one.
+fn inline_brand_classes(svg: &str, primary: &str, secondary: &str) -> String {
+    swap_brand_tokens(svg, primary, secondary)
+        .replace(r#"class="cls-1""#, &format!(r#"fill="{primary}""#))
+        .replace(r#"class="cls-2""#, &format!(r#"fill="{secondary}""#))
+}
+
+/// One left-to-right pass swapping `TEAL` for `primary` and `TEAL_LIGHT` for
+/// `secondary`, so neither replacement can ever see the other's output.
+fn swap_brand_tokens(svg: &str, primary: &str, secondary: &str) -> String {
+    let mut out = String::with_capacity(svg.len());
+    let mut rest = svg;
+    while !rest.is_empty() {
+        if let Some(tail) = rest.strip_prefix(TEAL) {
+            out.push_str(primary);
+            rest = tail;
+        } else if let Some(tail) = rest.strip_prefix(TEAL_LIGHT) {
+            out.push_str(secondary);
+            rest = tail;
+        } else {
+            let c = rest.chars().next().expect("non-empty remainder");
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    out
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────

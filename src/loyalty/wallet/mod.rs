@@ -15,6 +15,7 @@
 pub mod apns;
 pub mod apple;
 pub mod google;
+pub mod i18n;
 pub mod notices;
 pub mod refresh;
 pub mod web_service;
@@ -328,6 +329,8 @@ pub struct CardCopy {
     /// wrong for a heading that says "Where it works". Reusing it meant a shop
     /// with six branches and two sets of coordinates advertised two branches.
     pub branches: Vec<String>,
+    /// Where else to find the shop. Same list on both wallets and the web card.
+    pub social: Vec<crate::orgs::social::SocialLink>,
 }
 
 /// Everything the back of the card says about the shop, in one round trip each.
@@ -335,6 +338,10 @@ pub async fn card_copy(pool: &PgPool, org_id: Uuid) -> CardCopy {
     CardCopy {
         rewards: reward_lines(pool, org_id).await,
         branches: branch_names(pool, org_id).await,
+        social: crate::orgs::branding::load(pool, org_id)
+            .await
+            .map(|b| b.social_links)
+            .unwrap_or_default(),
     }
 }
 
@@ -660,6 +667,7 @@ mod tests {
         let copy = CardCopy {
             rewards: vec![],
             branches: vec!["Maadi".into(), "Zamalek".into(), "Alexandria".into()],
+            social: vec![],
         };
         // One located branch, three open ones.
         let lines = back_of_card(&apple::tests::member(), &s, &copy);
@@ -674,6 +682,7 @@ mod tests {
         let copy = CardCopy {
             rewards: vec![],
             branches: (1..=15).map(|i| format!("Branch {i}")).collect(),
+            social: vec![],
         };
         let lines = back_of_card(&apple::tests::member(), &s, &copy);
         let branches = lines.iter().find(|l| l.key == "branches").unwrap();
@@ -707,6 +716,7 @@ mod tests {
         let copy = CardCopy {
             rewards: vec!["Espresso — 5 visits".to_string()],
             branches: vec!["Maadi".into(), "Zamalek".into()],
+            social: vec![],
         };
 
         let apple = apple::pass_json(

@@ -11,6 +11,7 @@
 //! render the QR of the *short* URL, and return an inline base64 data-URL.
 //! Clients never supply a pre-made short URL.
 
+pub mod brand;
 pub mod db;
 pub mod handlers;
 pub mod layout;
@@ -24,6 +25,7 @@ mod tests;
 use qrcode::EcLevel;
 
 use crate::errors::AppError;
+use brand::CardBrand;
 
 // ── Madar brand tokens (single source of truth) ─────────────────────────────
 /// Teal deep — QR modules, frame, wordmark, primary text.
@@ -56,6 +58,13 @@ pub struct QrCardOptions {
     pub bleed_mm: f32,
     /// Draw trim crop marks (only meaningful when `bleed_mm > 0`). Default false.
     pub crop_marks: bool,
+    /// The shop's brand, when the organisation is on the branding tier.
+    ///
+    /// `None` is not "no brand", it is "Madar's" — and it means every line of
+    /// the composition below runs exactly as it did before this field existed,
+    /// which is the only way the unbranded card stays byte-identical.
+    /// Built by [`brand::card_brand`] from the one brand loader.
+    pub brand: Option<CardBrand>,
 }
 
 impl Default for QrCardOptions {
@@ -66,6 +75,7 @@ impl Default for QrCardOptions {
             dpi: DEFAULT_DPI,
             bleed_mm: 0.0,
             crop_marks: false,
+            brand: None,
         }
     }
 }
@@ -126,11 +136,24 @@ pub fn render_qr_card_svg(opts: &QrCardOptions) -> Result<String, QrCardError> {
 }
 
 /// Render the branded A6 card to a PNG at `opts.dpi`.
+///
+/// A shop's logo is composited onto the rasterised card rather than left to the
+/// SVG renderer, because resvg is built here without its `raster-images`
+/// feature: it parses the `<image>` element, honours its geometry, and then
+/// draws nothing at all — one `log::warn!` and a hole where the mark should be.
+/// The placement comes from [`layout::logo_rect_mm`], the same function that
+/// positions the `<image>` in the SVG, so the two outputs cannot drift apart.
+/// Enabling that feature in `Cargo.toml` would let this step be deleted.
 pub fn render_qr_card_png(opts: &QrCardOptions) -> Result<Vec<u8>, QrCardError> {
     let svg = render_qr_card_svg(opts)?;
     let b = opts.bleed_mm.clamp(0.0, 20.0);
     let dpi = opts.dpi.clamp(MIN_DPI, MAX_DPI);
-    render::rasterize(&svg, 105.0 + 2.0 * b, 148.0 + 2.0 * b, dpi)
+    let mut pixmap = render::rasterize_pixmap(&svg, 105.0 + 2.0 * b, 148.0 + 2.0 * b, dpi)?;
+    if let Some(logo) = opts.brand.as_ref().and_then(|br| br.logo.as_ref()) {
+        let (x, y, w, h) = layout::logo_rect_mm(logo);
+        render::draw_logo(&mut pixmap, logo, x + b, y + b, w, h, dpi)?;
+    }
+    render::encode_pixmap(&pixmap)
 }
 
 /// Render a plain black-on-white receipt QR sized at `module_px` pixels per module.

@@ -49,6 +49,9 @@ pub struct Org {
     pub brand_card_image: Option<String>,
     /// The branding tier. Super admin only — see `UpdateOrgRequest`.
     pub custom_branding: bool,
+    /// Where else to find the shop, keyed by platform. See `orgs::social`.
+    #[schema(value_type = Object)]
+    pub social_links: serde_json::Value,
     pub is_active: bool,
     /// IANA timezone name. The org-level default that branches inherit when
     /// their own timezone is unset. Defaults to `Africa/Cairo`.
@@ -98,6 +101,12 @@ pub struct UpdateOrgRequest {
     /// super-admin only — which is the whole reason it lives here rather than
     /// with the other branding controls an org manager can reach.
     pub custom_branding: Option<bool>,
+    /// Where else to find the shop. Validated against a closed list of
+    /// platforms and `https` only — these are printed onto a customer's wallet
+    /// pass, and a card that renders whatever was typed can be made to say
+    /// anything. See `orgs::social`.
+    #[schema(value_type = Option<Object>)]
+    pub social_links: Option<serde_json::Value>,
 }
 
 // ── OpenAPI-only multipart schemas ────────────────────────────
@@ -242,6 +251,11 @@ pub async fn create_org(
         .slug
         .ok_or_else(|| AppError::BadRequest("slug is required".into()))?;
 
+    // Before the collision check, because a reserved name is not "taken by
+    // someone else" and saying so would send them looking for the shop that
+    // has it.
+    super::slugs::validate(&slug)?;
+
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM organizations WHERE slug = $1)")
             .bind(&slug)
@@ -276,7 +290,7 @@ pub async fn create_org(
         r#"
         INSERT INTO organizations (name, slug, logo_url, currency_code, tax_rate, receipt_footer, timezone)
         VALUES ($1, $2, $3, $4, $5, $6, $7::timezone_name)
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, is_active, timezone::text AS timezone
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
         "#,
     )
     .bind(&name)
@@ -329,7 +343,7 @@ pub async fn list_orgs(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResp
 
     let orgs = sqlx::query_as::<_, Org>(
         r#"
-        SELECT id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, is_active, timezone::text AS timezone
+        SELECT id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
         FROM organizations
         WHERE deleted_at IS NULL
         ORDER BY name
@@ -487,7 +501,21 @@ pub async fn update_org(
 
     let existing = fetch_org(pool.get_ref(), *org_id).await?;
 
-    if let Some(slug) = &body.slug {
+    if let Some(slug) = &body.slug
+        && slug != &existing.slug
+    {
+        // A slug on the branding tier is a hostname and a printed QR code. The
+        // sticker on the window cannot be recalled, so the name stops being
+        // editable once anything outside our control encodes it.
+        if super::slugs::is_frozen(existing.custom_branding) {
+            return Err(AppError::Conflict(
+                "This shop's short name is part of its web address and the codes it has \
+                 printed, so it cannot be changed. Turn custom branding off first if it \
+                 really has to move."
+                    .into(),
+            ));
+        }
+        super::slugs::validate(slug)?;
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM organizations WHERE slug = $1 AND id != $2)",
         )
@@ -516,6 +544,16 @@ pub async fn update_org(
         validate_timezone(pool.get_ref(), tz).await?;
     }
 
+    // Checked before the write, and stripped of blanks — an empty value is how
+    // a shop removes a link, and storing "" would print an empty row on a card.
+    let social = match &body.social_links {
+        Some(v) => {
+            super::social::validate(v)?;
+            Some(super::social::clean(v))
+        }
+        None => None,
+    };
+
     let logo_url_is_present = body.logo_url.is_some();
     let logo_url_val = body.logo_url.as_ref().and_then(|o| o.clone());
 
@@ -531,9 +569,10 @@ pub async fn update_org(
             logo_url       = CASE WHEN $9 THEN $8 ELSE logo_url END,
             timezone       = COALESCE(NULLIF($10, '')::timezone_name, timezone),
             custom_branding = COALESCE($11, custom_branding),
+            social_links   = COALESCE($12, social_links),
             updated_at     = NOW()
         WHERE id = $1 AND deleted_at IS NULL
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, is_active, timezone::text AS timezone
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
         "#,
     )
     .bind(*org_id)
@@ -547,6 +586,7 @@ pub async fn update_org(
     .bind(logo_url_is_present)
     .bind(&body.timezone)
     .bind(body.custom_branding)
+    .bind(&social)
     .fetch_optional(pool.get_ref())
     .await?
     .ok_or_else(|| AppError::NotFound("Org not found".into()))?;
@@ -690,7 +730,7 @@ pub async fn upload_org_logo(
             brand_background = $3, brand_foreground = $4, brand_accent = $5,
             brand_logo_source = $2, brand_logo_is_mark = $6
         WHERE id = $1 AND deleted_at IS NULL
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, is_active, timezone::text AS timezone
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
         "#,
     )
     .bind(*org_id)
@@ -816,7 +856,7 @@ pub async fn upload_org_card_image(
         r#"
         UPDATE organizations SET brand_card_image = $2, updated_at = NOW()
         WHERE id = $1 AND deleted_at IS NULL
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, is_active, timezone::text AS timezone
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
         "#,
     )
     .bind(*org_id)
@@ -887,7 +927,7 @@ pub(crate) fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 
 async fn fetch_org(pool: &PgPool, id: Uuid) -> Result<Org, AppError> {
     sqlx::query_as::<_, Org>(
-        "SELECT id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, is_active, timezone::text AS timezone
+        "SELECT id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
          FROM organizations
          WHERE id = $1 AND deleted_at IS NULL",
     )

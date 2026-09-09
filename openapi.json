@@ -25739,6 +25739,99 @@
         }
       }
     },
+    "/public/loyalty/card/{token}/orders": {
+      "get": {
+        "tags": [
+          "loyalty-public"
+        ],
+        "summary": "The member's own purchase history.",
+        "description": "Authenticated by the token in the URL — the same one their pass carries and\nthe till scans — because that is the only credential a loyalty member has.\nWhich means anyone holding the link can read it, and that is worth stating\nrather than glossing: a forwarded card link forwards the history with it.\nThe shop decides whether to run a programme on those terms, and the privacy\npolicy says so plainly.\n\nVoided orders are excluded. A sale that was reversed is not something the\ncustomer bought, and showing it invites a question the page cannot answer.",
+        "operationId": "loyalty_card_orders",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "description": "Member token from the pass barcode",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PastOrders"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/public/loyalty/card/{token}/preferences": {
       "post": {
         "tags": [
@@ -26213,6 +26306,109 @@
                   "items": {
                     "$ref": "#/components/schemas/PublicOrg"
                   }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/public/orgs/brand": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "The shop behind a guest page.",
+        "description": "Public and unauthenticated by necessity: it is the first request a customer's\nbrowser makes, before there is any notion of a session. Nothing here is\nprivate — a name, a logo and three colours are on the shopfront.",
+        "operationId": "public_org_brand",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "query",
+            "description": "The shop, when the page already knows which one it is.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "query",
+            "description": "The first label of the hostname, when it does not — `rue` for\n`rue.madar-pos.cloud`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicBrand"
                 }
               }
             }
@@ -54114,6 +54310,7 @@
           "currency_code",
           "tax_rate",
           "custom_branding",
+          "social_links",
           "is_active",
           "timezone"
         ],
@@ -54185,6 +54382,10 @@
           "slug": {
             "type": "string",
             "example": "the-rue"
+          },
+          "social_links": {
+            "type": "object",
+            "description": "Where else to find the shop, keyed by platform. See `orgs::social`."
           },
           "tax_rate": {
             "type": "number",
@@ -54749,6 +54950,56 @@
               "null"
             ],
             "description": "`https://pay.google.com/gp/v/save/<jwt>`."
+          }
+        }
+      },
+      "PastOrder": {
+        "type": "object",
+        "description": "One past visit, as the customer's own page shows it.",
+        "required": [
+          "id",
+          "placed_at",
+          "branch_name",
+          "total",
+          "items"
+        ],
+        "properties": {
+          "branch_name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What they had. The customer asked for this to be here; see the note on\nthe handler about who else can see it."
+          },
+          "placed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "In piastres, like every other figure on the wire."
+          }
+        }
+      },
+      "PastOrders": {
+        "type": "object",
+        "required": [
+          "orders"
+        ],
+        "properties": {
+          "orders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PastOrder"
+            }
           }
         }
       },
@@ -56043,6 +56294,63 @@
           },
           "umbrella_open_now": {
             "type": "boolean"
+          }
+        }
+      },
+      "PublicBrand": {
+        "type": "object",
+        "description": "A shop, as a guest page needs to know it.",
+        "required": [
+          "org_id",
+          "name",
+          "slug",
+          "custom_branding",
+          "logo_is_mark",
+          "background_color",
+          "foreground_color",
+          "accent_color"
+        ],
+        "properties": {
+          "accent_color": {
+            "type": "string"
+          },
+          "background_color": {
+            "type": "string",
+            "description": "`#RRGGBB`. Madar's own when the shop is not on the tier."
+          },
+          "card_image_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "custom_branding": {
+            "type": "boolean",
+            "description": "Whether the rest of this is the shop's or Madar's.\n\nThe page does not need it to render — the palette below is already\nresolved — but it decides how loudly Madar signs the footer."
+          },
+          "foreground_color": {
+            "type": "string"
+          },
+          "logo_is_mark": {
+            "type": "boolean",
+            "description": "True when the logo is a shape on transparency and may be repainted for\ncontrast. See `orgs::branding::is_mark`."
+          },
+          "logo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "description": "Always the shop's own name, at every tier. A page that does not say\nwhose it is helps nobody, and that was never the thing being sold."
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "slug": {
+            "type": "string"
           }
         }
       },
@@ -61082,6 +61390,13 @@
               "string",
               "null"
             ]
+          },
+          "social_links": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Where else to find the shop. Validated against a closed list of\nplatforms and `https` only — these are printed onto a customer's wallet\npass, and a card that renders whatever was typed can be made to say\nanything. See `orgs::social`."
           },
           "tax_rate": {
             "type": [

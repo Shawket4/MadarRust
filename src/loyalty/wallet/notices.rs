@@ -66,10 +66,12 @@ async fn wallets_for(pool: &PgPool, member: &MemberRow) -> (bool, bool) {
     } else {
         false
     };
-    // Google: we know we CREATED an object. Whether anyone saved it is a
-    // further question Google will answer, at the cost of a read per member —
-    // worth doing if this proves too generous, and not worth it before.
-    let google = member.google_object_id.is_some();
+    // Google: not "did we create an object" — a customer who opened the card
+    // page and never tapped the badge has one of those. `hasUsers` is Google
+    // answering whether anyone actually saved it, which costs a read and is
+    // worth it: the alternative is calling a message delivered to a card that
+    // does not exist on any phone.
+    let google = super::google::has_saved_card(member).await;
     (apple, google)
 }
 

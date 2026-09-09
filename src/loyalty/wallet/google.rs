@@ -288,6 +288,29 @@ pub fn loyalty_object(
 ) -> serde_json::Value {
     let mode = settings.mode();
     let balance = member.balance_in(mode);
+
+    // Google localises inline, field by field, from the same table Apple's
+    // strings file is built from — one place to be wrong rather than two. A
+    // string with no Arabic is emitted as itself: a shop's own reward names and
+    // its branches are not ours to translate.
+    let pairs = super::i18n::strings_for(settings, settings.program_name_ar.as_deref());
+    let localized = |en: &str| -> serde_json::Value {
+        match pairs.iter().find(|p| p.en == en) {
+            Some(p) => json!({
+                "defaultValue": { "language": "en", "value": en },
+                "translatedValues": [{ "language": "ar", "value": p.ar }]
+            }),
+            None => serde_json::Value::Null,
+        }
+    };
+    let with_localized = |mut field: serde_json::Value, key: &str, en: &str| {
+        let l = localized(en);
+        if !l.is_null() {
+            field[key] = l;
+        }
+        field
+    };
+
     json!({
         "id": object_id(issuer, member),
         "classId": class_id(issuer, member.org_id),
@@ -298,17 +321,25 @@ pub fn loyalty_object(
         // renders in the details list BELOW it, which is where the progress
         // used to sit: a customer opening their wallet saw a balance and had to
         // scroll past the card to find out how close they were.
-        "loyaltyPoints": {
-            "label": balance_label(mode),
-            "balance": { "string": progress_line(balance, settings.default_reward_cost) }
-        },
+        "loyaltyPoints": with_localized(
+            json!({
+                "label": balance_label(mode),
+                "balance": { "string": progress_line(balance, settings.default_reward_cost) }
+            }),
+            "localizedLabel",
+            balance_label(mode),
+        ),
         // What they are working towards, not how far along they are — the
         // figures are already in the slot above. "Get a free drink" is the
         // thing a customer opens the card to be reminded of.
-        "secondaryLoyaltyPoints": {
-            "label": "Reward",
-            "balance": { "string": headline }
-        },
+        "secondaryLoyaltyPoints": with_localized(
+            json!({
+                "label": "Reward",
+                "balance": { "string": headline }
+            }),
+            "localizedLabel",
+            "Reward",
+        ),
         "barcode": {
             "type": "QR_CODE",
             "value": member.member_token,
@@ -334,10 +365,29 @@ pub fn loyalty_object(
         // the shared "Member" line would appear a third time — and it carries a
         // phone number, which is the last thing to print twice. Apple keeps it:
         // it has no automatic equivalent.
+        // Google's own place for links, rather than URLs printed as text in a
+        // details row — it renders them as buttons and they open in the app the
+        // shop actually wants them opened in.
+        "linksModuleData": {
+            "uris": copy
+                .social
+                .iter()
+                .map(|l| json!({
+                    "kind": "walletobjects#uri",
+                    "uri": l.url,
+                    "description": l.label,
+                    "id": l.key
+                }))
+                .collect::<Vec<_>>()
+        },
         "textModulesData": super::back_of_card(member, settings, copy)
             .into_iter()
             .filter(|l| l.key != "member")
-            .map(|l| json!({ "id": l.key, "header": l.label, "body": l.value }))
+            .map(|l| {
+                let row = json!({ "id": l.key, "header": l.label, "body": l.value });
+                let row = with_localized(row, "localizedHeader", &l.label);
+                with_localized(row, "localizedBody", &l.value)
+            })
             .collect::<Vec<_>>(),
     })
 }
@@ -926,6 +976,33 @@ pub async fn add_message(member: &MemberRow, body: &str) -> Result<(), AppError>
     )))
 }
 
+/// Has this member actually saved their Google card?
+///
+/// Holding a `google_object_id` only means WE created an object; a customer who
+/// opened the card page and never tapped the badge has one too. Sending their
+/// message to a card nobody saved and calling it delivered is how someone stops
+/// hearing from a shop they still use.
+///
+/// Google answers it on the object as `hasUsers`. It costs a read, which is why
+/// this is only ever asked before a message and never on a page load. A failure
+/// answers "no": the fallback is a WhatsApp, and sending one message too many
+/// is a smaller wrong than sending none.
+pub async fn has_saved_card(member: &MemberRow) -> bool {
+    if member.google_object_id.is_none() {
+        return false;
+    }
+    match read_object(member).await {
+        Ok(o) => o["hasUsers"].as_bool().unwrap_or(false),
+        Err(e) => {
+            tracing::warn!(
+                customer_id = %member.id, error = %e,
+                "loyalty: could not ask Google whether the card was saved"
+            );
+            false
+        }
+    }
+}
+
 /// The shop's class as Google holds it — the other half of the picture.
 ///
 /// The object says what one member's card is; the class says what the shop's
@@ -1125,6 +1202,7 @@ mod tests {
             palette: crate::orgs::branding::Palette::default(),
             logo_is_mark: true,
             custom_branding: true,
+            social_links: vec![],
             card_image_url: None,
         };
         let m = super::super::apple::tests::member();
@@ -1187,6 +1265,7 @@ mod tests {
             card_image_url: None,
             logo_is_mark: true,
             custom_branding: true,
+            social_links: vec![],
         };
         let places = [super::super::PassLocation {
             latitude: 30.06,
@@ -1259,6 +1338,7 @@ mod tests {
             name: "RUE".into(),
             logo_url: Some("/api/uploads/logos/rue.png".into()),
             custom_branding: true,
+            social_links: vec![],
             ..OrgBrand::default()
         };
         let class = loyalty_class("338", uuid::Uuid::nil(), &brand, &s, &[]);
@@ -1275,6 +1355,7 @@ mod tests {
         let bare = OrgBrand {
             name: "RUE".into(),
             custom_branding: true,
+            social_links: vec![],
             ..OrgBrand::default()
         };
         assert_eq!(

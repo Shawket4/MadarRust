@@ -443,10 +443,37 @@ pub fn pass_json(
         })
         .unwrap_or_default();
 
-    let back: Vec<serde_json::Value> = super::back_of_card(member, settings, copy)
+    let mut back: Vec<serde_json::Value> = super::back_of_card(member, settings, copy)
         .into_iter()
         .map(|l| json!({ "key": l.key, "label": l.label, "value": l.value }))
         .collect();
+
+    // Where else to find them, as links a finger can hit.
+    //
+    // `attributedValue` is the only field property Apple renders markup in, and
+    // it takes a narrow subset — an anchor and little else. `value` is the
+    // fallback for anywhere the attributed one is not used, so both are set and
+    // they must say the same thing.
+    if !copy.social.is_empty() {
+        let anchors = copy
+            .social
+            .iter()
+            .map(|l| format!("<a href='{}'>{}</a>", l.url, l.label))
+            .collect::<Vec<_>>()
+            .join("   ");
+        let plain = copy
+            .social
+            .iter()
+            .map(|l| format!("{}: {}", l.label, l.url))
+            .collect::<Vec<_>>()
+            .join("\n");
+        back.push(json!({
+            "key": "social",
+            "label": "Find us",
+            "value": plain,
+            "attributedValue": anchors
+        }));
+    }
 
     let mut pass = json!({
         "formatVersion": 1,
@@ -706,6 +733,15 @@ pub async fn build_pass_for(pool: &PgPool, member: &MemberRow) -> Result<Vec<u8>
     // the pass with no explanation at all.
     let mut images = brand.images.clone();
     images.extend(strip);
+    // The Arabic, as a file inside the pass rather than a decision we made for
+    // them. iOS looks every string up here before drawing it, so a phone set to
+    // Arabic reads an Arabic card and everyone else reads exactly what they
+    // read before — see `wallet::i18n`.
+    let pairs = super::i18n::strings_for(&settings, settings.program_name_ar.as_deref());
+    images.push((
+        "ar.lproj/pass.strings".to_string(),
+        super::i18n::strings_file(&pairs).into_bytes(),
+    ));
     build_pkpass(&pass, &images)
 }
 

@@ -14,6 +14,7 @@ use resvg::tiny_skia;
 use resvg::usvg;
 
 use super::QrCardError;
+use super::brand::CardLogo;
 
 /// Bundled fonts (committed under `assets/fonts/`, SIL OFL). Embedded at compile
 /// time so there is no runtime filesystem dependency and no system-font path.
@@ -81,6 +82,21 @@ pub fn rasterize(
     canvas_h_mm: f32,
     dpi: u32,
 ) -> Result<Vec<u8>, QrCardError> {
+    encode_pixmap(&rasterize_pixmap(svg, canvas_w_mm, canvas_h_mm, dpi)?)
+}
+
+/// The same render, stopping one step short of PNG.
+///
+/// A shop's logo has to be painted onto the card after resvg has finished with
+/// it (see [`super::render_qr_card_png`]), and encoding to PNG only to decode
+/// it again so something can be drawn on top would be pure waste — so the
+/// pixmap is handed out and encoded once, at the end.
+pub fn rasterize_pixmap(
+    svg: &str,
+    canvas_w_mm: f32,
+    canvas_h_mm: f32,
+    dpi: u32,
+) -> Result<tiny_skia::Pixmap, QrCardError> {
     let mut opt = usvg::Options {
         dpi: 96.0,
         ..usvg::Options::default()
@@ -101,9 +117,70 @@ pub fn rasterize(
         &mut pixmap.as_mut(),
     );
 
+    Ok(pixmap)
+}
+
+pub fn encode_pixmap(pixmap: &tiny_skia::Pixmap) -> Result<Vec<u8>, QrCardError> {
     pixmap
         .encode_png()
         .map_err(|e| QrCardError::Encode(e.to_string()))
+}
+
+/// Paint a shop's logo into its slot on an already-rasterised card.
+///
+/// The logo is resampled to the slot's exact pixel size first and then blitted
+/// at an integer offset, rather than blitted through a scaling transform. That
+/// keeps the resampling in Lanczos3 — visibly better than tiny-skia's pattern
+/// filtering on the kind of hard-edged mark most shops upload — and it keeps
+/// the mark landing on the same pixel the SVG's `<image>` would have covered,
+/// with no half-pixel drift between the two outputs.
+pub fn draw_logo(
+    pixmap: &mut tiny_skia::Pixmap,
+    logo: &CardLogo,
+    x_mm: f32,
+    y_mm: f32,
+    w_mm: f32,
+    h_mm: f32,
+    dpi: u32,
+) -> Result<(), QrCardError> {
+    let (tw, th) = (px(w_mm, dpi).max(1), px(h_mm, dpi).max(1));
+    let resized = image::load_from_memory(&logo.png)
+        .map_err(|e| QrCardError::Render(format!("logo decode failed: {e}")))?
+        .resize_exact(tw, th, image::imageops::FilterType::Lanczos3)
+        .to_rgba8();
+    let src = to_pixmap(&resized)
+        .ok_or_else(|| QrCardError::Render("logo pixmap allocation failed".into()))?;
+    pixmap.draw_pixmap(
+        px(x_mm, dpi) as i32,
+        px(y_mm, dpi) as i32,
+        src.as_ref(),
+        &tiny_skia::PixmapPaint::default(),
+        tiny_skia::Transform::identity(),
+        None,
+    );
+    Ok(())
+}
+
+/// Straight RGBA to tiny-skia's premultiplied RGBA.
+///
+/// tiny-skia stores colour already multiplied by alpha and rejects any pixel
+/// whose channels exceed its alpha, so the conversion cannot be a memcpy. The
+/// rounded product `(c * a + 127) / 255` is never greater than `a`, so
+/// `from_rgba` never rejects a pixel this produces; the `?` is there because
+/// the compiler cannot know that, not because a logo can fail it.
+fn to_pixmap(img: &image::RgbaImage) -> Option<tiny_skia::Pixmap> {
+    let mut pm = tiny_skia::Pixmap::new(img.width(), img.height())?;
+    let premul = |c: u8, a: u8| ((c as u16 * a as u16 + 127) / 255) as u8;
+    for (dst, src) in pm.pixels_mut().iter_mut().zip(img.pixels()) {
+        let [r, g, b, a] = src.0;
+        *dst = tiny_skia::PremultipliedColorU8::from_rgba(
+            premul(r, a),
+            premul(g, a),
+            premul(b, a),
+            a,
+        )?;
+    }
+    Some(pm)
 }
 
 /// Render a plain, unbranded QR as black modules on white — the shape that

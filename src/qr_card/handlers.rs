@@ -22,6 +22,7 @@ use crate::{
 
 use super::{
     QrCardOptions,
+    brand::{CardBrand, card_brand},
     db::{self, BranchTable, CreateTableRequest},
     render_qr_card_png, render_qr_card_svg, render_qr_receipt_png,
     shlink::ShortLinkProvider,
@@ -87,9 +88,36 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
         .ok_or_else(|| AppError::Unauthorized("Missing claims".into()))
 }
 
+/// The brand this organisation's card is painted in, or `None` for Madar's.
+///
+/// `orgs::branding::load` is the one brand loader and it applies the tier gate
+/// itself, so nothing here asks whether the shop is entitled to its own
+/// colours — an org that has not bought custom branding comes back wearing
+/// Madar's, and `card_brand` turns that into the `None` the renderer reads as
+/// "compose the card exactly as it was composed before any of this existed".
+///
+/// Every card-rendering endpoint in this file goes through it, and that is the
+/// part worth guarding. A card that came back in the wrong shop's colours would
+/// be spotted immediately; one that came back in Madar's because a single
+/// endpoint forgot to ask looks entirely correct, right up until a shop asks
+/// why their table cards are branded and their loyalty cards are not.
+async fn card_brand_for(pool: &PgPool, org_id: Uuid) -> Result<Option<CardBrand>, AppError> {
+    Ok(card_brand(
+        &crate::orgs::branding::load(pool, org_id).await?,
+    ))
+}
+
 /// Render the QR of `short_url` according to the query flags and return the
 /// `data:…` string.
-fn render_data_url(short_url: &str, q: &QrRenderQuery) -> Result<String, AppError> {
+///
+/// The receipt QR is deliberately left out of the branding: it is black on
+/// white because that is what survives a thermal printer, and a shop's colours
+/// would arrive as grey dither.
+fn render_data_url(
+    short_url: &str,
+    q: &QrRenderQuery,
+    brand: Option<&CardBrand>,
+) -> Result<String, AppError> {
     if !q.card {
         let png = render_qr_receipt_png(short_url, q.module_px)?;
         return Ok(format!("data:image/png;base64,{}", B64.encode(&png)));
@@ -100,6 +128,7 @@ fn render_data_url(short_url: &str, q: &QrRenderQuery) -> Result<String, AppErro
         dpi: q.dpi,
         bleed_mm: q.bleed_mm,
         crop_marks: q.crop_marks,
+        brand: brand.cloned(),
     };
     if q.svg {
         let svg = render_qr_card_svg(&opts)?;
@@ -372,7 +401,8 @@ pub async fn branch_qr(
     )
     .await?;
 
-    let qr_data_url = render_data_url(&row.short_url, &q_with_caption)?;
+    let brand = card_brand_for(pool.get_ref(), org_id).await?;
+    let qr_data_url = render_data_url(&row.short_url, &q_with_caption, brand.as_ref())?;
     Ok(HttpResponse::Ok().json(QrResponse {
         kind: kind.into(),
         long_url: row.long_url,
@@ -424,7 +454,8 @@ pub async fn org_qr(
     )
     .await?;
 
-    let qr_data_url = render_data_url(&row.short_url, &q)?;
+    let brand = card_brand_for(pool.get_ref(), org_id).await?;
+    let qr_data_url = render_data_url(&row.short_url, &q, brand.as_ref())?;
     Ok(HttpResponse::Ok().json(QrResponse {
         kind: "org_order".into(),
         long_url: row.long_url,
@@ -491,7 +522,8 @@ pub async fn branch_booking_qr(
     )
     .await?;
 
-    let qr_data_url = render_data_url(&row.short_url, &q)?;
+    let brand = card_brand_for(pool.get_ref(), org_id).await?;
+    let qr_data_url = render_data_url(&row.short_url, &q, brand.as_ref())?;
     Ok(HttpResponse::Ok().json(QrResponse {
         kind: "branch_booking".into(),
         long_url: row.long_url,
@@ -560,7 +592,8 @@ pub async fn org_booking_qr(
     )
     .await?;
 
-    let qr_data_url = render_data_url(&row.short_url, &q)?;
+    let brand = card_brand_for(pool.get_ref(), org_id).await?;
+    let qr_data_url = render_data_url(&row.short_url, &q, brand.as_ref())?;
     Ok(HttpResponse::Ok().json(QrResponse {
         kind: "org_booking".into(),
         long_url: row.long_url,
@@ -746,7 +779,8 @@ pub async fn table_qr(
     )
     .await?;
 
-    let qr_data_url = render_data_url(&row.short_url, &q_with_caption)?;
+    let brand = card_brand_for(pool.get_ref(), org_id).await?;
+    let qr_data_url = render_data_url(&row.short_url, &q_with_caption, brand.as_ref())?;
     Ok(HttpResponse::Ok().json(QrResponse {
         kind: "table_order".into(),
         long_url: row.long_url,
@@ -810,7 +844,8 @@ pub async fn delivery_order_qr(
     )
     .await?;
 
-    let qr_data_url = render_data_url(&row.short_url, &q)?;
+    let brand = card_brand_for(pool.get_ref(), org_id).await?;
+    let qr_data_url = render_data_url(&row.short_url, &q, brand.as_ref())?;
     Ok(HttpResponse::Ok().json(QrResponse {
         kind: "order_track".into(),
         long_url: row.long_url,
@@ -872,6 +907,7 @@ pub async fn create_marketing_link(
 
     let opts = QrCardOptions {
         short_url: row.short_url.clone(),
+        brand: card_brand_for(pool.get_ref(), org_id).await?,
         ..Default::default()
     };
     let png = render_qr_card_png(&opts)?;
@@ -996,7 +1032,8 @@ pub async fn org_loyalty_qr(
     )
     .await?;
 
-    let qr_data_url = render_data_url(&row.short_url, &q)?;
+    let brand = card_brand_for(pool.get_ref(), org_id).await?;
+    let qr_data_url = render_data_url(&row.short_url, &q, brand.as_ref())?;
     Ok(HttpResponse::Ok().json(QrResponse {
         kind: "org_loyalty".into(),
         long_url: row.long_url,
@@ -1063,7 +1100,8 @@ pub async fn branch_loyalty_qr(
     )
     .await?;
 
-    let qr_data_url = render_data_url(&row.short_url, &q)?;
+    let brand = card_brand_for(pool.get_ref(), org_id).await?;
+    let qr_data_url = render_data_url(&row.short_url, &q, brand.as_ref())?;
     Ok(HttpResponse::Ok().json(QrResponse {
         kind: "branch_loyalty".into(),
         long_url: row.long_url,

@@ -498,6 +498,90 @@ pub struct CardView {
     pub marketing_opt_out: bool,
 }
 
+/// One past visit, as the customer's own page shows it.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PastOrder {
+    pub id: Uuid,
+    pub placed_at: chrono::DateTime<chrono::Utc>,
+    pub branch_name: String,
+    /// In piastres, like every other figure on the wire.
+    pub total: i32,
+    /// What they had. The customer asked for this to be here; see the note on
+    /// the handler about who else can see it.
+    pub items: Vec<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PastOrders {
+    pub orders: Vec<PastOrder>,
+}
+
+/// The member's own purchase history.
+///
+/// Authenticated by the token in the URL — the same one their pass carries and
+/// the till scans — because that is the only credential a loyalty member has.
+/// Which means anyone holding the link can read it, and that is worth stating
+/// rather than glossing: a forwarded card link forwards the history with it.
+/// The shop decides whether to run a programme on those terms, and the privacy
+/// policy says so plainly.
+///
+/// Voided orders are excluded. A sale that was reversed is not something the
+/// customer bought, and showing it invites a question the page cannot answer.
+#[utoipa::path(get, path = "/public/loyalty/card/{token}/orders", tag = "loyalty-public",
+    operation_id = "loyalty_card_orders",
+    params(("token" = String, Path, description = "Member token from the pass barcode")),
+    responses((status = 200, body = PastOrders), AppErrorResponse))]
+pub async fn card_orders(
+    pool: web::Data<PgPool>,
+    token: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    let member = model::find_by_token(pool.get_ref(), token.as_str())
+        .await?
+        .ok_or_else(|| AppError::NotFound("Card not found".into()))?;
+
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        id: Uuid,
+        placed_at: chrono::DateTime<chrono::Utc>,
+        branch_name: String,
+        total: i32,
+        items: Vec<String>,
+    }
+    // Capped rather than paged: a card page is a glance, not an archive, and a
+    // customer who wants every receipt they have ever had is asking the shop.
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT o.id, o.created_at AS placed_at, b.name AS branch_name, \
+                o.total_amount AS total, \
+                COALESCE(ARRAY( \
+                    SELECT CASE WHEN i.quantity > 1 \
+                                THEN i.quantity || ' × ' || i.item_name \
+                                ELSE i.item_name END \
+                      FROM order_items i WHERE i.order_id = o.id \
+                     ORDER BY i.item_name), '{}') AS items \
+           FROM orders o \
+           JOIN branches b ON b.id = o.branch_id \
+          WHERE o.loyalty_customer_id = $1 AND o.voided_at IS NULL \
+          ORDER BY o.created_at DESC \
+          LIMIT 50",
+    )
+    .bind(member.id)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(PastOrders {
+        orders: rows
+            .into_iter()
+            .map(|r| PastOrder {
+                id: r.id,
+                placed_at: r.placed_at,
+                branch_name: r.branch_name,
+                total: r.total,
+                items: r.items,
+            })
+            .collect(),
+    }))
+}
+
 /// What a customer can change about their own card, without an account.
 ///
 /// The token in the URL is the credential — the same one their pass carries and

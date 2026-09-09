@@ -352,6 +352,13 @@ pub struct OrgBrand {
     /// True when [`is_mark`] says the logo can be recoloured for contrast.
     /// False for an opaque tile, and for no logo at all.
     pub logo_is_mark: bool,
+    /// Where else the shop can be found — Instagram, a website, and so on.
+    ///
+    /// NOT gated on the branding tier, and deliberately so. A shop's Instagram
+    /// is a fact about the shop in the way its name is, not decoration it is
+    /// buying; a customer holding a card is better off able to find them either
+    /// way. What the tier sells is looking like yourself, not existing.
+    pub social_links: Vec<super::social::SocialLink>,
 }
 
 /// Read an organisation's brand.
@@ -370,28 +377,56 @@ pub async fn load(pool: &sqlx::PgPool, org_id: uuid::Uuid) -> Result<OrgBrand, s
         brand_logo_is_mark: Option<bool>,
         brand_card_image: Option<String>,
         custom_branding: bool,
+        social_links: serde_json::Value,
     }
     let row: Option<Row> = sqlx::query_as(
         "SELECT name, logo_url, brand_background, brand_foreground, brand_accent, \
-                brand_logo_is_mark, brand_card_image, custom_branding \
+                brand_logo_is_mark, brand_card_image, custom_branding, social_links \
            FROM organizations WHERE id = $1",
     )
     .bind(org_id)
     .fetch_optional(pool)
     .await?;
-    let Some(row) = row else {
+    let Some(mut row) = row else {
         return Ok(OrgBrand::default());
     };
 
     // The tier gate, applied once and here. The shop's NAME is always its own —
     // a card that does not say whose it is helps nobody, and the name is not
     // what anyone is paying for.
+    let social_links = super::social::links_of(&row.social_links);
+
     if !row.custom_branding {
         return Ok(OrgBrand {
             name: row.name,
             custom_branding: false,
+            social_links,
             ..OrgBrand::default()
         });
+    }
+
+    // Same healing for the PALETTE. These columns arrived after some logos did,
+    // and a shop whose row predates them was silently wearing Madar's colours
+    // on the tier it had paid for — falling back is right for a shop with no
+    // logo and wrong for one whose logo we simply never looked at.
+    if row.brand_background.is_none()
+        && let Some(url) = row.logo_url.as_deref()
+        && let Some(p) = read_logo(url).and_then(|img| palette_from_image(&img))
+    {
+        let _ = sqlx::query(
+            "UPDATE organizations \
+                SET brand_background = $2, brand_foreground = $3, brand_accent = $4 \
+              WHERE id = $1 AND brand_background IS NULL",
+        )
+        .bind(org_id)
+        .bind(&p.background)
+        .bind(&p.foreground)
+        .bind(&p.accent)
+        .execute(pool)
+        .await;
+        row.brand_background = Some(p.background);
+        row.brand_foreground = Some(p.foreground);
+        row.brand_accent = Some(p.accent);
     }
 
     // Healed on first read, not backfilled by an operator. The column arrived
@@ -423,6 +458,7 @@ pub async fn load(pool: &sqlx::PgPool, org_id: uuid::Uuid) -> Result<OrgBrand, s
         },
         logo_is_mark,
         custom_branding: true,
+        social_links,
     })
 }
 

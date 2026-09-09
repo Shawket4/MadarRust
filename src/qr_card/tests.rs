@@ -932,3 +932,332 @@ mod http {
         }
     }
 }
+
+// ── Branded cards (the branding tier) ─────────────────────────────────────────
+
+#[cfg(test)]
+mod branded {
+    use image::{DynamicImage, GenericImageView, Rgba, RgbaImage};
+
+    use crate::orgs::branding::{self, OrgBrand, Palette};
+    use crate::qr_card::brand::{CardBrand, MAX_LOGO_PX, MIN_LOGO_PX, card_brand, prepare_logo};
+    use crate::qr_card::{
+        PAPER, QrCardOptions, TEAL, TEAL_LIGHT, render, render_qr_card_png, render_qr_card_svg,
+    };
+
+    const SHORT: &str = "https://sfx.link/Ab3xK";
+    /// A light brand: the shop's colour is the ground, near-black ink on it.
+    const GOLD: (&str, &str, &str) = ("#FFD400", "#12222A", "#8A6D00");
+
+    fn opts(brand: Option<CardBrand>) -> QrCardOptions {
+        QrCardOptions {
+            short_url: SHORT.into(),
+            brand,
+            ..Default::default()
+        }
+    }
+
+    fn org(p: (&str, &str, &str)) -> OrgBrand {
+        OrgBrand {
+            name: "Qahwa & Co".into(),
+            custom_branding: true,
+            palette: Palette {
+                background: p.0.into(),
+                foreground: p.1.into(),
+                accent: p.2.into(),
+            },
+            ..Default::default()
+        }
+    }
+
+    fn lum(hex: &str) -> f64 {
+        let (r, g, b) = branding::parse_hex(hex).expect("hex");
+        branding::luminance(r, g, b)
+    }
+
+    fn solid(w: u32, h: u32, px: [u8; 4]) -> DynamicImage {
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(w, h, Rgba(px)))
+    }
+
+    fn two_tone(w: u32, h: u32) -> DynamicImage {
+        let mut img = RgbaImage::new(w, h);
+        for (x, _y, p) in img.enumerate_pixels_mut() {
+            *p = if x < w / 2 {
+                Rgba([220, 30, 30, 255])
+            } else {
+                Rgba([30, 60, 220, 255])
+            };
+        }
+        DynamicImage::ImageRgba8(img)
+    }
+
+    fn decode_qr(png: &[u8]) -> String {
+        let img = image::load_from_memory(png).expect("valid png").to_luma8();
+        let mut prepared = rqrr::PreparedImage::prepare(img);
+        let grids = prepared.detect_grids();
+        assert!(!grids.is_empty(), "no QR grid detected");
+        grids[0].decode().expect("QR decodes").1
+    }
+
+    /// The whole promise of the unbranded card: a shop that has not bought the
+    /// branding tier gets the card Madar has always printed, to the byte.
+    ///
+    /// A golden file rather than a spot-check of a few substrings, because the
+    /// ways this could regress are not ones a substring test would notice — a
+    /// colour resolved through the wrong variable, an attribute reordered, a
+    /// footer line emitted when it should not have been. The SVG is composed
+    /// by string formatting alone, with no font or rasteriser in the path, so
+    /// it is stable enough to pin exactly.
+    #[test]
+    fn the_unbranded_card_is_byte_for_byte_the_card_that_shipped_before() {
+        let svg = render_qr_card_svg(&QrCardOptions {
+            short_url: SHORT.into(),
+            caption: Some("Table 5".into()),
+            ..Default::default()
+        })
+        .expect("svg");
+        assert_eq!(
+            svg,
+            include_str!("golden_unbranded_card.svg"),
+            "the unbranded card changed; if that was deliberate, the golden file \
+             has to be regenerated and the change justified"
+        );
+    }
+
+    /// The tier gate is the loader's job, and this is the whole of this
+    /// module's part in it: no flag check, just the `None` that routes back to
+    /// the card above.
+    #[test]
+    fn an_org_off_the_tier_yields_no_brand_at_all() {
+        let mut o = org(GOLD);
+        o.custom_branding = false;
+        assert!(card_brand(&o).is_none());
+    }
+
+    /// The QR is the one part of the card that is not a matter of taste.
+    ///
+    /// Two properties, and both matter: the pair has to clear AA, and the
+    /// modules have to be the DARKER half — a light-on-dark code is legal SVG
+    /// and unreadable to most of the scanners these cards are pointed at.
+    #[test]
+    fn the_qr_pair_is_always_dark_on_light_and_clears_aa() {
+        for p in [
+            GOLD,
+            ("#0D6273", "#EFF3F4", "#2E94A6"), // a dark brand — the pair inverts
+            ("#1A1A2E", "#EFF3F4", "#4A4A7E"),
+            ("#7F7F7F", "#888888", "#909090"), // readable against nothing
+        ] {
+            let b = card_brand(&org(p)).expect("on the tier");
+            let (g, i) = (lum(&b.ground), lum(&b.ink));
+            assert!(i < g, "modules must be the darker half for {}", p.0);
+            assert!(
+                branding::contrast(g, i) >= 4.5,
+                "{} vs {} is {:.2}:1",
+                b.ground,
+                b.ink,
+                branding::contrast(g, i)
+            );
+        }
+    }
+
+    /// The defensive path: a palette that cannot be made to scan gives the card
+    /// up rather than the code. The accent goes with it, because a hairline
+    /// that fails 3:1 against the ground it is drawn on is not a frame.
+    #[test]
+    fn an_unreadable_palette_falls_back_to_ink_on_paper() {
+        let b = card_brand(&org(("#7F7F7F", "#888888", "#909090"))).expect("on the tier");
+        assert_eq!(b.ground, PAPER);
+        assert_eq!(b.ink, TEAL);
+        assert_eq!(b.accent, TEAL, "an unreadable accent is not drawn");
+    }
+
+    /// A branded card scans, which is the only thing about it that is not
+    /// negotiable.
+    #[test]
+    fn a_branded_card_still_scans() {
+        for p in [GOLD, ("#0D6273", "#EFF3F4", "#2E94A6")] {
+            let b = card_brand(&org(p)).expect("on the tier");
+            let png = render_qr_card_png(&QrCardOptions {
+                dpi: 300,
+                ..opts(Some(b))
+            })
+            .expect("render");
+            assert_eq!(decode_qr(&png), SHORT, "palette {}", p.0);
+        }
+    }
+
+    /// What the shop actually bought: its colours on the card, its name where
+    /// Madar's wordmark was, and none of Madar's own tokens left anywhere —
+    /// including inside the fallback mark, which ships hardcoded in teal.
+    #[test]
+    fn a_branded_card_wears_the_shops_colours_and_name() {
+        let b = card_brand(&org(GOLD)).expect("on the tier");
+        let svg = render_qr_card_svg(&opts(Some(b))).expect("svg");
+        for c in [GOLD.0, GOLD.1, GOLD.2] {
+            assert!(svg.contains(c), "{c} missing from the card");
+        }
+        assert!(
+            !svg.contains(TEAL),
+            "Madar's teal survived on a branded card"
+        );
+        assert!(!svg.contains(TEAL_LIGHT));
+        assert!(!svg.contains(PAPER));
+        assert!(svg.contains("Qahwa &amp; Co"), "the shop's name, escaped");
+    }
+
+    /// Madar's credit is on both cards. It is the lockup on an unbranded one
+    /// and a line of type on a branded one, and the point of the test is that
+    /// there is no third state where it is absent.
+    #[test]
+    fn powered_by_madar_is_on_the_branded_card_and_the_lockup_on_the_other() {
+        let branded = render_qr_card_svg(&opts(Some(card_brand(&org(GOLD)).expect("on the tier"))))
+            .expect("svg");
+        assert!(branded.contains("Powered by Madar"));
+
+        let plain = render_qr_card_svg(&opts(None)).expect("svg");
+        assert!(
+            !plain.contains("Powered by Madar"),
+            "the unbranded card credits Madar with the wordmark, not a line"
+        );
+        assert!(
+            plain.contains(TEAL_LIGHT),
+            "the wordmark lockup is still there"
+        );
+    }
+
+    /// The print floor, and the reason it exists.
+    ///
+    /// The slot is 15 mm and the card rasterises at 600 DPI, so one image pixel
+    /// per device pixel would be `15 / 25.4 * 600 = 354`. The bar is set at the
+    /// 300 DPI commercial-print floor instead — `15 / 25.4 * 300 = 177` — below
+    /// which the logo is being blown up more than twofold and prints soft. On a
+    /// run of several hundred cards that is discovered by the shop, not by us.
+    #[test]
+    fn a_logo_below_the_print_floor_is_refused() {
+        assert_eq!(MIN_LOGO_PX, 177, "15 mm at 300 DPI");
+        assert!(prepare_logo(&solid(176, 176, [20, 20, 20, 255]), true, TEAL).is_none());
+        assert!(
+            prepare_logo(&solid(177, 40, [20, 20, 20, 255]), true, TEAL).is_some(),
+            "the long edge is what gets fitted to the slot, so it is what counts"
+        );
+    }
+
+    /// …and a refused logo leaves a card with Madar's vector mark on it, not a
+    /// hole where the mark should be.
+    #[test]
+    fn a_refused_logo_falls_back_to_madars_mark() {
+        let mut b = card_brand(&org(GOLD)).expect("on the tier");
+        let ink = b.ink.clone();
+        b.logo = prepare_logo(&solid(120, 120, [20, 20, 20, 255]), true, &ink);
+        assert!(b.logo.is_none(), "too small to print");
+
+        let svg = render_qr_card_svg(&opts(Some(b))).expect("svg");
+        assert!(!svg.contains("<image"), "nothing raster was drawn");
+        assert!(
+            svg.contains(r#"<circle cx="74.04" cy="25.96""#),
+            "Madar's mark is in the slot"
+        );
+    }
+
+    /// A logo that passes is embedded as a `data:` URI, fitted to its own
+    /// aspect — and, because resvg is built here without raster-image support,
+    /// it has to arrive in the PNG by another route. This is the test that
+    /// catches that route being broken: it reads the pixel at the card's
+    /// centre, which is the middle of the mark slot.
+    #[test]
+    fn an_accepted_logo_reaches_both_the_svg_and_the_raster() {
+        let logo = prepare_logo(&solid(400, 400, [255, 0, 255, 255]), false, "#12222A")
+            .expect("400 px clears the floor");
+        let mut b = card_brand(&org(GOLD)).expect("on the tier");
+        b.logo = Some(logo);
+
+        let svg = render_qr_card_svg(&opts(Some(b.clone()))).expect("svg");
+        assert!(svg.contains(r#"<image x="45" y="51.5" width="15" height="15""#));
+        assert!(svg.contains(r#"href="data:image/png;base64,"#));
+
+        let png = render_qr_card_png(&QrCardOptions {
+            dpi: 150,
+            ..opts(Some(b))
+        })
+        .expect("render");
+        let img = image::load_from_memory(&png).expect("valid png");
+        let (cx, cy) = (render::px(52.5, 150), render::px(59.0, 150));
+        assert_eq!(
+            img.get_pixel(cx, cy).0,
+            [255, 0, 255, 255],
+            "the shop's logo is on the printed card"
+        );
+    }
+
+    /// A wide logo keeps its shape: the long edge fills the slot and the short
+    /// one is left short, rather than the mark being squared up into something
+    /// nobody drew.
+    #[test]
+    fn a_wide_logo_is_fitted_by_its_long_edge() {
+        let logo =
+            prepare_logo(&solid(400, 200, [255, 0, 255, 255]), false, "#12222A").expect("accepted");
+        let mut b = card_brand(&org(GOLD)).expect("on the tier");
+        b.logo = Some(logo);
+        let svg = render_qr_card_svg(&opts(Some(b))).expect("svg");
+        assert!(svg.contains(r#"<image x="45" y="55.25" width="15" height="7.5""#));
+    }
+
+    /// Tinting is for a single-colour mark and nothing else. Repainting every
+    /// pixel of a two-colour logo does not recolour it, it flattens it into a
+    /// silhouette — so `logo_is_mark` decides, and this is what it decides
+    /// between.
+    #[test]
+    fn a_multi_colour_logo_is_drawn_as_uploaded() {
+        let img = two_tone(400, 400);
+        let as_is = prepare_logo(&img, false, "#12222A").expect("accepted");
+        let tinted = prepare_logo(&img, true, "#12222A").expect("accepted");
+
+        let a = image::load_from_memory(&as_is.png).expect("png");
+        assert_eq!(a.get_pixel(10, 10).0, [220, 30, 30, 255]);
+        assert_eq!(a.get_pixel(390, 10).0, [30, 60, 220, 255]);
+
+        let t = image::load_from_memory(&tinted.png).expect("png");
+        assert_eq!(t.get_pixel(10, 10).0, [0x12, 0x22, 0x2A, 255]);
+        assert_eq!(
+            t.get_pixel(10, 10).0,
+            t.get_pixel(390, 10).0,
+            "a tint collapses the two halves, which is why it is gated"
+        );
+    }
+
+    /// Nothing above the slot at the highest DPI this module will ever raster
+    /// can be seen, and an uncapped upload is megabytes of base64 in every
+    /// card SVG — which is returned inline in a JSON response.
+    #[test]
+    fn an_oversized_logo_is_capped() {
+        let big =
+            prepare_logo(&solid(3000, 1500, [20, 20, 20, 255]), false, TEAL).expect("accepted");
+        assert_eq!(big.width, MAX_LOGO_PX, "15 mm at 2400 DPI");
+        assert!(big.height < MAX_LOGO_PX, "aspect preserved");
+    }
+
+    /// SVG text does not wrap, so a long name is a name that runs off the card
+    /// unless something stops it. Something stops it.
+    #[test]
+    fn a_long_shop_name_is_cut_rather_than_left_to_overflow() {
+        let mut o = org(GOLD);
+        o.name = "The Extremely Long Coffee House Of Heliopolis".into();
+        let svg =
+            render_qr_card_svg(&opts(Some(card_brand(&o).expect("on the tier")))).expect("svg");
+        assert!(svg.contains('…'), "elided");
+        assert!(!svg.contains("Heliopolis"));
+    }
+
+    /// An org row that has gone missing has no name, and a card with a gap
+    /// where the name goes reads as a rendering fault. It simply has no name
+    /// line, which is a finished card.
+    #[test]
+    fn a_nameless_org_gets_a_card_without_a_name_line() {
+        let mut o = org(GOLD);
+        o.name = "   ".into();
+        let svg =
+            render_qr_card_svg(&opts(Some(card_brand(&o).expect("on the tier")))).expect("svg");
+        assert!(svg.contains("Powered by Madar"));
+        assert_eq!(svg.matches("<text").count(), 1, "only the Madar line");
+    }
+}

@@ -6,7 +6,8 @@
 //! manual adjustment — and nowhere else.
 //!
 //! So a shop opening a branch, or filling in coordinates for one it opened last
-//! month, changed nothing for anybody already carrying a card. Their pass kept
+//! month — or, later, adding its Instagram — changed nothing for anybody
+//! already carrying a card. Their pass kept
 //! the old list until they next bought something, and a customer who did not
 //! come back kept it forever. The lock-screen prompt at the new branch never
 //! appeared, which is the one thing the feature exists for.
@@ -99,8 +100,14 @@ pub async fn stale_passes(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>, AppErr
         "SELECT c.id \
            FROM loyalty_customers c \
            JOIN ( \
-               SELECT org_id, MAX(updated_at) AS changed \
-                 FROM branches WHERE deleted_at IS NULL GROUP BY org_id \
+               SELECT o.id AS org_id, \
+                      GREATEST( \
+                          o.updated_at, \
+                          COALESCE((SELECT MAX(b.updated_at) FROM branches b \
+                                     WHERE b.org_id = o.id AND b.deleted_at IS NULL), \
+                                   o.updated_at) \
+                      ) AS changed \
+                 FROM organizations o WHERE o.deleted_at IS NULL \
            ) b ON b.org_id = c.org_id \
           WHERE (c.pass_updated_at IS NULL OR c.pass_updated_at < b.changed) \
             AND ( \

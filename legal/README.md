@@ -21,6 +21,25 @@ Specifically needing counsel:
   question for counsel — the policy currently describes it plainly and offers the customer a
   wallet-free alternative.
 - Whether the controller/processor split described in `dpa.md` matches how contracts read.
+- **The member's card page, whose only credential is the token in their barcode.** It now
+  shows a purchase history — date, branch, total and the items on each order — so anyone
+  holding the link, or a photograph of the barcode, can read it. That is a deliberate trade:
+  the same token has to work from a tapped link in a message, with no password. Whether a
+  bearer token is adequate protection for a purchase history under the PDPL, whether the
+  page needs a warning at the point the link is shared, and whether a shop should be able
+  to require the one-time code to open it, are all questions for counsel. The policy
+  currently states the exposure plainly rather than taking a position on it.
+- **Whether the birthday and "we've missed you" messages may run on an opt-out.** They are
+  marketing, sent to a phone number given for a different purpose; today the switch is on
+  the customer's card page and every message links to it, and there is no opt-in step at
+  signup. Whether Egyptian law — and separately WhatsApp's own rules for business messaging
+  — require prior consent rather than a way out is not something to decide by writing it
+  down.
+- **Whether message CONTENT reaching Google is covered by the wallet consent above.** A
+  card added to Google Wallet already sends Google a name and a balance. Putting a greeting
+  or a win-back nudge on that card sends Google the words of it too, which is a different
+  kind of disclosure from a balance, and the customer consented to the card rather than to
+  the messages. Apple is unaffected — its push is empty and the text never leaves us.
 
 ## Why git
 

@@ -2,6 +2,10 @@ use crate::{auth::middleware::JwtMiddleware, orgs::handlers, qr_card::handlers a
 use actix_web::web;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
+    // Outside the JWT scope on purpose: this is the first request a customer's
+    // browser makes, before any session exists, and everything it returns is
+    // already on the shopfront.
+    cfg.route("/public/orgs/brand", web::get().to(super::public::brand));
     cfg.service(
         web::scope("/orgs")
             .wrap(JwtMiddleware)
