@@ -164,9 +164,21 @@ pub(crate) async fn create_open_ticket_inner(
     // queued offline fire is historical; cloud consumers re-seed via snapshot).
     hub: Option<&BranchEventHub>,
 ) -> Result<HttpResponse, AppError> {
-    if body.items.is_empty() {
+    // SEATING a party and FIRING a round are two acts that used to be one.
+    //
+    // A ticket is a tab on a table. Firing sends food to a kitchen. Requiring
+    // items to open one meant a table could not be claimed until somebody had
+    // decided what to eat — so the POS bound the table in local UI state
+    // instead, which never left the device: two tellers could seat the same
+    // table and neither could see the other.
+    //
+    // An empty ticket seats. It touches no kitchen, and rounds are added to it
+    // exactly as they always were. A table is required, because a tab on no
+    // table with nothing on it is not anything.
+    let seating = body.items.is_empty();
+    if seating && body.table_id.is_none() {
         return Err(AppError::BadRequest(
-            "A ticket must fire at least one item".into(),
+            "A ticket must fire at least one item, or name the table it seats".into(),
         ));
     }
     // The branch must be operating (any till open) to fire to the kitchen. Replay
@@ -201,21 +213,30 @@ pub(crate) async fn create_open_ticket_inner(
     let mut tx = pool.get_ref().begin().await?;
     let ticket_ref = mint_ticket_ref(&mut tx, body.branch_id, now).await?;
 
-    // Table arbitration (shared with held orders): an occupied — or unknown —
-    // table is DROPPED rather than failing the fire. A queued offline fire must
-    // never dead-letter over a table race; the ticket floats table-less and the
-    // waiter reassigns from the canvas.
-    let table_id = match body.table_id {
-        Some(t)
-            if crate::floor_ops::lock_table(&mut tx, t, body.branch_id).await?
+    // Table arbitration. An occupied — or unknown — table is DROPPED rather
+    // than failing a FIRE: a queued offline fire must never dead-letter over a
+    // table race, so the ticket floats table-less and the waiter reassigns from
+    // the canvas.
+    //
+    // Seating is the opposite. The table IS the request, so handing back a
+    // table-less ticket would silently seat a party nowhere — the teller taps a
+    // table, sees nothing happen, and taps again. A race there is answered, not
+    // absorbed.
+    let free = match body.table_id {
+        Some(t) => {
+            crate::floor_ops::lock_table(&mut tx, t, body.branch_id).await?
                 && crate::floor_ops::occupant_of(&mut tx, t, None)
                     .await?
-                    .is_none() =>
-        {
-            Some(t)
+                    .is_none()
         }
-        _ => None,
+        None => false,
     };
+    if seating && !free {
+        return Err(AppError::Conflict(
+            "Somebody is already on that table. Refresh the floor to see who.".into(),
+        ));
+    }
+    let table_id = if free { body.table_id } else { None };
     let label = table_label(pool.get_ref(), table_id).await?;
 
     let open_ticket_id: Uuid = sqlx::query_scalar(
@@ -247,32 +268,41 @@ pub(crate) async fn create_open_ticket_inner(
     if let Some(b) = body.booking_id {
         crate::bookings::handlers::link_ticket(&mut tx, b, body.branch_id, open_ticket_id).await?;
     }
-    let kt_id = fire_round(
-        &mut tx,
-        pool.get_ref(),
-        org_id,
-        body.branch_id,
-        open_ticket_id,
-        1,
-        actor.teller_id,
-        body.round_idempotency_key,
-        &body.items,
-        label.as_deref(),
-        Some(ticket_ref.as_str()),
-    )
-    .await?;
+    // Nothing goes to the kitchen when a party merely sits down.
+    let kt_id = if seating {
+        None
+    } else {
+        Some(
+            fire_round(
+                &mut tx,
+                pool.get_ref(),
+                org_id,
+                body.branch_id,
+                open_ticket_id,
+                1,
+                actor.teller_id,
+                body.round_idempotency_key,
+                &body.items,
+                label.as_deref(),
+                Some(ticket_ref.as_str()),
+            )
+            .await?,
+        )
+    };
     tx.commit().await?;
 
     if let Some(hub) = hub {
-        publish_fired(
-            pool.get_ref(),
-            hub,
-            body.branch_id,
-            open_ticket_id,
-            kt_id,
-            "ticket.fired",
-        )
-        .await;
+        if let Some(kt_id) = kt_id {
+            publish_fired(
+                pool.get_ref(),
+                hub,
+                body.branch_id,
+                open_ticket_id,
+                kt_id,
+                "ticket.fired",
+            )
+            .await;
+        }
         if let Some(t) = table_id {
             publish_table_status(pool.get_ref(), hub, body.branch_id, t).await;
         }
