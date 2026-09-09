@@ -2653,6 +2653,7 @@ dependencies = [
  "tracing",
  "tracing-actix-web",
  "tracing-subscriber",
+ "ttf-parser",
  "urlencoding",
  "utoipa",
  "utoipa-swagger-ui",

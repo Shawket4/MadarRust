@@ -109,8 +109,66 @@ pub struct LoyaltySettings {
     #[serde(default)]
     pub reward_any_item: bool,
 
+    /// Whether a ceiling applies to what a member may hold at all.
+    ///
+    /// Separate from the figure below, because "no number" has to be able to
+    /// mean something. Off, a card collects without end.
+    #[serde(default)]
+    pub balance_cap_enabled: bool,
+
+    /// The ceiling, when `balance_cap_enabled`. `None` = derive it.
+    ///
+    /// A `None` here is NOT "no cap" — that is what the switch is for. It means
+    /// the most expensive reward on offer at this scope, read from the
+    /// catalogue at award time. Once a customer can claim anything in the
+    /// programme, collecting more buys them nothing and leaves the shop
+    /// carrying a liability it never chose; and because it is derived, adding a
+    /// dearer reward raises the ceiling without anyone retyping it.
+    ///
+    /// Earning at the cap is DROPPED, not refused: the sale is not the
+    /// customer's doing and must not fail because their card is full.
+    #[serde(default)]
+    pub balance_cap: Option<i32>,
+
+    /// How many rewards one order may claim. `None` = unlimited.
+    ///
+    /// `Some(1)` is the setting most shops mean when they ask for this: a
+    /// member with thirty stamps and a five-stamp reward can otherwise take six
+    /// free items in one visit, which is the same giveaway the shop believed it
+    /// was spreading over six.
+    #[serde(default)]
+    pub max_rewards_per_order: Option<i32>,
+
     pub terms: Option<String>,
     pub terms_ar: Option<String>,
+
+    /// How many active branches have coordinates set. **Read-only.**
+    ///
+    /// The one thing that decides whether a saved card can notify a customer
+    /// when they are at the shop. Both wallets geofence from the branch
+    /// coordinates on the pass, so a programme whose branches have none gets no
+    /// location prompt on the phone and no nearby notification — and nothing
+    /// anywhere said so, which reads as the wallet being broken rather than as
+    /// a field nobody filled in.
+    ///
+    /// Read-only in effect: this type doubles as the PUT body, and the write
+    /// path binds its columns explicitly, so a value sent here is parsed and
+    /// then ignored. It is a fact about `branches`, answered on this page
+    /// because this is where someone wonders why the card is silent.
+    #[serde(default)]
+    pub geofenced_branches: i64,
+
+    /// The ceiling actually in force, once derived. **Read-only.**
+    ///
+    /// `balance_cap` is what the shop TYPED, which is usually nothing; this is
+    /// what that resolves to against the current catalogue. The dashboard shows
+    /// it so "leave it empty" is a visible number rather than a promise, and so
+    /// the figure on screen is the one the award path will use rather than the
+    /// dashboard's own guess at it.
+    ///
+    /// `null` when no ceiling applies.
+    #[serde(default)]
+    pub effective_balance_cap: Option<i32>,
 }
 
 impl LoyaltySettings {
@@ -135,6 +193,11 @@ impl LoyaltySettings {
             winback_message: None,
             winback_reward_amount: None,
             reward_any_item: false,
+            balance_cap_enabled: false,
+            balance_cap: None,
+            max_rewards_per_order: None,
+            geofenced_branches: 0,
+            effective_balance_cap: None,
             terms: None,
             terms_ar: None,
         }
@@ -174,6 +237,16 @@ impl LoyaltySettings {
         if self.program_name.trim().is_empty() {
             return Err(AppError::BadRequest("program_name is required".into()));
         }
+        if self.balance_cap.is_some_and(|c| c <= 0) {
+            return Err(AppError::BadRequest(
+                "A balance cap must be greater than zero — leave it empty for no cap".into(),
+            ));
+        }
+        if self.max_rewards_per_order.is_some_and(|c| c <= 0) {
+            return Err(AppError::BadRequest(
+                "Rewards per order must be at least 1 — leave it empty for no limit".into(),
+            ));
+        }
         if self.winback_reward_amount.is_some_and(|a| a <= 0) {
             return Err(AppError::BadRequest(
                 "a win-back reward must be worth more than nothing".into(),
@@ -209,6 +282,9 @@ struct Row {
     winback_message: Option<String>,
     winback_reward_amount: Option<i32>,
     reward_any_item: bool,
+    balance_cap_enabled: bool,
+    balance_cap: Option<i32>,
+    max_rewards_per_order: Option<i32>,
     terms: Option<String>,
     terms_ar: Option<String>,
 }
@@ -217,7 +293,8 @@ const COLS: &str = "org_id, branch_id, enabled, program_name, program_name_ar, m
     earn_piastres_per_point, earn_on_discounted, earn_include_tax, \
     default_reward_cost, require_otp, birthday_enabled, birthday_reward_amount, \
     birthday_message, birthday_message_ar, winback_enabled, winback_message, \
-    winback_reward_amount, reward_any_item, terms, terms_ar";
+    winback_reward_amount, reward_any_item, balance_cap_enabled, balance_cap, \
+    max_rewards_per_order, terms, terms_ar";
 
 impl From<Row> for LoyaltySettings {
     fn from(r: Row) -> Self {
@@ -241,6 +318,13 @@ impl From<Row> for LoyaltySettings {
             winback_message: r.winback_message,
             winback_reward_amount: r.winback_reward_amount,
             reward_any_item: r.reward_any_item,
+            balance_cap_enabled: r.balance_cap_enabled,
+            balance_cap: r.balance_cap,
+            max_rewards_per_order: r.max_rewards_per_order,
+            // Filled by the read handler, which is the only place it means
+            // anything; the loaders answer about `loyalty_settings` alone.
+            geofenced_branches: 0,
+            effective_balance_cap: None,
             terms: r.terms,
             terms_ar: r.terms_ar,
         }
@@ -346,12 +430,40 @@ pub async fn get_settings(
     }
     // A branch scope reports what that branch RUNS ON (inherited or its own), so
     // the dashboard shows the numbers in force rather than an empty form.
-    let settings = match query.branch_id {
+    let mut settings = match query.branch_id {
         Some(b) => load_effective(pool.get_ref(), org_id, b).await?,
         None => load_scope(pool.get_ref(), org_id, None)
             .await?
             .unwrap_or_else(|| LoyaltySettings::defaults(org_id, None)),
     };
+    // Whether a card can geofence at all. See the field's docs: without a
+    // single branch coordinate the wallets never raise the location prompt, and
+    // the shop reads that as the pass being broken.
+    settings.geofenced_branches = sqlx::query_scalar(
+        "SELECT count(*) FROM branches \
+          WHERE org_id = $1 AND is_active AND deleted_at IS NULL \
+            AND latitude IS NOT NULL AND longitude IS NOT NULL",
+    )
+    .bind(org_id)
+    .fetch_one(pool.get_ref())
+    .await?;
+
+    // What the ceiling resolves to against the catalogue this scope actually
+    // offers — the number the award path will use, rather than the dashboard's
+    // own reading of the same rule.
+    if settings.balance_cap_enabled {
+        let branch = settings.branch_id.or(query.branch_id);
+        let rewards = match branch {
+            Some(b) => load_effective_rewards(pool.get_ref(), org_id, b).await?.0,
+            // Org scope has no branch to price against; the org's own list is
+            // what every branch inherits until it overrides.
+            None => in_mode(
+                load_reward_rows(pool.get_ref(), org_id, None).await?,
+                settings.mode(),
+            ),
+        };
+        settings.effective_balance_cap = effective_balance_cap(&settings, &rewards);
+    }
     Ok(HttpResponse::Ok().json(settings))
 }
 
@@ -383,8 +495,9 @@ pub async fn put_settings(
             mode, earn_piastres_per_point, earn_on_discounted, earn_include_tax, default_reward_cost, \
             require_otp, birthday_enabled, birthday_reward_amount, birthday_message, \
             birthday_message_ar, winback_enabled, winback_message, winback_reward_amount, \
-            reward_any_item, terms, terms_ar) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) \
+            reward_any_item, balance_cap_enabled, balance_cap, \
+            max_rewards_per_order, terms, terms_ar) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24) \
          ON CONFLICT (org_id, COALESCE(branch_id, '00000000-0000-0000-0000-000000000000'::uuid)) \
          DO UPDATE SET enabled = EXCLUDED.enabled, program_name = EXCLUDED.program_name, \
             program_name_ar = EXCLUDED.program_name_ar, mode = EXCLUDED.mode, \
@@ -400,7 +513,11 @@ pub async fn put_settings(
             winback_enabled = EXCLUDED.winback_enabled, \
             winback_message = EXCLUDED.winback_message, \
             winback_reward_amount = EXCLUDED.winback_reward_amount, \
-            reward_any_item = EXCLUDED.reward_any_item, terms = EXCLUDED.terms, \
+            reward_any_item = EXCLUDED.reward_any_item, \
+            balance_cap_enabled = EXCLUDED.balance_cap_enabled, \
+            balance_cap = EXCLUDED.balance_cap, \
+            max_rewards_per_order = EXCLUDED.max_rewards_per_order, \
+            terms = EXCLUDED.terms, \
             terms_ar = EXCLUDED.terms_ar, updated_at = now() \
          RETURNING {COLS}"
     ))
@@ -423,6 +540,9 @@ pub async fn put_settings(
     .bind(&incoming.winback_message)
     .bind(incoming.winback_reward_amount)
     .bind(incoming.reward_any_item)
+    .bind(incoming.balance_cap_enabled)
+    .bind(incoming.balance_cap)
+    .bind(incoming.max_rewards_per_order)
     .bind(&incoming.terms)
     .bind(&incoming.terms_ar)
     .fetch_one(pool.get_ref())
@@ -566,6 +686,38 @@ where
 /// The catalogue a branch actually offers: its own list when it has one, else
 /// the org's. An empty branch list means "inherit", not "no rewards" — a branch
 /// that wants no rewards turns the program off for itself.
+/// The ceiling a member's balance may reach, or `None` for no ceiling.
+///
+/// Three states, and the middle one is the point of the whole setting:
+///
+/// * switched off — no ceiling;
+/// * on with a figure — that figure;
+/// * on WITHOUT a figure — the dearest reward on offer here.
+///
+/// The derived case reads the catalogue rather than a number someone typed,
+/// because the number someone typed goes stale the moment a reward is added or
+/// repriced, and a stale ceiling silently discards points a customer was told
+/// they had earned. Once they can claim the best thing on the list, collecting
+/// more buys them nothing.
+///
+/// An empty catalogue falls back to `default_reward_cost`: a shop that has
+/// switched a ceiling on has asked for one, and the fallback is the same figure
+/// its pass already shows as the target.
+pub fn effective_balance_cap(settings: &LoyaltySettings, rewards: &[RewardItem]) -> Option<i32> {
+    if !settings.balance_cap_enabled {
+        return None;
+    }
+    if let Some(explicit) = settings.balance_cap {
+        return Some(explicit.max(1));
+    }
+    let dearest = rewards.iter().map(|r| r.cost_amount).max().unwrap_or(0);
+    Some(if dearest > 0 {
+        dearest
+    } else {
+        settings.default_reward_cost.max(1)
+    })
+}
+
 pub async fn load_effective_rewards(
     pool: &PgPool,
     org_id: Uuid,

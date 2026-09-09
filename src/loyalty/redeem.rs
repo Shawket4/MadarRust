@@ -160,6 +160,29 @@ pub async fn plan(
         });
     }
 
+    // The shop's ceiling on how much one visit may claim.
+    //
+    // Counted in ITEMS, not lines. A line carries `units`, so "one reward per
+    // line" — already enforced above — does not bound the giveaway at all: a
+    // single line with six units is six free coffees. The setting a shop means
+    // when it asks for this is "one free thing per visit", and that is what
+    // this counts.
+    //
+    // Refused rather than trimmed, unlike the earning cap. The customer has not
+    // paid yet and the teller has not promised anything; handing over four of
+    // the six they asked for, silently, is worse at the counter than saying
+    // what the limit is.
+    if let Some(max) = settings.max_rewards_per_order {
+        let claimed: i32 = lines.iter().map(|l| l.units).sum();
+        if claimed > max {
+            return Err(AppError::Conflict(if max == 1 {
+                "Only one reward per order here — take the rest next time".into()
+            } else {
+                format!("Only {max} rewards per order here; this order claims {claimed}")
+            }));
+        }
+    }
+
     // One check against the whole basket, not one per line: a balance that
     // covers the first reward but not the second must fail the sale, not hand
     // over half of what the teller told the customer they were getting.

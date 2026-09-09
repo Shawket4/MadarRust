@@ -235,6 +235,14 @@ pub async fn award_inner(
 
     let member = resolve_member(pool, order.org_id, &body, order.member_id).await?;
 
+    // The catalogue, before the award rather than after it: with no explicit
+    // figure the ceiling IS the dearest reward on offer, so the award cannot be
+    // computed without knowing what this branch offers.
+    let (catalogue, _) =
+        crate::loyalty::settings::load_effective_rewards(pool, order.org_id, order.branch_id)
+            .await?;
+    let cap = crate::loyalty::settings::effective_balance_cap(&settings, &catalogue);
+
     let mut tx = pool.begin().await?;
     let points = model::award_for_order(
         &mut tx,
@@ -249,6 +257,7 @@ pub async fn award_inner(
         },
         settings.rule(),
         settings.enabled,
+        cap,
         actor,
     )
     .await?;
@@ -280,11 +289,8 @@ pub async fn award_inner(
         wallet::push_update(pool, member.id);
     }
 
-    let (rewards, _) =
-        crate::loyalty::settings::load_effective_rewards(pool, order.org_id, order.branch_id)
-            .await?;
     let mode = settings.mode();
-    let target = model::reward_target(&settings, &rewards);
+    let target = model::reward_target(&settings, &catalogue);
     let fresh = model::find_by_id(pool, member.id)
         .await?
         .ok_or_else(|| AppError::NotFound("Member not found".into()))?;

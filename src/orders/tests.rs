@@ -2360,6 +2360,167 @@ async fn test_create_order_full_breakdown_recorded_verbatim(pool: PgPool) {
     assert_eq!(order_expected_total(&pool, of.order.id).await, Some(570));
 }
 
+/// A till that prices a bill under a tax policy the branch no longer has is
+/// refused, and told why.
+///
+/// This is the point of making tax server-authoritative: the alternative — the
+/// one that shipped — was recording whatever the till sent, so a till with a
+/// stale rate quietly wrote the tax line of the accounts.
+#[sqlx::test]
+async fn a_total_that_ignores_the_branch_tax_policy_is_refused(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // 500
+    sqlx::query("UPDATE organizations SET tax_rate = 0.14 WHERE id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // A till that still thinks the shop is tax-free.
+    let mut body = simple_order(branch, shift, item);
+    body.subtotal = Some(500);
+    body.total_amount = Some(500); // the server makes it 570
+
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(&body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::CONFLICT);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("570"),
+        "the refusal names the real total: {msg}"
+    );
+    assert!(
+        msg.contains("sign in again"),
+        "and says how to fix it: {msg}"
+    );
+}
+
+/// One piastre of rounding is not a disagreement.
+///
+/// A build that rounded with `f64` can differ from the decimal engine by a
+/// single minor unit on a half-piastre. Refusing a sale over that would be an
+/// outage on deploy day, so the server takes its own figure and proceeds.
+#[sqlx::test]
+async fn a_single_piastre_of_rounding_drift_is_tolerated(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // 500
+    sqlx::query("UPDATE organizations SET tax_rate = 0.14 WHERE id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut body = simple_order(branch, shift, item);
+    body.subtotal = Some(500);
+    body.total_amount = Some(569); // server says 570
+
+    let of = create_order_ok!(app, token, body);
+    assert_eq!(
+        of.order.total_amount, 570,
+        "the server's figure is what is recorded, not the till's"
+    );
+    assert_eq!(of.order.tax_amount, 70);
+}
+
+/// The rate is written onto the order, so changing it later cannot restate the
+/// books.
+#[sqlx::test]
+async fn the_applied_rate_is_recorded_on_the_order(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // 500
+    sqlx::query("UPDATE organizations SET tax_rate = 0.10 WHERE id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut body = simple_order(branch, shift, item);
+    body.subtotal = Some(500);
+    body.total_amount = None;
+    let of = create_order_ok!(app, token, body);
+    assert_eq!(of.order.tax_amount, 50);
+
+    // The shop puts its rate up tomorrow.
+    sqlx::query("UPDATE organizations SET tax_rate = 0.20 WHERE id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (rate, tax): (rust_decimal::Decimal, i32) =
+        sqlx::query_as("SELECT tax_rate_applied, tax_amount FROM orders WHERE id = $1")
+            .bind(of.order.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(tax, 50, "yesterday's sale keeps yesterday's tax");
+    assert_eq!(
+        rate.to_string(),
+        "0.1000",
+        "and says which rate produced it"
+    );
+}
+
+/// A branch may tax differently from its organisation.
+#[sqlx::test]
+async fn a_branch_override_beats_the_org_rate(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // 500
+    sqlx::query("UPDATE organizations SET tax_rate = 0.14 WHERE id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE branches SET tax_rate = 0 WHERE id = $1")
+        .bind(branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut body = simple_order(branch, shift, item);
+    body.subtotal = Some(500);
+    body.total_amount = None;
+    let of = create_order_ok!(app, token, body);
+    assert_eq!(
+        of.order.tax_amount, 0,
+        "an explicit branch 0 is not 'inherit'"
+    );
+    assert_eq!(of.order.total_amount, 500);
+}
+
+/// Tax-inclusive pricing: the menu price is what the customer pays.
+#[sqlx::test]
+async fn an_inclusive_bill_charges_the_menu_price_and_breaks_the_tax_out(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // 500
+    sqlx::query("UPDATE organizations SET tax_rate = 0.25, tax_inclusive = true WHERE id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut body = simple_order(branch, shift, item);
+    body.subtotal = Some(500);
+    body.total_amount = None;
+    let of = create_order_ok!(app, token, body);
+    assert_eq!(
+        of.order.total_amount, 500,
+        "the customer pays the price on the board"
+    );
+    assert_eq!(of.order.tax_amount, 100, "which already contained 25% tax");
+}
+
 /// A charged ADDON price is recorded verbatim and flags the order.
 #[sqlx::test]
 async fn test_create_order_addon_charged_price_recorded_and_flags(pool: PgPool) {
@@ -3083,6 +3244,17 @@ async fn split_payment_orders_filter_and_display_by_real_legs(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
+
+    // This test is about payment LEGS, so the bill is kept tax-free and the
+    // legs sum to it exactly. (A seeded org inherits the 0.14 column default;
+    // leaving it would make the server price this bill at 684 and refuse a
+    // 600 total, which is a different test — see
+    // `a_total_that_ignores_the_branch_tax_policy_is_refused`.)
+    sqlx::query("UPDATE organizations SET tax_rate = 0 WHERE id = $1")
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // One split sale: card 400 + cash 200.
     let req = test::TestRequest::post()

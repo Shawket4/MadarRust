@@ -520,6 +520,12 @@ pub struct FinalizeCtx<'a> {
     pub created_at: DateTime<Utc>,
     pub subtotal: i32,
     pub tax_amount: i32,
+    /// The policy this bill was priced under, recorded alongside the figures it
+    /// produced. See `orders.tax_rate_applied`.
+    pub service_charge_amount: i32,
+    pub tax_rate_applied: rust_decimal::Decimal,
+    pub service_charge_rate_applied: rust_decimal::Decimal,
+    pub tax_inclusive: bool,
     pub delivery_fee: i32,
     pub total_amount: i32,
     /// Frozen channel discount (item subtotal only). `discount_amount` is 0
@@ -591,13 +597,16 @@ pub async fn apply_snapshot(
              tax_amount, total_amount, tip_amount, status,
              customer_name, notes, created_at, order_ref,
              price_flagged, price_expected_total, tip_is_cash,
-             order_type, delivery_fee, delivery_order_id)
+             order_type, delivery_fee, delivery_order_id,
+             service_charge_amount, tax_rate_applied,
+             service_charge_rate_applied, tax_inclusive)
         VALUES ($1, $2, $3, $4, $5, $6,
                 $15::discount_type, $16, $17, $18,
                 $7, $8, 0, 'completed',
                 $9, $10, $11, $12,
                 false, $8, NULL,
-                $19, $13, $14)
+                $19, $13, $14,
+                $20, $21, $22, $23)
         RETURNING
             id, branch_id, shift_id, teller_id,
             (SELECT name FROM users WHERE id = $3) AS teller_name,
@@ -608,7 +617,7 @@ pub async fn apply_snapshot(
             -- below); reads hydrate the real legs.
             '[]'::json AS payment_legs,
             subtotal, discount_type::text, discount_value,
-            discount_amount, tax_amount, total_amount,
+            discount_amount, tax_amount, service_charge_amount, total_amount,
             amount_tendered, change_given, tip_amount, tip_payment_method, discount_id,
             customer_name, notes, order_type, delivery_fee, delivery_order_id,
             (SELECT channel::text FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_channel,
@@ -636,6 +645,10 @@ pub async fn apply_snapshot(
     .bind(ctx.discount_amount) // $17
     .bind(ctx.discount_id)     // $18
     .bind(ctx.order_type)      // $19
+    .bind(ctx.service_charge_amount) // $20
+    .bind(ctx.tax_rate_applied)      // $21
+    .bind(ctx.service_charge_rate_applied) // $22
+    .bind(ctx.tax_inclusive)         // $23
     .fetch_one(&mut **tx)
     .await?;
 

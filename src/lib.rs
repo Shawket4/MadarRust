@@ -48,6 +48,7 @@ pub mod shifts;
 pub mod staff;
 pub mod stocktakes;
 pub mod sync;
+pub mod tax;
 pub mod tickets;
 pub mod tills;
 pub mod translation;

@@ -529,6 +529,18 @@ pub async fn finalize_delivery_order(
         return Err(AppError::Conflict("Order is already finalized".into()));
     }
 
+    // Tax on an online order used to be the literal `0`, so every bill taken
+    // through the ordering site was recorded untaxed and the tax reports
+    // understated by exactly that channel. It is priced under the same branch
+    // policy as a bill rung up at the till, by the same engine.
+    //
+    // The delivery fee stays outside the tax base: it is a carriage charge on a
+    // sale, not part of the sale, and the customer already agreed the quoted
+    // fee at checkout.
+    let policy = crate::tax::policy::for_branch(pool.get_ref(), order.branch_id).await?;
+    let breakdown =
+        crate::tax::compute(order.subtotal as i64, order.discount_amount as i64, &policy);
+
     let ctx = FinalizeCtx {
         branch_id: order.branch_id,
         shift_id: body.shift_id,
@@ -537,9 +549,13 @@ pub async fn finalize_delivery_order(
         is_cash,
         created_at: now,
         subtotal: order.subtotal,
-        tax_amount: 0,
+        tax_amount: breakdown.tax as i32,
+        service_charge_amount: breakdown.service_charge as i32,
+        tax_rate_applied: policy.tax_rate,
+        service_charge_rate_applied: policy.service_charge_rate,
+        tax_inclusive: policy.tax_inclusive,
         delivery_fee: order.delivery_fee,
-        total_amount: order.total,
+        total_amount: breakdown.total as i32 + order.delivery_fee,
         discount_id: order.discount_id,
         discount_type: order.discount_type.as_deref(),
         discount_value: order.discount_value,

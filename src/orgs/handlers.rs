@@ -37,6 +37,14 @@ pub struct Org {
     /// Stored as `BigDecimal` internally; transmitted as a JSON number.
     #[schema(value_type = f64, example = 0.14)]
     pub tax_rate: sqlx::types::BigDecimal,
+    /// `true` = menu prices already contain the tax, and the receipt breaks it
+    /// out backwards rather than adding it on at the till.
+    pub tax_inclusive: bool,
+    /// Fraction of the bill added as a service charge; `0` disables it.
+    #[schema(value_type = f64, example = 0.0)]
+    pub service_charge_rate: sqlx::types::BigDecimal,
+    /// Whether the service charge is itself taxed.
+    pub service_charge_taxable: bool,
     pub receipt_footer: Option<String>,
     /// The card palette derived from `logo_url` when it was uploaded
     /// (`orgs::branding`). Read-only over the API: there is nothing to set, and
@@ -83,6 +91,10 @@ pub struct UpdateOrgRequest {
     pub currency_code: Option<String>,
     #[schema(example = 0.14)]
     pub tax_rate: Option<f64>,
+    pub tax_inclusive: Option<bool>,
+    #[schema(example = 0.0)]
+    pub service_charge_rate: Option<f64>,
+    pub service_charge_taxable: Option<bool>,
     pub receipt_footer: Option<String>,
     pub is_active: Option<bool>,
     /// IANA timezone name (e.g. `Africa/Cairo`). Validated against the
@@ -265,7 +277,7 @@ pub async fn create_org(
     let tax_rate = fields.tax_rate.unwrap_or(0.14);
     if !(0.0..=1.0).contains(&tax_rate) {
         return Err(AppError::BadRequest(
-            "tax_rate must be between 0 and 1".into(),
+            "tax_rate is a fraction between 0 and 1, not a percentage — 0.14 means 14%".into(),
         ));
     }
 
@@ -280,9 +292,12 @@ pub async fn create_org(
 
     let org = sqlx::query_as::<_, Org>(
         r#"
+        -- tax_inclusive / service_charge_* deliberately absent: a new org takes
+        -- the column defaults (exclusive pricing, no service charge) and
+        -- configures them in Settings afterwards.
         INSERT INTO organizations (name, slug, logo_url, currency_code, tax_rate, receipt_footer, timezone)
         VALUES ($1, $2, $3, $4, $5, $6, $7::timezone_name)
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
         "#,
     )
     .bind(&name)
@@ -335,7 +350,7 @@ pub async fn list_orgs(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResp
 
     let orgs = sqlx::query_as::<_, Org>(
         r#"
-        SELECT id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
+        SELECT id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
         FROM organizations
         WHERE deleted_at IS NULL
         ORDER BY name
@@ -524,11 +539,21 @@ pub async fn update_org(
         }
     }
 
-    if let Some(r) = body.tax_rate {
-        if !(0.0..=1.0).contains(&r) {
-            return Err(AppError::BadRequest(
-                "tax_rate must be between 0 and 1".into(),
-            ));
+    // Both rates are FRACTIONS. The message says so, because "must be between
+    // 0 and 1" on a field labelled "%" is what made this setting unusable: the
+    // person typed 14, was refused, and had no way to learn that 0.14 was
+    // wanted.
+    for (name, value) in [
+        ("tax_rate", body.tax_rate),
+        ("service_charge_rate", body.service_charge_rate),
+    ] {
+        if let Some(r) = value
+            && !(0.0..=1.0).contains(&r)
+        {
+            return Err(AppError::BadRequest(format!(
+                "{name} is a fraction between 0 and 1, not a percentage — \
+                 0.14 means 14%"
+            )));
         }
     }
 
@@ -562,9 +587,12 @@ pub async fn update_org(
             timezone       = COALESCE(NULLIF($10, '')::timezone_name, timezone),
             custom_branding = COALESCE($11, custom_branding),
             social_links   = COALESCE($12, social_links),
+            tax_inclusive  = COALESCE($13, tax_inclusive),
+            service_charge_rate = COALESCE($14, service_charge_rate),
+            service_charge_taxable = COALESCE($15, service_charge_taxable),
             updated_at     = NOW()
         WHERE id = $1 AND deleted_at IS NULL
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
         "#,
     )
     .bind(*org_id)
@@ -579,6 +607,9 @@ pub async fn update_org(
     .bind(&body.timezone)
     .bind(body.custom_branding)
     .bind(&social)
+    .bind(body.tax_inclusive)
+    .bind(body.service_charge_rate)
+    .bind(body.service_charge_taxable)
     .fetch_optional(pool.get_ref())
     .await?
     .ok_or_else(|| AppError::NotFound("Org not found".into()))?;
@@ -718,7 +749,7 @@ pub async fn upload_org_logo(
             brand_background = $3, brand_foreground = $4, brand_accent = $5,
             brand_logo_source = $2, brand_logo_is_mark = $6
         WHERE id = $1 AND deleted_at IS NULL
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
         "#,
     )
     .bind(*org_id)
@@ -831,7 +862,7 @@ pub async fn upload_org_card_image(
         r#"
         UPDATE organizations SET brand_card_image = $2, updated_at = NOW()
         WHERE id = $1 AND deleted_at IS NULL
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
         "#,
     )
     .bind(*org_id)
@@ -902,7 +933,7 @@ pub(crate) fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 
 async fn fetch_org(pool: &PgPool, id: Uuid) -> Result<Org, AppError> {
     sqlx::query_as::<_, Org>(
-        "SELECT id, name, slug, logo_url, currency_code, tax_rate, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
+        "SELECT id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
          FROM organizations
          WHERE id = $1 AND deleted_at IS NULL",
     )

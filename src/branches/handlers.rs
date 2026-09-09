@@ -73,6 +73,16 @@ pub struct Branch {
     pub longitude: Option<f64>,
     /// Radius in meters within which this branch is considered a match. Defaults to 200.
     pub geo_radius_meters: Option<i32>,
+    /// Tax policy OVERRIDES. `null` means inherit the organisation's setting —
+    /// which is not the same as `0`. An org that changes its rate still moves
+    /// every branch that never asked to differ; a branch that genuinely charges
+    /// no tax says so with an explicit `0`.
+    #[schema(value_type = Option<f64>, example = 0.14)]
+    pub tax_rate: Option<sqlx::types::BigDecimal>,
+    pub tax_inclusive: Option<bool>,
+    #[schema(value_type = Option<f64>, example = 0.0)]
+    pub service_charge_rate: Option<sqlx::types::BigDecimal>,
+    pub service_charge_taxable: Option<bool>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -137,6 +147,25 @@ pub struct UpdateBranchRequest {
     #[schema(nullable, value_type = Option<i32>)]
     pub printer_port: Option<Option<i32>>,
 
+    // Tax policy overrides. Absent = leave as-is; explicit `null` = go back to
+    // inheriting the org; a value = override. All three states are needed, so
+    // these use the same double-option pattern as the printer fields.
+    #[serde(default, deserialize_with = "double_option")]
+    #[schema(nullable, value_type = Option<f64>)]
+    pub tax_rate: Option<Option<f64>>,
+
+    #[serde(default, deserialize_with = "double_option")]
+    #[schema(nullable, value_type = Option<bool>)]
+    pub tax_inclusive: Option<Option<bool>>,
+
+    #[serde(default, deserialize_with = "double_option")]
+    #[schema(nullable, value_type = Option<f64>)]
+    pub service_charge_rate: Option<Option<f64>>,
+
+    #[serde(default, deserialize_with = "double_option")]
+    #[schema(nullable, value_type = Option<bool>)]
+    pub service_charge_taxable: Option<Option<bool>>,
+
     // Clearable geo fields
     #[serde(default, deserialize_with = "double_option")]
     #[schema(nullable, value_type = Option<f64>)]
@@ -190,7 +219,7 @@ pub async fn list_branches(
                    COALESCE(b.timezone, o.timezone)::text AS timezone,
                    b.printer_brand, b.printer_ip::text, b.printer_port,
                    b.is_active, o.logo_url as org_logo_url,
-                   b.latitude, b.longitude, b.geo_radius_meters,
+                   b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable,
                    b.created_at, b.updated_at
             FROM branches b
             JOIN organizations o ON o.id = b.org_id
@@ -210,7 +239,7 @@ pub async fn list_branches(
                    COALESCE(b.timezone, o.timezone)::text AS timezone,
                    b.printer_brand, b.printer_ip::text, b.printer_port,
                    b.is_active, o.logo_url as org_logo_url,
-                   b.latitude, b.longitude, b.geo_radius_meters,
+                   b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable,
                    b.created_at, b.updated_at
             FROM branches b
             JOIN organizations o ON o.id = b.org_id
@@ -284,14 +313,14 @@ pub async fn create_branch(
             VALUES ($1, $2, $3, $4, $5::timezone_name, $6, $7::inet, $8, $9, $10, $11)
             RETURNING id, org_id, code, name, address, phone, timezone,
                       printer_brand, printer_ip, printer_port,
-                      is_active, latitude, longitude, geo_radius_meters,
+                      is_active, latitude, longitude, geo_radius_meters, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable,
                       created_at, updated_at
         )
         SELECT i.id, i.org_id, i.code, i.name, i.address, i.phone,
                COALESCE(i.timezone, o.timezone)::text AS timezone,
                i.printer_brand, i.printer_ip::text, i.printer_port,
                i.is_active, o.logo_url as org_logo_url,
-               i.latitude, i.longitude, i.geo_radius_meters,
+               i.latitude, i.longitude, i.geo_radius_meters, i.tax_rate, i.tax_inclusive, i.service_charge_rate, i.service_charge_taxable,
                i.created_at, i.updated_at
         FROM inserted i
         JOIN organizations o ON o.id = i.org_id
@@ -365,6 +394,22 @@ pub async fn update_branch(
     let new_latitude: Option<Option<f64>> = body.latitude;
     let new_longitude: Option<Option<f64>> = body.longitude;
 
+    // Both rates are FRACTIONS. Rejected here as well as by the database's
+    // CHECK, so the caller gets a sentence rather than a constraint violation.
+    for (name, value) in [
+        ("tax_rate", body.tax_rate),
+        ("service_charge_rate", body.service_charge_rate),
+    ] {
+        if let Some(Some(r)) = value
+            && !(0.0..=1.0).contains(&r)
+        {
+            return Err(AppError::BadRequest(format!(
+                "{name} is a fraction between 0 and 1, not a percentage — \
+                 0.14 means 14%"
+            )));
+        }
+    }
+
     let branch = sqlx::query_as::<_, Branch>(
         r#"
         WITH updated AS (
@@ -395,6 +440,13 @@ pub async fn update_branch(
                                       ELSE longitude
                                     END,
                 geo_radius_meters = COALESCE($17, geo_radius_meters),
+                -- Tax overrides are CLEARABLE: setting one back to null must
+                -- return the branch to inheriting the org, which `COALESCE`
+                -- could never express.
+                tax_rate          = CASE WHEN $18 THEN $19 ELSE tax_rate END,
+                tax_inclusive     = CASE WHEN $20 THEN $21 ELSE tax_inclusive END,
+                service_charge_rate = CASE WHEN $22 THEN $23 ELSE service_charge_rate END,
+                service_charge_taxable = CASE WHEN $24 THEN $25 ELSE service_charge_taxable END,
                 -- Editing a branch has to MOVE this, and it did not.
                 --
                 -- The loyalty pass refresh decides a card is stale by comparing
@@ -408,14 +460,14 @@ pub async fn update_branch(
             WHERE id = $1 AND deleted_at IS NULL
             RETURNING id, org_id, code, name, address, phone, timezone,
                       printer_brand, printer_ip, printer_port,
-                      is_active, latitude, longitude, geo_radius_meters,
+                      is_active, latitude, longitude, geo_radius_meters, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable,
                       created_at, updated_at
         )
         SELECT u.id, u.org_id, u.code, u.name, u.address, u.phone,
                COALESCE(u.timezone, o.timezone)::text AS timezone,
                u.printer_brand, u.printer_ip::text, u.printer_port,
                u.is_active, o.logo_url as org_logo_url,
-               u.latitude, u.longitude, u.geo_radius_meters,
+               u.latitude, u.longitude, u.geo_radius_meters, u.tax_rate, u.tax_inclusive, u.service_charge_rate, u.service_charge_taxable,
                u.created_at, u.updated_at
         FROM updated u
         JOIN organizations o ON o.id = u.org_id
@@ -438,6 +490,16 @@ pub async fn update_branch(
     .bind(new_longitude.is_some())
     .bind(new_longitude.and_then(|o| o))
     .bind(body.geo_radius_meters)
+    // Tax overrides: a `(present, value)` pair each, so an explicit null
+    // clears the override and returns the branch to inheriting the org.
+    .bind(body.tax_rate.is_some())
+    .bind(body.tax_rate.and_then(|o| o).map(rate_to_decimal))
+    .bind(body.tax_inclusive.is_some())
+    .bind(body.tax_inclusive.and_then(|o| o))
+    .bind(body.service_charge_rate.is_some())
+    .bind(body.service_charge_rate.and_then(|o| o).map(rate_to_decimal))
+    .bind(body.service_charge_taxable.is_some())
+    .bind(body.service_charge_taxable.and_then(|o| o))
     .fetch_optional(pool.get_ref())
     .await?
     .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
@@ -592,7 +654,7 @@ async fn fetch_branch(pool: &PgPool, id: Uuid) -> Result<Branch, AppError> {
                COALESCE(b.timezone, o.timezone)::text AS timezone,
                b.printer_brand, b.printer_ip::text, b.printer_port,
                b.is_active, o.logo_url as org_logo_url,
-               b.latitude, b.longitude, b.geo_radius_meters,
+               b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable,
                b.created_at, b.updated_at
         FROM branches b
         JOIN organizations o ON o.id = b.org_id
@@ -603,4 +665,13 @@ async fn fetch_branch(pool: &PgPool, id: Uuid) -> Result<Branch, AppError> {
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| AppError::NotFound("Branch not found".into()))
+}
+
+/// A rate on the wire is a JSON number; the column is `numeric(5,4)`.
+///
+/// Converted through the decimal string rather than by scaling, so `0.145`
+/// stores as 0.145 rather than as whatever the nearest binary double rounds to.
+fn rate_to_decimal(r: f64) -> sqlx::types::BigDecimal {
+    use std::str::FromStr;
+    sqlx::types::BigDecimal::from_str(&r.to_string()).unwrap_or_default()
 }

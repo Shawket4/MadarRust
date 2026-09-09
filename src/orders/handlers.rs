@@ -33,7 +33,7 @@ const ORDER_SELECT: &str =
      COALESCE((SELECT json_agg(json_build_object('method', op.method, 'amount', op.amount) ORDER BY op.id)
                FROM order_payments op WHERE op.order_id = o.id), '[]'::json) AS payment_legs,
      o.subtotal, o.discount_type::text, o.discount_value,
-     o.discount_amount, o.tax_amount, o.total_amount,
+     o.discount_amount, o.tax_amount, o.service_charge_amount, o.total_amount,
      o.amount_tendered, o.change_given, o.tip_amount, o.tip_payment_method, o.discount_id,
      o.customer_name, o.notes, o.order_type, o.delivery_fee, o.delivery_order_id,
      d.channel::text AS delivery_channel, d.customer_lat AS delivery_lat, d.customer_lng AS delivery_lng,
@@ -152,6 +152,11 @@ pub struct Order {
     pub discount_value: i32,
     pub discount_amount: i32,
     pub tax_amount: i32,
+    /// The service charge on this bill; `0` where the branch charges none.
+    /// Its own field, and its own receipt line: a charge the customer did not
+    /// choose is stated separately from the tax rather than folded into it.
+    #[serde(default)]
+    pub service_charge_amount: i32,
     pub total_amount: i32,
     pub amount_tendered: Option<i32>,
     pub change_given: Option<i32>,
@@ -784,12 +789,11 @@ pub(crate) async fn create_order_inner(
         (body.discount_type.clone(), body.discount_value.unwrap_or(0))
     };
 
-    let tax_rate: sqlx::types::BigDecimal = sqlx::query_scalar(
-        "SELECT o.tax_rate FROM organizations o JOIN branches b ON b.org_id = o.id WHERE b.id = $1",
-    )
-    .bind(body.branch_id)
-    .fetch_one(pool.get_ref())
-    .await?;
+    // The branch's effective policy: its own settings where it overrides, the
+    // org's otherwise. Read once, applied to both the expected and the recorded
+    // breakdown, and recorded ON the order so a later rate change cannot
+    // restate this bill.
+    let policy = crate::tax::policy::for_branch(pool.get_ref(), body.branch_id).await?;
 
     // ── Local types ───────────────────────────────────────────
     struct ResolvedOptional {
@@ -1357,7 +1361,6 @@ pub(crate) async fn create_order_inner(
         });
     }
 
-    let tax_rate_f64: f64 = tax_rate.to_string().parse().unwrap_or(0.14);
     // Shared with the delivery-order discount path so the two can never drift.
     let calc_discount = |sub: i32| -> i32 {
         crate::discounts::handlers::calc_discount(
@@ -1370,9 +1373,9 @@ pub(crate) async fn create_order_inner(
     // Server EXPECTED breakdown (catalog + branch override) — used only to detect and
     // flag deviations; it never overrides what the customer was actually charged.
     let expected_discount = calc_discount(expected_subtotal);
-    let expected_taxable = expected_subtotal - expected_discount;
-    let expected_tax = (expected_taxable as f64 * tax_rate_f64).round() as i32;
-    let expected_total = expected_taxable + expected_tax;
+    let expected_breakdown =
+        crate::tax::compute(expected_subtotal as i64, expected_discount as i64, &policy);
+    let expected_total = expected_breakdown.total as i32;
 
     // RECORDED breakdown — the POS's charged numbers are the source of truth; any field
     // the POS omits falls back to a server computation over the charged subtotal
@@ -1395,30 +1398,75 @@ pub(crate) async fn create_order_inner(
     // the till's subtotal and reducing it would be reducing a figure whose
     // discount and tax were computed over the un-reduced one.
     let claimed = !redemption_plan.is_empty();
+
+    // WHAT WAS SOLD is the till's to state; WHAT IT ADDS UP TO is not.
+    //
+    // Line prices stay client-authoritative, deliberately: a till may charge a
+    // manager override or an older menu price, and the server records what the
+    // customer was actually charged rather than arguing with it. But the
+    // arithmetic ON that subtotal — discount, service charge, tax, total — is
+    // the server's, because it is the only party that knows the branch's
+    // current tax policy and the only one whose answer the books can trust.
+    //
+    // This used to be `body.tax_amount` taken verbatim, which meant a stale
+    // till, an old build, or a forged request wrote the tax line of the
+    // accounts. A reward claim was already an exception (`loyalty::redeem::plan`
+    // prices redemptions here); now every bill is.
     let subtotal = if claimed {
         subtotal
     } else {
         body.subtotal.unwrap_or(subtotal)
     };
-    let discount_amount = if claimed {
-        calc_discount(subtotal).clamp(0, subtotal)
-    } else {
-        body.discount_amount
-            .unwrap_or_else(|| calc_discount(subtotal))
-            .clamp(0, subtotal)
-    };
-    let taxable = subtotal - discount_amount;
-    let tax_amount = if claimed {
-        (taxable as f64 * tax_rate_f64).round() as i32
-    } else {
-        body.tax_amount
-            .unwrap_or_else(|| (taxable as f64 * tax_rate_f64).round() as i32)
-    };
-    let total_amount = if claimed {
-        taxable + tax_amount
-    } else {
-        body.total_amount.unwrap_or(taxable + tax_amount)
-    };
+    // The discount stays the till's to state, as it always was: a manager can
+    // approve an amount off that no discount rule expresses, and the server
+    // cannot reproduce a decision a person made at the counter. What changes is
+    // that the tax is then computed over THAT stated discount rather than
+    // accepted alongside it.
+    let discount_amount = body
+        .discount_amount
+        .unwrap_or_else(|| calc_discount(subtotal))
+        .clamp(0, subtotal);
+    let breakdown = crate::tax::compute(subtotal as i64, discount_amount as i64, &policy);
+    let service_charge_amount = breakdown.service_charge as i32;
+    let tax_amount = breakdown.tax as i32;
+    let total_amount = breakdown.total as i32;
+
+    // What the till thought the bill came to. A disagreement is refused rather
+    // than recorded, because recording it is how the books came to contain
+    // whatever the client sent.
+    //
+    // The tolerance is ONE minor unit, and it is not a fudge: it is the gap
+    // between two correct roundings of the same half-piastre, which is all a
+    // pre-Decimal build can differ by once the policy matches. Anything larger
+    // is a real disagreement about the bill — a stale rate, a missing service
+    // charge, a tampered payload — and the till must resync rather than sell.
+    const ROUNDING_SLACK: i32 = 1;
+    // A REWARD is the one thing on this bill the till could not have priced.
+    // `loyalty::redeem::plan` decides what a redemption is worth, here, because
+    // it is the only way two offline tills cannot each honour the last reward —
+    // so a till that claims one necessarily sends a total computed before that
+    // reduction. That is not a disagreement about the bill, it is the till not
+    // knowing something only the server knows, and refusing the sale over it
+    // would refuse every redemption. The server's figure simply stands.
+    if let Some(claimed_total) = body.total_amount.filter(|_| !claimed) {
+        let drift = (claimed_total - total_amount).abs();
+        if drift > ROUNDING_SLACK {
+            tracing::warn!(
+                branch_id = %body.branch_id,
+                claimed_total,
+                server_total = total_amount,
+                tax_rate = %policy.tax_rate,
+                tax_inclusive = policy.tax_inclusive,
+                service_charge_rate = %policy.service_charge_rate,
+                "refused an order whose total disagrees with the branch's tax policy"
+            );
+            return Err(AppError::Conflict(format!(
+                "This till priced the order at {claimed_total} but the branch's current \
+                 settings make it {total_amount}. The till's tax settings are out of date — \
+                 sign in again to refresh them, then retake the order."
+            )));
+        }
+    }
     let change_given = body
         .change_given
         .or_else(|| body.amount_tendered.map(|t| (t - total_amount).max(0)));
@@ -1593,10 +1641,12 @@ pub(crate) async fn create_order_inner(
              amount_tendered, change_given, tip_amount, tip_payment_method,
              discount_id, customer_name, notes, status,
              idempotency_key, created_at, tip_is_cash, order_ref,
-             price_flagged, price_expected_total, waiter_id, loyalty_customer_id)
+             price_flagged, price_expected_total, waiter_id, loyalty_customer_id,
+             service_charge_amount, tax_rate_applied, service_charge_rate_applied,
+             tax_inclusive)
         VALUES ($1, $2, $3, $4, $5, $6, $7::discount_type, $8,
                 $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'completed', $19, $20, $21, $22,
-                $23, $24, $25, $26)
+                $23, $24, $25, $26, $27, $28, $29, $30)
         RETURNING
             id, branch_id, shift_id, teller_id,
             (SELECT name FROM users WHERE id = $3) AS teller_name,
@@ -1606,7 +1656,7 @@ pub(crate) async fn create_order_inner(
             -- nothing to aggregate yet. Reads hydrate the real legs.
             '[]'::json AS payment_legs,
             subtotal, discount_type::text, discount_value,
-            discount_amount, tax_amount, total_amount,
+            discount_amount, tax_amount, service_charge_amount, total_amount,
             amount_tendered, change_given, tip_amount, tip_payment_method, discount_id,
             customer_name, notes, order_type, delivery_fee, delivery_order_id,
             (SELECT channel::text FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_channel,
@@ -1647,6 +1697,13 @@ pub(crate) async fn create_order_inner(
     // receipt already knows who. Scanning twice for one customer is the part of
     // this that read as two unrelated features.
     .bind(body.loyalty_customer_id)
+    // The policy AS APPLIED. Recorded per order so a rate change next month
+    // cannot restate this month's books, and so a reprint years later shows
+    // the rate the customer was actually charged.
+    .bind(service_charge_amount)
+    .bind(policy.tax_rate)
+    .bind(policy.service_charge_rate)
+    .bind(policy.tax_inclusive)
     .fetch_one(&mut *tx)
     .await
     {
@@ -2462,7 +2519,7 @@ pub(crate) async fn void_order_inner(
                COALESCE((SELECT json_agg(json_build_object('method', op.method, 'amount', op.amount) ORDER BY op.id)
                          FROM order_payments op WHERE op.order_id = orders.id), '[]'::json) AS payment_legs,
                subtotal, discount_type::text, discount_value,
-               discount_amount, tax_amount, total_amount,
+               discount_amount, tax_amount, service_charge_amount, total_amount,
                amount_tendered, change_given, tip_amount, tip_payment_method,
                discount_id, customer_name, notes,
                order_type, delivery_fee, delivery_order_id,

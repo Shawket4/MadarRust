@@ -1112,7 +1112,11 @@ mod it {
         .unwrap();
         assert_eq!(ostatus, "completed");
         assert_eq!(otype, "delivery");
-        assert_eq!(total, 1300);
+        // 1000 + 14% tax + a 300 fee. An online order used to record tax 0,
+        // so this total was 1300 and the whole channel was untaxed in the
+        // books; the delivery fee is carriage on the sale and stays outside
+        // the tax base.
+        assert_eq!(total, 1440);
         assert_eq!(fee, 300);
         assert!(oref.is_some());
 
@@ -1281,11 +1285,19 @@ mod it {
         assert_eq!(o["order_type"], "delivery");
         assert_eq!(o["delivery_fee"], 300);
         assert_eq!(o["subtotal"], 1000);
-        assert_eq!(o["total_amount"], 1300);
-        assert_eq!(o["delivery_order_id"].as_str().unwrap(), id.to_string());
-        // Subtotal + fee must reconcile to the total (the math the old API broke).
+        assert_eq!(o["total_amount"], 1440);
         assert_eq!(
-            o["subtotal"].as_i64().unwrap() + o["delivery_fee"].as_i64().unwrap(),
+            o["tax_amount"], 140,
+            "an online sale is taxed like any other"
+        );
+        assert_eq!(o["delivery_order_id"].as_str().unwrap(), id.to_string());
+        // Every part must reconcile to the total (the math the old API broke).
+        // Tax belongs in this sum now: leaving it out is exactly how a channel
+        // came to be recorded untaxed.
+        assert_eq!(
+            o["subtotal"].as_i64().unwrap() - o["discount_amount"].as_i64().unwrap()
+                + o["tax_amount"].as_i64().unwrap()
+                + o["delivery_fee"].as_i64().unwrap(),
             o["total_amount"].as_i64().unwrap(),
         );
         // Nested delivery context for the dashboard order-detail "Delivery" card.
@@ -1311,9 +1323,9 @@ mod it {
         assert_eq!(summary["delivery_fees"], 300);
         // Channel-split KPIs (computed server-side over the whole filtered set).
         assert_eq!(summary["delivery_orders"], 1);
-        assert_eq!(summary["delivery_revenue"], 1300);
+        assert_eq!(summary["delivery_revenue"], 1440);
         assert_eq!(summary["in_mall_orders"], 1);
-        assert_eq!(summary["in_mall_revenue"], 1300);
+        assert_eq!(summary["in_mall_revenue"], 1440);
         assert_eq!(summary["in_mall_fees"], 300);
         assert_eq!(summary["outside_orders"], 0);
         assert_eq!(summary["outside_revenue"], 0);
@@ -1538,7 +1550,9 @@ mod it {
         assert_eq!(sub, 1000);
         assert_eq!(dval, 10);
         assert_eq!(damt, 100);
-        assert_eq!(tot, 1200);
+        // 1000 less the 10% discount = 900, taxed at 14% = 126, plus the fee.
+        // Tax follows the discount rather than preceding it.
+        assert_eq!(tot, 1326);
         assert_eq!(dtype.as_deref(), Some("percentage"));
 
         // The orders API surfaces it too.
@@ -1552,7 +1566,7 @@ mod it {
         .await;
         assert_eq!(st, StatusCode::OK, "{o}");
         assert_eq!(o["discount_amount"], 100);
-        assert_eq!(o["total_amount"], 1200);
+        assert_eq!(o["total_amount"], 1326);
         assert_eq!(o["delivery_fee"], 300);
     }
 
@@ -1668,7 +1682,10 @@ mod it {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(total, 500, "must use the frozen price, not the edited 999");
+        assert_eq!(
+            total, 570,
+            "must use the frozen price (500 + 14% tax), not the edited 999"
+        );
         let unit: i32 = sqlx::query_scalar("SELECT unit_price FROM order_items WHERE order_id=$1")
             .bind(order_id)
             .fetch_one(&pool)

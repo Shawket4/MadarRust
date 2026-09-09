@@ -59,6 +59,38 @@ pub struct ResolveBranchResponse {
     pub distance_meters: f64,
 }
 
+/// The tax policy the caller should price under, resolved for their branch
+/// where they have one and their organisation otherwise.
+///
+/// Sent at login and on every `/auth/me`, which is what makes a rate change
+/// reach a till that has been running for weeks. The flat `tax_rate` beside it
+/// is kept for builds that predate this object; both describe the same rate.
+#[derive(Serialize, Deserialize, ToSchema, Clone, Copy, Debug)]
+pub struct TaxPolicyPublic {
+    /// Fraction, NOT a percentage: `0.14` is 14%.
+    #[schema(example = 0.14)]
+    pub tax_rate: f64,
+    /// `true` = menu prices already contain the tax.
+    pub tax_inclusive: bool,
+    /// Fraction of the bill added as a service charge; `0` disables it.
+    #[schema(example = 0.0)]
+    pub service_charge_rate: f64,
+    /// Whether the service charge is itself taxed.
+    pub service_charge_taxable: bool,
+}
+
+impl From<crate::tax::TaxPolicy> for TaxPolicyPublic {
+    fn from(p: crate::tax::TaxPolicy) -> Self {
+        use rust_decimal::prelude::ToPrimitive;
+        Self {
+            tax_rate: p.tax_rate.to_f64().unwrap_or(0.0),
+            tax_inclusive: p.tax_inclusive,
+            service_charge_rate: p.service_charge_rate.to_f64().unwrap_or(0.0),
+            service_charge_taxable: p.service_charge_taxable,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct LoginResponse {
     /// JWT to send as `Authorization: Bearer <token>` on subsequent requests.
@@ -68,6 +100,9 @@ pub struct LoginResponse {
     /// /auth/me so the POS has it immediately after login.
     #[schema(example = 0.14)]
     pub tax_rate: f64,
+    /// The full policy, including tax-inclusive pricing and service charge.
+    /// Prefer this over the flat `tax_rate` above.
+    pub tax_policy: TaxPolicyPublic,
     #[schema(example = "EGP")]
     pub currency_code: String,
 }
@@ -79,6 +114,13 @@ pub struct MeResponse {
     /// org. Exposed so the POS can compute a tax-inclusive cart total client-side.
     #[schema(example = 0.14)]
     pub tax_rate: f64,
+    /// The full policy, including tax-inclusive pricing and service charge.
+    ///
+    /// A till re-reads this whenever it syncs, which is what makes a rate
+    /// changed in the dashboard reach a device that has not signed in for
+    /// weeks. Without it the till prices under a stale rate and — now that the
+    /// server refuses totals it disagrees with — cannot sell at all.
+    pub tax_policy: TaxPolicyPublic,
     /// Org currency code (e.g. "EGP").
     #[schema(example = "EGP")]
     pub currency_code: String,
@@ -340,16 +382,12 @@ pub async fn login(
         .flatten()
     };
 
-    let (tax_rate, currency_code): (f64, String) = match user.org_id {
-        Some(org_id) => sqlx::query_as(
-            "SELECT COALESCE(tax_rate, 0)::float8, currency_code FROM organizations WHERE id = $1",
-        )
-        .bind(org_id)
-        .fetch_optional(pool.get_ref())
-        .await?
-        .unwrap_or((0.0, "EGP".to_string())),
-        None => (0.0, "EGP".to_string()),
-    };
+    // The policy this caller prices under: their BRANCH's where they have one,
+    // because a branch may override its org, and the till needs the rate that
+    // applies where it is standing — not the org average.
+    let (tax_policy, currency_code) =
+        resolve_tax_context(pool.get_ref(), user.org_id, branch_id_for_response).await?;
+    let tax_rate = tax_policy.tax_rate;
 
     let mut user_public = UserPublic::from(user);
     user_public.branch_id = branch_id_for_response;
@@ -358,6 +396,7 @@ pub async fn login(
         token,
         user: user_public,
         tax_rate,
+        tax_policy,
         currency_code,
     }))
 }
@@ -415,24 +454,18 @@ pub async fn me(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, A
         }
     };
 
-    // Org-level config the POS needs for a tax-inclusive cart total.
-    let (tax_rate, currency_code): (f64, String) = match user.org_id {
-        Some(org_id) => sqlx::query_as(
-            "SELECT COALESCE(tax_rate, 0)::float8, currency_code FROM organizations WHERE id = $1",
-        )
-        .bind(org_id)
-        .fetch_optional(pool.get_ref())
-        .await?
-        .unwrap_or((0.0, "EGP".to_string())),
-        None => (0.0, "EGP".to_string()),
-    };
+    // The policy this caller prices under. Re-read on every /auth/me, which is
+    // the path a running till uses to notice a rate it has not seen.
+    let (tax_policy, currency_code) =
+        resolve_tax_context(pool.get_ref(), user.org_id, branch_id).await?;
 
     let mut user_public = UserPublic::from(user);
     user_public.branch_id = branch_id;
 
     Ok(HttpResponse::Ok().json(MeResponse {
         user: user_public,
-        tax_rate,
+        tax_rate: tax_policy.tax_rate,
+        tax_policy,
         currency_code,
     }))
 }
@@ -580,4 +613,38 @@ pub async fn permissions(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRe
     }
 
     Ok(HttpResponse::Ok().json(AuthPermissionsResponse { permissions }))
+}
+
+/// The tax policy and currency to hand a caller.
+///
+/// Branch-first, org-second, and tax-free when the user belongs to neither —
+/// deliberately NOT the old `unwrap_or(0.14)`, which invented Egyptian VAT for
+/// anyone whose org could not be read.
+async fn resolve_tax_context(
+    pool: &sqlx::PgPool,
+    org_id: Option<Uuid>,
+    branch_id: Option<Uuid>,
+) -> Result<(TaxPolicyPublic, String), AppError> {
+    let Some(org_id) = org_id else {
+        return Ok((crate::tax::TaxPolicy::default().into(), "EGP".to_string()));
+    };
+
+    let currency: String =
+        sqlx::query_scalar("SELECT currency_code FROM organizations WHERE id = $1")
+            .bind(org_id)
+            .fetch_optional(pool)
+            .await?
+            .unwrap_or_else(|| "EGP".to_string());
+
+    // A branch that no longer exists (or belongs to another org) falls back to
+    // the org rather than failing the login: being unable to sign in is worse
+    // than pricing at the org rate for one shift.
+    let policy = match branch_id {
+        Some(b) => match crate::tax::policy::for_branch(pool, b).await {
+            Ok(p) => p,
+            Err(_) => crate::tax::policy::for_org(pool, org_id).await?,
+        },
+        None => crate::tax::policy::for_org(pool, org_id).await?,
+    };
+    Ok((policy.into(), currency))
 }

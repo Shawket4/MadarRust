@@ -42790,7 +42790,7 @@
           "service_charge": {
             "type": "integer",
             "format": "int32",
-            "description": "Always 0: Madar has no service-charge concept. Present so the field is\nstable if one is ever introduced."
+            "description": "The service charge added to this order, `0` where the branch charges\nnone. This was a hard-coded `0` for every order — the field was\npublished as if it meant something while a service charge did not\nexist. It does now, and this is it."
           },
           "status": {
             "type": "string"
@@ -42807,7 +42807,7 @@
           "total_amount": {
             "type": "integer",
             "format": "int32",
-            "description": "`subtotal - discount_amount + tax_amount`. Deliberately COMPUTED rather\nthan read from `orders.total_amount`, which also carries the delivery\nfee — this figure is the order's own value and nothing else. Tips are\nexcluded too (they are not part of `total_amount` in the first place)."
+            "description": "`subtotal - discount_amount + service_charge + tax_amount`. Deliberately COMPUTED rather\nthan read from `orders.total_amount`, which also carries the delivery\nfee — this figure is the order's own value and nothing else. Tips are\nexcluded too (they are not part of `total_amount` in the first place)."
           }
         }
       },
@@ -43872,6 +43872,35 @@
             ],
             "format": "int32",
             "example": 9100
+          },
+          "service_charge_rate": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "example": 0.0
+          },
+          "service_charge_taxable": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "tax_inclusive": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "tax_rate": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Tax policy OVERRIDES. `null` means inherit the organisation's setting —\nwhich is not the same as `0`. An org that changes its rate still moves\nevery branch that never asked to differ; a branch that genuinely charges\nno tax says so with an explicit `0`.",
+            "example": 0.14
           },
           "timezone": {
             "type": "string",
@@ -51451,12 +51480,17 @@
           "token",
           "user",
           "tax_rate",
+          "tax_policy",
           "currency_code"
         ],
         "properties": {
           "currency_code": {
             "type": "string",
             "example": "EGP"
+          },
+          "tax_policy": {
+            "$ref": "#/components/schemas/TaxPolicyPublic",
+            "description": "The full policy, including tax-inclusive pricing and service charge.\nPrefer this over the flat `tax_rate` above."
           },
           "tax_rate": {
             "type": "number",
@@ -51611,6 +51645,18 @@
           "require_otp"
         ],
         "properties": {
+          "balance_cap": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The ceiling, when `balance_cap_enabled`. `None` = derive it.\n\nA `None` here is NOT \"no cap\" — that is what the switch is for. It means\nthe most expensive reward on offer at this scope, read from the\ncatalogue at award time. Once a customer can claim anything in the\nprogramme, collecting more buys them nothing and leaves the shop\ncarrying a liability it never chose; and because it is derived, adding a\ndearer reward raises the ceiling without anyone retyping it.\n\nEarning at the cap is DROPPED, not refused: the sale is not the\ncustomer's doing and must not fail because their card is full."
+          },
+          "balance_cap_enabled": {
+            "type": "boolean",
+            "description": "Whether a ceiling applies to what a member may hold at all.\n\nSeparate from the figure below, because \"no number\" has to be able to\nmean something. Off, a card collects without end."
+          },
           "birthday_enabled": {
             "type": "boolean",
             "description": "Ask for a birthday at signup, and greet them on the day.\n\nOff means the form does not ASK — not that it asks and ignores. A date of\nbirth is the most sensitive thing this feature collects, and a shop that\ndoes not run birthday rewards has no business holding one."
@@ -51662,9 +51708,30 @@
             "format": "int32",
             "description": "One point per this many piastres. 1000 = a point per 10 EGP. The\ndashboard shows and accepts EGP; the wire is always piastres."
           },
+          "effective_balance_cap": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The ceiling actually in force, once derived. **Read-only.**\n\n`balance_cap` is what the shop TYPED, which is usually nothing; this is\nwhat that resolves to against the current catalogue. The dashboard shows\nit so \"leave it empty\" is a visible number rather than a promise, and so\nthe figure on screen is the one the award path will use rather than the\ndashboard's own guess at it.\n\n`null` when no ceiling applies."
+          },
           "enabled": {
             "type": "boolean",
             "description": "The program switch for this scope."
+          },
+          "geofenced_branches": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many active branches have coordinates set. **Read-only.**\n\nThe one thing that decides whether a saved card can notify a customer\nwhen they are at the shop. Both wallets geofence from the branch\ncoordinates on the pass, so a programme whose branches have none gets no\nlocation prompt on the phone and no nearby notification — and nothing\nanywhere said so, which reads as the wallet being broken rather than as\na field nobody filled in.\n\nRead-only in effect: this type doubles as the PUT body, and the write\npath binds its columns explicitly, so a value sent here is parsed and\nthen ignored. It is a fact about `branches`, answered on this page\nbecause this is where someone wonders why the card is silent."
+          },
+          "max_rewards_per_order": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How many rewards one order may claim. `None` = unlimited.\n\n`Some(1)` is the setting most shops mean when they ask for this: a\nmember with thirty stamps and a five-stamp reward can otherwise take six\nfree items in one visit, which is the same giveaway the shop believed it\nwas spreading over six."
           },
           "mode": {
             "type": "string",
@@ -52091,6 +52158,7 @@
         "required": [
           "user",
           "tax_rate",
+          "tax_policy",
           "currency_code"
         ],
         "properties": {
@@ -52098,6 +52166,10 @@
             "type": "string",
             "description": "Org currency code (e.g. \"EGP\").",
             "example": "EGP"
+          },
+          "tax_policy": {
+            "$ref": "#/components/schemas/TaxPolicyPublic",
+            "description": "The full policy, including tax-inclusive pricing and service charge.\n\nA till re-reads this whenever it syncs, which is what makes a rate\nchanged in the dashboard reach a device that has not signed in for\nweeks. Without it the till prices under a stale rate and — now that the\nserver refuses totals it disagrees with — cannot sell at all."
           },
           "tax_rate": {
             "type": "number",
@@ -53328,6 +53400,11 @@
             "type": "string",
             "description": "The order's NOMINAL payment label. For a split order this is the literal\n`'mixed'` — a label that exists in no money report, because reports bucket\nby what was actually tendered. Use [`Order::payment_legs`] for the real\nmethods; treat this as a display badge only."
           },
+          "service_charge_amount": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The service charge on this bill; `0` where the branch charges none.\nIts own field, and its own receipt line: a charge the customer did not\nchoose is stated separately from the tax rather than folded into it."
+          },
           "shift_id": {
             "type": "string",
             "format": "uuid"
@@ -54226,6 +54303,9 @@
           "slug",
           "currency_code",
           "tax_rate",
+          "tax_inclusive",
+          "service_charge_rate",
+          "service_charge_taxable",
           "custom_branding",
           "social_links",
           "is_active",
@@ -54296,6 +54376,16 @@
               "null"
             ]
           },
+          "service_charge_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "Fraction of the bill added as a service charge; `0` disables it.",
+            "example": 0.0
+          },
+          "service_charge_taxable": {
+            "type": "boolean",
+            "description": "Whether the service charge is itself taxed."
+          },
           "slug": {
             "type": "string",
             "example": "the-rue"
@@ -54303,6 +54393,10 @@
           "social_links": {
             "type": "object",
             "description": "Where else to find the shop, keyed by platform. See `orgs::social`."
+          },
+          "tax_inclusive": {
+            "type": "boolean",
+            "description": "`true` = menu prices already contain the tax, and the receipt breaks it\nout backwards rather than adding it on at the till."
           },
           "tax_rate": {
             "type": "number",
@@ -60223,6 +60317,38 @@
           }
         }
       },
+      "TaxPolicyPublic": {
+        "type": "object",
+        "description": "The tax policy the caller should price under, resolved for their branch\nwhere they have one and their organisation otherwise.\n\nSent at login and on every `/auth/me`, which is what makes a rate change\nreach a till that has been running for weeks. The flat `tax_rate` beside it\nis kept for builds that predate this object; both describe the same rate.",
+        "required": [
+          "tax_rate",
+          "tax_inclusive",
+          "service_charge_rate",
+          "service_charge_taxable"
+        ],
+        "properties": {
+          "service_charge_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "Fraction of the bill added as a service charge; `0` disables it.",
+            "example": 0.0
+          },
+          "service_charge_taxable": {
+            "type": "boolean",
+            "description": "Whether the service charge is itself taxed."
+          },
+          "tax_inclusive": {
+            "type": "boolean",
+            "description": "`true` = menu prices already contain the tax."
+          },
+          "tax_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "Fraction, NOT a percentage: `0.14` is 14%.",
+            "example": 0.14
+          }
+        }
+      },
       "TeamPresence": {
         "type": "object",
         "description": "The whole team's state right now, plus the day's labour against plan.",
@@ -60774,6 +60900,32 @@
             ],
             "format": "int32"
           },
+          "service_charge_rate": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "service_charge_taxable": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "tax_inclusive": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "tax_rate": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
           "timezone": {
             "type": [
               "string",
@@ -61263,6 +61415,20 @@
               "null"
             ]
           },
+          "service_charge_rate": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "example": 0.0
+          },
+          "service_charge_taxable": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "slug": {
             "type": [
               "string",
@@ -61275,6 +61441,12 @@
               "null"
             ],
             "description": "Where else to find the shop. Validated against a closed list of\nplatforms and `https` only — these are printed onto a customer's wallet\npass, and a card that renders whatever was typed can be made to say\nanything. See `orgs::social`."
+          },
+          "tax_inclusive": {
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "tax_rate": {
             "type": [

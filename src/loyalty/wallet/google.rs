@@ -130,18 +130,32 @@ pub async fn check(org_id: Option<uuid::Uuid>) -> Result<String, String> {
             // Not just "it exists". Two things about a class decide whether a
             // saved card behaves, and neither is visible from the outside: a
             // class stuck UNDER_REVIEW does not get everything an approved one
-            // does, and a class with no locations cannot anchor a card to a
-            // shop. Both were invisible while this reported existence alone.
+            // does, and a class with no merchant locations cannot anchor a card
+            // to a shop. Both were invisible while this reported existence
+            // alone.
             let body = resp.text().await.unwrap_or_default();
             let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
             let review = v["reviewStatus"]
                 .as_str()
                 .unwrap_or("unknown")
                 .to_lowercase();
-            let places = v["locations"].as_array().map_or(0, |a| a.len());
+            // `merchantLocations` is what triggers a nearby notification;
+            // `locations` is the deprecated field that no longer does. A class
+            // carrying only the old one looks configured and is inert, which is
+            // exactly the state this panel existed to make visible.
+            let places = v["merchantLocations"].as_array().map_or(0, |a| a.len());
+            let stale = v["locations"].as_array().map_or(0, |a| a.len());
+            let note = if places == 0 && stale > 0 {
+                format!(
+                    " {stale} on the DEPRECATED `locations` field, which no longer \
+                     triggers notifications — the class needs rewriting."
+                )
+            } else {
+                String::new()
+            };
             Ok(format!(
                 "Ready. This shop's card class ({id}) exists — review status \
-                 {review}, {places} branch location(s) on it."
+                 {review}, {places} branch location(s) that can notify.{note}"
             ))
         }
         // Nothing wrong: the class is made when the first customer saves a card.
@@ -212,6 +226,51 @@ pub const MADAR_LOGO_PATH: &str = "/public/loyalty/brand/logo.png";
 /// Deliberately carries no `reviewStatus`: `ensure_class` sets it on both the
 /// insert and the update, for a reason that only shows up on an approved class
 /// and is written down there.
+/// Branch coordinates in the shape that actually raises a notification.
+///
+/// `merchantLocations`, NOT `locations`. They look interchangeable and are not:
+/// Google's reference marks `locations` (a `walletobjects#latLongPoint` array)
+/// deprecated with the words "this field is currently not supported to trigger
+/// geo notifications", while `merchantLocations` "will trigger a notification
+/// when a user enters within a Google-set radius of the point".
+///
+/// That distinction was the whole bug. Passes carried branch coordinates the
+/// entire time, in the field Google stopped reading, so an approved card that
+/// saved perfectly never asked for location permission and never surfaced when
+/// its owner was standing in the shop. Nothing was refused and nothing was
+/// logged, because nothing was malformed — the coordinates were simply being
+/// filed somewhere inert.
+///
+/// The shape is narrower too: latitude and longitude only. No `kind`, and no
+/// name — the old points carried one and these do not.
+///
+/// Ten maximum on the class and ten on the object, each; anything past ten is
+/// rejected outright, so the slice is cut here as well as at the query.
+fn merchant_locations(locations: &[super::PassLocation]) -> Vec<serde_json::Value> {
+    locations
+        .iter()
+        .take(super::MAX_LOCATIONS)
+        .map(|l| {
+            json!({
+                "latitude": l.latitude,
+                "longitude": l.longitude,
+            })
+        })
+        .collect()
+}
+
+/// Drop keys whose value is an empty array.
+///
+/// `"merchantLocations": []` is not the same as omitting it. Google has refused
+/// a class carrying locations before — which is why there is a retry without
+/// them — and sending an empty one asks that question for no benefit, on every
+/// shop that has not set a single branch coordinate.
+fn drop_empty_arrays(v: &mut serde_json::Value) {
+    if let Some(map) = v.as_object_mut() {
+        map.retain(|_, value| !value.as_array().is_some_and(|a| a.is_empty()));
+    }
+}
+
 pub fn loyalty_class(
     issuer: &str,
     org_id: uuid::Uuid,
@@ -231,19 +290,13 @@ pub fn loyalty_class(
         "hexBackgroundColor": brand.palette.background,
         // The shop's branches, on the shop's template.
         //
-        // The object carries locations too — the member's own nearest ten —
+        // The object carries merchant locations too — the member's own nearest
+        // ten —
         // and which of the two Google reads for a nearby prompt is not
         // something I could establish by reasoning about it. So both carry
         // them, which is cheap and is true either way: "where this shop is" is
         // a fact about the shop, and this is the resource that describes one.
-        "locations": locations
-            .iter()
-            .map(|l| json!({
-                "kind": "walletobjects#latLongPoint",
-                "latitude": l.latitude,
-                "longitude": l.longitude,
-            }))
-            .collect::<Vec<_>>(),
+        "merchantLocations": merchant_locations(locations),
     });
     // REQUIRED by Google, and the cause of "Something went wrong" on a save
     // that still routed to the app: a loyalty class without a `programLogo` is
@@ -268,6 +321,7 @@ pub fn loyalty_class(
     if let Some(uri) = super::absolute_api_url(&logo) {
         class["programLogo"] = json!({ "sourceUri": { "uri": uri } });
     }
+    drop_empty_arrays(&mut class);
     class
 }
 
@@ -309,7 +363,7 @@ pub fn loyalty_object(
         field
     };
 
-    json!({
+    let mut object = json!({
         "id": object_id(issuer, member),
         "classId": class_id(issuer, member.org_id),
         "state": "ACTIVE",
@@ -376,14 +430,7 @@ pub fn loyalty_object(
         // phone when the customer is there — Google's counterpart to Apple's
         // lock-screen `locations`. Only branches whose coordinates an admin has
         // actually set; a branch without them simply does not surface.
-        "locations": locations
-            .iter()
-            .map(|l| json!({
-                "kind": "walletobjects#latLongPoint",
-                "latitude": l.latitude,
-                "longitude": l.longitude,
-            }))
-            .collect::<Vec<_>>(),
+        "merchantLocations": merchant_locations(locations),
         // What Apple puts on the BACK of the card. Google shows these under it
         // rather than behind it, which is the same content in the same order —
         // built by `wallet::back_of_card`, once, so the two cannot drift into
@@ -424,7 +471,9 @@ pub fn loyalty_object(
                 with_localized(row, "localizedBody", &l.value)
             })
             .collect::<Vec<_>>(),
-    })
+    });
+    drop_empty_arrays(&mut object);
+    object
 }
 
 /// The shop's photograph, as Google's banner — Apple's strip, by another name.
@@ -800,10 +849,10 @@ async fn ensure_class(
     // So the branches are the part we give up, never the shop's identity. And
     // because both attempts are in the transcript, production tells us which it
     // was rather than another round of guessing.
-    if refused.is_some() && sent.get("locations").is_some() {
+    if refused.is_some() && sent.get("merchantLocations").is_some() {
         let mut without = sent.clone();
         if let Some(o) = without.as_object_mut() {
-            o.remove("locations");
+            o.remove("merchantLocations");
         }
         if attempt("update the class without branches", &without, steps)
             .await
@@ -1304,6 +1353,115 @@ pub async fn push_balance(pool: &PgPool, member: &MemberRow) -> Result<(), AppEr
 mod tests {
     use super::*;
 
+    fn a_branch(lat: f64, lng: f64, name: &str) -> super::super::PassLocation {
+        super::super::PassLocation {
+            latitude: lat,
+            longitude: lng,
+            name: name.into(),
+        }
+    }
+
+    /// Branch coordinates must go in the field that still triggers a
+    /// notification.
+    ///
+    /// `locations` and `merchantLocations` look interchangeable and are not.
+    /// Google's reference marks the first deprecated — "this field is currently
+    /// not supported to trigger geo notifications" — while the second "will
+    /// trigger a notification when a user enters within a Google-set radius".
+    ///
+    /// The card shipped writing the deprecated one. Nothing failed: the class
+    /// and object were accepted, the pass saved, the coordinates were on it,
+    /// and Android never once asked for location permission because there was
+    /// nothing there for it to geofence. A silent difference between two
+    /// spellings of the same idea, so it is pinned here rather than left to be
+    /// rediscovered.
+    #[test]
+    fn branch_coordinates_go_in_merchant_locations_not_the_deprecated_field() {
+        let settings = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
+        let brand = OrgBrand {
+            name: "RUE Coffee".into(),
+            logo_url: None,
+            palette: crate::orgs::branding::Palette::default(),
+            logo_is_mark: false,
+            custom_branding: true,
+            card_image_url: None,
+            social_links: Default::default(),
+        };
+        let places = [
+            a_branch(30.0444, 31.2357, "Downtown"),
+            a_branch(31.2001, 29.9187, "Alexandria"),
+        ];
+
+        let class = loyalty_class(
+            "3388000000000000000",
+            uuid::Uuid::nil(),
+            &brand,
+            &settings,
+            &places,
+        );
+        let on_class = class["merchantLocations"]
+            .as_array()
+            .expect("the class geofences through merchantLocations");
+        assert_eq!(on_class.len(), 2);
+        assert!(
+            class.get("locations").is_none(),
+            "the deprecated field must not be written: it does nothing and \
+             reads as if the card were configured"
+        );
+
+        // Latitude and longitude only. The old points carried a `kind` and a
+        // name; a MerchantLocation takes neither, and Google rejects extras.
+        assert_eq!(on_class[0]["latitude"], 30.0444);
+        assert_eq!(on_class[0]["longitude"], 31.2357);
+        assert!(
+            on_class[0].get("kind").is_none(),
+            "no kind on a MerchantLocation"
+        );
+        assert!(
+            on_class[0].get("name").is_none(),
+            "no name on a MerchantLocation"
+        );
+    }
+
+    /// A shop with no coordinates sends no key at all.
+    ///
+    /// `"merchantLocations": []` is not the same as omitting it, and asking
+    /// Google to accept an empty array buys nothing.
+    #[test]
+    fn a_shop_with_no_coordinates_omits_the_key_rather_than_sending_an_empty_one() {
+        let settings = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
+        let brand = OrgBrand {
+            name: "RUE Coffee".into(),
+            logo_url: None,
+            palette: crate::orgs::branding::Palette::default(),
+            logo_is_mark: false,
+            custom_branding: true,
+            card_image_url: None,
+            social_links: Default::default(),
+        };
+        let class = loyalty_class(
+            "3388000000000000000",
+            uuid::Uuid::nil(),
+            &brand,
+            &settings,
+            &[],
+        );
+        assert!(
+            class.get("merchantLocations").is_none(),
+            "an empty geofence list should not be sent at all"
+        );
+    }
+
+    /// Ten is Google's ceiling, and the eleventh is rejected outright rather
+    /// than ignored — which would take the whole class update down with it.
+    #[test]
+    fn no_more_than_ten_merchant_locations_are_sent() {
+        let many: Vec<_> = (0..15)
+            .map(|i| a_branch(30.0 + i as f64 * 0.01, 31.0, "Branch"))
+            .collect();
+        assert_eq!(merchant_locations(&many).len(), super::super::MAX_LOCATIONS);
+    }
+
     /// The save link must not grow with the shop.
     ///
     /// It used to carry the whole class AND the whole object. For a shop with
@@ -1416,9 +1574,10 @@ mod tests {
             "the status belongs to the writer, not the body"
         );
         // The shop's branches ride on the shop's template, as well as on each
-        // member's object.
-        assert_eq!(class["locations"][0]["latitude"], 30.06);
-        assert_eq!(class["locations"][0]["kind"], "walletobjects#latLongPoint");
+        // member's object — in `merchantLocations`, the field that still
+        // triggers a nearby notification. See
+        // `branch_coordinates_go_in_merchant_locations_not_the_deprecated_field`.
+        assert_eq!(class["merchantLocations"][0]["latitude"], 30.06);
         assert_eq!(
             class["id"],
             format!("3388000000000000000.madar-{}", uuid::Uuid::nil())

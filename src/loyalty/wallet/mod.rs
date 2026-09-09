@@ -31,7 +31,7 @@ use crate::errors::AppError;
 
 /// Both wallets cap the locations they will act on at ten; more are ignored, so
 /// sending more only costs bytes on every device holding the pass.
-const MAX_LOCATIONS: usize = 10;
+pub(crate) const MAX_LOCATIONS: usize = 10;
 
 /// A branch as a pass surfaces it: Apple puts it on the lock screen when the
 /// customer is nearby, Google geofences the object the same way.

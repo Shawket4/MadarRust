@@ -124,7 +124,12 @@ fn purpose_of(kind: &str) -> Option<&'static str> {
         "org_order" | "branch_order" | "table_order" => Some("Scan to order"),
         "order_track" => Some("Track your order"),
         "org_booking" | "branch_booking" => Some("Scan to book a table"),
-        "org_loyalty" | "branch_loyalty" => Some("Scan to join our rewards"),
+        // Loyalty deliberately has NONE. The card is handed over at the
+        // counter, or sits beside the till, where "scan to join our rewards"
+        // reads as an advert for something the person is already doing — and a
+        // loyalty code is scanned by EXISTING members far more often than by
+        // new ones, for whom the line is simply wrong.
+        "org_loyalty" | "branch_loyalty" => None,
         // A marketing link is whatever the shop pointed it at, and guessing
         // would be worse than the caption they wrote themselves.
         _ => None,

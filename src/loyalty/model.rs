@@ -254,6 +254,7 @@ pub async fn award_for_order(
     amounts: OrderAmounts,
     rule: EarnRule,
     enabled: bool,
+    balance_cap: Option<i32>,
     created_by: Option<Uuid>,
 ) -> Result<i32, AppError> {
     if !enabled {
@@ -265,6 +266,42 @@ pub async fn award_for_order(
         // caller sets `orders.loyalty_customer_id`); it just buys nothing.
         return Ok(0);
     }
+
+    // The shop's ceiling, if it set one.
+    //
+    // The award is TRIMMED to the cap rather than refused. A full card is not
+    // the customer's doing and must never fail their sale — they are standing
+    // at a counter having already paid. What stops is the accrual, which is the
+    // thing the shop asked to bound; a card at the ceiling simply stays there
+    // until something is redeemed off it.
+    //
+    // Read inside the transaction, and in the ledger's currency: an org running
+    // visits caps visits, and its points column is not what is being bounded.
+    let points = match balance_cap {
+        None => points,
+        Some(cap) => {
+            let current: i32 = sqlx::query_scalar(&format!(
+                "SELECT {column} FROM loyalty_customers WHERE id = $1 FOR UPDATE",
+                column = match rule.mode {
+                    earn::Mode::Points => "points_balance",
+                    earn::Mode::Visits => "visits_balance",
+                }
+            ))
+            .bind(customer_id)
+            .fetch_optional(&mut **tx)
+            .await?
+            .unwrap_or(0);
+            let room = (cap - current).max(0);
+            let trimmed = points.min(room);
+            if trimmed <= 0 {
+                // At the ceiling. Nothing is written, so the order is not
+                // marked as earned either — and if the cap is later raised, the
+                // sale can still be claimed.
+                return Ok(0);
+            }
+            trimmed
+        }
+    };
     let inserted = sqlx::query(
         "INSERT INTO loyalty_transactions \
             (org_id, customer_id, branch_id, kind, currency, points, order_id, basis_piastres, \

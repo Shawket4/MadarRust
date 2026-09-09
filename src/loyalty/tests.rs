@@ -1521,6 +1521,337 @@ async fn place_with_rewards(
     (status, test::read_body_json(resp).await)
 }
 
+/// A shop can stop one visit clearing a hoard.
+///
+/// "One reward per line" was already enforced, and it bounds nothing: a line
+/// carries `units`, so a single line asking for six is six free coffees. The
+/// cap counts ITEMS, which is what a shop means by "one free thing per visit".
+#[sqlx::test]
+async fn a_redemption_cap_counts_items_not_lines(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    seed_cash_method(&pool, org).await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    enable_program_mode(&pool, org, "visits", 1000, 5, false).await;
+    sqlx::query("UPDATE loyalty_settings SET max_rewards_per_order = 1 WHERE org_id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let member = seed_member(&pool, org, "201000000031", "Mredeemcap0000000001").await;
+    let latte = seed_menu_item(&pool, org, "Latte", 5_000).await;
+    seed_reward(&pool, org, latte, "visits", 5).await;
+    // Plenty of stamps: the balance is not what should stop this.
+    grant(&pool, org, member, branch, "visits", 30).await;
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(crate::orders::routes::configure)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let jwt = token(teller, org, UserRole::Teller, Some(branch));
+
+    // ONE line, six of them, all claimed. Six free coffees on a 1-per-order cap.
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .set_json(&serde_json::json!({
+            "branch_id": branch, "shift_id": shift, "payment_method": "cash",
+            "idempotency_key": Uuid::new_v4(),
+            "loyalty_customer_id": member,
+            "loyalty_redemptions": [{ "item_index": 0, "units": 6 }],
+            "items": [{ "menu_item_id": latte, "quantity": 6 }]
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        actix_web::http::StatusCode::CONFLICT,
+        "six units on a one-per-order cap must be refused"
+    );
+    let body: Value = test::read_body_json(resp).await;
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("one reward per order"),
+        "the refusal should say what the limit is: {msg}"
+    );
+
+    // The same order claiming ONE goes through.
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .set_json(&serde_json::json!({
+            "branch_id": branch, "shift_id": shift, "payment_method": "cash",
+            "idempotency_key": Uuid::new_v4(),
+            "loyalty_customer_id": member,
+            "loyalty_redemptions": [{ "item_index": 0, "units": 1 }],
+            "items": [{ "menu_item_id": latte, "quantity": 6 }]
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(
+        resp.status().is_success(),
+        "one reward is within the cap: {:?}",
+        resp.status()
+    );
+}
+
+/// With the ceiling on and no figure typed, it is the dearest reward on offer.
+///
+/// A number someone typed goes stale the moment a reward is added or repriced,
+/// and a stale ceiling silently discards points a customer was told they had
+/// earned. Derived, it follows the list.
+#[sqlx::test]
+async fn an_unset_ceiling_is_the_dearest_reward_and_follows_the_catalogue(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    seed_cash_method(&pool, org).await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    enable_program_mode(&pool, org, "visits", 1000, 5, false).await;
+    // Switched on, with no figure: derive it.
+    sqlx::query(
+        "UPDATE loyalty_settings SET balance_cap_enabled = true, balance_cap = NULL \
+          WHERE org_id = $1",
+    )
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let espresso = seed_menu_item(&pool, org, "Espresso", 3_000).await;
+    let cake = seed_menu_item(&pool, org, "Cake", 9_000).await;
+    seed_reward(&pool, org, espresso, "visits", 5).await;
+    seed_reward(&pool, org, cake, "visits", 8).await;
+
+    let member = seed_member(&pool, org, "201000000033", "Mderivedcap000000001").await;
+    // One below the dearest reward (8), so the next stamp lands exactly on it.
+    grant(&pool, org, member, branch, "visits", 7).await;
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(crate::orders::routes::configure)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let jwt = token(teller, org, UserRole::Teller, Some(branch));
+
+    let sell_and_award = async |key: Uuid| {
+        let app = &app;
+        let req = test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {jwt}")))
+            .set_json(&serde_json::json!({
+                "branch_id": branch, "shift_id": shift, "payment_method": "cash",
+                "idempotency_key": key,
+                "items": [{ "menu_item_id": espresso, "quantity": 1 }]
+            }))
+            .to_request();
+        let resp = test::call_service(app, req).await;
+        assert!(
+            resp.status().is_success(),
+            "sale failed: {:?}",
+            resp.status()
+        );
+        let body: Value = test::read_body_json(resp).await;
+        let order_id = body["id"].as_str().expect("order id").to_string();
+
+        let req = test::TestRequest::post()
+            .uri("/loyalty/award")
+            .insert_header(("Authorization", format!("Bearer {jwt}")))
+            .set_json(&serde_json::json!({
+                "branch_id": branch, "order_id": order_id,
+                "token": "Mderivedcap000000001"
+            }))
+            .to_request();
+        let resp = test::call_service(app, req).await;
+        let status = resp.status();
+        let body: Value = test::read_body_json(resp).await;
+        (status, body)
+    };
+
+    // Up to the dearest reward, not to the cheapest one.
+    let (status, body) = sell_and_award(Uuid::new_v4()).await;
+    assert!(status.is_success(), "{status} {body}");
+    assert_eq!(
+        visits_of(&pool, member).await,
+        8,
+        "the ceiling is the CAKE, not the espresso"
+    );
+
+    // And no further.
+    let (status, _) = sell_and_award(Uuid::new_v4()).await;
+    assert!(status.is_success());
+    assert_eq!(visits_of(&pool, member).await, 8);
+
+    // The shop adds a dearer reward. The ceiling rises on its own — nobody
+    // retypes a number, which is the whole point of deriving it.
+    let hamper = seed_menu_item(&pool, org, "Hamper", 40_000).await;
+    seed_reward(&pool, org, hamper, "visits", 12).await;
+
+    let (status, body) = sell_and_award(Uuid::new_v4()).await;
+    assert!(status.is_success(), "{status} {body}");
+    assert_eq!(
+        visits_of(&pool, member).await,
+        9,
+        "collecting resumes toward the new dearest reward"
+    );
+}
+
+/// An explicit figure beats the catalogue.
+#[sqlx::test]
+async fn a_typed_ceiling_overrides_the_dearest_reward(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    enable_program_mode(&pool, org, "visits", 1000, 5, false).await;
+    sqlx::query(
+        "UPDATE loyalty_settings SET balance_cap_enabled = true, balance_cap = 3 \
+          WHERE org_id = $1",
+    )
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let cake = seed_menu_item(&pool, org, "Cake", 9_000).await;
+    seed_reward(&pool, org, cake, "visits", 8).await;
+
+    let settings = crate::loyalty::settings::load_effective(&pool, org, branch)
+        .await
+        .unwrap();
+    let (rewards, _) = crate::loyalty::settings::load_effective_rewards(&pool, org, branch)
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::loyalty::settings::effective_balance_cap(&settings, &rewards),
+        Some(3),
+        "a typed figure wins over the catalogue"
+    );
+
+    // And switched off, nothing caps at all.
+    sqlx::query("UPDATE loyalty_settings SET balance_cap_enabled = false WHERE org_id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let settings = crate::loyalty::settings::load_effective(&pool, org, branch)
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::loyalty::settings::effective_balance_cap(&settings, &rewards),
+        None,
+        "the switch decides whether there is a ceiling at all"
+    );
+}
+
+/// Earning stops at the shop's ceiling — and the sale still completes.
+///
+/// The award is trimmed rather than refused: a full card is not the customer's
+/// doing, and they are standing at a counter having already paid.
+#[sqlx::test]
+async fn earning_stops_at_the_balance_cap_without_failing_the_sale(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    seed_cash_method(&pool, org).await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    enable_program_mode(&pool, org, "visits", 1000, 5, false).await;
+    sqlx::query(
+        "UPDATE loyalty_settings SET balance_cap_enabled = true, balance_cap = 10 \
+          WHERE org_id = $1",
+    )
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let member = seed_member(&pool, org, "201000000032", "Mbalancecap000000001").await;
+    let latte = seed_menu_item(&pool, org, "Latte", 5_000).await;
+    // One short of the ceiling.
+    grant(&pool, org, member, branch, "visits", 9).await;
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(crate::orders::routes::configure)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let jwt = token(teller, org, UserRole::Teller, Some(branch));
+
+    // Sell, then press the button — points are an explicit act, so the cap has
+    // to hold on the award rather than on the checkout.
+    let sell_and_award = async |key: Uuid| {
+        let app = &app;
+        let req = test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {jwt}")))
+            .set_json(&serde_json::json!({
+                "branch_id": branch, "shift_id": shift, "payment_method": "cash",
+                "idempotency_key": key,
+                "items": [{ "menu_item_id": latte, "quantity": 1 }]
+            }))
+            .to_request();
+        let resp = test::call_service(app, req).await;
+        assert!(
+            resp.status().is_success(),
+            "sale failed: {:?}",
+            resp.status()
+        );
+        let body: Value = test::read_body_json(resp).await;
+        let order_id = body["id"].as_str().expect("order id").to_string();
+
+        let req = test::TestRequest::post()
+            .uri("/loyalty/award")
+            .insert_header(("Authorization", format!("Bearer {jwt}")))
+            .set_json(&serde_json::json!({
+                "branch_id": branch, "order_id": order_id,
+                "token": "Mbalancecap000000001"
+            }))
+            .to_request();
+        let resp = test::call_service(app, req).await;
+        let status = resp.status();
+        let body: Value = test::read_body_json(resp).await;
+        (status, body)
+    };
+
+    // The stamp that reaches the ceiling.
+    let (status, body) = sell_and_award(Uuid::new_v4()).await;
+    assert!(status.is_success(), "award failed: {status} {body}");
+    assert_eq!(body["points_awarded"], 1);
+    assert_eq!(
+        visits_of(&pool, member).await,
+        10,
+        "one more, up to the cap"
+    );
+
+    // And the one past it: the sale and the award both succeed, and the balance
+    // does not move. A full card must never be an error at the counter.
+    let (status, body) = sell_and_award(Uuid::new_v4()).await;
+    assert!(
+        status.is_success(),
+        "a full card must never fail an award: {status} {body}"
+    );
+    assert_eq!(body["points_awarded"], 0, "nothing was added");
+    assert_eq!(
+        visits_of(&pool, member).await,
+        10,
+        "the balance stays at the ceiling"
+    );
+}
+
 /// The till's own arithmetic must not be able to charge for a free coffee.
 ///
 /// Pricing is client-authoritative everywhere else — the till computes what it

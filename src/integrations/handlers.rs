@@ -100,10 +100,12 @@ pub struct AnalyticsOrder {
     pub subtotal: i32,
     pub discount_amount: i32,
     pub tax_amount: i32,
-    /// Always 0: Madar has no service-charge concept. Present so the field is
-    /// stable if one is ever introduced.
+    /// The service charge added to this order, `0` where the branch charges
+    /// none. This was a hard-coded `0` for every order — the field was
+    /// published as if it meant something while a service charge did not
+    /// exist. It does now, and this is it.
     pub service_charge: i32,
-    /// `subtotal - discount_amount + tax_amount`. Deliberately COMPUTED rather
+    /// `subtotal - discount_amount + service_charge + tax_amount`. Deliberately COMPUTED rather
     /// than read from `orders.total_amount`, which also carries the delivery
     /// fee — this figure is the order's own value and nothing else. Tips are
     /// excluded too (they are not part of `total_amount` in the first place).
@@ -156,6 +158,7 @@ struct Totals {
     subtotal: i64,
     total_discount: i64,
     total_tax: i64,
+    total_service_charge: i64,
     total_revenue: i64,
 }
 
@@ -232,7 +235,8 @@ pub async fn analytics_orders(
                COALESCE(SUM(o.subtotal), 0)::bigint                                AS subtotal,
                COALESCE(SUM(o.discount_amount), 0)::bigint                         AS total_discount,
                COALESCE(SUM(o.tax_amount), 0)::bigint                              AS total_tax,
-               COALESCE(SUM(o.subtotal - o.discount_amount + o.tax_amount), 0)::bigint
+               COALESCE(SUM(o.service_charge_amount), 0)::bigint                    AS total_service_charge,
+               COALESCE(SUM(o.subtotal - o.discount_amount + o.service_charge_amount + o.tax_amount), 0)::bigint
                                                                                    AS total_revenue
           FROM orders o
          WHERE o.branch_id = $1
@@ -261,8 +265,9 @@ pub async fn analytics_orders(
                o.subtotal,
                o.discount_amount,
                o.tax_amount,
-               0                                                   AS service_charge,
-               (o.subtotal - o.discount_amount + o.tax_amount)::int AS total_amount
+               o.service_charge_amount                              AS service_charge,
+               (o.subtotal - o.discount_amount + o.service_charge_amount + o.tax_amount)::int
+                                                                   AS total_amount
           FROM orders o
          WHERE o.branch_id = $1
            AND o.created_at >= $2
@@ -300,7 +305,7 @@ pub async fn analytics_orders(
         subtotal: totals.subtotal,
         total_discount: totals.total_discount,
         total_tax: totals.total_tax,
-        total_service_charge: 0,
+        total_service_charge: totals.total_service_charge,
         total_revenue: totals.total_revenue,
         avg_order_total,
         limit,

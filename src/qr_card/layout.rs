@@ -82,10 +82,21 @@ const POWERED_OPACITY: f32 = 0.6;
 /// The wordmark beside the words: how tall against the type, how far from it,
 /// and how wide the asset is for its height (its viewBox is 322 × 92).
 const POWERED_MARK_RATIO: f32 = 1.5;
-const POWERED_GAP: f32 = 1.2;
+/// Clear space between the words and the wordmark.
+///
+/// Larger than it looks like it needs to be, because it absorbs the error in
+/// `POWERED_ADVANCE` below as well as separating the two. At 1.2 the mark sat
+/// flush against the "y" and the lockup read as one run-on word.
+const POWERED_GAP: f32 = 2.6;
 const LABEL_ASPECT: f32 = 322.0 / 92.0;
 /// Manrope's average advance across "Powered by", as a share of the em.
-const POWERED_ADVANCE: f32 = 0.5;
+///
+/// An ESTIMATE — the glyphs are measured by resvg at render time, not here, so
+/// this only decides where the mark is placed relative to where the text is
+/// expected to end. Under-measuring puts the mark ON the words, which is what
+/// 0.5 did: Manrope Medium runs nearer 0.55 across this string, and the "P",
+/// "w" and "d" are all wider than the average it was averaging.
+const POWERED_ADVANCE: f32 = 0.56;
 
 /// The Madar mark — embedded verbatim, the single source of truth.
 const MARK_SVG: &str = include_str!("../../assets/madar-mark.svg");
@@ -576,4 +587,98 @@ fn extract_svg_inner(svg: &str) -> Result<&str, QrCardError> {
         return Err(QrCardError::SvgParse("asset: malformed".into()));
     }
     Ok(&svg[gt..close])
+}
+
+#[cfg(test)]
+mod powered_by_tests {
+    use super::*;
+
+    /// The advance width of `POWERED_TEXT` in the font it is actually set in,
+    /// as a share of the em — measured from the shipped file, not guessed.
+    fn measured_advance_per_char() -> f32 {
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/fonts/Manrope-Medium.ttf"
+        ))
+        .expect("the font the card is set in ships with the repo");
+        let face = ttf_parser::Face::parse(&data, 0).expect("Manrope-Medium parses");
+        let upem = face.units_per_em() as f32;
+        let total: f32 = POWERED_TEXT
+            .chars()
+            .map(|c| {
+                face.glyph_index(c)
+                    .and_then(|g| face.glyph_hor_advance(g))
+                    .unwrap_or(0) as f32
+            })
+            .sum();
+        (total / upem) / POWERED_TEXT.chars().count() as f32
+    }
+
+    /// `POWERED_ADVANCE` must not UNDER-state the type.
+    ///
+    /// The lockup is laid out from that estimate, because the glyphs are
+    /// measured by resvg at render time and not here. Under-estimating puts
+    /// the wordmark on top of the words, which is what shipped: "Powered by"
+    /// and the mark ran together with no space between them.
+    #[test]
+    fn the_advance_estimate_is_not_narrower_than_the_font() {
+        let measured = measured_advance_per_char();
+        assert!(
+            POWERED_ADVANCE >= measured,
+            "POWERED_ADVANCE is {POWERED_ADVANCE}, but Manrope-Medium sets \
+             \"{POWERED_TEXT}\" at {measured:.4} em/char — the wordmark would be \
+             placed inside the words"
+        );
+        // And not absurdly wide either, or the lockup grows a hole in it.
+        assert!(
+            POWERED_ADVANCE < measured + 0.08,
+            "POWERED_ADVANCE is {POWERED_ADVANCE} against a measured {measured:.4} — \
+             that much slack opens a visible gap in the lockup"
+        );
+    }
+
+    /// The wordmark clears the words, using the real text width.
+    #[test]
+    fn the_wordmark_clears_the_words() {
+        let real_text_w =
+            POWERED_TEXT.chars().count() as f32 * POWERED_SIZE * measured_advance_per_char();
+        let assumed_text_w = POWERED_TEXT.chars().count() as f32 * POWERED_SIZE * POWERED_ADVANCE;
+        let mark_starts_at = assumed_text_w + POWERED_GAP;
+
+        let clearance = mark_starts_at - real_text_w;
+        assert!(
+            clearance > 0.0,
+            "the wordmark starts at {mark_starts_at:.2}mm and the words run to \
+             {real_text_w:.2}mm — they overlap"
+        );
+        // A lockup needs air, not a hairline: at least a fifth of the type size.
+        assert!(
+            clearance >= POWERED_SIZE * 0.2,
+            "only {clearance:.2}mm of clear space at {POWERED_SIZE}mm type — reads as one word"
+        );
+        // But not so much that the credit falls apart into two things.
+        assert!(
+            clearance <= POWERED_SIZE * 1.2,
+            "{clearance:.2}mm of space at {POWERED_SIZE}mm type — the mark reads as unrelated"
+        );
+    }
+
+    /// The whole lockup stays inside the card.
+    #[test]
+    fn the_lockup_fits_within_the_trim() {
+        let text_w = POWERED_TEXT.chars().count() as f32 * POWERED_SIZE * POWERED_ADVANCE;
+        let mark_w = POWERED_SIZE * POWERED_MARK_RATIO * LABEL_ASPECT;
+        let total = text_w + POWERED_GAP + mark_w;
+        let left = QR_CX - total / 2.0;
+        assert!(
+            left > FRAME_INSET,
+            "lockup starts at {left:.2}mm, inside the frame"
+        );
+        assert!(
+            left + total < TRIM_W - FRAME_INSET,
+            "lockup ends at {:.2}mm, past the frame at {:.2}mm",
+            left + total,
+            TRIM_W - FRAME_INSET
+        );
+    }
 }
