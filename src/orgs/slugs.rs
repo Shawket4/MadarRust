@@ -181,13 +181,37 @@ pub fn validate(slug: &str) -> Result<(), AppError> {
 /// The tier is the line because it is the tier that puts the slug in a hostname
 /// and on printed cards. A shop that has not been given custom branding can
 /// still rename itself freely, and should be able to.
-pub fn is_frozen(custom_branding: bool) -> bool {
-    custom_branding
+///
+/// A shop with NO slug yet is not frozen either, whatever its tier. Nothing is
+/// encoded in an empty string: there is no hostname, no printed card, nothing
+/// outside our control that names it. Freezing one was a deadlock rather than
+/// a safeguard — an org from before slugs existed, carrying `slug = ''` and the
+/// branding tier, could not be given a slug, and because the dashboard requires
+/// one to submit the form, could not be edited AT ALL. Not its name, not its
+/// tax rate, not its receipt footer.
+pub fn is_frozen(custom_branding: bool, current_slug: &str) -> bool {
+    custom_branding && !current_slug.trim().is_empty()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The freeze protects something that EXISTS. An org from before slugs
+    /// were a thing carries an empty one, and there is a live example: branded,
+    /// active, `slug = \'\'`. Freezing that made the whole organisation
+    /// uneditable, because the dashboard cannot submit without a slug and the
+    /// server refused every slug it sent.
+    #[test]
+    fn a_shop_with_no_slug_yet_can_still_be_given_one() {
+        assert!(!is_frozen(true, ""), "nothing is printed on an empty name");
+        assert!(!is_frozen(true, "   "), "nor on a blank one");
+        // And once it has one, it is load-bearing and stops moving.
+        assert!(is_frozen(true, "drops"));
+        // Off the tier, a shop renames itself freely either way.
+        assert!(!is_frozen(false, "drops"));
+        assert!(!is_frozen(false, ""));
+    }
 
     #[test]
     fn the_names_we_are_already_using_are_refused() {

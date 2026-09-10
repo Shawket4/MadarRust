@@ -51,6 +51,72 @@ async fn grant_permission(pool: &PgPool, role: &str, resource: &str, action: &st
     .unwrap();
 }
 
+/// A branch's tax override has to come back as a NUMBER, and `null` when it
+/// inherits — which is not the same as zero.
+///
+/// The column is `numeric` and the field is a `BigDecimal`, and bigdecimal's
+/// serde writes that as a JSON string. A dashboard reading `"0.1400"` through
+/// `Number.isFinite` gets false and shows zero, so the override looks like it
+/// saved and did nothing. Nothing failed; the bytes just disagreed with the
+/// schema, which said `f64` all along.
+#[sqlx::test]
+async fn a_branch_rate_comes_back_as_a_json_number(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    grant_permission(&pool, "org_admin", "branches", "create").await;
+    grant_permission(&pool, "org_admin", "branches", "update").await;
+    let token = generate_org_admin_token(Uuid::new_v4(), org_id);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/branches")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&serde_json::json!({
+                "org_id": org_id,
+                "name": "Inherits",
+                "address": "1 High St",
+            }))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let branch_id = body["id"].as_str().unwrap().to_string();
+    assert!(body["tax_rate"].is_null(), "inherit is null, never 0");
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::put()
+            .uri(&format!("/branches/{branch_id}"))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&serde_json::json!({
+                "tax_rate": 0.14,
+                "service_charge_rate": 0.125,
+            }))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success(), "got {}", resp.status());
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    for field in ["tax_rate", "service_charge_rate"] {
+        assert!(
+            body[field].is_number(),
+            "{field} came back as {:?}",
+            body[field]
+        );
+    }
+    assert_eq!(body["tax_rate"].as_f64().unwrap(), 0.14);
+    assert_eq!(body["service_charge_rate"].as_f64().unwrap(), 0.125);
+}
+
 #[sqlx::test]
 async fn test_create_branch_success(pool: PgPool) {
     let app = test::init_service(

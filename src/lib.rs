@@ -40,6 +40,7 @@ pub mod permissions;
 pub mod purchasing;
 pub mod qr_card;
 pub mod rate_limit;
+pub mod rates;
 pub mod realtime;
 pub mod recipes;
 pub mod reports;

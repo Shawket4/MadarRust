@@ -47758,9 +47758,39 @@
               "null"
             ]
           },
+          "require_table_for_orders": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Must every sale name a table? Default false."
+          },
+          "service_charge_rate": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "A fraction, like the tax rate: 0.12 is 12%. Default 0.",
+            "example": 0.0
+          },
+          "service_charge_taxable": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Is the service charge itself taxed? Default true."
+          },
           "slug": {
             "type": "string",
             "example": "the-rue"
+          },
+          "tax_inclusive": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Are menu prices tax-inclusive? Default false (tax added on top)."
           },
           "tax_rate": {
             "type": [
@@ -47768,6 +47798,7 @@
               "null"
             ],
             "format": "double",
+            "description": "A FRACTION: 0.14 is 14%. Same unit as `PATCH /orgs/{id}`.",
             "example": 0.14
           },
           "timezone": {

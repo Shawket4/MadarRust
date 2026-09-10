@@ -36,12 +36,14 @@ pub struct Org {
     /// Tax rate as a decimal (e.g. `0.14` for 14% VAT).
     /// Stored as `BigDecimal` internally; transmitted as a JSON number.
     #[schema(value_type = f64, example = 0.14)]
+    #[serde(serialize_with = "crate::rates::serialize")]
     pub tax_rate: sqlx::types::BigDecimal,
     /// `true` = menu prices already contain the tax, and the receipt breaks it
     /// out backwards rather than adding it on at the till.
     pub tax_inclusive: bool,
     /// Fraction of the bill added as a service charge; `0` disables it.
     #[schema(value_type = f64, example = 0.0)]
+    #[serde(serialize_with = "crate::rates::serialize")]
     pub service_charge_rate: sqlx::types::BigDecimal,
     /// Whether the service charge is itself taxed.
     pub service_charge_taxable: bool,
@@ -84,8 +86,27 @@ struct CreateOrgFields {
     slug: Option<String>,
     currency_code: Option<String>,
     tax_rate: Option<f64>,
+    // The rest of the tax policy. Create used to take the RATE and nothing
+    // else, while the form that posts here collects all four — so a shop set
+    // up with a 12% service charge, tax-inclusive pricing, got neither, was
+    // told the organisation had been created, and had to discover in the
+    // edit dialog that half of what it typed had been dropped on the floor.
+    tax_inclusive: Option<bool>,
+    service_charge_rate: Option<f64>,
+    service_charge_taxable: Option<bool>,
+    require_table_for_orders: Option<bool>,
     receipt_footer: Option<String>,
     timezone: Option<String>,
+}
+
+/// A multipart checkbox: absent is None, and anything a form posts for "on"
+/// counts. `false` is what an unticked box sends when it sends anything.
+fn parse_bool(s: &str) -> Option<bool> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" | "" => Some(false),
+        _ => None,
+    }
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -148,8 +169,22 @@ pub struct CreateOrgMultipart {
     #[schema(example = "EGP")]
     pub currency_code: Option<String>,
 
+    /// A FRACTION: 0.14 is 14%. Same unit as `PATCH /orgs/{id}`.
     #[schema(example = 0.14)]
     pub tax_rate: Option<f64>,
+
+    /// Are menu prices tax-inclusive? Default false (tax added on top).
+    pub tax_inclusive: Option<bool>,
+
+    /// A fraction, like the tax rate: 0.12 is 12%. Default 0.
+    #[schema(example = 0.0)]
+    pub service_charge_rate: Option<f64>,
+
+    /// Is the service charge itself taxed? Default true.
+    pub service_charge_taxable: Option<bool>,
+
+    /// Must every sale name a table? Default false.
+    pub require_table_for_orders: Option<bool>,
 
     pub receipt_footer: Option<String>,
 
@@ -245,6 +280,26 @@ pub async fn create_org(
                     fields.tax_rate = s.parse::<f64>().ok();
                 }
             }
+            "service_charge_rate" => {
+                if let Some(s) = text_field(&mut field).await? {
+                    fields.service_charge_rate = s.parse::<f64>().ok();
+                }
+            }
+            "tax_inclusive" => {
+                if let Some(s) = text_field(&mut field).await? {
+                    fields.tax_inclusive = parse_bool(&s);
+                }
+            }
+            "service_charge_taxable" => {
+                if let Some(s) = text_field(&mut field).await? {
+                    fields.service_charge_taxable = parse_bool(&s);
+                }
+            }
+            "require_table_for_orders" => {
+                if let Some(s) = text_field(&mut field).await? {
+                    fields.require_table_for_orders = parse_bool(&s);
+                }
+            }
             "receipt_footer" => fields.receipt_footer = text_field(&mut field).await?,
             "timezone" => fields.timezone = text_field(&mut field).await?,
             _ => {
@@ -279,6 +334,18 @@ pub async fn create_org(
     }
 
     let currency = fields.currency_code.as_deref().unwrap_or("EGP");
+    // The service charge is a fraction too, and the CHECK on the column will
+    // refuse a percentage — but with a constraint violation, not a sentence
+    // anyone can act on. Say it here, the way the rate already does.
+    if let Some(r) = fields.service_charge_rate
+        && !(0.0..=1.0).contains(&r)
+    {
+        return Err(AppError::BadRequest(
+            "service_charge_rate is a fraction between 0 and 1, not a percentage — \
+             0.12 means 12%"
+                .into(),
+        ));
+    }
     let tax_rate = fields.tax_rate.unwrap_or(0.14);
     if !(0.0..=1.0).contains(&tax_rate) {
         return Err(AppError::BadRequest(
@@ -300,8 +367,12 @@ pub async fn create_org(
         -- tax_inclusive / service_charge_* deliberately absent: a new org takes
         -- the column defaults (exclusive pricing, no service charge) and
         -- configures them in Settings afterwards.
-        INSERT INTO organizations (name, slug, logo_url, currency_code, tax_rate, receipt_footer, timezone)
-        VALUES ($1, $2, $3, $4, $5, $6, $7::timezone_name)
+        INSERT INTO organizations (name, slug, logo_url, currency_code, tax_rate,
+                                   tax_inclusive, service_charge_rate, service_charge_taxable,
+                                   require_table_for_orders, receipt_footer, timezone)
+        VALUES ($1, $2, $3, $4, $5,
+                COALESCE($6, false), COALESCE($7, 0), COALESCE($8, true),
+                COALESCE($9, false), $10, $11::timezone_name)
         RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
         "#,
     )
@@ -310,6 +381,10 @@ pub async fn create_org(
     .bind(&logo_url)
     .bind(currency)
     .bind(tax_rate)
+    .bind(fields.tax_inclusive)
+    .bind(fields.service_charge_rate)
+    .bind(fields.service_charge_taxable)
+    .bind(fields.require_table_for_orders)
     .bind(&fields.receipt_footer)
     .bind(timezone)
     .fetch_one(&mut *tx)
@@ -519,7 +594,7 @@ pub async fn update_org(
         // A slug on the branding tier is a hostname and a printed QR code. The
         // sticker on the window cannot be recalled, so the name stops being
         // editable once anything outside our control encodes it.
-        if super::slugs::is_frozen(existing.custom_branding) {
+        if super::slugs::is_frozen(existing.custom_branding, &existing.slug) {
             return Err(AppError::Conflict(
                 "This shop's short name is part of its web address and the codes it has \
                  printed, so it cannot be changed. Turn custom branding off first if it \

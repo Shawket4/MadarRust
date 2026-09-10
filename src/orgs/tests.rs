@@ -696,6 +696,60 @@ async fn test_onboarding_org_profile_step(pool: PgPool) {
     assert_eq!(profile["done"], true);
 }
 
+/// A rate has to come BACK as a number, not a string.
+///
+/// "I set it to 14, it says saved, and nothing changes" is what a string on
+/// this field looks like from a dashboard: the write lands, and the form that
+/// reads it back runs `Number.isFinite("0.14")`, gets false, and shows zero —
+/// so the setting appears to do nothing while the database has exactly what
+/// was asked for. The column is `numeric` and the field is a `BigDecimal`, and
+/// nothing until now pinned which of the two shapes serde picks.
+#[sqlx::test]
+async fn a_rate_comes_back_as_a_json_number(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO organizations (id, name, slug, tax_rate) VALUES ($1,'O','o-json',0.05)",
+    )
+    .bind(org_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let token = generate_super_admin_token();
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri(&format!("/orgs/{}", org_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&serde_json::json!({
+                "tax_rate": 0.14,
+                "service_charge_rate": 0.12,
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+
+    for field in ["tax_rate", "service_charge_rate"] {
+        assert!(
+            body[field].is_number(),
+            "{field} came back as {:?} — a dashboard reading this with \
+             Number.isFinite gets false and shows zero",
+            body[field]
+        );
+    }
+    assert_eq!(body["tax_rate"].as_f64().unwrap(), 0.14);
+    assert_eq!(body["service_charge_rate"].as_f64().unwrap(), 0.12);
+}
+
 /// V16: tax_rate outside [0, 1] must be rejected (negative or >100%).
 #[sqlx::test]
 async fn test_update_org_rejects_out_of_range_tax_rate(pool: PgPool) {
