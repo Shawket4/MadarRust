@@ -120,6 +120,7 @@ pub struct StockTransfer {
     pub ingredient_name: String,
     pub unit: String,
     #[schema(value_type = f64)]
+    #[serde(serialize_with = "crate::decimals::serialize")]
     pub quantity: sqlx::types::BigDecimal,
     pub note: Option<String>,
     pub initiated_by: Uuid,
@@ -146,8 +147,10 @@ pub struct StockMovement {
     pub movement_type: String,
     /// Signed delta applied to stock (consumption negative, replenishment positive).
     #[schema(value_type = f64)]
+    #[serde(serialize_with = "crate::decimals::serialize")]
     pub quantity: sqlx::types::BigDecimal,
     #[schema(value_type = f64)]
+    #[serde(serialize_with = "crate::decimals::serialize")]
     pub balance_after: sqlx::types::BigDecimal,
     /// Piastres per unit at movement time; `null` ⟺ unknown.
     pub unit_cost: Option<i64>,

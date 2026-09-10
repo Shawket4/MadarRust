@@ -78,11 +78,11 @@ pub struct Branch {
     /// every branch that never asked to differ; a branch that genuinely charges
     /// no tax says so with an explicit `0`.
     #[schema(value_type = Option<f64>, example = 0.14)]
-    #[serde(serialize_with = "crate::rates::serialize_opt")]
+    #[serde(serialize_with = "crate::decimals::serialize_opt")]
     pub tax_rate: Option<sqlx::types::BigDecimal>,
     pub tax_inclusive: Option<bool>,
     #[schema(value_type = Option<f64>, example = 0.0)]
-    #[serde(serialize_with = "crate::rates::serialize_opt")]
+    #[serde(serialize_with = "crate::decimals::serialize_opt")]
     pub service_charge_rate: Option<sqlx::types::BigDecimal>,
     pub service_charge_taxable: Option<bool>,
     pub created_at: DateTime<Utc>,

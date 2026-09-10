@@ -233,22 +233,6 @@ pub struct OrderItemAddon {
     pub line_cost: Option<i64>,
 }
 
-/// Serialize an `Option<BigDecimal>` as a JSON number (or null) instead of
-/// bigdecimal's default string form, so the wire matches the `number` the
-/// OpenAPI schema + generated POS client expect.
-fn serialize_bigdecimal_opt_as_number<S>(
-    v: &Option<sqlx::types::BigDecimal>,
-    s: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    match v {
-        Some(bd) => s.serialize_f64(bd.to_string().parse::<f64>().unwrap_or(0.0)),
-        None => s.serialize_none(),
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct OrderItemOptional {
     pub id: Uuid,
@@ -266,7 +250,7 @@ pub struct OrderItemOptional {
     // POS can't decode the create-order response → the queued sale never acks and
     // dead-letters even though it was saved. Emit a real JSON number.
     #[schema(value_type = Option<f64>)]
-    #[serde(serialize_with = "serialize_bigdecimal_opt_as_number")]
+    #[serde(serialize_with = "crate::decimals::serialize_opt")]
     pub quantity_deducted: Option<sqlx::types::BigDecimal>,
     /// Ingredient cost per parent-item unit in piastres. `null` ⟺ unknown or
     /// no ingredient linked.

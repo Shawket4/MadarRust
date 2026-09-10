@@ -36,14 +36,14 @@ pub struct Org {
     /// Tax rate as a decimal (e.g. `0.14` for 14% VAT).
     /// Stored as `BigDecimal` internally; transmitted as a JSON number.
     #[schema(value_type = f64, example = 0.14)]
-    #[serde(serialize_with = "crate::rates::serialize")]
+    #[serde(serialize_with = "crate::decimals::serialize")]
     pub tax_rate: sqlx::types::BigDecimal,
     /// `true` = menu prices already contain the tax, and the receipt breaks it
     /// out backwards rather than adding it on at the till.
     pub tax_inclusive: bool,
     /// Fraction of the bill added as a service charge; `0` disables it.
     #[schema(value_type = f64, example = 0.0)]
-    #[serde(serialize_with = "crate::rates::serialize")]
+    #[serde(serialize_with = "crate::decimals::serialize")]
     pub service_charge_rate: sqlx::types::BigDecimal,
     /// Whether the service charge is itself taxed.
     pub service_charge_taxable: bool,

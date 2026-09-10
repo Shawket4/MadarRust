@@ -107,6 +107,7 @@ pub struct AddonOverride {
     pub org_ingredient_id: Option<Uuid>,
     pub ingredient_unit: String,
     #[schema(value_type = f64)]
+    #[serde(serialize_with = "crate::decimals::serialize")]
     pub quantity_used: sqlx::types::BigDecimal,
     pub replaces_org_ingredient_id: Option<Uuid>,
     pub replaces_ingredient_name: Option<String>,
@@ -120,6 +121,7 @@ pub struct AddonOverride {
 pub struct MenuItemRecipe {
     pub org_ingredient_id: Option<Uuid>,
     #[schema(value_type = f64)]
+    #[serde(serialize_with = "crate::decimals::serialize")]
     pub quantity_used: sqlx::types::BigDecimal,
     pub ingredient_name: String,
     pub ingredient_unit: String,
@@ -131,6 +133,7 @@ pub struct MenuItemRecipe {
 pub struct AddonItemIngredient {
     pub org_ingredient_id: Option<Uuid>,
     #[schema(value_type = f64)]
+    #[serde(serialize_with = "crate::decimals::serialize")]
     pub quantity_used: sqlx::types::BigDecimal,
     pub ingredient_name: String,
     pub ingredient_unit: String,
@@ -2104,6 +2107,7 @@ pub struct OptionalField {
     pub ingredient_name: Option<String>,
     pub ingredient_unit: Option<String>,
     #[schema(value_type = Option<f64>)]
+    #[serde(serialize_with = "crate::decimals::serialize_opt")]
     pub quantity_used: Option<sqlx::types::BigDecimal>,
     pub size_label: Option<String>,
     pub is_active: bool,

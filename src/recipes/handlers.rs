@@ -21,6 +21,7 @@ pub struct DrinkRecipe {
     pub ingredient_name: String,
     pub unit: String,
     #[schema(value_type = f64)]
+    #[serde(serialize_with = "crate::decimals::serialize")]
     pub quantity_used: sqlx::types::BigDecimal,
 }
 
@@ -32,6 +33,7 @@ pub struct AddonIngredient {
     pub ingredient_name: String,
     pub unit: String,
     #[schema(value_type = f64)]
+    #[serde(serialize_with = "crate::decimals::serialize")]
     pub quantity_used: sqlx::types::BigDecimal,
 }
 
