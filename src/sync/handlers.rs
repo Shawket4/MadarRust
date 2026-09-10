@@ -208,7 +208,30 @@ impl ReplayOp {
             // waiter never sees it, so a queued award attributed to one could
             // not have been made live.
             | ReplayOp::AwardLoyaltyPoints { .. } => *role == Teller,
-            ReplayOp::FireOpenTicket { .. } | ReplayOp::AddTicketRound { .. } => *role == Waiter,
+            // A TELLER opens tabs and adds to them too, not just a waiter.
+            //
+            // This said Waiter only, and was right while firing was something
+            // only the waiter app did. Then the floor arrived: seating a party
+            // is a ticket with no items, the tables screen is where a teller
+            // does it, and under the "every order must have a table" toggle
+            // that screen is the teller's HOME. So a teller tapping a free
+            // table queued a fire that this gate then refused, and the till
+            // showed "Replay actor may not perform this operation" for the
+            // ordinary act of seating somebody.
+            //
+            // It was also stricter than the live route, which contradicts the
+            // whole point of this function: `create_open_ticket` checks
+            // `open_tickets:create` and NO role at all, and the teller has that
+            // grant by default (`permissions::seeder`). Since the POS drains
+            // every write through `/sync/replay`, "stricter than live" here
+            // means "impossible", not "safer".
+            //
+            // The permission table stays the real authority: revoke
+            // `open_tickets:create` from a teller and `required_permissions`
+            // still turns this away, live or replayed.
+            ReplayOp::FireOpenTicket { .. } | ReplayOp::AddTicketRound { .. } => {
+                matches!(role, Teller | Waiter)
+            }
             ReplayOp::VoidOpenTicket { .. } => matches!(role, Teller | Waiter),
             // A kitchen device bumps; a teller may bump the till queue too.
             ReplayOp::BumpKitchenItem { .. } | ReplayOp::UnbumpKitchenItem { .. } => {

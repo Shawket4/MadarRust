@@ -562,6 +562,105 @@ async fn replay_fire_round_settle_idempotent_and_attributed(pool: PgPool) {
     assert_eq!(orders, 1, "exactly one order materialized");
 }
 
+/// A TELLER seating a party is the ordinary act the floor is for, and it has to
+/// survive the queue.
+///
+/// Seating is a ticket with no items, the tables screen is where a teller does
+/// it, and under the "every order must have a table" toggle that screen is the
+/// teller's HOME. The replay gate said firing was waiter-only — right while
+/// only the waiter app fired — so every tap on a free table came back "Replay
+/// actor may not perform this operation for this organization".
+///
+/// It was also stricter than the live route, which is the one thing this gate
+/// must never be: `create_open_ticket` checks `open_tickets:create` and no role
+/// at all. Since the POS drains every write through `/sync/replay`, stricter
+/// than live means impossible.
+#[sqlx::test]
+async fn a_teller_can_seat_a_party_through_the_queue(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let _shift = open_shift_row(&pool, branch, teller).await;
+    let table = seed_table(&pool, org, branch, "T1").await;
+    grant(&pool, "teller", "open_tickets", "create").await;
+    let bearer = token(teller, org, UserRole::Teller);
+
+    // Exactly what `seat_table` queues: a fire with no items, naming a table.
+    let seat = serde_json::json!({
+        "op": "fire_open_ticket",
+        "teller_id": teller,
+        "request": { "branch_id": branch, "items": [], "table_id": table }
+    });
+    let r = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/sync/replay")
+            .insert_header(("Authorization", format!("Bearer {bearer}")))
+            .set_json(&seat)
+            .to_request(),
+    )
+    .await;
+    assert!(
+        r.status().is_success(),
+        "a teller seats a party, got {}",
+        r.status()
+    );
+
+    let status: String = sqlx::query_scalar("SELECT status FROM branch_tables WHERE id = $1")
+        .bind(table)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "seated", "the room knows the table is taken");
+}
+
+/// And the permission table is still the authority. Revoke a teller's
+/// `open_tickets:create` and the queue is not a way around it — which is the
+/// whole reason `required_permissions` re-checks what the live endpoint checks.
+#[sqlx::test]
+async fn a_teller_denied_open_tickets_cannot_seat_through_the_queue_either(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let table = seed_table(&pool, org, branch, "T1").await;
+    grant(&pool, "teller", "open_tickets", "create").await;
+    // A per-user deny beats the role grant, live or replayed.
+    sqlx::query(
+        "INSERT INTO permissions (user_id, resource, action, granted) \
+         VALUES ($1, 'open_tickets'::permission_resource, 'create'::permission_action, false)",
+    )
+    .bind(teller)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let bearer = token(teller, org, UserRole::Teller);
+
+    let seat = serde_json::json!({
+        "op": "fire_open_ticket",
+        "teller_id": teller,
+        "request": { "branch_id": branch, "items": [], "table_id": table }
+    });
+    let r = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/sync/replay")
+            .insert_header(("Authorization", format!("Bearer {bearer}")))
+            .set_json(&seat)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(r.status(), 403, "a revoked grant still refuses");
+
+    let status: String = sqlx::query_scalar("SELECT status FROM branch_tables WHERE id = $1")
+        .bind(table)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "free", "and the table was not taken");
+}
+
 /// Replay attribution-safety: an op can only be replayed under a role that could
 /// have produced it live, and only for an actor in the bearer's org.
 #[sqlx::test]
@@ -574,10 +673,12 @@ async fn replay_rejects_wrong_actor_role_or_org(pool: PgPool) {
     let teller = seed_user(&pool, org, "teller").await;
     let bearer = token(teller, org, UserRole::Teller);
 
-    // A TELLER cannot be the actor of a fire (firing is waiter-only).
-    let fire_by_teller = serde_json::json!({
+    // A KITCHEN device cannot be the actor of a fire. It bumps what arrives;
+    // it never opens a tab, so an op attributed to one could not have happened.
+    let kitchen = seed_user(&pool, org, "kitchen").await;
+    let fire_by_kitchen = serde_json::json!({
         "op": "fire_open_ticket",
-        "teller_id": teller,
+        "teller_id": kitchen,
         "request": { "branch_id": branch, "items": [{ "menu_item_id": item, "quantity": 1 }] }
     });
     let r = test::call_service(
@@ -585,11 +686,11 @@ async fn replay_rejects_wrong_actor_role_or_org(pool: PgPool) {
         test::TestRequest::post()
             .uri("/sync/replay")
             .insert_header(("Authorization", format!("Bearer {bearer}")))
-            .set_json(&fire_by_teller)
+            .set_json(&fire_by_kitchen)
             .to_request(),
     )
     .await;
-    assert_eq!(r.status(), 403, "teller may not fire a ticket");
+    assert_eq!(r.status(), 403, "a kitchen device may not open a tab");
 
     // A WAITER cannot be the actor of a settle (settling is teller-only).
     let settle_by_waiter = serde_json::json!({
