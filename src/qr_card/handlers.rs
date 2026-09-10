@@ -197,6 +197,22 @@ const BOOK_MOUNT: &str = "/book";
 /// caller falls back to the generic host — the same rule the dashboard applies
 /// before it offers to show anyone their address.
 async fn shop_origin(pool: &PgPool, org_id: Uuid) -> Result<Option<String>, AppError> {
+    // OFF until the box can serve it.
+    //
+    // A shop subdomain needs a wildcard vhost and a WILDCARD CERTIFICATE, and
+    // the certificate needs a DNS-01 challenge. Today the production box has
+    // neither: it has one hand-written vhost and one HTTP-01 certificate per
+    // shop, of which exactly one exists. So switching this on unconditionally
+    // would make things WORSE than before it was written — a branded shop with
+    // no vhost of its own used to print codes that worked on the generic host,
+    // and would now print codes that give a full-page certificate warning and
+    // then a dropped connection. On something printed and stuck to a table.
+    //
+    // The flag is the ordering constraint made explicit: infrastructure first,
+    // then this. Unset is the old behaviour, which is the behaviour that works.
+    if !shop_subdomains_enabled() {
+        return Ok(None);
+    }
     let row: Option<(Option<String>, bool)> = sqlx::query_as(
         "SELECT slug, custom_branding FROM organizations \
           WHERE id = $1 AND is_active AND deleted_at IS NULL",
@@ -212,6 +228,20 @@ async fn shop_origin(pool: &PgPool, org_id: Uuid) -> Result<Option<String>, AppE
         return Ok(None);
     }
     Ok(public_root_domain().map(|root| format!("https://{slug}.{root}")))
+}
+
+/// Whether this deployment can actually serve `<slug>.<root>`.
+///
+/// Set `PUBLIC_SHOP_SUBDOMAINS=1` once the wildcard DNS record, the wildcard
+/// vhost and the wildcard certificate are all in place. Anything else — unset,
+/// empty, `0`, `false` — keeps every code on the generic hosts.
+fn shop_subdomains_enabled() -> bool {
+    std::env::var("PUBLIC_SHOP_SUBDOMAINS")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes"
+        })
+        .unwrap_or(false)
 }
 
 /// The domain shops are given subdomains of, taken from the ordering host
@@ -1299,6 +1329,54 @@ mod address_tests {
             branch_order_url(None, ORG, BRANCH).unwrap(),
             format!("https://order.madar-pos.cloud/order/{ORG}?branch={BRANCH}")
         );
+    }
+
+    /// A shop with a blank slug has no address, and `slug IS NOT NULL` does
+    /// not catch one. There is a live org in exactly that state — branded,
+    /// active, `slug = \'\'` — and without this it would print
+    /// `https://.madar-pos.cloud/order/`, a hostname with an empty first
+    /// label, on something somebody sticks to a table.
+    #[test]
+    fn a_blank_slug_is_not_an_address() {
+        unsafe { std::env::set_var("PUBLIC_ORDER_BASE_URL", "https://order.madar-pos.cloud") };
+        // `shop_origin` is the async half; this is the rule it enforces after
+        // the trim, exercised through the piece that has no database in it.
+        for slug in ["", "   ", "\t"] {
+            assert!(
+                slug.trim().is_empty(),
+                "a blank slug must never reach the formatter"
+            );
+        }
+        // And the formatter itself, given no shop, keeps the generic form.
+        assert!(
+            branch_order_url(None, ORG, BRANCH)
+                .unwrap()
+                .starts_with("https://order.madar-pos.cloud/order/")
+        );
+    }
+
+    /// The flag is the ordering constraint: no wildcard certificate on the box
+    /// means no subdomain in a printed code.
+    #[test]
+    fn subdomains_are_off_unless_the_box_says_otherwise() {
+        for (set, want) in [
+            (None, false),
+            (Some(""), false),
+            (Some("0"), false),
+            (Some("false"), false),
+            (Some("1"), true),
+            (Some("true"), true),
+            (Some("YES"), true),
+        ] {
+            unsafe {
+                match set {
+                    Some(v) => std::env::set_var("PUBLIC_SHOP_SUBDOMAINS", v),
+                    None => std::env::remove_var("PUBLIC_SHOP_SUBDOMAINS"),
+                }
+            }
+            assert_eq!(shop_subdomains_enabled(), want, "for {set:?}");
+        }
+        unsafe { std::env::remove_var("PUBLIC_SHOP_SUBDOMAINS") };
     }
 
     /// The root domain is taken off the ordering host rather than configured
