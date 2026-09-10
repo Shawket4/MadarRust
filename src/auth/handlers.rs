@@ -103,6 +103,14 @@ pub struct LoginResponse {
     /// The full policy, including tax-inclusive pricing and service charge.
     /// Prefer this over the flat `tax_rate` above.
     pub tax_policy: TaxPolicyPublic,
+    /// Every dine-in sale belongs to a table.
+    ///
+    /// The till needs this, not just the server: the rule changes what the POS
+    /// puts in front of a teller — the floor becomes the home screen and a sale
+    /// starts by picking a table — and a refusal AFTER the items are rung up is
+    /// far too late to be useful.
+    #[serde(default)]
+    pub require_table_for_orders: bool,
     #[schema(example = "EGP")]
     pub currency_code: String,
 }
@@ -121,6 +129,10 @@ pub struct MeResponse {
     /// weeks. Without it the till prices under a stale rate and — now that the
     /// server refuses totals it disagrees with — cannot sell at all.
     pub tax_policy: TaxPolicyPublic,
+    /// Every dine-in sale belongs to a table. Re-read on every `/auth/me`, so
+    /// switching it on reaches a till that has been running for weeks.
+    #[serde(default)]
+    pub require_table_for_orders: bool,
     /// Org currency code (e.g. "EGP").
     #[schema(example = "EGP")]
     pub currency_code: String,
@@ -385,7 +397,7 @@ pub async fn login(
     // The policy this caller prices under: their BRANCH's where they have one,
     // because a branch may override its org, and the till needs the rate that
     // applies where it is standing — not the org average.
-    let (tax_policy, currency_code) =
+    let (tax_policy, currency_code, require_table_for_orders) =
         resolve_tax_context(pool.get_ref(), user.org_id, branch_id_for_response).await?;
     let tax_rate = tax_policy.tax_rate;
 
@@ -397,6 +409,7 @@ pub async fn login(
         user: user_public,
         tax_rate,
         tax_policy,
+        require_table_for_orders,
         currency_code,
     }))
 }
@@ -456,7 +469,7 @@ pub async fn me(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, A
 
     // The policy this caller prices under. Re-read on every /auth/me, which is
     // the path a running till uses to notice a rate it has not seen.
-    let (tax_policy, currency_code) =
+    let (tax_policy, currency_code, require_table_for_orders) =
         resolve_tax_context(pool.get_ref(), user.org_id, branch_id).await?;
 
     let mut user_public = UserPublic::from(user);
@@ -466,6 +479,7 @@ pub async fn me(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, A
         user: user_public,
         tax_rate: tax_policy.tax_rate,
         tax_policy,
+        require_table_for_orders,
         currency_code,
     }))
 }
@@ -624,17 +638,22 @@ async fn resolve_tax_context(
     pool: &sqlx::PgPool,
     org_id: Option<Uuid>,
     branch_id: Option<Uuid>,
-) -> Result<(TaxPolicyPublic, String), AppError> {
+) -> Result<(TaxPolicyPublic, String, bool), AppError> {
     let Some(org_id) = org_id else {
-        return Ok((crate::tax::TaxPolicy::default().into(), "EGP".to_string()));
+        return Ok((
+            crate::tax::TaxPolicy::default().into(),
+            "EGP".to_string(),
+            false,
+        ));
     };
 
-    let currency: String =
-        sqlx::query_scalar("SELECT currency_code FROM organizations WHERE id = $1")
-            .bind(org_id)
-            .fetch_optional(pool)
-            .await?
-            .unwrap_or_else(|| "EGP".to_string());
+    let row: Option<(String, bool)> = sqlx::query_as(
+        "SELECT currency_code, require_table_for_orders FROM organizations WHERE id = $1",
+    )
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await?;
+    let (currency, require_table) = row.unwrap_or_else(|| ("EGP".to_string(), false));
 
     // A branch that no longer exists (or belongs to another org) falls back to
     // the org rather than failing the login: being unable to sign in is worse
@@ -646,5 +665,5 @@ async fn resolve_tax_context(
         },
         None => crate::tax::policy::for_org(pool, org_id).await?,
     };
-    Ok((policy.into(), currency))
+    Ok((policy.into(), currency, require_table))
 }

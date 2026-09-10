@@ -51488,6 +51488,10 @@
             "type": "string",
             "example": "EGP"
           },
+          "require_table_for_orders": {
+            "type": "boolean",
+            "description": "Every dine-in sale belongs to a table.\n\nThe till needs this, not just the server: the rule changes what the POS\nputs in front of a teller — the floor becomes the home screen and a sale\nstarts by picking a table — and a refusal AFTER the items are rung up is\nfar too late to be useful."
+          },
           "tax_policy": {
             "$ref": "#/components/schemas/TaxPolicyPublic",
             "description": "The full policy, including tax-inclusive pricing and service charge.\nPrefer this over the flat `tax_rate` above."
@@ -52166,6 +52170,10 @@
             "type": "string",
             "description": "Org currency code (e.g. \"EGP\").",
             "example": "EGP"
+          },
+          "require_table_for_orders": {
+            "type": "boolean",
+            "description": "Every dine-in sale belongs to a table. Re-read on every `/auth/me`, so\nswitching it on reaches a till that has been running for weeks."
           },
           "tax_policy": {
             "$ref": "#/components/schemas/TaxPolicyPublic",
@@ -54306,6 +54314,7 @@
           "tax_inclusive",
           "service_charge_rate",
           "service_charge_taxable",
+          "require_table_for_orders",
           "custom_branding",
           "social_links",
           "is_active",
@@ -54375,6 +54384,10 @@
               "string",
               "null"
             ]
+          },
+          "require_table_for_orders": {
+            "type": "boolean",
+            "description": "Every dine-in sale must belong to a table. No effect where a branch has\nno floor authored — a shop cannot be made to seat somebody in a room\nwith no seats."
           },
           "service_charge_rate": {
             "type": "number",
@@ -61412,6 +61425,12 @@
           "receipt_footer": {
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "require_table_for_orders": {
+            "type": [
+              "boolean",
               "null"
             ]
           },

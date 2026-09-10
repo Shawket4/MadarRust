@@ -655,6 +655,19 @@ pub async fn create_order(
     check_permission(pool.get_ref(), &claims, "orders", "create").await?;
     require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
 
+    // "Every dine-in sale belongs to a table", where a shop has asked for it.
+    //
+    // This is the till's DIRECT path — ring it up, take the money, done. A
+    // shop running a dining room wants that sale to have gone through the
+    // floor instead, so the room knows who has ordered. Settling a ticket
+    // reaches the order through `create_order_inner` and is unaffected: it
+    // already has its table. So is offline replay, which is history and must
+    // never dead-letter over a rule the device could not ask about.
+    //
+    // A branch with no tables is exempt by construction — a shop cannot be
+    // made to seat somebody in a room with no seats.
+    require_table_if_the_shop_says_so(pool.get_ref(), body.branch_id).await?;
+
     // Prefer the in-body idempotency key (the canonical, replay-durable token);
     // fall back to the legacy `Idempotency-Key` header for older clients. Resolve
     // it HERE (the only place with the request headers) so the inner core — which
@@ -3523,4 +3536,41 @@ mod wire_tests {
         let vn = serde_json::to_value(&opt_none).unwrap();
         assert!(vn["quantity_deducted"].is_null());
     }
+}
+
+/// Refuse a table-less till sale where the organisation requires one.
+///
+/// Silent — and free — for every shop that has not switched it on: one query
+/// that answers false and returns.
+async fn require_table_if_the_shop_says_so(
+    pool: &sqlx::PgPool,
+    branch_id: Uuid,
+) -> Result<(), AppError> {
+    let required: bool = sqlx::query_scalar(
+        "SELECT o.require_table_for_orders \
+           FROM branches b JOIN organizations o ON o.id = b.org_id \
+          WHERE b.id = $1 AND b.deleted_at IS NULL",
+    )
+    .bind(branch_id)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(false);
+    if !required {
+        return Ok(());
+    }
+    // Only where there is a floor to seat somebody on.
+    let has_tables: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM branch_tables WHERE branch_id = $1 AND is_active)",
+    )
+    .bind(branch_id)
+    .fetch_one(pool)
+    .await?;
+    if !has_tables {
+        return Ok(());
+    }
+    Err(AppError::Conflict(
+        "This shop puts every dine-in sale on a table. Seat the party from the \
+         floor, add their items, then settle."
+            .into(),
+    ))
 }

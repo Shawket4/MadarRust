@@ -2521,6 +2521,58 @@ async fn an_inclusive_bill_charges_the_menu_price_and_breaks_the_tax_out(pool: P
     assert_eq!(of.order.tax_amount, 100, "which already contained 25% tax");
 }
 
+/// A shop can insist every dine-in sale belongs to a table.
+#[sqlx::test]
+async fn a_till_sale_is_refused_where_the_shop_puts_everyone_on_a_table(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await;
+    sqlx::query("UPDATE organizations SET require_table_for_orders = true WHERE id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // No floor yet: a shop cannot be made to seat somebody in a room with no
+    // seats, so the rule does not bite.
+    let mut body = simple_order(branch, shift, item);
+    body.total_amount = None;
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(&body)
+        .to_request();
+    assert!(
+        test::call_service(&app, req).await.status().is_success(),
+        "a branch with no tables is exempt"
+    );
+
+    // Author a floor, and the same sale is refused.
+    sqlx::query("INSERT INTO branch_tables (org_id, branch_id, label) VALUES ($1, $2, 'T1')")
+        .bind(org)
+        .bind(branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut body = simple_order(branch, shift, item);
+    body.total_amount = None;
+    body.idempotency_key = Some(Uuid::new_v4());
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(&body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::CONFLICT);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("Seat the party"),
+        "the refusal says what to do instead: {msg}"
+    );
+}
+
 /// A charged ADDON price is recorded verbatim and flags the order.
 #[sqlx::test]
 async fn test_create_order_addon_charged_price_recorded_and_flags(pool: PgPool) {

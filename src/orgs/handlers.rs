@@ -45,6 +45,10 @@ pub struct Org {
     pub service_charge_rate: sqlx::types::BigDecimal,
     /// Whether the service charge is itself taxed.
     pub service_charge_taxable: bool,
+    /// Every dine-in sale must belong to a table. No effect where a branch has
+    /// no floor authored — a shop cannot be made to seat somebody in a room
+    /// with no seats.
+    pub require_table_for_orders: bool,
     pub receipt_footer: Option<String>,
     /// The card palette derived from `logo_url` when it was uploaded
     /// (`orgs::branding`). Read-only over the API: there is nothing to set, and
@@ -95,6 +99,7 @@ pub struct UpdateOrgRequest {
     #[schema(example = 0.0)]
     pub service_charge_rate: Option<f64>,
     pub service_charge_taxable: Option<bool>,
+    pub require_table_for_orders: Option<bool>,
     pub receipt_footer: Option<String>,
     pub is_active: Option<bool>,
     /// IANA timezone name (e.g. `Africa/Cairo`). Validated against the
@@ -297,7 +302,7 @@ pub async fn create_org(
         -- configures them in Settings afterwards.
         INSERT INTO organizations (name, slug, logo_url, currency_code, tax_rate, receipt_footer, timezone)
         VALUES ($1, $2, $3, $4, $5, $6, $7::timezone_name)
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
         "#,
     )
     .bind(&name)
@@ -350,7 +355,7 @@ pub async fn list_orgs(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResp
 
     let orgs = sqlx::query_as::<_, Org>(
         r#"
-        SELECT id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
+        SELECT id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
         FROM organizations
         WHERE deleted_at IS NULL
         ORDER BY name
@@ -590,9 +595,10 @@ pub async fn update_org(
             tax_inclusive  = COALESCE($13, tax_inclusive),
             service_charge_rate = COALESCE($14, service_charge_rate),
             service_charge_taxable = COALESCE($15, service_charge_taxable),
+            require_table_for_orders = COALESCE($16, require_table_for_orders),
             updated_at     = NOW()
         WHERE id = $1 AND deleted_at IS NULL
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
         "#,
     )
     .bind(*org_id)
@@ -610,6 +616,7 @@ pub async fn update_org(
     .bind(body.tax_inclusive)
     .bind(body.service_charge_rate)
     .bind(body.service_charge_taxable)
+    .bind(body.require_table_for_orders)
     .fetch_optional(pool.get_ref())
     .await?
     .ok_or_else(|| AppError::NotFound("Org not found".into()))?;
@@ -749,7 +756,7 @@ pub async fn upload_org_logo(
             brand_background = $3, brand_foreground = $4, brand_accent = $5,
             brand_logo_source = $2, brand_logo_is_mark = $6
         WHERE id = $1 AND deleted_at IS NULL
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
         "#,
     )
     .bind(*org_id)
@@ -862,7 +869,7 @@ pub async fn upload_org_card_image(
         r#"
         UPDATE organizations SET brand_card_image = $2, updated_at = NOW()
         WHERE id = $1 AND deleted_at IS NULL
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
         "#,
     )
     .bind(*org_id)
@@ -933,7 +940,7 @@ pub(crate) fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 
 async fn fetch_org(pool: &PgPool, id: Uuid) -> Result<Org, AppError> {
     sqlx::query_as::<_, Org>(
-        "SELECT id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
+        "SELECT id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
          FROM organizations
          WHERE id = $1 AND deleted_at IS NULL",
     )

@@ -283,9 +283,23 @@ mod tests {
         assert_eq!(e.extra["attempt"], 2);
         // Fingerprint carries no value, so this is one issue rather than one
         // per message variation.
-        let fp = e.fingerprint.as_ref();
-        assert!(fp.contains(&"handled".into()));
-        assert!(!fp.iter().any(|f| f.contains("502")));
+        //
+        // Asserted by EQUALITY rather than by searching the fingerprint for a
+        // fragment of the message. Searching flaked about once in a hundred and
+        // fifty runs: `component` ends in a random 32-character hex uuid, and a
+        // hex string contains the digits "502" by chance often enough to fail a
+        // suite that is otherwise green — a false alarm about the one property
+        // this test exists to protect. Equality proves the same thing and
+        // cannot be fooled by what the random suffix happens to spell.
+        assert_eq!(
+            e.fingerprint.as_ref(),
+            &[
+                "handled".to_string(),
+                component.clone(),
+                "send_message".to_string(),
+            ],
+            "the fingerprint is component+operation only — never the message"
+        );
     }
 
     #[test]
