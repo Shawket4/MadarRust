@@ -166,27 +166,112 @@ fn render_data_url(
     Ok(format!("data:image/png;base64,{}", B64.encode(&png)))
 }
 
-/// Build `{PUBLIC_ORDER_BASE_URL}/order/{org_id}?branch={branch_id}`.
-/// The dashboard route is `/order/$orgId` — org lives in the path segment.
-fn branch_order_url(org_id: Uuid, branch_id: Uuid) -> Result<String, AppError> {
-    let base = std::env::var("PUBLIC_ORDER_BASE_URL")
-        .map_err(|_| AppError::ServiceUnavailable("PUBLIC_ORDER_BASE_URL not configured".into()))?;
+// ── A shop's own address ─────────────────────────────────────────────────────
+//
+// On the branding tier a shop stops being a path on one of our hosts and
+// becomes a hostname: `drops.madar-pos.cloud`. The customer surfaces have
+// answered to that since it shipped — every public bundle calls `useHostOrg()`,
+// which takes the first label of the hostname as a slug and resolves the org,
+// so the id does not need to be in the path at all.
+//
+// The QR generator never got switched over, so every card a branded shop
+// printed still pointed at `order.madar-pos.cloud/order/<uuid>` — the generic
+// host, and a route the ordering bundle labels "back-compat". The shop's own
+// address appeared on its dashboard and nowhere a customer would ever see it.
+//
+// ONE host, three mounts, decided at build time by `MADAR_MOUNT`
+// (`vite.order.config.ts` / `vite.reservations.config.ts`): the root is the
+// loyalty card, `/order` is the menu, `/book` is bookings. Keep this in step
+// with `MadarDashboard/src/features/settings/shop-address.ts`, which tells the
+// shop the same three addresses — if they disagree, one of us is printing a
+// 404.
+
+/// Where the menu is mounted on a shop's own host.
+const ORDER_MOUNT: &str = "/order";
+/// Where bookings are mounted on a shop's own host.
+const BOOK_MOUNT: &str = "/book";
+
+/// The origin a shop's own codes should point at, or `None` when it has none.
+///
+/// `None` is the ordinary answer for every shop off the branding tier, and the
+/// caller falls back to the generic host — the same rule the dashboard applies
+/// before it offers to show anyone their address.
+async fn shop_origin(pool: &PgPool, org_id: Uuid) -> Result<Option<String>, AppError> {
+    let row: Option<(Option<String>, bool)> = sqlx::query_as(
+        "SELECT slug, custom_branding FROM organizations \
+          WHERE id = $1 AND is_active AND deleted_at IS NULL",
+    )
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((Some(slug), true)) = row else {
+        return Ok(None);
+    };
+    let slug = slug.trim().to_lowercase();
+    if slug.is_empty() {
+        return Ok(None);
+    }
+    Ok(public_root_domain().map(|root| format!("https://{slug}.{root}")))
+}
+
+/// The domain shops are given subdomains of, taken from the ordering host
+/// rather than configured separately — `order.madar-pos.cloud` is
+/// `madar-pos.cloud`. Staging and production differ, and a second variable
+/// would be a second thing to get wrong in one of them.
+///
+/// `None` where there is no subdomain to give: a bare host, an IP, localhost.
+fn public_root_domain() -> Option<String> {
+    let base = std::env::var("PUBLIC_ORDER_BASE_URL").ok()?;
+    let host = base
+        .rsplit("://")
+        .next()?
+        .split('/')
+        .next()?
+        .split(':')
+        .next()?;
+    let labels: Vec<&str> = host.split('.').filter(|l| !l.is_empty()).collect();
+    if labels.len() < 3 || labels.iter().all(|l| l.bytes().all(|b| b.is_ascii_digit())) {
+        return None;
+    }
+    Some(labels[1..].join("."))
+}
+
+/// The ordering page for one branch.
+///
+/// On a shop's own host the hostname IS the org, so the id leaves the path:
+/// `{slug}.madar-pos.cloud/order/?branch=B`. Everywhere else it stays where it
+/// has always been: `order.madar-pos.cloud/order/{org}?branch=B`.
+fn branch_order_url(shop: Option<&str>, org_id: Uuid, branch_id: Uuid) -> Result<String, AppError> {
     Ok(format!(
-        "{}/order/{}?branch={}",
-        base.trim_end_matches('/'),
-        org_id,
+        "{}?branch={}",
+        order_base(shop, org_id)?,
         branch_id
     ))
 }
 
-/// Build `{PUBLIC_ORDER_BASE_URL}/order/{org_id}?branch={b}&table={t}`.
-fn table_order_url(org_id: Uuid, branch_id: Uuid, table_id: Uuid) -> Result<String, AppError> {
-    let base = std::env::var("PUBLIC_ORDER_BASE_URL")
-        .map_err(|_| AppError::ServiceUnavailable("PUBLIC_ORDER_BASE_URL not configured".into()))?;
+/// The ordering bundle's entry, with or without the org in the path.
+fn order_base(shop: Option<&str>, org_id: Uuid) -> Result<String, AppError> {
+    match shop {
+        Some(origin) => Ok(format!("{origin}{ORDER_MOUNT}/")),
+        None => {
+            let base = std::env::var("PUBLIC_ORDER_BASE_URL").map_err(|_| {
+                AppError::ServiceUnavailable("PUBLIC_ORDER_BASE_URL not configured".into())
+            })?;
+            Ok(format!("{}/order/{}", base.trim_end_matches('/'), org_id))
+        }
+    }
+}
+
+/// One table's code: the menu, pre-bound to where the customer is sitting.
+fn table_order_url(
+    shop: Option<&str>,
+    org_id: Uuid,
+    branch_id: Uuid,
+    table_id: Uuid,
+) -> Result<String, AppError> {
     Ok(format!(
-        "{}/order/{}?branch={}&table={}",
-        base.trim_end_matches('/'),
-        org_id,
+        "{}?branch={}&table={}",
+        order_base(shop, org_id)?,
         branch_id,
         table_id
     ))
@@ -220,27 +305,23 @@ fn marketing_url(path: &str) -> Result<String, AppError> {
     Ok(format!("{}{}", base.trim_end_matches('/'), path))
 }
 
-/// Build `{base}/order/{org_id}?branch={b}&channel=in_mall&place_name={p}&floor={f}&unit_number={u}`.
+/// A code for a stand in a mall: the menu with the channel locked and the
+/// customer's location pre-filled.
 fn in_mall_order_url(
+    shop: Option<&str>,
     org_id: Uuid,
     branch_id: Uuid,
     place_name: &str,
     floor: &str,
     unit_number: &str,
 ) -> Result<String, AppError> {
-    let base = std::env::var("PUBLIC_ORDER_BASE_URL")
-        .map_err(|_| AppError::ServiceUnavailable("PUBLIC_ORDER_BASE_URL not configured".into()))?;
-    let p = urlencoding::encode(place_name);
-    let f = urlencoding::encode(floor);
-    let u = urlencoding::encode(unit_number);
     Ok(format!(
-        "{}/order/{}?branch={}&channel=in_mall&place_name={}&floor={}&unit_number={}",
-        base.trim_end_matches('/'),
-        org_id,
+        "{}?branch={}&channel=in_mall&place_name={}&floor={}&unit_number={}",
+        order_base(shop, org_id)?,
         branch_id,
-        p,
-        f,
-        u
+        urlencoding::encode(place_name),
+        urlencoding::encode(floor),
+        urlencoding::encode(unit_number),
     ))
 }
 
@@ -276,8 +357,14 @@ fn loyalty_base() -> Result<String, AppError> {
 }
 
 /// Build `{PUBLIC_LOYALTY_BASE_URL}/join/{branch_id}` — the counter's join form.
-fn branch_loyalty_url(branch_id: Uuid) -> Result<String, AppError> {
-    Ok(format!("{}/join/{}", loyalty_base()?, branch_id))
+fn branch_loyalty_url(shop: Option<&str>, branch_id: Uuid) -> Result<String, AppError> {
+    // The card is mounted at the ROOT of a shop's own host, so the join form
+    // hangs straight off it.
+    let base = match shop {
+        Some(origin) => origin.to_string(),
+        None => loyalty_base()?,
+    };
+    Ok(format!("{base}/join/{branch_id}"))
 }
 
 /// Build `{PUBLIC_LOYALTY_BASE_URL}/join/org/{org_id}` — one code for the whole
@@ -287,27 +374,42 @@ fn branch_loyalty_url(branch_id: Uuid) -> Result<String, AppError> {
 /// public link that means different things depending on what a uuid turns out
 /// to be is a link nobody can reason about, and the branch cards already
 /// printed keep working untouched.
-fn org_loyalty_url(org_id: Uuid) -> Result<String, AppError> {
-    Ok(format!("{}/join/org/{}", loyalty_base()?, org_id))
+fn org_loyalty_url(shop: Option<&str>, org_id: Uuid) -> Result<String, AppError> {
+    let base = match shop {
+        Some(origin) => origin.to_string(),
+        None => loyalty_base()?,
+    };
+    Ok(format!("{base}/join/org/{org_id}"))
 }
 
 /// Build `{PUBLIC_RESERVATIONS_BASE_URL}/{org_id}` — the guest picks the branch.
-fn org_booking_url(org_id: Uuid) -> Result<String, AppError> {
-    Ok(format!("{}/{}", reservations_base()?, org_id))
+fn org_booking_url(shop: Option<&str>, org_id: Uuid) -> Result<String, AppError> {
+    Ok(format!("{}/{}", booking_base(shop)?, org_id))
+}
+
+/// The reservations bundle's entry — its own host, or the `/book` mount on a
+/// shop's. Its routes still name the org, because a guest picking a branch
+/// lands on `/{org}` either way.
+fn booking_base(shop: Option<&str>) -> Result<String, AppError> {
+    match shop {
+        Some(origin) => Ok(format!("{origin}{BOOK_MOUNT}")),
+        None => reservations_base(),
+    }
 }
 
 /// Build `{PUBLIC_RESERVATIONS_BASE_URL}/{org_id}/{branch_id}` — one branch,
 /// straight to its slot picker.
-fn branch_booking_url(org_id: Uuid, branch_id: Uuid) -> Result<String, AppError> {
-    Ok(format!("{}/{}/{}", reservations_base()?, org_id, branch_id))
+fn branch_booking_url(
+    shop: Option<&str>,
+    org_id: Uuid,
+    branch_id: Uuid,
+) -> Result<String, AppError> {
+    Ok(format!("{}/{}/{}", booking_base(shop)?, org_id, branch_id))
 }
 
-/// Build `{base}/order/{org_id}` — org-wide branch picker.
-/// Org is the path segment; no branch pre-selection so the customer sees the picker.
-fn org_order_url(org_id: Uuid) -> Result<String, AppError> {
-    let base = std::env::var("PUBLIC_ORDER_BASE_URL")
-        .map_err(|_| AppError::ServiceUnavailable("PUBLIC_ORDER_BASE_URL not configured".into()))?;
-    Ok(format!("{}/order/{}", base.trim_end_matches('/'), org_id))
+/// The whole shop: no branch pre-selected, so the customer sees the picker.
+fn org_order_url(shop: Option<&str>, org_id: Uuid) -> Result<String, AppError> {
+    order_base(shop, org_id)
 }
 
 /// Fetch the branch, checking it belongs to the caller's org.
@@ -391,12 +493,14 @@ pub async fn branch_qr(
     };
 
     let (kind, target_ref, long_url, auto_caption) = if let Some((place, floor, unit)) = &in_mall {
-        let url = in_mall_order_url(org_id, branch_id, place, floor, unit)?;
+        let shop = shop_origin(pool.get_ref(), org_id).await?;
+        let url = in_mall_order_url(shop.as_deref(), org_id, branch_id, place, floor, unit)?;
         let target = format!("{}:in_mall:{}:{}:{}", branch_id, place, floor, unit);
         let caption = place.clone();
         ("branch_order_in_mall", target, url, Some(caption))
     } else {
-        let url = branch_order_url(org_id, branch_id)?;
+        let shop = shop_origin(pool.get_ref(), org_id).await?;
+        let url = branch_order_url(shop.as_deref(), org_id, branch_id)?;
         ("branch_order", branch_id.to_string(), url, None)
     };
 
@@ -465,7 +569,8 @@ pub async fn org_qr(
     let org_id = *id;
     require_same_org(&claims, Some(org_id))?;
 
-    let long_url = org_order_url(org_id)?;
+    let shop = shop_origin(pool.get_ref(), org_id).await?;
+    let long_url = org_order_url(shop.as_deref(), org_id)?;
     let row = db::get_or_create_short_link(
         pool.get_ref(),
         provider.get_ref().as_ref(),
@@ -533,7 +638,8 @@ pub async fn branch_booking_qr(
         ));
     }
 
-    let long_url = branch_booking_url(org_id, branch_id)?;
+    let shop = shop_origin(pool.get_ref(), org_id).await?;
+    let long_url = branch_booking_url(shop.as_deref(), org_id, branch_id)?;
     let row = db::get_or_create_short_link(
         pool.get_ref(),
         provider.get_ref().as_ref(),
@@ -603,7 +709,8 @@ pub async fn org_booking_qr(
         ));
     }
 
-    let long_url = org_booking_url(org_id)?;
+    let shop = shop_origin(pool.get_ref(), org_id).await?;
+    let long_url = org_booking_url(shop.as_deref(), org_id)?;
     let row = db::get_or_create_short_link(
         pool.get_ref(),
         provider.get_ref().as_ref(),
@@ -784,7 +891,8 @@ pub async fn table_qr(
         return Err(AppError::NotFound("Table not found".into()));
     }
 
-    let long_url = table_order_url(org_id, branch_id, path.tid)?;
+    let shop = shop_origin(pool.get_ref(), org_id).await?;
+    let long_url = table_order_url(shop.as_deref(), org_id, branch_id, path.tid)?;
     let caption = q.caption.clone().unwrap_or_else(|| table.label.clone());
     let q_with_caption = QrRenderQuery {
         caption: Some(caption),
@@ -1043,7 +1151,8 @@ pub async fn org_loyalty_qr(
         ));
     }
 
-    let long_url = org_loyalty_url(org_id)?;
+    let shop = shop_origin(pool.get_ref(), org_id).await?;
+    let long_url = org_loyalty_url(shop.as_deref(), org_id)?;
     let row = db::get_or_create_short_link(
         pool.get_ref(),
         provider.get_ref().as_ref(),
@@ -1111,7 +1220,8 @@ pub async fn branch_loyalty_qr(
         ));
     }
 
-    let long_url = branch_loyalty_url(branch_id)?;
+    let shop = shop_origin(pool.get_ref(), org_id).await?;
+    let long_url = branch_loyalty_url(shop.as_deref(), branch_id)?;
     let row = db::get_or_create_short_link(
         pool.get_ref(),
         provider.get_ref().as_ref(),
@@ -1134,4 +1244,85 @@ pub async fn branch_loyalty_qr(
         short_code: row.short_code,
         qr_data_url,
     }))
+}
+
+#[cfg(test)]
+mod address_tests {
+    use super::*;
+
+    const ORG: Uuid = Uuid::from_u128(0x1111_2222_3333_4444_5555_6666_7777_8888);
+    const BRANCH: Uuid = Uuid::from_u128(0x9999_0000_1111_2222_3333_4444_5555_6666);
+    const TABLE: Uuid = Uuid::from_u128(0xaaaa_bbbb_cccc_dddd_eeee_ffff_0000_1111);
+    const SHOP: &str = "https://drops.madar-pos.cloud";
+
+    /// A branded shop's codes carry its OWN address, and the org id leaves the
+    /// path — on that hostname the hostname is the org.
+    #[test]
+    fn a_branded_shop_prints_its_own_address() {
+        let shop = Some(SHOP);
+        assert_eq!(
+            branch_order_url(shop, ORG, BRANCH).unwrap(),
+            format!("https://drops.madar-pos.cloud/order/?branch={BRANCH}")
+        );
+        assert_eq!(
+            table_order_url(shop, ORG, BRANCH, TABLE).unwrap(),
+            format!("https://drops.madar-pos.cloud/order/?branch={BRANCH}&table={TABLE}")
+        );
+        assert_eq!(
+            org_order_url(shop, ORG).unwrap(),
+            "https://drops.madar-pos.cloud/order/"
+        );
+        // The card is mounted at the root; bookings at /book, which still names
+        // the org because that is the route the bundle publishes.
+        assert_eq!(
+            branch_loyalty_url(shop, BRANCH).unwrap(),
+            format!("https://drops.madar-pos.cloud/join/{BRANCH}")
+        );
+        assert_eq!(
+            org_loyalty_url(shop, ORG).unwrap(),
+            format!("https://drops.madar-pos.cloud/join/org/{ORG}")
+        );
+        assert_eq!(
+            branch_booking_url(shop, ORG, BRANCH).unwrap(),
+            format!("https://drops.madar-pos.cloud/book/{ORG}/{BRANCH}")
+        );
+    }
+
+    /// A shop off the branding tier has no address of its own, and its codes
+    /// keep pointing where they always did. Nothing already printed changes.
+    #[test]
+    fn an_unbranded_shop_keeps_the_generic_host() {
+        unsafe {
+            std::env::set_var("PUBLIC_ORDER_BASE_URL", "https://order.madar-pos.cloud");
+        }
+        assert_eq!(
+            branch_order_url(None, ORG, BRANCH).unwrap(),
+            format!("https://order.madar-pos.cloud/order/{ORG}?branch={BRANCH}")
+        );
+    }
+
+    /// The root domain is taken off the ordering host rather than configured
+    /// twice — one variable to get wrong instead of two.
+    #[test]
+    fn the_root_domain_comes_off_the_ordering_host() {
+        let cases = [
+            ("https://order.madar-pos.cloud", Some("madar-pos.cloud")),
+            (
+                "https://order.staging.madar-pos.cloud",
+                Some("staging.madar-pos.cloud"),
+            ),
+            (
+                "http://order.madar-pos.cloud:8443/",
+                Some("madar-pos.cloud"),
+            ),
+            // Nothing to give a subdomain of.
+            ("https://example.com", None),
+            ("http://localhost:5173", None),
+            ("http://127.0.0.1:8081", None),
+        ];
+        for (base, want) in cases {
+            unsafe { std::env::set_var("PUBLIC_ORDER_BASE_URL", base) };
+            assert_eq!(public_root_domain().as_deref(), want, "root of {base}");
+        }
+    }
 }
