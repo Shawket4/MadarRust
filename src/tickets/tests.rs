@@ -123,17 +123,19 @@ macro_rules! app {
     };
 }
 
-/// Seating a party opens a tab and takes the table, without touching a kitchen.
+/// A party sitting down is NOT a bill, and the first round is.
 ///
-/// Creating a ticket used to require items, so a table could not be claimed
-/// until somebody had decided what to eat — and the POS bound the table in
-/// local UI state instead, which never left the device. Two tellers could seat
-/// the same table and neither could see the other.
+/// Seating used to open an empty ticket. That put a zero-value bill in every
+/// report, and a party who changed their mind and left had to be VOIDED — as
+/// though a sale had been undone. Occupancy travels on its own now
+/// (`floor_ops::hold_table`), and the tab starts when somebody orders, taking
+/// the table the party is already sitting at.
 #[sqlx::test]
-async fn seating_opens_an_empty_tab_and_takes_the_table(pool: PgPool) {
+async fn the_first_round_claims_the_table_the_party_is_sitting_at(pool: PgPool) {
     let app = app!(pool);
     let org = seed_org(&pool).await;
     let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 2500).await;
     let teller = seed_user(&pool, org, "teller").await;
     let _shift = open_shift_row(&pool, branch, teller).await;
     let table = seed_table(&pool, org, branch, "T1").await;
@@ -141,8 +143,20 @@ async fn seating_opens_an_empty_tab_and_takes_the_table(pool: PgPool) {
     grant(&pool, "teller", "open_tickets", "read").await;
     let t = token(teller, org, UserRole::Teller);
 
-    assert_eq!(table_status(&pool, table).await, "free");
+    // They sat down: the table is taken, and there is no bill anywhere.
+    sqlx::query("UPDATE branch_tables SET status = 'seated' WHERE id = $1")
+        .bind(table)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let tickets: i64 = sqlx::query_scalar("SELECT count(*) FROM open_tickets")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(tickets, 0, "sitting down is not a bill");
 
+    // Their first round starts the tab ON that table — `seated` with no ticket
+    // on it is claimable, and this is who it was being held for.
     let resp = test::call_service(
         &app,
         test::TestRequest::post()
@@ -152,90 +166,28 @@ async fn seating_opens_an_empty_tab_and_takes_the_table(pool: PgPool) {
                 "branch_id": branch,
                 "table_id": table,
                 "guest_count": 2,
-                "items": []
+                "items": [{ "menu_item_id": item, "quantity": 2 }]
             }))
             .to_request(),
     )
     .await;
-    assert_eq!(resp.status(), 201, "seating opens a ticket");
+    assert_eq!(resp.status(), 201);
     let view: OpenTicketView = test::read_body_json(resp).await;
-    assert_eq!(view.status, "open");
-    assert!(view.items.is_empty(), "nothing was ordered yet");
-    assert_eq!(view.subtotal, 0);
-
-    // The floor says so, which is the whole point — every other device sees it.
+    assert_eq!(view.table_id, Some(table), "the tab took their table");
+    assert_eq!(view.subtotal, 5000, "two of them, one round");
     assert_eq!(table_status(&pool, table).await, "seated");
-
-    // And no kitchen ticket was raised: nobody has ordered anything.
-    let kitchen: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM kitchen_tickets \
-              WHERE source_type = 'open_ticket' AND source_id = $1",
-    )
-    .bind(view.id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(kitchen, 0, "seating a party is not an order");
 }
 
-/// A second party cannot be seated on a taken table, and is told so.
-///
-/// A FIRE drops a raced table and floats table-less, because a queued offline
-/// fire must never dead-letter. Seating is the opposite: the table IS the
-/// request, so absorbing the race would seat a party nowhere while the teller
-/// watched nothing happen.
+/// A tab with nothing on it is not a thing. It was, briefly, and it is what
+/// seating used to create.
 #[sqlx::test]
-async fn seating_a_taken_table_is_refused_rather_than_absorbed(pool: PgPool) {
+async fn a_ticket_must_carry_at_least_one_item(pool: PgPool) {
     let app = app!(pool);
     let org = seed_org(&pool).await;
     let branch = seed_branch(&pool, org).await;
     let teller = seed_user(&pool, org, "teller").await;
     let _shift = open_shift_row(&pool, branch, teller).await;
     let table = seed_table(&pool, org, branch, "T1").await;
-    grant(&pool, "teller", "open_tickets", "create").await;
-    grant(&pool, "teller", "open_tickets", "read").await;
-    let t = token(teller, org, UserRole::Teller);
-
-    let seat = |key: Uuid| {
-        test::TestRequest::post()
-            .uri("/open-tickets")
-            .insert_header(("Authorization", format!("Bearer {t}")))
-            .set_json(&serde_json::json!({
-                "branch_id": branch, "table_id": table,
-                "idempotency_key": key, "items": []
-            }))
-            .to_request()
-    };
-
-    assert_eq!(
-        test::call_service(&app, seat(Uuid::new_v4()))
-            .await
-            .status(),
-        201
-    );
-
-    let resp = test::call_service(&app, seat(Uuid::new_v4())).await;
-    assert_eq!(
-        resp.status(),
-        actix_web::http::StatusCode::CONFLICT,
-        "the second party is refused, not silently seated nowhere"
-    );
-    let body: serde_json::Value = test::read_body_json(resp).await;
-    let msg = body["error"].as_str().unwrap_or_default();
-    assert!(
-        msg.contains("already on that table"),
-        "the refusal says what happened: {msg}"
-    );
-}
-
-/// An empty ticket with no table is not anything.
-#[sqlx::test]
-async fn an_empty_ticket_must_at_least_name_its_table(pool: PgPool) {
-    let app = app!(pool);
-    let org = seed_org(&pool).await;
-    let branch = seed_branch(&pool, org).await;
-    let teller = seed_user(&pool, org, "teller").await;
-    let _shift = open_shift_row(&pool, branch, teller).await;
     grant(&pool, "teller", "open_tickets", "create").await;
     let t = token(teller, org, UserRole::Teller);
 
@@ -244,11 +196,64 @@ async fn an_empty_ticket_must_at_least_name_its_table(pool: PgPool) {
         test::TestRequest::post()
             .uri("/open-tickets")
             .insert_header(("Authorization", format!("Bearer {t}")))
-            .set_json(&serde_json::json!({ "branch_id": branch, "items": [] }))
+            .set_json(&serde_json::json!({
+                "branch_id": branch, "table_id": table, "items": []
+            }))
             .to_request(),
     )
     .await;
-    assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), 400);
+    assert_eq!(
+        table_status(&pool, table).await,
+        "free",
+        "and nothing moved"
+    );
+}
+
+/// An UNBUSSED table is not claimable by a round. A fire absorbs a table it
+/// cannot have rather than dead-lettering, so the ticket simply floats
+/// table-less and the waiter reassigns it — but it must never silently clear
+/// somebody else's plates by seating a new party on them.
+#[sqlx::test]
+async fn a_round_will_not_claim_a_table_nobody_has_bussed(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 500).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let _shift = open_shift_row(&pool, branch, teller).await;
+    let table = seed_table(&pool, org, branch, "T1").await;
+    grant(&pool, "teller", "open_tickets", "create").await;
+    grant(&pool, "teller", "open_tickets", "read").await;
+    let t = token(teller, org, UserRole::Teller);
+
+    sqlx::query("UPDATE branch_tables SET status = 'dirty' WHERE id = $1")
+        .bind(table)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/open-tickets")
+            .insert_header(("Authorization", format!("Bearer {t}")))
+            .set_json(&serde_json::json!({
+                "branch_id": branch,
+                "table_id": table,
+                "items": [{ "menu_item_id": item, "quantity": 1 }]
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 201, "the round still lands");
+    let view: OpenTicketView = test::read_body_json(resp).await;
+    assert_eq!(view.table_id, None, "but not on the dirty table");
+    assert_eq!(
+        table_status(&pool, table).await,
+        "dirty",
+        "still needs a cloth"
+    );
 }
 
 /// Full chain: a waiter fires a dine-in ticket → it lands on the KDS → a cook
@@ -562,35 +567,45 @@ async fn replay_fire_round_settle_idempotent_and_attributed(pool: PgPool) {
     assert_eq!(orders, 1, "exactly one order materialized");
 }
 
-/// A TELLER seating a party is the ordinary act the floor is for, and it has to
-/// survive the queue.
+/// A TELLER ringing up a table is the ordinary act the floor is for, and it has
+/// to survive the queue.
 ///
-/// Seating is a ticket with no items, the tables screen is where a teller does
-/// it, and under the "every order must have a table" toggle that screen is the
-/// teller's HOME. The replay gate said firing was waiter-only — right while
-/// only the waiter app fired — so every tap on a free table came back "Replay
-/// actor may not perform this operation for this organization".
+/// The tables screen is where a teller takes a party's round, and under the
+/// "every order must have a table" toggle that screen is the teller's HOME. The
+/// replay gate said firing was waiter-only — right while only the waiter app
+/// fired — so every round a teller queued came back "Replay actor may not
+/// perform this operation for this organization".
 ///
 /// It was also stricter than the live route, which is the one thing this gate
 /// must never be: `create_open_ticket` checks `open_tickets:create` and no role
 /// at all. Since the POS drains every write through `/sync/replay`, stricter
 /// than live means impossible.
 #[sqlx::test]
-async fn a_teller_can_seat_a_party_through_the_queue(pool: PgPool) {
+async fn a_teller_can_ring_up_a_table_through_the_queue(pool: PgPool) {
     let app = app!(pool);
     let org = seed_org(&pool).await;
     let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 500).await;
     let teller = seed_user(&pool, org, "teller").await;
     let _shift = open_shift_row(&pool, branch, teller).await;
     let table = seed_table(&pool, org, branch, "T1").await;
     grant(&pool, "teller", "open_tickets", "create").await;
     let bearer = token(teller, org, UserRole::Teller);
 
-    // Exactly what `seat_table` queues: a fire with no items, naming a table.
+    // The party is already sitting there; this is their first round arriving.
+    sqlx::query("UPDATE branch_tables SET status = 'seated' WHERE id = $1")
+        .bind(table)
+        .execute(&pool)
+        .await
+        .unwrap();
     let seat = serde_json::json!({
         "op": "fire_open_ticket",
         "teller_id": teller,
-        "request": { "branch_id": branch, "items": [], "table_id": table }
+        "request": {
+            "branch_id": branch,
+            "table_id": table,
+            "items": [{ "menu_item_id": item, "quantity": 1 }]
+        }
     });
     let r = test::call_service(
         &app,
@@ -603,7 +618,7 @@ async fn a_teller_can_seat_a_party_through_the_queue(pool: PgPool) {
     .await;
     assert!(
         r.status().is_success(),
-        "a teller seats a party, got {}",
+        "a teller rings up a table, got {}",
         r.status()
     );
 
@@ -619,10 +634,11 @@ async fn a_teller_can_seat_a_party_through_the_queue(pool: PgPool) {
 /// `open_tickets:create` and the queue is not a way around it — which is the
 /// whole reason `required_permissions` re-checks what the live endpoint checks.
 #[sqlx::test]
-async fn a_teller_denied_open_tickets_cannot_seat_through_the_queue_either(pool: PgPool) {
+async fn a_teller_denied_open_tickets_cannot_ring_up_through_the_queue_either(pool: PgPool) {
     let app = app!(pool);
     let org = seed_org(&pool).await;
     let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 500).await;
     let teller = seed_user(&pool, org, "teller").await;
     let table = seed_table(&pool, org, branch, "T1").await;
     grant(&pool, "teller", "open_tickets", "create").await;
@@ -640,7 +656,11 @@ async fn a_teller_denied_open_tickets_cannot_seat_through_the_queue_either(pool:
     let seat = serde_json::json!({
         "op": "fire_open_ticket",
         "teller_id": teller,
-        "request": { "branch_id": branch, "items": [], "table_id": table }
+        "request": {
+            "branch_id": branch,
+            "table_id": table,
+            "items": [{ "menu_item_id": item, "quantity": 1 }]
+        }
     });
     let r = test::call_service(
         &app,

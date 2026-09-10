@@ -10284,8 +10284,8 @@
         "tags": [
           "floor"
         ],
-        "summary": "Take a table for a HELD ORDER the till keeps to itself.",
-        "description": "A parked cart is device-local by design: the order, its lines and its money\nnever leave the till, and only the sale it becomes is ever pushed. But the\nTABLE is not the till's private business — it is a fact about the room, and\nthe dashboard's floor and every other till were being told that a table with\nsomebody's order waiting on it was free. The next party got seated on top of\nit.\n\nSo the occupancy syncs and the order does not. The server learns that the\ntable is taken and nothing whatever about what is on it.\n\nLike `clear_table`, and for the reason written there, this is not a\nset-status endpoint: exactly one transition, `free` -> `seated`, refused\nfrom anything else. A table a ticket is already on stays the ticket's.",
+        "summary": "Take a table. THE seating primitive.",
+        "description": "Occupancy travels on its own here, carrying nothing about why. Two things\nuse it:\n\n  * A PARTY SITTING DOWN. They have ordered nothing yet, so there is no\n    bill — a ticket starts with their first round and claims this table on\n    the way in. Seating used to open an empty ticket instead, which put a\n    zero-value bill in every report and made a party who changed their mind\n    and left something you had to VOID.\n  * A PARKED CART. Device-local by design: the order, its lines and its\n    money never leave the till. But the table is not the till's private\n    business, and while it stayed local the dashboard's floor and every\n    other terminal were told a table with somebody's order waiting on it was\n    free.\n\nIn both cases the server learns that the table is taken and nothing\nwhatever about what is on it.\n\nLike `clear_table`, and for the reason written there, this is not a\nset-status endpoint: exactly one transition, `free` -> `seated`, refused\nfrom anything else. A table a ticket is already on stays the ticket's.",
         "operationId": "hold_table",
         "parameters": [
           {
@@ -53242,6 +53242,7 @@
         "required": [
           "id",
           "round_number",
+          "round_fired_at",
           "line",
           "line_total",
           "voided"
@@ -53264,6 +53265,11 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "round_fired_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the round this line came in on was fired. A bill is read as a\nsequence of visits to the table — \"the drinks at seven, the food at\nhalf past\" — and without the clock a till can only show a flat list\nthat says nothing about how the evening went."
           },
           "round_number": {
             "type": "integer",

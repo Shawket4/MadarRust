@@ -352,17 +352,24 @@ pub struct ReleaseTableRequest {
     pub bus: bool,
 }
 
-/// Take a table for a HELD ORDER the till keeps to itself.
+/// Take a table. THE seating primitive.
 ///
-/// A parked cart is device-local by design: the order, its lines and its money
-/// never leave the till, and only the sale it becomes is ever pushed. But the
-/// TABLE is not the till's private business — it is a fact about the room, and
-/// the dashboard's floor and every other till were being told that a table with
-/// somebody's order waiting on it was free. The next party got seated on top of
-/// it.
+/// Occupancy travels on its own here, carrying nothing about why. Two things
+/// use it:
 ///
-/// So the occupancy syncs and the order does not. The server learns that the
-/// table is taken and nothing whatever about what is on it.
+///   * A PARTY SITTING DOWN. They have ordered nothing yet, so there is no
+///     bill — a ticket starts with their first round and claims this table on
+///     the way in. Seating used to open an empty ticket instead, which put a
+///     zero-value bill in every report and made a party who changed their mind
+///     and left something you had to VOID.
+///   * A PARKED CART. Device-local by design: the order, its lines and its
+///     money never leave the till. But the table is not the till's private
+///     business, and while it stayed local the dashboard's floor and every
+///     other terminal were told a table with somebody's order waiting on it was
+///     free.
+///
+/// In both cases the server learns that the table is taken and nothing
+/// whatever about what is on it.
 ///
 /// Like `clear_table`, and for the reason written there, this is not a
 /// set-status endpoint: exactly one transition, `free` -> `seated`, refused

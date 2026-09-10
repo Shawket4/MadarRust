@@ -164,21 +164,20 @@ pub(crate) async fn create_open_ticket_inner(
     // queued offline fire is historical; cloud consumers re-seed via snapshot).
     hub: Option<&BranchEventHub>,
 ) -> Result<HttpResponse, AppError> {
-    // SEATING a party and FIRING a round are two acts that used to be one.
+    // A TICKET IS A BILL. It exists because somebody ordered something.
     //
-    // A ticket is a tab on a table. Firing sends food to a kitchen. Requiring
-    // items to open one meant a table could not be claimed until somebody had
-    // decided what to eat — so the POS bound the table in local UI state
-    // instead, which never left the device: two tellers could seat the same
-    // table and neither could see the other.
+    // Seating a party is not this. It is a fact about the room — that table is
+    // taken — and it now travels on its own, through `hold_table` /
+    // `release_table` in `floor_ops`. Nothing about a party who has sat down
+    // and not yet ordered belongs in a bill: an empty ticket had no money, no
+    // kitchen work and no reason to be in a report, and a party who changed
+    // their mind and left needed it VOIDED, as though a sale had been undone.
     //
-    // An empty ticket seats. It touches no kitchen, and rounds are added to it
-    // exactly as they always were. A table is required, because a tab on no
-    // table with nothing on it is not anything.
-    let seating = body.items.is_empty();
-    if seating && body.table_id.is_none() {
+    // So the tab starts with the first round, carrying the table the party is
+    // already sitting at.
+    if body.items.is_empty() {
         return Err(AppError::BadRequest(
-            "A ticket must fire at least one item, or name the table it seats".into(),
+            "A ticket must fire at least one item".into(),
         ));
     }
     // The branch must be operating (any till open) to fire to the kitchen. Replay
@@ -213,30 +212,31 @@ pub(crate) async fn create_open_ticket_inner(
     let mut tx = pool.get_ref().begin().await?;
     let ticket_ref = mint_ticket_ref(&mut tx, body.branch_id, now).await?;
 
-    // Table arbitration. An occupied — or unknown — table is DROPPED rather
-    // than failing a FIRE: a queued offline fire must never dead-letter over a
-    // table race, so the ticket floats table-less and the waiter reassigns from
-    // the canvas.
+    // Table arbitration. An occupied — or unknown, or unbussed — table is
+    // DROPPED rather than failing the fire: a queued offline round must never
+    // dead-letter over a table race, so the ticket floats table-less and the
+    // waiter reassigns it from the canvas.
     //
-    // Seating is the opposite. The table IS the request, so handing back a
-    // table-less ticket would silently seat a party nowhere — the teller taps a
-    // table, sees nothing happen, and taps again. A race there is answered, not
-    // absorbed.
-    let free = match body.table_id {
+    // `seated` with no ticket on it is CLAIMABLE, and that is the ordinary
+    // path: the party sat down first, which held the table, and this is their
+    // first round arriving to start the bill. `dirty` is not — nobody has
+    // bussed it, and a fire silently clearing that would send the next party to
+    // somebody else's plates.
+    let claimable = match body.table_id {
         Some(t) => {
             crate::floor_ops::lock_table(&mut tx, t, body.branch_id).await?
                 && crate::floor_ops::occupant_of(&mut tx, t, None)
                     .await?
                     .is_none()
+                && sqlx::query_scalar::<_, String>("SELECT status FROM branch_tables WHERE id = $1")
+                    .bind(t)
+                    .fetch_one(&mut *tx)
+                    .await?
+                    != "dirty"
         }
         None => false,
     };
-    if seating && !free {
-        return Err(AppError::Conflict(
-            "Somebody is already on that table. Refresh the floor to see who.".into(),
-        ));
-    }
-    let table_id = if free { body.table_id } else { None };
+    let table_id = if claimable { body.table_id } else { None };
     let label = table_label(pool.get_ref(), table_id).await?;
 
     let open_ticket_id: Uuid = sqlx::query_scalar(
@@ -268,27 +268,22 @@ pub(crate) async fn create_open_ticket_inner(
     if let Some(b) = body.booking_id {
         crate::bookings::handlers::link_ticket(&mut tx, b, body.branch_id, open_ticket_id).await?;
     }
-    // Nothing goes to the kitchen when a party merely sits down.
-    let kt_id = if seating {
-        None
-    } else {
-        Some(
-            fire_round(
-                &mut tx,
-                pool.get_ref(),
-                org_id,
-                body.branch_id,
-                open_ticket_id,
-                1,
-                actor.teller_id,
-                body.round_idempotency_key,
-                &body.items,
-                label.as_deref(),
-                Some(ticket_ref.as_str()),
-            )
-            .await?,
+    let kt_id = Some(
+        fire_round(
+            &mut tx,
+            pool.get_ref(),
+            org_id,
+            body.branch_id,
+            open_ticket_id,
+            1,
+            actor.teller_id,
+            body.round_idempotency_key,
+            &body.items,
+            label.as_deref(),
+            Some(ticket_ref.as_str()),
         )
-    };
+        .await?,
+    );
     tx.commit().await?;
 
     if let Some(hub) = hub {

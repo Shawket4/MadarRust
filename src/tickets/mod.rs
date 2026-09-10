@@ -31,6 +31,11 @@ pub(crate) use crate::orgs::handlers::extract_claims;
 pub struct OpenTicketItemView {
     pub id: Uuid,
     pub round_number: i32,
+    /// When the round this line came in on was fired. A bill is read as a
+    /// sequence of visits to the table — "the drinks at seven, the food at
+    /// half past" — and without the clock a till can only show a flat list
+    /// that says nothing about how the evening went.
+    pub round_fired_at: DateTime<Utc>,
     pub menu_item_id: Option<Uuid>,
     /// The frozen priced SnapshotLine (name, size, addons, totals).
     pub line: serde_json::Value,
@@ -116,9 +121,20 @@ where
         return Ok(None);
     };
 
-    let items = sqlx::query_as::<_, (Uuid, i32, Option<Uuid>, serde_json::Value, i32, bool)>(
-        "SELECT oti.id, r.round_number, oti.menu_item_id, oti.line, oti.line_total, \
-                (oti.voided_at IS NOT NULL) AS voided \
+    let items = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            i32,
+            DateTime<Utc>,
+            Option<Uuid>,
+            serde_json::Value,
+            i32,
+            bool,
+        ),
+    >(
+        "SELECT oti.id, r.round_number, r.fired_at, oti.menu_item_id, oti.line, \
+                oti.line_total, (oti.voided_at IS NOT NULL) AS voided \
          FROM open_ticket_items oti JOIN open_ticket_rounds r ON r.id = oti.round_id \
          WHERE oti.open_ticket_id = $1 ORDER BY r.round_number, oti.created_at",
     )
@@ -127,13 +143,16 @@ where
     .await?
     .into_iter()
     .map(
-        |(id, round_number, menu_item_id, line, line_total, voided)| OpenTicketItemView {
-            id,
-            round_number,
-            menu_item_id,
-            line,
-            line_total,
-            voided,
+        |(id, round_number, round_fired_at, menu_item_id, line, line_total, voided)| {
+            OpenTicketItemView {
+                id,
+                round_number,
+                round_fired_at,
+                menu_item_id,
+                line,
+                line_total,
+                voided,
+            }
         },
     )
     .collect();
