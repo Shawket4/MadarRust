@@ -27,6 +27,13 @@ pub fn register(cfg: &mut web::ServiceConfig) {
     cfg.route("/tables/swap", web::post().to(handlers::swap_tables))
         // The one human act status cannot derive: "the plates are gone".
         .route("/tables/{id}/clear", web::post().to(handlers::clear_table))
+        // A till taking / giving back a table for its own device-local parked
+        // order. The occupancy syncs; the order never does.
+        .route("/tables/{id}/hold", web::post().to(handlers::hold_table))
+        .route(
+            "/tables/{id}/release",
+            web::post().to(handlers::release_table),
+        )
         .route("/transfers", web::get().to(handlers::list_floor_transfers))
         .route(
             "/transfers",

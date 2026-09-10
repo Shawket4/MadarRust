@@ -10279,6 +10279,210 @@
         ]
       }
     },
+    "/floor/tables/{id}/hold": {
+      "post": {
+        "tags": [
+          "floor"
+        ],
+        "summary": "Take a table for a HELD ORDER the till keeps to itself.",
+        "description": "A parked cart is device-local by design: the order, its lines and its money\nnever leave the till, and only the sale it becomes is ever pushed. But the\nTABLE is not the till's private business — it is a fact about the room, and\nthe dashboard's floor and every other till were being told that a table with\nsomebody's order waiting on it was free. The next party got seated on top of\nit.\n\nSo the occupancy syncs and the order does not. The server learns that the\ntable is taken and nothing whatever about what is on it.\n\nLike `clear_table`, and for the reason written there, this is not a\nset-status endpoint: exactly one transition, `free` -> `seated`, refused\nfrom anything else. A table a ticket is already on stays the ticket's.",
+        "operationId": "hold_table",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Table ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HoldTableRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Table is held"
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/floor/tables/{id}/release": {
+      "post": {
+        "tags": [
+          "floor"
+        ],
+        "summary": "Give back a table a till was holding for its own parked order.",
+        "description": "The counterpart to `hold_table`: the hold moved to another table, was\nchecked out, or was discarded. Exactly one transition out of `seated` --\nto `free`, or to `dirty` when `bus` says the party ate -- and never over a\nlive ticket — if one has landed since, the ticket owns the\ntable and this is a no-op rather than a way to free an occupied table.",
+        "operationId": "release_table",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Table ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseTableRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Table is free"
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/floor/transfers": {
       "get": {
         "tags": [
@@ -50446,6 +50650,18 @@
           }
         }
       },
+      "HoldTableRequest": {
+        "type": "object",
+        "required": [
+          "branch_id"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "HoursEntry": {
         "type": "object",
         "description": "One weekly booking window. `dow`: 0 = Sunday … 6 = Saturday. `open`/`close`\nare `HH:MM` local; a close at or before open means \"closes after midnight\".",
@@ -57433,6 +57649,22 @@
             "items": {
               "$ref": "#/components/schemas/PresetInfo"
             }
+          }
+        }
+      },
+      "ReleaseTableRequest": {
+        "type": "object",
+        "required": [
+          "branch_id"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "bus": {
+            "type": "boolean",
+            "description": "The party ATE here and has paid: the table needs bussing before anyone\nelse sits, so it lands `dirty` rather than `free`. The same fork the\ntill makes locally when a parked order checks out versus is discarded --\na discard means nobody ever sat, and the table goes straight back to the\nroom. Without this the dashboard would show a table with dirty plates on\nit as ready for the next party."
           }
         }
       },

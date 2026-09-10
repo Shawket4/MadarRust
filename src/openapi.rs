@@ -291,6 +291,8 @@ paths(
         // ── held orders + transfer waitlist ───────────────────────────
         crate::floor_ops::handlers::swap_tables,
         crate::floor_ops::handlers::clear_table,
+        crate::floor_ops::handlers::hold_table,
+        crate::floor_ops::handlers::release_table,
         crate::floor_ops::handlers::list_floor_transfers,
         crate::floor_ops::handlers::create_floor_transfer,
         crate::floor_ops::handlers::cancel_transfer,
@@ -629,6 +631,8 @@ paths(
         crate::floor_ops::TransfersSyncResponse,
         crate::floor_ops::handlers::SwapTablesRequest,
         crate::floor_ops::handlers::ClearTableRequest,
+        crate::floor_ops::handlers::HoldTableRequest,
+        crate::floor_ops::handlers::ReleaseTableRequest,
         crate::floor_ops::handlers::CreateFloorTransferRequest,
         crate::floor_ops::handlers::FulfillTransferRequest,
         crate::kitchen::stations::KitchenStation,

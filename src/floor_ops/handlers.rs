@@ -14,8 +14,9 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use super::{
-    FloorEvents, TransferView, TransfersSyncResponse, autofulfill_transfers, extract_claims,
-    free_table, lock_table, occupant_of, require_branch_access, seat_table, transfer_view,
+    FloorEvents, TransferView, TransfersSyncResponse, autofulfill_transfers, bus_table,
+    extract_claims, free_table, lock_table, occupant_of, require_branch_access, seat_table,
+    transfer_view,
 };
 use crate::errors::{AppError, AppErrorResponse};
 use crate::permissions::checker::{check_permission, check_permission_for};
@@ -321,6 +322,199 @@ pub(crate) async fn clear_table_inner(
         )));
     }
     free_table(&mut *tx, table_id).await?;
+    tx.commit().await?;
+
+    if let Some(hub) = hub {
+        let mut events = FloorEvents::default();
+        events.tables.push(table_id);
+        events.publish(pool.get_ref(), hub, branch_id).await;
+    }
+    Ok(HttpResponse::Ok().json(serde_json::json!({ "ok": true })))
+}
+
+// ── A till's own hold on a table ─────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct HoldTableRequest {
+    pub branch_id: Uuid,
+}
+
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct ReleaseTableRequest {
+    pub branch_id: Uuid,
+    /// The party ATE here and has paid: the table needs bussing before anyone
+    /// else sits, so it lands `dirty` rather than `free`. The same fork the
+    /// till makes locally when a parked order checks out versus is discarded --
+    /// a discard means nobody ever sat, and the table goes straight back to the
+    /// room. Without this the dashboard would show a table with dirty plates on
+    /// it as ready for the next party.
+    #[serde(default)]
+    pub bus: bool,
+}
+
+/// Take a table for a HELD ORDER the till keeps to itself.
+///
+/// A parked cart is device-local by design: the order, its lines and its money
+/// never leave the till, and only the sale it becomes is ever pushed. But the
+/// TABLE is not the till's private business — it is a fact about the room, and
+/// the dashboard's floor and every other till were being told that a table with
+/// somebody's order waiting on it was free. The next party got seated on top of
+/// it.
+///
+/// So the occupancy syncs and the order does not. The server learns that the
+/// table is taken and nothing whatever about what is on it.
+///
+/// Like `clear_table`, and for the reason written there, this is not a
+/// set-status endpoint: exactly one transition, `free` -> `seated`, refused
+/// from anything else. A table a ticket is already on stays the ticket's.
+#[utoipa::path(
+    post, path = "/floor/tables/{id}/hold", tag = "floor",
+    params(("id" = Uuid, Path, description = "Table ID")),
+    request_body = HoldTableRequest,
+    responses((status = 200, description = "Table is held"), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn hold_table(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    hub: web::Data<BranchEventHub>,
+    id: web::Path<Uuid>,
+    body: web::Json<HoldTableRequest>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "open_tickets", "update").await?;
+    require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
+    hold_table_inner(pool, *id, Some(body.branch_id), Some(hub.get_ref())).await
+}
+
+/// The replay-safe half. See `clear_table_inner` for why this split exists:
+/// a queued offline op flushes through exactly this code.
+pub(crate) async fn hold_table_inner(
+    pool: crate::db::Db,
+    table_id: Uuid,
+    branch_id: Option<Uuid>,
+    hub: Option<&BranchEventHub>,
+) -> Result<HttpResponse, AppError> {
+    let branch_id = match branch_id {
+        Some(b) => b,
+        None => sqlx::query_scalar("SELECT branch_id FROM branch_tables WHERE id = $1")
+            .bind(table_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .ok_or_else(|| AppError::NotFound("Table not found".into()))?,
+    };
+
+    let mut tx = pool.get_ref().begin().await?;
+    if !lock_table(&mut tx, table_id, branch_id).await? {
+        return Err(AppError::NotFound("Table not found".into()));
+    }
+    if occupant_of(&mut tx, table_id, None).await?.is_some() {
+        return Err(AppError::Conflict("Someone is seated at this table".into()));
+    }
+    let status: String = sqlx::query_scalar("SELECT status FROM branch_tables WHERE id = $1")
+        .bind(table_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    match status.as_str() {
+        // Already ours (or another till's hold) — the common double-tap, and a
+        // replayed op after a reconnect. Saying yes twice is correct.
+        "seated" => {
+            tx.commit().await?;
+            return Ok(HttpResponse::Ok().json(serde_json::json!({ "ok": true })));
+        }
+        "free" => {}
+        other => {
+            return Err(AppError::Conflict(format!(
+                "Table is {other} — clear it before parking an order on it"
+            )));
+        }
+    }
+    seat_table(&mut *tx, table_id).await?;
+    tx.commit().await?;
+
+    if let Some(hub) = hub {
+        let mut events = FloorEvents::default();
+        events.tables.push(table_id);
+        events.publish(pool.get_ref(), hub, branch_id).await;
+    }
+    Ok(HttpResponse::Ok().json(serde_json::json!({ "ok": true })))
+}
+
+/// Give back a table a till was holding for its own parked order.
+///
+/// The counterpart to `hold_table`: the hold moved to another table, was
+/// checked out, or was discarded. Exactly one transition out of `seated` --
+/// to `free`, or to `dirty` when `bus` says the party ate -- and never over a
+/// live ticket — if one has landed since, the ticket owns the
+/// table and this is a no-op rather than a way to free an occupied table.
+#[utoipa::path(
+    post, path = "/floor/tables/{id}/release", tag = "floor",
+    params(("id" = Uuid, Path, description = "Table ID")),
+    request_body = ReleaseTableRequest,
+    responses((status = 200, description = "Table is free"), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn release_table(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    hub: web::Data<BranchEventHub>,
+    id: web::Path<Uuid>,
+    body: web::Json<ReleaseTableRequest>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "open_tickets", "update").await?;
+    require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
+    release_table_inner(
+        pool,
+        *id,
+        Some(body.branch_id),
+        body.bus,
+        Some(hub.get_ref()),
+    )
+    .await
+}
+
+/// The replay-safe half.
+pub(crate) async fn release_table_inner(
+    pool: crate::db::Db,
+    table_id: Uuid,
+    branch_id: Option<Uuid>,
+    bus: bool,
+    hub: Option<&BranchEventHub>,
+) -> Result<HttpResponse, AppError> {
+    let branch_id = match branch_id {
+        Some(b) => b,
+        None => sqlx::query_scalar("SELECT branch_id FROM branch_tables WHERE id = $1")
+            .bind(table_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .ok_or_else(|| AppError::NotFound("Table not found".into()))?,
+    };
+
+    let mut tx = pool.get_ref().begin().await?;
+    if !lock_table(&mut tx, table_id, branch_id).await? {
+        return Err(AppError::NotFound("Table not found".into()));
+    }
+    // A ticket landed on it in the meantime: the ticket is the occupant now and
+    // freeing the table would strand it. Not an error — the hold is gone either
+    // way, which is all the caller was telling us.
+    if occupant_of(&mut tx, table_id, None).await?.is_some() {
+        tx.commit().await?;
+        return Ok(HttpResponse::Ok().json(serde_json::json!({ "ok": true })));
+    }
+    let status: String = sqlx::query_scalar("SELECT status FROM branch_tables WHERE id = $1")
+        .bind(table_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    // `dirty` is left alone on purpose: a table waiting to be bussed is not
+    // freed by a hold moving off it, and only a person clears that.
+    if status == "seated" {
+        if bus {
+            bus_table(&mut *tx, table_id).await?;
+        } else {
+            free_table(&mut *tx, table_id).await?;
+        }
+    }
     tx.commit().await?;
 
     if let Some(hub) = hub {

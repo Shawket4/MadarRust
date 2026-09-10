@@ -24,6 +24,15 @@ use crate::tickets::handlers::{
 /// are the SAME bodies the live routes accept (idempotency keys ride inside
 /// them), so a replayed op dedups server-side exactly like a lost-response retry
 /// on the live endpoint.
+/// The release op's body. The branch is not on the wire (the table resolves it,
+/// like a clear); `bus` is the one thing the till knows and the server cannot
+/// derive — whether the party ate before the hold ended.
+#[derive(Debug, Default, Deserialize)]
+pub struct ReleaseReplay {
+    #[serde(default)]
+    pub bus: bool,
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ReplayOp {
@@ -124,6 +133,22 @@ pub enum ReplayOp {
         #[serde(default)]
         request: serde_json::Value,
     },
+    /// A till parked one of its own device-local orders on a table, or took it
+    /// back off. Only the OCCUPANCY crosses the wire — the parked order itself
+    /// never leaves the device — so the floor the dashboard sees matches the
+    /// room, and the next party isn't seated on top of a held cart.
+    HoldTable {
+        teller_id: Uuid,
+        table_id: Uuid,
+        #[serde(default)]
+        request: serde_json::Value,
+    },
+    ReleaseTable {
+        teller_id: Uuid,
+        table_id: Uuid,
+        #[serde(default)]
+        request: ReleaseReplay,
+    },
     // Bookings at service time: a waiter/teller seats a booked party or marks
     // a no-show while the cloud is unreachable. Both idempotent on status.
     SeatBooking {
@@ -157,6 +182,8 @@ impl ReplayOp {
             | ReplayOp::CancelTableTransfer { teller_id, .. }
             | ReplayOp::FulfillTableTransfer { teller_id, .. }
             | ReplayOp::ClearTable { teller_id, .. }
+            | ReplayOp::HoldTable { teller_id, .. }
+            | ReplayOp::ReleaseTable { teller_id, .. }
             | ReplayOp::SeatBooking { teller_id, .. }
             | ReplayOp::NoShowBooking { teller_id, .. }
             | ReplayOp::AwardLoyaltyPoints { teller_id, .. } => *teller_id,
@@ -193,7 +220,9 @@ impl ReplayOp {
             | ReplayOp::CreateTableTransfer { .. }
             | ReplayOp::CancelTableTransfer { .. }
             | ReplayOp::FulfillTableTransfer { .. }
-            | ReplayOp::ClearTable { .. } => matches!(role, Teller | Waiter),
+            | ReplayOp::ClearTable { .. }
+            | ReplayOp::HoldTable { .. }
+            | ReplayOp::ReleaseTable { .. } => matches!(role, Teller | Waiter),
             ReplayOp::SeatBooking { .. } | ReplayOp::NoShowBooking { .. } => {
                 matches!(role, Teller | Waiter)
             }
@@ -225,6 +254,11 @@ impl ReplayOp {
             }
             // Swap checks the moved tickets inside the core, and so does clear.
             ReplayOp::SwapTables { .. } | ReplayOp::ClearTable { .. } => &[],
+            // Parking an order on a table is the same authority as working the
+            // ticket that would otherwise sit there.
+            ReplayOp::HoldTable { .. } | ReplayOp::ReleaseTable { .. } => {
+                &[("open_tickets", "update")]
+            }
             ReplayOp::CreateTableTransfer { .. } => &[("table_transfers", "create")],
             ReplayOp::CancelTableTransfer { .. } => &[("table_transfers", "update")],
             // Fulfill also checks the occupant's kind inside the core.
@@ -506,6 +540,27 @@ pub async fn replay(
             )
             .await
         }
+        ReplayOp::HoldTable { table_id, .. } => {
+            crate::floor_ops::handlers::hold_table_inner(
+                pool.clone(),
+                table_id,
+                None,
+                Some(hub.get_ref()),
+            )
+            .await
+        }
+        ReplayOp::ReleaseTable {
+            table_id, request, ..
+        } => {
+            crate::floor_ops::handlers::release_table_inner(
+                pool.clone(),
+                table_id,
+                None,
+                request.bus,
+                Some(hub.get_ref()),
+            )
+            .await
+        }
         ReplayOp::FulfillTableTransfer {
             transfer_id,
             request,
@@ -626,7 +681,9 @@ async fn op_branch_must_be_in_org(pool: &PgPool, op: &ReplayOp, org: Uuid) -> Re
         }
         // The op carries no branch, so the table is the only thing to resolve
         // through — which is exactly the cross-org check this fn exists for.
-        ReplayOp::ClearTable { table_id, .. } => {
+        ReplayOp::ClearTable { table_id, .. }
+        | ReplayOp::HoldTable { table_id, .. }
+        | ReplayOp::ReleaseTable { table_id, .. } => {
             sqlx::query_scalar(
                 "SELECT b.org_id FROM branch_tables bt JOIN branches b ON b.id = bt.branch_id \
                  WHERE bt.id = $1",

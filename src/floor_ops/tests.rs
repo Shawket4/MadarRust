@@ -471,6 +471,149 @@ async fn settling_a_ticket_buses_its_table(pool: PgPool) {
     assert_eq!(resp.status(), 200);
 }
 
+/// A till's HOLD on a table syncs, even though the parked order does not.
+///
+/// A held order is device-local by design — its lines and its money never
+/// leave the till, and only the sale it becomes is pushed. But the TABLE is a
+/// fact about the room: without this the dashboard's floor, and every other
+/// till, were told a table with somebody's order waiting on it was free, and
+/// the next party got seated on top of it.
+#[sqlx::test]
+async fn a_till_can_hold_a_table_for_its_own_parked_order(pool: PgPool) {
+    grant_defaults(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let t1 = seed_table(&pool, org, branch, None, "T1").await;
+    let app = app!(pool);
+    let t = token(teller, org, UserRole::Teller);
+
+    assert_eq!(table_status(&pool, t1).await, "free");
+
+    let resp = post_json!(
+        app,
+        t,
+        &format!("/floor/tables/{t1}/hold"),
+        serde_json::json!({ "branch_id": branch })
+    );
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        table_status(&pool, t1).await,
+        "seated",
+        "the room now knows the table is taken"
+    );
+
+    // Holding again is idempotent: a replayed op after a reconnect, and the
+    // ordinary double-tap. Treating either as an error teaches staff to ignore
+    // errors.
+    let resp = post_json!(
+        app,
+        t,
+        &format!("/floor/tables/{t1}/hold"),
+        serde_json::json!({ "branch_id": branch })
+    );
+    assert_eq!(resp.status(), 200);
+
+    // And giving it back frees it.
+    let resp = post_json!(
+        app,
+        t,
+        &format!("/floor/tables/{t1}/release"),
+        serde_json::json!({ "branch_id": branch })
+    );
+    assert_eq!(resp.status(), 200);
+    assert_eq!(table_status(&pool, t1).await, "free");
+}
+
+/// A hold never takes a table a ticket is on, and never frees one either.
+#[sqlx::test]
+async fn a_hold_cannot_take_or_free_a_table_a_ticket_owns(pool: PgPool) {
+    grant_defaults(&pool).await;
+    // The defaults give a teller everything but firing a ticket, which is the
+    // waiter's job — here the teller stands in for the party being seated.
+    grant(&pool, "teller", "open_tickets", "create").await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let item = seed_menu_item(&pool, org, 1000).await;
+    let _shift = open_shift_row(&pool, branch, teller).await;
+    let t1 = seed_table(&pool, org, branch, None, "T1").await;
+    let app = app!(pool);
+    let t = token(teller, org, UserRole::Teller);
+
+    // A real party, seated by a ticket.
+    let resp = post_json!(
+        app,
+        t,
+        "/open-tickets",
+        serde_json::json!({
+            "branch_id": branch, "table_id": t1,
+            "items": [{ "menu_item_id": item, "quantity": 1 }]
+        })
+    );
+    assert_eq!(resp.status(), 201);
+    assert_eq!(table_status(&pool, t1).await, "seated");
+
+    // A hold may not park on top of them.
+    let resp = post_json!(
+        app,
+        t,
+        &format!("/floor/tables/{t1}/hold"),
+        serde_json::json!({ "branch_id": branch })
+    );
+    assert_eq!(
+        resp.status(),
+        409,
+        "somebody is sitting there — the hold is refused, not layered on"
+    );
+
+    // And releasing must not strand the ticket by freeing its table. It says
+    // OK — the hold is gone either way, which is all the caller claimed — but
+    // the table stays the ticket's.
+    let resp = post_json!(
+        app,
+        t,
+        &format!("/floor/tables/{t1}/release"),
+        serde_json::json!({ "branch_id": branch })
+    );
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        table_status(&pool, t1).await,
+        "seated",
+        "the ticket still owns its table"
+    );
+}
+
+/// Releasing never launders a table that is waiting to be bussed.
+#[sqlx::test]
+async fn releasing_a_hold_leaves_a_dirty_table_dirty(pool: PgPool) {
+    grant_defaults(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let t1 = seed_table(&pool, org, branch, None, "T1").await;
+    sqlx::query("UPDATE branch_tables SET status = 'dirty' WHERE id = $1")
+        .bind(t1)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = app!(pool);
+    let t = token(teller, org, UserRole::Teller);
+
+    let resp = post_json!(
+        app,
+        t,
+        &format!("/floor/tables/{t1}/release"),
+        serde_json::json!({ "branch_id": branch })
+    );
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        table_status(&pool, t1).await,
+        "dirty",
+        "only a person says the plates are gone"
+    );
+}
+
 // ── Transfer waitlist ────────────────────────────────────────────────────────
 
 #[sqlx::test]
@@ -869,6 +1012,130 @@ async fn replay_clears_a_bussed_table(pool: PgPool) {
     );
     assert_eq!(resp.status(), 200, "replaying a clear is idempotent");
     assert_eq!(table_status(&pool, table).await, "free");
+}
+
+/// The offline path: a till parks an order on a table with no network, and the
+/// occupancy reaches the floor when it drains — through the same code the live
+/// route uses, with the branch read off the table.
+#[sqlx::test]
+async fn a_queued_hold_reaches_the_floor_when_it_drains(pool: PgPool) {
+    grant_defaults(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let t1 = seed_table(&pool, org, branch, None, "T1").await;
+    let app = app!(pool);
+    let t = token(teller, org, UserRole::Teller);
+
+    let resp = post_json!(
+        app,
+        t,
+        "/sync/replay",
+        serde_json::json!({ "op": "hold_table", "teller_id": teller, "table_id": t1, "request": {} })
+    );
+    assert_eq!(resp.status(), 200, "queued hold replays");
+    assert_eq!(table_status(&pool, t1).await, "seated");
+
+    // A lost ack replays it; `seated` -> `seated` is a yes, not a 409.
+    let resp = post_json!(
+        app,
+        t,
+        "/sync/replay",
+        serde_json::json!({ "op": "hold_table", "teller_id": teller, "table_id": t1, "request": {} })
+    );
+    assert_eq!(resp.status(), 200, "replaying a hold is idempotent");
+
+    let resp = post_json!(
+        app,
+        t,
+        "/sync/replay",
+        serde_json::json!({ "op": "release_table", "teller_id": teller, "table_id": t1, "request": {} })
+    );
+    assert_eq!(resp.status(), 200, "queued release replays");
+    assert_eq!(table_status(&pool, t1).await, "free");
+
+    let resp = post_json!(
+        app,
+        t,
+        "/sync/replay",
+        serde_json::json!({ "op": "release_table", "teller_id": teller, "table_id": t1, "request": {} })
+    );
+    assert_eq!(resp.status(), 200, "replaying a release is idempotent");
+}
+
+/// The fork the till makes locally when a parked order ends: discarded means
+/// nobody ever sat and the table goes back to the room; checked out means the
+/// party ate, and the table waits for a human with a cloth.
+#[sqlx::test]
+async fn a_released_hold_lands_dirty_when_the_party_ate(pool: PgPool) {
+    grant_defaults(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let t1 = seed_table(&pool, org, branch, None, "T1").await;
+    let app = app!(pool);
+    let t = token(teller, org, UserRole::Teller);
+
+    let resp = post_json!(
+        app,
+        t,
+        &format!("/floor/tables/{t1}/hold"),
+        serde_json::json!({ "branch_id": branch })
+    );
+    assert_eq!(resp.status(), 200);
+
+    let resp = post_json!(
+        app,
+        t,
+        &format!("/floor/tables/{t1}/release"),
+        serde_json::json!({ "branch_id": branch, "bus": true })
+    );
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        table_status(&pool, t1).await,
+        "dirty",
+        "the plates are still on it"
+    );
+
+    // And a release with no `bus` cannot undo that: clearing is a person's job.
+    let resp = post_json!(
+        app,
+        t,
+        &format!("/floor/tables/{t1}/release"),
+        serde_json::json!({ "branch_id": branch })
+    );
+    assert_eq!(resp.status(), 200);
+    assert_eq!(table_status(&pool, t1).await, "dirty");
+}
+
+/// Neither op may cross an org boundary; like a clear, the table is what
+/// resolves the branch, so the table is what has to be checked.
+#[sqlx::test]
+async fn replay_hold_cannot_reach_another_orgs_table(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    grant_defaults(&pool).await;
+    let t = token(teller, org, UserRole::Teller);
+
+    let other = seed_org(&pool).await;
+    let other_branch = seed_branch(&pool, other).await;
+    let their_table = seed_table(&pool, other, other_branch, None, "T1").await;
+
+    for op in ["hold_table", "release_table"] {
+        let resp = post_json!(
+            app,
+            t,
+            "/sync/replay",
+            serde_json::json!({ "op": op, "teller_id": teller, "table_id": their_table, "request": {} })
+        );
+        assert!(
+            matches!(resp.status().as_u16(), 403 | 404),
+            "cross-org {op} rejected, got {}",
+            resp.status()
+        );
+        assert_eq!(table_status(&pool, their_table).await, "free");
+    }
 }
 
 /// A clear must never cross an org boundary, even though the op carries no
