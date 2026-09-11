@@ -144,6 +144,31 @@ pub struct CardBrand {
     pub background_color: Option<String>,
     pub foreground_color: Option<String>,
     pub label_color: Option<String>,
+    /// Where else to find the shop, in the order a card prints them. Empty is
+    /// the common case, and the page draws nothing for it — no row, no
+    /// placeholder.
+    ///
+    /// NOT gated on the branding tier, like `OrgBrand::social_links` it is read
+    /// from: a shop's Instagram is a fact about the shop in the way its name
+    /// is, so a Madar-coloured card carries the links too.
+    pub social_links: Vec<PublicSocialLink>,
+}
+
+/// One place the shop can be found, as a page prints it.
+///
+/// The same three things the wallet passes render (`wallet::apple`,
+/// `wallet::google`), so the card in the phone and the card on the page list
+/// the same links in the same order.
+#[derive(Serialize, ToSchema, Clone)]
+pub struct PublicSocialLink {
+    /// One of `orgs::social::PLATFORMS` — what the page picks its glyph by.
+    pub key: String,
+    /// What a human calls it. The page falls back to this where it has no
+    /// glyph for `key`, so a platform added on the server still renders.
+    pub label: String,
+    /// `https://…` and nothing else — checked on write and again on read, see
+    /// `orgs::social::links_of`.
+    pub url: String,
 }
 
 /// The organisation's own identity: its name, its logo, and the palette derived
@@ -168,6 +193,15 @@ fn card_brand(
         background_color: Some(org.palette.background.clone()),
         foreground_color: Some(org.palette.foreground.clone()),
         label_color: Some(org.palette.accent.clone()),
+        social_links: org
+            .social_links
+            .iter()
+            .map(|l| PublicSocialLink {
+                key: l.key.to_string(),
+                label: l.label.to_string(),
+                url: l.url.clone(),
+            })
+            .collect(),
     }
 }
 

@@ -21,15 +21,17 @@ fn get_secret() -> JwtSecret {
 }
 
 fn org_admin_token(user_id: Uuid, org_id: Uuid) -> String {
-    crate::auth::jwt::create_token(
-        &get_secret(),
-        user_id,
-        Some(org_id),
-        UserRole::OrgAdmin,
-        None,
-        24,
-    )
-    .unwrap()
+    token_for(user_id, Some(org_id), UserRole::OrgAdmin)
+}
+
+/// Issuing, rotating and revoking a partner credential are OURS, not a shop's —
+/// so the tests that exercise those paths sign in as one of us.
+fn super_admin_token(user_id: Uuid, org_id: Uuid) -> String {
+    token_for(user_id, Some(org_id), UserRole::SuperAdmin)
+}
+
+fn token_for(user_id: Uuid, org_id: Option<Uuid>, role: UserRole) -> String {
+    crate::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
 }
 
 fn basic(username: &str, secret: &str) -> String {
@@ -816,7 +818,7 @@ async fn create_returns_the_secret_once_and_it_authenticates(pool: PgPool) {
     .await
     .unwrap();
     let app = app(pool.clone()).await;
-    let token = org_admin_token(admin, s.org);
+    let token = super_admin_token(admin, s.org);
 
     let req = test::TestRequest::post()
         .uri("/integrations/credentials")
@@ -877,7 +879,7 @@ async fn usernames_are_unique_across_orgs(pool: PgPool) {
         .uri("/integrations/credentials")
         .insert_header((
             "Authorization",
-            format!("Bearer {}", org_admin_token(admin, b.org)),
+            format!("Bearer {}", super_admin_token(admin, b.org)),
         ))
         .set_json(json!({"name": "Dup", "branch_id": b.branch, "username": "SHARED-NAME"}))
         .to_request();
@@ -908,7 +910,7 @@ async fn cannot_issue_a_credential_for_another_orgs_branch(pool: PgPool) {
         .uri("/integrations/credentials")
         .insert_header((
             "Authorization",
-            format!("Bearer {}", org_admin_token(admin, a.org)),
+            format!("Bearer {}", super_admin_token(admin, a.org)),
         ))
         .set_json(json!({"name": "Sneaky", "branch_id": b.branch, "username": "sneaky"}))
         .to_request();
@@ -963,7 +965,7 @@ async fn rotate_invalidates_the_old_secret_and_revoke_ends_access(pool: PgPool) 
     .await
     .unwrap();
     let app = app(pool).await;
-    let token = org_admin_token(admin, s.org);
+    let token = super_admin_token(admin, s.org);
     let url = "/integrations/analytics/orders?from=2026-06-01&to=2026-06-01".to_string();
 
     let req = test::TestRequest::post()
@@ -1006,4 +1008,112 @@ async fn rotate_invalidates_the_old_secret_and_revoke_ends_access(pool: PgPool) 
         test::call_service(&app, req).await.status(),
         StatusCode::UNAUTHORIZED
     );
+}
+
+// ── Who may do what to a partner credential ──────────────────────────────────
+
+/// An org admin may SEE what exists and change none of it.
+///
+/// A partner credential is not a setting a shop administers for itself — it is
+/// an agreement between us and a third party, and the secret it mints reads
+/// that shop's order data. So the shop can audit the list (it is their data
+/// being read, and "who has access?" is a fair question to be able to answer
+/// without asking us) and cannot issue, rotate or revoke.
+#[sqlx::test]
+async fn an_org_admin_can_list_credentials_but_not_change_them(pool: PgPool) {
+    let s = seed(&pool, "perm", Some("Africa/Cairo")).await;
+    let admin = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO users (id, name, role, org_id, email, password_hash)
+         VALUES ($1, 'Admin', 'org_admin', $2, 'admin-' || $1::text || '@example.com', 'x')",
+    )
+    .bind(admin)
+    .bind(s.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let existing = seed_credential(&pool, &s, "already-there").await;
+    let app = app(pool.clone()).await;
+    let token = org_admin_token(admin, s.org);
+    let auth = || ("Authorization", format!("Bearer {token}"));
+
+    // READ: allowed.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/integrations/credentials")
+            .insert_header(auth())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "an org admin may audit the list");
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert!(body.as_array().is_some_and(|a| !a.is_empty()));
+    // …and never carries a secret, whoever is asking.
+    assert!(
+        !serde_json::to_string(&body).unwrap().contains(&existing),
+        "a list must not hand back the secret"
+    );
+
+    // ISSUE: refused.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/integrations/credentials")
+            .insert_header(auth())
+            .set_json(json!({ "name": "Nope", "branch_id": s.branch, "username": "nope" }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN, "issuing is ours");
+
+    let id = credential_id(&pool, "already-there").await;
+
+    // ROTATE: refused — it would silently break whoever holds the old secret.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/integrations/credentials/{id}/rotate"))
+            .insert_header(auth())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN, "rotating is ours");
+
+    // REVOKE: refused — it would cut off a live integration.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri(&format!("/integrations/credentials/{id}"))
+            .insert_header(auth())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN, "revoking is ours");
+}
+
+/// Below org admin, there is nothing here at all — not even the list.
+#[sqlx::test]
+async fn a_teller_cannot_even_see_the_credentials(pool: PgPool) {
+    let s = seed(&pool, "perm2", Some("Africa/Cairo")).await;
+    let app = app(pool.clone()).await;
+    let token = token_for(s.teller, Some(s.org), UserRole::Teller);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/integrations/credentials")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+async fn credential_id(pool: &PgPool, username: &str) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM integration_credentials WHERE username = $1")
+        .bind(username)
+        .fetch_one(pool)
+        .await
+        .unwrap()
 }

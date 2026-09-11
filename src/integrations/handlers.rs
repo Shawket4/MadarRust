@@ -16,7 +16,7 @@ use sqlx::PgPool;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use crate::auth::guards::require_org_admin;
+use crate::auth::guards::{require_org_admin, require_super_admin};
 use crate::auth::jwt::Claims;
 use crate::db::Db;
 use crate::errors::AppError;
@@ -387,7 +387,12 @@ pub async fn create_credential(
     body: web::Json<CreateCredentialRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    require_org_admin(&claims)?;
+    // SUPER ADMIN ONLY. Issuing one mints a secret that reads this org's order data, and a
+    // partner credential is not a setting a shop administers for itself —
+    // it is an agreement between us and a third party. An org admin may SEE
+    // what exists (`list_credentials` below is still org-admin); changing it
+    // is ours.
+    require_super_admin(&claims)?;
     let org_id = scope_org(&req, &claims)?;
 
     let name = body.name.trim();
@@ -500,7 +505,12 @@ pub async fn rotate_credential(
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    require_org_admin(&claims)?;
+    // SUPER ADMIN ONLY. Rotating one silently breaks whatever is using the old secret, and a
+    // partner credential is not a setting a shop administers for itself —
+    // it is an agreement between us and a third party. An org admin may SEE
+    // what exists (`list_credentials` below is still org-admin); changing it
+    // is ours.
+    require_super_admin(&claims)?;
     let org_id = scope_org(&req, &claims)?;
 
     let secret = generate_secret();
@@ -546,7 +556,12 @@ pub async fn revoke_credential(
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    require_org_admin(&claims)?;
+    // SUPER ADMIN ONLY. Revoking one cuts off a live partner integration, and a
+    // partner credential is not a setting a shop administers for itself —
+    // it is an agreement between us and a third party. An org admin may SEE
+    // what exists (`list_credentials` below is still org-admin); changing it
+    // is ours.
+    require_super_admin(&claims)?;
     let org_id = scope_org(&req, &claims)?;
 
     // Soft revocation: the row survives as the record of who held access.
