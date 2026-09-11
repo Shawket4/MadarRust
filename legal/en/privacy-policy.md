@@ -1,7 +1,7 @@
 ---
 title: Privacy Policy
-version: 1.4
-effective: 2026-09-10
+version: 1.5
+effective: 2026-09-11
 ---
 
 # Privacy Policy
@@ -147,9 +147,17 @@ numbers** — only which method was used and the amount.
 Only what running the service requires. The current providers, what each receives and where
 it operates are listed at **[Sub-processors](/subprocessors.html)**.
 
-One disclosure worth stating plainly: **menu item names** are sent to Google Cloud
-Translation to produce translated menus. No customer data is involved — only the names of
-dishes.
+Two disclosures worth stating plainly rather than leaving to a table.
+
+**Menu item names** are sent to Google Cloud Translation to produce translated menus. No
+customer data is involved — only the names of dishes.
+
+**The customer-facing pages are served through Cloudflare**, which sits in front of them as a
+reverse proxy. It ends the encrypted connection rather than passing it through, so it can see
+the traffic in the clear: the visitor's IP address, the pages opened, and anything submitted
+on them. It acts on our instructions and does not use that traffic for its own purposes. The
+staff-facing system — the till, the dashboard and the API behind them — does not go through
+Cloudflare, and no database content is ever held there.
 
 Where a restaurant asks us to send its order data to another system it uses — for example
 an in-house shopping-mall reporting system — we do so **only on that restaurant's written

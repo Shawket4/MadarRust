@@ -1,7 +1,7 @@
 ---
 title: Security
-version: 1.0
-effective: 2026-09-01
+version: 1.1
+effective: 2026-09-11
 ---
 
 # Security
@@ -36,7 +36,10 @@ encryption — is describing something other than how databases work.
 
 ## Encryption
 
-- **In transit:** TLS on all public endpoints, with certificates renewed automatically.
+- **In transit:** TLS on all public endpoints, with certificates renewed automatically. The
+  customer-facing pages are served through Cloudflare, which terminates that TLS and
+  re-encrypts to our servers — so the connection is encrypted end to end, but Cloudflare is
+  a party to it. See [Sub-processors](/subprocessors.html).
 - **At rest:** the backup repository is encrypted.
 - **Passwords:** stored only as salted hashes; never recoverable, by us or anyone else.
 - **Card numbers:** never touch Madar systems — they go directly to the payment provider.

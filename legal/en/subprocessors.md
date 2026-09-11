@@ -1,7 +1,7 @@
 ---
 title: Sub-processors
-version: 1.4
-effective: 2026-09-10
+version: 1.5
+effective: 2026-09-11
 ---
 
 # Sub-processors
@@ -12,6 +12,7 @@ notified at least **30 days** before a new one is added.
 | Provider | Purpose | Data it receives | Location |
 |---|---|---|---|
 | Hostinger | Application and database hosting | All platform data | European Union |
+| Cloudflare | Serving the customer-facing pages — the menu, the loyalty card and bookings — and the network that carries them | Everything those pages send and receive, including the visitor's **IP address**, the pages requested, and the contents of those requests. Cloudflare terminates the encrypted connection, so it can see this traffic in the clear | Global network; served from the location nearest the visitor |
 | Google Cloud Translation | Translating menu item names | **Menu item names only** — no customer data | Outside Egypt |
 | WhatsApp / Meta | Delivering one-time codes, order updates, and the loyalty programme's birthday and "we've missed you" messages where a customer has no wallet card to reach | Customer phone number, message text | Outside Egypt |
 | Google (Gemini) | Answering managers' plain-language questions about their own business | The manager's question and aggregated business figures — **no customer data**; staff names are replaced with codes before sending | Outside Egypt |
@@ -34,6 +35,28 @@ than taken on trust.
 | Staff names sent | **None.** Replaced with `E-1`, `E-2` … before sending |
 | Conversations | Stored so a manager can reopen them; kept with the merchant's account and deleted with it. Only the questions, the answers and the queries are stored — never the result rows |
 | Turning it off | Removing the provider credential disables it entirely; nothing is then sent to any AI service |
+
+## Cloudflare, and what it can see
+
+Cloudflare sits in front of the customer-facing pages as a reverse proxy. A customer opening
+a menu or a loyalty card connects to Cloudflare, and Cloudflare connects to us.
+
+That arrangement is worth stating plainly rather than burying in a table, because it has a
+consequence people often assume away: **Cloudflare ends the encrypted connection, not us.**
+It can see the traffic in the clear before re-encrypting it to our servers. That includes the
+visitor's IP address, which pages they opened, and anything they submitted on them.
+
+What it does **not** carry:
+
+- **The staff-facing system.** The till, the dashboard and the API they use reach our servers
+  directly, without passing through Cloudflare.
+- **The database.** Cloudflare never holds a copy of anything. It relays requests; it is not a
+  store.
+- **Card numbers.** These never reach our systems at all, by any route — see the Privacy
+  Policy.
+
+Cloudflare acts on our instructions as a processor and does not use this traffic for its own
+purposes.
 
 ## Run on our own infrastructure
 
