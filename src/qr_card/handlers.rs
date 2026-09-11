@@ -199,17 +199,21 @@ const BOOK_MOUNT: &str = "/book";
 async fn shop_origin(pool: &PgPool, org_id: Uuid) -> Result<Option<String>, AppError> {
     // OFF until the box can serve it.
     //
-    // A shop subdomain needs a wildcard vhost and a WILDCARD CERTIFICATE, and
-    // the certificate needs a DNS-01 challenge. Today the production box has
-    // neither: it has one hand-written vhost and one HTTP-01 certificate per
-    // shop, of which exactly one exists. So switching this on unconditionally
-    // would make things WORSE than before it was written — a branded shop with
-    // no vhost of its own used to print codes that worked on the generic host,
-    // and would now print codes that give a full-page certificate warning and
-    // then a dropped connection. On something printed and stuck to a table.
+    // A shop subdomain needs a wildcard vhost AND a certificate a browser
+    // trusts for `<anything>.madar-pos.cloud`. Both exist in production now:
+    // one wildcard vhost with the three mounts, behind Cloudflare's proxy,
+    // which terminates TLS with its own Universal SSL and reaches the origin
+    // over a Cloudflare Origin CA certificate. That is why there is no wildcard
+    // Let's Encrypt lineage and nothing here to renew — and also why a shop
+    // hostname must stay PROXIED: the origin certificate is trusted by
+    // Cloudflare alone, so a host switched to DNS-only would serve a browser
+    // something it rejects.
     //
-    // The flag is the ordering constraint made explicit: infrastructure first,
-    // then this. Unset is the old behaviour, which is the behaviour that works.
+    // The flag stays because the ordering constraint is real and the failure is
+    // ugly: with it on and the vhost wrong, a branded shop that used to print
+    // codes working on the generic host prints codes that give a full-page
+    // certificate warning instead. On something stuck to a table. Unset is the
+    // old behaviour, which is the behaviour that works.
     if !shop_subdomains_enabled() {
         return Ok(None);
     }
