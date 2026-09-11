@@ -409,25 +409,23 @@ fn branch_loyalty_url(shop: Option<&str>, branch_id: Uuid) -> Result<String, App
 /// to be is a link nobody can reason about, and the branch cards already
 /// printed keep working untouched.
 fn org_loyalty_url(shop: Option<&str>, org_id: Uuid) -> Result<String, AppError> {
-    let base = match shop {
-        Some(origin) => origin.to_string(),
-        None => loyalty_base()?,
-    };
-    Ok(format!("{base}/join/org/{org_id}"))
+    match shop {
+        // The hostname already NAMES the shop, so the id would be saying it
+        // twice. The card bundle's `/` route resolves the org from the host and
+        // renders exactly this page, so `https://rue.madar-pos.cloud/` IS the
+        // whole-shop join — the shortest URL the shop will ever print, and a
+        // sparser QR code for it.
+        Some(origin) => Ok(format!("{origin}/")),
+        None => Ok(format!("{}/join/org/{org_id}", loyalty_base()?)),
+    }
 }
 
 /// Build `{PUBLIC_RESERVATIONS_BASE_URL}/{org_id}` — the guest picks the branch.
 fn org_booking_url(shop: Option<&str>, org_id: Uuid) -> Result<String, AppError> {
-    Ok(format!("{}/{}", booking_base(shop)?, org_id))
-}
-
-/// The reservations bundle's entry — its own host, or the `/book` mount on a
-/// shop's. Its routes still name the org, because a guest picking a branch
-/// lands on `/{org}` either way.
-fn booking_base(shop: Option<&str>) -> Result<String, AppError> {
     match shop {
-        Some(origin) => Ok(format!("{origin}{BOOK_MOUNT}")),
-        None => reservations_base(),
+        // As with the card: the host is the org, so `/book/` is the whole of it.
+        Some(origin) => Ok(format!("{origin}{BOOK_MOUNT}/")),
+        None => Ok(format!("{}/{}", reservations_base()?, org_id)),
     }
 }
 
@@ -438,7 +436,15 @@ fn branch_booking_url(
     org_id: Uuid,
     branch_id: Uuid,
 ) -> Result<String, AppError> {
-    Ok(format!("{}/{}/{}", booking_base(shop)?, org_id, branch_id))
+    match shop {
+        // `?branch=` rather than a path segment, because with the org gone from
+        // the path a lone `/book/<uuid>` is indistinguishable from the org-level
+        // form and the bundle would read the branch as an org. The ordering
+        // bundle names its branch the same way, so the two codes for one table
+        // read alike.
+        Some(origin) => Ok(format!("{origin}{BOOK_MOUNT}/?branch={branch_id}")),
+        None => Ok(format!("{}/{}/{}", reservations_base()?, org_id, branch_id)),
+    }
 }
 
 /// The whole shop: no branch pre-selected, so the customer sees the picker.
@@ -1306,19 +1312,74 @@ mod address_tests {
             org_order_url(shop, ORG).unwrap(),
             "https://drops.madar-pos.cloud/order/"
         );
-        // The card is mounted at the root; bookings at /book, which still names
-        // the org because that is the route the bundle publishes.
+        // The card is mounted at the root, bookings at /book.
         assert_eq!(
             branch_loyalty_url(shop, BRANCH).unwrap(),
             format!("https://drops.madar-pos.cloud/join/{BRANCH}")
         );
         assert_eq!(
+            branch_booking_url(shop, ORG, BRANCH).unwrap(),
+            format!("https://drops.madar-pos.cloud/book/?branch={BRANCH}")
+        );
+    }
+
+    /// THE ORG IS THE HOSTNAME, so it is not in the path as well.
+    ///
+    /// `drops.madar-pos.cloud` already names the shop; both bundles resolve it
+    /// from the host and render the same page they would have rendered from an
+    /// id in the path. Repeating it cost 36 characters in something printed on
+    /// a card, and a denser QR code to carry them.
+    #[test]
+    fn a_shops_own_host_does_not_repeat_the_org_in_the_path() {
+        let shop = Some(SHOP);
+        assert_eq!(
             org_loyalty_url(shop, ORG).unwrap(),
-            format!("https://drops.madar-pos.cloud/join/org/{ORG}")
+            "https://drops.madar-pos.cloud/"
         );
         assert_eq!(
+            org_booking_url(shop, ORG).unwrap(),
+            "https://drops.madar-pos.cloud/book/"
+        );
+        // And no form on a shop host mentions the org anywhere.
+        for url in [
+            branch_order_url(shop, ORG, BRANCH).unwrap(),
+            table_order_url(shop, ORG, BRANCH, TABLE).unwrap(),
+            org_order_url(shop, ORG).unwrap(),
+            branch_loyalty_url(shop, BRANCH).unwrap(),
+            org_loyalty_url(shop, ORG).unwrap(),
             branch_booking_url(shop, ORG, BRANCH).unwrap(),
-            format!("https://drops.madar-pos.cloud/book/{ORG}/{BRANCH}")
+            org_booking_url(shop, ORG).unwrap(),
+        ] {
+            assert!(
+                !url.contains(&ORG.to_string()),
+                "the host already says which shop: {url}"
+            );
+        }
+    }
+
+    /// The SHARED host still needs the org, and every code already printed for
+    /// it keeps working. Dropping the id there would break them all.
+    #[test]
+    fn the_shared_host_still_names_the_org() {
+        unsafe {
+            std::env::set_var("PUBLIC_ORDER_BASE_URL", "https://order.madar-pos.cloud");
+            std::env::set_var("PUBLIC_LOYALTY_BASE_URL", "https://loyalty.madar-pos.cloud");
+            std::env::set_var(
+                "PUBLIC_RESERVATIONS_BASE_URL",
+                "https://reservations.madar-pos.cloud",
+            );
+        }
+        assert_eq!(
+            org_loyalty_url(None, ORG).unwrap(),
+            format!("https://loyalty.madar-pos.cloud/join/org/{ORG}")
+        );
+        assert_eq!(
+            org_booking_url(None, ORG).unwrap(),
+            format!("https://reservations.madar-pos.cloud/{ORG}")
+        );
+        assert_eq!(
+            branch_booking_url(None, ORG, BRANCH).unwrap(),
+            format!("https://reservations.madar-pos.cloud/{ORG}/{BRANCH}")
         );
     }
 
