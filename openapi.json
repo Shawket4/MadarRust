@@ -54562,7 +54562,6 @@
         "required": [
           "id",
           "name",
-          "slug",
           "currency_code",
           "tax_rate",
           "tax_inclusive",
@@ -54654,7 +54653,11 @@
             "description": "Whether the service charge is itself taxed."
           },
           "slug": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`None` when the shop has no address of its own. Never an empty string —\nthe column holds NULL for that and a CHECK keeps it so.",
             "example": "the-rue"
           },
           "social_links": {
@@ -56581,7 +56584,6 @@
         "required": [
           "org_id",
           "name",
-          "slug",
           "custom_branding",
           "logo_is_mark",
           "background_color",
@@ -56628,7 +56630,11 @@
             "format": "uuid"
           },
           "slug": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`None` when the shop has no address of its own — reached by `org_id`,\nwhich every page that already knows the shop uses."
           }
         }
       },

@@ -33,7 +33,9 @@ pub struct PublicBrand {
     /// Always the shop's own name, at every tier. A page that does not say
     /// whose it is helps nobody, and that was never the thing being sold.
     pub name: String,
-    pub slug: String,
+    /// `None` when the shop has no address of its own — reached by `org_id`,
+    /// which every page that already knows the shop uses.
+    pub slug: Option<String>,
     /// Whether the rest of this is the shop's or Madar's.
     ///
     /// The page does not need it to render — the palette below is already
@@ -110,11 +112,15 @@ pub async fn brand(
     };
 
     let org = crate::orgs::branding::load(pool.get_ref(), org_id).await?;
-    let slug: String = sqlx::query_scalar("SELECT slug FROM organizations WHERE id = $1")
-        .bind(org_id)
-        .fetch_optional(pool.get_ref())
-        .await?
-        .ok_or_else(|| AppError::NotFound("No shop at that address".into()))?;
+    // Two different absences, and only the outer one is a missing shop: the row
+    // may exist and simply have no address of its own, which is what a shop
+    // that has never been given a slug looks like.
+    let slug: Option<String> =
+        sqlx::query_scalar::<_, Option<String>>("SELECT slug FROM organizations WHERE id = $1")
+            .bind(org_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .ok_or_else(|| AppError::NotFound("No shop at that address".into()))?;
 
     Ok(HttpResponse::Ok().json(PublicBrand {
         org_id,

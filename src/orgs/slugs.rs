@@ -183,14 +183,19 @@ pub fn validate(slug: &str) -> Result<(), AppError> {
 /// still rename itself freely, and should be able to.
 ///
 /// A shop with NO slug yet is not frozen either, whatever its tier. Nothing is
-/// encoded in an empty string: there is no hostname, no printed card, nothing
-/// outside our control that names it. Freezing one was a deadlock rather than
-/// a safeguard — an org from before slugs existed, carrying `slug = ''` and the
-/// branding tier, could not be given a slug, and because the dashboard requires
-/// one to submit the form, could not be edited AT ALL. Not its name, not its
-/// tax rate, not its receipt footer.
-pub fn is_frozen(custom_branding: bool, current_slug: &str) -> bool {
-    custom_branding && !current_slug.trim().is_empty()
+/// encoded in a name that does not exist: there is no hostname, no printed
+/// card, nothing outside our control that names it. Freezing one was a deadlock
+/// rather than a safeguard — an org from before slugs existed, carrying no slug
+/// and the branding tier, could not be given one, and because the dashboard
+/// requires one to submit the form, could not be edited AT ALL. Not its name,
+/// not its tax rate, not its receipt footer.
+///
+/// `None` is the whole of "no slug" now; the column was NOT NULL and such a
+/// shop carried `''`, which a CHECK constraint no longer permits. The blank
+/// arm survives here anyway, because a value arriving from a request is not a
+/// value that came from the column.
+pub fn is_frozen(custom_branding: bool, current_slug: Option<&str>) -> bool {
+    custom_branding && current_slug.is_some_and(|s| !s.trim().is_empty())
 }
 
 #[cfg(test)]
@@ -204,13 +209,17 @@ mod tests {
     /// server refused every slug it sent.
     #[test]
     fn a_shop_with_no_slug_yet_can_still_be_given_one() {
-        assert!(!is_frozen(true, ""), "nothing is printed on an empty name");
-        assert!(!is_frozen(true, "   "), "nor on a blank one");
+        assert!(
+            !is_frozen(true, None),
+            "nothing is printed on a name that does not exist"
+        );
+        assert!(!is_frozen(true, Some("")), "nor on an empty one");
+        assert!(!is_frozen(true, Some("   ")), "nor on a blank one");
         // And once it has one, it is load-bearing and stops moving.
-        assert!(is_frozen(true, "drops"));
+        assert!(is_frozen(true, Some("drops")));
         // Off the tier, a shop renames itself freely either way.
-        assert!(!is_frozen(false, "drops"));
-        assert!(!is_frozen(false, ""));
+        assert!(!is_frozen(false, Some("drops")));
+        assert!(!is_frozen(false, None));
     }
 
     #[test]

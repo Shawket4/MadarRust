@@ -27,8 +27,10 @@ pub struct Org {
     pub id: Uuid,
     #[schema(example = "The Rue")]
     pub name: String,
+    /// `None` when the shop has no address of its own. Never an empty string —
+    /// the column holds NULL for that and a CHECK keeps it so.
     #[schema(example = "the-rue")]
-    pub slug: String,
+    pub slug: Option<String>,
     #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
     pub logo_url: Option<String>,
     #[schema(example = "EGP")]
@@ -589,12 +591,12 @@ pub async fn update_org(
     let existing = fetch_org(pool.get_ref(), *org_id).await?;
 
     if let Some(slug) = &body.slug
-        && slug != &existing.slug
+        && Some(slug) != existing.slug.as_ref()
     {
         // A slug on the branding tier is a hostname and a printed QR code. The
         // sticker on the window cannot be recalled, so the name stops being
         // editable once anything outside our control encodes it.
-        if super::slugs::is_frozen(existing.custom_branding, &existing.slug) {
+        if super::slugs::is_frozen(existing.custom_branding, existing.slug.as_deref()) {
             return Err(AppError::Conflict(
                 "This shop's short name is part of its web address and the codes it has \
                  printed, so it cannot be changed. Turn custom branding off first if it \

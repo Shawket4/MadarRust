@@ -72,7 +72,7 @@ async fn test_create_org_success(pool: PgPool) {
 
     let org: Org = test::read_body_json(resp).await;
     assert_eq!(org.name, "Test Organization");
-    assert_eq!(org.slug, "test-org");
+    assert_eq!(org.slug.as_deref(), Some("test-org"));
     assert_eq!(org.currency_code, "USD");
     // Depending on DB mapping, tax_rate could be parsed differently, but it should succeed.
 }
@@ -362,7 +362,7 @@ async fn test_update_org(pool: PgPool) {
 
     let org: Org = test::read_body_json(resp).await;
     assert_eq!(org.name, "Updated Name");
-    assert_eq!(org.slug, "updated-slug");
+    assert_eq!(org.slug.as_deref(), Some("updated-slug"));
 }
 
 #[sqlx::test]
@@ -832,7 +832,7 @@ fn brand_app(
     }
 }
 
-async fn seed_shop(pool: &PgPool, name: &str, slug: &str) -> Uuid {
+async fn seed_shop(pool: &PgPool, name: &str, slug: Option<&str>) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO organizations (id, name, slug, is_active) VALUES ($1, $2, $3, true)")
         .bind(id)
@@ -846,7 +846,7 @@ async fn seed_shop(pool: &PgPool, name: &str, slug: &str) -> Uuid {
 
 #[sqlx::test]
 async fn a_shop_is_found_by_its_short_name(pool: PgPool) {
-    let id = seed_shop(&pool, "Drops", "drops").await;
+    let id = seed_shop(&pool, "Drops", Some("drops")).await;
     let app = brand_app(&pool).await;
 
     let resp = test::call_service(
@@ -864,14 +864,16 @@ async fn a_shop_is_found_by_its_short_name(pool: PgPool) {
 
 /// A blank `?slug=` is not a shop that might exist — it is no name at all.
 ///
-/// It used to MATCH. An organisation carrying the legacy empty-string slug is
-/// precisely the one meant to have no address of its own, and `?slug=` handed
-/// it back: name, branding, logo, org id. No hostname can reach it (a first
-/// label is never empty), so it was never a wildcard enumeration hole — but a
-/// public endpoint should not answer a question nobody asked.
+/// It used to MATCH, back when a shop with no address carried `''`: the org
+/// specifically meant to have no public identity was handed back whole — name,
+/// branding, logo, org id. The column holds NULL for that now, so the match is
+/// gone at the source too; this pins the QUERY side, which is the half a stored
+/// value cannot fix. No hostname can reach it either way (a first label is
+/// never empty), but a public endpoint should not answer a question nobody
+/// asked.
 #[sqlx::test]
 async fn a_blank_short_name_does_not_resolve_the_shop_that_has_none(pool: PgPool) {
-    seed_shop(&pool, "Rue", "").await;
+    seed_shop(&pool, "Rue", None).await;
     let app = brand_app(&pool).await;
 
     for uri in [
@@ -895,7 +897,7 @@ async fn a_blank_short_name_does_not_resolve_the_shop_that_has_none(pool: PgPool
 /// list — type names, keep the ones that 403 instead of 404.
 #[sqlx::test]
 async fn an_inactive_shop_is_indistinguishable_from_no_shop(pool: PgPool) {
-    let id = seed_shop(&pool, "Closed", "closed").await;
+    let id = seed_shop(&pool, "Closed", Some("closed")).await;
     sqlx::query("UPDATE organizations SET is_active = false WHERE id = $1")
         .bind(id)
         .execute(&pool)
@@ -916,4 +918,87 @@ async fn an_inactive_shop_is_indistinguishable_from_no_shop(pool: PgPool) {
         bodies[0], bodies[1],
         "the two answers must be byte-identical"
     );
+}
+
+// ── A shop without an address has no slug ────────────────────────────────────
+
+/// The database holds the invariant, not just the handler.
+///
+/// `slug` was NOT NULL, so a shop from before slugs existed carried `''` — "no
+/// slug" wearing the costume of a slug. It broke three things: the branding
+/// freeze read it as a name worth protecting and made the org uneditable, the
+/// public brand lookup matched it, and — quietly — `uq_organizations_slug` is
+/// UNIQUE, so `''` occupied a slot and a SECOND such org would have collided.
+#[sqlx::test]
+async fn a_shop_without_an_address_has_no_slug_rather_than_a_blank_one(pool: PgPool) {
+    let blank = sqlx::query("INSERT INTO organizations (name, slug) VALUES ('Blank', '')")
+        .execute(&pool)
+        .await;
+    assert!(blank.is_err(), "an empty slug is no longer storable");
+
+    let spaces = sqlx::query("INSERT INTO organizations (name, slug) VALUES ('Spaces', '   ')")
+        .execute(&pool)
+        .await;
+    assert!(spaces.is_err(), "nor a blank one");
+
+    // NULL is the state `''` was pretending to be, and a btree unique index
+    // treats NULLs as distinct — so ANY number of shops may have no address.
+    for name in ["No Address One", "No Address Two"] {
+        sqlx::query("INSERT INTO organizations (name, slug) VALUES ($1, NULL)")
+            .bind(name)
+            .execute(&pool)
+            .await
+            .expect("two shops with no address must coexist");
+    }
+
+    // A real slug is still unique among the living.
+    sqlx::query("INSERT INTO organizations (name, slug) VALUES ('Drops', 'drops')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let dupe = sqlx::query("INSERT INTO organizations (name, slug) VALUES ('Drops Two', 'drops')")
+        .execute(&pool)
+        .await;
+    assert!(dupe.is_err(), "a name that IS an address is still taken");
+}
+
+/// The deadlock that made an organisation uneditable, end to end.
+///
+/// Branded + no slug: the freeze must not fire, because nothing is printed on
+/// a name that does not exist. Then, once it has one, it stops moving.
+#[sqlx::test]
+async fn a_branded_shop_with_no_address_can_still_be_given_one(pool: PgPool) {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO organizations (id, name, slug, custom_branding) VALUES ($1, 'Rue', NULL, true)",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let token = generate_super_admin_token();
+    let patch = |slug: &str| {
+        test::TestRequest::patch()
+            .uri(&format!("/orgs/{id}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(serde_json::json!({ "slug": slug }))
+            .to_request()
+    };
+
+    let resp = test::call_service(&app, patch("rue")).await;
+    assert_eq!(resp.status().as_u16(), 200, "a blank name freezes nothing");
+    let org: Org = test::read_body_json(resp).await;
+    assert_eq!(org.slug.as_deref(), Some("rue"));
+
+    // And now it is a hostname on a printed card.
+    let resp = test::call_service(&app, patch("rue-coffee")).await;
+    assert_eq!(resp.status().as_u16(), 409, "a real name is load-bearing");
 }
