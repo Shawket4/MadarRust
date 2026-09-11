@@ -72,7 +72,14 @@ pub async fn brand(
     pool: web::Data<PgPool>,
     query: web::Query<BrandQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let org_id = match (query.org_id, query.slug.as_deref()) {
+    let org_id = match (
+        query.org_id,
+        query
+            .slug
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+    ) {
         (Some(id), _) => id,
         (None, Some(slug)) => {
             sqlx::query_scalar::<_, Uuid>(
@@ -88,6 +95,13 @@ pub async fn brand(
             // would make this an enumeration tool for our whole customer list.
             .ok_or_else(|| AppError::NotFound("No shop at that address".into()))?
         }
+        // Including `?slug=`, which is not a shop that might exist — it is no
+        // name at all. It used to MATCH: an organisation carrying the legacy
+        // empty-string slug is precisely the one meant to have no address of
+        // its own, and a blank query handed it back, branding and all. No
+        // hostname can produce it (a first label is never empty), so this was
+        // never a wildcard enumeration hole — but a public endpoint should not
+        // answer a question nobody asked.
         (None, None) => {
             return Err(AppError::BadRequest(
                 "Name the shop, by id or by short name".into(),

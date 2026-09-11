@@ -804,3 +804,116 @@ async fn test_update_org_rejects_out_of_range_tax_rate(pool: PgPool) {
     .await;
     assert!(resp.status().is_success());
 }
+
+// ── The public brand lookup ──────────────────────────────────────────────────
+//
+// The first request a customer's browser makes, before there is any notion of a
+// session, and the only thing standing between a wildcard subdomain and a list
+// of our customers.
+
+fn brand_app(
+    pool: &PgPool,
+) -> impl std::future::Future<
+    Output = impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+> {
+    let pool = pool.clone();
+    async move {
+        test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool))
+                .app_data(web::Data::new(get_secret()))
+                .configure(routes::configure),
+        )
+        .await
+    }
+}
+
+async fn seed_shop(pool: &PgPool, name: &str, slug: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO organizations (id, name, slug, is_active) VALUES ($1, $2, $3, true)")
+        .bind(id)
+        .bind(name)
+        .bind(slug)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
+#[sqlx::test]
+async fn a_shop_is_found_by_its_short_name(pool: PgPool) {
+    let id = seed_shop(&pool, "Drops", "drops").await;
+    let app = brand_app(&pool).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/public/orgs/brand?slug=drops")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["org_id"].as_str().unwrap(), id.to_string());
+    assert_eq!(body["slug"], "drops");
+}
+
+/// A blank `?slug=` is not a shop that might exist — it is no name at all.
+///
+/// It used to MATCH. An organisation carrying the legacy empty-string slug is
+/// precisely the one meant to have no address of its own, and `?slug=` handed
+/// it back: name, branding, logo, org id. No hostname can reach it (a first
+/// label is never empty), so it was never a wildcard enumeration hole — but a
+/// public endpoint should not answer a question nobody asked.
+#[sqlx::test]
+async fn a_blank_short_name_does_not_resolve_the_shop_that_has_none(pool: PgPool) {
+    seed_shop(&pool, "Rue", "").await;
+    let app = brand_app(&pool).await;
+
+    for uri in [
+        "/public/orgs/brand?slug=",
+        "/public/orgs/brand?slug=%20",
+        "/public/orgs/brand",
+    ] {
+        let resp = test::call_service(&app, test::TestRequest::get().uri(uri).to_request()).await;
+        assert_eq!(
+            resp.status().as_u16(),
+            400,
+            "{uri} must name no shop at all, not the one with no name"
+        );
+    }
+}
+
+/// A switched-off shop and a shop that never existed answer identically.
+///
+/// A wildcard subdomain answers for every name anyone types, so a lookup that
+/// distinguished the two would be an enumeration tool for the whole customer
+/// list — type names, keep the ones that 403 instead of 404.
+#[sqlx::test]
+async fn an_inactive_shop_is_indistinguishable_from_no_shop(pool: PgPool) {
+    let id = seed_shop(&pool, "Closed", "closed").await;
+    sqlx::query("UPDATE organizations SET is_active = false WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = brand_app(&pool).await;
+
+    let mut bodies = Vec::new();
+    for uri in [
+        "/public/orgs/brand?slug=closed",
+        "/public/orgs/brand?slug=never-existed-xyz",
+    ] {
+        let resp = test::call_service(&app, test::TestRequest::get().uri(uri).to_request()).await;
+        assert_eq!(resp.status().as_u16(), 404, "{uri}");
+        bodies.push(test::read_body(resp).await);
+    }
+    assert_eq!(
+        bodies[0], bodies[1],
+        "the two answers must be byte-identical"
+    );
+}
