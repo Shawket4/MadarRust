@@ -499,22 +499,67 @@ pub fn asset_key(url: &str) -> String {
 /// which sidesteps the question of what Google does with transparency.
 pub fn logo_badge(brand: &OrgBrand, size: u32) -> Option<image::DynamicImage> {
     let logo = brand.logo_url.as_deref().and_then(read_upload)?;
-    let (br, bg, bb) = parse_hex(&brand.palette.background).unwrap_or((13, 98, 115));
+    let tint = brand
+        .logo_is_mark
+        .then_some(brand.palette.foreground.as_str());
+    // A circle's inscribed square is about 0.707 of its diameter, so anything
+    // inside 70% of the canvas survives Google's mask whatever shape it is.
+    Some(on_ground(
+        &logo,
+        &brand.palette.background,
+        tint,
+        size,
+        0.70,
+    ))
+}
+
+/// A logo centred on an OPAQUE square of the shop's own ground.
+///
+/// The square is the point. A wallet draws these in slots whose background
+/// belongs to the SYSTEM, not to the pass — a notification, a lock screen, a
+/// list row — and it picks that background itself, light or dark, without
+/// asking. A mark on transparency is therefore a coin flip: repainted in the
+/// pass's foreground so it reads on the pass, it is white, and white on a light
+/// notification is nothing at all. Carrying its own ground, it reads the same
+/// everywhere and matches the card it came from.
+///
+/// ASPECT RATIO IS PRESERVED, which is most of the work. Logos are not square:
+/// a wordmark is wide, a monogram is square, some are tall. `resize` FITS
+/// inside the box and keeps the shape; `resize_to_fill` would cover-crop it,
+/// which silently eats the ends off a wordmark — the shop's name, usually. So
+/// the artwork is fitted into `inset` of the square and centred on both axes,
+/// and a wide logo simply sits as a band across the middle, which is what it
+/// honestly is.
+///
+/// `inset` is the fraction of the square the artwork may occupy: smaller where
+/// something will mask the result to a circle, larger where it will not.
+pub fn on_ground(
+    logo: &image::DynamicImage,
+    background: &str,
+    tint: Option<&str>,
+    size: u32,
+    inset: f64,
+) -> image::DynamicImage {
+    let (br, bg, bb) = parse_hex(background).unwrap_or((13, 98, 115));
     let mut canvas = image::RgbaImage::from_pixel(size, size, image::Rgba([br, bg, bb, 255]));
 
-    // A circle's inscribed square is about 0.707 of its diameter, so anything
-    // inside 70% of the canvas survives the mask whatever shape it is.
-    let inner = (size as f64 * 0.70) as u32;
-    let logo = if brand.logo_is_mark {
-        tint_mark(&logo, &brand.palette.foreground)
-    } else {
-        logo
+    let owned;
+    let logo = match tint {
+        Some(hex) => {
+            owned = tint_mark(logo, hex);
+            &owned
+        }
+        None => logo,
     };
+
+    // `max(1)` because a 29px icon at a small inset rounds toward zero, and
+    // `resize(0, 0, …)` is a panic rather than a small picture.
+    let inner = ((size as f64 * inset) as u32).max(1);
     let fitted = logo.resize(inner, inner, image::imageops::FilterType::Lanczos3);
-    let x = ((size - fitted.width()) / 2) as i64;
-    let y = ((size - fitted.height()) / 2) as i64;
+    let x = ((size.saturating_sub(fitted.width())) / 2) as i64;
+    let y = ((size.saturating_sub(fitted.height())) / 2) as i64;
     image::imageops::overlay(&mut canvas, &fitted.to_rgba8(), x, y);
-    Some(image::DynamicImage::ImageRgba8(canvas))
+    image::DynamicImage::ImageRgba8(canvas)
 }
 
 /// The shop's photograph, cropped to a banner.

@@ -280,34 +280,38 @@ impl Default for PassBrand {
 
 /// Resize the org's logo into the image set a pass needs.
 ///
-/// Apple's sizes, and both are required: `icon` (29pt, shown in notifications
-/// and on the lock screen — a pass without it is refused outright) and `logo`
-/// (up to 160×50pt in the header). Aspect ratio is preserved for the logo and
-/// the icon is squared, because a stretched mark is worse than Madar's.
+/// Apple's sizes, and both are required: `icon` (29pt) and `logo` (up to
+/// 160x50pt in the header). They are NOT the same picture, and treating them as
+/// one is what made a blue logo arrive white.
 ///
-/// `tint` repaints a MARK so it reads on the pass. The pass's ground is derived
-/// from the logo's own dominant colour, so a logo left in its own colours is
-/// very nearly the colour it is sitting on; the foreground is the one colour
-/// already guaranteed to clear AA on that ground. Passed `None` for a logo with
-/// its background baked in, where repainting would give a solid rectangle.
+/// `logo` is drawn ON THE PASS, over the pass's own ground. A mark is repainted
+/// in the foreground so it reads there, and it keeps its transparency —
+/// giving it an opaque rectangle would look like a sticker stuck on the card.
+///
+/// `icon` is not drawn on the pass at all. iOS uses it in NOTIFICATIONS, on the
+/// lock screen and in Wallet's list, where the system supplies the background
+/// and chooses it — light or dark — without asking. A mark repainted white to
+/// read on a blue pass is then white on a white notification, which is nothing
+/// at all. So the icon carries its own ground: the shop's background colour,
+/// opaque, with the mark on top. The same thing Google's badge has always done.
+///
+/// ASPECT RATIO is preserved for both. A wordmark is wide, a monogram is
+/// square; `resize` fits and keeps the shape, where `resize_to_fill` — which
+/// the icon used to use — cover-crops, quietly eating the ends off a wordmark.
 fn images_from_logo(
     img: &image::DynamicImage,
+    background: &str,
     tint: Option<&str>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
-    let owned;
-    let img = match tint {
-        Some(hex) => {
-            owned = crate::orgs::branding::tint_mark(img, hex);
-            &owned
-        }
-        None => img,
-    };
     let mut out = Vec::with_capacity(6);
     let encode = |im: image::DynamicImage| -> Option<Vec<u8>> {
         let mut buf = std::io::Cursor::new(Vec::new());
         im.write_to(&mut buf, image::ImageFormat::Png).ok()?;
         Some(buf.into_inner())
     };
+
+    // 0.82 rather than Google's 0.70: Apple rounds the corners of this slot but
+    // does not mask it to a circle, so there is more of the square to use.
     for (name, px) in [
         ("icon.png", 29u32),
         ("icon@2x.png", 58),
@@ -315,9 +319,20 @@ fn images_from_logo(
     ] {
         out.push((
             name.to_string(),
-            encode(img.resize_to_fill(px, px, image::imageops::FilterType::Lanczos3))?,
+            encode(crate::orgs::branding::on_ground(
+                img, background, tint, px, 0.82,
+            ))?,
         ));
     }
+
+    let owned;
+    let header = match tint {
+        Some(hex) => {
+            owned = crate::orgs::branding::tint_mark(img, hex);
+            &owned
+        }
+        None => img,
+    };
     for (name, w, h) in [
         ("logo.png", 160u32, 50u32),
         ("logo@2x.png", 320, 100),
@@ -325,7 +340,7 @@ fn images_from_logo(
     ] {
         out.push((
             name.to_string(),
-            encode(img.resize(w, h, image::imageops::FilterType::Lanczos3))?,
+            encode(header.resize(w, h, image::imageops::FilterType::Lanczos3))?,
         ));
     }
     Some(out)
@@ -348,7 +363,7 @@ pub fn pass_brand(brand: &crate::orgs::branding::OrgBrand) -> PassBrand {
             let tint = brand
                 .logo_is_mark
                 .then_some(brand.palette.foreground.as_str());
-            images_from_logo(&img, tint)
+            images_from_logo(&img, &brand.palette.background, tint)
         })
         .unwrap_or(d.images);
 
@@ -1047,7 +1062,7 @@ pub(crate) mod tests {
             .unwrap();
 
         let decoded = image::load_from_memory(&png.into_inner()).unwrap();
-        let set = images_from_logo(&decoded, None).expect("a real PNG resizes");
+        let set = images_from_logo(&decoded, "#0D6273", None).expect("a real PNG resizes");
         let names: Vec<&str> = set.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(
             names,
@@ -1084,13 +1099,26 @@ pub(crate) mod tests {
             .write_to(&mut buf, image::ImageFormat::Png)
             .unwrap();
         let decoded = image::load_from_memory(&buf.into_inner()).unwrap();
-        let tinted = images_from_logo(&decoded, Some("#EFF3F4")).unwrap();
-        let icon = image::load_from_memory(&tinted[0].1).unwrap().to_rgba8();
-        let opaque = icon.pixels().find(|p| p.0[3] > 200).expect("a shape");
+        let tinted = images_from_logo(&decoded, "#0D6273", Some("#EFF3F4")).unwrap();
+        // The HEADER LOGO is the one drawn on the pass's own ground, so it is
+        // where "repainted, not left blue" is visible: transparent around a
+        // mark in the foreground colour.
+        let (_, logo_png) = tinted.iter().find(|(n, _)| n == "logo.png").unwrap();
+        let logo = image::load_from_memory(logo_png).unwrap().to_rgba8();
+        let opaque = logo.pixels().find(|p| p.0[3] > 200).expect("a shape");
         assert_eq!(
             [opaque.0[0], opaque.0[1], opaque.0[2]],
             [0xEF, 0xF3, 0xF4],
             "the mark is repainted in the pass's foreground, not left blue"
+        );
+        // The ICON carries its own ground instead, so the same mark sits on the
+        // shop's background rather than on whatever a notification supplies.
+        let icon = image::load_from_memory(&tinted[0].1).unwrap().to_rgba8();
+        assert_eq!(icon.get_pixel(0, 0).0, [0x0D, 0x62, 0x73, 255]);
+        assert!(
+            icon.pixels()
+                .any(|p| [p.0[0], p.0[1], p.0[2]] == [0xEF, 0xF3, 0xF4]),
+            "the repainted mark is still on it"
         );
 
         // A logo with its background BAKED IN is not a mark: every pixel is
@@ -1584,6 +1612,134 @@ pub(crate) mod tests {
             std::env::remove_var("LOYALTY_APPLE_CERT_PEM");
             std::env::remove_var("LOYALTY_APPLE_KEY_PEM");
             std::env::remove_var("LOYALTY_APPLE_WWDR_PEM");
+        }
+    }
+
+    // ── The icon carries its own ground ──────────────────────────────────────
+
+    /// A solid block of one colour, `w` by `h`, on full transparency around a
+    /// centred shape — a stand-in for a logo at whatever aspect ratio.
+    fn fake_logo(w: u32, h: u32) -> image::DynamicImage {
+        let mut img = image::RgbaImage::from_pixel(w, h, image::Rgba([0, 0, 0, 0]));
+        // A mark: mostly clear, with an opaque shape in the middle.
+        for y in (h / 4)..(h * 3 / 4) {
+            for x in (w / 4)..(w * 3 / 4) {
+                img.put_pixel(x, y, image::Rgba([0, 40, 200, 255]));
+            }
+        }
+        image::DynamicImage::ImageRgba8(img)
+    }
+
+    fn decode(images: &[(String, Vec<u8>)], name: &str) -> image::DynamicImage {
+        let (_, bytes) = images.iter().find(|(n, _)| n == name).expect(name);
+        image::load_from_memory(bytes).expect("valid png")
+    }
+
+    /// THE BUG THIS PINS: the icon used to be a mark repainted in the pass's
+    /// FOREGROUND and saved on transparency. That reads on the pass, whose
+    /// ground is the shop's background — but iOS draws `icon.png` in
+    /// notifications and on the lock screen, where IT picks the background. A
+    /// white mark on a light notification is nothing at all, which is how a
+    /// shop with a blue logo got no icon.
+    #[test]
+    fn every_icon_is_opaque_because_the_system_picks_what_is_behind_it() {
+        let imgs = images_from_logo(&fake_logo(512, 512), "#0D6273", Some("#EFF3F4")).unwrap();
+        for name in ["icon.png", "icon@2x.png", "icon@3x.png"] {
+            let icon = decode(&imgs, name).to_rgba8();
+            assert!(
+                icon.pixels().all(|p| p.0[3] == 255),
+                "{name} has transparent pixels; a notification would show the system's background through it"
+            );
+            // And it is the SHOP's ground, not black or white.
+            assert_eq!(
+                icon.get_pixel(0, 0).0,
+                [0x0D, 0x62, 0x73, 255],
+                "{name} corner"
+            );
+        }
+    }
+
+    /// The header logo is the opposite case: it IS drawn on the pass's own
+    /// ground, so an opaque rectangle there would look like a sticker.
+    #[test]
+    fn the_header_logo_keeps_its_transparency() {
+        let imgs = images_from_logo(&fake_logo(512, 512), "#0D6273", Some("#EFF3F4")).unwrap();
+        let logo = decode(&imgs, "logo.png").to_rgba8();
+        assert!(
+            logo.pixels().any(|p| p.0[3] == 0),
+            "the pass's own ground must show through around the mark"
+        );
+    }
+
+    /// LOGOS ARE NOT SQUARE. A wordmark is wide, a monogram is square, some are
+    /// tall — and the icon slot is square whatever arrives. Fitted and centred,
+    /// never cover-cropped: `resize_to_fill`, which this used to use, would eat
+    /// the ends off a wordmark, which is usually the shop's name.
+    #[test]
+    fn a_logo_of_any_shape_is_fitted_whole_and_centred() {
+        for (w, h, shape) in [
+            (1200, 300, "wide"),
+            (300, 1200, "tall"),
+            (512, 512, "square"),
+        ] {
+            let imgs = images_from_logo(&fake_logo(w, h), "#0D6273", None).unwrap();
+            let icon = decode(&imgs, "icon@3x.png").to_rgba8();
+            assert_eq!(
+                (icon.width(), icon.height()),
+                (87, 87),
+                "{shape} icon is square"
+            );
+
+            // The artwork is centred, so the ground is symmetric around it: the
+            // margins on opposite sides match. A cover-crop would fill one axis
+            // edge to edge and leave nothing.
+            let ground = image::Rgba([0x0D, 0x62, 0x73, 255]);
+            let row = 87 / 2;
+            let left = (0..87)
+                .take_while(|x| *icon.get_pixel(*x, row) == ground)
+                .count();
+            let right = (0..87)
+                .rev()
+                .take_while(|x| *icon.get_pixel(*x, row) == ground)
+                .count();
+            let col = 87 / 2;
+            let top = (0..87)
+                .take_while(|y| *icon.get_pixel(col, *y) == ground)
+                .count();
+            let bottom = (0..87)
+                .rev()
+                .take_while(|y| *icon.get_pixel(col, *y) == ground)
+                .count();
+            assert!(
+                left.abs_diff(right) <= 1,
+                "{shape} not centred horizontally"
+            );
+            assert!(top.abs_diff(bottom) <= 1, "{shape} not centred vertically");
+
+            // A wide logo keeps its width and gains margin above and below;
+            // a tall one the reverse. Either way nothing is cropped away.
+            if shape == "wide" {
+                assert!(
+                    top > left,
+                    "a wide logo should sit as a band, not fill the square"
+                );
+            }
+            if shape == "tall" {
+                assert!(left > top, "a tall logo should sit as a column");
+            }
+        }
+    }
+
+    /// Madar's own fallback icons ship in the binary, and had the same defect —
+    /// so an unbranded shop's pass was invisible in notifications too.
+    #[test]
+    fn the_built_in_fallback_icons_are_opaque_too() {
+        for (name, bytes) in PASS_IMAGES.iter().filter(|(n, _)| n.starts_with("icon")) {
+            let img = image::load_from_memory(bytes).expect(name).to_rgba8();
+            assert!(
+                img.pixels().all(|p| p.0[3] == 255),
+                "{name} ships with transparency"
+            );
         }
     }
 }
