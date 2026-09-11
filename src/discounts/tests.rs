@@ -1,4 +1,5 @@
 use actix_web::{App, test, web};
+use rust_decimal_macros::dec;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -87,7 +88,7 @@ async fn test_discounts_crud_success(pool: PgPool) {
             org_id,
             name: "Summer Sale".into(),
             dtype: "percentage".into(),
-            value: 20,
+            value: dec!(0.20),
             is_active: None, // defaults to true
         })
         .to_request();
@@ -96,7 +97,7 @@ async fn test_discounts_crud_success(pool: PgPool) {
     let discount: Discount = test::read_body_json(resp_create).await;
     assert_eq!(discount.name, "Summer Sale");
     assert_eq!(discount.dtype, "percentage");
-    assert_eq!(discount.value, 20);
+    assert_eq!(discount.value, dec!(0.20));
     assert!(discount.is_active);
 
     // 2. List Discounts
@@ -117,7 +118,7 @@ async fn test_discounts_crud_success(pool: PgPool) {
             name_translations: None,
             name: Some("Winter Sale".into()),
             dtype: Some("fixed".into()),
-            value: Some(500), // e.g. $5.00
+            value: Some(dec!(500)), // e.g. $5.00
             is_active: Some(false),
         })
         .to_request();
@@ -126,7 +127,7 @@ async fn test_discounts_crud_success(pool: PgPool) {
     let updated: Discount = test::read_body_json(resp_update).await;
     assert_eq!(updated.name, "Winter Sale");
     assert_eq!(updated.dtype, "fixed");
-    assert_eq!(updated.value, 500);
+    assert_eq!(updated.value, dec!(500));
     assert!(!updated.is_active);
 
     // 4. Delete Discount
@@ -171,7 +172,7 @@ async fn test_discounts_validation_failures(pool: PgPool) {
             org_id,
             name: "Sale".into(),
             dtype: "magic".into(), // Invalid
-            value: 20,
+            value: dec!(0.20),
             is_active: None,
         })
         .to_request();
@@ -187,7 +188,7 @@ async fn test_discounts_validation_failures(pool: PgPool) {
             org_id,
             name: "Sale".into(),
             dtype: "fixed".into(),
-            value: -500, // Invalid
+            value: dec!(-500), // Invalid
             is_active: None,
         })
         .to_request();
@@ -203,7 +204,7 @@ async fn test_discounts_validation_failures(pool: PgPool) {
             org_id,
             name: "Sale".into(),
             dtype: "percentage".into(),
-            value: 150, // Invalid (> 100)
+            value: dec!(1.5), // Invalid: a fraction, so > 1 is over 100%
             is_active: None,
         })
         .to_request();
@@ -238,7 +239,7 @@ async fn test_discounts_wrong_org(pool: PgPool) {
             org_id: org_id_b,
             name: "Sale".into(),
             dtype: "percentage".into(),
-            value: 10,
+            value: dec!(0.10),
             is_active: None,
         })
         .to_request();
@@ -252,4 +253,55 @@ async fn test_discounts_wrong_org(pool: PgPool) {
         .to_request();
     let resp_list = test::call_service(&app, req_list).await;
     assert_eq!(resp_list.status().as_u16(), 403); // Forbidden
+}
+
+/// The convention, enforced by the database and not only by the handler.
+///
+/// A percentage is a FRACTION here, exactly like `tax_rate` — and the reason
+/// this test exists is that two conventions for "a percentage" inside one money
+/// engine is how a shop ends up typing 14 into a field that wanted 0.14. That
+/// already happened once, on the tax rate, and cost a day to find. A CHECK
+/// constraint means a row written by a migration, a fixture or a psql session
+/// cannot reintroduce the old convention behind the API's back.
+#[sqlx::test]
+async fn the_database_refuses_a_percentage_that_is_not_a_fraction(pool: PgPool) {
+    let org_id = seed_org(&pool).await;
+
+    let insert = |value: rust_decimal::Decimal| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO discounts (org_id, name, type, value, is_active) \
+                 VALUES ($1, 'D', 'percentage', $2, true)",
+            )
+            .bind(org_id)
+            .bind(value)
+            .execute(&pool)
+            .await
+        }
+    };
+
+    assert!(
+        insert(dec!(14)).await.is_err(),
+        "14 is 1400% — the old convention must not be storable"
+    );
+    assert!(insert(dec!(0.14)).await.is_ok(), "0.14 is 14%");
+    assert!(
+        insert(dec!(0.125)).await.is_ok(),
+        "12.5% — inexpressible in the integer column this replaced"
+    );
+}
+
+/// A fixed discount is still minor units, and still may not go negative.
+#[sqlx::test]
+async fn the_database_refuses_a_negative_fixed_discount(pool: PgPool) {
+    let org_id = seed_org(&pool).await;
+    let res = sqlx::query(
+        "INSERT INTO discounts (org_id, name, type, value, is_active) \
+         VALUES ($1, 'D', 'fixed', -500, true)",
+    )
+    .bind(org_id)
+    .execute(&pool)
+    .await;
+    assert!(res.is_err());
 }

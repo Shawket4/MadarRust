@@ -1,5 +1,7 @@
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use chrono::{DateTime, Utc};
+use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::{Decimal, RoundingStrategy};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -20,7 +22,9 @@ pub struct Discount {
     #[schema(value_type = Object)]
     pub name_translations: serde_json::Value,
     pub dtype: String,
-    pub value: i32,
+    /// Polymorphic by `dtype`: a FRACTION for `percentage` (0.14 = 14%, like
+    /// every other rate in this schema), or minor units for `fixed`.
+    pub value: Decimal,
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -39,7 +43,7 @@ pub struct CreateDiscountRequest {
     #[schema(value_type = Option<Object>)]
     pub name_translations: Option<serde_json::Value>,
     pub dtype: String,
-    pub value: i32,
+    pub value: Decimal,
     pub is_active: Option<bool>,
 }
 
@@ -49,7 +53,7 @@ pub struct UpdateDiscountRequest {
     #[schema(value_type = Option<Object>)]
     pub name_translations: Option<serde_json::Value>,
     pub dtype: Option<String>,
-    pub value: Option<i32>,
+    pub value: Option<Decimal>,
     pub is_active: Option<bool>,
 }
 
@@ -261,13 +265,16 @@ fn validate_dtype(dt: &str) -> Result<(), AppError> {
     }
 }
 
-fn validate_value(value: i32, dtype: &str) -> Result<(), AppError> {
-    if value < 0 {
+/// A percentage is a fraction, the same as `tax_rate` and every other rate
+/// here: `0.14` is 14%. A fixed discount is an amount in minor units. The 400
+/// says which, because "value must be 0-1" on its own reads like a bug.
+fn validate_value(value: Decimal, dtype: &str) -> Result<(), AppError> {
+    if value < Decimal::ZERO {
         return Err(AppError::BadRequest("value must be >= 0".into()));
     }
-    if dtype == "percentage" && value > 100 {
+    if dtype == "percentage" && value > Decimal::ONE {
         return Err(AppError::BadRequest(
-            "percentage value must be 0-100".into(),
+            "a percentage discount is a fraction between 0 and 1 (0.14 = 14%)".into(),
         ));
     }
     Ok(())
@@ -279,58 +286,78 @@ fn validate_value(value: i32, dtype: &str) -> Result<(), AppError> {
 /// subtotal. Always clamped to `[0, subtotal]` so a malformed discount can never
 /// drive a total negative or inflated. Single source of truth for both the POS
 /// order path and delivery-order intake/finalize.
-pub fn calc_discount(dtype: Option<&str>, value: i32, subtotal: i32) -> i32 {
+pub fn calc_discount(dtype: Option<&str>, value: Decimal, subtotal: i32) -> i32 {
     let d = match dtype {
-        Some("percentage") => (subtotal as f64 * value as f64 / 100.0).round() as i32,
-        Some("fixed") => value.min(subtotal),
+        // A FRACTION, like every other rate in this schema: 0.14 is 14%. It was
+        // stored as `14` and divided by 100 at each use site, which made it the
+        // one percentage in the money engine that did not look like the others —
+        // and an `integer` column could not express 12.5% at all.
+        Some("percentage") => round_minor(Decimal::from(subtotal) * value),
+        // Minor units, and never more than the bill.
+        Some("fixed") => round_minor(value).min(subtotal),
         _ => 0,
     };
     d.clamp(0, subtotal)
 }
 
+/// Half-away-from-zero to the whole minor unit — the same rounding the tax
+/// engine uses, so the two halves of one bill round the same way.
+fn round_minor(d: Decimal) -> i32 {
+    d.round_dp_with_strategy(0, RoundingStrategy::MidpointAwayFromZero)
+        .to_i32()
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod calc_discount_tests {
     use super::calc_discount;
+    use rust_decimal_macros::dec;
 
     #[test]
     fn percentage_of_subtotal() {
-        assert_eq!(calc_discount(Some("percentage"), 10, 1000), 100);
+        assert_eq!(calc_discount(Some("percentage"), dec!(0.10), 1000), 100);
+    }
+
+    #[test]
+    fn a_fractional_percentage_is_expressible() {
+        // The reason for the fraction: `integer` could not hold 12.5% at all.
+        assert_eq!(calc_discount(Some("percentage"), dec!(0.125), 1000), 125);
     }
 
     #[test]
     fn percentage_rounds_half_away_from_zero() {
-        // 105 × 10 / 100 = 10.5 → 11.
-        assert_eq!(calc_discount(Some("percentage"), 10, 105), 11);
+        // 105 x 0.10 = 10.5 -> 11.
+        assert_eq!(calc_discount(Some("percentage"), dec!(0.10), 105), 11);
     }
 
     #[test]
-    fn percentage_over_100_is_capped_at_subtotal() {
-        assert_eq!(calc_discount(Some("percentage"), 150, 1000), 1000);
+    fn percentage_over_one_is_capped_at_subtotal() {
+        assert_eq!(calc_discount(Some("percentage"), dec!(1.5), 1000), 1000);
     }
 
     #[test]
     fn negative_percentage_clamps_to_zero() {
-        assert_eq!(calc_discount(Some("percentage"), -10, 1000), 0);
+        assert_eq!(calc_discount(Some("percentage"), dec!(-0.10), 1000), 0);
     }
 
     #[test]
     fn fixed_is_taken_verbatim() {
-        assert_eq!(calc_discount(Some("fixed"), 300, 1000), 300);
+        assert_eq!(calc_discount(Some("fixed"), dec!(300), 1000), 300);
     }
 
     #[test]
     fn fixed_larger_than_subtotal_caps_at_subtotal() {
-        assert_eq!(calc_discount(Some("fixed"), 5000, 1000), 1000);
+        assert_eq!(calc_discount(Some("fixed"), dec!(5000), 1000), 1000);
     }
 
     #[test]
     fn negative_fixed_clamps_to_zero() {
-        assert_eq!(calc_discount(Some("fixed"), -50, 1000), 0);
+        assert_eq!(calc_discount(Some("fixed"), dec!(-50), 1000), 0);
     }
 
     #[test]
     fn unknown_type_is_no_discount() {
-        assert_eq!(calc_discount(Some("bogus"), 50, 1000), 0);
-        assert_eq!(calc_discount(None, 50, 1000), 0);
+        assert_eq!(calc_discount(Some("bogus"), dec!(0.50), 1000), 0);
+        assert_eq!(calc_discount(None, dec!(0.50), 1000), 0);
     }
 }

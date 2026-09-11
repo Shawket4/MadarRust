@@ -532,7 +532,7 @@ pub struct FinalizeCtx<'a> {
     /// when none; `total_amount == subtotal - discount_amount + delivery_fee`.
     pub discount_id: Option<Uuid>,
     pub discount_type: Option<&'a str>,
-    pub discount_value: i32,
+    pub discount_value: rust_decimal::Decimal,
     pub discount_amount: i32,
     pub customer_name: Option<&'a str>,
     pub notes: Option<&'a str>,

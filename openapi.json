@@ -47084,8 +47084,8 @@
             "format": "uuid"
           },
           "value": {
-            "type": "integer",
-            "format": "int32"
+            "type": "number",
+            "format": "double"
           }
         }
       },
@@ -47421,10 +47421,10 @@
           },
           "discount_value": {
             "type": [
-              "integer",
+              "number",
               "null"
             ],
-            "format": "int32"
+            "format": "double"
           },
           "guest_count": {
             "type": [
@@ -47619,10 +47619,10 @@
           },
           "discount_value": {
             "type": [
-              "integer",
+              "number",
               "null"
             ],
-            "format": "int32"
+            "format": "double"
           },
           "idempotency_key": {
             "type": [
@@ -48779,9 +48779,9 @@
             "type": "object"
           },
           "value": {
-            "type": "integer",
-            "format": "int32",
-            "description": "Percentage points (0-100) for `percentage`; piastres for `fixed`."
+            "type": "number",
+            "format": "double",
+            "description": "A FRACTION for `percentage` (0.14 = 14%, like every other rate here);\npiastres for `fixed`."
           }
         }
       },
@@ -49135,8 +49135,8 @@
             ]
           },
           "discount_value": {
-            "type": "integer",
-            "format": "int32"
+            "type": "number",
+            "format": "double"
           },
           "extra_prep_minutes": {
             "type": "integer",
@@ -49692,8 +49692,9 @@
             "format": "date-time"
           },
           "value": {
-            "type": "integer",
-            "format": "int32"
+            "type": "number",
+            "format": "double",
+            "description": "Polymorphic by `dtype`: a FRACTION for `percentage` (0.14 = 14%, like\nevery other rate in this schema), or minor units for `fixed`."
           }
         }
       },
@@ -53622,8 +53623,8 @@
             ]
           },
           "discount_value": {
-            "type": "integer",
-            "format": "int32"
+            "type": "number",
+            "format": "double"
           },
           "id": {
             "type": "string",
@@ -58683,10 +58684,10 @@
           },
           "discount_value": {
             "type": [
-              "integer",
+              "number",
               "null"
             ],
-            "format": "int32"
+            "format": "double"
           },
           "loyalty_customer_id": {
             "type": [
@@ -61430,10 +61431,10 @@
           },
           "value": {
             "type": [
-              "integer",
+              "number",
               "null"
             ],
-            "format": "int32"
+            "format": "double"
           }
         }
       },

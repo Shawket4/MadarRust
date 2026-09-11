@@ -2,6 +2,7 @@
 use actix_web::{App, test, web};
 use chrono::Utc;
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -466,7 +467,7 @@ async fn test_create_order_with_addons_and_discount(pool: PgPool) {
         customer_name: None,
         notes: None,
         discount_type: Some("fixed".to_string()),
-        discount_value: Some(50),
+        discount_value: Some(dec!(50)),
         discount_id: None,
         amount_tendered: None,
         tip_amount: None,
@@ -1432,16 +1433,28 @@ fn simple_order(branch_id: Uuid, shift_id: Uuid, menu_item_id: Uuid) -> CreateOr
     }
 }
 
-async fn seed_discount(pool: &PgPool, org_id: Uuid, dtype: &str, value: i32) -> Uuid {
+async fn seed_discount(
+    pool: &PgPool,
+    org_id: Uuid,
+    dtype: &str,
+    value: rust_decimal::Decimal,
+) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO discounts (id, org_id, name, type, value, is_active) VALUES ($1,$2,'D',$3::discount_type,$4,true)")
         .bind(id).bind(org_id).bind(dtype).bind(value).execute(pool).await.unwrap();
     id
 }
 
-/// V15: a percentage discount > 100 must clamp to subtotal (no negative total/tax).
+/// A percentage over 100% — a fraction above 1 — is REFUSED at intake.
+///
+/// `calc_discount` still clamps (the engine must never produce a negative
+/// total), but under the fraction convention an out-of-range value is no longer
+/// an absurdity to absorb quietly: `14` is exactly what a till still speaking
+/// the old "14 means 14%" convention sends, and clamping it would hand over the
+/// whole bill. The clamp stays as the engine's floor; the 400 is what a stale
+/// client actually needs to hear.
 #[sqlx::test]
-async fn test_discount_percentage_over_100_is_clamped(pool: PgPool) {
+async fn test_discount_percentage_over_one_is_refused(pool: PgPool) {
     let app = order_app!(pool);
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
@@ -1454,7 +1467,8 @@ async fn test_discount_percentage_over_100_is_clamped(pool: PgPool) {
 
     let mut req_body = simple_order(branch_id, shift_id, menu_item_id);
     req_body.discount_type = Some("percentage".to_string());
-    req_body.discount_value = Some(150);
+    // The old convention's "14%".
+    req_body.discount_value = Some(dec!(14));
 
     let resp = test::call_service(
         &app,
@@ -1465,14 +1479,7 @@ async fn test_discount_percentage_over_100_is_clamped(pool: PgPool) {
             .to_request(),
     )
     .await;
-    assert!(resp.status().is_success());
-    let o: OrderFull = test::read_body_json(resp).await;
-    assert_eq!(
-        o.order.discount_amount, 500,
-        "150% discount clamps to subtotal"
-    );
-    assert_eq!(o.order.tax_amount, 0, "tax must not go negative");
-    assert_eq!(o.order.total_amount, 0, "total must not go negative");
+    assert_eq!(resp.status().as_u16(), 400);
 }
 
 /// V15: a negative discount_value must clamp to 0 (no inflated total).
@@ -1490,7 +1497,7 @@ async fn test_discount_negative_value_is_clamped(pool: PgPool) {
 
     let mut req_body = simple_order(branch_id, shift_id, menu_item_id);
     req_body.discount_type = Some("fixed".to_string());
-    req_body.discount_value = Some(-100);
+    req_body.discount_value = Some(dec!(-100));
 
     let resp = test::call_service(
         &app,
@@ -1522,7 +1529,7 @@ async fn test_discount_id_must_belong_to_caller_org(pool: PgPool) {
     let menu_item_id = seed_menu_item(&pool, org_a, cat_id).await;
 
     // A discount belonging to ORG B.
-    let other_discount = seed_discount(&pool, org_b, "fixed", 100).await;
+    let other_discount = seed_discount(&pool, org_b, "fixed", dec!(100)).await;
 
     let mut req_body = simple_order(branch_id, shift_id, menu_item_id);
     req_body.discount_id = Some(other_discount);
@@ -1853,7 +1860,7 @@ async fn test_summary_excludes_voided_discounts(pool: PgPool) {
     for _ in 0..2 {
         let mut body = simple_order(branch_id, shift_id, menu_item_id);
         body.discount_type = Some("fixed".to_string());
-        body.discount_value = Some(100);
+        body.discount_value = Some(dec!(100));
         let resp = test::call_service(
             &app,
             test::TestRequest::post()
@@ -2033,7 +2040,7 @@ async fn test_percentage_discount_is_rounded_not_truncated(pool: PgPool) {
 
     let mut body = simple_order(branch_id, shift_id, item);
     body.discount_type = Some("percentage".to_string());
-    body.discount_value = Some(10);
+    body.discount_value = Some(dec!(0.10));
     let resp = test::call_service(
         &app,
         test::TestRequest::post()
@@ -2048,7 +2055,7 @@ async fn test_percentage_discount_is_rounded_not_truncated(pool: PgPool) {
     assert_eq!(o.order.subtotal, 2995);
     assert_eq!(
         o.order.discount_amount, 300,
-        "10% of 2995 = 299.5 must round to 300"
+        "0.10 of 2995 = 299.5 must round to 300"
     );
 }
 

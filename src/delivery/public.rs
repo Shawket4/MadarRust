@@ -337,8 +337,9 @@ pub struct DeliveryMenuDiscount {
     pub name_translations: serde_json::Value,
     /// "percentage" | "fixed".
     pub dtype: String,
-    /// Percentage points (0-100) for `percentage`; piastres for `fixed`.
-    pub value: i32,
+    /// A FRACTION for `percentage` (0.14 = 14%, like every other rate here);
+    /// piastres for `fixed`.
+    pub value: rust_decimal::Decimal,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -392,24 +393,32 @@ pub async fn public_menu(
 
     // The channel's active discount (customer-facing), if any.
     let discount_col = channel_discount_col(&query.channel);
-    let discount: Option<DeliveryMenuDiscount> =
-        sqlx::query_as::<_, (Uuid, String, serde_json::Value, String, i32)>(&format!(
-            "SELECT d.id, d.name, d.name_translations, d.type::text, d.value \
+    let discount: Option<DeliveryMenuDiscount> = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            serde_json::Value,
+            String,
+            rust_decimal::Decimal,
+        ),
+    >(&format!(
+        "SELECT d.id, d.name, d.name_translations, d.type::text, d.value \
              FROM branch_delivery_settings s JOIN discounts d ON d.id = s.{discount_col} \
              WHERE s.branch_id = $1 AND d.is_active = true"
-        ))
-        .bind(branch_id)
-        .fetch_optional(pool.get_ref())
-        .await?
-        .map(
-            |(id, name, name_translations, dtype, value)| DeliveryMenuDiscount {
-                id,
-                name,
-                name_translations,
-                dtype,
-                value,
-            },
-        );
+    ))
+    .bind(branch_id)
+    .fetch_optional(pool.get_ref())
+    .await?
+    .map(
+        |(id, name, name_translations, dtype, value)| DeliveryMenuDiscount {
+            id,
+            name,
+            name_translations,
+            dtype,
+            value,
+        },
+    );
 
     let categories: Vec<DeliveryMenuCategory> =
         sqlx::query_as::<_, (Uuid, String, serde_json::Value, Option<String>)>(
@@ -1439,11 +1448,11 @@ pub async fn create_delivery_order(
     let (discount_id, discount_type, discount_value, discount_amount): (
         Option<Uuid>,
         Option<String>,
-        i32,
+        rust_decimal::Decimal,
         i32,
     ) = match configured_discount {
         Some(did) => {
-            let row: Option<(String, i32)> = sqlx::query_as(
+            let row: Option<(String, rust_decimal::Decimal)> = sqlx::query_as(
                 "SELECT type::text, value FROM discounts WHERE id = $1 AND is_active = true",
             )
             .bind(did)
@@ -1455,10 +1464,10 @@ pub async fn create_delivery_order(
                         crate::discounts::handlers::calc_discount(Some(&dtype), dvalue, subtotal);
                     (Some(did), Some(dtype), dvalue, amt)
                 }
-                None => (None, None, 0, 0),
+                None => (None, None, rust_decimal::Decimal::ZERO, 0),
             }
         }
-        None => (None, None, 0, 0),
+        None => (None, None, rust_decimal::Decimal::ZERO, 0),
     };
 
     let total = subtotal - discount_amount + delivery_fee;

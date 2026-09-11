@@ -50,7 +50,7 @@ pub struct CreateOpenTicketRequest {
     #[serde(default)]
     pub discount_type: Option<String>,
     #[serde(default)]
-    pub discount_value: Option<i32>,
+    pub discount_value: Option<rust_decimal::Decimal>,
 }
 
 #[derive(Deserialize, Serialize, ToSchema)]
@@ -70,7 +70,7 @@ pub struct SettleOpenTicketRequest {
     #[serde(default)]
     pub discount_type: Option<String>,
     #[serde(default)]
-    pub discount_value: Option<i32>,
+    pub discount_value: Option<rust_decimal::Decimal>,
     #[serde(default)]
     pub tip_amount: Option<i32>,
     #[serde(default)]
@@ -199,6 +199,18 @@ pub(crate) async fn create_open_ticket_inner(
             let view = open_ticket_view(pool.get_ref(), id).await?;
             return Ok(HttpResponse::Ok().json(view));
         }
+    }
+
+    // A percentage is a fraction here, like the tax rate. Checked at the FIRE
+    // rather than only at the settle: a waiter's discount that the till will
+    // refuse hours later, with the party waiting to pay, is a bad place to
+    // discover a stale client.
+    if body.discount_type.as_deref() == Some("percentage")
+        && body.discount_value.unwrap_or(rust_decimal::Decimal::ZERO) > rust_decimal::Decimal::ONE
+    {
+        return Err(AppError::BadRequest(
+            "discount_value for a percentage is a fraction between 0 and 1 (0.14 = 14%)".into(),
+        ));
     }
 
     let org_id: Uuid =
@@ -722,7 +734,7 @@ pub(crate) async fn settle_open_ticket_inner(
         Option<String>,
         Option<Uuid>,
         Option<String>,
-        Option<i32>,
+        Option<rust_decimal::Decimal>,
         Uuid,
     )> = sqlx::query_as(
         "SELECT branch_id, org_id, status::text, order_id, customer_name, notes, \

@@ -149,7 +149,7 @@ pub struct Order {
     pub payment_legs: Vec<PaymentLeg>,
     pub subtotal: i32,
     pub discount_type: Option<String>,
-    pub discount_value: i32,
+    pub discount_value: Decimal,
     pub discount_amount: i32,
     pub tax_amount: i32,
     /// The service charge on this bill; `0` where the branch charges none.
@@ -391,7 +391,7 @@ pub struct CreateOrderRequest {
     pub customer_name: Option<String>,
     pub notes: Option<String>,
     pub discount_type: Option<String>,
-    pub discount_value: Option<i32>,
+    pub discount_value: Option<Decimal>,
     pub discount_id: Option<Uuid>,
     pub amount_tendered: Option<i32>,
     pub tip_amount: Option<i32>,
@@ -748,6 +748,7 @@ pub(crate) async fn create_order_inner(
     validate_payment_method(pool.get_ref(), org_id, &body.payment_method).await?;
     if let Some(dt) = &body.discount_type {
         validate_discount_type(dt)?;
+        validate_discount_value(dt, body.discount_value.unwrap_or(Decimal::ZERO))?;
     }
     if let Some(tpm) = &body.tip_payment_method {
         validate_payment_method(pool.get_ref(), org_id, tpm).await?;
@@ -767,7 +768,7 @@ pub(crate) async fn create_order_inner(
 
     let (resolved_discount_type, resolved_discount_value) = if let Some(disc_id) = body.discount_id
     {
-        let row: Option<(String, i32)> = sqlx::query_as(
+        let row: Option<(String, Decimal)> = sqlx::query_as(
                 "SELECT type::text, value FROM discounts WHERE id = $1 AND org_id = $2 AND is_active = true"
             )
             .bind(disc_id)
@@ -783,7 +784,10 @@ pub(crate) async fn create_order_inner(
             }
         }
     } else {
-        (body.discount_type.clone(), body.discount_value.unwrap_or(0))
+        (
+            body.discount_type.clone(),
+            body.discount_value.unwrap_or(Decimal::ZERO),
+        )
     };
 
     // The branch's effective policy: its own settings where it overrides, the
@@ -3237,6 +3241,22 @@ fn validate_discount_type(dt: &str) -> Result<(), AppError> {
             "discount_type must be 'percentage' or 'fixed'".into(),
         )),
     }
+}
+
+/// A percentage on the wire is a FRACTION, like every other rate here.
+///
+/// `calc_discount` clamps, so an out-of-range value can never drive a total
+/// negative — but under the fraction convention the clamp is no longer a safe
+/// silence: a till still speaking the old convention sends `14` for 14%, which
+/// clamps to the WHOLE subtotal and gives the bill away. A stale client has to
+/// hear about it, so this is a 400 and not a quiet correction.
+fn validate_discount_value(dt: &str, value: Decimal) -> Result<(), AppError> {
+    if dt == "percentage" && value > Decimal::ONE {
+        return Err(AppError::BadRequest(
+            "discount_value for a percentage is a fraction between 0 and 1 (0.14 = 14%)".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_void_reason(reason: &str) -> Result<(), AppError> {

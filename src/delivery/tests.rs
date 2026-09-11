@@ -284,6 +284,7 @@ mod it {
     use actix_http::Request;
     use actix_web::dev::{Service, ServiceResponse};
     use actix_web::{App, http::StatusCode, test, web};
+    use rust_decimal_macros::dec;
     use serde_json::{Value, json};
     use sqlx::PgPool;
     use uuid::Uuid;
@@ -424,7 +425,12 @@ mod it {
         .await
         .unwrap();
     }
-    async fn seed_discount(pool: &PgPool, org: Uuid, dtype: &str, value: i32) -> Uuid {
+    async fn seed_discount(
+        pool: &PgPool,
+        org: Uuid,
+        dtype: &str,
+        value: rust_decimal::Decimal,
+    ) -> Uuid {
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO discounts (id, org_id, name, type, value, is_active) VALUES ($1,$2,'D',$3::discount_type,$4,true)")
             .bind(id)
@@ -1408,7 +1414,7 @@ mod it {
         seed_shift(&pool, branch, teller).await;
         let item = seed_item(&pool, org, 500).await;
         seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
-        let disc = seed_discount(&pool, org, "percentage", 10).await;
+        let disc = seed_discount(&pool, org, "percentage", dec!(0.10)).await;
         set_in_mall_discount(&pool, branch, Some(disc)).await;
 
         let app = app!(&pool);
@@ -1428,7 +1434,7 @@ mod it {
         assert_eq!(b["subtotal"], 1000);
         assert_eq!(b["discount_amount"], 100); // 10% of 1000
         assert_eq!(b["discount_type"], "percentage");
-        assert_eq!(b["discount_value"], 10);
+        assert_eq!(b["discount_value"], 0.10);
         assert_eq!(b["delivery_fee"], 300); // fee always charged in full
         assert_eq!(b["total"], 1200); // 1000 - 100 + 300
         assert_eq!(b["discount_id"].as_str().unwrap(), disc.to_string());
@@ -1443,7 +1449,7 @@ mod it {
         seed_shift(&pool, branch, teller).await;
         let item = seed_item(&pool, org, 500).await;
         seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
-        let disc = seed_discount(&pool, org, "fixed", 150).await;
+        let disc = seed_discount(&pool, org, "fixed", dec!(150)).await;
         set_in_mall_discount(&pool, branch, Some(disc)).await;
 
         let app = app!(&pool);
@@ -1473,7 +1479,7 @@ mod it {
         seed_shift(&pool, branch, teller).await;
         let item = seed_item(&pool, org, 500).await;
         seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
-        let disc = seed_discount(&pool, org, "percentage", 10).await;
+        let disc = seed_discount(&pool, org, "percentage", dec!(0.10)).await;
         set_in_mall_discount(&pool, branch, Some(disc)).await;
         // Deactivate AFTER configuring — intake must honor only active discounts.
         sqlx::query("UPDATE discounts SET is_active=false WHERE id=$1")
@@ -1512,7 +1518,7 @@ mod it {
         seed_settings(&pool, branch, true, false, 300).await;
         let item = seed_item(&pool, org, 500).await;
         seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
-        let disc = seed_discount(&pool, org, "percentage", 10).await;
+        let disc = seed_discount(&pool, org, "percentage", dec!(0.10)).await;
         set_in_mall_discount(&pool, branch, Some(disc)).await;
 
         let id = place_in_mall_order(&pool, branch, item, 2).await;
@@ -1540,7 +1546,13 @@ mod it {
         let order_id = b["order_id"].as_str().unwrap().to_string();
 
         // The real order carries the frozen discount, fee untouched.
-        let (sub, dval, damt, tot, dtype): (i32, i32, i32, i32, Option<String>) = sqlx::query_as(
+        let (sub, dval, damt, tot, dtype): (
+            i32,
+            rust_decimal::Decimal,
+            i32,
+            i32,
+            Option<String>,
+        ) = sqlx::query_as(
             "SELECT subtotal, discount_value, discount_amount, total_amount, discount_type::text FROM orders WHERE id=$1",
         )
         .bind(Uuid::parse_str(&order_id).unwrap())
@@ -1548,7 +1560,7 @@ mod it {
         .await
         .unwrap();
         assert_eq!(sub, 1000);
-        assert_eq!(dval, 10);
+        assert_eq!(dval, dec!(0.10));
         assert_eq!(damt, 100);
         // 1000 less the 10% discount = 900, taxed at 14% = 126, plus the fee.
         // Tax follows the discount rather than preceding it.
@@ -1579,7 +1591,7 @@ mod it {
         let token = admin_token(admin, org);
         let app = app!(&pool);
 
-        let inactive = seed_discount(&pool, org, "percentage", 10).await;
+        let inactive = seed_discount(&pool, org, "percentage", dec!(0.10)).await;
         sqlx::query("UPDATE discounts SET is_active=false WHERE id=$1")
             .bind(inactive)
             .execute(&pool)
@@ -1601,7 +1613,7 @@ mod it {
         );
 
         let org2 = seed_org(&pool).await;
-        let foreign = seed_discount(&pool, org2, "fixed", 50).await;
+        let foreign = seed_discount(&pool, org2, "fixed", dec!(50)).await;
         let body2 = json!({
             "branch_id": branch, "in_mall_enabled": true, "outside_enabled": false,
             "in_mall_fee": 0, "prep_time_minutes": 20, "in_mall_discount_id": foreign,
@@ -1626,7 +1638,7 @@ mod it {
         seed_settings(&pool, branch, true, false, 0).await;
         seed_shift(&pool, branch, teller).await;
         let _item = seed_item(&pool, org, 500).await;
-        let disc = seed_discount(&pool, org, "percentage", 15).await;
+        let disc = seed_discount(&pool, org, "percentage", dec!(0.15)).await;
         set_in_mall_discount(&pool, branch, Some(disc)).await;
 
         let app = app!(&pool);
@@ -1638,7 +1650,7 @@ mod it {
         .await;
         assert_eq!(st, StatusCode::OK, "{b}");
         assert_eq!(b["discount"]["dtype"], "percentage");
-        assert_eq!(b["discount"]["value"], 15);
+        assert_eq!(b["discount"]["value"], 0.15);
         assert_eq!(b["discount"]["id"].as_str().unwrap(), disc.to_string());
     }
 

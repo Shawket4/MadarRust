@@ -45,7 +45,7 @@ pub struct DeliveryOrder {
     pub discount_id: Option<Uuid>,
     pub discount_type: Option<String>,
     #[serde(default)]
-    pub discount_value: i32,
+    pub discount_value: rust_decimal::Decimal,
     #[serde(default)]
     pub discount_amount: i32,
     /// Extra prep minutes the teller added on top of the branch base (multiples of 5).
