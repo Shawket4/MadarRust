@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use super::availability::slot_starts;
 use super::handlers::{
-    CreateBookingRequest, UpdateBookingRequest, cancel_inner, create_booking_inner,
+    Cancelled, CreateBookingRequest, UpdateBookingRequest, cancel_inner, create_booking_inner,
     day_availability, service_today, update_booking_inner,
 };
 use super::model::{BookingView, booking_view, booking_view_by_token};
@@ -425,17 +425,20 @@ pub async fn cancel_public_booking(
     token: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
     let cur = by_token(pool.get_ref(), &token).await?;
-    if cur.status != "confirmed" {
-        return Err(AppError::Conflict(format!(
-            "This booking is already {}",
-            cur.status
-        )));
-    }
-    cancel_inner(pool.get_ref(), cur.id, "guest", None).await?;
-    publish_booking(pool.get_ref(), hub.get_ref(), "booking.changed", cur.id).await;
-    let view = booking_view(pool.get_ref(), cur.id)
-        .await?
-        .ok_or(AppError::Internal)?;
-    notify(pool.get_ref(), &view, Kind::Cancelled).await;
+    // A guest has no hand on the floor, so a seated party's booking is the
+    // venue's to cancel; `cancel_inner` says so. A second tap on a booking
+    // that is already cancelled is not an error — it is the same wish, already
+    // granted, and gets the same page back.
+    let view = match cancel_inner(pool.get_ref(), cur.id, "guest", None, None).await? {
+        Cancelled::Done { .. } => {
+            publish_booking(pool.get_ref(), hub.get_ref(), "booking.changed", cur.id).await;
+            let view = booking_view(pool.get_ref(), cur.id)
+                .await?
+                .ok_or(AppError::Internal)?;
+            notify(pool.get_ref(), &view, Kind::Cancelled).await;
+            view
+        }
+        Cancelled::Already => cur,
+    };
     Ok(HttpResponse::Ok().json(public_view(pool.get_ref(), view).await?))
 }

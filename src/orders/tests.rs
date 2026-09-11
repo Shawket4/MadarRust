@@ -302,6 +302,7 @@ async fn test_order_ref_generated_and_decoded(pool: PgPool) {
     let user_id = seed_user(&pool, org_id, "org_admin").await;
     grant_permission(&pool, "org_admin", "orders", "create").await;
     grant_permission(&pool, "org_admin", "orders", "update").await;
+    grant_permission(&pool, "org_admin", "orders", "delete").await; // void
     grant_permission(&pool, "org_admin", "orders", "read").await;
     let token = generate_org_admin_token(user_id, org_id);
     let shift_id = seed_shift(&pool, branch_id, user_id).await;
@@ -999,6 +1000,7 @@ async fn test_void_order(pool: PgPool) {
     let user_id = seed_user(&pool, org_id, "org_admin").await;
     grant_permission(&pool, "org_admin", "orders", "create").await;
     grant_permission(&pool, "org_admin", "orders", "update").await;
+    grant_permission(&pool, "org_admin", "orders", "delete").await; // void
     let token = generate_org_admin_token(user_id, org_id);
     let shift_id = seed_shift(&pool, branch_id, user_id).await;
 
@@ -1095,6 +1097,7 @@ async fn test_void_no_restock_logs_waste(pool: PgPool) {
     let user_id = seed_user(&pool, org_id, "org_admin").await;
     grant_permission(&pool, "org_admin", "orders", "create").await;
     grant_permission(&pool, "org_admin", "orders", "update").await;
+    grant_permission(&pool, "org_admin", "orders", "delete").await; // void
     let token = generate_org_admin_token(user_id, org_id);
     let shift_id = seed_shift(&pool, branch_id, user_id).await;
     let cat_id = seed_category(&pool, org_id).await;
@@ -1666,6 +1669,7 @@ async fn test_void_is_idempotent_no_double_restock(pool: PgPool) {
     let user_id = seed_user(&pool, org_id, "org_admin").await;
     grant_permission(&pool, "org_admin", "orders", "create").await;
     grant_permission(&pool, "org_admin", "orders", "update").await;
+    grant_permission(&pool, "org_admin", "orders", "delete").await; // void
     let token = generate_org_admin_token(user_id, org_id);
     let shift_id = seed_shift(&pool, branch_id, user_id).await;
     let cat_id = seed_category(&pool, org_id).await;
@@ -1849,6 +1853,7 @@ async fn test_summary_excludes_voided_discounts(pool: PgPool) {
     let user_id = seed_user(&pool, org_id, "org_admin").await;
     grant_permission(&pool, "org_admin", "orders", "create").await;
     grant_permission(&pool, "org_admin", "orders", "update").await;
+    grant_permission(&pool, "org_admin", "orders", "delete").await; // void
     grant_permission(&pool, "org_admin", "orders", "read").await;
     let token = generate_org_admin_token(user_id, org_id);
     let shift_id = seed_shift(&pool, branch_id, user_id).await;
@@ -3198,6 +3203,7 @@ async fn test_void_voided_at_guard(pool: PgPool) {
     let user_id = seed_user(&pool, org_id, "org_admin").await;
     grant_permission(&pool, "org_admin", "orders", "create").await;
     grant_permission(&pool, "org_admin", "orders", "update").await;
+    grant_permission(&pool, "org_admin", "orders", "delete").await; // void
     let token = generate_org_admin_token(user_id, org_id);
     let shift_id = seed_shift(&pool, branch_id, user_id).await;
     let cat_id = seed_category(&pool, org_id).await;
@@ -3464,4 +3470,304 @@ async fn renaming_a_payment_method_carries_history(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(is_cash, Some(false));
+}
+
+// ── A void is one transaction ─────────────────────────────────────────────────
+
+/// The counter sale the void tests tear up: one item with a recipe, so the
+/// void has stock to put back, rung by an org admin on their own shift.
+async fn ring_up_a_sale(pool: &PgPool) -> (Uuid, Uuid, Uuid, Uuid, Uuid, String) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = seed_org(pool).await;
+    let branch_id = seed_branch(pool, org_id).await;
+    let user_id = seed_user(pool, org_id, "org_admin").await;
+    grant_permission(pool, "org_admin", "orders", "create").await;
+    grant_permission(pool, "org_admin", "orders", "delete").await; // void
+    grant_permission(pool, "org_admin", "orders", "update").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(pool, branch_id, user_id).await;
+    let cat_id = seed_category(pool, org_id).await;
+    let menu_item_id = seed_menu_item(pool, org_id, cat_id).await;
+    let ing_id = seed_ingredient(pool, org_id, "Coffee Beans", "g").await;
+    seed_branch_inventory(pool, branch_id, ing_id, 1000.0).await;
+    add_menu_item_recipe(pool, menu_item_id, ing_id, 20.0).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(&simple_order(branch_id, shift_id, menu_item_id))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 201);
+    let created: OrderFull = test::read_body_json(resp).await;
+    (
+        org_id,
+        branch_id,
+        user_id,
+        shift_id,
+        created.order.id,
+        token,
+    )
+}
+
+/// A void is ONE transaction that writes every dependent state — asserted on
+/// every table it touches, because "the status flipped" was all the old void
+/// could promise. The loyalty reversal is the ledger trigger's
+/// (`orders_reverse_loyalty_on_void`), fired by the same UPDATE and committed
+/// with it; the kitchen close and the inventory reversal are the handler's.
+/// The delivery row is asserted UNCHANGED, on purpose: see the comment at the
+/// end of `void_order_inner`.
+#[sqlx::test]
+async fn a_void_is_one_transaction_across_every_ledger(pool: PgPool) {
+    let (org_id, branch_id, user_id, _shift_id, order_id, token) = ring_up_a_sale(&pool).await;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    // The sale earned the customer 50 points (the award endpoint's row, seeded
+    // the way the loyalty tests seed it; the ledger trigger books the balance).
+    let member: Uuid = sqlx::query_scalar(
+        "INSERT INTO loyalty_customers (org_id, phone, name, member_token) \
+         VALUES ($1, '+201000000001', 'Ali', $2) RETURNING id",
+    )
+    .bind(org_id)
+    .bind(format!("tok-{order_id}"))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let earn: Uuid = sqlx::query_scalar(
+        "INSERT INTO loyalty_transactions (org_id, customer_id, branch_id, kind, currency, points, order_id, source) \
+         VALUES ($1, $2, $3, 'earn', 'points', 50, $4, 'sale') RETURNING id",
+    )
+    .bind(org_id)
+    .bind(member)
+    .bind(branch_id)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let balance = |pool: &PgPool| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i32>(
+                "SELECT points_balance FROM loyalty_customers WHERE id = $1",
+            )
+            .bind(member)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(balance(&pool).await, 50);
+
+    // The sale also finalized a delivery order (linked both ways, as finalize
+    // leaves them).
+    let delivery: Uuid = sqlx::query_scalar(
+        "INSERT INTO delivery_orders (org_id, branch_id, channel, status, customer_name, customer_phone, \
+             cart, subtotal, delivery_fee, total, tax_amount, tax_rate_applied, tax_inclusive, \
+             payment_method, delivered_at, order_id) \
+         VALUES ($1, $2, 'outside', 'delivered', 'Ali', '+201000000001', '{}'::jsonb, 0, 0, 0, 0, 0, false, \
+                 'cash', now(), $3) RETURNING id",
+    )
+    .bind(org_id)
+    .bind(branch_id)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE orders SET delivery_order_id = $2 WHERE id = $1")
+        .bind(order_id)
+        .bind(delivery)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // What the void has to undo: a kitchen ticket still firing, 20g of beans gone.
+    let (k_status, k_closed): (String, bool) = sqlx::query_as(
+        "SELECT status::text, closed_at IS NOT NULL FROM kitchen_tickets WHERE order_id = $1",
+    )
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((k_status.as_str(), k_closed), ("firing", false));
+    let on_hand = |pool: &PgPool| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, f64>(
+                "SELECT on_hand::float8 FROM branch_stock WHERE branch_id = $1 AND org_ingredient_id = \
+                 (SELECT org_ingredient_id FROM inventory_movements WHERE source_id = $2 LIMIT 1)",
+            )
+            .bind(branch_id)
+            .bind(order_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(on_hand(&pool).await, 980.0);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/orders/{order_id}/void"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(&VoidOrderRequest {
+                reason: "wrong_order".into(),
+                note: Some("rang twice".into()),
+                voided_at: None,
+                restore_inventory: Some(true),
+            })
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    // The order: an event with an actor, a reason and a note.
+    let (status, voided_by, reason, note, voided): (
+        String,
+        Option<Uuid>,
+        Option<String>,
+        Option<String>,
+        bool,
+    ) = sqlx::query_as(
+        "SELECT status::text, voided_by, void_reason::text, void_note, voided_at IS NOT NULL \
+             FROM orders WHERE id = $1",
+    )
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "voided");
+    assert_eq!(voided_by, Some(user_id));
+    assert_eq!(reason.as_deref(), Some("wrong_order"));
+    assert_eq!(note.as_deref(), Some("rang twice"));
+    assert!(voided);
+
+    // Loyalty: the earn is reversed, by the void, and the balance is back.
+    let reversal: Option<(String, String, i32, Option<Uuid>)> = sqlx::query_as(
+        "SELECT kind::text, source, points, created_by FROM loyalty_transactions \
+         WHERE reverses_id = $1",
+    )
+    .bind(earn)
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        reversal,
+        Some(("reverse_earn".into(), "void".into(), -50, Some(user_id))),
+        "the ledger says the void took the points back"
+    );
+    assert_eq!(balance(&pool).await, 0);
+
+    // The kitchen: voided, closed `voided`, by the voider, lines off the queue.
+    let (k_status, k_reason, k_by): (String, Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT status::text, close_reason::text, closed_by FROM kitchen_tickets WHERE order_id = $1",
+    )
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (k_status.as_str(), k_reason.as_deref(), k_by),
+        ("voided", Some("voided"), Some(user_id))
+    );
+    let live_lines: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM kitchen_ticket_items i JOIN kitchen_tickets kt ON kt.id = i.kitchen_ticket_id \
+         WHERE kt.order_id = $1 AND i.voided_at IS NULL",
+    )
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(live_lines, 0);
+
+    // Inventory: the sale deduction is reversed through the ledger, stock is back.
+    let movements: Vec<(String, f64)> = sqlx::query_as(
+        "SELECT type::text, quantity::float8 FROM inventory_movements \
+         WHERE source_type = 'order' AND source_id = $1 ORDER BY created_at, type",
+    )
+    .bind(order_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        movements,
+        vec![("sale".into(), -20.0), ("void_restock".into(), 20.0)]
+    );
+    assert_eq!(on_hand(&pool).await, 1000.0);
+
+    // The delivery row is the delivery, not the sale: it stays `delivered`
+    // and linked, as `delivery_orders_sale_means_delivered` requires. "Was
+    // its sale voided" is the join through `orders.status` above.
+    let (d_status, d_order): (String, Option<Uuid>) =
+        sqlx::query_as("SELECT status::text, order_id FROM delivery_orders WHERE id = $1")
+            .bind(delivery)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((d_status.as_str(), d_order), ("delivered", Some(order_id)));
+}
+
+/// Owner ruling 4: a void corrects a mistake on an unpaid bill; a refund
+/// returns money already taken. A sale that has given money back cannot be
+/// voided — the books already say it happened. Refund the remainder instead.
+#[sqlx::test]
+async fn a_sale_that_has_refunded_money_cannot_be_voided(pool: PgPool) {
+    let (_org_id, _branch_id, user_id, shift_id, order_id, token) = ring_up_a_sale(&pool).await;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO order_refunds (order_id, shift_id, amount, method, is_cash, reason, issued_by) \
+         VALUES ($1, $2, 100, 'cash', true, 'goodwill', $3)",
+    )
+    .bind(order_id)
+    .bind(shift_id)
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/orders/{order_id}/void"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(&VoidOrderRequest {
+                reason: "customer_request".into(),
+                note: None,
+                voided_at: None,
+                restore_inventory: Some(true),
+            })
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 409, "the sale stands; refund the rest");
+    let status: String = sqlx::query_scalar("SELECT status::text FROM orders WHERE id = $1")
+        .bind(order_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        status, "completed",
+        "a partial refund leaves the status alone"
+    );
 }

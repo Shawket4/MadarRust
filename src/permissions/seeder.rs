@@ -55,6 +55,8 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         ("org_admin", "orders", "create", true),
         ("org_admin", "orders", "read", true),
         ("org_admin", "orders", "update", true),
+        // `orders:delete` is the VOID rung — nothing hard-deletes an order.
+        // See the teller block for why voiding has its own rung.
         ("org_admin", "orders", "delete", true),
         ("org_admin", "order_items", "create", true),
         ("org_admin", "order_items", "read", true),
@@ -110,6 +112,14 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         ("org_admin", "delivery_orders", "update", true),
         ("org_admin", "delivery_orders", "delete", true),
         // ── branch_manager: operational access, no org-level management ─
+        //
+        // A branch manager may WORK THE TILL (owner's ruling): PIN in, open a
+        // drawer, ring up, take payment, void, refund, force-close an absent
+        // teller's shift — with no approval flow, because there is nobody above
+        // them on the floor to approve. So this block holds every grant the
+        // teller's does, plus the manager's own. The replay path admits the
+        // role for attribution (`sync::can_sign_in_at_a_till`); these rows are
+        // what let the ops through once it does.
         ("branch_manager", "branches", "read", true),
         ("branch_manager", "users", "create", true),
         ("branch_manager", "users", "read", true),
@@ -127,6 +137,7 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         ("branch_manager", "orders", "create", true),
         ("branch_manager", "orders", "read", true),
         ("branch_manager", "orders", "update", true),
+        ("branch_manager", "orders", "delete", true), // void
         ("branch_manager", "order_items", "create", true),
         ("branch_manager", "order_items", "read", true),
         ("branch_manager", "order_items", "update", true),
@@ -172,7 +183,27 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         ("teller", "payments", "create", true),
         ("teller", "payments", "read", true),
         ("teller", "payment_methods", "read", true),
-        ("teller", "orders", "update", true), // needed for void_order
+        // Voiding is its own rung, `delete`, split from `update` — nothing
+        // hard-deletes an order, so the rung was free, and it is what a void is:
+        // a sale taken off the books before any money moved. Ringing up and
+        // voiding used to share `update`, which meant a shop could not give one
+        // person the till and another the voids without giving both both. The
+        // owner ruled there is no approval FLOW — whoever holds the grant voids,
+        // unprompted — not that the grant is indivisible, so the teller gets it
+        // by default and a shop that wants otherwise revokes it per user.
+        //
+        // `update` stays granted: void was the only order write behind it, but
+        // taking a grant away that a deployed till may still ask for is not
+        // worth what it saves.
+        ("teller", "orders", "update", true),
+        ("teller", "orders", "delete", true), // void
+        // A refund RETURNS money already taken; a void corrects a bill nobody
+        // has paid. Different event, different resource, so a shop may hold
+        // them apart. Issued in the teller's shift, from the teller's drawer,
+        // so the teller holds it by default; a waiter has no drawer to refund
+        // from and gets nothing here.
+        ("teller", "refunds", "create", true),
+        ("teller", "refunds", "read", true),
         ("teller", "shifts", "create", true),
         ("teller", "shifts", "read", true),
         ("teller", "shifts", "update", true), // covers cash movements
@@ -196,6 +227,9 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         ("teller", "open_tickets", "create", true),
         ("teller", "open_tickets", "read", true),
         ("teller", "open_tickets", "update", true),
+        // Tearing up a bill (or a line of one) is the ticket's void rung, kept
+        // apart from adding to it for the same reason as the order's.
+        ("teller", "open_tickets", "delete", true),
         // ── kitchen station + routing config (managers) ───────────
         ("org_admin", "kitchen_stations", "create", true),
         ("org_admin", "kitchen_stations", "read", true),
@@ -206,14 +240,20 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         ("org_admin", "open_tickets", "read", true),
         ("org_admin", "open_tickets", "create", true),
         ("org_admin", "open_tickets", "update", true),
+        ("org_admin", "open_tickets", "delete", true),
         ("branch_manager", "kitchen_stations", "create", true),
         ("branch_manager", "kitchen_stations", "read", true),
         ("branch_manager", "kitchen_stations", "update", true),
         ("branch_manager", "kitchen_stations", "delete", true),
         ("branch_manager", "kitchen_orders", "read", true),
         ("branch_manager", "kitchen_orders", "update", true),
+        // `create` was missing: a manager at the till seats a party and rings
+        // up a table exactly as the teller does, and both go through
+        // `open_tickets:create`. Without it the tables screen refused them.
+        ("branch_manager", "open_tickets", "create", true),
         ("branch_manager", "open_tickets", "read", true),
         ("branch_manager", "open_tickets", "update", true),
+        ("branch_manager", "open_tickets", "delete", true),
         // ── waiter: menu reads + open-ticket fire (no shift/cash) ──
         ("waiter", "branches", "read", true),
         ("waiter", "categories", "read", true),
@@ -224,6 +264,10 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         ("waiter", "open_tickets", "create", true),
         ("waiter", "open_tickets", "read", true),
         ("waiter", "open_tickets", "update", true),
+        // A waiter voids their own ticket, or takes a line off it, before it
+        // is settled — the void rung, like the teller's. No `orders` or
+        // `refunds`: once the bill is paid the money is the drawer's business.
+        ("waiter", "open_tickets", "delete", true),
         ("waiter", "kitchen_orders", "read", true),
         // Kitchen Display role: read the feed + bump lines, and read stations (to
         // resolve the device's station). NOTHING on the POS/cash/ticket side.
@@ -334,6 +378,15 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         ("branch_manager", "loyalty", "update", true),
         ("teller", "loyalty", "read", true),
         ("teller", "loyalty", "update", true),
+        // ── refunds (money going back out) ────────────────────────
+        // Its own resource so a shop can decide who returns money separately
+        // from who voids (20260912090000). Only `create` and `read` exist to
+        // grant: a refund is an append-only receipt, so there is no `update` or
+        // `delete` to hold. The teller's rows sit in the teller block above.
+        ("org_admin", "refunds", "create", true),
+        ("org_admin", "refunds", "read", true),
+        ("branch_manager", "refunds", "create", true),
+        ("branch_manager", "refunds", "read", true),
     ];
 
     for &(role, resource, action, granted) in defaults {

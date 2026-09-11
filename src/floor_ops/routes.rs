@@ -18,7 +18,7 @@ use crate::floor_ops::handlers;
 /// and the transfer waitlist a host works.
 ///
 /// There is deliberately no route that SETS a table's status. Status is derived
-/// from the ticket on the table -- except `clear`, which performs the single
+/// from the occupancy ledger -- except `clear`, which records the single
 /// transition no server can observe: a bussed table becoming ready.
 ///
 /// These must be registered BEFORE `/tables/{id}`: `{id}` matches the literal

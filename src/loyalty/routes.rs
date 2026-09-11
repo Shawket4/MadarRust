@@ -47,6 +47,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/wallet-status", web::get().to(handlers::wallet_status))
                 .route("/members", web::get().to(handlers::list_members))
                 .route("/members/{id}", web::get().to(handlers::get_member))
+                // Forgets the person, keeps the books. Admin only.
+                .route("/members/{id}", web::delete().to(handlers::delete_member))
                 // Also a live call to Google, and also super-admin only.
                 .route(
                     "/members/{id}/google-object",

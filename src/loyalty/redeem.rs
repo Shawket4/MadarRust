@@ -219,8 +219,8 @@ pub async fn record(
         sqlx::query(
             "INSERT INTO loyalty_transactions \
                 (org_id, customer_id, branch_id, kind, currency, points, order_id, \
-                 order_line_index, reward_menu_item_id, created_by) \
-             VALUES ($1,$2,$3,'redeem',$4,$5,$6,$7,$8,$9) \
+                 order_line_index, reward_menu_item_id, created_by, source) \
+             VALUES ($1,$2,$3,'redeem',$4,$5,$6,$7,$8,$9,'redemption') \
              ON CONFLICT DO NOTHING",
         )
         .bind(org_id)

@@ -286,8 +286,12 @@ async fn test_cash_movements(pool: PgPool) {
     test::call_service(&app, req_open).await;
 
     // 1. Add cash movement
+    // No kind sent — the clients in the field still speak only in signed
+    // amounts, and a negative one has always meant a pay-out.
     let move_req = CashMovementRequest {
         amount: -500,
+        kind: None,
+        corrects_id: None,
         note: "Paid vendor".into(),
         created_at: None,
         client_ref: None,
@@ -310,6 +314,11 @@ async fn test_cash_movements(pool: PgPool) {
     let movements: Vec<CashMovement> = test::read_body_json(resp_list).await;
     assert_eq!(movements.len(), 1);
     assert_eq!(movements[0].amount, -500);
+    assert_eq!(
+        movements[0].kind, "pay_out",
+        "an unlabelled negative amount is a pay-out, as it always was"
+    );
+    assert_eq!(movements[0].corrects_id, None);
 }
 
 #[sqlx::test]
@@ -417,6 +426,8 @@ async fn test_cash_movement_client_ref_idempotent(pool: PgPool) {
     let cref = Uuid::new_v4();
     let body = CashMovementRequest {
         amount: -500,
+        kind: None,
+        corrects_id: None,
         note: "Paid vendor".into(),
         created_at: None,
         client_ref: Some(cref),
@@ -1370,6 +1381,8 @@ async fn test_cash_movement_timestamp_contract(pool: PgPool) {
             .insert_header(("Authorization", format!("Bearer {}", token)))
             .set_json(&CashMovementRequest {
                 amount: -500,
+                kind: None,
+                corrects_id: None,
                 note: "vendor".into(),
                 created_at,
                 client_ref: None,
@@ -1586,4 +1599,637 @@ async fn test_cash_continuity_is_per_till(pool: PgPool) {
     let s3: Shift = test::read_body_json(r).await;
     assert!(!s3.opening_cash_was_edited);
     assert_eq!(s3.opening_cash_original, None);
+}
+
+// ── Cash movement kinds ───────────────────────────────────────
+
+/// Helper for the kind tests: an open shift under an org admin, with the
+/// permissions the shift routes check. Returns (token, shift_id, branch_id, user_id).
+async fn open_admin_shift(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Uuid,
+    till_id: Option<Uuid>,
+    opening_cash: i32,
+) -> (String, Uuid, Uuid) {
+    let user_id = seed_user(pool, org_id, "org_admin").await;
+    grant_permission(pool, "org_admin", "shifts", "read").await;
+    grant_permission(pool, "org_admin", "shifts", "create").await;
+    grant_permission(pool, "org_admin", "shifts", "update").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = Uuid::new_v4();
+    let resp = test::call_service(
+        app,
+        test::TestRequest::post()
+            .uri(&format!("/shifts/branches/{}/open", branch_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&OpenShiftRequest {
+                till_id,
+                id: Some(shift_id),
+                opening_cash,
+                opening_cash_edited: None,
+                edit_reason: None,
+                opened_at: None,
+            })
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 201, "shift must open");
+    (token, shift_id, user_id)
+}
+
+fn movement_json(amount: i32, kind: Option<&str>, corrects_id: Option<Uuid>) -> serde_json::Value {
+    serde_json::json!({
+        "amount": amount,
+        "kind": kind,
+        "corrects_id": corrects_id,
+        "note": "test",
+    })
+}
+
+/// The kind fixes the sign and the report counts by kind: a safe drop leaves the
+/// drawer but is not spend, and a correction nets against the row it reverses
+/// instead of showing the same money as cash in AND cash out. For a shift with
+/// only pay-ins and pay-outs the in/out figures are exactly what they were.
+#[sqlx::test]
+async fn test_cash_movement_kinds_drive_the_report(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let (token, shift_id, _) = open_admin_shift(&app, &pool, org_id, branch_id, None, 1000).await;
+
+    let post = |body: serde_json::Value| {
+        let token = token.clone();
+        let app = &app;
+        async move {
+            test::call_service(
+                app,
+                test::TestRequest::post()
+                    .uri(&format!("/shifts/{}/cash-movements", shift_id))
+                    .insert_header(("Authorization", format!("Bearer {}", token)))
+                    .set_json(&body)
+                    .to_request(),
+            )
+            .await
+        }
+    };
+
+    // The kind and the sign must agree — a 400 with words, never a CHECK 500.
+    for (amount, kind) in [(-100, "pay_in"), (100, "pay_out"), (100, "safe_drop")] {
+        let resp = post(movement_json(amount, Some(kind), None)).await;
+        assert_eq!(resp.status(), 400, "{kind} of {amount} must be rejected");
+    }
+    // Only a correction may say what it corrects.
+    let resp = post(movement_json(-100, Some("pay_out"), Some(Uuid::new_v4()))).await;
+    assert_eq!(resp.status(), 400, "corrects_id on a pay-out is rejected");
+
+    // A real day: an owner tops up the float, the teller buys milk, drops cash
+    // to the safe, then records a pay-out by mistake and reverses it.
+    let resp = post(movement_json(2000, Some("pay_in"), None)).await;
+    assert_eq!(resp.status(), 201);
+    let resp = post(movement_json(-300, Some("pay_out"), None)).await;
+    assert_eq!(resp.status(), 201);
+    let resp = post(movement_json(-1500, Some("safe_drop"), None)).await;
+    assert_eq!(resp.status(), 201);
+    let resp = post(movement_json(-800, Some("pay_out"), None)).await;
+    assert_eq!(resp.status(), 201);
+    let mistake: CashMovement = test::read_body_json(resp).await;
+
+    // A correction must reverse the row EXACTLY …
+    let resp = post(movement_json(500, Some("correction"), Some(mistake.id))).await;
+    assert_eq!(resp.status(), 400, "a partial reversal is not a correction");
+    // … of a row that exists …
+    let resp = post(movement_json(800, Some("correction"), Some(Uuid::new_v4()))).await;
+    assert_eq!(resp.status(), 404);
+    // … and then it lands.
+    let resp = post(movement_json(800, Some("correction"), Some(mistake.id))).await;
+    assert_eq!(resp.status(), 201, "exact reversal is accepted");
+    let fix: CashMovement = test::read_body_json(resp).await;
+    assert_eq!(fix.kind, "correction");
+    assert_eq!(fix.corrects_id, Some(mistake.id));
+    // A row is corrected once: the money is already back.
+    let resp = post(movement_json(800, Some("correction"), Some(mistake.id))).await;
+    assert_eq!(
+        resp.status(),
+        409,
+        "a second correction of the same row is refused"
+    );
+
+    // A correction of something never recorded (a miscounted float).
+    let resp = post(movement_json(50, Some("correction"), None)).await;
+    assert_eq!(resp.status(), 201);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/shifts/{}/report", shift_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let rep: ShiftReportResponse = test::read_body_json(resp).await;
+
+    assert_eq!(rep.cash_movements_in, 2000, "pay-ins only");
+    assert_eq!(
+        rep.cash_movements_out, 300,
+        "spend excludes the safe drop and the reversed mistake"
+    );
+    assert_eq!(rep.safe_drops, 1500, "the safe drop stands on its own");
+    assert_eq!(
+        rep.cash_adjustments, 50,
+        "an unlinked correction is an adjustment"
+    );
+    // The drawer does not care about kinds: every note moved.
+    let net = 2000 - 300 - 1500 - 800 + 800 + 50;
+    assert_eq!(rep.cash_movements_net, net);
+    assert_eq!(
+        rep.expected_cash,
+        1000 + net,
+        "expected cash follows the drawer"
+    );
+    assert_eq!(rep.cash_movements.len(), 6);
+    let fix_row = rep
+        .cash_movements
+        .iter()
+        .find(|m| m.id == fix.id)
+        .expect("correction listed");
+    assert_eq!(fix_row.corrects_kind.as_deref(), Some("pay_out"));
+    // No till float set → nothing proposed.
+    assert_eq!(rep.standard_float, None);
+    assert_eq!(rep.suggested_safe_drop, None);
+}
+
+/// A correction is scoped to its shift: pointing it at another drawer's row
+/// would net nothing anyone can see and silently move this drawer's cash.
+#[sqlx::test]
+async fn test_correction_must_stay_on_its_shift(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let till_a = seed_till(&pool, org_id, branch_id, "A", true).await;
+    let till_b = seed_till(&pool, org_id, branch_id, "B", false).await;
+    let (token_a, shift_a, _) =
+        open_admin_shift(&app, &pool, org_id, branch_id, Some(till_a), 0).await;
+    let (token_b, shift_b, _) =
+        open_admin_shift(&app, &pool, org_id, branch_id, Some(till_b), 0).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/shifts/{}/cash-movements", shift_a))
+            .insert_header(("Authorization", format!("Bearer {}", token_a)))
+            .set_json(&movement_json(-400, Some("pay_out"), None))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 201);
+    let on_a: CashMovement = test::read_body_json(resp).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/shifts/{}/cash-movements", shift_b))
+            .insert_header(("Authorization", format!("Bearer {}", token_b)))
+            .set_json(&movement_json(400, Some("correction"), Some(on_a.id)))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 400, "cross-shift correction is refused");
+}
+
+// ── Standard float ────────────────────────────────────────────
+
+/// The till knows what should stay in the drawer, so the pre-close report can
+/// propose "leave the float, drop the rest" instead of relying on memory.
+#[sqlx::test]
+async fn test_standard_float_proposes_the_safe_drop(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    sqlx::query("INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash, is_active) VALUES ($1,'cash','{}','e','i',true,true)")
+        .bind(org_id).execute(&pool).await.unwrap();
+    let branch_id = seed_branch(&pool, org_id).await;
+    let till = seed_till(&pool, org_id, branch_id, "Front", true).await;
+    sqlx::query("UPDATE tills SET standard_float = 5000 WHERE id = $1")
+        .bind(till)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (token, shift_id, user_id) =
+        open_admin_shift(&app, &pool, org_id, branch_id, Some(till), 1000).await;
+
+    let report = |shift: Uuid| {
+        let token = token.clone();
+        let app = &app;
+        async move {
+            let resp = test::call_service(
+                app,
+                test::TestRequest::get()
+                    .uri(&format!("/shifts/{}/report", shift))
+                    .insert_header(("Authorization", format!("Bearer {}", token)))
+                    .to_request(),
+            )
+            .await;
+            assert!(resp.status().is_success());
+            let rep: ShiftReportResponse = test::read_body_json(resp).await;
+            rep
+        }
+    };
+
+    // Under the float: nothing to drop, but the float is still shown.
+    let rep = report(shift_id).await;
+    assert_eq!(rep.standard_float, Some(5000));
+    assert_eq!(
+        rep.suggested_safe_drop,
+        Some(0),
+        "a drawer under its float drops nothing"
+    );
+
+    // A 6000 cash sale → 7000 in the drawer → drop 2000 to close at 5000.
+    let order_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref) VALUES ($1,$2,$3,$4, gen_random_uuid(), 6000,0,6000,'completed',1,'cash', gen_random_uuid()::text)")
+        .bind(order_id).bind(branch_id).bind(user_id).bind(shift_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ($1,'cash',6000,true)")
+        .bind(order_id).execute(&pool).await.unwrap();
+    let rep = report(shift_id).await;
+    assert_eq!(rep.expected_cash, 7000);
+    assert_eq!(rep.suggested_safe_drop, Some(2000));
+
+    // Closed: the float is history, no action is proposed.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/shifts/{}/close", shift_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&CloseShiftRequest {
+                closing_cash_declared: 5000,
+                cash_note: None,
+                closed_at: None,
+            })
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let rep = report(shift_id).await;
+    assert_eq!(rep.standard_float, Some(5000));
+    assert_eq!(rep.suggested_safe_drop, None);
+}
+
+// ── Ruling 3: a branch manager works the till ─────────────────
+
+/// A branch manager opens a shift, is handed their OWN shift back as the
+/// current one even when another drawer opened later, moves cash, closes, and
+/// force-closes an absent teller's shift — with no approval step anywhere.
+#[sqlx::test]
+async fn test_branch_manager_works_the_till(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let till_a = seed_till(&pool, org_id, branch_id, "A", true).await;
+    let till_b = seed_till(&pool, org_id, branch_id, "B", false).await;
+    // What `permissions::seeder` promises a branch manager.
+    for action in ["create", "read", "update"] {
+        grant_permission(&pool, "branch_manager", "shifts", action).await;
+        grant_permission(&pool, "teller", "shifts", action).await;
+    }
+    let manager = seed_user(&pool, org_id, "branch_manager").await;
+    assign_user_to_branch(&pool, manager, branch_id).await;
+    let manager_token = generate_token(manager, Some(org_id), UserRole::BranchManager);
+    let teller = seed_user(&pool, org_id, "teller").await;
+    let teller_token = generate_teller_token(teller, org_id);
+
+    let open = |token: &str, till: Uuid| {
+        let token = token.to_string();
+        let app = &app;
+        async move {
+            test::call_service(
+                app,
+                test::TestRequest::post()
+                    .uri(&format!("/shifts/branches/{}/open", branch_id))
+                    .insert_header(("Authorization", format!("Bearer {}", token)))
+                    .set_json(&OpenShiftRequest {
+                        till_id: Some(till),
+                        id: None,
+                        opening_cash: 0,
+                        opening_cash_edited: None,
+                        edit_reason: None,
+                        opened_at: None,
+                    })
+                    .to_request(),
+            )
+            .await
+        }
+    };
+
+    // The manager opens Till A; a teller opens Till B afterwards.
+    let resp = open(&manager_token, till_a).await;
+    assert_eq!(resp.status(), 201, "a branch manager may open a shift");
+    let managers_shift: Shift = test::read_body_json(resp).await;
+    assert_eq!(managers_shift.teller_id, manager);
+    let resp = open(&teller_token, till_b).await;
+    assert_eq!(resp.status(), 201);
+    let tellers_shift: Shift = test::read_body_json(resp).await;
+
+    // The device asks for the current shift with no till: the manager gets
+    // THEIR shift, not the teller's newer one.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/shifts/branches/{}/current", branch_id))
+            .insert_header(("Authorization", format!("Bearer {}", manager_token)))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let prefill: ShiftPreFill = test::read_body_json(resp).await;
+    assert_eq!(
+        prefill.open_shift.map(|s| s.id),
+        Some(managers_shift.id),
+        "a manager at the till adopts their own open shift"
+    );
+
+    // Cash moves and the shift closes under the manager's own name.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/shifts/{}/cash-movements", managers_shift.id))
+            .insert_header(("Authorization", format!("Bearer {}", manager_token)))
+            .set_json(&movement_json(-250, Some("pay_out"), None))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 201);
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/shifts/{}/close", managers_shift.id))
+            .insert_header(("Authorization", format!("Bearer {}", manager_token)))
+            .set_json(&CloseShiftRequest {
+                closing_cash_declared: 0,
+                cash_note: None,
+                closed_at: None,
+            })
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let closed: CloseShiftResponse = test::read_body_json(resp).await;
+    assert_eq!(closed.shift.closed_by, Some(manager));
+
+    // The teller has gone home: the manager force-closes their shift.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/shifts/{}/force-close", tellers_shift.id))
+            .insert_header(("Authorization", format!("Bearer {}", manager_token)))
+            .set_json(&ForceCloseRequest {
+                reason: Some("went home".into()),
+            })
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 200, "a branch manager may force-close");
+    let forced: Shift = test::read_body_json(resp).await;
+    assert_eq!(forced.status, "force_closed");
+    assert_eq!(forced.force_closed_by, Some(manager));
+}
+
+// ── Kitchen tickets close with the shift ──────────────────────
+
+/// At a branch with no kitchen screen nothing is ever bumped, so the till
+/// queue closes with the branch's last open shift (`kitchen::
+/// retire_unbumped_at_shift_close`): `settled` by the closer where the bill
+/// was paid, `retired` by nobody where the order was voided. A ticket behind a
+/// KDS is left alone.
+#[sqlx::test]
+async fn test_close_shift_closes_unbumped_kitchen_tickets_in_till_mode(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    // No routing override and no stations → effective mode `till`.
+    let branch_id = seed_branch(&pool, org_id).await;
+    let kds_branch = seed_branch(&pool, org_id).await;
+    sqlx::query("UPDATE branches SET kitchen_routing_mode = 'kds' WHERE id = $1")
+        .bind(kds_branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (token, shift_id, user_id) =
+        open_admin_shift(&app, &pool, org_id, branch_id, None, 0).await;
+    let (_, other_shift, other_user) =
+        open_admin_shift(&app, &pool, org_id, kds_branch, None, 0).await;
+
+    let order = |branch: Uuid, shift: Uuid, teller: Uuid, n: i32, voided: bool| {
+        let pool = pool.clone();
+        async move {
+            let id = Uuid::new_v4();
+            let status = if voided { "voided" } else { "completed" };
+            sqlx::query(
+                "INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref, voided_at, voided_by) \
+                 VALUES ($1,$2,$3,$4, gen_random_uuid(), 100,0,100,$5::order_status,$6,'cash', gen_random_uuid()::text, \
+                         CASE WHEN $7 THEN now() END, CASE WHEN $7 THEN $3 END)",
+            )
+            .bind(id).bind(branch).bind(teller).bind(shift).bind(status).bind(n).bind(voided)
+            .execute(&pool).await.unwrap();
+            let kt = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO kitchen_tickets (id, org_id, branch_id, order_id) VALUES ($1,$2,$3,$4)",
+            )
+            .bind(kt).bind(org_id).bind(branch).bind(id)
+            .execute(&pool).await.unwrap();
+            kt
+        }
+    };
+    let paid = order(branch_id, shift_id, user_id, 1, false).await;
+    let voided = order(branch_id, shift_id, user_id, 2, true).await;
+    let elsewhere = order(kds_branch, other_shift, other_user, 3, false).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/shifts/{}/close", shift_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&CloseShiftRequest {
+                closing_cash_declared: 100,
+                cash_note: None,
+                closed_at: None,
+            })
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    let state = |kt: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (Option<String>, Option<Uuid>, String)>(
+                "SELECT close_reason::text, closed_by, status::text FROM kitchen_tickets WHERE id = $1",
+            )
+            .bind(kt)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(
+        state(paid).await,
+        (Some("settled".into()), Some(user_id), "firing".into()),
+        "a paid order's ticket closes as settled by the closer; the cooking state is untouched"
+    );
+    assert_eq!(
+        state(voided).await,
+        (Some("retired".into()), None, "firing".into()),
+        "a voided order's ticket is retired by nobody"
+    );
+    assert_eq!(
+        state(elsewhere).await,
+        (None, None, "firing".into()),
+        "another shift's ticket, behind a KDS, stays live"
+    );
+}
+
+// ── Refunds and the drawer ────────────────────────────────────
+
+/// The Z-report's cash side has to add up after a refund. `payment_summary`
+/// is a revenue figure and drops a fully refunded sale by status, exactly as
+/// the sales report does; the drawer took that sale's notes all the same and
+/// then handed some back. The report says both, in their own lines, and
+/// `expected_cash` is their sum: float + cash bucket + cash tips +
+/// cash_in_refunded_sales + movements − refunds_issued_cash.
+#[sqlx::test]
+async fn test_shift_report_reconciles_refunds_against_the_drawer(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    sqlx::query("INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash, is_active) VALUES ($1,'cash','{}','e','i',true,true)")
+        .bind(org_id).execute(&pool).await.unwrap();
+    let branch_id = seed_branch(&pool, org_id).await;
+    let (token, shift_id, user_id) =
+        open_admin_shift(&app, &pool, org_id, branch_id, None, 1000).await;
+
+    let report = |shift: Uuid| {
+        let token = token.clone();
+        let app = &app;
+        async move {
+            let resp = test::call_service(
+                app,
+                test::TestRequest::get()
+                    .uri(&format!("/shifts/{}/report", shift))
+                    .insert_header(("Authorization", format!("Bearer {}", token)))
+                    .to_request(),
+            )
+            .await;
+            assert!(resp.status().is_success());
+            let rep: ShiftReportResponse = test::read_body_json(resp).await;
+            rep
+        }
+    };
+    let cash_sale = |number: i32, total: i32| {
+        let pool = pool.clone();
+        async move {
+            let order_id = Uuid::new_v4();
+            sqlx::query("INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref) VALUES ($1,$2,$3,$4, gen_random_uuid(), $5,0,$5,'completed',$6,'cash', gen_random_uuid()::text)")
+                .bind(order_id).bind(branch_id).bind(user_id).bind(shift_id).bind(total).bind(number).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ($1,'cash',$2,true)")
+                .bind(order_id).bind(total).execute(&pool).await.unwrap();
+            order_id
+        }
+    };
+    let refund = |order_id: Uuid, amount: i32| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO order_refunds (order_id, shift_id, amount, method, is_cash, reason, issued_by) \
+                 VALUES ($1, $2, $3, 'cash', true, 'quality_issue', $4)",
+            )
+            .bind(order_id).bind(shift_id).bind(amount).bind(user_id).execute(&pool).await.unwrap();
+        }
+    };
+
+    // Two cash sales: 6000 and 2000 → 9000 in the drawer.
+    let big = cash_sale(1, 6000).await;
+    let small = cash_sale(2, 2000).await;
+    let rep = report(shift_id).await;
+    assert_eq!(rep.expected_cash, 9000);
+    assert_eq!(rep.refunds_issued_count, 0);
+    assert_eq!(rep.cash_in_refunded_sales, 0);
+
+    // 500 back on the big one (partial: the sale stays sold) and the small one
+    // refunded in full (its status flips; it leaves the revenue lines).
+    refund(big, 500).await;
+    refund(small, 2000).await;
+    let rep = report(shift_id).await;
+
+    let cash_bucket: i64 = rep
+        .payment_summary
+        .iter()
+        .filter(|r| r.is_cash)
+        .map(|r| r.total)
+        .sum();
+    assert_eq!(
+        cash_bucket, 6000,
+        "the revenue bucket drops the fully refunded sale and keeps the partial one whole"
+    );
+    assert_eq!(rep.refunds_issued_count, 2);
+    assert_eq!(rep.refunds_issued_amount, 2500);
+    assert_eq!(rep.refunds_issued_cash, 2500);
+    assert_eq!(
+        rep.cash_in_refunded_sales, 2000,
+        "the notes from the fully refunded sale still went into the drawer"
+    );
+    assert_eq!(
+        rep.expected_cash,
+        1000 + 6000 + 2000 - 2500,
+        "float + cash sales (all of them) − cash refunded"
+    );
+    assert_eq!(
+        rep.expected_cash,
+        rep.shift.opening_cash as i64
+            + cash_bucket
+            + rep.cash_tips
+            + rep.cash_in_refunded_sales
+            + rep.cash_movements_net
+            - rep.refunds_issued_cash,
+        "the sheet adds up from its own lines"
+    );
 }

@@ -10,7 +10,17 @@
 //!   insert a normal completed `orders` row — order lines, addons, optionals,
 //!   payment, inventory movements (`record_movement`), and a minted `order_ref` —
 //!   WITHOUT re-pricing or re-resolving anything. Menu/recipe/override edits made
-//!   between intake and finalize cannot leak in.
+//!   between intake and finalize cannot leak in, and neither does a tax change:
+//!   the caller hands it the policy and figures frozen on the `delivery_orders`
+//!   row, not the branch's policy of the day.
+//!
+//!   This is deliberately NOT `orders::handlers::create_order_inner`. The till's
+//!   path re-prices — tax under the branch's CURRENT policy, deductions from the
+//!   CURRENT recipe at CURRENT costs, optionals at catalog price — and cannot
+//!   express `order_type`, the delivery fee or the delivery link at all, so a
+//!   finalize through it would book a different sale from the one the customer
+//!   agreed. Until the till's path can replay a frozen bill, the replay lives
+//!   here and mirrors its inserts column for column.
 //! * [`record_waste`] runs on **cancel with restore=false**: the food was made
 //!   but not delivered, so the frozen plan is deducted from stock and logged as a
 //!   `waste` movement.
@@ -28,7 +38,6 @@ use uuid::Uuid;
 
 use crate::errors::AppError;
 use crate::orders::component_resolve::{AddonInput, resolve_menu_item_configuration};
-use crate::orders::handlers::Order;
 
 // ── Intake input ──────────────────────────────────────────────
 
@@ -511,6 +520,10 @@ fn addon_cost(deductions: &[SnapshotDeduction], addon_item_id: Uuid) -> Option<i
 
 // ── Finalize: replay snapshot into a real orders row ──────────
 
+/// Everything the sale is booked from. Every money figure here is FROZEN — read
+/// off the `delivery_orders` row, never computed at finalize — and the orders
+/// row CHECKs that they agree with each other, so a caller that invents one is
+/// refused rather than recorded.
 pub struct FinalizeCtx<'a> {
     pub branch_id: Uuid,
     pub shift_id: Uuid,
@@ -519,40 +532,53 @@ pub struct FinalizeCtx<'a> {
     pub is_cash: bool,
     pub created_at: DateTime<Utc>,
     pub subtotal: i32,
+    /// Inside `total_amount` when `tax_inclusive`, added to it otherwise.
     pub tax_amount: i32,
     /// The policy this bill was priced under, recorded alongside the figures it
-    /// produced. See `orders.tax_rate_applied`.
+    /// produced. See `orders.tax_rate_applied`. For a delivery the service
+    /// charge pair is zero — dine-in only, by ruling — and `orders` CHECKs it.
     pub service_charge_amount: i32,
     pub tax_rate_applied: rust_decimal::Decimal,
     pub service_charge_rate_applied: rust_decimal::Decimal,
     pub tax_inclusive: bool,
     pub delivery_fee: i32,
+    /// `subtotal - discount_amount + service_charge_amount + delivery_fee`, plus
+    /// `tax_amount` when exclusive. The quote's own `total`.
     pub total_amount: i32,
     /// Frozen channel discount (item subtotal only). `discount_amount` is 0
-    /// when none; `total_amount == subtotal - discount_amount + delivery_fee`.
+    /// when none.
     pub discount_id: Option<Uuid>,
     pub discount_type: Option<&'a str>,
     pub discount_value: rust_decimal::Decimal,
     pub discount_amount: i32,
     pub customer_name: Option<&'a str>,
     pub notes: Option<&'a str>,
-    /// `'delivery'` for a finalized delivery order, `'dine_in'` for a settled
-    /// waiter open ticket (and any other POS-style materialization).
+    /// `'delivery'` — for every online channel, pickup included: a pickup is
+    /// a delivery channel, not a takeaway (see `orders.order_type`). Carried
+    /// rather than hard-coded so the row states its kind where it is written.
     pub order_type: &'a str,
-    /// The originating delivery order, when materializing a delivery. `None` for
-    /// dine-in tickets (which have no `delivery_orders` row) — the delivery-only
-    /// RETURNING subselects resolve to NULL in that case.
+    /// The quote this sale settles. `orders.delivery_order_id`; the read model
+    /// hydrates channel and coordinates through it.
     pub delivery_order_id: Option<Uuid>,
 }
 
+/// The sale a snapshot became: its id and the reference printed on the receipt.
+/// Deliberately not the full `Order` read model — the row is read back through
+/// the orders API like any other sale, and returning only the keys keeps this
+/// replay from having to track every column that model grows.
+pub struct MaterializedOrder {
+    pub id: Uuid,
+    pub order_ref: String,
+}
+
 /// Replay the frozen snapshot into a normal completed `orders` row inside an
-/// existing transaction. Returns the created order plus any oversold warnings.
+/// existing transaction. Returns the created sale plus any oversold warnings.
 pub async fn apply_snapshot(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ctx: &FinalizeCtx<'_>,
     lines: &[SnapshotLine],
     deductions: &[SnapshotDeduction],
-) -> Result<(Order, Vec<String>), AppError> {
+) -> Result<(MaterializedOrder, Vec<String>), AppError> {
     let order_number: i32 = sqlx::query_scalar(
         "SELECT COALESCE(MAX(order_number), 0) + 1 FROM orders WHERE shift_id = $1",
     )
@@ -588,7 +614,13 @@ pub async fn apply_snapshot(
         ref_seq
     );
 
-    let order = sqlx::query_as::<_, Order>(
+    // `service_charge_taxable_applied` is left NULL on purpose. The quote does
+    // not record it — with the service-charge rate pinned at zero the flag
+    // cannot influence a figure, and a column that records a policy that
+    // cannot apply is one that lies the day someone reads it. Writing the
+    // branch's flag of THIS moment would be the one act of pricing this replay
+    // must not do.
+    let order_id: Uuid = sqlx::query_scalar(
         r#"
         INSERT INTO orders
             (branch_id, shift_id, teller_id, order_number,
@@ -607,23 +639,7 @@ pub async fn apply_snapshot(
                 false, $8, NULL,
                 $19, $13, $14,
                 $20, $21, $22, $23)
-        RETURNING
-            id, branch_id, shift_id, teller_id,
-            (SELECT name FROM users WHERE id = $3) AS teller_name,
-            -- Delivery orders never pass through a waiter's ticket → always null.
-            waiter_id, (SELECT name FROM users WHERE id = waiter_id) AS waiter_name,
-            order_number, order_ref, status::text, payment_method::text,
-            -- Written just after this statement (see the order_payments insert
-            -- below); reads hydrate the real legs.
-            '[]'::json AS payment_legs,
-            subtotal, discount_type::text, discount_value,
-            discount_amount, tax_amount, service_charge_amount, total_amount,
-            amount_tendered, change_given, tip_amount, tip_payment_method, discount_id,
-            customer_name, notes, order_type, delivery_fee, delivery_order_id,
-            (SELECT channel::text FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_channel,
-            (SELECT customer_lat FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_lat,
-            (SELECT customer_lng FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_lng,
-            voided_at, void_reason::text, void_note, voided_by, created_at
+        RETURNING id
         "#,
     )
     .bind(ctx.branch_id)
@@ -640,17 +656,21 @@ pub async fn apply_snapshot(
     .bind(&order_ref)
     .bind(ctx.delivery_fee)
     .bind(ctx.delivery_order_id)
-    .bind(ctx.discount_type)   // $15
-    .bind(ctx.discount_value)  // $16
+    .bind(ctx.discount_type) // $15
+    .bind(ctx.discount_value) // $16
     .bind(ctx.discount_amount) // $17
-    .bind(ctx.discount_id)     // $18
-    .bind(ctx.order_type)      // $19
+    .bind(ctx.discount_id) // $18
+    .bind(ctx.order_type) // $19
     .bind(ctx.service_charge_amount) // $20
-    .bind(ctx.tax_rate_applied)      // $21
+    .bind(ctx.tax_rate_applied) // $21
     .bind(ctx.service_charge_rate_applied) // $22
-    .bind(ctx.tax_inclusive)         // $23
+    .bind(ctx.tax_inclusive) // $23
     .fetch_one(&mut **tx)
     .await?;
+    let order = MaterializedOrder {
+        id: order_id,
+        order_ref,
+    };
 
     sqlx::query(
         "INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ($1, $2, $3, $4)",
@@ -786,6 +806,45 @@ async fn apply_one_deductions(
         }
     }
     Ok(())
+}
+
+// ── What the kitchen would read ───────────────────────────────
+
+/// The slim kitchen display lines for a frozen cart — the same projection the
+/// till's `create_order_inner` builds for a counter order (addons as
+/// modifiers, `2× Extra shot` when repeated; no prices), so a delivery round
+/// renders on the KDS exactly like a till round. Server-minted ids: an online
+/// order is never projected offline, so there is no client id to honour.
+///
+/// Built for the confirm step, which cannot fire it yet: `kitchen_tickets`
+/// names its source by `order_id` or `open_ticket_id` (exactly one, CHECKed)
+/// and a delivery order has neither until the door. See `staff::set_status`.
+pub fn kitchen_lines(cart: &CartSnapshot) -> Vec<crate::kitchen::KitchenLine> {
+    cart.lines
+        .iter()
+        .map(|line| {
+            let modifiers = line
+                .addons
+                .iter()
+                .map(|a| {
+                    if a.quantity > 1 {
+                        format!("{}× {}", a.quantity, a.addon_name)
+                    } else {
+                        a.addon_name.clone()
+                    }
+                })
+                .collect();
+            crate::kitchen::KitchenLine {
+                menu_item_id: Some(line.menu_item_id),
+                name: line.item_name.clone(),
+                qty: line.quantity,
+                size_label: line.size_label.clone(),
+                modifiers,
+                notes: line.notes.clone(),
+                kitchen_item_id: None,
+            }
+        })
+        .collect()
 }
 
 /// Cancel-with-waste: the food was made but not delivered. Deduct the frozen plan

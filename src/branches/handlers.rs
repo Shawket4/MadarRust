@@ -85,6 +85,13 @@ pub struct Branch {
     #[serde(serialize_with = "crate::decimals::serialize_opt")]
     pub service_charge_rate: Option<sqlx::types::BigDecimal>,
     pub service_charge_taxable: Option<bool>,
+    /// Whether every dine-in sale here must belong to a table. Same shape as
+    /// the tax overrides: `null` inherits the organisation, which is not the
+    /// same as `false`. An explicit `false` lets a counter with two stools by
+    /// the window keep ringing walk-ups while the org's dining rooms seat
+    /// everyone; an explicit `true` does the reverse. This is the OVERRIDE —
+    /// the resolved answer is `branches::policy::require_table_for_orders`.
+    pub require_table_for_orders: Option<bool>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -168,6 +175,13 @@ pub struct UpdateBranchRequest {
     #[schema(nullable, value_type = Option<bool>)]
     pub service_charge_taxable: Option<Option<bool>>,
 
+    // The table rule, with the same three states as the tax overrides: absent
+    // = leave as-is, explicit `null` = back to inheriting the org, a bool =
+    // override in that direction.
+    #[serde(default, deserialize_with = "double_option")]
+    #[schema(nullable, value_type = Option<bool>)]
+    pub require_table_for_orders: Option<Option<bool>>,
+
     // Clearable geo fields
     #[serde(default, deserialize_with = "double_option")]
     #[schema(nullable, value_type = Option<f64>)]
@@ -221,7 +235,7 @@ pub async fn list_branches(
                    COALESCE(b.timezone, o.timezone)::text AS timezone,
                    b.printer_brand, b.printer_ip::text, b.printer_port,
                    b.is_active, o.logo_url as org_logo_url,
-                   b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable,
+                   b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable, b.require_table_for_orders,
                    b.created_at, b.updated_at
             FROM branches b
             JOIN organizations o ON o.id = b.org_id
@@ -241,7 +255,7 @@ pub async fn list_branches(
                    COALESCE(b.timezone, o.timezone)::text AS timezone,
                    b.printer_brand, b.printer_ip::text, b.printer_port,
                    b.is_active, o.logo_url as org_logo_url,
-                   b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable,
+                   b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable, b.require_table_for_orders,
                    b.created_at, b.updated_at
             FROM branches b
             JOIN organizations o ON o.id = b.org_id
@@ -315,14 +329,14 @@ pub async fn create_branch(
             VALUES ($1, $2, $3, $4, $5::timezone_name, $6, $7::inet, $8, $9, $10, $11)
             RETURNING id, org_id, code, name, address, phone, timezone,
                       printer_brand, printer_ip, printer_port,
-                      is_active, latitude, longitude, geo_radius_meters, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable,
+                      is_active, latitude, longitude, geo_radius_meters, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders,
                       created_at, updated_at
         )
         SELECT i.id, i.org_id, i.code, i.name, i.address, i.phone,
                COALESCE(i.timezone, o.timezone)::text AS timezone,
                i.printer_brand, i.printer_ip::text, i.printer_port,
                i.is_active, o.logo_url as org_logo_url,
-               i.latitude, i.longitude, i.geo_radius_meters, i.tax_rate, i.tax_inclusive, i.service_charge_rate, i.service_charge_taxable,
+               i.latitude, i.longitude, i.geo_radius_meters, i.tax_rate, i.tax_inclusive, i.service_charge_rate, i.service_charge_taxable, i.require_table_for_orders,
                i.created_at, i.updated_at
         FROM inserted i
         JOIN organizations o ON o.id = i.org_id
@@ -449,6 +463,9 @@ pub async fn update_branch(
                 tax_inclusive     = CASE WHEN $20 THEN $21 ELSE tax_inclusive END,
                 service_charge_rate = CASE WHEN $22 THEN $23 ELSE service_charge_rate END,
                 service_charge_taxable = CASE WHEN $24 THEN $25 ELSE service_charge_taxable END,
+                -- The table rule clears the same way. A defaulted false here
+                -- would be the org flag silently switched off at this branch.
+                require_table_for_orders = CASE WHEN $26 THEN $27 ELSE require_table_for_orders END,
                 -- Editing a branch has to MOVE this, and it did not.
                 --
                 -- The loyalty pass refresh decides a card is stale by comparing
@@ -462,14 +479,14 @@ pub async fn update_branch(
             WHERE id = $1 AND deleted_at IS NULL
             RETURNING id, org_id, code, name, address, phone, timezone,
                       printer_brand, printer_ip, printer_port,
-                      is_active, latitude, longitude, geo_radius_meters, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable,
+                      is_active, latitude, longitude, geo_radius_meters, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders,
                       created_at, updated_at
         )
         SELECT u.id, u.org_id, u.code, u.name, u.address, u.phone,
                COALESCE(u.timezone, o.timezone)::text AS timezone,
                u.printer_brand, u.printer_ip::text, u.printer_port,
                u.is_active, o.logo_url as org_logo_url,
-               u.latitude, u.longitude, u.geo_radius_meters, u.tax_rate, u.tax_inclusive, u.service_charge_rate, u.service_charge_taxable,
+               u.latitude, u.longitude, u.geo_radius_meters, u.tax_rate, u.tax_inclusive, u.service_charge_rate, u.service_charge_taxable, u.require_table_for_orders,
                u.created_at, u.updated_at
         FROM updated u
         JOIN organizations o ON o.id = u.org_id
@@ -502,6 +519,8 @@ pub async fn update_branch(
     .bind(body.service_charge_rate.and_then(|o| o).map(rate_to_decimal))
     .bind(body.service_charge_taxable.is_some())
     .bind(body.service_charge_taxable.and_then(|o| o))
+    .bind(body.require_table_for_orders.is_some())
+    .bind(body.require_table_for_orders.and_then(|o| o))
     .fetch_optional(pool.get_ref())
     .await?
     .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
@@ -656,7 +675,7 @@ async fn fetch_branch(pool: &PgPool, id: Uuid) -> Result<Branch, AppError> {
                COALESCE(b.timezone, o.timezone)::text AS timezone,
                b.printer_brand, b.printer_ip::text, b.printer_port,
                b.is_active, o.logo_url as org_logo_url,
-               b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable,
+               b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable, b.require_table_for_orders,
                b.created_at, b.updated_at
         FROM branches b
         JOIN organizations o ON o.id = b.org_id

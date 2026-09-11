@@ -1950,6 +1950,46 @@
       }
     },
     {
+      "id": "custom-023",
+      "lang": "en",
+      "question": "refunds by reason last month",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "refunds",
+        "dimensions": [
+          "refund_reason"
+        ],
+        "measures": [
+          "refund_count",
+          "refund_amount"
+        ],
+        "period": "last_month"
+      }
+    },
+    {
+      "id": "custom-024",
+      "lang": "ar",
+      "question": "المرتجعات حسب السبب الشهر اللي فات",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "refunds",
+        "dimensions": [
+          "refund_reason"
+        ],
+        "measures": [
+          "refund_count",
+          "refund_amount"
+        ],
+        "period": "last_month"
+      }
+    },
+    {
       "id": "entity-001",
       "lang": "en",
       "question": "how did Ahmed do as a waiter last week",

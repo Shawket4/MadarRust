@@ -30,11 +30,38 @@ async fn seed_table(pool: &PgPool, org: Uuid, branch: Uuid, label: &str) -> Uuid
 }
 
 async fn table_status(pool: &PgPool, table: Uuid) -> String {
-    sqlx::query_scalar("SELECT status FROM branch_tables WHERE id = $1")
+    sqlx::query_scalar("SELECT status FROM v_table_status WHERE table_id = $1")
         .bind(table)
         .fetch_one(pool)
         .await
         .unwrap()
+}
+/// A party sat down at `table` with no bill yet: a live `party` row in the
+/// occupancy ledger, placed by `by`.
+async fn seed_party_hold(pool: &PgPool, table: Uuid, by: Uuid) {
+    sqlx::query(
+        "INSERT INTO table_occupancies (org_id, branch_id, table_id, held_by, started_by) \
+         SELECT org_id, branch_id, id, 'party', $2 FROM branch_tables WHERE id = $1",
+    )
+    .bind(table)
+    .bind(by)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+/// The last party left plates on `table`: an ended row still owed a bus.
+async fn seed_dirty(pool: &PgPool, table: Uuid) {
+    sqlx::query(
+        "INSERT INTO table_occupancies \
+            (org_id, branch_id, table_id, held_by, started_at, ended_at, end_reason, needs_bussing) \
+         SELECT org_id, branch_id, id, 'party', now() - interval '1 hour', \
+                now() - interval '10 minutes', 'released', true \
+           FROM branch_tables WHERE id = $1",
+    )
+    .bind(table)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 async fn seed_org(pool: &PgPool) -> Uuid {
@@ -144,11 +171,8 @@ async fn the_first_round_claims_the_table_the_party_is_sitting_at(pool: PgPool) 
     let t = token(teller, org, UserRole::Teller);
 
     // They sat down: the table is taken, and there is no bill anywhere.
-    sqlx::query("UPDATE branch_tables SET status = 'seated' WHERE id = $1")
-        .bind(table)
-        .execute(&pool)
-        .await
-        .unwrap();
+    seed_party_hold(&pool, table, teller).await;
+    assert_eq!(table_status(&pool, table).await, "seated");
     let tickets: i64 = sqlx::query_scalar("SELECT count(*) FROM open_tickets")
         .fetch_one(&pool)
         .await
@@ -176,6 +200,22 @@ async fn the_first_round_claims_the_table_the_party_is_sitting_at(pool: PgPool) 
     assert_eq!(view.table_id, Some(table), "the tab took their table");
     assert_eq!(view.subtotal, 5000, "two of them, one round");
     assert_eq!(table_status(&pool, table).await, "seated");
+    // The hold became the ticket: its row ended `seated`, the ticket's is live.
+    let rows: Vec<(String, Option<String>, Option<Uuid>)> = sqlx::query_as(
+        "SELECT held_by, end_reason, open_ticket_id FROM table_occupancies \
+          WHERE table_id = $1 ORDER BY started_at, id",
+    )
+    .bind(table)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("party".into(), Some("seated".into()), None),
+            ("ticket".into(), None, Some(view.id)),
+        ]
+    );
 }
 
 /// A tab with nothing on it is not a thing. It was, briefly, and it is what
@@ -227,11 +267,7 @@ async fn a_round_will_not_claim_a_table_nobody_has_bussed(pool: PgPool) {
     grant(&pool, "teller", "open_tickets", "read").await;
     let t = token(teller, org, UserRole::Teller);
 
-    sqlx::query("UPDATE branch_tables SET status = 'dirty' WHERE id = $1")
-        .bind(table)
-        .execute(&pool)
-        .await
-        .unwrap();
+    seed_dirty(&pool, table).await;
 
     let resp = test::call_service(
         &app,
@@ -330,7 +366,9 @@ async fn waiter_fire_bump_settle_end_to_end(pool: PgPool) {
     assert_eq!(feed.len(), 1, "one outstanding kitchen ticket");
     let kitchen_item_id = feed[0].items[0].id;
 
-    // 3. Bump it → the open ticket becomes ready.
+    // 3. Bump it → the kitchen is done. The BILL stays `open` (readiness is not
+    //    a bill state); the kitchen ticket closes `bumped` and the view derives
+    //    `ready` from it.
     let bump = test::call_service(
         &app,
         test::TestRequest::post()
@@ -345,7 +383,40 @@ async fn waiter_fire_bump_settle_end_to_end(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(status, "ready", "all lines bumped → ticket ready");
+    assert_eq!(
+        status, "open",
+        "the bill is still unpaid, whatever the kitchen did"
+    );
+    let (kt_status, close_reason, closed_by): (String, Option<String>, Option<Uuid>) =
+        sqlx::query_as(
+            "SELECT status::text, close_reason::text, closed_by \
+             FROM kitchen_tickets WHERE open_ticket_id = $1",
+        )
+        .bind(ticket_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(kt_status, "ready");
+    assert_eq!(
+        close_reason.as_deref(),
+        Some("bumped"),
+        "the last bump closes the ticket"
+    );
+    assert_eq!(closed_by, Some(teller), "by whoever bumped it");
+    let get = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/open-tickets/{ticket_id}"))
+            .insert_header(("Authorization", format!("Bearer {teller_t}")))
+            .to_request(),
+    )
+    .await;
+    let view: OpenTicketView = test::read_body_json(get).await;
+    assert!(view.ready, "readiness is derived from the kitchen tickets");
+    assert!(
+        view.ready_at.is_some(),
+        "and the moment is kept on the bill as history"
+    );
 
     // 4. Cashier settles into THEIR shift → a paid dine-in order.
     let settle = test::call_service(
@@ -388,6 +459,27 @@ async fn waiter_fire_bump_settle_end_to_end(pool: PgPool) {
             .unwrap();
     assert_eq!(st, "settled");
     assert_eq!(oid, Some(order.id));
+    // Both sides of the link, written in the order's own transaction.
+    let back: Option<Uuid> = sqlx::query_scalar("SELECT open_ticket_id FROM orders WHERE id = $1")
+        .bind(order.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        back,
+        Some(ticket_id),
+        "the order points back at the bill it settled"
+    );
+    // The kitchen ticket was already closed `bumped`; the settle does not
+    // rewrite that — the first close wins.
+    let reason: Option<String> = sqlx::query_scalar(
+        "SELECT close_reason::text FROM kitchen_tickets WHERE open_ticket_id = $1",
+    )
+    .bind(ticket_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(reason.as_deref(), Some("bumped"));
 
     // 5. Double settle is a clean conflict.
     let again = test::call_service(
@@ -443,6 +535,7 @@ async fn replay_fire_round_settle_idempotent_and_attributed(pool: PgPool) {
     grant(&pool, "waiter", "open_tickets", "update").await; // add round
     grant(&pool, "teller", "open_tickets", "update").await; // settle
     grant(&pool, "teller", "orders", "create").await; // settle materializes the order
+    grant(&pool, "teller", "payments", "create").await; // ...and takes the money
     let bearer = token(teller, org, UserRole::Teller);
 
     let ticket_idem = Uuid::new_v4();
@@ -593,11 +686,7 @@ async fn a_teller_can_ring_up_a_table_through_the_queue(pool: PgPool) {
     let bearer = token(teller, org, UserRole::Teller);
 
     // The party is already sitting there; this is their first round arriving.
-    sqlx::query("UPDATE branch_tables SET status = 'seated' WHERE id = $1")
-        .bind(table)
-        .execute(&pool)
-        .await
-        .unwrap();
+    seed_party_hold(&pool, table, teller).await;
     let seat = serde_json::json!({
         "op": "fire_open_ticket",
         "teller_id": teller,
@@ -854,16 +943,29 @@ async fn replay_bump_idempotent_and_attributed(pool: PgPool) {
     )
     .await;
     assert_eq!(r.status(), 204, "replayed bump ok");
-    let (status, bumped_by): (String, Option<Uuid>) = sqlx::query_as(
-        "SELECT ot.status::text, kti.bumped_by FROM open_tickets ot, kitchen_ticket_items kti \
-         WHERE ot.id=$1 AND kti.id=$2",
+    // Readiness lives on the KITCHEN ticket (and closes it, `bumped`); the bill
+    // itself stays `open`.
+    let (status, kt_status, close_reason, bumped_by): (
+        String,
+        String,
+        Option<String>,
+        Option<Uuid>,
+    ) = sqlx::query_as(
+        "SELECT ot.status::text, kt.status::text, kt.close_reason::text, kti.bumped_by \
+             FROM open_tickets ot, kitchen_tickets kt, kitchen_ticket_items kti \
+             WHERE ot.id=$1 AND kt.open_ticket_id = ot.id AND kti.id=$2",
     )
     .bind(ticket_id)
     .bind(kitchen_item_id)
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(status, "ready", "only line bumped → ticket ready");
+    assert_eq!(status, "open", "the bill is not a kitchen state");
+    assert_eq!(
+        kt_status, "ready",
+        "only line bumped → kitchen ticket ready"
+    );
+    assert_eq!(close_reason.as_deref(), Some("bumped"));
     assert_eq!(
         bumped_by,
         Some(kitchen),
@@ -924,12 +1026,18 @@ async fn replay_bump_idempotent_and_attributed(pool: PgPool) {
     )
     .await;
     assert_eq!(ru.status(), 204, "replayed unbump ok");
-    let status2: String = sqlx::query_scalar("SELECT status::text FROM open_tickets WHERE id=$1")
-        .bind(ticket_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(status2, "open", "unbumped line → ticket no longer ready");
+    let (kt_status, closed_at): (String, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
+        "SELECT status::text, closed_at FROM kitchen_tickets WHERE open_ticket_id = $1",
+    )
+    .bind(ticket_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        kt_status, "firing",
+        "unbumped line → kitchen ticket back to firing"
+    );
+    assert!(closed_at.is_none(), "a recall reopens a `bumped` close");
 }
 
 /// Regression — the "nothing happens on the teller side" bug. A waiter device
@@ -1214,4 +1322,483 @@ async fn a_ticket_reward_without_a_line_id_is_refused(pool: PgPool) {
     )
     .await;
     assert_eq!(settle.status(), 400, "a guessed index is refused");
+}
+
+// ── Settle and void as real transactions ─────────────────────────────────────
+
+/// A confirmed booking for a party of two, arriving about now.
+async fn seed_booking(pool: &PgPool, org: Uuid, branch: Uuid) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO bookings (org_id, branch_id, party_size, starts_at, ends_at, guest_name, guest_phone) \
+         VALUES ($1, $2, 2, now(), now() + interval '2 hours', 'Ali', '2010') RETURNING id",
+    )
+    .bind(org)
+    .bind(branch)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+async fn seed_card_method(pool: &PgPool, org: Uuid) {
+    sqlx::query(
+        "INSERT INTO org_payment_methods (org_id, name, color, icon, is_cash, is_active) \
+         VALUES ($1, 'card', '#000', 'card', false, true)",
+    )
+    .bind(org)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+async fn booking_state(pool: &PgPool, id: Uuid) -> (String, Option<String>, Option<String>) {
+    sqlx::query_as("SELECT status::text, cancelled_by, cancel_reason FROM bookings WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+async fn kitchen_state(
+    pool: &PgPool,
+    ticket: Uuid,
+) -> (String, Option<String>, Option<Uuid>, bool) {
+    sqlx::query_as(
+        "SELECT status::text, close_reason::text, closed_by, closed_at IS NOT NULL \
+         FROM kitchen_tickets WHERE open_ticket_id = $1",
+    )
+    .bind(ticket)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+async fn occupancy_end(pool: &PgPool, ticket: Uuid) -> (Option<String>, bool, Option<Uuid>, bool) {
+    sqlx::query_as(
+        "SELECT end_reason, needs_bussing, ended_by, ended_at IS NOT NULL \
+         FROM table_occupancies WHERE open_ticket_id = $1",
+    )
+    .bind(ticket)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// A void is ONE event with every consequence inside it.
+///
+/// Before this, tearing a bill up flipped its status and left its kitchen
+/// copies `firing`, its table `seated` and its booking `seated` — three
+/// screens each telling a different story about a party that had left. Every
+/// table a ticket void touches is asserted here; the test is the deliverable
+/// as much as the fix.
+#[sqlx::test]
+async fn voiding_a_ticket_tears_down_everything_it_held(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 1000).await;
+    seed_cash_method(&pool, org).await;
+    let table = seed_table(&pool, org, branch, "T1").await;
+    let booking = seed_booking(&pool, org, branch).await;
+    let waiter = seed_user(&pool, org, "waiter").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let _shift = open_shift_row(&pool, branch, teller).await;
+    grant(&pool, "waiter", "open_tickets", "create").await;
+    grant(&pool, "teller", "open_tickets", "update").await;
+    grant(&pool, "teller", "open_tickets", "delete").await; // void
+    let waiter_t = token(waiter, org, UserRole::Waiter);
+    let teller_t = token(teller, org, UserRole::Teller);
+
+    // The booked party sits at T1 and orders.
+    let fire = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/open-tickets")
+            .insert_header(("Authorization", format!("Bearer {waiter_t}")))
+            .set_json(&serde_json::json!({
+                "branch_id": branch, "table_id": table, "booking_id": booking,
+                "items": [{ "menu_item_id": item, "quantity": 1 }]
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(fire.status(), 201);
+    let view: OpenTicketView = test::read_body_json(fire).await;
+    let ticket = view.id;
+    assert_eq!(
+        view.table_id,
+        Some(table),
+        "the party's table was claimable"
+    );
+
+    // What the void has to undo.
+    assert_eq!(booking_state(&pool, booking).await.0, "seated");
+    assert_eq!(table_status(&pool, table).await, "seated");
+    let (k_status, k_reason, _, k_closed) = kitchen_state(&pool, ticket).await;
+    assert_eq!(
+        (k_status.as_str(), k_reason, k_closed),
+        ("firing", None, false)
+    );
+
+    let void = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/open-tickets/{ticket}/void"))
+            .insert_header(("Authorization", format!("Bearer {teller_t}")))
+            .set_json(
+                &serde_json::json!({ "reason": "wrong_order", "note": "rang the wrong table" }),
+            )
+            .to_request(),
+    )
+    .await;
+    assert_eq!(void.status(), 200, "the teller voids the bill");
+
+    // The bill: an event with an actor, a reason and a note.
+    let (status, voided_by, reason, note, voided): (
+        String,
+        Option<Uuid>,
+        Option<String>,
+        Option<String>,
+        bool,
+    ) = sqlx::query_as(
+        "SELECT status::text, voided_by, void_reason::text, void_note, voided_at IS NOT NULL \
+             FROM open_tickets WHERE id = $1",
+    )
+    .bind(ticket)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "voided");
+    assert_eq!(voided_by, Some(teller), "the void names who tore it up");
+    assert_eq!(reason.as_deref(), Some("wrong_order"));
+    assert_eq!(note.as_deref(), Some("rang the wrong table"));
+    assert!(voided);
+
+    // The kitchen: the round is voided, closed `voided`, by the voider, and
+    // every line is off the queue.
+    let (k_status, k_reason, k_by, k_closed) = kitchen_state(&pool, ticket).await;
+    assert_eq!(k_status, "voided");
+    assert_eq!(k_reason.as_deref(), Some("voided"));
+    assert_eq!(k_by, Some(teller));
+    assert!(k_closed);
+    let live_lines: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM kitchen_ticket_items i JOIN kitchen_tickets kt ON kt.id = i.kitchen_ticket_id \
+         WHERE kt.open_ticket_id = $1 AND i.voided_at IS NULL",
+    )
+    .bind(ticket)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        live_lines, 0,
+        "no line of a voided round is left for a station to cook"
+    );
+
+    // The floor: the occupancy ended `voided`, nothing to bus, table free.
+    let (end_reason, needs_bussing, ended_by, ended) = occupancy_end(&pool, ticket).await;
+    assert_eq!(end_reason.as_deref(), Some("voided"));
+    assert!(!needs_bussing, "nobody ate, nothing to bus");
+    assert_eq!(ended_by, Some(teller));
+    assert!(ended);
+    assert_eq!(table_status(&pool, table).await, "free");
+
+    // The booking: the party did not eat under it — cancelled, by the system.
+    let (b_status, b_by, b_reason) = booking_state(&pool, booking).await;
+    assert_eq!(b_status, "cancelled");
+    assert_eq!(b_by.as_deref(), Some("system"));
+    assert_eq!(b_reason.as_deref(), Some("Ticket voided"));
+
+    // Idempotent: a lost-ack retry returns the voided bill and re-stamps nothing.
+    let again = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/open-tickets/{ticket}/void"))
+            .insert_header(("Authorization", format!("Bearer {teller_t}")))
+            .set_json(&serde_json::json!({ "reason": "other", "note": "retry" }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(again.status(), 200);
+    let note_after: Option<String> =
+        sqlx::query_scalar("SELECT void_note FROM open_tickets WHERE id = $1")
+            .bind(ticket)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(note_after.as_deref(), Some("rang the wrong table"));
+}
+
+/// The bill the till shows is the bill the books record.
+///
+/// The till used to show (and collect) the ticket's running subtotal while the
+/// settle booked subtotal − discount + service charge + tax, so every table
+/// sale left the drawer short by exactly the tax. Now the view carries the
+/// server-priced bill, the settle refuses the old figure through the same
+/// drift check a counter checkout gets, and the tenders, the change and the
+/// time the till says it was paid all land on the order — with the floor
+/// ended in the same commit.
+#[sqlx::test]
+async fn the_bill_the_till_sees_is_the_bill_the_books_record(pool: PgPool) {
+    use chrono::Timelike;
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    // 14% exclusive (the org default) plus a 10% service charge, taxed.
+    sqlx::query("UPDATE organizations SET service_charge_rate = 0.10, service_charge_taxable = true WHERE id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 1000).await;
+    seed_cash_method(&pool, org).await;
+    seed_card_method(&pool, org).await;
+    let table = seed_table(&pool, org, branch, "T1").await;
+    let waiter = seed_user(&pool, org, "waiter").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    grant(&pool, "waiter", "open_tickets", "create").await;
+    grant(&pool, "teller", "open_tickets", "read").await;
+    grant(&pool, "teller", "open_tickets", "update").await;
+    grant(&pool, "teller", "orders", "create").await;
+    grant(&pool, "teller", "payments", "create").await;
+    let waiter_t = token(waiter, org, UserRole::Waiter);
+    let teller_t = token(teller, org, UserRole::Teller);
+
+    // 2 × 1000 with the waiter's 10% off.
+    let fire = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/open-tickets")
+            .insert_header(("Authorization", format!("Bearer {waiter_t}")))
+            .set_json(&serde_json::json!({
+                "branch_id": branch, "table_id": table,
+                "discount_type": "percentage", "discount_value": "0.10",
+                "items": [{ "menu_item_id": item, "quantity": 2 }]
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(fire.status(), 201);
+    let view: OpenTicketView = test::read_body_json(fire).await;
+    let ticket = view.id;
+
+    // The bill, server-priced: 2000 − 200 = 1800; +10% = 180; 14% of 1980 = 277.
+    let get = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/open-tickets/{ticket}"))
+            .insert_header(("Authorization", format!("Bearer {teller_t}")))
+            .to_request(),
+    )
+    .await;
+    let view: OpenTicketView = test::read_body_json(get).await;
+    assert_eq!(view.subtotal, 2000);
+    assert_eq!(view.bill.subtotal, 2000);
+    assert_eq!(view.bill.discount_amount, 200);
+    assert_eq!(view.bill.service_charge_amount, 180);
+    assert_eq!(view.bill.tax_amount, 277);
+    assert!(!view.bill.tax_inclusive);
+    assert_eq!(view.bill.total, 2257, "what the drawer must collect");
+
+    // The old figure — the subtotal — is refused, not booked.
+    let short = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/open-tickets/{ticket}/settle"))
+            .insert_header(("Authorization", format!("Bearer {teller_t}")))
+            .set_json(&serde_json::json!({
+                "shift_id": shift, "payment_method": "cash", "total_amount": 2000
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        short.status(),
+        409,
+        "a till that collected the subtotal is out of step with the books"
+    );
+    let still_open: String =
+        sqlx::query_scalar("SELECT status::text FROM open_tickets WHERE id = $1")
+            .bind(ticket)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(still_open, "open");
+
+    // Paid ten minutes ago as the till says, half by card, 43 back in change.
+    let settled_at = (chrono::Utc::now() - chrono::Duration::minutes(10))
+        .with_nanosecond(0)
+        .unwrap();
+    let settle = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/open-tickets/{ticket}/settle"))
+            .insert_header(("Authorization", format!("Bearer {teller_t}")))
+            .set_json(&serde_json::json!({
+                "shift_id": shift, "payment_method": "cash",
+                "total_amount": view.bill.total,
+                "payment_splits": [
+                    { "method": "cash", "amount": 1257 },
+                    { "method": "card", "amount": 1000 }
+                ],
+                "amount_tendered": 1300, "change_given": 43,
+                "settled_at": settled_at
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(settle.status(), 200);
+    let order: Order = test::read_body_json(settle).await;
+    assert_eq!(
+        order.total_amount, view.bill.total,
+        "the books record what the till showed"
+    );
+    assert_eq!(order.discount_amount, 200);
+    assert_eq!(order.service_charge_amount, 180);
+    assert_eq!(order.tax_amount, 277);
+    assert_eq!(order.amount_tendered, Some(1300));
+    assert_eq!(order.change_given, Some(43));
+    assert_eq!(
+        order.created_at, settled_at,
+        "the sale is dated when the till says it was paid"
+    );
+
+    // The split tenders survived — two legs, and the badge says so.
+    let legs: Vec<(String, i32)> = sqlx::query_as(
+        "SELECT method, amount FROM order_payments WHERE order_id = $1 ORDER BY amount DESC",
+    )
+    .bind(order.id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(legs, vec![("cash".into(), 1257), ("card".into(), 1000)]);
+    assert_eq!(order.payment_method, "mixed");
+
+    // One instant on both rows.
+    let ticket_settled_at: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT settled_at FROM open_tickets WHERE id = $1")
+            .bind(ticket)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(ticket_settled_at, Some(settled_at));
+
+    // The floor, in the same commit: the party checked out, the table is
+    // theirs to bus, the kitchen copy closed with the sale.
+    let (end_reason, needs_bussing, ended_by, _) = occupancy_end(&pool, ticket).await;
+    assert_eq!(end_reason.as_deref(), Some("settled"));
+    assert!(needs_bussing);
+    assert_eq!(ended_by, Some(teller));
+    assert_eq!(table_status(&pool, table).await, "dirty");
+    let (_, k_reason, k_by, _) = kitchen_state(&pool, ticket).await;
+    assert_eq!(k_reason.as_deref(), Some("settled"));
+    assert_eq!(k_by, Some(teller));
+
+    // After the settle the view's bill is what was BOOKED, not a repricing.
+    let get = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/open-tickets/{ticket}"))
+            .insert_header(("Authorization", format!("Bearer {teller_t}")))
+            .to_request(),
+    )
+    .await;
+    let after: OpenTicketView = test::read_body_json(get).await;
+    assert_eq!(after.bill.total, order.total_amount);
+}
+
+/// The settle-time discount is TYPED. Silence inherits the waiter's; the
+/// literal `"none"` clears it; anything else replaces it. It used to be
+/// `.or()`, so a cashier could neither see nor clear what the waiter applied.
+#[sqlx::test]
+async fn a_cashier_inherits_clears_or_replaces_the_waiters_discount(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 1000).await;
+    seed_cash_method(&pool, org).await;
+    let waiter = seed_user(&pool, org, "waiter").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    grant(&pool, "waiter", "open_tickets", "create").await;
+    grant(&pool, "teller", "open_tickets", "read").await;
+    grant(&pool, "teller", "open_tickets", "update").await;
+    grant(&pool, "teller", "orders", "create").await;
+    grant(&pool, "teller", "payments", "create").await;
+    let waiter_t = token(waiter, org, UserRole::Waiter);
+    let teller_t = token(teller, org, UserRole::Teller);
+
+    // Three identical bills, each with the waiter's 10% on it.
+    let mut tickets = Vec::new();
+    for _ in 0..3 {
+        let fire = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/open-tickets")
+                .insert_header(("Authorization", format!("Bearer {waiter_t}")))
+                .set_json(&serde_json::json!({
+                    "branch_id": branch,
+                    "discount_type": "percentage", "discount_value": "0.10",
+                    "items": [{ "menu_item_id": item, "quantity": 2 }]
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(fire.status(), 201);
+        let v: OpenTicketView = test::read_body_json(fire).await;
+        assert_eq!(
+            v.discount_type.as_deref(),
+            Some("percentage"),
+            "the cashier can SEE it"
+        );
+        assert_eq!(v.bill.discount_amount, 200);
+        tickets.push(v.id);
+    }
+    let settle = |ticket: Uuid, extra: serde_json::Value| {
+        let mut body = serde_json::json!({ "shift_id": shift, "payment_method": "cash" });
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        test::TestRequest::post()
+            .uri(&format!("/open-tickets/{ticket}/settle"))
+            .insert_header(("Authorization", format!("Bearer {teller_t}")))
+            .set_json(&body)
+            .to_request()
+    };
+
+    // Silence: the waiter's 10% is inherited. 1800 + 14% = 2052.
+    let r = test::call_service(
+        &app,
+        settle(tickets[0], serde_json::json!({ "total_amount": 2052 })),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let o: Order = test::read_body_json(r).await;
+    assert_eq!((o.discount_amount, o.total_amount), (200, 2052));
+
+    // "none": no discount at all, whatever the waiter set. 2000 + 14% = 2280.
+    let r = test::call_service(
+        &app,
+        settle(
+            tickets[1],
+            serde_json::json!({ "discount_type": "none", "total_amount": 2280 }),
+        ),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let o: Order = test::read_body_json(r).await;
+    assert_eq!(
+        (o.discount_amount, o.discount_type, o.total_amount),
+        (0, None, 2280)
+    );
+
+    // A cashier's own discount replaces the waiter's outright — never a merge
+    // of the waiter's type under the cashier's value. 1500 + 14% = 1710.
+    let r = test::call_service(
+        &app,
+        settle(
+            tickets[2],
+            serde_json::json!({ "discount_type": "fixed", "discount_value": "500", "total_amount": 1710 }),
+        ),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let o: Order = test::read_body_json(r).await;
+    assert_eq!(o.discount_type.as_deref(), Some("fixed"));
+    assert_eq!((o.discount_amount, o.total_amount), (500, 1710));
 }

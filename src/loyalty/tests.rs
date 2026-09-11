@@ -791,14 +791,55 @@ async fn signup_without_otp_mints_a_member_and_a_token(pool: PgPool) {
     assert!(member_token.starts_with('M'));
     assert!(Uuid::parse_str(&member_token).is_err());
 
-    // Rescanning the counter QR returns the SAME card, not a second member.
+    // Rescanning the counter QR does not make a second member — but neither
+    // does it hand the card to whoever typed the number. The token IS the card:
+    // balance, history, wallet passes. Until this device has proved it owns the
+    // phone, the page is told there is a card and offered the OTP, and nothing
+    // that belongs to the member leaves the server.
     let req = test::TestRequest::post()
         .uri("/public/loyalty/join")
-        .set_json(json!({ "branch_id": branch, "name": "Ali", "phone": "01000000001" }))
+        .set_json(json!({ "branch_id": branch, "name": "Someone Else", "phone": "01000000001" }))
         .to_request();
     let body: Value = test::call_and_read_body_json(&app, req).await;
     assert_eq!(body["already_member"], true);
+    assert_eq!(body["verify_required"], true);
+    assert!(body["member_token"].is_null(), "{body}");
+    assert!(body["passes"].is_null(), "{body}");
+    assert_eq!(
+        body["name"], "Someone Else",
+        "the name on file is not echoed"
+    );
+    assert_eq!(body["card_link_sent"], false, "no gateway configured here");
+
+    // A device that HAS verified this phone gets the same card back.
+    let phone = crate::delivery::normalize_phone("01000000001").unwrap();
+    let device = crate::delivery::whatsapp::issue_device_token(&secret().0, &phone).unwrap();
+    let req = test::TestRequest::post()
+        .uri("/public/loyalty/join")
+        .set_json(json!({
+            "branch_id": branch, "name": "Ali", "phone": "01000000001",
+            "device_token": device
+        }))
+        .to_request();
+    let body: Value = test::call_and_read_body_json(&app, req).await;
+    assert_eq!(body["already_member"], true);
+    assert_eq!(body["verify_required"], false);
     assert_eq!(body["member_token"], member_token);
+    assert!(body["passes"].is_object());
+
+    // And a token verified for a DIFFERENT phone proves nothing about this one.
+    let other = crate::delivery::normalize_phone("01000000002").unwrap();
+    let wrong = crate::delivery::whatsapp::issue_device_token(&secret().0, &other).unwrap();
+    let req = test::TestRequest::post()
+        .uri("/public/loyalty/join")
+        .set_json(json!({
+            "branch_id": branch, "name": "Ali", "phone": "01000000001",
+            "device_token": wrong
+        }))
+        .to_request();
+    let body: Value = test::call_and_read_body_json(&app, req).await;
+    assert_eq!(body["verify_required"], true);
+    assert!(body["member_token"].is_null());
 
     let n: i64 = sqlx::query_scalar("SELECT count(*) FROM loyalty_customers WHERE org_id = $1")
         .bind(org)
@@ -2552,4 +2593,507 @@ async fn pass_locations_are_scoped_to_the_org(pool: PgPool) {
             .is_empty(),
         "a closed branch must not stay on the pass"
     );
+}
+
+// ── The ledger's provenance, and a void's clawback ───────────────────────────
+
+/// A settled sale on the books, written directly. The order route itself is
+/// exercised elsewhere; here the order is scenery for what the ledger does.
+async fn seed_settled_order(
+    pool: &PgPool,
+    branch: Uuid,
+    shift: Uuid,
+    teller: Uuid,
+    subtotal: i32,
+    number: i32,
+) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO orders (branch_id, shift_id, teller_id, idempotency_key, subtotal, \
+             discount_amount, tax_amount, total_amount, status, order_number, \
+             payment_method, order_ref) \
+         VALUES ($1,$2,$3, gen_random_uuid(), $4, 0, 0, $4, 'completed', $5, 'cash', \
+                 gen_random_uuid()::text) \
+         RETURNING id",
+    )
+    .bind(branch)
+    .bind(shift)
+    .bind(teller)
+    .bind(subtotal)
+    .bind(number)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// What the till does when it tears an order up, reduced to the one statement
+/// the ledger reacts to. Every void path — live, replayed, an admin's — ends in
+/// this UPDATE, which is why the reversal hangs off it and not off any of them.
+async fn void_order(pool: &PgPool, order: Uuid, by: Uuid) {
+    sqlx::query(
+        "UPDATE orders SET status = 'voided', voided_at = now(), voided_by = $2, \
+                void_reason = 'wrong_order' WHERE id = $1",
+    )
+    .bind(order)
+    .bind(by)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn ledger_rows(pool: &PgPool, member: Uuid) -> Vec<(String, String, i32, Option<Uuid>)> {
+    sqlx::query_as(
+        "SELECT kind::text, source, points, reverses_id FROM loyalty_transactions \
+          WHERE customer_id = $1 ORDER BY created_at, kind",
+    )
+    .bind(member)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// The defect the ledger migration exists for: points earned on a sale that was
+/// then voided used to stay earned. Now the void claws them back, in the void's
+/// own transaction, and the ledger says the void did it.
+#[sqlx::test]
+async fn a_void_claws_back_what_its_sale_earned(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    enable_program(&pool, org, 1000, 100, false).await;
+    let member = seed_member(&pool, org, "201000000001", "Mvoidtoken00000000001").await;
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let jwt = token(teller, org, UserRole::Teller, Some(branch));
+
+    // 130 EGP at a point per 10 EGP: thirteen points, through the real award.
+    let order = seed_settled_order(&pool, branch, shift, teller, 13_000, 1).await;
+    let req = test::TestRequest::post()
+        .uri("/loyalty/award")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .set_json(json!({ "branch_id": branch, "order_id": order, "customer_id": member }))
+        .to_request();
+    let body: Value = test::call_and_read_body_json(&app, req).await;
+    assert_eq!(body["points_awarded"], 13, "{body}");
+    assert_eq!(balance_of(&pool, member).await, 13);
+
+    void_order(&pool, order, teller).await;
+
+    assert_eq!(
+        balance_of(&pool, member).await,
+        0,
+        "the void took its points back"
+    );
+    let rows = ledger_rows(&pool, member).await;
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[0].0, "earn");
+    assert_eq!(rows[0].1, "sale", "an earn says it came from a sale");
+    assert_eq!(rows[1].0, "reverse_earn");
+    assert_eq!(rows[1].1, "void", "the reversal says the void did it");
+    assert_eq!(rows[1].2, -13);
+    let earn_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM loyalty_transactions WHERE customer_id = $1 AND kind = 'earn'",
+    )
+    .bind(member)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows[1].3, Some(earn_id), "and names the row it undoes");
+
+    // The lifetime figure is net of what was undone — a voided sale is not
+    // something the customer ever earned.
+    let lifetime: i32 =
+        sqlx::query_scalar("SELECT lifetime_points FROM loyalty_customers WHERE id = $1")
+            .bind(member)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(lifetime, 0);
+
+    // The void was not the till's doing: the ledger still refuses a second
+    // writer, so application code must never also write void reversals.
+    let second: Result<Option<Uuid>, _> =
+        sqlx::query_scalar("SELECT loyalty_reverse($1, NULL, 'void', NULL, NULL)")
+            .bind(earn_id)
+            .fetch_one(&pool)
+            .await;
+    assert_eq!(
+        second.unwrap(),
+        None,
+        "nothing left to reverse is a fact, not an error"
+    );
+    assert_eq!(balance_of(&pool, member).await, 0);
+}
+
+/// The points were already spent when the sale was voided. Default (a): clamp
+/// at zero — the shop eats the reward, and the earn stays visibly part-reversed.
+/// `allow_negative_balance` lets a shop that would rather the books balance
+/// send the card below zero instead.
+#[sqlx::test]
+async fn a_clawback_of_spent_points_clamps_at_zero_unless_the_shop_says_otherwise(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let admin = seed_user(&pool, org, "org_admin").await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    enable_program(&pool, org, 1000, 100, false).await;
+    let member = seed_member(&pool, org, "201000000001", "Mclamptoken0000000001").await;
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let jwt = token(teller, org, UserRole::Teller, Some(branch));
+    let admin_jwt = token(admin, org, UserRole::OrgAdmin, None);
+
+    let award = |order: Uuid| {
+        test::TestRequest::post()
+            .uri("/loyalty/award")
+            .insert_header(("Authorization", format!("Bearer {jwt}")))
+            .set_json(json!({ "branch_id": branch, "order_id": order, "customer_id": member }))
+            .to_request()
+    };
+    // Spending, stood in for by an admin deduction: a redeem needs a whole
+    // order round-trip and moves the balance the same way.
+    let spend = |n: i32| {
+        test::TestRequest::post()
+            .uri("/loyalty/adjust")
+            .insert_header(("Authorization", format!("Bearer {admin_jwt}")))
+            .set_json(json!({
+                "branch_id": branch, "customer_id": member, "points": -n, "note": "spent"
+            }))
+            .to_request()
+    };
+
+    // Earn 13, spend 13, void the sale.
+    let first = seed_settled_order(&pool, branch, shift, teller, 13_000, 1).await;
+    assert!(
+        test::call_service(&app, award(first))
+            .await
+            .status()
+            .is_success()
+    );
+    assert!(
+        test::call_service(&app, spend(13))
+            .await
+            .status()
+            .is_success()
+    );
+    assert_eq!(balance_of(&pool, member).await, 0);
+    void_order(&pool, first, teller).await;
+    assert_eq!(
+        balance_of(&pool, member).await,
+        0,
+        "clamped: the shop eats the reward rather than showing a customer a minus"
+    );
+    let rows = ledger_rows(&pool, member).await;
+    assert!(
+        !rows.iter().any(|r| r.0 == "reverse_earn"),
+        "nothing to claw, so nothing written — the earn stays visibly unreversed: {rows:?}"
+    );
+    // And the deduction says a person did it, not a sale.
+    assert!(
+        rows.iter()
+            .any(|r| r.0 == "adjust" && r.1 == "manual" && r.2 == -13)
+    );
+
+    // Now the shop opts into the hole.
+    let mut settings: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri("/loyalty/settings")
+            .insert_header(("Authorization", format!("Bearer {admin_jwt}")))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(settings["allow_negative_balance"], false, "off by default");
+    settings["allow_negative_balance"] = json!(true);
+    let saved: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::put()
+            .uri("/loyalty/settings")
+            .insert_header(("Authorization", format!("Bearer {admin_jwt}")))
+            .set_json(&settings)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(saved["allow_negative_balance"], true, "{saved}");
+
+    let second = seed_settled_order(&pool, branch, shift, teller, 13_000, 2).await;
+    assert!(
+        test::call_service(&app, award(second))
+            .await
+            .status()
+            .is_success()
+    );
+    assert!(
+        test::call_service(&app, spend(13))
+            .await
+            .status()
+            .is_success()
+    );
+    void_order(&pool, second, teller).await;
+    assert_eq!(
+        balance_of(&pool, member).await,
+        -13,
+        "the books balance and the next visits earn into the hole"
+    );
+
+    // Spending still cannot overdraw, whatever the setting says: a deduction
+    // from a negative balance is refused with a sentence, not a 500.
+    let resp = test::call_service(&app, spend(1)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    // A gift still lands on a card in debt.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/loyalty/adjust")
+            .insert_header(("Authorization", format!("Bearer {admin_jwt}")))
+            .set_json(json!({ "branch_id": branch, "customer_id": member, "points": 3 }))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success());
+    assert_eq!(balance_of(&pool, member).await, -10);
+}
+
+/// The member's history now says WHY each row exists, so a till or a dashboard
+/// prints the reason instead of guessing it from the kind and the note.
+#[sqlx::test]
+async fn the_ledger_reports_where_each_movement_came_from(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let admin = seed_user(&pool, org, "org_admin").await;
+    enable_program(&pool, org, 1000, 100, false).await;
+    let member = seed_member(&pool, org, "201000000001", "Msourcetoken000000001").await;
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let admin_jwt = token(admin, org, UserRole::OrgAdmin, None);
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/loyalty/adjust")
+            .insert_header(("Authorization", format!("Bearer {admin_jwt}")))
+            .set_json(json!({ "branch_id": branch, "customer_id": member, "points": 20 }))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success());
+
+    let detail: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/loyalty/members/{member}"))
+            .insert_header(("Authorization", format!("Bearer {admin_jwt}")))
+            .to_request(),
+    )
+    .await;
+    let row = &detail["ledger"][0];
+    assert_eq!(row["kind"], "adjust");
+    assert_eq!(row["source"], "manual", "{row}");
+    assert!(row["reverses_id"].is_null());
+}
+
+// ── Forgetting a member ──────────────────────────────────────────────────────
+
+/// Deleting a member scrubs the person and keeps the books. The ledger is the
+/// shop's record of what it gave away; it is not the member's data, and the
+/// database would refuse to lose it anyway.
+#[sqlx::test]
+async fn forgetting_a_member_keeps_the_books_and_frees_the_phone(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let admin = seed_user(&pool, org, "org_admin").await;
+    enable_program(&pool, org, 1000, 100, false).await;
+    let member = seed_member(&pool, org, "201000000001", "Mforgettoken000000001").await;
+    sqlx::query(
+        "UPDATE loyalty_customers SET birth_month = 3, birth_day = 17, \
+                google_object_id = 'issuer.obj' WHERE id = $1",
+    )
+    .bind(member)
+    .execute(&pool)
+    .await
+    .unwrap();
+    grant(&pool, org, member, branch, "points", 10).await;
+    sqlx::query(
+        "INSERT INTO loyalty_pass_devices (device_library_id, customer_id, org_id, push_token) \
+         VALUES ('dev-1', $1, $2, 'push')",
+    )
+    .bind(member)
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let delete = |jwt: String| {
+        test::TestRequest::delete()
+            .uri(&format!("/loyalty/members/{member}"))
+            .insert_header(("Authorization", format!("Bearer {jwt}")))
+            .to_request()
+    };
+
+    // A teller identifies people; they do not erase them.
+    assert_eq!(
+        test::call_service(
+            &app,
+            delete(token(teller, org, UserRole::Teller, Some(branch)))
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    // Another tenant's admin cannot even see them.
+    let other = seed_org(&pool).await;
+    let other_admin = seed_user(&pool, other, "org_admin").await;
+    assert_eq!(
+        test::call_service(
+            &app,
+            delete(token(other_admin, other, UserRole::OrgAdmin, None))
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    let admin_jwt = token(admin, org, UserRole::OrgAdmin, None);
+    assert_eq!(
+        test::call_service(&app, delete(admin_jwt.clone()))
+            .await
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+
+    #[derive(sqlx::FromRow)]
+    struct After {
+        name: String,
+        phone: String,
+        member_token: String,
+        apple_auth_token: Option<String>,
+        birth_month: Option<i16>,
+        marketing_opt_out: bool,
+        deleted: bool,
+        points_balance: i32,
+    }
+    let after: After = sqlx::query_as(
+        "SELECT name, phone, member_token, apple_auth_token, birth_month, marketing_opt_out, \
+                deleted_at IS NOT NULL AS deleted, points_balance \
+           FROM loyalty_customers WHERE id = $1",
+    )
+    .bind(member)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(after.deleted);
+    assert_eq!(after.name, "Deleted member");
+    assert!(after.phone.starts_with("deleted:"), "{}", after.phone);
+    assert_ne!(
+        after.member_token, "Mforgettoken000000001",
+        "the barcode is dead"
+    );
+    assert!(after.apple_auth_token.is_none());
+    assert!(after.birth_month.is_none(), "nothing left to greet");
+    assert!(after.marketing_opt_out, "and nothing to be written to");
+    // The books: untouched.
+    assert_eq!(after.points_balance, 10);
+    let ledger: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM loyalty_transactions WHERE customer_id = $1")
+            .bind(member)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        ledger, 1,
+        "the ledger is the shop's record, not the member's data"
+    );
+    let devices: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM loyalty_pass_devices WHERE customer_id = $1")
+            .bind(member)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(devices, 0, "no update is ever pushed to that phone again");
+
+    // The old token resolves to nobody at the till, and the member is gone
+    // from the admin's list.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/loyalty/lookup")
+            .insert_header(("Authorization", format!("Bearer {admin_jwt}")))
+            .set_json(json!({ "branch_id": branch, "token": "Mforgettoken000000001" }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/loyalty/members/{member}"))
+            .insert_header(("Authorization", format!("Bearer {admin_jwt}")))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Forgetting twice is not a failure — and does not confirm a phone number
+    // used to be a member.
+    assert_eq!(
+        test::call_service(&app, delete(admin_jwt.clone()))
+            .await
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+
+    // The same phone can join again tomorrow, as a fresh member with a fresh
+    // card: the unique index only covers live rows.
+    let body: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/loyalty/join")
+            .set_json(json!({ "branch_id": branch, "name": "Ali", "phone": "201000000001" }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(body["already_member"], false, "{body}");
+    assert_eq!(body["balance"], 0, "a fresh card, not the old balance");
+    let fresh: Uuid = sqlx::query_scalar(
+        "SELECT id FROM loyalty_customers WHERE org_id = $1 AND phone = $2 AND deleted_at IS NULL",
+    )
+    .bind(org)
+    .bind("201000000001")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_ne!(fresh, member);
 }

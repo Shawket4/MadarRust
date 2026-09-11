@@ -1,9 +1,10 @@
 //! Table occupancy and the transfer waitlist.
 //!
-//! The invariant under test: a table has at most one live occupant, an occupant
-//! is always an open ticket, and `branch_tables.status` is only ever moved by
-//! the three shared walks. Parked orders are client-local drafts and have no
-//! server presence to test.
+//! The invariant under test: a table has at most one live occupant, every
+//! occupancy is a ledger row that says who took the table and who ended it, and
+//! status is only ever READ -- from `v_table_status`. Parked orders are
+//! client-local drafts; only the hold they place on a table has a server
+//! presence to test.
 
 use actix_web::{App, test, web};
 use sqlx::PgPool;
@@ -105,12 +106,75 @@ async fn seed_table(
     .unwrap();
     id
 }
+/// The derived status -- the one the room is supposed to trust.
 async fn table_status(pool: &PgPool, table: Uuid) -> String {
-    sqlx::query_scalar("SELECT status FROM branch_tables WHERE id = $1")
+    sqlx::query_scalar("SELECT status FROM v_table_status WHERE table_id = $1")
         .bind(table)
         .fetch_one(pool)
         .await
         .unwrap()
+}
+/// A table the last party left plates on, spelled the way the backfill spells
+/// it: an ended row still carrying its bussing debt.
+async fn seed_dirty(pool: &PgPool, table: Uuid) {
+    sqlx::query(
+        "INSERT INTO table_occupancies \
+            (org_id, branch_id, table_id, held_by, started_at, ended_at, end_reason, needs_bussing) \
+         SELECT org_id, branch_id, id, 'party', now() - interval '1 hour', \
+                now() - interval '10 minutes', 'released', true \
+           FROM branch_tables WHERE id = $1",
+    )
+    .bind(table)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+/// `(held_by, open_ticket_id, started_by, started_till_id, ended_by, ended_till_id,
+/// end_reason, needs_bussing, cleared_by)` of the table's latest ledger row.
+#[allow(clippy::type_complexity)]
+async fn latest_row(
+    pool: &PgPool,
+    table: Uuid,
+) -> (
+    String,
+    Option<Uuid>,
+    Option<Uuid>,
+    Option<Uuid>,
+    Option<Uuid>,
+    Option<Uuid>,
+    Option<String>,
+    bool,
+    Option<Uuid>,
+) {
+    sqlx::query_as(
+        "SELECT held_by, open_ticket_id, started_by, started_till_id, ended_by, ended_till_id, \
+                end_reason, needs_bussing, cleared_by \
+           FROM table_occupancies WHERE table_id = $1 \
+          ORDER BY started_at DESC, id DESC LIMIT 1",
+    )
+    .bind(table)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+async fn rows_on(pool: &PgPool, table: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM table_occupancies WHERE table_id = $1")
+        .bind(table)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+async fn till_of_open_shift(pool: &PgPool, teller: Uuid) -> Uuid {
+    sqlx::query_scalar("SELECT till_id FROM shifts WHERE teller_id = $1 AND status = 'open'")
+        .bind(teller)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+/// The `code` a refusal carries -- what the till branches on.
+async fn refusal_code(resp: actix_web::dev::ServiceResponse) -> Option<String> {
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    body["code"].as_str().map(str::to_owned)
 }
 /// An open shift, returning its id (the settle path needs one to bank into).
 async fn open_shift_row(pool: &PgPool, branch: Uuid, teller: Uuid) -> Uuid {
@@ -161,6 +225,7 @@ async fn grant_defaults(pool: &PgPool) {
         ("table_transfers", "update"),
         ("open_tickets", "read"),
         ("open_tickets", "update"),
+        ("open_tickets", "delete"), // void is its own rung
         // The host ops the seeder really grants a teller — table state included,
         // which is how a checked-out table gets cleared from the POS.
         ("floor_plan", "read"),
@@ -173,6 +238,7 @@ async fn grant_defaults(pool: &PgPool) {
         ("open_tickets", "create"),
         ("open_tickets", "read"),
         ("open_tickets", "update"),
+        ("open_tickets", "delete"), // void is its own rung
         ("table_transfers", "create"),
         ("table_transfers", "read"),
         ("table_transfers", "update"),
@@ -330,7 +396,6 @@ async fn ticket_fire_drops_occupied_table_and_move_conflicts(pool: PgPool) {
     let item = seed_menu_item(&pool, org, 1000).await;
     shift_row(&pool, branch, teller).await;
     grant_defaults(&pool).await;
-    let t = token(teller, org, UserRole::Teller);
     let w = token(waiter, org, UserRole::Waiter);
     let t1 = seed_table(&pool, org, branch, None, "T1").await;
     let t2 = seed_table(&pool, org, branch, None, "T2").await;
@@ -435,6 +500,13 @@ async fn settling_a_ticket_buses_its_table(pool: PgPool) {
     let ticket: OpenTicketView = test::read_body_json(resp).await;
     assert_eq!(ticket.table_id, Some(t1));
     assert_eq!(table_status(&pool, t1).await, "seated");
+    // The ledger says who seated it: the waiter, from no till (a handheld
+    // opens no shift).
+    let row = latest_row(&pool, t1).await;
+    assert_eq!(
+        (row.0.as_str(), row.1, row.2, row.3),
+        ("ticket", Some(ticket.id), Some(waiter), None)
+    );
 
     let resp = post_json!(
         app,
@@ -448,6 +520,25 @@ async fn settling_a_ticket_buses_its_table(pool: PgPool) {
         "dirty",
         "a checked-out table needs a bus — it is NOT handed back automatically"
     );
+    // ...and who ended it, from which till, and why.
+    let row = latest_row(&pool, t1).await;
+    assert_eq!(row.4, Some(teller), "ended by the cashier");
+    assert_eq!(
+        row.5,
+        Some(till_of_open_shift(&pool, teller).await),
+        "at their till"
+    );
+    assert_eq!((row.6.as_deref(), row.7), (Some("settled"), true));
+    // Until the column is dropped, the trigger keeps it saying the same thing.
+    let projected: String = sqlx::query_scalar("SELECT status FROM branch_tables WHERE id = $1")
+        .bind(t1)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        projected, "dirty",
+        "the legacy column is a projection of the ledger"
+    );
 
     // Only a human clearing it makes it available again — no server can see
     // that the plates are gone.
@@ -459,6 +550,11 @@ async fn settling_a_ticket_buses_its_table(pool: PgPool) {
     );
     assert_eq!(resp.status(), 200);
     assert_eq!(table_status(&pool, t1).await, "free");
+    assert_eq!(
+        latest_row(&pool, t1).await.8,
+        Some(teller),
+        "clearing is a recorded human act"
+    );
 
     // Clearing again is idempotent: a double-tap on the POS prompt is not an
     // error, and treating it as one would teach staff to ignore errors.
@@ -566,6 +662,11 @@ async fn a_hold_cannot_take_or_free_a_table_a_ticket_owns(pool: PgPool) {
         409,
         "somebody is sitting there — the hold is refused, not layered on"
     );
+    assert_eq!(
+        refusal_code(resp).await.as_deref(),
+        Some("TABLE_OCCUPIED"),
+        "and the till is told why, in a word it can branch on"
+    );
 
     // And releasing must not strand the ticket by freeing its table. It says
     // OK — the hold is gone either way, which is all the caller claimed — but
@@ -592,11 +693,7 @@ async fn releasing_a_hold_leaves_a_dirty_table_dirty(pool: PgPool) {
     let branch = seed_branch(&pool, org).await;
     let teller = seed_user(&pool, org, "teller").await;
     let t1 = seed_table(&pool, org, branch, None, "T1").await;
-    sqlx::query("UPDATE branch_tables SET status = 'dirty' WHERE id = $1")
-        .bind(t1)
-        .execute(&pool)
-        .await
-        .unwrap();
+    seed_dirty(&pool, t1).await;
     let app = app!(pool);
     let t = token(teller, org, UserRole::Teller);
 
@@ -612,6 +709,98 @@ async fn releasing_a_hold_leaves_a_dirty_table_dirty(pool: PgPool) {
         "dirty",
         "only a person says the plates are gone"
     );
+
+    // Nor does a new hold launder it: the plates are somebody's problem first.
+    let resp = post_json!(
+        app,
+        t,
+        &format!("/floor/tables/{t1}/hold"),
+        serde_json::json!({ "branch_id": branch })
+    );
+    assert_eq!(resp.status(), 409);
+    assert_eq!(refusal_code(resp).await.as_deref(), Some("TABLE_DIRTY"));
+    assert_eq!(table_status(&pool, t1).await, "dirty");
+}
+
+/// A hold has an owner or it does not exist. The ledger names the hand and the
+/// till, a second till is refused with a reason it can act on, and the same
+/// till re-holding -- the double-tap, or the next shift on the same drawer --
+/// is the same hold, not a fight over the table.
+#[sqlx::test]
+async fn a_hold_is_owned_by_the_till_that_placed_it(pool: PgPool) {
+    grant_defaults(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let morning = seed_user(&pool, org, "teller").await;
+    let afternoon = seed_user(&pool, org, "teller").await;
+    let handheld = seed_user(&pool, org, "waiter").await;
+    let shift = open_shift_row(&pool, branch, morning).await;
+    let t1 = seed_table(&pool, org, branch, None, "T1").await;
+    let app = app!(pool);
+    let m = token(morning, org, UserRole::Teller);
+    let a = token(afternoon, org, UserRole::Teller);
+    let h = token(handheld, org, UserRole::Waiter);
+
+    let resp = post_json!(
+        app,
+        m,
+        &format!("/floor/tables/{t1}/hold"),
+        serde_json::json!({ "branch_id": branch })
+    );
+    assert_eq!(resp.status(), 200);
+    let till = till_of_open_shift(&pool, morning).await;
+    let row = latest_row(&pool, t1).await;
+    assert_eq!(
+        (row.0.as_str(), row.1, row.2, row.3),
+        ("party", None, Some(morning), Some(till)),
+        "a bare hold, owned by the morning teller at their till"
+    );
+
+    // Another hand, another till (none, for a handheld): refused, with a code.
+    let resp = post_json!(
+        app,
+        h,
+        &format!("/floor/tables/{t1}/hold"),
+        serde_json::json!({ "branch_id": branch })
+    );
+    assert_eq!(resp.status(), 409, "a second party cannot be parked on top");
+    assert_eq!(refusal_code(resp).await.as_deref(), Some("TABLE_HELD"));
+    assert_eq!(rows_on(&pool, t1).await, 1, "and nothing was written");
+
+    // Shift handover on the same drawer: the afternoon teller inherits the
+    // parked draft, and re-holding its table is a yes, not a new row.
+    sqlx::query("UPDATE shifts SET status = 'closed', closed_at = now() WHERE id = $1")
+        .bind(shift)
+        .execute(&pool)
+        .await
+        .unwrap();
+    open_shift_row(&pool, branch, afternoon).await;
+    assert_eq!(
+        till_of_open_shift(&pool, afternoon).await,
+        till,
+        "same till"
+    );
+    let resp = post_json!(
+        app,
+        a,
+        &format!("/floor/tables/{t1}/hold"),
+        serde_json::json!({ "branch_id": branch })
+    );
+    assert_eq!(resp.status(), 200);
+    assert_eq!(rows_on(&pool, t1).await, 1);
+
+    // Whoever checks the draft out releases it, and the ledger says who did.
+    let resp = post_json!(
+        app,
+        a,
+        &format!("/floor/tables/{t1}/release"),
+        serde_json::json!({ "branch_id": branch, "bus": true })
+    );
+    assert_eq!(resp.status(), 200);
+    let row = latest_row(&pool, t1).await;
+    assert_eq!((row.4, row.5), (Some(afternoon), Some(till)));
+    assert_eq!((row.6.as_deref(), row.7), (Some("released"), true));
+    assert_eq!(table_status(&pool, t1).await, "dirty");
 }
 
 // ── Transfer waitlist ────────────────────────────────────────────────────────
@@ -684,6 +873,7 @@ async fn transfer_waitlist_lifecycle(pool: PgPool) {
         })
     );
     assert_eq!(resp.status(), 409);
+    assert_eq!(refusal_code(resp).await.as_deref(), Some("TRANSFER_EXISTS"));
 
     // Fulfilling onto a table OUTSIDE the wished section is rejected.
     let resp = post_json!(
@@ -713,6 +903,12 @@ async fn transfer_waitlist_lifecycle(pool: PgPool) {
     assert_eq!(ta, Some(t_in));
     assert_eq!(table_status(&pool, t_out).await, "free");
     assert_eq!(table_status(&pool, t_in).await, "seated");
+    let left = latest_row(&pool, t_out).await;
+    assert_eq!(
+        (left.6.as_deref(), left.4),
+        (Some("moved"), Some(teller)),
+        "O1's row ended `moved`, by the host"
+    );
 
     // Replayed fulfil is idempotent; cancelling a fulfilled wish conflicts.
     let resp = post_json!(
@@ -729,6 +925,10 @@ async fn transfer_waitlist_lifecycle(pool: PgPool) {
         serde_json::json!({})
     );
     assert_eq!(resp.status(), 409);
+    assert_eq!(
+        refusal_code(resp).await.as_deref(),
+        Some("TRANSFER_FULFILLED")
+    );
 }
 
 #[sqlx::test]

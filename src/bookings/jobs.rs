@@ -8,8 +8,17 @@
 //!      `booking.arriving` once — the POS pings the floor ("party due in 15").
 //!   3. **No-shows.** Confirmed past `starts_at + auto_no_show_minutes` (or past
 //!      the window's end when the grace is off) roll to `no_show`.
-//!   4. **Completion.** Seated bookings whose window ended an hour ago, with no
-//!      still-open ticket, roll to `completed`.
+//!   4. **Voided parties.** A seated booking whose bill was torn up is
+//!      `cancelled` — the same rule the ticket void applies inline; this is the
+//!      backstop for a void that reached the ticket without the booking hook.
+//!   5. **Completion.** Seated bookings whose window ended an hour ago, with no
+//!      still-open ticket and no voided-only history, roll to `completed`.
+//!
+//! The sweep never touches the occupancy ledger. A booking is bookkeeping; a
+//! table is the floor's, and whether a party is still sitting at one is a fact
+//! only a person on the floor can observe — the same reason a dirty table is
+//! cleared by hand and never on a timer. A hold the host placed by seating a
+//! booking that then never ordered is released from the POS.
 //!
 //! Runs on the OWNER pool (bypasses RLS) — every query is keyed by branch.
 
@@ -50,6 +59,7 @@ pub async fn run_tick(pool: &PgPool, hub: &BranchEventHub) -> Result<(), crate::
     send_reminders(pool).await?;
     announce_arrivals(pool, hub).await?;
     roll_no_shows(pool, hub).await?;
+    cancel_voided(pool, hub).await?;
     complete_finished(pool, hub).await?;
     Ok(())
 }
@@ -114,6 +124,21 @@ async fn roll_no_shows(pool: &PgPool, hub: &BranchEventHub) -> Result<(), crate:
     Ok(())
 }
 
+/// The one rule, shared with the ticket void hook so there is a single writer
+/// of "a voided party is a cancelled booking" (see
+/// `handlers::cancel_for_voided_tickets`).
+async fn cancel_voided(pool: &PgPool, hub: &BranchEventHub) -> Result<(), crate::errors::AppError> {
+    for id in super::handlers::cancel_for_voided_tickets(pool, None).await? {
+        publish_booking(pool, hub, "booking.changed", id).await;
+    }
+    Ok(())
+}
+
+/// Tickets are found through `open_tickets.booking_id` — the written side of
+/// the link. A booking with a live bill is not finished; one whose only bills
+/// were voided is not finished either, it is cancelled (step 4 got it, or
+/// will). What remains is a party that paid, or one that was seated and never
+/// ordered under its booking — either way the booking is done.
 async fn complete_finished(
     pool: &PgPool,
     hub: &BranchEventHub,
@@ -122,7 +147,10 @@ async fn complete_finished(
         "UPDATE bookings b SET status = 'completed', completed_at = now(), updated_at = now() \
          WHERE b.status = 'seated' AND b.ends_at + interval '60 minutes' < now() \
            AND NOT EXISTS (SELECT 1 FROM open_tickets ot \
-                           WHERE ot.id = b.open_ticket_id AND ot.status = 'open') \
+                           WHERE ot.booking_id = b.id AND ot.status = 'open') \
+           AND (NOT EXISTS (SELECT 1 FROM open_tickets ot WHERE ot.booking_id = b.id) \
+                OR EXISTS (SELECT 1 FROM open_tickets ot \
+                           WHERE ot.booking_id = b.id AND ot.status = 'settled')) \
          RETURNING b.id",
     )
     .fetch_all(pool)

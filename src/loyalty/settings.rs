@@ -139,6 +139,23 @@ pub struct LoyaltySettings {
     #[serde(default)]
     pub max_rewards_per_order: Option<i32>,
 
+    /// When a void or refund claws back points the member has already spent,
+    /// may the balance go below zero?
+    ///
+    /// Off (the default) clamps at zero: the shop eats the reward that was
+    /// already handed over, and the earn stays visibly part-reversed on the
+    /// ledger against an order that says `voided`, so a report can list who
+    /// benefited and by how much. On, the balance goes negative and the next
+    /// visits earn into the hole — the books balance, and the customer sees a
+    /// minus on their card for what was nearly always the shop's own mistake.
+    ///
+    /// Clawbacks ONLY. A redemption or a manual deduction can never overdraw
+    /// whatever this says: you cannot spend what you do not have; you can only
+    /// owe because a sale you were paid for was undone. Enforced in the
+    /// database (`loyalty_apply_txn`), not here.
+    #[serde(default)]
+    pub allow_negative_balance: bool,
+
     pub terms: Option<String>,
     pub terms_ar: Option<String>,
 
@@ -196,6 +213,7 @@ impl LoyaltySettings {
             balance_cap_enabled: false,
             balance_cap: None,
             max_rewards_per_order: None,
+            allow_negative_balance: false,
             geofenced_branches: 0,
             effective_balance_cap: None,
             terms: None,
@@ -285,6 +303,7 @@ struct Row {
     balance_cap_enabled: bool,
     balance_cap: Option<i32>,
     max_rewards_per_order: Option<i32>,
+    allow_negative_balance: bool,
     terms: Option<String>,
     terms_ar: Option<String>,
 }
@@ -294,7 +313,7 @@ const COLS: &str = "org_id, branch_id, enabled, program_name, program_name_ar, m
     default_reward_cost, require_otp, birthday_enabled, birthday_reward_amount, \
     birthday_message, birthday_message_ar, winback_enabled, winback_message, \
     winback_reward_amount, reward_any_item, balance_cap_enabled, balance_cap, \
-    max_rewards_per_order, terms, terms_ar";
+    max_rewards_per_order, allow_negative_balance, terms, terms_ar";
 
 impl From<Row> for LoyaltySettings {
     fn from(r: Row) -> Self {
@@ -321,6 +340,7 @@ impl From<Row> for LoyaltySettings {
             balance_cap_enabled: r.balance_cap_enabled,
             balance_cap: r.balance_cap,
             max_rewards_per_order: r.max_rewards_per_order,
+            allow_negative_balance: r.allow_negative_balance,
             // Filled by the read handler, which is the only place it means
             // anything; the loaders answer about `loyalty_settings` alone.
             geofenced_branches: 0,
@@ -496,8 +516,8 @@ pub async fn put_settings(
             require_otp, birthday_enabled, birthday_reward_amount, birthday_message, \
             birthday_message_ar, winback_enabled, winback_message, winback_reward_amount, \
             reward_any_item, balance_cap_enabled, balance_cap, \
-            max_rewards_per_order, terms, terms_ar) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24) \
+            max_rewards_per_order, allow_negative_balance, terms, terms_ar) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25) \
          ON CONFLICT (org_id, COALESCE(branch_id, '00000000-0000-0000-0000-000000000000'::uuid)) \
          DO UPDATE SET enabled = EXCLUDED.enabled, program_name = EXCLUDED.program_name, \
             program_name_ar = EXCLUDED.program_name_ar, mode = EXCLUDED.mode, \
@@ -517,6 +537,7 @@ pub async fn put_settings(
             balance_cap_enabled = EXCLUDED.balance_cap_enabled, \
             balance_cap = EXCLUDED.balance_cap, \
             max_rewards_per_order = EXCLUDED.max_rewards_per_order, \
+            allow_negative_balance = EXCLUDED.allow_negative_balance, \
             terms = EXCLUDED.terms, \
             terms_ar = EXCLUDED.terms_ar, updated_at = now() \
          RETURNING {COLS}"
@@ -543,6 +564,7 @@ pub async fn put_settings(
     .bind(incoming.balance_cap_enabled)
     .bind(incoming.balance_cap)
     .bind(incoming.max_rewards_per_order)
+    .bind(incoming.allow_negative_balance)
     .bind(&incoming.terms)
     .bind(&incoming.terms_ar)
     .fetch_one(pool.get_ref())

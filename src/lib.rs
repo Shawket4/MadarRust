@@ -43,6 +43,7 @@ pub mod qr_card;
 pub mod rate_limit;
 pub mod realtime;
 pub mod recipes;
+pub mod refunds;
 pub mod reports;
 pub mod reservations;
 pub mod shifts;

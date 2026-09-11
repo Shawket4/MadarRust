@@ -1,6 +1,7 @@
-//! Held-order endpoints: the sync list, park (offline-first upsert), the
-//! resume claim/release pair, discard/complete tombstones, table assignment,
-//! the atomic cross-entity table swap, and the transfer waitlist.
+//! Floor endpoints: the atomic two-table swap, clearing a bussed table, a
+//! till's hold/release of a table for its own parked draft, and the transfer
+//! waitlist. Every occupancy change is a ledger write through the primitives
+//! in the parent module; nothing here writes a status.
 //!
 //! Every mutation is split live-route / `*_inner` so `/sync/replay` can flush
 //! a till's offline backlog through the same core (same idempotency, same
@@ -14,9 +15,9 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use super::{
-    FloorEvents, TransferView, TransfersSyncResponse, autofulfill_transfers, bus_table,
-    extract_claims, free_table, lock_table, occupant_of, require_branch_access, seat_table,
-    transfer_view,
+    FloorEvents, Hand, Holder, TransferView, TransfersSyncResponse, clear_bussing, extract_claims,
+    live_occupancy, lock_table, occupant_of, refusal, refused, release_party_hold, relocate_ticket,
+    require_branch_access, take_table, transfer_view,
 };
 use crate::errors::{AppError, AppErrorResponse};
 use crate::permissions::checker::{check_permission, check_permission_for};
@@ -98,24 +99,17 @@ async fn branch_org(pool: &sqlx::PgPool, branch_id: Uuid) -> Result<Uuid, AppErr
 }
 
 /// Move one ticket onto `to_table` (or off any table when `None`) inside the
-/// caller's transaction, and resolve any transfer wish it just satisfied.
+/// caller's transaction, collecting the events it caused.
 async fn move_ticket(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ticket_id: Uuid,
     to_table: Option<Uuid>,
+    by: &Hand,
     events: &mut FloorEvents,
 ) -> Result<(), AppError> {
-    sqlx::query("UPDATE open_tickets SET table_id = $2, updated_at = now() WHERE id = $1")
-        .bind(ticket_id)
-        .bind(to_table)
-        .execute(&mut **tx)
-        .await?;
+    let fulfilled = relocate_ticket(tx, ticket_id, to_table, by).await?;
     events.tickets.push(ticket_id);
-    if let Some(t) = to_table {
-        events
-            .transfers
-            .extend(autofulfill_transfers(tx, ticket_id, t).await?);
-    }
+    events.transfers.extend(fulfilled);
     Ok(())
 }
 
@@ -144,10 +138,10 @@ pub async fn swap_tables(
     .await
 }
 
-/// Swap core: exchange the occupants of two tables in ONE transaction. One
-/// empty side degenerates to a move; both empty is a 400. Works across entity
-/// kinds (a held order can swap with a waiter ticket); the actor needs the
-/// `update` permission of every kind it moves.
+/// Swap core: exchange the tickets on two tables in ONE transaction. One
+/// empty side degenerates to a move; both empty is a 400. A bare hold on the
+/// "empty" side is not an occupant to swap -- the arriving ticket takes it
+/// over, as a fire would.
 pub(crate) async fn swap_tables_inner(
     pool: crate::db::Db,
     body: web::Json<SwapTablesRequest>,
@@ -185,28 +179,21 @@ pub(crate) async fn swap_tables_inner(
     )
     .await?;
 
-    // Clear both sides before landing either, so a concurrent read never sees
-    // two tickets on one table.
+    let hand = Hand::of(&mut *tx, actor.teller_id, body.branch_id).await?;
+    // Clear both sides before landing either: the live-per-table and
+    // live-per-ticket indexes would refuse the second landing otherwise, and a
+    // concurrent read never sees two tickets on one table.
     if let Some(t) = occ_a {
-        move_ticket(&mut tx, t, None, &mut events).await?;
+        move_ticket(&mut tx, t, None, &hand, &mut events).await?;
     }
     if let Some(t) = occ_b {
-        move_ticket(&mut tx, t, None, &mut events).await?;
+        move_ticket(&mut tx, t, None, &hand, &mut events).await?;
     }
     if let Some(t) = occ_a {
-        move_ticket(&mut tx, t, Some(body.table_b), &mut events).await?;
+        move_ticket(&mut tx, t, Some(body.table_b), &hand, &mut events).await?;
     }
     if let Some(t) = occ_b {
-        move_ticket(&mut tx, t, Some(body.table_a), &mut events).await?;
-    }
-    // A table someone landed on is seated; a side left empty is bused.
-    match occ_b {
-        Some(_) => seat_table(&mut *tx, body.table_a).await?,
-        None => free_table(&mut *tx, body.table_a).await?,
-    }
-    match occ_a {
-        Some(_) => seat_table(&mut *tx, body.table_b).await?,
-        None => free_table(&mut *tx, body.table_b).await?,
+        move_ticket(&mut tx, t, Some(body.table_a), &hand, &mut events).await?;
     }
     events.tables.push(body.table_a);
     events.tables.push(body.table_b);
@@ -227,10 +214,10 @@ pub struct ClearTableRequest {
 
 /// Mark a bussed table ready for the next party.
 ///
-/// The ONE human act the derived-status model needs. Everything else about a
-/// table's status follows from the ticket on it: seated when one lands, free
-/// when nobody vacated, dirty after a checkout. But no server can see that the
-/// plates have been cleared, so a person says so.
+/// The ONE human act the ledger cannot derive. Everything else about a
+/// table's status follows from its rows: seated while one is live, dirty
+/// after a checkout ended it. But no server can see that the plates have been
+/// cleared, so a person says so, and the row records who.
 ///
 /// Deliberately not a set-status endpoint. Its predecessor took any status and
 /// wrote it with no lock and no occupancy check, so it could declare a table
@@ -263,7 +250,7 @@ pub async fn clear_table(
     .await
 }
 
-/// Clear core: the `dirty` -> `free` walk, shared by the live route and
+/// Clear core: the `dirty` -> `free` transition, shared by the live route and
 /// `/sync/replay`.
 ///
 /// `branch_id` is what the LIVE caller asserted, and the table must be in it.
@@ -303,25 +290,23 @@ pub(crate) async fn clear_table_inner(
     if !lock_table(&mut tx, table_id, branch_id).await? {
         return Err(AppError::NotFound("Table not found".into()));
     }
-    // A table someone is sitting at is not "bussed", whatever its status says.
-    if occupant_of(&mut tx, table_id, None).await?.is_some() {
-        return Err(AppError::Conflict("Someone is seated at this table".into()));
+    // A table someone is sitting at is not "bussed".
+    if let Some(live) = live_occupancy(&mut tx, table_id).await? {
+        return Err(match live.held_by.as_str() {
+            "ticket" => refused(refusal::TABLE_OCCUPIED, "Someone is seated at this table"),
+            _ => refused(
+                refusal::TABLE_HELD,
+                "This table is held, not waiting to be cleared",
+            ),
+        });
     }
-    let status: String = sqlx::query_scalar("SELECT status FROM branch_tables WHERE id = $1")
-        .bind(table_id)
-        .fetch_one(&mut *tx)
-        .await?;
-    if status != "dirty" {
-        // Idempotent for the common double-tap; loud for anything else.
-        if status == "free" {
-            tx.commit().await?;
-            return Ok(HttpResponse::Ok().json(serde_json::json!({ "ok": true })));
-        }
-        return Err(AppError::Conflict(format!(
-            "Table is {status}, not waiting to be cleared"
-        )));
+    let hand = Hand::of(&mut *tx, actor.teller_id, branch_id).await?;
+    // Nothing to clear is the common double-tap (and a replayed op after a
+    // lost ack): `free` -> `free` is a yes, not a 409.
+    if !clear_bussing(&mut tx, table_id, &hand).await? {
+        tx.commit().await?;
+        return Ok(HttpResponse::Ok().json(serde_json::json!({ "ok": true })));
     }
-    free_table(&mut *tx, table_id).await?;
     tx.commit().await?;
 
     if let Some(hub) = hub {
@@ -352,10 +337,12 @@ pub struct ReleaseTableRequest {
     pub bus: bool,
 }
 
-/// Take a table. THE seating primitive.
+/// Take a table for a party with no bill yet.
 ///
-/// Occupancy travels on its own here, carrying nothing about why. Two things
-/// use it:
+/// Occupancy travels on its own here, carrying nothing about what is on the
+/// table -- but always who took it: the hold is a `party` row in the ledger
+/// owned by the hand that placed it, so there is no such thing as a table held
+/// by nobody. Two things use it:
 ///
 ///   * A PARTY SITTING DOWN. They have ordered nothing yet, so there is no
 ///     bill — a ticket starts with their first round and claims this table on
@@ -368,12 +355,13 @@ pub struct ReleaseTableRequest {
 ///     other terminal were told a table with somebody's order waiting on it was
 ///     free.
 ///
-/// In both cases the server learns that the table is taken and nothing
-/// whatever about what is on it.
+/// In both cases the server learns that the table is taken, by whom and from
+/// which till, and nothing whatever about what is on it.
 ///
 /// Like `clear_table`, and for the reason written there, this is not a
 /// set-status endpoint: exactly one transition, `free` -> `seated`, refused
-/// from anything else. A table a ticket is already on stays the ticket's.
+/// from anything else with a `code` the till can act on. A table a ticket is
+/// already on stays the ticket's; a table another till holds stays theirs.
 #[utoipa::path(
     post, path = "/floor/tables/{id}/hold", tag = "floor",
     params(("id" = Uuid, Path, description = "Table ID")),
@@ -391,7 +379,14 @@ pub async fn hold_table(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "open_tickets", "update").await?;
     require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
-    hold_table_inner(pool, *id, Some(body.branch_id), Some(hub.get_ref())).await
+    hold_table_inner(
+        pool,
+        *id,
+        Some(body.branch_id),
+        ActingContext::live(&claims)?,
+        Some(hub.get_ref()),
+    )
+    .await
 }
 
 /// The replay-safe half. See `clear_table_inner` for why this split exists:
@@ -400,6 +395,7 @@ pub(crate) async fn hold_table_inner(
     pool: crate::db::Db,
     table_id: Uuid,
     branch_id: Option<Uuid>,
+    actor: ActingContext,
     hub: Option<&BranchEventHub>,
 ) -> Result<HttpResponse, AppError> {
     let branch_id = match branch_id {
@@ -415,31 +411,16 @@ pub(crate) async fn hold_table_inner(
     if !lock_table(&mut tx, table_id, branch_id).await? {
         return Err(AppError::NotFound("Table not found".into()));
     }
-    if occupant_of(&mut tx, table_id, None).await?.is_some() {
-        return Err(AppError::Conflict("Someone is seated at this table".into()));
-    }
-    let status: String = sqlx::query_scalar("SELECT status FROM branch_tables WHERE id = $1")
-        .bind(table_id)
-        .fetch_one(&mut *tx)
-        .await?;
-    match status.as_str() {
-        // Already ours (or another till's hold) — the common double-tap, and a
-        // replayed op after a reconnect. Saying yes twice is correct.
-        "seated" => {
-            tx.commit().await?;
-            return Ok(HttpResponse::Ok().json(serde_json::json!({ "ok": true })));
-        }
-        "free" => {}
-        other => {
-            return Err(AppError::Conflict(format!(
-                "Table is {other} — clear it before parking an order on it"
-            )));
-        }
-    }
-    seat_table(&mut *tx, table_id).await?;
+    let hand = Hand::of(&mut *tx, actor.teller_id, branch_id).await?;
+    // Already ours is the common double-tap and the replayed op after a
+    // reconnect; saying yes twice is correct. Anything else that is not a free
+    // table is a coded refusal -- see `take_table`.
+    let taken = take_table(&mut tx, table_id, Holder::Party, None, &hand).await?;
     tx.commit().await?;
 
-    if let Some(hub) = hub {
+    if let Some(hub) = hub
+        && taken.landed
+    {
         let mut events = FloorEvents::default();
         events.tables.push(table_id);
         events.publish(pool.get_ref(), hub, branch_id).await;
@@ -450,10 +431,14 @@ pub(crate) async fn hold_table_inner(
 /// Give back a table a till was holding for its own parked order.
 ///
 /// The counterpart to `hold_table`: the hold moved to another table, was
-/// checked out, or was discarded. Exactly one transition out of `seated` --
-/// to `free`, or to `dirty` when `bus` says the party ate -- and never over a
-/// live ticket — if one has landed since, the ticket owns the
-/// table and this is a no-op rather than a way to free an occupied table.
+/// checked out, or was discarded. Ends the `party` row -- leaving the table
+/// `free`, or `dirty` when `bus` says the party ate -- and never touches a
+/// ticket's: if one has landed since, the ticket owns the table and this is a
+/// no-op rather than a way to free an occupied table.
+///
+/// Not owner-gated on purpose. The draft is device-local and outlives a shift
+/// handover, so the teller who checks it out is often not the one who parked
+/// it; the ledger records who released it instead of refusing them.
 #[utoipa::path(
     post, path = "/floor/tables/{id}/release", tag = "floor",
     params(("id" = Uuid, Path, description = "Table ID")),
@@ -476,6 +461,7 @@ pub async fn release_table(
         *id,
         Some(body.branch_id),
         body.bus,
+        ActingContext::live(&claims)?,
         Some(hub.get_ref()),
     )
     .await
@@ -487,6 +473,7 @@ pub(crate) async fn release_table_inner(
     table_id: Uuid,
     branch_id: Option<Uuid>,
     bus: bool,
+    actor: ActingContext,
     hub: Option<&BranchEventHub>,
 ) -> Result<HttpResponse, AppError> {
     let branch_id = match branch_id {
@@ -502,29 +489,18 @@ pub(crate) async fn release_table_inner(
     if !lock_table(&mut tx, table_id, branch_id).await? {
         return Err(AppError::NotFound("Table not found".into()));
     }
-    // A ticket landed on it in the meantime: the ticket is the occupant now and
-    // freeing the table would strand it. Not an error — the hold is gone either
-    // way, which is all the caller was telling us.
-    if occupant_of(&mut tx, table_id, None).await?.is_some() {
-        tx.commit().await?;
-        return Ok(HttpResponse::Ok().json(serde_json::json!({ "ok": true })));
-    }
-    let status: String = sqlx::query_scalar("SELECT status FROM branch_tables WHERE id = $1")
-        .bind(table_id)
-        .fetch_one(&mut *tx)
-        .await?;
-    // `dirty` is left alone on purpose: a table waiting to be bussed is not
-    // freed by a hold moving off it, and only a person clears that.
-    if status == "seated" {
-        if bus {
-            bus_table(&mut *tx, table_id).await?;
-        } else {
-            free_table(&mut *tx, table_id).await?;
-        }
-    }
+    // Only a `party` row is ours to end. A ticket that landed in the meantime
+    // owns the table and freeing it would strand the bill; a table with no
+    // live row is already released (and `dirty` stays dirty -- only a person
+    // clears that). Neither is an error: the hold is gone either way, which
+    // is all the caller was telling us.
+    let hand = Hand::of(&mut *tx, actor.teller_id, branch_id).await?;
+    let released = release_party_hold(&mut tx, table_id, bus, &hand).await?;
     tx.commit().await?;
 
-    if let Some(hub) = hub {
+    if let Some(hub) = hub
+        && released
+    {
         let mut events = FloorEvents::default();
         events.tables.push(table_id);
         events.publish(pool.get_ref(), hub, branch_id).await;
@@ -648,10 +624,13 @@ pub(crate) async fn create_transfer_inner(
         }
     }
 
-    // The occupant must be live here; its CURRENT table becomes `from_table_id`.
+    // The occupant must be live here; its CURRENT table (per the ledger)
+    // becomes `from_table_id`.
     let from_table: Option<Uuid> = sqlx::query_scalar(
-        "SELECT table_id FROM open_tickets \
-         WHERE id = $1 AND branch_id = $2 AND status IN ('open','ready')",
+        "SELECT (SELECT o.table_id FROM table_occupancies o \
+                  WHERE o.open_ticket_id = t.id AND o.ended_at IS NULL) \
+           FROM open_tickets t \
+          WHERE t.id = $1 AND t.branch_id = $2 AND t.status = 'open'",
     )
     .bind(body.occupant_id)
     .bind(body.branch_id)
@@ -668,8 +647,9 @@ pub(crate) async fn create_transfer_inner(
     .fetch_optional(pool.get_ref())
     .await?;
     if waiting.is_some() {
-        return Err(AppError::Conflict(
-            "This party already has a waiting transfer".into(),
+        return Err(refused(
+            refusal::TRANSFER_EXISTS,
+            "This party already has a waiting transfer",
         ));
     }
 
@@ -735,7 +715,10 @@ pub(crate) async fn cancel_transfer_inner(
     match status.as_str() {
         "cancelled" => {} // idempotent
         "fulfilled" => {
-            return Err(AppError::Conflict("Transfer is already fulfilled".into()));
+            return Err(refused(
+                refusal::TRANSFER_FULFILLED,
+                "Transfer is already fulfilled",
+            ));
         }
         _ => {
             sqlx::query(
@@ -816,7 +799,10 @@ pub(crate) async fn fulfill_transfer_inner(
             return Ok(HttpResponse::Ok().json(view));
         }
         "cancelled" => {
-            return Err(AppError::Conflict("Transfer is already cancelled".into()));
+            return Err(refused(
+                refusal::TRANSFER_CANCELLED,
+                "Transfer is already cancelled",
+            ));
         }
         _ => {}
     }
@@ -850,15 +836,15 @@ pub(crate) async fn fulfill_transfer_inner(
     }
 
     // The ticket must still be live.
-    let live: Option<Option<Uuid>> = sqlx::query_scalar(
-        "SELECT table_id FROM open_tickets WHERE id = $1 AND status IN ('open','ready')",
-    )
-    .bind(occupant_id)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let live: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM open_tickets WHERE id = $1 AND status = 'open'")
+            .bind(occupant_id)
+            .fetch_optional(&mut *tx)
+            .await?;
     if live.is_none() {
-        return Err(AppError::Conflict(
-            "The party's order is no longer live".into(),
+        return Err(refused(
+            refusal::TICKET_NOT_LIVE,
+            "The party's order is no longer live",
         ));
     }
     check_permission_for(
@@ -874,26 +860,36 @@ pub(crate) async fn fulfill_transfer_inner(
         .await?
         .is_some()
     {
-        return Err(AppError::Conflict("Table is already occupied".into()));
+        return Err(refused(
+            refusal::TABLE_OCCUPIED,
+            "Table is already occupied",
+        ));
     }
 
     // The old table (if any) frees up; the party lands on the new one.
-    let old_table: Option<Uuid> =
-        sqlx::query_scalar("SELECT table_id FROM open_tickets WHERE id = $1")
-            .bind(occupant_id)
-            .fetch_one(&mut *tx)
-            .await?;
-    move_ticket(&mut tx, occupant_id, Some(body.table_id), &mut events).await?;
+    let old_table: Option<Uuid> = sqlx::query_scalar(
+        "SELECT table_id FROM table_occupancies WHERE open_ticket_id = $1 AND ended_at IS NULL",
+    )
+    .bind(occupant_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let hand = Hand::of(&mut *tx, actor.teller_id, branch_id).await?;
+    move_ticket(
+        &mut tx,
+        occupant_id,
+        Some(body.table_id),
+        &hand,
+        &mut events,
+    )
+    .await?;
     if let Some(old) = old_table
         && old != body.table_id
     {
-        free_table(&mut *tx, old).await?;
         events.tables.push(old);
     }
-    seat_table(&mut *tx, body.table_id).await?;
     events.tables.push(body.table_id);
 
-    // `autofulfill_transfers` inside `move_occupant` resolves this request when
+    // `autofulfill_transfers` inside `relocate_ticket` resolves this request when
     // the wish matches; a section wish landing on a table WITHOUT a section
     // (edge: table moved out of the section since) still needs the explicit stamp.
     sqlx::query(

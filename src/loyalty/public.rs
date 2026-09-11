@@ -389,20 +389,45 @@ pub struct JoinInput {
     pub locale: Option<String>,
 }
 
-/// What the customer sees after signing up: their card, and the buttons.
+/// What the customer sees after signing up: their card, and the buttons — or,
+/// for a phone that is already a member and has not been proved, an invitation
+/// to prove it.
+///
+/// The member token is a bearer credential: whoever holds it holds the card,
+/// the balance, the purchase history and the wallet passes. So it is handed out
+/// on exactly two occasions — to a NEW member, whose token nobody else could
+/// want yet, and to an existing member whose device has verified THIS phone by
+/// OTP. Typing a phone number is not proof of owning it; anyone who knows a
+/// customer's number can type it.
 #[derive(Serialize, ToSchema)]
 pub struct JoinResult {
-    pub member_token: String,
+    /// Absent when `verify_required`: the page has nothing to show yet.
+    pub member_token: Option<String>,
+    /// The name as the caller typed it. For a returning member the name ON FILE
+    /// is not echoed until they have verified — it is a fact about the person
+    /// who owns the phone, not about the person typing it.
     pub name: String,
-    /// The live balance, in `mode`'s currency. Zero for a fresh member.
+    /// The live balance, in `mode`'s currency. Zero for a fresh member, and zero
+    /// (not the real figure) while `verify_required`.
     pub balance: i32,
     pub mode: String,
     pub next_reward_cost: i32,
     pub brand: CardBrand,
-    pub passes: PassLinks,
+    /// Absent when `verify_required`.
+    pub passes: Option<PassLinks>,
     /// True when this phone was already a member — the page says "welcome back"
-    /// and shows the existing card rather than pretending to have made a new one.
+    /// rather than pretending to have made a new card.
     pub already_member: bool,
+    /// This phone already has a card and the device has not proved it owns the
+    /// phone. The page should run the ordinary OTP flow (`/public/otp/request`
+    /// then `/public/otp/verify`) and POST here again with the `device_token`
+    /// it is handed; the card comes back on that call.
+    pub verify_required: bool,
+    /// While `verify_required`: the card link was also sent to the number on
+    /// file, by WhatsApp — the one channel that proves possession without a
+    /// code. False when no gateway is configured or there is no public base to
+    /// build a link on; the page then offers only the OTP.
+    pub card_link_sent: bool,
 }
 
 #[utoipa::path(post, path = "/public/loyalty/join", tag = "loyalty-public", operation_id = "loyalty_join", request_body = JoinInput,
@@ -434,16 +459,20 @@ pub async fn join(
     }
     let phone = normalize_phone(&body.phone)?;
 
-    // The same proof of phone the delivery intake requires, and only when the
-    // branch asks for it — an admin turns OTP off per tenant exactly as they do
-    // for ordering and bookings.
-    if settings.require_otp {
-        let token = body.device_token.as_deref().unwrap_or_default();
-        if !whatsapp::verify_device_token(&secret.0, &phone, token) {
-            return Err(AppError::Unauthorized(
-                "Verify your phone number first".into(),
-            ));
-        }
+    // Has THIS device proved it owns THIS phone? The same 90-day device-trust
+    // token the delivery intake issues after an OTP; it is bound to the phone,
+    // so a token verified for one number says nothing about another.
+    let verified = body
+        .device_token
+        .as_deref()
+        .is_some_and(|t| whatsapp::verify_device_token(&secret.0, &phone, t));
+    // A branch may demand the proof for every signup, new members included —
+    // an admin turns OTP off per tenant exactly as they do for ordering and
+    // bookings.
+    if settings.require_otp && !verified {
+        return Err(AppError::Unauthorized(
+            "Verify your phone number first".into(),
+        ));
     }
 
     let locale = match body.locale.as_deref() {
@@ -451,59 +480,158 @@ pub async fn join(
         _ => "en",
     };
 
-    // Joining twice from the same phone is a normal thing to do — a customer who
-    // lost their pass rescans the counter QR. Return the existing card rather
-    // than a duplicate member or an error.
-    let (member, already_member) =
-        match model::find_by_phone(pool.get_ref(), org_id, &phone).await? {
-            Some(existing) => (existing, true),
-            None => {
-                let row: MemberRow = sqlx::query_as(&format!(
-                    "INSERT INTO loyalty_customers \
-                        (org_id, phone, name, member_token, joined_branch_id, locale, \
-                         apple_auth_token, birth_month, birth_day) \
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING {}",
-                    model::MEMBER_COLS
-                ))
-                .bind(org_id)
-                .bind(&phone)
-                .bind(name)
-                .bind(mint_member_token())
-                // Reporting only, and honestly null for an org-wide code: we
-                // do not know where they were, and a membership belongs to the
-                // shop rather than to a branch.
-                .bind(scope.branch_id)
-                .bind(locale)
-                // Apple authenticates pass updates with this; minted now so a
-                // pass issued later needs no second write.
-                .bind(mint_member_token())
-                // Dropped unless the shop asked for one, and only ever as a
-                // valid PAIR — a month with no day greets nobody, a day with no
-                // month greets everybody twelve times.
-                .bind(birthday.map(|(m, _)| m))
-                .bind(birthday.map(|(_, d)| d))
-                .fetch_one(pool.get_ref())
-                .await?;
-                (row, false)
-            }
-        };
-
     let (_, rewards) = load_for_scope(pool.get_ref(), &scope).await?;
     let mode = settings.mode();
     let org = crate::orgs::branding::load(pool.get_ref(), org_id).await?;
     let brand = card_brand(&org, &settings);
+    let next_reward_cost = model::reward_target(&settings, &rewards);
+
+    // Joining twice from the same phone is a normal thing to do — a customer who
+    // lost their pass rescans the counter QR — so an existing member is not an
+    // error. But it used to return that member's card to whoever typed the
+    // number, and the card IS the credential. Now: an unverified device is told
+    // the phone has a card and offered the OTP, and nothing else; a verified
+    // one gets the card back.
+    //
+    // Two people submitting the same new number at once race to the INSERT.
+    // The partial unique index on (org_id, phone) makes one of them lose, and
+    // ON CONFLICT turns that loss into a no-op rather than a 409 — the loser
+    // then finds the row the winner made and is treated as a returning member,
+    // which is what they are by the time they look.
+    let inserted: Option<MemberRow> = sqlx::query_as(&format!(
+        "INSERT INTO loyalty_customers \
+            (org_id, phone, name, member_token, joined_branch_id, locale, \
+             apple_auth_token, birth_month, birth_day) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) \
+         ON CONFLICT (org_id, phone) WHERE deleted_at IS NULL DO NOTHING \
+         RETURNING {}",
+        model::MEMBER_COLS
+    ))
+    .bind(org_id)
+    .bind(&phone)
+    .bind(name)
+    .bind(mint_member_token())
+    // Reporting only, and honestly null for an org-wide code: we do not know
+    // where they were, and a membership belongs to the shop rather than to a
+    // branch.
+    .bind(scope.branch_id)
+    .bind(locale)
+    // Apple authenticates pass updates with this; minted now so a pass issued
+    // later needs no second write.
+    .bind(mint_member_token())
+    // Dropped unless the shop asked for one, and only ever as a valid PAIR — a
+    // month with no day greets nobody, a day with no month greets everybody
+    // twelve times.
+    .bind(birthday.map(|(m, _)| m))
+    .bind(birthday.map(|(_, d)| d))
+    .fetch_optional(pool.get_ref())
+    .await?;
+
+    let (member, already_member) = match inserted {
+        Some(fresh) => (fresh, false),
+        None => {
+            let existing = model::find_by_phone(pool.get_ref(), org_id, &phone)
+                .await?
+                // The conflict target is exactly this lookup, so a miss here
+                // means the row vanished between the two statements: forgotten
+                // by an admin in the same instant. Vanishingly rare; the retry
+                // the page will make lands on a clean insert.
+                .ok_or_else(|| AppError::Conflict("Please try again".into()))?;
+            if !verified {
+                return Ok(HttpResponse::Ok().json(welcome_back(
+                    pool.get_ref(),
+                    &existing,
+                    name,
+                    &settings,
+                    &org,
+                    brand,
+                    next_reward_cost,
+                )));
+            }
+            (existing, true)
+        }
+    };
+
     let locations = wallet::locations_for_member(pool.get_ref(), &member).await?;
     let passes = wallet::links_for(pool.get_ref(), &member, &settings, &org, &locations).await;
     Ok(HttpResponse::Ok().json(JoinResult {
-        member_token: member.member_token.clone(),
+        member_token: Some(member.member_token.clone()),
         name: member.name.clone(),
         balance: member.balance_in(mode),
         mode: settings.mode.clone(),
-        next_reward_cost: model::reward_target(&settings, &rewards),
+        next_reward_cost,
         brand,
-        passes,
+        passes: Some(passes),
         already_member,
+        verify_required: false,
+        card_link_sent: false,
     }))
+}
+
+/// The answer for a phone that already has a card, from a device that has not
+/// proved it owns the phone.
+///
+/// Nothing that belongs to the member leaves here: no token, no passes, no
+/// balance, not even the name on file. The page gets what it needs to offer the
+/// OTP, and — where a WhatsApp gateway is configured — the member gets their
+/// card link on the number itself. That message is the one channel that proves
+/// possession without a code: it can only be read by whoever holds the phone,
+/// and if that is the person at the counter they are done; if it is not, the
+/// real owner has just learned someone typed their number, which is the right
+/// person to know.
+#[allow(clippy::too_many_arguments)]
+fn welcome_back(
+    pool: &PgPool,
+    member: &MemberRow,
+    typed_name: &str,
+    settings: &super::settings::LoyaltySettings,
+    org: &crate::orgs::branding::OrgBrand,
+    brand: CardBrand,
+    next_reward_cost: i32,
+) -> JoinResult {
+    let card_link_sent = match wallet::card_link(member) {
+        Some(link) if std::env::var("WHATSAPP_SERVICE_URL").is_ok() => {
+            // In the member's own language, not the page's: the page is being
+            // read by whoever typed the number, and the message goes to the
+            // phone's owner.
+            let program = if member.locale.starts_with("ar") {
+                settings
+                    .program_name_ar
+                    .as_deref()
+                    .unwrap_or(&settings.program_name)
+            } else {
+                &settings.program_name
+            };
+            let text = if member.locale.starts_with("ar") {
+                format!(
+                    "بطاقتك في {program} ({org}) موجودة هنا: {link}\n\n\
+                     لو مش أنت اللي طلب البطاقة دي، تجاهل الرسالة — محدش يقدر يوصلها من غير الرابط ده.",
+                    org = org.name
+                )
+            } else {
+                format!(
+                    "Your {program} card at {org} is here: {link}\n\n\
+                     If you didn't just ask for it, ignore this — nobody can reach your card without this link.",
+                    org = org.name
+                )
+            };
+            whatsapp::send_message(pool.clone(), member.phone.clone(), text);
+            true
+        }
+        _ => false,
+    };
+    JoinResult {
+        member_token: None,
+        name: typed_name.to_string(),
+        balance: 0,
+        mode: settings.mode.clone(),
+        next_reward_cost,
+        brand,
+        passes: None,
+        already_member: true,
+        verify_required: true,
+        card_link_sent,
+    }
 }
 
 /// The member's own card page — what they see when they open the link again.

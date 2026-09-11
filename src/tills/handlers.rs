@@ -29,6 +29,11 @@ pub struct Till {
     pub name: String,
     pub is_default: bool,
     pub is_active: bool,
+    /// The cash that should be in this drawer at the start of a shift, in
+    /// minor units. The shift report proposes closing at it ("leave the float,
+    /// drop the rest into the safe"); `None` means the shop has not decided
+    /// and nothing is proposed.
+    pub standard_float: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -47,6 +52,10 @@ pub struct CreateTillRequest {
     pub is_default: Option<bool>,
     #[serde(default)]
     pub is_active: Option<bool>,
+    /// Standard float in minor units; must not be negative. Omit or `null`
+    /// for "not decided".
+    #[serde(default)]
+    pub standard_float: Option<i32>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -57,10 +66,39 @@ pub struct UpdateTillRequest {
     pub is_default: Option<bool>,
     #[serde(default)]
     pub is_active: Option<bool>,
+    /// Standard float in minor units. Absent → unchanged; `null` → cleared
+    /// (the shop no longer proposes a closing figure); a value → set. Same
+    /// `Option<Option<T>>` shape as the branch printer fields.
+    #[serde(default, deserialize_with = "double_option")]
+    #[schema(value_type = Option<i32>)]
+    pub standard_float: Option<Option<i32>>,
 }
 
-const TILL_COLS: &str =
-    "id, org_id, branch_id, name, is_default, is_active, created_at, updated_at";
+/// Deserializes a field that can be:
+///  - absent           → None         (don't update)
+///  - present as null  → Some(None)   (set to null)
+///  - present as value → Some(Some(v))(set to value)
+fn double_option<'de, T, D>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(de).map(Some)
+}
+
+/// `tills_standard_float_is_not_negative`, said before the row is written so
+/// the caller gets a 400 with words rather than a CHECK violation.
+fn validate_standard_float(value: Option<i32>) -> Result<(), AppError> {
+    if value.is_some_and(|v| v < 0) {
+        return Err(AppError::BadRequest(
+            "Standard float cannot be negative".into(),
+        ));
+    }
+    Ok(())
+}
+
+const TILL_COLS: &str = "id, org_id, branch_id, name, is_default, is_active, standard_float, \
+     created_at, updated_at";
 
 async fn fetch_till(pool: &PgPool, id: Uuid) -> Result<Till, AppError> {
     sqlx::query_as::<_, Till>(&format!(
@@ -132,6 +170,7 @@ pub async fn create_till(
     if name.is_empty() {
         return Err(AppError::BadRequest("Till name is required".into()));
     }
+    validate_standard_float(body.standard_float)?;
 
     // Resolve the branch's org (and confirm it exists / is live).
     let org_id: Uuid =
@@ -156,14 +195,15 @@ pub async fn create_till(
     }
 
     let till = sqlx::query_as::<_, Till>(&format!(
-        "INSERT INTO tills (org_id, branch_id, name, is_default, is_active) \
-         VALUES ($1, $2, $3, $4, $5) RETURNING {TILL_COLS}"
+        "INSERT INTO tills (org_id, branch_id, name, is_default, is_active, standard_float) \
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING {TILL_COLS}"
     ))
     .bind(org_id)
     .bind(body.branch_id)
     .bind(name)
     .bind(is_default)
     .bind(body.is_active.unwrap_or(true))
+    .bind(body.standard_float)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -205,6 +245,7 @@ pub async fn update_till(
     if body.name.as_deref().is_some_and(|s| s.trim().is_empty()) {
         return Err(AppError::BadRequest("Till name cannot be empty".into()));
     }
+    validate_standard_float(body.standard_float.flatten())?;
 
     let mut tx = pool.get_ref().begin().await?;
     if body.is_default == Some(true) {
@@ -218,12 +259,16 @@ pub async fn update_till(
         .await?;
     }
 
+    // `standard_float` is nullable, so COALESCE cannot express "clear it": $5
+    // says whether the field was sent at all and $6 carries the value (NULL
+    // when clearing).
     let till = sqlx::query_as::<_, Till>(&format!(
         "UPDATE tills SET \
-             name       = COALESCE($2, name), \
-             is_default = COALESCE($3, is_default), \
-             is_active  = COALESCE($4, is_active), \
-             updated_at = now() \
+             name           = COALESCE($2, name), \
+             is_default     = COALESCE($3, is_default), \
+             is_active      = COALESCE($4, is_active), \
+             standard_float = CASE WHEN $5 THEN $6 ELSE standard_float END, \
+             updated_at     = now() \
          WHERE id = $1 AND deleted_at IS NULL \
          RETURNING {TILL_COLS}"
     ))
@@ -231,6 +276,8 @@ pub async fn update_till(
     .bind(new_name)
     .bind(body.is_default)
     .bind(body.is_active)
+    .bind(body.standard_float.is_some())
+    .bind(body.standard_float.flatten())
     .fetch_one(&mut *tx)
     .await?;
 

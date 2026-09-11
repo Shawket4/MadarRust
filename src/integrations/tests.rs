@@ -1046,7 +1046,11 @@ async fn an_org_admin_can_list_credentials_but_not_change_them(pool: PgPool) {
             .to_request(),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK, "an org admin may audit the list");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "an org admin may audit the list"
+    );
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert!(body.as_array().is_some_and(|a| !a.is_empty()));
     // …and never carries a secret, whoever is asking.

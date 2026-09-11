@@ -2518,6 +2518,7 @@
         "tags": [
           "bookings"
         ],
+        "summary": "`seated` → `completed` by hand. The party is done with the booking; if\nthey never started a bill under it, the hold seating placed is let go of\ntoo (a bill, had there been one, would have ended it `seated` already and\nits settle buses the table). Already `completed` is a clean 200.",
         "operationId": "complete_booking",
         "parameters": [
           {
@@ -10183,7 +10184,7 @@
           "floor"
         ],
         "summary": "Mark a bussed table ready for the next party.",
-        "description": "The ONE human act the derived-status model needs. Everything else about a\ntable's status follows from the ticket on it: seated when one lands, free\nwhen nobody vacated, dirty after a checkout. But no server can see that the\nplates have been cleared, so a person says so.\n\nDeliberately not a set-status endpoint. Its predecessor took any status and\nwrote it with no lock and no occupancy check, so it could declare a table\nfree while a ticket was open on it. This performs exactly one transition,\n`dirty` -> `free`, and refuses anything else.",
+        "description": "The ONE human act the ledger cannot derive. Everything else about a\ntable's status follows from its rows: seated while one is live, dirty\nafter a checkout ended it. But no server can see that the plates have been\ncleared, so a person says so, and the row records who.\n\nDeliberately not a set-status endpoint. Its predecessor took any status and\nwrote it with no lock and no occupancy check, so it could declare a table\nfree while a ticket was open on it. This performs exactly one transition,\n`dirty` -> `free`, and refuses anything else.",
         "operationId": "clear_table",
         "parameters": [
           {
@@ -10284,8 +10285,8 @@
         "tags": [
           "floor"
         ],
-        "summary": "Take a table. THE seating primitive.",
-        "description": "Occupancy travels on its own here, carrying nothing about why. Two things\nuse it:\n\n  * A PARTY SITTING DOWN. They have ordered nothing yet, so there is no\n    bill — a ticket starts with their first round and claims this table on\n    the way in. Seating used to open an empty ticket instead, which put a\n    zero-value bill in every report and made a party who changed their mind\n    and left something you had to VOID.\n  * A PARKED CART. Device-local by design: the order, its lines and its\n    money never leave the till. But the table is not the till's private\n    business, and while it stayed local the dashboard's floor and every\n    other terminal were told a table with somebody's order waiting on it was\n    free.\n\nIn both cases the server learns that the table is taken and nothing\nwhatever about what is on it.\n\nLike `clear_table`, and for the reason written there, this is not a\nset-status endpoint: exactly one transition, `free` -> `seated`, refused\nfrom anything else. A table a ticket is already on stays the ticket's.",
+        "summary": "Take a table for a party with no bill yet.",
+        "description": "Occupancy travels on its own here, carrying nothing about what is on the\ntable -- but always who took it: the hold is a `party` row in the ledger\nowned by the hand that placed it, so there is no such thing as a table held\nby nobody. Two things use it:\n\n  * A PARTY SITTING DOWN. They have ordered nothing yet, so there is no\n    bill — a ticket starts with their first round and claims this table on\n    the way in. Seating used to open an empty ticket instead, which put a\n    zero-value bill in every report and made a party who changed their mind\n    and left something you had to VOID.\n  * A PARKED CART. Device-local by design: the order, its lines and its\n    money never leave the till. But the table is not the till's private\n    business, and while it stayed local the dashboard's floor and every\n    other terminal were told a table with somebody's order waiting on it was\n    free.\n\nIn both cases the server learns that the table is taken, by whom and from\nwhich till, and nothing whatever about what is on it.\n\nLike `clear_table`, and for the reason written there, this is not a\nset-status endpoint: exactly one transition, `free` -> `seated`, refused\nfrom anything else with a `code` the till can act on. A table a ticket is\nalready on stays the ticket's; a table another till holds stays theirs.",
         "operationId": "hold_table",
         "parameters": [
           {
@@ -10387,7 +10388,7 @@
           "floor"
         ],
         "summary": "Give back a table a till was holding for its own parked order.",
-        "description": "The counterpart to `hold_table`: the hold moved to another table, was\nchecked out, or was discarded. Exactly one transition out of `seated` --\nto `free`, or to `dirty` when `bus` says the party ate -- and never over a\nlive ticket — if one has landed since, the ticket owns the\ntable and this is a no-op rather than a way to free an occupied table.",
+        "description": "The counterpart to `hold_table`: the hold moved to another table, was\nchecked out, or was discarded. Ends the `party` row -- leaving the table\n`free`, or `dirty` when `bus` says the party ate -- and never touches a\nticket's: if one has landed since, the ticket owns the table and this is a\nno-op rather than a way to free an occupied table.\n\nNot owner-gated on purpose. The draft is device-local and outlives a shift\nhandover, so the teller who checks it out is often not the one who parked\nit; the ledger records who released it instead of refusing them.",
         "operationId": "release_table",
         "parameters": [
           {
@@ -13973,7 +13974,8 @@
         "tags": [
           "kitchen"
         ],
-        "summary": "Outstanding kitchen tickets for a branch (those with at least one un-bumped,\nun-voided line — for the given station if provided), oldest first. Seed for\nthe KDS; live updates arrive on `/realtime/stream?topics=kitchen`.",
+        "summary": "The branch's LIVE kitchen tickets — not closed, oldest first — optionally\nnarrowed to those with un-bumped work for one station. Seed for the KDS;\nlive updates arrive on `/realtime/stream?topics=kitchen`.",
+        "description": "\"Live\" is `closed_at IS NULL`, not \"has an un-bumped line\": a ticket at a\nbranch that never bumps stays on the till queue until its bill settles or\nthe shift closes, and a ticket the kitchen finished is closed `bumped` the\nmoment its last line is.",
         "operationId": "feed",
         "parameters": [
           {
@@ -29422,6 +29424,402 @@
         ]
       }
     },
+    "/refunds": {
+      "post": {
+        "tags": [
+          "refunds"
+        ],
+        "operationId": "create_refund",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRefundRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Replay of a refund already on record (same client_ref)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefundIssued"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Refund issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefundIssued"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/refunds/order/{order_id}": {
+      "get": {
+        "tags": [
+          "refunds"
+        ],
+        "operationId": "list_order_refunds",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "description": "Order ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Refunds against one order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderRefunds"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/refunds/shift/{shift_id}": {
+      "get": {
+        "tags": [
+          "refunds"
+        ],
+        "operationId": "list_shift_refunds",
+        "parameters": [
+          {
+            "name": "shift_id",
+            "in": "path",
+            "description": "Shift ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Refunds issued in one shift",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShiftRefunds"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/refunds/{id}": {
+      "get": {
+        "tags": [
+          "refunds"
+        ],
+        "operationId": "get_refund",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Refund ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One refund",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefundFull"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/reports/branches/{branch_id}/addons": {
       "get": {
         "tags": [
@@ -43907,7 +44305,8 @@
               "string",
               "null"
             ],
-            "format": "uuid"
+            "format": "uuid",
+            "description": "The ticket this party is (or was) eating on. DERIVED from\n`open_tickets.booking_id` — the live one if there is one, else the\nlatest — never stored on the booking."
           },
           "party_size": {
             "type": "integer",
@@ -44077,6 +44476,13 @@
             "format": "int32",
             "example": 9100
           },
+          "require_table_for_orders": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether every dine-in sale here must belong to a table. Same shape as\nthe tax overrides: `null` inherits the organisation, which is not the\nsame as `false`. An explicit `false` lets a counter with two stools by\nthe window keep ringing walk-ups while the org's dining rooms seat\neveryone; an explicit `true` does the reverse. This is the OVERRIDE —\nthe resolved answer is `branches::policy::require_table_for_orders`."
+          },
           "service_charge_rate": {
             "type": [
               "number",
@@ -44235,8 +44641,16 @@
             "format": "int64",
             "description": "The cash slice of `total_tips`."
           },
+          "gross_sales": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "refunded_amount": {
+            "type": "integer",
+            "format": "int64"
+          },
           "revenue_by_method": {
-            "description": "Goods only, by method actually tendered. Tips are in `total_tips`."
+            "description": "Goods only, by method actually tendered — money in. Tips are in\n`total_tips`; refunds are not netted from the buckets."
           },
           "total_orders": {
             "type": "integer",
@@ -44244,7 +44658,8 @@
           },
           "total_revenue": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Net of refunds: `gross_sales − refunded_amount`."
           },
           "total_tips": {
             "type": "integer",
@@ -44281,6 +44696,14 @@
           "pickup_fee"
         ],
         "properties": {
+          "auto_reject_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Minutes a `received` order may wait for a teller before the sweeper\nrejects it and tells the customer. `null` = never: the order waits until\nsomeone acts on it. Read at sweep time rather than frozen on the order,\nso a branch that shortens it means the change to apply to what is\nalready waiting."
+          },
           "branch_id": {
             "type": "string",
             "format": "uuid"
@@ -44541,8 +44964,18 @@
             ],
             "format": "date-time"
           },
+          "gross_sales": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sales in range as rung up, before any refund. Was what `total_revenue`\nmeant until 2026-09."
+          },
+          "refunded_amount": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Money refunded against the sales in range (partial refunds; a fully\nrefunded order is out of every figure here by status)."
+          },
           "revenue_by_method": {
-            "description": "Money collected FOR GOODS, bucketed by the method actually tendered\n(`order_payments`). Tips are not in here — see `total_tips`."
+            "description": "Money collected FOR GOODS, bucketed by the method actually tendered\n(`order_payments`) — money IN. Tips are not in here — see `total_tips`\n— and refunds are not netted out: they are money OUT with a tender of\ntheir own, on `GET /shifts/{id}/refunds` and the refunds dataset."
           },
           "subtotal": {
             "type": "integer",
@@ -44561,6 +44994,11 @@
               "$ref": "#/components/schemas/ItemSales"
             }
           },
+          "total_delivery_fees": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Delivery fees on the sales in range — inside `total_revenue`, outside\nthe tax base, not food revenue."
+          },
           "total_discount": {
             "type": "integer",
             "format": "int64"
@@ -44576,7 +45014,13 @@
           },
           "total_revenue": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "What the sales in range are worth after refunds: `gross_sales` less\n`refunded_amount`. A refund is attributed to the sale it was against,\nwhenever it was issued — the same restatement a full refund makes by\nflipping the order's status out of the sold set."
+          },
+          "total_service_charge": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Service charge on the dine-in bills in range — inside `total_revenue`\nas the shop's income, not a pass-through."
           },
           "total_tax": {
             "type": "integer",
@@ -44603,6 +45047,14 @@
           "prep_time_minutes"
         ],
         "properties": {
+          "auto_reject_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Minutes before an unaccepted order is rejected automatically. `null`\n(and omitted, for older clients) = never."
+          },
           "branch_id": {
             "type": "string",
             "format": "uuid"
@@ -45472,6 +45924,7 @@
           "id",
           "shift_id",
           "amount",
+          "kind",
           "note",
           "moved_by",
           "moved_by_name",
@@ -45490,6 +45943,14 @@
             "format": "uuid",
             "description": "Client-minted idempotency / reconciliation key, echoed back so an\noffline client can map its queued movement to the server row. NULL for\nlive online movements."
           },
+          "corrects_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "For a `correction`: the movement it reverses. NULL for every other kind,\nand for a correction of something never recorded as a row."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -45497,6 +45958,10 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "One of `pay_in` / `pay_out` / `safe_drop` / `correction` — see\n[`CashMovementKind`]."
           },
           "moved_by": {
             "type": "string",
@@ -45513,6 +45978,16 @@
             "format": "uuid"
           }
         }
+      },
+      "CashMovementKind": {
+        "type": "string",
+        "description": "What a cash movement IS, which fixes its sign. The DB holds this as a text\ncolumn under `shift_cash_movements_kind_is_known` (same convention as\n`order_type`), so the wire value is the snake_case label and the model\ncarries it as a plain `String`; this enum exists so the handler can validate\na request before the CHECK turns a teller's mistake into a 500.",
+        "enum": [
+          "pay_in",
+          "pay_out",
+          "safe_drop",
+          "correction"
+        ]
       },
       "CashMovementRequest": {
         "type": "object",
@@ -45533,6 +46008,14 @@
             "format": "uuid",
             "description": "Client-minted idempotency / reconciliation key. The POS sends a stable\nUUID per movement so a replayed offline movement dedupes instead of\ndouble-applying. Omit for live online movements."
           },
+          "corrects_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "For a `correction` only: the movement on this shift it reverses. The\namount must be the exact opposite of that row's, and a row may be\ncorrected once. Omit for a correction of something never recorded."
+          },
           "created_at": {
             "type": [
               "string",
@@ -45540,6 +46023,17 @@
             ],
             "format": "date-time",
             "description": "When the movement actually happened. Omit for live (online) movements —\nthe server stamps `now()`. The POS sends this for movements made OFFLINE\nso they keep their real time after syncing. Future values are rejected."
+          },
+          "kind": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CashMovementKind",
+                "description": "What the movement is. Optional for the clients already in the field,\nwhich send only a signed amount: an omitted kind resolves by sign\n(negative → `pay_out`, positive → `pay_in`), exactly what the In/Out\nchips have always meant. A supplied kind must agree with the sign."
+              }
+            ]
           },
           "note": {
             "type": "string"
@@ -45549,7 +46043,9 @@
       "CashMovementSummaryRow": {
         "type": "object",
         "required": [
+          "id",
           "amount",
+          "kind",
           "note",
           "moved_by_name",
           "created_at"
@@ -45559,9 +46055,30 @@
             "type": "integer",
             "format": "int32"
           },
+          "corrects_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "corrects_kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The kind of the movement `corrects_id` points at, so a printed report\ncan say \"correction of pay-out\" and the totals can net the pair inside\nthe bucket the mistake was made in."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string"
           },
           "moved_by_name": {
             "type": "string"
@@ -47925,6 +48442,71 @@
           }
         }
       },
+      "CreateRefundRequest": {
+        "type": "object",
+        "required": [
+          "order_id",
+          "amount",
+          "method",
+          "reason"
+        ],
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Minor units, > 0. Together with every refund already on the order it\nmay not exceed `orders.total_amount`."
+          },
+          "client_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Client-minted idempotency key. A retried request or a replayed offline\nqueue carrying the same key gets the original refund back instead of\nhanding the money out again."
+          },
+          "issued_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the refund was issued. Omit for live requests — the server stamps\n`now()`. An offline till sends the real time; future values are rejected."
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RefundLineInput"
+            }
+          },
+          "method": {
+            "type": "string",
+            "description": "How the money went back — a name from the org's payment-method\nvocabulary. One tender per refund; a split is two refunds."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Free-text explanation. Required when `reason` is `other`."
+          },
+          "order_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The settled sale the money goes back against."
+          },
+          "reason": {
+            "$ref": "#/components/schemas/RefundReason"
+          },
+          "shift_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The shift whose drawer the money leaves. Omit for a live request and the\nactor's own open shift at the order's branch is used; a replayed offline\nrefund must name the shift it was issued in, the way a queued sale does."
+          }
+        }
+      },
       "CreateReturnRequest": {
         "type": "object",
         "required": [
@@ -48239,6 +48821,14 @@
           },
           "name": {
             "type": "string"
+          },
+          "standard_float": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Standard float in minor units; must not be negative. Omit or `null`\nfor \"not decided\"."
           }
         }
       },
@@ -48657,7 +49247,7 @@
       },
       "DeliveryChannelSales": {
         "type": "object",
-        "description": "Delivery sales for one delivery channel (`in_mall` / `outside`). Revenue and\norder counts are over **delivered** orders only; `cancelled_orders` is shown\nseparately so the UI can surface drop-off without inflating revenue.",
+        "description": "Delivery sales for one delivery channel. Revenue and order counts are over\n**delivered** orders only; `cancelled_orders` is shown separately so the UI\ncan surface drop-off without inflating revenue.\n\nRead from `delivery_orders` — the quote — not from `orders`: a delivery that\nnever settled into a sale still tells the shop something about its\nchannels. Refunds are against the sale and are not netted here.",
         "required": [
           "channel",
           "orders",
@@ -48677,12 +49267,17 @@
           },
           "channel": {
             "type": "string",
-            "description": "Delivery channel: `in_mall` or `outside`."
+            "description": "Delivery channel: `in_mall`, `outside`, `umbrella` or `pickup`."
           },
           "delivery_fees": {
             "type": "integer",
             "format": "int64",
-            "description": "Sum of `delivery_fee` (piastres) over delivered orders."
+            "description": "Sum of `delivery_fee` (piastres) over delivered orders. Outside the tax\nbase and not food revenue; a pickup carries none."
+          },
+          "goods_revenue": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`revenue − delivery_fees`: the bill for the goods (tax included), the\nfigure comparable with dine-in and takeaway revenue."
           },
           "orders": {
             "type": "integer",
@@ -48691,7 +49286,7 @@
           "revenue": {
             "type": "integer",
             "format": "int64",
-            "description": "Sum of `total` (piastres) over delivered orders on this channel."
+            "description": "Sum of `total` (piastres) over delivered orders on this channel — the\nwhole bill, delivery fee included."
           }
         }
       },
@@ -49134,7 +49729,7 @@
               "null"
             ],
             "format": "uuid",
-            "description": "Frozen channel discount on the item subtotal (`total == subtotal -\ndiscount_amount + delivery_fee`). `discount_amount` is 0 when none."
+            "description": "Frozen channel discount on the item subtotal. `discount_amount` is 0\nwhen none."
           },
           "discount_type": {
             "type": [
@@ -49145,6 +49740,13 @@
           "discount_value": {
             "type": "number",
             "format": "double"
+          },
+          "distance_source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How `road_distance_meters` was measured: `osrm` (routed) or `haversine`\n(straight line — the routing fallback, and always the in-mall walking\ndistance). `None` exactly when no distance was recorded."
           },
           "extra_prep_minutes": {
             "type": "integer",
@@ -49188,11 +49790,19 @@
             ],
             "format": "date-time"
           },
+          "payment_method": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What was actually taken at the door. Set at finalize and only then;\n`Some` exactly when the order is `delivered`."
+          },
           "payment_method_hint": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "What the customer SAID they would pay with, at checkout. Display only."
           },
           "place_name": {
             "type": [
@@ -49235,6 +49845,15 @@
             ],
             "format": "int32"
           },
+          "service_charge_amount": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Always 0: the service charge is dine-in only. Present so the till can\nrender the same breakdown for every kind of sale."
+          },
+          "service_charge_rate_applied": {
+            "type": "number",
+            "format": "double"
+          },
           "status": {
             "type": "string"
           },
@@ -49242,9 +49861,24 @@
             "type": "integer",
             "format": "int32"
           },
+          "tax_amount": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The tax as priced at intake, under the policy frozen beside it. Inside\n`total` when `tax_inclusive`, added to it otherwise. Finalize does not\nre-price: a rate the shop changes between the quote and the door does\nnot move a bill the customer already agreed."
+          },
+          "tax_inclusive": {
+            "type": "boolean",
+            "description": "Copy of the ONE inclusivity flag (org, branch override) as it stood at\nintake — not a setting of its own."
+          },
+          "tax_rate_applied": {
+            "type": "number",
+            "format": "double",
+            "description": "Fraction, not a percentage: `0.14` is 14%."
+          },
           "total": {
             "type": "integer",
-            "format": "int32"
+            "format": "int32",
+            "description": "The quote: `subtotal - discount_amount + delivery_fee`, plus\n`tax_amount` when the tax is exclusive. Replayed verbatim at finalize."
           },
           "unit_number": {
             "type": [
@@ -49351,7 +49985,7 @@
       },
       "DeliverySalesReport": {
         "type": "object",
-        "description": "Delivery sales rolled up across channels, plus a per-channel breakdown.\nAlways returns both `in_mall` and `outside` channels (zero-filled) so the\ndashboard renders a stable shape.",
+        "description": "Delivery sales rolled up across channels, plus a per-channel breakdown.\nAlways returns every channel in [`DELIVERY_CHANNELS`] (zero-filled) so the\ndashboard renders a stable shape.",
         "required": [
           "total_orders",
           "total_revenue",
@@ -49393,6 +50027,11 @@
             "type": "integer",
             "format": "int64"
           },
+          "total_goods_revenue": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`total_revenue − total_delivery_fees`."
+          },
           "total_orders": {
             "type": "integer",
             "format": "int64"
@@ -49417,6 +50056,9 @@
           "subtotal",
           "delivery_fee",
           "discount_amount",
+          "tax_amount",
+          "tax_rate_applied",
+          "tax_inclusive",
           "total",
           "customer_name"
         ],
@@ -49546,6 +50188,18 @@
           "subtotal": {
             "type": "integer",
             "format": "int32"
+          },
+          "tax_amount": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The tax line, frozen at intake. Inside `total` when `tax_inclusive`\n(render \"includes VAT\"), added to it otherwise (render a tax line)."
+          },
+          "tax_inclusive": {
+            "type": "boolean"
+          },
+          "tax_rate_applied": {
+            "type": "number",
+            "format": "double"
           },
           "total": {
             "type": "integer",
@@ -51153,45 +51807,66 @@
       },
       "JoinResult": {
         "type": "object",
-        "description": "What the customer sees after signing up: their card, and the buttons.",
+        "description": "What the customer sees after signing up: their card, and the buttons — or,\nfor a phone that is already a member and has not been proved, an invitation\nto prove it.\n\nThe member token is a bearer credential: whoever holds it holds the card,\nthe balance, the purchase history and the wallet passes. So it is handed out\non exactly two occasions — to a NEW member, whose token nobody else could\nwant yet, and to an existing member whose device has verified THIS phone by\nOTP. Typing a phone number is not proof of owning it; anyone who knows a\ncustomer's number can type it.",
         "required": [
-          "member_token",
           "name",
           "balance",
           "mode",
           "next_reward_cost",
           "brand",
-          "passes",
-          "already_member"
+          "already_member",
+          "verify_required",
+          "card_link_sent"
         ],
         "properties": {
           "already_member": {
             "type": "boolean",
-            "description": "True when this phone was already a member — the page says \"welcome back\"\nand shows the existing card rather than pretending to have made a new one."
+            "description": "True when this phone was already a member — the page says \"welcome back\"\nrather than pretending to have made a new card."
           },
           "balance": {
             "type": "integer",
             "format": "int32",
-            "description": "The live balance, in `mode`'s currency. Zero for a fresh member."
+            "description": "The live balance, in `mode`'s currency. Zero for a fresh member, and zero\n(not the real figure) while `verify_required`."
           },
           "brand": {
             "$ref": "#/components/schemas/CardBrand"
           },
+          "card_link_sent": {
+            "type": "boolean",
+            "description": "While `verify_required`: the card link was also sent to the number on\nfile, by WhatsApp — the one channel that proves possession without a\ncode. False when no gateway is configured or there is no public base to\nbuild a link on; the page then offers only the OTP."
+          },
           "member_token": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Absent when `verify_required`: the page has nothing to show yet."
           },
           "mode": {
             "type": "string"
           },
           "name": {
-            "type": "string"
+            "type": "string",
+            "description": "The name as the caller typed it. For a returning member the name ON FILE\nis not echoed until they have verified — it is a fact about the person\nwho owns the phone, not about the person typing it."
           },
           "next_reward_cost": {
             "type": "integer",
             "format": "int32"
           },
           "passes": {
-            "$ref": "#/components/schemas/PassLinks"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PassLinks",
+                "description": "Absent when `verify_required`."
+              }
+            ]
+          },
+          "verify_required": {
+            "type": "boolean",
+            "description": "This phone already has a card and the device has not proved it owns the\nphone. The page should run the ordinary OTP flow (`/public/otp/request`\nthen `/public/otp/verify`) and POST here again with the `device_token`\nit is handed; the card comes back on that call."
           }
         }
       },
@@ -51366,6 +52041,21 @@
             "type": "string",
             "format": "uuid"
           },
+          "close_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`bumped`, `settled`, `voided` or `retired` — see [`CloseReason`]."
+          },
+          "closed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the ticket left the kitchen's attention for good; `null` while it\nis live. A till queue that shows history renders closed tickets greyed;\nthe KDS feed never returns them."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -51398,7 +52088,8 @@
             "type": "string"
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "description": "The state of the cooking: `firing`, `ready`, `voided`."
           },
           "table_label": {
             "type": [
@@ -51561,6 +52252,7 @@
         "required": [
           "id",
           "kind",
+          "source",
           "currency",
           "points",
           "branch_id",
@@ -51598,7 +52290,8 @@
             "format": "uuid"
           },
           "kind": {
-            "type": "string"
+            "type": "string",
+            "description": "`earn`, `redeem`, `adjust`, or `reverse_earn` / `reverse_redeem` /\n`reverse_adjust` — the last three undo the row named in `reverses_id`."
           },
           "note": {
             "type": [
@@ -51617,11 +52310,23 @@
             "type": "integer",
             "format": "int32"
           },
+          "reverses_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "For a reversal, the row it undoes."
+          },
           "reward_name": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "source": {
+            "type": "string",
+            "description": "Why the row exists: `sale`, `redemption`, `void`, `refund`, `birthday`,\n`winback` or `manual`. What a till or a dashboard should print as the\nreason, instead of guessing from the kind and the note."
           }
         }
       },
@@ -51905,6 +52610,10 @@
           "require_otp"
         ],
         "properties": {
+          "allow_negative_balance": {
+            "type": "boolean",
+            "description": "When a void or refund claws back points the member has already spent,\nmay the balance go below zero?\n\nOff (the default) clamps at zero: the shop eats the reward that was\nalready handed over, and the earn stays visibly part-reversed on the\nledger against an order that says `voided`, so a report can list who\nbenefited and by how much. On, the balance goes negative and the next\nvisits earn into the hole — the books balance, and the customer sees a\nminus on their card for what was nearly always the shop's own mistake.\n\nClawbacks ONLY. A redemption or a manual deduction can never overdraw\nwhatever this says: you cannot spend what you do not have; you can only\nowe because a sale you were paid for was undone. Enforced in the\ndatabase (`loyalty_apply_txn`), not here."
+          },
           "balance_cap": {
             "type": [
               "integer",
@@ -53230,6 +53939,26 @@
           }
         }
       },
+      "OnlineTaxPolicy": {
+        "type": "object",
+        "description": "What the storefront needs to render a bill honestly: the rate, and whether\nthe menu prices already contain it. Sent with the branch list and with every\nquote so a page can show a tax line (exclusive) or an \"includes VAT\" note\n(inclusive) instead of quietly under-quoting. No service-charge fields: an\nonline order never carries one, and a field that is always zero invites a\npage to render a line for it.",
+        "required": [
+          "tax_rate",
+          "tax_inclusive"
+        ],
+        "properties": {
+          "tax_inclusive": {
+            "type": "boolean",
+            "description": "`true` = menu prices already contain the tax; the total will not grow."
+          },
+          "tax_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "Fraction, NOT a percentage: `0.14` is 14%.",
+            "example": 0.14
+          }
+        }
+      },
       "OpenShiftRequest": {
         "type": "object",
         "required": [
@@ -53332,6 +54061,10 @@
           "items"
         ],
         "properties": {
+          "bill": {
+            "$ref": "#/components/schemas/TicketBill",
+            "description": "The bill as the SERVER prices it — see [`TicketBill`]. This is the\nfigure the till shows and the drawer collects, because it is the figure\nthe settle will book; `subtotal` above is only its first line."
+          },
           "booking_id": {
             "type": [
               "string",
@@ -53349,6 +54082,27 @@
               "string",
               "null"
             ]
+          },
+          "discount_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The discount the waiter put on the bill at fire time, if any. Shown so\nthe cashier can SEE what a settle will inherit — and clear it with an\nexplicit `discount_type: \"none\"` rather than have it applied silently."
+          },
+          "discount_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "discount_value": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
           },
           "guest_count": {
             "type": [
@@ -53394,12 +54148,17 @@
             ],
             "format": "uuid"
           },
+          "ready": {
+            "type": "boolean",
+            "description": "The kitchen has plated every line of every round. DERIVED from the\nticket's `kitchen_tickets` at read time, so it is always what the KDS\nsays now. `false` for a ticket nothing was ever fired to the kitchen for\n(routing mode `off`): there is nothing to be ready."
+          },
           "ready_at": {
             "type": [
               "string",
               "null"
             ],
-            "format": "date-time"
+            "format": "date-time",
+            "description": "The last moment the kitchen had the whole ticket plated. History for\nthe timing reports; `ready` is the live fact."
           },
           "settled_at": {
             "type": [
@@ -53409,7 +54168,8 @@
             "format": "date-time"
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "description": "The bill: `open`, `settled` or `voided`. Never `ready` — see [`Self::ready`]."
           },
           "subtotal": {
             "type": "integer",
@@ -53427,6 +54187,26 @@
               "string",
               "null"
             ]
+          },
+          "void_note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "void_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Categorised like an order void, so void-rate reports read dine-in and\ncounter alike."
+          },
+          "voided_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
           }
         }
       },
@@ -53657,7 +54437,7 @@
           },
           "order_type": {
             "type": "string",
-            "description": "Order origin: \"dine_in\" (POS sale) or \"delivery\" (finalized delivery\norder). Defaults to \"dine_in\" for every POS sale."
+            "description": "What kind of sale: \"dine_in\" (settled from a waiter's ticket — the only\nkind that carries a service charge), \"takeaway\" (rung straight through\nthe till) or \"delivery\" (a finalized delivery order). Till sales before\n2026-09 say \"dine_in\" because \"takeaway\" could not be expressed."
           },
           "payment_legs": {
             "type": "array",
@@ -54054,6 +54834,8 @@
           "subtotal",
           "delivery_fee",
           "discount_amount",
+          "tax_amount",
+          "tax_inclusive",
           "total",
           "customer_name",
           "items"
@@ -54129,6 +54911,14 @@
           "subtotal": {
             "type": "integer",
             "format": "int32"
+          },
+          "tax_amount": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Tax as frozen at intake: inside `total` when `tax_inclusive`, added to\nit otherwise."
+          },
+          "tax_inclusive": {
+            "type": "boolean"
           },
           "total": {
             "type": "integer",
@@ -54486,6 +55276,46 @@
             ]
           }
         }
+      },
+      "OrderRefunds": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RefundTotals"
+          },
+          {
+            "type": "object",
+            "required": [
+              "order_id",
+              "order_status",
+              "total_amount",
+              "refundable_remaining",
+              "refunds"
+            ],
+            "properties": {
+              "order_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "order_status": {
+                "type": "string"
+              },
+              "refundable_remaining": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "refunds": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RefundFull"
+                }
+              },
+              "total_amount": {
+                "type": "integer",
+                "format": "int32"
+              }
+            }
+          }
+        ]
       },
       "OrderSummary": {
         "type": "object",
@@ -56538,7 +57368,8 @@
           "umbrella_open_now",
           "pickup_open_now",
           "otp_required",
-          "in_mall_require_location"
+          "in_mall_require_location",
+          "tax_policy"
         ],
         "properties": {
           "code": {
@@ -56577,6 +57408,10 @@
           },
           "pickup_open_now": {
             "type": "boolean"
+          },
+          "tax_policy": {
+            "$ref": "#/components/schemas/OnlineTaxPolicy",
+            "description": "The tax this branch prices online orders under. The storefront renders\na tax line from it (exclusive) or an \"includes VAT\" note (inclusive) —\nthe same policy intake will freeze onto the order."
           },
           "umbrella_enabled": {
             "type": "boolean"
@@ -57375,7 +58210,8 @@
       "QuoteResponse": {
         "type": "object",
         "required": [
-          "status"
+          "status",
+          "tax_policy"
         ],
         "properties": {
           "distance_meters": {
@@ -57395,6 +58231,10 @@
           "status": {
             "type": "string",
             "description": "\"ok\" | \"out_of_range\" | \"unavailable\""
+          },
+          "tax_policy": {
+            "$ref": "#/components/schemas/OnlineTaxPolicy",
+            "description": "The tax the cart will be priced under at this branch. A quote is a fee\nquote — it has no cart, so no tax amount — but the page rendering the\ncheckout total needs the rate and the inclusivity beside the fee, or it\nshows the customer one number and intake records another. Present on\nevery outcome: the policy is the branch's, not the address's."
           },
           "zone_id": {
             "type": [
@@ -57686,6 +58526,234 @@
           "sort_order": {
             "type": "integer",
             "format": "int32"
+          }
+        }
+      },
+      "Refund": {
+        "type": "object",
+        "required": [
+          "id",
+          "branch_id",
+          "order_id",
+          "shift_id",
+          "amount",
+          "method",
+          "is_cash",
+          "reason",
+          "issued_by",
+          "issued_by_name",
+          "issued_at",
+          "created_at"
+        ],
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "client_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "is_cash": {
+            "type": "boolean",
+            "description": "Whether `method` meant cash when the refund was issued. Snapshotted."
+          },
+          "issued_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "issued_by": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "issued_by_name": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "order_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reason": {
+            "type": "string",
+            "description": "One of the [`RefundReason`] spellings."
+          },
+          "shift_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The shift the refund was ISSUED in — the drawer the money left. Not\nnecessarily the shift the order was sold in."
+          }
+        }
+      },
+      "RefundFull": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Refund"
+          },
+          {
+            "type": "object",
+            "required": [
+              "lines"
+            ],
+            "properties": {
+              "lines": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RefundLine"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "RefundIssued": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RefundFull"
+          },
+          {
+            "$ref": "#/components/schemas/RefundTotals"
+          },
+          {
+            "type": "object",
+            "required": [
+              "order_status",
+              "refundable_remaining"
+            ],
+            "properties": {
+              "order_status": {
+                "type": "string",
+                "description": "`orders.status` after this refund — `refunded` only when the cumulative\namount reached the total (the trigger's rule, not this module's)."
+              },
+              "refundable_remaining": {
+                "type": "integer",
+                "format": "int64",
+                "description": "`total_amount − refunded_amount`: what may still be returned."
+              }
+            }
+          }
+        ],
+        "description": "What `POST /refunds` returns: the refund, plus where the order now stands\nso the till can print \"fully refunded\" without a second request."
+      },
+      "RefundLine": {
+        "type": "object",
+        "required": [
+          "id",
+          "order_item_id",
+          "item_name",
+          "quantity",
+          "amount",
+          "restock"
+        ],
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "item_name": {
+            "type": "string",
+            "description": "`order_items.item_name`, so a receipt reprint names the dish without a\nsecond lookup."
+          },
+          "order_item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "quantity": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "restock": {
+            "type": "boolean",
+            "description": "Whether the goods came back. Recorded per line; nothing in this module\nwrites it `true` yet (see the module docs on restock)."
+          }
+        }
+      },
+      "RefundLineInput": {
+        "type": "object",
+        "description": "One line of the order a refund is for. Optional detail: an overcharge or a\ngoodwill gesture is an amount with no line behind it.",
+        "required": [
+          "order_item_id",
+          "quantity",
+          "amount"
+        ],
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The share of the refund's amount attributed to this line, minor units.\nZero is allowed (a reward line sent back for nothing). The lines of a\nrefund may not add up to more than the refund."
+          },
+          "order_item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "quantity": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many of the line's units this refund is for. Held, cumulatively\nacross every refund of the order, to what the line sold."
+          }
+        }
+      },
+      "RefundReason": {
+        "type": "string",
+        "description": "Why money went back. The first three share their spelling with\n[`crate::orders::VoidReason`] so a report reads \"wrong order\" across voids\nand refunds alike; the rest exist only for refunds (you do not void a sale\nfor being late). Bound as text; the table's CHECK is the authority on the\nvocabulary and this enum mirrors it.",
+        "enum": [
+          "customer_request",
+          "wrong_order",
+          "quality_issue",
+          "overcharged",
+          "late_or_undelivered",
+          "goodwill",
+          "other"
+        ]
+      },
+      "RefundTotals": {
+        "type": "object",
+        "description": "\"Everything returned\" — against one order, or in one shift. Read from\n`v_order_refund_totals` for an order and summed by `shift_id` for a shift.",
+        "required": [
+          "refunded_amount",
+          "refunded_cash",
+          "refund_count"
+        ],
+        "properties": {
+          "refund_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "refunded_amount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "refunded_cash": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The cash slice of `refunded_amount` — what left a drawer."
           }
         }
       },
@@ -58705,13 +59773,21 @@
             ],
             "format": "int32"
           },
+          "change_given": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "What the till handed back. Recorded as the drawer saw it, like a\ncounter sale's; absent, it is derived from `amount_tendered` and the\nserver's total."
+          },
           "discount_id": {
             "type": [
               "string",
               "null"
             ],
             "format": "uuid",
-            "description": "Settle-time overrides (else the ticket's own discount / no tip)."
+            "description": "Settle-time discount. ABSENT (all three fields) means the waiter's\nticket discount is inherited, as it always was — but the till can now\nsee that discount on the ticket view. The literal `discount_type:\n\"none\"` settles with no discount at all; any other value (or a\n`discount_id`) replaces the waiter's."
           },
           "discount_type": {
             "type": [
@@ -58744,6 +59820,24 @@
           "payment_method": {
             "type": "string"
           },
+          "payment_splits": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/PaymentSplitInput"
+            },
+            "description": "Split tenders, when the party paid with more than one. Carried to the\norder's payment legs like a counter sale's; they must sum to the total."
+          },
+          "settled_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the bill was paid, as the till says. An offline settle replayed\nlater keeps its real time — it becomes the order's `created_at` and the\nticket's `settled_at`, one instant on both rows. Absent means now; a\nfuture clock is refused."
+          },
           "shift_id": {
             "type": "string",
             "format": "uuid"
@@ -58760,6 +59854,14 @@
               "string",
               "null"
             ]
+          },
+          "total_amount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "What the till says the bill came to — the figure its drawer collected.\nChecked against the server's own total exactly as a counter checkout is\n(`create_order_inner`'s drift check); a disagreement is refused, not\nrecorded. Absent on older builds, which then get no check. The figure\nto send is `OpenTicketView::bill.total`, which is priced by the same\nengine under the same policy — a till that shows that number cannot\ndisagree with the books."
           }
         }
       },
@@ -58928,6 +60030,32 @@
           }
         }
       },
+      "ShiftRefunds": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RefundTotals"
+          },
+          {
+            "type": "object",
+            "required": [
+              "shift_id",
+              "refunds"
+            ],
+            "properties": {
+              "refunds": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RefundFull"
+                }
+              },
+              "shift_id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          }
+        ]
+      },
       "ShiftReportResponse": {
         "type": "object",
         "required": [
@@ -58942,11 +60070,23 @@
           "cash_movements",
           "cash_movements_in",
           "cash_movements_out",
+          "safe_drops",
+          "cash_adjustments",
           "cash_movements_net",
           "expected_cash",
           "printed_at"
         ],
         "properties": {
+          "cash_adjustments": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Signed sum of corrections that reverse nothing on record (a miscounted\nfloat). Kept apart so a fix-up is never mistaken for a receipt or a cost."
+          },
+          "cash_in_refunded_sales": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Cash tenders and cash tips on this shift's sales that were later FULLY\nrefunded. `payment_summary` and `cash_tips` leave those sales out (they\nare revenue figures and match the sales report), but the notes did go\ninto the drawer, so `expected_cash` counts them. Reported so the sheet\nadds up: `expected_cash = opening_cash + cash bucket + cash_tips +\ncash_in_refunded_sales + cash_movements_net − refunds_issued_cash`."
+          },
           "cash_movements": {
             "type": "array",
             "items": {
@@ -58955,16 +60095,18 @@
           },
           "cash_movements_in": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Non-sale cash placed in the drawer (`pay_in`), net of any correction\nthat reversed one. Positive."
           },
           "cash_movements_net": {
             "type": "integer",
             "format": "int64",
-            "description": "Net of all cash movements (in - out) as a signed integer"
+            "description": "Signed net effect of EVERY movement on the drawer — the figure\n`compute_system_cash` adds to the float and the cash sales:\n`in − out − safe_drops + cash_adjustments`."
           },
           "cash_movements_out": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "What the shift SPENT (`pay_out`), net of corrections. Positive. A safe\ndrop is NOT in here — that money left the drawer but not the shop."
           },
           "cash_tips": {
             "type": "integer",
@@ -58996,8 +60138,42 @@
             "type": "string",
             "format": "date-time"
           },
+          "refunds_issued_amount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "refunds_issued_cash": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "refunds_issued_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Refunds ISSUED FROM THIS DRAWER — keyed on `order_refunds.shift_id`,\nwhich need not be the shift that made the sale. Money OUT; the Z-report's\nreturns line. `refunds_issued_cash` is what `compute_system_cash`\nsubtracts."
+          },
+          "safe_drops": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Cash moved from the drawer to the safe (`safe_drop`), net of\ncorrections. Positive. Out of the drawer, still the shop's."
+          },
           "shift": {
             "$ref": "#/components/schemas/Shift"
+          },
+          "standard_float": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The till's standard float, when the shop has set one: what should stay\nin the drawer at close. `None` means \"not decided\" — propose nothing."
+          },
+          "suggested_safe_drop": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "For an OPEN shift on a till with a standard float: how much of\n`expected_cash` to drop into the safe so the drawer closes at the\nfloat. Never negative — a drawer under its float has nothing to drop.\n`None` when the shift is closed or the till has no float."
           },
           "total_payments": {
             "type": "integer",
@@ -59073,6 +60249,11 @@
             ],
             "format": "int64"
           },
+          "gross_sales": {
+            "type": "integer",
+            "format": "int64",
+            "description": "This shift's sales as rung up, before any refund. Was what\n`total_revenue` meant until 2026-09."
+          },
           "opened_at": {
             "type": "string",
             "format": "date-time"
@@ -59081,8 +60262,26 @@
             "type": "integer",
             "format": "int64"
           },
+          "refunded_amount": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Money refunded AGAINST this shift's sales, whenever and from whichever\ndrawer it was issued. `gross_sales − refunded_amount = total_revenue`.\nA fully refunded sale is out of all three (its status is `refunded`)."
+          },
+          "refunds_issued_amount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "refunds_issued_cash": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "refunds_issued_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Refunds ISSUED IN THIS SHIFT — keyed on `order_refunds.shift_id`, the\ndrawer the money left, which need not be the shift that made the sale.\nThis is the Z-report's money-out line: `refunds_issued_cash` is what the\ndrawer is short by relative to its cash sales."
+          },
           "revenue_by_method": {
-            "description": "Goods only, by method actually tendered. Tips are in `total_tips`."
+            "description": "Goods only, by method actually tendered — money IN. Tips are in\n`total_tips`; refunds are not netted from these buckets (they are money\nOUT, with their own tender — see `refunds_issued_*`)."
           },
           "shift_id": {
             "type": "string",
@@ -59098,6 +60297,11 @@
           "teller_name": {
             "type": "string"
           },
+          "total_delivery_fees": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Delivery fees on this shift's sales. Inside `total_revenue` (the\ncustomer paid them) but outside the tax base and not food revenue."
+          },
           "total_discount": {
             "type": "integer",
             "format": "int64"
@@ -59108,7 +60312,13 @@
           },
           "total_revenue": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "What this shift's sales are worth after refunds: `gross_sales` less\n`refunded_amount`. Same definition as `total_revenue` on the branch\nsales report, so the two reconcile."
+          },
+          "total_service_charge": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Service charge added to this shift's dine-in bills. Inside\n`total_revenue` as the shop's income; see `analytics::schema` for why."
           },
           "total_tax": {
             "type": "integer",
@@ -60736,7 +61946,8 @@
         "properties": {
           "avg_order_value": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Average bill as rung up — a refund does not shrink what was ordered."
           },
           "orders": {
             "type": "integer",
@@ -60744,7 +61955,8 @@
           },
           "revenue": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Net of refunds against this teller's sales."
           },
           "shifts": {
             "type": "integer",
@@ -60760,6 +61972,58 @@
           "voided": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "TicketBill": {
+        "type": "object",
+        "description": "What the party owes, priced where the books are priced.\n\nThe till used to show the ticket's running `subtotal` and collect that,\nwhile the settle booked subtotal − discount + service charge + tax. Every\nsuch drawer was short by the tax on every table sale, and the drift check\nat settle now refuses that figure outright — so the till must be shown the\nright one, and only the server knows the branch's policy. Priced under the\nsame engine and the same resolved policy as `create_order_inner`, with the\nservice charge on (a ticket is dine-in by definition, ruling 2). For a\nsettled ticket the figures are the ORDER's, as booked, not a repricing\nunder today's policy.",
+        "required": [
+          "subtotal",
+          "discount_amount",
+          "service_charge_amount",
+          "tax_amount",
+          "tax_inclusive",
+          "total",
+          "tax_rate",
+          "service_charge_rate"
+        ],
+        "properties": {
+          "discount_amount": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The waiter's discount, resolved (a `discount_id` is looked up the way\nthe settle looks it up). A cashier who clears it at settle will see a\ndifferent total than this one, and that is the point of showing it."
+          },
+          "service_charge_amount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "service_charge_rate": {
+            "type": "number",
+            "format": "double"
+          },
+          "subtotal": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Live lines as charged, before discount. Gross when tax-inclusive."
+          },
+          "tax_amount": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Inside the total when `tax_inclusive`, on top of it otherwise."
+          },
+          "tax_inclusive": {
+            "type": "boolean"
+          },
+          "tax_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "The rates the figures were computed under, for the printed bill."
+          },
+          "total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "What the drawer must collect."
           }
         }
       },
@@ -60801,6 +62065,14 @@
             "type": "string",
             "format": "uuid"
           },
+          "standard_float": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The cash that should be in this drawer at the start of a shift, in\nminor units. The shift report proposes closing at it (\"leave the float,\ndrop the rest into the safe\"); `None` means the shop has not decided\nand nothing is proposed."
+          },
           "updated_at": {
             "type": "string",
             "format": "date-time"
@@ -60830,9 +62102,14 @@
           "period": {
             "type": "string"
           },
-          "revenue": {
+          "refunded": {
             "type": "integer",
             "format": "int64"
+          },
+          "revenue": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Net of refunds against the period's sales; `refunded` is what came off."
           },
           "revenue_by_method": {},
           "tax": {
@@ -61219,6 +62496,12 @@
               "null"
             ],
             "format": "int32"
+          },
+          "require_table_for_orders": {
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "service_charge_rate": {
             "type": [
@@ -61985,6 +63268,14 @@
               "string",
               "null"
             ]
+          },
+          "standard_float": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Standard float in minor units. Absent → unchanged; `null` → cleared\n(the shop no longer proposes a closing figure); a value → set. Same\n`Option<Option<T>>` shape as the branch printer fields."
           }
         }
       },
@@ -62736,11 +64027,22 @@
       },
       "VoidOpenTicketRequest": {
         "type": "object",
+        "description": "Why a bill is torn up. `reason` is typed; `note` is what actually happened,\nrequired when the reason is `other`.\n\nDeserialised leniently, because a void queued offline by an older till\narrives here months later with the picker's LABEL (`\"Order mistake\"`, or\n`\"Order mistake — burnt\"`) where the enum now is, and a queued op that fails\nto parse dead-letters. Those spellings map exactly as migration\n`20260912020000` mapped the stored rows; an unrecognised string is `other`\nwith the whole text as the note, so nothing the waiter wrote is lost.",
         "properties": {
-          "reason": {
+          "note": {
             "type": [
               "string",
               "null"
+            ]
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VoidReason"
+              }
             ]
           }
         }
@@ -62776,6 +64078,16 @@
           }
         }
       },
+      "VoidReason": {
+        "type": "string",
+        "description": "Why a sale or a bill was torn up — the `void_reason` enum, shared by\n`orders` and `open_tickets` so a void-rate report reads counter and dine-in\nalike without a translation layer. Bound as text and cast in SQL\n(`$n::void_reason`), the way the order void has always done it.",
+        "enum": [
+          "customer_request",
+          "wrong_order",
+          "quality_issue",
+          "other"
+        ]
+      },
       "WaiterStats": {
         "type": "object",
         "description": "Per-waiter sales split. Only waiter-attributed orders appear (dine-in\nsettled from a waiter's ticket — `orders.waiter_id IS NOT NULL`); direct\nteller sales and delivery orders are out of scope, so totals here are a\nsubset of the branch overview. `attributed_orders`/`attributed_revenue`\non the report envelope let the UI caption that gap.",
@@ -62797,7 +64109,8 @@
           },
           "avg_order_value": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Average bill as rung up — a refund does not shrink what was ordered."
           },
           "line_items": {
             "type": "integer",
@@ -62810,7 +64123,8 @@
           },
           "revenue": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Net of refunds against this waiter's sales."
           },
           "voided": {
             "type": "integer",
@@ -63301,6 +64615,10 @@
     {
       "name": "shifts",
       "description": "Shift open/close, cash reconciliation, printable reports."
+    },
+    {
+      "name": "refunds",
+      "description": "Money returned against a settled order, out of a shift's drawer. Append-only; distinct from a void (a void says the sale never happened). The order's status flips to `refunded` only when refunds reach its total."
     },
     {
       "name": "tills",

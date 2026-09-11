@@ -651,3 +651,126 @@ async fn the_executor_refuses_to_write(pool: PgPool) {
         .unwrap_err();
     assert!(err.to_string().contains("read-only"), "{err}");
 }
+
+// ── Refunds ─────────────────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn a_partial_refund_is_netted_from_revenue_and_reported_apart(pool: PgPool) {
+    let s = seed(&pool, "a").await;
+    // The seed's Latte order: 10000, paid in cash, sold in the seeded shift.
+    let (latte_order, shift, teller): (Uuid, Uuid, Uuid) = sqlx::query_as(
+        "SELECT o.id, o.shift_id, o.teller_id FROM orders o WHERE o.branch_id = $1 AND o.total_amount = 10000",
+    )
+    .bind(s.branch)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO order_refunds (order_id, shift_id, amount, method, is_cash, reason, issued_by)
+         VALUES ($1, $2, 1000, 'cash', true, 'quality_issue', $3)",
+    )
+    .bind(latte_order)
+    .bind(shift)
+    .bind(teller)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = metrics_app(&pool).await;
+    let body = post_query(
+        &app,
+        &org_admin_token(s.org),
+        json!({
+            "period": { "preset": "all_time" },
+            "widgets": [
+                { "key": "rev", "preset": "revenue_total" },
+                { "key": "money", "spec": {
+                    "dataset": "orders",
+                    "measures": ["gross_sales", "refund_amount", "revenue", "net_revenue",
+                                 "profit", "refund_count", "order_count", "avg_order_value"]
+                }},
+                { "key": "issued", "preset": "refunds_by_day" },
+                { "key": "reasons", "preset": "refunds_by_reason" }
+            ]
+        }),
+    )
+    .await;
+
+    // The order stays `completed` (only a full refund flips it), so the status
+    // filter alone would still count all 16300. Revenue must not.
+    assert_eq!(body["results"]["rev"]["rows"][0]["revenue"], 15300);
+
+    let m = &body["results"]["money"]["rows"][0];
+    assert_eq!(m["gross_sales"], 16300, "as rung up");
+    assert_eq!(m["refund_amount"], 1000);
+    assert_eq!(m["revenue"], 15300, "gross_sales − refund_amount");
+    // No tax and no delivery fee in the seed, so the merchant's take is the
+    // whole of what was kept: 9000 of the Latte bill plus 6300 for the Mocha.
+    assert_eq!(m["net_revenue"], 15300);
+    // Cost stays whole — the coffee was made: 2500 + 1750.
+    assert_eq!(m["profit"], 15300 - 4250);
+    assert_eq!(m["refund_count"], 1);
+    assert_eq!(
+        m["order_count"], 2,
+        "a partially refunded order is still an order"
+    );
+    assert_eq!(
+        m["avg_order_value"], 8150,
+        "the bill as rung up, not what was kept"
+    );
+
+    // The refund's own grain: by the day it was issued, cash apart.
+    let issued = &body["results"]["issued"];
+    assert_eq!(issued["status"], "ok", "{}", issued["error"]);
+    assert_eq!(issued["rows"][0]["refund_amount"], 1000);
+    assert_eq!(issued["rows"][0]["cash_refund_amount"], 1000);
+    assert_eq!(issued["rows"][0]["refund_count"], 1);
+    let reasons = &body["results"]["reasons"]["rows"];
+    assert_eq!(reasons[0]["refund_reason"], "quality_issue");
+    assert_eq!(reasons[0]["orders_refunded"], 1);
+
+    // Refund the rest: the status flips, the sale leaves `sold` and takes its
+    // refunds with it, and the refunds dataset counts it as fully refunded.
+    sqlx::query(
+        "INSERT INTO order_refunds (order_id, shift_id, amount, method, is_cash, reason, issued_by)
+         VALUES ($1, $2, 9000, 'card', false, 'quality_issue', $3)",
+    )
+    .bind(latte_order)
+    .bind(shift)
+    .bind(teller)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let body = post_query(
+        &app,
+        &org_admin_token(s.org),
+        json!({
+            "period": { "preset": "all_time" },
+            "widgets": [
+                { "key": "sold", "spec": { "dataset": "orders",
+                    "measures": ["gross_sales", "refund_amount", "revenue", "order_count"] }},
+                { "key": "all", "spec": { "dataset": "orders", "filters": { "status": "all" },
+                    "measures": ["gross_sales", "refund_amount", "revenue", "refund_count"] }},
+                { "key": "issued", "spec": { "dataset": "refunds",
+                    "measures": ["refund_amount", "cash_refund_amount", "fully_refunded_orders", "orders_refunded"] }}
+            ]
+        }),
+    )
+    .await;
+    let sold = &body["results"]["sold"]["rows"][0];
+    assert_eq!(sold["order_count"], 1);
+    assert_eq!(sold["gross_sales"], 6300);
+    assert_eq!(sold["refund_amount"], 0);
+    assert_eq!(sold["revenue"], 6300);
+    // Under 'all' the identity still holds and the whole refund is visible.
+    let all = &body["results"]["all"]["rows"][0];
+    assert_eq!(all["gross_sales"], 16300);
+    assert_eq!(all["refund_amount"], 10000);
+    assert_eq!(all["revenue"], 6300);
+    assert_eq!(all["refund_count"], 1);
+    let issued = &body["results"]["issued"]["rows"][0];
+    assert_eq!(issued["refund_amount"], 10000);
+    assert_eq!(issued["cash_refund_amount"], 1000);
+    assert_eq!(issued["fully_refunded_orders"], 1);
+    assert_eq!(issued["orders_refunded"], 1);
+}

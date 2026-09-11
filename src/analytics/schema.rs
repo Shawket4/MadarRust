@@ -214,10 +214,17 @@ macro_rules! dims_with_time {
 
 /// Order status. `sold` is the default everywhere: a voided or refunded order
 /// is not revenue, and defaulting to "all" is how naive dashboards overstate.
+///
+/// `refunded` is the status of a FULLY refunded order only (the trigger in
+/// 20260912090000 flips it when the cumulative refund reaches the total). A
+/// partially refunded order stays `completed`, stays inside `sold`, and the
+/// money that went back is subtracted by the measures themselves through the
+/// `refunds` join — status alone can no longer tell you what was kept.
 const F_ORDER_STATUS: Filter = Filter {
     id: "status",
     label: "Order status",
-    help: "Which orders count. 'sold' (default) excludes voided and refunded orders.",
+    help: "Which orders count. 'sold' (default) excludes voided and fully refunded orders; \
+           partially refunded orders stay in and the money measures net their refunds.",
     options: &[
         FilterOpt {
             value: "sold",
@@ -250,7 +257,8 @@ const F_ORDER_STATUS: Filter = Filter {
 const F_ORDER_TYPE: Filter = Filter {
     id: "order_type",
     label: "Order type",
-    help: "Dine-in versus delivery orders.",
+    help: "Dine-in (the only kind that carries a service charge), takeaway rung up at the \
+           counter, or delivery. Rows before 2026-09 say dine_in for every till sale.",
     options: &[
         FilterOpt {
             value: "any",
@@ -259,6 +267,10 @@ const F_ORDER_TYPE: Filter = Filter {
         FilterOpt {
             value: "dine_in",
             sql: "AND o.order_type = 'dine_in'",
+        },
+        FilterOpt {
+            value: "takeaway",
+            sql: "AND o.order_type = 'takeaway'",
         },
         FilterOpt {
             value: "delivery",
@@ -351,7 +363,49 @@ const ORDERS_JOINS: &[Join] = &[
               bool_or(oi.line_cost IS NULL) AS cost_missing \
               FROM order_items oi WHERE oi.order_id = o.id) it ON true",
     },
+    // Money returned against the order. One row per order (the view groups by
+    // order_id), so it cannot fan out either. `refunded_amount` is NULL for an
+    // order nothing was returned on — every consumer COALESCEs it.
+    Join {
+        id: "refunds",
+        sql: "LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id",
+    },
 ];
+
+/// The merchant's own take on an order, after refunds, as a SUM over the group.
+///
+/// Per order: `(total − tax − delivery_fee) × (total − refunded) ÷ total`. The
+/// first factor is what the shop keeps of a bill — the tax is the state's and
+/// the delivery fee is the courier's — and it is right under both tax policies:
+/// `total_amount` has an exclusive tax added on and an inclusive one inside,
+/// and subtracting `tax_amount` lands on the same net-of-tax figure either way.
+/// The second factor is the share of the bill the customer did not get back. A
+/// refund is recorded in "what the customer paid" units (its tax rides inside
+/// it, the way it rode inside the bill), so pro-rating is the only honest
+/// split: subtracting the whole refund would charge the merchant for tax that
+/// is no longer owed.
+///
+/// THE SERVICE CHARGE IS IN HERE, and that is a decision, not an accident. It
+/// could be read as a pass-through to staff, like a tip; it is not treated as
+/// one. A tip never enters `total_amount` or the tax base and belongs to the
+/// person who was tipped. The service charge is on the bill, is priced by the
+/// shop's own policy, enters the tax base by default
+/// (`organizations.service_charge_taxable`), and the shop decides what to do
+/// with it — paying it out to staff is payroll, a cost against revenue, not a
+/// deduction from it. So `net_revenue` = goods + service charge, net of tax,
+/// delivery fee and refunds; `service_charge_total` reports the charge on its
+/// own for a shop that wants to see it apart.
+///
+/// A zero-total bill divides by NULL and drops out of the SUM, which is right:
+/// its net take is zero. Rounded once, after the SUM, so a hundred bills do not
+/// each contribute half a piastre of rounding.
+macro_rules! net_revenue_sql {
+    () => {
+        "SUM((o.total_amount - o.tax_amount - o.delivery_fee) \
+          * (o.total_amount - COALESCE(rf.refunded_amount,0))::numeric \
+          / NULLIF(o.total_amount,0))"
+    };
+}
 
 const ORDERS_MEASURES: &[Meas] = &[
     Meas {
@@ -362,21 +416,54 @@ const ORDERS_MEASURES: &[Meas] = &[
         joins: &[],
         help: "Number of orders.",
     },
+    // `revenue` was SUM(total_amount) until 2026-09: a partially refunded sale
+    // counted in full, because only a FULL refund changes the order's status
+    // and the status filter was the only thing subtracting anything. It is now
+    // net of the money returned. `gross_sales` keeps the old figure under a
+    // name that says what it is, and `revenue = gross_sales − refund_amount`
+    // holds under every status filter.
     Meas {
         id: "revenue",
         label: "Revenue",
+        // `::bigint` is load-bearing: `refunded_amount` is a bigint, so the SUM
+        // comes back numeric, and the executor decodes a Money column as i64 —
+        // a numeric would read as NULL on every dashboard. Any measure that
+        // mixes the view's columns in needs the same cast.
+        expr: "COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount,0)),0)::bigint",
+        kind: ColumnKind::Money,
+        joins: &["refunds"],
+        help: "What the shop kept: order totals after discount (tax, service charge and \
+               delivery fee included), less any money refunded against those orders. \
+               Fully refunded orders are already out under the default 'sold' filter.",
+    },
+    Meas {
+        id: "gross_sales",
+        label: "Gross sales",
         expr: "COALESCE(SUM(o.total_amount),0)",
         kind: ColumnKind::Money,
         joins: &[],
-        help: "Gross revenue: order totals after discount, including tax and delivery fee.",
+        help: "Order totals as rung up, before any refund. revenue = gross_sales − refund_amount.",
     },
     Meas {
         id: "net_revenue",
         label: "Net revenue",
-        expr: "COALESCE(SUM(o.total_amount - o.tax_amount - o.delivery_fee),0)",
+        expr: concat!("COALESCE(ROUND(", net_revenue_sql!(), "),0)::bigint"),
+        kind: ColumnKind::Money,
+        joins: &["refunds"],
+        help: "The merchant's own take: revenue less tax and delivery fees, net of refunds \
+               (a refund's tax share is pro-rated out, not charged to the merchant). \
+               The service charge stays IN — it is the shop's income, not a tip; see \
+               service_charge_total to view it apart.",
+    },
+    Meas {
+        id: "service_charge_total",
+        label: "Service charge",
+        expr: "COALESCE(SUM(o.service_charge_amount),0)",
         kind: ColumnKind::Money,
         joins: &[],
-        help: "Revenue excluding tax and delivery fees — the merchant's own take.",
+        help: "Service charge added to the bills, as rung up. Dine-in only by rule; taxable \
+               or not according to the policy the order was priced under. Counted inside \
+               revenue and net_revenue as the shop's income.",
     },
     Meas {
         id: "subtotal",
@@ -408,7 +495,8 @@ const ORDERS_MEASURES: &[Meas] = &[
         expr: "COALESCE(SUM(o.tax_amount),0)",
         kind: ColumnKind::Money,
         joins: &[],
-        help: "Tax collected.",
+        help: "Tax on the bills as rung up (inclusive or exclusive, per the order's policy). \
+               Not reduced by partial refunds — net_revenue carries the refund's tax share.",
     },
     Meas {
         id: "tip_total",
@@ -456,22 +544,30 @@ const ORDERS_MEASURES: &[Meas] = &[
         help: "Tips taken in cash. These leave the drawer rather than the bank, so they \
                matter to the shift count as well as to payroll.",
     },
+    // Refunds on the ORDER grain are attributed to the sale they were against,
+    // whenever they were issued — the same restatement a full refund makes
+    // through the status flip. That is the right view for "what did we keep of
+    // September's sales"; for "how much did we hand back in September" use the
+    // `refunds` dataset, whose grain is the refund and whose clock is issued_at.
     Meas {
         id: "refund_count",
-        label: "Refunds",
-        expr: "COUNT(*) FILTER (WHERE o.status = 'refunded')",
+        label: "Orders refunded",
+        expr: "COUNT(*) FILTER (WHERE rf.refund_count > 0)",
         kind: ColumnKind::Count,
-        joins: &[],
-        help: "Orders refunded. Needs the status filter set to 'all' or 'refunded' to be \
-               non-zero, because 'sold' excludes them.",
+        joins: &["refunds"],
+        help: "Orders with at least one refund against them. Under the default 'sold' \
+               filter this is the PARTIALLY refunded ones only — a fully refunded order \
+               is out of 'sold'. Set status to 'all' for every order that returned money.",
     },
     Meas {
         id: "refund_amount",
-        label: "Refunded value",
-        expr: "COALESCE(SUM(o.total_amount) FILTER (WHERE o.status = 'refunded'),0)",
+        label: "Refunded",
+        expr: "COALESCE(SUM(rf.refunded_amount),0)::bigint",
         kind: ColumnKind::Money,
-        joins: &[],
-        help: "Value of refunded orders.",
+        joins: &["refunds"],
+        help: "Money returned against these orders, attributed to the sale it was against. \
+               Under 'sold' this is partial refunds only; under 'all' it is everything. \
+               For refunds by the day they were ISSUED, use the refunds dataset.",
     },
     Meas {
         id: "delivery_fees",
@@ -479,7 +575,8 @@ const ORDERS_MEASURES: &[Meas] = &[
         expr: "COALESCE(SUM(o.delivery_fee),0)",
         kind: ColumnKind::Money,
         joins: &[],
-        help: "Delivery fees charged.",
+        help: "Delivery fees charged, as rung up. Outside the tax base and not food revenue: \
+               inside revenue (the customer paid it) but excluded from net_revenue.",
     },
     Meas {
         id: "avg_order_value",
@@ -487,7 +584,8 @@ const ORDERS_MEASURES: &[Meas] = &[
         expr: "COALESCE(AVG(o.total_amount),0)::bigint",
         kind: ColumnKind::Money,
         joins: &[],
-        help: "Average order total (average ticket).",
+        help: "Average order total as rung up (average ticket). A refund does not shrink \
+               the bill that was ordered, so this is gross_sales ÷ orders, not revenue ÷ orders.",
     },
     Meas {
         id: "void_count",
@@ -539,20 +637,33 @@ const ORDERS_MEASURES: &[Meas] = &[
         joins: &["items"],
         help: "Cost of goods sold. NULL if any line lacks a cost snapshot.",
     },
+    // Cost stays whole when revenue is refunded: a plate sent back was still
+    // cooked. So a refund lowers profit by its full net share, which is the
+    // truth of it.
     Meas {
         id: "profit",
         label: "Profit",
-        expr: "(CASE WHEN bool_or(it.cost_missing) THEN NULL ELSE SUM(o.total_amount - o.tax_amount - o.delivery_fee) - SUM(it.cost) END)::bigint",
+        expr: concat!(
+            "(CASE WHEN bool_or(it.cost_missing) THEN NULL ELSE ROUND(COALESCE(",
+            net_revenue_sql!(),
+            ",0) - SUM(it.cost)) END)::bigint"
+        ),
         kind: ColumnKind::Money,
-        joins: &["items"],
-        help: "Net revenue minus cost of goods. NULL if any cost is missing.",
+        joins: &["items", "refunds"],
+        help: "Net revenue (after refunds) minus cost of goods. NULL if any cost is missing.",
     },
     Meas {
         id: "margin_pct",
         label: "Margin %",
-        expr: "(CASE WHEN bool_or(it.cost_missing) THEN NULL ELSE ROUND(100.0 * (SUM(o.total_amount - o.tax_amount - o.delivery_fee) - SUM(it.cost)) / NULLIF(SUM(o.total_amount - o.tax_amount - o.delivery_fee),0), 1) END)::float8",
+        expr: concat!(
+            "(CASE WHEN bool_or(it.cost_missing) THEN NULL ELSE ROUND(100.0 * (COALESCE(",
+            net_revenue_sql!(),
+            ",0) - SUM(it.cost)) / NULLIF(",
+            net_revenue_sql!(),
+            ",0), 1) END)::float8"
+        ),
         kind: ColumnKind::Number,
-        joins: &["items"],
+        joins: &["items", "refunds"],
         help: "Profit as a percentage of net revenue.",
     },
     Meas {
@@ -600,10 +711,13 @@ const ORDERS_DIMS: &[Dim] = dims_with_time!(
             joins: &[],
             time: false
         },
+        // A sale that came through no delivery order is labelled by its own
+        // kind. This used to say 'dine_in' for anything without a channel,
+        // which was true until takeaway became expressible.
         Dim {
             id: "delivery_channel",
             label: "Channel",
-            expr: "COALESCE(d.channel::text,'dine_in')",
+            expr: "COALESCE(d.channel::text, o.order_type)",
             kind: ColumnKind::Label,
             joins: &["delivery"],
             time: false
@@ -836,7 +950,9 @@ const PAYMENT_MEASURES: &[Meas] = &[
         expr: "COALESCE(SUM(op.amount),0)",
         kind: ColumnKind::Money,
         joins: &[],
-        help: "Amount tendered. Sums tender, not order totals.",
+        help: "Amount tendered — money IN, by the method it came in. Sums tender, not order \
+               totals, and is not reduced by refunds: money going back out is its own event \
+               in the refunds dataset, with its own tender.",
     },
     Meas {
         id: "avg_payment",
@@ -901,6 +1017,157 @@ const PAYMENT_DIMS: &[Dim] = dims_with_time!(
         },
     ]
 );
+
+// ── Dataset: refunds (one row per refund) ────────────────────────────────────
+//
+// The refund's own grain and its own clock. On the orders dataset a refund is
+// folded into the sale it was against, whenever it happened; here it sits on
+// the day it was ISSUED, out of the drawer it left. "How much did we give back
+// last month" is this dataset; "what did we keep of last month's sales" is
+// the other one. Both are true and they are not the same number.
+
+const REFUND_JOINS: &[Join] = &[
+    Join {
+        id: "branch",
+        sql: "LEFT JOIN branches b ON b.id = r.branch_id",
+    },
+    // Whoever issued it. A person — `cashier` is claimed by the cashier
+    // EntityKind, so the name is pseudonymised before it reaches a model.
+    Join {
+        id: "cashier",
+        sql: "LEFT JOIN users t ON t.id = r.issued_by",
+    },
+];
+
+const REFUND_MEASURES: &[Meas] = &[
+    Meas {
+        id: "refund_count",
+        label: "Refunds",
+        expr: "COUNT(*)",
+        kind: ColumnKind::Count,
+        joins: &[],
+        help: "Number of refunds issued. One tender per row, so a refund split across two \
+               tenders counts twice here and once in orders_refunded.",
+    },
+    Meas {
+        id: "refund_amount",
+        label: "Refunded",
+        expr: "COALESCE(SUM(r.amount),0)",
+        kind: ColumnKind::Money,
+        joins: &[],
+        help: "Money handed back, by the day it was issued. Tax rides inside it the way it \
+               rode inside the bill.",
+    },
+    Meas {
+        id: "cash_refund_amount",
+        label: "Cash refunded",
+        expr: "COALESCE(SUM(r.amount) FILTER (WHERE r.is_cash),0)",
+        kind: ColumnKind::Money,
+        joins: &[],
+        help: "The cash slice of refund_amount — what physically left a drawer, and what \
+               the shift's expected cash is short by.",
+    },
+    Meas {
+        id: "avg_refund",
+        label: "Avg refund",
+        expr: "COALESCE(AVG(r.amount),0)::bigint",
+        kind: ColumnKind::Money,
+        joins: &[],
+        help: "Average amount per refund.",
+    },
+    Meas {
+        id: "orders_refunded",
+        label: "Orders",
+        expr: "COUNT(DISTINCT r.order_id)",
+        kind: ColumnKind::Count,
+        joins: &[],
+        help: "Distinct orders that had money returned against them.",
+    },
+    Meas {
+        id: "fully_refunded_orders",
+        label: "Fully refunded",
+        expr: "COUNT(DISTINCT r.order_id) FILTER (WHERE o.status = 'refunded')",
+        kind: ColumnKind::Count,
+        joins: &[],
+        help: "Orders whose refunds reached the whole bill — the ones no longer counted as \
+               sales anywhere.",
+    },
+];
+
+const REFUND_DIMS: &[Dim] = dims_with_time!(
+    "r.issued_at",
+    [
+        Dim {
+            id: "branch",
+            label: "Branch",
+            expr: "b.name",
+            kind: ColumnKind::Label,
+            joins: &["branch"],
+            time: false
+        },
+        Dim {
+            id: "cashier",
+            label: "Issued by",
+            expr: "COALESCE(t.name, 'Unknown')",
+            kind: ColumnKind::Label,
+            joins: &["cashier"],
+            time: false
+        },
+        Dim {
+            id: "refund_reason",
+            label: "Reason",
+            expr: "r.reason",
+            kind: ColumnKind::Label,
+            joins: &[],
+            time: false
+        },
+        Dim {
+            id: "refund_method",
+            label: "Method",
+            expr: "r.method",
+            kind: ColumnKind::Label,
+            joins: &[],
+            time: false
+        },
+        Dim {
+            id: "tender_kind",
+            label: "Cash or card",
+            expr: "CASE WHEN r.is_cash THEN 'Cash' ELSE 'Non-cash' END",
+            kind: ColumnKind::Label,
+            joins: &[],
+            time: false
+        },
+        Dim {
+            id: "order_type",
+            label: "Order type",
+            expr: "COALESCE(o.order_type,'unknown')",
+            kind: ColumnKind::Label,
+            joins: &[],
+            time: false
+        },
+    ]
+);
+
+const F_REFUND_TENDER: Filter = Filter {
+    id: "tender",
+    label: "Refund tender",
+    help: "How the money went back: cash out of the drawer, or onto a card or wallet.",
+    options: &[
+        FilterOpt {
+            value: "any",
+            sql: "",
+        },
+        FilterOpt {
+            value: "cash",
+            sql: "AND r.is_cash",
+        },
+        FilterOpt {
+            value: "non_cash",
+            sql: "AND NOT r.is_cash",
+        },
+    ],
+    default: "any",
+};
 
 // ── Dataset: inventory (one row per stock movement) ──────────────────────────
 
@@ -1695,8 +1962,10 @@ pub const DATASETS: &[Dataset] = &[
         id: "orders",
         title: "Orders",
         help: "One row per order (a completed sale ticket). Use for revenue, ticket size, \
-               discounts, tips, voids, and anything counted per order. Do NOT use for \
-               per-product questions — use order_items.",
+               discounts, tips, voids, service charge, and anything counted per order. \
+               Revenue here is net of refunds against each sale. Do NOT use for \
+               per-product questions — use order_items — or for refunds by the day they \
+               were issued — use refunds.",
         from: "orders o",
         branch_col: "o.branch_id",
         time_col: "o.created_at",
@@ -1749,6 +2018,25 @@ pub const DATASETS: &[Dataset] = &[
         filters: &[F_ORDER_STATUS, F_ORDER_TYPE],
         default_measures: &["paid_amount", "payment_count"],
         default_viz: Viz::Donut,
+    },
+    Dataset {
+        id: "refunds",
+        title: "Refunds",
+        help: "One row per refund — money handed back against a settled order, on the day \
+               it was issued. Use for how much was returned, in cash or otherwise, by \
+               reason, by who issued it. NOT for revenue: the orders dataset already \
+               nets refunds against the sales they were for.",
+        from: "order_refunds r JOIN orders o ON o.id = r.order_id",
+        branch_col: "r.branch_id",
+        time_col: "r.issued_at",
+        time_is_date: false,
+        base_pred: "",
+        joins: REFUND_JOINS,
+        dims: REFUND_DIMS,
+        measures: REFUND_MEASURES,
+        filters: &[F_ORDER_TYPE, F_REFUND_TENDER],
+        default_measures: &["refund_count", "refund_amount"],
+        default_viz: Viz::Bar,
     },
     Dataset {
         id: "inventory",

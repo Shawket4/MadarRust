@@ -37,23 +37,56 @@ pub struct DeliveryOrder {
     pub customer_lng: Option<f64>,
     pub delivery_zone_id: Option<Uuid>,
     pub road_distance_meters: Option<i32>,
+    /// How `road_distance_meters` was measured: `osrm` (routed) or `haversine`
+    /// (straight line — the routing fallback, and always the in-mall walking
+    /// distance). `None` exactly when no distance was recorded.
+    #[serde(default)]
+    pub distance_source: Option<String>,
     pub subtotal: i32,
     pub delivery_fee: i32,
+    /// The quote: `subtotal - discount_amount + delivery_fee`, plus
+    /// `tax_amount` when the tax is exclusive. Replayed verbatim at finalize.
     pub total: i32,
-    /// Frozen channel discount on the item subtotal (`total == subtotal -
-    /// discount_amount + delivery_fee`). `discount_amount` is 0 when none.
+    /// Frozen channel discount on the item subtotal. `discount_amount` is 0
+    /// when none.
     pub discount_id: Option<Uuid>,
     pub discount_type: Option<String>,
     #[serde(default)]
     pub discount_value: rust_decimal::Decimal,
     #[serde(default)]
     pub discount_amount: i32,
+    /// The tax as priced at intake, under the policy frozen beside it. Inside
+    /// `total` when `tax_inclusive`, added to it otherwise. Finalize does not
+    /// re-price: a rate the shop changes between the quote and the door does
+    /// not move a bill the customer already agreed.
+    #[serde(default)]
+    pub tax_amount: i32,
+    /// Fraction, not a percentage: `0.14` is 14%.
+    #[serde(default)]
+    #[schema(value_type = f64)]
+    pub tax_rate_applied: rust_decimal::Decimal,
+    /// Copy of the ONE inclusivity flag (org, branch override) as it stood at
+    /// intake — not a setting of its own.
+    #[serde(default)]
+    pub tax_inclusive: bool,
+    /// Always 0: the service charge is dine-in only. Present so the till can
+    /// render the same breakdown for every kind of sale.
+    #[serde(default)]
+    pub service_charge_amount: i32,
+    #[serde(default)]
+    #[schema(value_type = f64)]
+    pub service_charge_rate_applied: rust_decimal::Decimal,
     /// Extra prep minutes the teller added on top of the branch base (multiples of 5).
     pub extra_prep_minutes: i32,
     /// The frozen priced line snapshot the POS renders before finalize.
     #[schema(value_type = Object)]
     pub cart: serde_json::Value,
+    /// What the customer SAID they would pay with, at checkout. Display only.
     pub payment_method_hint: Option<String>,
+    /// What was actually taken at the door. Set at finalize and only then;
+    /// `Some` exactly when the order is `delivered`.
+    #[serde(default)]
+    pub payment_method: Option<String>,
     pub otp_verified: bool,
     pub order_id: Option<Uuid>,
     pub receipt_printed_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -73,8 +106,10 @@ pub struct DeliveryOrder {
 const DO_SELECT: &str = "SELECT id, org_id, branch_id, channel::text, status::text, delivery_ref, \
     customer_name, customer_phone, place_name, floor, unit_number, landmark, address_line, \
     delivery_notes, customer_lat, customer_lng, delivery_zone_id, road_distance_meters, \
+    distance_source, \
     subtotal, delivery_fee, total, discount_id, discount_type::text, discount_value, discount_amount, \
-    extra_prep_minutes, cart, payment_method_hint, otp_verified, order_id, \
+    tax_amount, tax_rate_applied, tax_inclusive, service_charge_amount, service_charge_rate_applied, \
+    extra_prep_minutes, cart, payment_method_hint, payment_method, otp_verified, order_id, \
     receipt_printed_at, confirmed_at, preparing_at, ready_at, out_for_delivery_at, delivered_at, \
     cancelled_at, rejected_at, cancel_reason, cancel_restocked, created_at, updated_at \
     FROM delivery_orders";
@@ -266,25 +301,33 @@ pub async fn set_status(
         )));
     };
 
-    // Jump to any step (forward or backward): stamp the landed step and CLEAR
-    // every other step stamp, so the recorded position is exactly the landed
-    // step. The print-once guard (receipt_printed_at) is preserved, and set the
-    // first time the order lands on `confirmed`.
-    sqlx::query(
-        "UPDATE delivery_orders SET
-            status              = $2::delivery_order_status,
-            confirmed_at        = CASE WHEN $2 = 'confirmed'        THEN now() ELSE NULL END,
-            preparing_at        = CASE WHEN $2 = 'preparing'        THEN now() ELSE NULL END,
-            ready_at            = CASE WHEN $2 = 'ready'            THEN now() ELSE NULL END,
-            out_for_delivery_at = CASE WHEN $2 = 'out_for_delivery' THEN now() ELSE NULL END,
-            receipt_printed_at  = COALESCE(receipt_printed_at, CASE WHEN $2 = 'confirmed' THEN now() ELSE NULL END),
-            updated_at          = now()
-         WHERE id = $1",
-    )
-    .bind(id)
-    .bind(&body.status)
-    .execute(pool.get_ref())
-    .await?;
+    // The flip is a compare-and-swap on the status this handler READ. Two
+    // tills acting on one order — one confirming, one cancelling; or both
+    // advancing — used to both succeed, the second silently overwriting the
+    // first and sending its own WhatsApp about a state the order was no longer
+    // in. Now the second finds the row moved from under it and is told so.
+    if !advance_status(pool.get_ref(), id, &order.status, &body.status).await? {
+        let current = fetch_delivery_order(pool.get_ref(), id)
+            .await?
+            .ok_or(AppError::Internal)?;
+        return Err(AppError::Conflict(format!(
+            "Order changed to {} while you were working; refresh and try again",
+            current.status
+        )));
+    }
+
+    // KITCHEN: a confirmed delivery order should reach the KDS here, the way
+    // a counter order does the moment it is paid. It cannot yet. Wave 1 gave
+    // `kitchen_tickets` real sources — `order_id` or `open_ticket_id`, exactly
+    // one, CHECKed — and named delivery as NOT a source, because until now the
+    // delivery path never fired at all. A delivery order has no `orders` row
+    // until the door, so there is nothing for a kitchen ticket to reference at
+    // confirm time. Firing here needs a `delivery_order_id` source on
+    // `kitchen_tickets` (a migration) and an emit that can name it; both live
+    // outside this module. The lines are ready: `snapshot::kitchen_lines(&cart)`
+    // is the projection to hand it, once, on the first landing on `confirmed`
+    // (`receipt_printed_at` already marks that moment), inside its own tx and
+    // published as `kitchen.fired` after commit.
 
     // Send EXACTLY one WhatsApp — see jump_whatsapp_message.
     if let Some(ref dref) = order.delivery_ref
@@ -301,6 +344,41 @@ pub async fn set_status(
         BranchEvent::new(Topic::Delivery, "delivery.updated", &updated),
     );
     Ok(HttpResponse::Ok().json(updated))
+}
+
+/// Move an order from `prev` to `target` on the line — and ONLY from `prev`.
+///
+/// Stamps the landed step and CLEARS every other step stamp, so the recorded
+/// position is exactly the landed step. The print-once guard
+/// (`receipt_printed_at`) is preserved, and set the first time the order lands
+/// on `confirmed`. Returns `false`, having written nothing, when the row is no
+/// longer at `prev`: another till got there first, and the caller must re-read
+/// rather than assume. Separate from the handler so the guard can be exercised
+/// without staging a race.
+pub(crate) async fn advance_status(
+    pool: &PgPool,
+    id: Uuid,
+    prev: &str,
+    target: &str,
+) -> Result<bool, AppError> {
+    let rows = sqlx::query(
+        "UPDATE delivery_orders SET
+            status              = $2::delivery_order_status,
+            confirmed_at        = CASE WHEN $2 = 'confirmed'        THEN now() ELSE NULL END,
+            preparing_at        = CASE WHEN $2 = 'preparing'        THEN now() ELSE NULL END,
+            ready_at            = CASE WHEN $2 = 'ready'            THEN now() ELSE NULL END,
+            out_for_delivery_at = CASE WHEN $2 = 'out_for_delivery' THEN now() ELSE NULL END,
+            receipt_printed_at  = COALESCE(receipt_printed_at, CASE WHEN $2 = 'confirmed' THEN now() ELSE NULL END),
+            updated_at          = now()
+         WHERE id = $1 AND status = $3::delivery_order_status",
+    )
+    .bind(id)
+    .bind(target)
+    .bind(prev)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(rows == 1)
 }
 
 // ── Cancel / reject (with optional waste) ─────────────────────
@@ -529,18 +607,17 @@ pub async fn finalize_delivery_order(
         return Err(AppError::Conflict("Order is already finalized".into()));
     }
 
-    // Tax on an online order used to be the literal `0`, so every bill taken
-    // through the ordering site was recorded untaxed and the tax reports
-    // understated by exactly that channel. It is priced under the same branch
-    // policy as a bill rung up at the till, by the same engine.
+    // NO PRICING HERE. The tax, the rate, the inclusivity and the total were
+    // settled at intake by the same engine the till uses, and written onto
+    // the quote; this replays them. It used to re-price under the branch's
+    // policy of this moment and book `engine.total + fee` without writing it
+    // back — two totals for one sale, and the customer had been shown the
+    // smaller one. A rate the shop changes between the quote and the door
+    // does not move a bill the customer already agreed, which is the same
+    // reason `orders.tax_rate_applied` exists.
     //
-    // The delivery fee stays outside the tax base: it is a carriage charge on a
-    // sale, not part of the sale, and the customer already agreed the quoted
-    // fee at checkout.
-    let policy = crate::tax::policy::for_branch(pool.get_ref(), order.branch_id).await?;
-    let breakdown =
-        crate::tax::compute(order.subtotal as i64, order.discount_amount as i64, &policy);
-
+    // The service-charge pair is the quote's own zero: dine-in only, by
+    // ruling, and both tables CHECK it.
     let ctx = FinalizeCtx {
         branch_id: order.branch_id,
         shift_id: body.shift_id,
@@ -549,13 +626,13 @@ pub async fn finalize_delivery_order(
         is_cash,
         created_at: now,
         subtotal: order.subtotal,
-        tax_amount: breakdown.tax as i32,
-        service_charge_amount: breakdown.service_charge as i32,
-        tax_rate_applied: policy.tax_rate,
-        service_charge_rate_applied: policy.service_charge_rate,
-        tax_inclusive: policy.tax_inclusive,
+        tax_amount: order.tax_amount,
+        service_charge_amount: order.service_charge_amount,
+        tax_rate_applied: order.tax_rate_applied,
+        service_charge_rate_applied: order.service_charge_rate_applied,
+        tax_inclusive: order.tax_inclusive,
         delivery_fee: order.delivery_fee,
-        total_amount: breakdown.total as i32 + order.delivery_fee,
+        total_amount: order.total,
         discount_id: order.discount_id,
         discount_type: order.discount_type.as_deref(),
         discount_value: order.discount_value,
@@ -568,15 +645,37 @@ pub async fn finalize_delivery_order(
     let (created, warnings) =
         snapshot::apply_snapshot(&mut tx, &ctx, &cart.lines, &deductions).await?;
 
-    sqlx::query(
+    // What was paid goes in its own column. This used to overwrite the
+    // customer's hint with the real method, which is how rows came to say
+    // `digital_wallet` in a field whose validator only admits cash or card;
+    // the hint now keeps meaning what it says.
+    //
+    // Guarded the same way the status jumps are: the `FOR UPDATE` above holds
+    // a concurrent finalize, but a cancel that landed between this handler's
+    // read and its lock must not be overwritten by a `delivered`. Zero rows
+    // means the order left the line, and the sale is rolled back with it.
+    let rows = sqlx::query(
         "UPDATE delivery_orders SET status = 'delivered', delivered_at = now(), order_id = $2, \
-         payment_method_hint = $3, updated_at = now() WHERE id = $1",
+         payment_method = $3, updated_at = now() \
+         WHERE id = $1 AND order_id IS NULL \
+           AND status NOT IN ('delivered', 'cancelled', 'rejected')",
     )
     .bind(id)
     .bind(created.id)
     .bind(&body.payment_method)
     .execute(&mut *tx)
-    .await?;
+    .await?
+    .rows_affected();
+    if rows != 1 {
+        tx.rollback().await?;
+        let current = fetch_delivery_order(pool.get_ref(), id)
+            .await?
+            .ok_or(AppError::Internal)?;
+        return Err(AppError::Conflict(format!(
+            "Cannot finalize from {}",
+            current.status
+        )));
+    }
     tx.commit().await?;
 
     if let Some(ref dref) = order.delivery_ref {
@@ -596,7 +695,7 @@ pub async fn finalize_delivery_order(
     );
     Ok(HttpResponse::Ok().json(FinalizeResponse {
         order_id: created.id,
-        order_ref: created.order_ref,
+        order_ref: Some(created.order_ref),
         warnings,
         delivery_order,
     }))

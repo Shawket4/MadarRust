@@ -1,7 +1,6 @@
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use chrono::{DateTime, Utc};
-use rust_decimal::prelude::ToPrimitive;
-use rust_decimal::{Decimal, RoundingStrategy};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -281,31 +280,27 @@ fn validate_value(value: Decimal, dtype: &str) -> Result<(), AppError> {
 }
 
 /// Discount amount (piastres) for `subtotal` given a discount type
-/// (`"percentage"` | `"fixed"`) and its value. Percentage rounds half-away-from-
-/// zero so it matches the POS preview to the piastre; fixed is capped at the
-/// subtotal. Always clamped to `[0, subtotal]` so a malformed discount can never
-/// drive a total negative or inflated. Single source of truth for both the POS
-/// order path and delivery-order intake/finalize.
+/// (`"percentage"` | `"fixed"`) and its value. Always clamped to `[0, subtotal]`
+/// so a malformed discount can never drive a total negative or inflated. Single
+/// source of truth for both the POS order path and delivery-order intake/finalize.
+///
+/// The arithmetic itself is the tax engine's, not this module's: turning a rate
+/// into an amount is a rounding point the till must land on identically, and it
+/// is pinned to the till by `tax_vectors.json` only if both run the same code.
 pub fn calc_discount(dtype: Option<&str>, value: Decimal, subtotal: i32) -> i32 {
-    let d = match dtype {
+    use crate::tax;
+    let discount = match dtype {
         // A FRACTION, like every other rate in this schema: 0.14 is 14%. It was
         // stored as `14` and divided by 100 at each use site, which made it the
         // one percentage in the money engine that did not look like the others —
         // and an `integer` column could not express 12.5% at all.
-        Some("percentage") => round_minor(Decimal::from(subtotal) * value),
+        Some("percentage") => tax::Discount::Percentage(value),
         // Minor units, and never more than the bill.
-        Some("fixed") => round_minor(value).min(subtotal),
-        _ => 0,
+        Some("fixed") => tax::Discount::Fixed(value),
+        _ => tax::Discount::None,
     };
-    d.clamp(0, subtotal)
-}
-
-/// Half-away-from-zero to the whole minor unit — the same rounding the tax
-/// engine uses, so the two halves of one bill round the same way.
-fn round_minor(d: Decimal) -> i32 {
-    d.round_dp_with_strategy(0, RoundingStrategy::MidpointAwayFromZero)
-        .to_i32()
-        .unwrap_or(0)
+    // Clamped to `[0, subtotal]` by the engine; an `i32` subtotal fits back.
+    tax::discount_amount(i64::from(subtotal), discount) as i32
 }
 
 #[cfg(test)]

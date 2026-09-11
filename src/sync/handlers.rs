@@ -18,12 +18,6 @@ use crate::tickets::handlers::{
     AddRoundRequest, CreateOpenTicketRequest, SettleOpenTicketRequest, VoidOpenTicketRequest,
 };
 
-/// One queued op from a device, carrying its ORIGINAL actor (`teller_id` — a
-/// teller or a waiter) so the replay attributes the write to whoever rang it —
-/// not to whoever is signed in when the backlog flushes. The `request` payloads
-/// are the SAME bodies the live routes accept (idempotency keys ride inside
-/// them), so a replayed op dedups server-side exactly like a lost-response retry
-/// on the live endpoint.
 /// The release op's body. The branch is not on the wire (the table resolves it,
 /// like a clear); `bus` is the one thing the till knows and the server cannot
 /// derive — whether the party ate before the hold ended.
@@ -33,6 +27,12 @@ pub struct ReleaseReplay {
     pub bus: bool,
 }
 
+/// One queued op from a device, carrying its ORIGINAL actor (`teller_id` — a
+/// teller, a waiter, a kitchen screen, or a branch manager at the till) so the
+/// replay attributes the write to whoever rang it — not to whoever is signed in
+/// when the backlog flushes. The `request` payloads are the SAME bodies the live
+/// routes accept (idempotency keys ride inside them), so a replayed op dedups
+/// server-side exactly like a lost-response retry on the live endpoint.
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ReplayOp {
@@ -55,6 +55,17 @@ pub enum ReplayOp {
         order_id: Uuid,
         request: VoidOrderRequest,
     },
+    // Money handed back against a settled sale, out of the till's drawer, while
+    // the till was offline. The request names the order, the shift the money
+    // left (required on replay — there is no "current" shift for a queued op),
+    // the real `issued_at`, and a `client_ref` so a re-flushed queue returns
+    // the original refund instead of paying out twice. Distinct from a void:
+    // a void says the sale never happened; a refund says it did and some of
+    // the money went back (owner ruling 4).
+    RefundOrder {
+        teller_id: Uuid,
+        request: crate::refunds::handlers::CreateRefundRequest,
+    },
     // Adding a sale's loyalty points — an explicit teller action, queued when
     // the till was offline. The request carries `requested_at` (the moment the
     // button was pressed), so a drain days later still credits an award made in
@@ -69,8 +80,10 @@ pub enum ReplayOp {
         shift_id: Uuid,
         request: CashMovementRequest,
     },
-    // Waiter open-ticket ops (fire + rounds are fired by a WAITER; the cashier
-    // settle is a TELLER; either may void). `teller_id` carries the acting user.
+    // Open-ticket ops. Typically a waiter fires and adds rounds, the cashier
+    // settles, and either may void — but "typically" is not enforced here:
+    // whoever holds the grant does the op, and a teller or manager seating a
+    // party fires too. `teller_id` carries the acting user.
     FireOpenTicket {
         teller_id: Uuid,
         request: CreateOpenTicketRequest,
@@ -170,6 +183,7 @@ impl ReplayOp {
             | ReplayOp::CloseShift { teller_id, .. }
             | ReplayOp::CreateOrder { teller_id, .. }
             | ReplayOp::VoidOrder { teller_id, .. }
+            | ReplayOp::RefundOrder { teller_id, .. }
             | ReplayOp::CashMovement { teller_id, .. }
             | ReplayOp::FireOpenTicket { teller_id, .. }
             | ReplayOp::AddTicketRound { teller_id, .. }
@@ -190,88 +204,66 @@ impl ReplayOp {
         }
     }
 
-    /// Whether the embedded actor's actual role may have produced this op. Cash /
-    /// order / shift ops are TELLER-only (unchanged); a waiter fires tickets and
-    /// rounds; a teller (cashier) settles; either a waiter or teller may void.
-    /// This is the attribution-safety boundary — a write can never be replayed
-    /// under a role that couldn't have performed it live.
-    fn actor_role_allowed(&self, role: &UserRole) -> bool {
-        use UserRole::{Kitchen, Teller, Waiter};
-        match self {
-            ReplayOp::OpenShift { .. }
-            | ReplayOp::CloseShift { .. }
-            | ReplayOp::CreateOrder { .. }
-            | ReplayOp::VoidOrder { .. }
-            | ReplayOp::CashMovement { .. }
-            | ReplayOp::SettleOpenTicket { .. }
-            // The award button lives on the teller's receipt and history; a
-            // waiter never sees it, so a queued award attributed to one could
-            // not have been made live.
-            | ReplayOp::AwardLoyaltyPoints { .. } => *role == Teller,
-            // A TELLER opens tabs and adds to them too, not just a waiter.
-            //
-            // This said Waiter only, and was right while firing was something
-            // only the waiter app did. Then the floor arrived: seating a party
-            // is a ticket with no items, the tables screen is where a teller
-            // does it, and under the "every order must have a table" toggle
-            // that screen is the teller's HOME. So a teller tapping a free
-            // table queued a fire that this gate then refused, and the till
-            // showed "Replay actor may not perform this operation" for the
-            // ordinary act of seating somebody.
-            //
-            // It was also stricter than the live route, which contradicts the
-            // whole point of this function: `create_open_ticket` checks
-            // `open_tickets:create` and NO role at all, and the teller has that
-            // grant by default (`permissions::seeder`). Since the POS drains
-            // every write through `/sync/replay`, "stricter than live" here
-            // means "impossible", not "safer".
-            //
-            // The permission table stays the real authority: revoke
-            // `open_tickets:create` from a teller and `required_permissions`
-            // still turns this away, live or replayed.
-            ReplayOp::FireOpenTicket { .. } | ReplayOp::AddTicketRound { .. } => {
-                matches!(role, Teller | Waiter)
-            }
-            ReplayOp::VoidOpenTicket { .. } => matches!(role, Teller | Waiter),
-            // A kitchen device bumps; a teller may bump the till queue too.
-            ReplayOp::BumpKitchenItem { .. } | ReplayOp::UnbumpKitchenItem { .. } => {
-                matches!(role, Kitchen | Teller)
-            }
-            // Floor ops: a teller works the whole floor; a waiter moves/queues
-            // their own tickets (per-occupant permissions gate inside the core).
-            ReplayOp::SwapTables { .. }
-            | ReplayOp::CreateTableTransfer { .. }
-            | ReplayOp::CancelTableTransfer { .. }
-            | ReplayOp::FulfillTableTransfer { .. }
-            | ReplayOp::ClearTable { .. }
-            | ReplayOp::HoldTable { .. }
-            | ReplayOp::ReleaseTable { .. } => matches!(role, Teller | Waiter),
-            ReplayOp::SeatBooking { .. } | ReplayOp::NoShowBooking { .. } => {
-                matches!(role, Teller | Waiter)
-            }
-        }
-    }
-
-    /// The `(resource, action)` permission(s) the LIVE endpoint enforces for this op.
-    /// Replay must check the SAME ones against the op's actor, so a per-user override
-    /// (e.g. a teller whose `void` was revoked) can't be bypassed by queueing the
-    /// write offline. Kept in lock-step with the per-endpoint `check_permission`
-    /// calls (open=shifts/create, close+cash=shifts/update, order create/void=orders
-    /// create/update, ticket fire=create / round+settle+void=update, settle also
-    /// orders/create, bump=kitchen_orders/update).
+    /// The `(resource, action)` permission(s) the LIVE endpoint enforces for this
+    /// op. Replay checks the SAME ones against the op's embedded actor, through
+    /// the same resolver the live route uses (super_admin → per-user override →
+    /// role default → deny), so a grant made in the dashboard works offline and
+    /// a revocation stops a queued op the same as a live one.
+    ///
+    /// This is THE authority on what a replayed op may do. There is no role
+    /// table beside it any more. There used to be — `actor_role_allowed`, a
+    /// hard-coded role → op match — and it kept disagreeing with the table in
+    /// both directions: a teller seating a party at a table queued a fire the
+    /// role table refused while the live route (which checks
+    /// `open_tickets:create` and no role at all) allowed it, and a waiter the
+    /// dashboard had granted `kitchen_orders:update` could bump live but had
+    /// the queued bump thrown out. Since the POS drains EVERY write through
+    /// `/sync/replay`, "stricter than live" here never meant "safer"; it meant
+    /// the feature did not work offline. The role's part is now attribution
+    /// only — see `can_sign_in_at_a_till` — and this list decides the rest.
+    ///
+    /// Kept in lock-step with the per-endpoint `check_permission` calls:
+    ///   open=shifts/create; close+cash=shifts/update;
+    ///   order create=orders/create; order VOID=orders/delete;
+    ///   ticket fire=open_tickets/create; round=open_tickets/update;
+    ///   ticket VOID=open_tickets/delete;
+    ///   settle=open_tickets/update + orders/create + payments/create;
+    ///   bump=kitchen_orders/update.
+    /// A live route that changes its check without changing this list has
+    /// re-created the drift this function exists to prevent.
     fn required_permissions(&self) -> &'static [(&'static str, &'static str)] {
         match self {
             ReplayOp::OpenShift { .. } => &[("shifts", "create")],
             ReplayOp::CloseShift { .. } => &[("shifts", "update")],
             ReplayOp::CashMovement { .. } => &[("shifts", "update")],
             ReplayOp::CreateOrder { .. } => &[("orders", "create")],
-            ReplayOp::VoidOrder { .. } => &[("orders", "update")],
+            // A void is its own rung. Ringing up is `create`; voiding is
+            // `delete` — nothing hard-deletes an order, so the rung was free,
+            // and it is what a void is: taking a sale off the books before any
+            // money moved. Splitting it from `update` is what lets a shop hand
+            // voiding to someone other than the person ringing up (the owner
+            // ruled there is no approval FLOW, not that the grant is
+            // indivisible). Refunds are a different event again, under the
+            // `refunds` resource.
+            ReplayOp::VoidOrder { .. } => &[("orders", "delete")],
+            // Returning money is its own resource (`refunds:create`), held
+            // apart from voiding so a shop may give the two to different
+            // people. Same check as `POST /refunds`.
+            ReplayOp::RefundOrder { .. } => &[("refunds", "create")],
             ReplayOp::FireOpenTicket { .. } => &[("open_tickets", "create")],
             ReplayOp::AddTicketRound { .. } => &[("open_tickets", "update")],
-            ReplayOp::SettleOpenTicket { .. } => {
-                &[("open_tickets", "update"), ("orders", "create")]
-            }
-            ReplayOp::VoidOpenTicket { .. } => &[("open_tickets", "update")],
+            // Settle writes a paid order AND its payment legs, and the live
+            // route asks for all three — so does this, or a teller whose
+            // `payments:create` was revoked could still take money by
+            // queueing the settle.
+            ReplayOp::SettleOpenTicket { .. } => &[
+                ("open_tickets", "update"),
+                ("orders", "create"),
+                ("payments", "create"),
+            ],
+            // Tearing up a bill is the ticket's void rung, same reasoning as
+            // the order's: separate from adding to it.
+            ReplayOp::VoidOpenTicket { .. } => &[("open_tickets", "delete")],
             ReplayOp::BumpKitchenItem { .. } | ReplayOp::UnbumpKitchenItem { .. } => {
                 &[("kitchen_orders", "update")]
             }
@@ -306,11 +298,19 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 
 /// POST /sync/replay — flush ONE queued op, attributed to its embedded teller.
 ///
-/// Authorization: the bearer must be a member of an org, and the op's embedded
-/// teller must be an ACTIVE TELLER OF THAT SAME ORG. So any teller (or, later, a
-/// device principal) may flush the whole device backlog — A's ops and B's ops —
-/// each landing under its true author. The op's target (branch / shift / order)
-/// must also belong to the bearer's org, so a token can never replay across orgs.
+/// Authorization, in two parts that answer two different questions:
+///
+///   * ATTRIBUTION — may this write carry this actor's name? The bearer must be
+///     a member of an org, and the op's embedded actor must be an ACTIVE TILL
+///     USER OF THAT SAME ORG (`can_sign_in_at_a_till`). So any teller (or, later,
+///     a device principal) may flush the whole device backlog — A's ops and B's
+///     ops — each landing under its true author.
+///   * PERMISSION — may this actor do this thing? Answered by the permission
+///     tables, via `ReplayOp::required_permissions`, exactly as the live route
+///     answers it. Not by role here, not anywhere else.
+///
+/// The op's target (branch / shift / order) must also belong to the bearer's
+/// org, so a token can never replay across orgs.
 ///
 /// One op per call keeps the proven client-side drain engine (FIFO, dependency
 /// gating, backoff, idempotency, close-last) intact — the client just points each
@@ -329,12 +329,12 @@ pub async fn replay(
     let op = body.into_inner();
     let teller_id = op.teller_id();
 
-    // The embedded actor must be an active PIN-login user (teller, waiter, or
-    // kitchen) of the bearer's org, and its role must be one that could have
-    // produced THIS op live. This is the attribution-safety boundary: a write can
-    // never be replayed under an actor from a different org, nor attributed to a
-    // role that couldn't perform it (the per-op `actor_role_allowed` enforces the
-    // latter — e.g. only a kitchen/teller actor may replay a bump).
+    // ATTRIBUTION. The embedded actor must be a real, active till user of the
+    // bearer's org — someone who could have unlocked the device that queued this
+    // op. That is all the role decides here: a write can never be replayed under
+    // an actor from a different org, a disabled account, or a role that never
+    // signs in at a till. It says nothing about what the op may DO; that is the
+    // permission check below, and only that.
     let row: Option<(Option<Uuid>, bool, UserRole)> = sqlx::query_as(
         "SELECT org_id, is_active, role FROM users WHERE id = $1 AND deleted_at IS NULL",
     )
@@ -349,23 +349,18 @@ pub async fn replay(
             ));
         }
     };
-    if actor_org != token_org
-        || !is_active
-        || !matches!(
-            actor_role,
-            UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
-        )
-        || !op.actor_role_allowed(&actor_role)
-    {
+    if actor_org != token_org || !is_active || !crate::sync::can_sign_in_at_a_till(&actor_role) {
         return Err(AppError::Forbidden(
             "Replay actor may not perform this operation for this organization".into(),
         ));
     }
 
-    // Enforce the SAME per-user permissions the LIVE endpoint checks, against the
-    // ACTOR (the op's embedded author) — NOT just the coarse role above. Without
-    // this, a teller whose `void` (or any action) was revoked by a per-user override
-    // could still perform it by queueing it offline and letting it replay.
+    // PERMISSION. The SAME `(resource, action)` checks the LIVE endpoint makes,
+    // resolved against the ACTOR (the op's embedded author) through the same
+    // super_admin → per-user override → role default → deny chain. This is the
+    // one place "may they" is answered for a replayed op: a teller whose void
+    // was revoked in the dashboard cannot get it through by queueing it, and a
+    // waiter the dashboard granted a bump to gets the bump through offline.
     for &(resource, action) in op.required_permissions() {
         crate::permissions::checker::check_permission_for(
             pool.get_ref(),
@@ -426,6 +421,10 @@ pub async fn replay(
                 actor,
             )
             .await
+        }
+        ReplayOp::RefundOrder { request, .. } => {
+            crate::refunds::handlers::create_refund_inner(pool.clone(), web::Json(request), actor)
+                .await
         }
         ReplayOp::AwardLoyaltyPoints { request, .. } => {
             crate::loyalty::award::award_inner(
@@ -495,6 +494,7 @@ pub async fn replay(
                 pool.clone(),
                 ticket_id,
                 web::Json(request),
+                actor,
                 Some(hub.get_ref()),
             )
             .await
@@ -568,6 +568,7 @@ pub async fn replay(
                 pool.clone(),
                 table_id,
                 None,
+                actor,
                 Some(hub.get_ref()),
             )
             .await
@@ -580,6 +581,7 @@ pub async fn replay(
                 table_id,
                 None,
                 request.bus,
+                actor,
                 Some(hub.get_ref()),
             )
             .await
@@ -659,6 +661,16 @@ async fn op_branch_must_be_in_org(pool: &PgPool, op: &ReplayOp, org: Uuid) -> Re
                 "SELECT b.org_id FROM orders o JOIN branches b ON b.id = o.branch_id WHERE o.id = $1",
             )
             .bind(order_id)
+            .fetch_optional(pool)
+            .await?
+        }
+        // Resolved through the order the money goes back against; the
+        // `order_refunds` trigger then refuses a shift at any other branch.
+        ReplayOp::RefundOrder { request, .. } => {
+            sqlx::query_scalar(
+                "SELECT b.org_id FROM orders o JOIN branches b ON b.id = o.branch_id WHERE o.id = $1",
+            )
+            .bind(request.order_id)
             .fetch_optional(pool)
             .await?
         }

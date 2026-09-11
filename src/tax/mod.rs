@@ -7,4 +7,4 @@ pub mod engine;
 pub mod policy;
 pub mod vectors;
 
-pub use engine::{Breakdown, Minor, TaxPolicy, compute};
+pub use engine::{Breakdown, Discount, Minor, TaxPolicy, compute, discount_amount};

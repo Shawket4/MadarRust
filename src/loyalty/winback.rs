@@ -208,6 +208,7 @@ async fn nudge(pool: &PgPool, m: &Lapsed) -> Result<(), AppError> {
                 branch_id,
                 settings.mode(),
                 amount,
+                crate::loyalty::model::Source::Winback,
                 Some("We've missed you".to_string()),
                 None,
             )
@@ -335,8 +336,9 @@ mod tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO loyalty_settings (org_id, enabled, program_name, mode, \
-                 earn_piastres_per_point, default_reward_cost, winback_enabled) \
-             VALUES ($1, true, 'Rue Rewards', 'points', 1000, 100, true)",
+                 earn_piastres_per_point, default_reward_cost, winback_enabled, \
+                 winback_reward_amount) \
+             VALUES ($1, true, 'Rue Rewards', 'points', 1000, 100, true, 5)",
         )
         .bind(org)
         .execute(&pool)
@@ -357,11 +359,13 @@ mod tests {
             .await
             .unwrap();
             // Their last visit: ten days ago, so past the seven-day window and
-            // well inside the sixty-day one.
+            // well inside the sixty-day one. An `adjust` rather than an `earn`
+            // because the ledger now insists an earn names its sale, and the
+            // sweep counts ANY movement as a sighting.
             sqlx::query(
                 "INSERT INTO loyalty_transactions (org_id, customer_id, branch_id, kind, \
-                     currency, points, created_at) \
-                 VALUES ($1,$2,$3,'earn','points',1, now() - interval '10 days')",
+                     currency, points, source, created_at) \
+                 VALUES ($1,$2,$3,'adjust','points',1,'manual', now() - interval '10 days')",
             )
             .bind(org)
             .bind(id)
@@ -388,6 +392,17 @@ mod tests {
             !sent.iter().any(|(id, _)| *id == quiet),
             "an opt-out is an opt-out"
         );
+        // The sweetener is on the ledger, and the ledger says WHY — a report on
+        // what the programme gave away must not have to read the note.
+        let gift: (String, String, i32) = sqlx::query_as(
+            "SELECT kind::text, source, points FROM loyalty_transactions \
+              WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(away)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(gift, ("adjust".into(), "winback".into(), 5));
 
         // A second tick changes nothing: the spell is the same, and the nudge
         // for it is already recorded.

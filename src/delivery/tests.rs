@@ -132,6 +132,7 @@ fn validate_field_helpers() {
 
 #[cfg(test)]
 mod zone_fee {
+    use crate::delivery::DistanceSource;
     use crate::delivery::public::{FeeOutcome, ZoneRow, select_zone_fee};
     use uuid::Uuid;
 
@@ -153,16 +154,25 @@ mod zone_fee {
     #[test]
     fn smallest_covering_ring_fee_wins() {
         let zones = [zone(500, 1000), zone(2000, 2500)];
-        assert_eq!(fee_of(select_zone_fee(400, None, &zones)), 1000);
-        assert_eq!(fee_of(select_zone_fee(1500, None, &zones)), 2500);
-        assert_eq!(fee_of(select_zone_fee(500, None, &zones)), 1000); // inclusive boundary
+        assert_eq!(
+            fee_of(select_zone_fee(400, DistanceSource::Osrm, None, &zones)),
+            1000
+        );
+        assert_eq!(
+            fee_of(select_zone_fee(1500, DistanceSource::Osrm, None, &zones)),
+            2500
+        );
+        assert_eq!(
+            fee_of(select_zone_fee(500, DistanceSource::Osrm, None, &zones)),
+            1000
+        ); // inclusive boundary
     }
 
     #[test]
     fn out_of_range_when_no_zone_covers() {
         let zones = [zone(500, 1000)];
         assert!(matches!(
-            select_zone_fee(600, None, &zones),
+            select_zone_fee(600, DistanceSource::Osrm, None, &zones),
             FeeOutcome::OutOfRange
         ));
     }
@@ -171,7 +181,7 @@ mod zone_fee {
     fn branch_hard_cap_forces_out_of_range() {
         let zones = [zone(5000, 1000)];
         assert!(matches!(
-            select_zone_fee(700, Some(600), &zones),
+            select_zone_fee(700, DistanceSource::Osrm, Some(600), &zones),
             FeeOutcome::OutOfRange
         ));
     }
@@ -179,7 +189,7 @@ mod zone_fee {
     #[test]
     fn no_zones_is_out_of_range() {
         assert!(matches!(
-            select_zone_fee(100, None, &[]),
+            select_zone_fee(100, DistanceSource::Osrm, None, &[]),
             FeeOutcome::OutOfRange
         ));
     }
@@ -190,7 +200,73 @@ mod zone_fee {
         // cap check `distance > max` to `>=` would wrongly reject this exact-boundary
         // case — flagged by mutation testing at delivery/public.rs:557.
         let zones = [zone(1000, 1500)];
-        assert_eq!(fee_of(select_zone_fee(1000, Some(1000), &zones)), 1500);
+        assert_eq!(
+            fee_of(select_zone_fee(
+                1000,
+                DistanceSource::Osrm,
+                Some(1000),
+                &zones
+            )),
+            1500
+        );
+    }
+}
+
+// ── Kitchen projection of a frozen cart (pure, no DB) ─────────
+
+#[cfg(test)]
+mod kitchen_projection {
+    use crate::delivery::snapshot::{CartSnapshot, SnapshotAddon, SnapshotLine, kitchen_lines};
+    use uuid::Uuid;
+
+    fn addon(name: &str, qty: i32) -> SnapshotAddon {
+        SnapshotAddon {
+            addon_item_id: Uuid::new_v4(),
+            addon_name: name.into(),
+            name_translations: serde_json::json!({}),
+            unit_price: 100,
+            quantity: qty,
+            line_cost: None,
+        }
+    }
+
+    /// Mirrors the till's counter-order projection: addons become modifiers,
+    /// repeated ones are prefixed with their count, and nothing priced leaks.
+    #[test]
+    fn matches_the_counter_order_projection() {
+        let item = Uuid::new_v4();
+        let cart = CartSnapshot {
+            lines: vec![SnapshotLine {
+                menu_item_id: item,
+                item_name: "Latte".into(),
+                name_translations: serde_json::json!({}),
+                size_label: Some("L".into()),
+                unit_price: 500,
+                quantity: 2,
+                line_total: 1000,
+                notes: Some("no foam".into()),
+                addons: vec![addon("Extra shot", 2), addon("Oat milk", 1)],
+                optionals: vec![],
+                line_cost: None,
+                unit_cost: None,
+                cost_missing: false,
+            }],
+        };
+        let lines = kitchen_lines(&cart);
+        assert_eq!(lines.len(), 1);
+        let l = &lines[0];
+        assert_eq!(l.menu_item_id, Some(item));
+        assert_eq!(l.name, "Latte");
+        assert_eq!(l.qty, 2);
+        assert_eq!(l.size_label.as_deref(), Some("L"));
+        assert_eq!(l.modifiers, vec!["2× Extra shot", "Oat milk"]);
+        assert_eq!(l.notes.as_deref(), Some("no foam"));
+        assert!(l.kitchen_item_id.is_none(), "server-minted ids only");
+        let json = serde_json::to_value(l).unwrap();
+        assert!(
+            json.get("unit_price").is_none(),
+            "the cook does not read prices"
+        );
     }
 }
 
@@ -377,11 +453,16 @@ mod it {
     }
     async fn seed_user(pool: &PgPool, org: Uuid, role: &str) -> Uuid {
         let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO users (id, org_id, name, email, password_hash, role) VALUES ($1,$2,'U',$3,'h',$4::user_role)")
+        // The name has to vary. `idx_users_teller_unique_name_per_org` makes a
+        // teller's name unique within its org (it is what a till shows on the
+        // PIN pad), so a fixture that called every user 'U' worked only for as
+        // long as no test seeded two people into one shop.
+        sqlx::query("INSERT INTO users (id, org_id, name, email, password_hash, role) VALUES ($1,$2,$5,$3,'h',$4::user_role)")
             .bind(id)
             .bind(org)
             .bind(format!("u-{id}@t.com"))
             .bind(role)
+            .bind(format!("U {}", &id.to_string()[..8]))
             .execute(pool)
             .await
             .unwrap();
@@ -612,7 +693,18 @@ mod it {
         assert_eq!(b["status"], "received");
         assert_eq!(b["subtotal"], 1000);
         assert_eq!(b["delivery_fee"], 300);
-        assert_eq!(b["total"], 1300);
+        // The quote carries its tax. This used to be 1300 — `subtotal + fee`
+        // with no tax in it — while finalize booked 1440 under the org's
+        // default 14% exclusive, and the customer had agreed the smaller one.
+        assert_eq!(b["tax_amount"], 140);
+        assert_eq!(b["tax_inclusive"], false);
+        assert_eq!(b["tax_rate_applied"], 0.14);
+        assert_eq!(b["total"], 1440);
+        // No service charge on an online order, whatever the branch says.
+        assert_eq!(b["service_charge_amount"], 0);
+        // The in-mall walking distance is a straight line, and the row says so.
+        assert_eq!(b["road_distance_meters"], 0);
+        assert_eq!(b["distance_source"], "haversine");
         assert!(b["delivery_ref"].as_str().unwrap().starts_with("D-"));
     }
 
@@ -1146,6 +1238,406 @@ mod it {
         assert_eq!(moves, 1);
     }
 
+    // ── The quote carries its tax (20260912050000) ─────────────────
+
+    /// Branch-level override of the ONE inclusivity flag; `None` inherits.
+    async fn set_branch_tax(
+        pool: &PgPool,
+        branch: Uuid,
+        rate: Option<rust_decimal::Decimal>,
+        inclusive: Option<bool>,
+    ) {
+        sqlx::query("UPDATE branches SET tax_rate = $2, tax_inclusive = $3 WHERE id = $1")
+            .bind(branch)
+            .bind(rate)
+            .bind(inclusive)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn finalize(
+        pool: &PgPool,
+        id: Uuid,
+        teller: Uuid,
+        org: Uuid,
+        branch: Uuid,
+        shift: Uuid,
+        method: &str,
+    ) -> Uuid {
+        let app = app!(pool);
+        let (st, b) = send(
+            &app,
+            auth(
+                test::TestRequest::post().uri(&format!("/delivery-orders/{id}/finalize")),
+                &teller_token(teller, org, branch),
+            )
+            .set_json(json!({ "shift_id": shift, "payment_method": method })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "finalize: {b}");
+        Uuid::parse_str(b["order_id"].as_str().unwrap()).unwrap()
+    }
+
+    /// The figures the books carry for a sale, in the order the CHECKs name them.
+    async fn booked(
+        pool: &PgPool,
+        order_id: Uuid,
+    ) -> (
+        i32,
+        rust_decimal::Decimal,
+        bool,
+        i32,
+        rust_decimal::Decimal,
+        i32,
+        String,
+    ) {
+        sqlx::query_as(
+            "SELECT tax_amount, tax_rate_applied, tax_inclusive, service_charge_amount, \
+                    service_charge_rate_applied, total_amount, order_type \
+             FROM orders WHERE id = $1",
+        )
+        .bind(order_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Inclusive: the menu price already contains the tax, so the quote does
+    /// not grow — and the receipt still breaks the tax out. Then finalize books
+    /// exactly what was quoted.
+    #[sqlx::test]
+    async fn intake_under_an_inclusive_policy_keeps_the_menu_price(pool: PgPool) {
+        perms(&pool).await;
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        assign(&pool, teller, branch).await;
+        let shift = seed_shift(&pool, branch, teller).await;
+        seed_settings(&pool, branch, true, false, 300).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
+        // The org's 14% stays; only the branch's inclusivity overrides.
+        set_branch_tax(&pool, branch, None, Some(true)).await;
+
+        let app = app!(&pool);
+        let (st, b) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&intake_body(
+                    branch,
+                    "in_mall",
+                    json!([{ "menu_item_id": item, "quantity": 2 }]),
+                )),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{b}");
+        // 1000 gross at 14% is 877 net + 123 tax; the customer pays 1000 + fee.
+        assert_eq!(b["subtotal"], 1000);
+        assert_eq!(b["tax_amount"], 123);
+        assert_eq!(b["tax_inclusive"], true);
+        assert_eq!(b["tax_rate_applied"], 0.14);
+        assert_eq!(b["total"], 1300);
+        let id = Uuid::parse_str(b["id"].as_str().unwrap()).unwrap();
+
+        let order_id = finalize(&pool, id, teller, org, branch, shift, "cash").await;
+        let (tax, rate, incl, sc, sc_rate, total, kind) = booked(&pool, order_id).await;
+        assert_eq!((tax, incl, sc, total), (123, true, 0, 1300));
+        assert_eq!(rate, dec!(0.14));
+        assert_eq!(sc_rate, dec!(0));
+        assert_eq!(kind, "delivery");
+    }
+
+    /// Ruling 2: the service charge is dine-in only. A branch that charges one
+    /// at the till charges none online — the engine is run with the rate pinned
+    /// to zero, and both `delivery_orders` and `orders` CHECK the result.
+    #[sqlx::test]
+    async fn online_orders_carry_no_service_charge(pool: PgPool) {
+        perms(&pool).await;
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        assign(&pool, teller, branch).await;
+        let shift = seed_shift(&pool, branch, teller).await;
+        seed_settings(&pool, branch, true, false, 300).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
+        sqlx::query("UPDATE organizations SET service_charge_rate = 0.10 WHERE id = $1")
+            .bind(org)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let id = place_in_mall_order(&pool, branch, item, 2).await;
+        let (sc, sc_rate, tax, total): (i32, rust_decimal::Decimal, i32, i32) = sqlx::query_as(
+            "SELECT service_charge_amount, service_charge_rate_applied, tax_amount, total \
+             FROM delivery_orders WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        // No 100 of charge, and no tax on a charge that was never made.
+        assert_eq!((sc, tax, total), (0, 140, 1440));
+        assert_eq!(sc_rate, dec!(0));
+
+        let order_id = finalize(&pool, id, teller, org, branch, shift, "cash").await;
+        let (btax, _, _, bsc, bsc_rate, btotal, kind) = booked(&pool, order_id).await;
+        assert_eq!((btax, bsc, btotal), (140, 0, 1440));
+        assert_eq!(bsc_rate, dec!(0));
+        assert_eq!(kind, "delivery");
+    }
+
+    /// The defect this wave closes: intake quoted one number and finalize
+    /// charged another. Now the rate can change between the quote and the door
+    /// and the sale is still the quote — and what was paid lands in its own
+    /// column instead of overwriting what the customer said they would pay.
+    #[sqlx::test]
+    async fn finalize_replays_the_frozen_tax_not_the_rate_of_the_day(pool: PgPool) {
+        perms(&pool).await;
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        assign(&pool, teller, branch).await;
+        let shift = seed_shift(&pool, branch, teller).await;
+        seed_settings(&pool, branch, true, false, 300).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
+
+        let id = place_in_mall_order(&pool, branch, item, 2).await;
+        // The shop raises its rate after the customer agreed the quote.
+        sqlx::query("UPDATE organizations SET tax_rate = 0.20 WHERE id = $1")
+            .bind(org)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let order_id = finalize(&pool, id, teller, org, branch, shift, "card").await;
+        let (tax, rate, incl, _, _, total, _) = booked(&pool, order_id).await;
+        assert_eq!(
+            (tax, incl, total),
+            (140, false, 1440),
+            "the sale is the quote"
+        );
+        assert_eq!(rate, dec!(0.14), "the rate the quote was taken under");
+
+        let (quoted_total, paid, hint): (i32, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT total, payment_method, payment_method_hint FROM delivery_orders WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(quoted_total, total, "one total for one sale");
+        assert_eq!(paid.as_deref(), Some("card"));
+        assert_eq!(
+            hint.as_deref(),
+            Some("cash"),
+            "the hint keeps meaning what it says"
+        );
+    }
+
+    /// The storefront can show the tax it will be charged: the branch list and
+    /// the fee quote both carry the policy intake will freeze.
+    #[sqlx::test]
+    async fn public_surface_shows_the_tax_policy(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, true, false, 300).await;
+        seed_shift(&pool, branch, teller).await;
+        set_branch_tax(&pool, branch, Some(dec!(0.10)), Some(true)).await;
+
+        let app = app!(&pool);
+        let (st, body) = send(
+            &app,
+            test::TestRequest::get().uri(&format!("/public/branches?org_id={org}")),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let b = &body.as_array().unwrap()[0];
+        assert_eq!(b["tax_policy"]["tax_rate"], 0.1);
+        assert_eq!(b["tax_policy"]["tax_inclusive"], true);
+
+        let (st, q) = send(
+            &app,
+            test::TestRequest::get().uri(&format!(
+                "/public/branches/{branch}/delivery-quote?lat=30.0&lng=31.0&channel=in_mall"
+            )),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        assert_eq!(q["status"], "ok");
+        assert_eq!(q["fee"], 300);
+        assert_eq!(q["tax_policy"]["tax_rate"], 0.1);
+        assert_eq!(q["tax_policy"]["tax_inclusive"], true);
+    }
+
+    /// A pickup records no distance and therefore no source; the row refuses
+    /// one without the other.
+    #[sqlx::test]
+    async fn pickup_records_no_distance_and_no_source(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, false, false, 0).await;
+        sqlx::query(
+            "UPDATE branch_delivery_settings SET pickup_enabled = true WHERE branch_id = $1",
+        )
+        .bind(branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
+
+        let app = app!(&pool);
+        let (st, b) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&intake_body(
+                    branch,
+                    "pickup",
+                    json!([{ "menu_item_id": item, "quantity": 1 }]),
+                )),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{b}");
+        assert!(b["road_distance_meters"].is_null());
+        assert!(b["distance_source"].is_null());
+        assert_eq!(b["delivery_fee"], 0);
+        assert_eq!(b["total"], 570);
+    }
+
+    /// Two tills, one order: the flip only lands from the status the till
+    /// read. The loser writes nothing and is told to refresh.
+    #[sqlx::test]
+    async fn status_flip_only_moves_from_the_state_it_read(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, true, false, 0).await;
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
+        let id = place_in_mall_order(&pool, branch, item, 1).await;
+
+        use crate::delivery::staff::advance_status;
+        assert!(
+            advance_status(&pool, id, "received", "confirmed")
+                .await
+                .unwrap()
+        );
+        // The second till read `received` too; the row has moved from under it.
+        assert!(
+            !advance_status(&pool, id, "received", "preparing")
+                .await
+                .unwrap()
+        );
+
+        let (status, preparing_at): (String, Option<chrono::DateTime<chrono::Utc>>) =
+            sqlx::query_as("SELECT status::text, preparing_at FROM delivery_orders WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "confirmed");
+        assert!(preparing_at.is_none(), "the losing flip wrote nothing");
+    }
+
+    /// `auto_reject_minutes`: an order nobody accepted is rejected by the
+    /// sweep once it has outwaited the branch; `received` rows younger than
+    /// that, rows already accepted, and branches set to never are untouched.
+    #[sqlx::test]
+    async fn unaccepted_orders_are_rejected_after_the_branch_timeout(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let patient = seed_branch_named(&pool, org, "Patient").await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, true, false, 0).await;
+        seed_settings(&pool, patient, true, false, 0).await;
+        sqlx::query(
+            "UPDATE branch_delivery_settings SET auto_reject_minutes = 10 WHERE branch_id = $1",
+        )
+        .bind(branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+        seed_shift(&pool, branch, teller).await;
+        // A teller holds one open shift at a time; the second branch gets its own.
+        let other = seed_user(&pool, org, "teller").await;
+        seed_shift(&pool, patient, other).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
+
+        let stale = place_in_mall_order(&pool, branch, item, 1).await;
+        let fresh = place_in_mall_order(&pool, branch, item, 1).await;
+        let accepted = place_in_mall_order(&pool, branch, item, 1).await;
+        let never = place_in_mall_order(&pool, patient, item, 1).await;
+        assert!(
+            crate::delivery::staff::advance_status(&pool, accepted, "received", "confirmed")
+                .await
+                .unwrap()
+        );
+        sqlx::query(
+            "UPDATE delivery_orders SET created_at = now() - interval '11 minutes' \
+             WHERE id = ANY($1)",
+        )
+        .bind(vec![stale, accepted, never])
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let swept = crate::delivery::jobs::reject_unaccepted(&pool)
+            .await
+            .unwrap();
+        assert_eq!(swept.iter().map(|r| r.id).collect::<Vec<_>>(), vec![stale]);
+
+        let status_of = |id: Uuid| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_as::<
+                    _,
+                    (
+                        String,
+                        Option<chrono::DateTime<chrono::Utc>>,
+                        Option<bool>,
+                        Option<String>,
+                    ),
+                >(
+                    "SELECT status::text, rejected_at, cancel_restocked, cancel_reason \
+                     FROM delivery_orders WHERE id = $1",
+                )
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        let (st, at, restocked, why) = status_of(stale).await;
+        assert_eq!(st, "rejected");
+        assert!(at.is_some());
+        assert_eq!(restocked, Some(true), "nothing was made, nothing is wasted");
+        assert_eq!(
+            why.as_deref(),
+            Some(crate::delivery::jobs::AUTO_REJECT_REASON)
+        );
+        assert_eq!(status_of(fresh).await.0, "received");
+        assert_eq!(status_of(accepted).await.0, "confirmed");
+        assert_eq!(status_of(never).await.0, "received");
+
+        // Idempotent: a second tick finds nothing left to reject.
+        assert!(
+            crate::delivery::jobs::reject_unaccepted(&pool)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[sqlx::test]
     async fn status_jump_clears_skipped_and_rejects_non_steps(pool: PgPool) {
         // Jumping to any step stamps only the landed step and clears the rest, so
@@ -1436,7 +1928,10 @@ mod it {
         assert_eq!(b["discount_type"], "percentage");
         assert_eq!(b["discount_value"], 0.10);
         assert_eq!(b["delivery_fee"], 300); // fee always charged in full
-        assert_eq!(b["total"], 1200); // 1000 - 100 + 300
+        // 1000 - 100 = 900, taxed at 14% = 126, plus the fee. The tax follows
+        // the discount and the fee stays outside the tax base.
+        assert_eq!(b["tax_amount"], 126);
+        assert_eq!(b["total"], 1326);
         assert_eq!(b["discount_id"].as_str().unwrap(), disc.to_string());
     }
 
@@ -1467,7 +1962,9 @@ mod it {
         .await;
         assert_eq!(st, StatusCode::CREATED, "{b}");
         assert_eq!(b["discount_amount"], 150);
-        assert_eq!(b["total"], 1150); // 1000 - 150 + 300
+        // 850 taxed at 14% = 119, plus the 300 fee untouched by the discount.
+        assert_eq!(b["tax_amount"], 119);
+        assert_eq!(b["total"], 1269);
     }
 
     #[sqlx::test]
@@ -1503,7 +2000,7 @@ mod it {
         .await;
         assert_eq!(st, StatusCode::CREATED, "{b}");
         assert_eq!(b["discount_amount"], 0);
-        assert_eq!(b["total"], 1300); // no discount: 1000 + 300
+        assert_eq!(b["total"], 1440); // no discount: 1000 + 14% + 300
         assert!(b["discount_id"].is_null());
     }
 
@@ -2179,7 +2676,10 @@ mod it {
         assert!(b["delivery_ref"].as_str().unwrap().starts_with("D-"));
         assert_eq!(b["subtotal"], 500);
         assert_eq!(b["delivery_fee"], 300);
-        assert_eq!(b["total"], 800);
+        // The tracking page can render the tax line the storefront showed.
+        assert_eq!(b["tax_amount"], 70);
+        assert_eq!(b["tax_inclusive"], false);
+        assert_eq!(b["total"], 870);
         assert_eq!(b["estimated_prep_minutes"], 20); // branch default base, no extra yet
         // No phone is ever exposed on the public tracking view.
         assert!(b["customer_phone"].is_null());
@@ -3216,7 +3716,12 @@ mod it {
         );
         assert_eq!(b["delivery_fee"], 750, "zone fee must be applied");
         assert_eq!(b["subtotal"], 500);
-        assert_eq!(b["total"], 1250);
+        assert_eq!(b["tax_amount"], 70);
+        assert_eq!(b["total"], 1320);
+        // Routing was down, so the ring was matched on the straight line —
+        // recorded, because a fee matched that way is one the shop did not set.
+        assert_eq!(b["distance_source"], "haversine");
+        assert!(b["road_distance_meters"].as_i64().unwrap() > 0);
     }
 
     /// Outside delivery when the address falls outside all configured zones → 400.

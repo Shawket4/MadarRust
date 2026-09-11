@@ -872,3 +872,155 @@ async fn teller_can_open_a_ticket_on_a_table(pool: PgPool) {
         );
     }
 }
+
+/// The owner ruled that a branch manager may work the till: PIN in, open a
+/// drawer, ring up, take payment, void, refund, force-close. The seeder used
+/// to leave `open_tickets:create` out, so the manager's tables screen refused
+/// them the first thing a till does — seat a party. These are the till grants
+/// a manager must hold out of the box.
+#[sqlx::test]
+async fn a_branch_manager_holds_the_till_grants(pool: PgPool) {
+    use crate::auth::jwt::Claims;
+    use crate::permissions::checker::check_permission;
+
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
+    let org_id = seed_org(&pool).await;
+    let user_id = seed_user(
+        &pool,
+        org_id,
+        "Floor Manager",
+        UserRole::BranchManager,
+        "mgr@t.com",
+    )
+    .await;
+    let claims = Claims {
+        sub: user_id.to_string(),
+        org_id: Some(org_id.to_string()),
+        role: UserRole::BranchManager,
+        branch_id: None,
+        exp: 9_999_999_999,
+        iat: 0,
+    };
+
+    for (res, act) in [
+        ("shifts", "create"),
+        ("shifts", "update"), // close, cash movements, force-close
+        ("orders", "create"),
+        ("orders", "delete"), // void
+        ("payments", "create"),
+        ("open_tickets", "create"),
+        ("open_tickets", "update"),
+        ("open_tickets", "delete"), // void a bill or a line
+        ("refunds", "create"),
+        ("refunds", "read"),
+        ("kitchen_orders", "update"),
+        ("table_transfers", "create"),
+        ("loyalty", "update"),
+    ] {
+        assert!(
+            check_permission(&pool, &claims, res, act).await.is_ok(),
+            "branch manager should be allowed {res}:{act}"
+        );
+    }
+}
+
+/// Voiding is its own rung. Ringing up is `orders:create`; voiding is
+/// `orders:delete`; the two no longer travel together, so a shop can take the
+/// void away from one teller and leave them selling. Refunds are a third thing
+/// — money already taken going back — and sit under their own resource, which
+/// a waiter (no drawer) and a kitchen screen never hold.
+#[sqlx::test]
+async fn voiding_and_refunding_are_separate_from_ringing_up(pool: PgPool) {
+    use crate::auth::jwt::Claims;
+    use crate::permissions::checker::check_permission;
+
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
+    let org_id = seed_org(&pool).await;
+    let teller = seed_user(&pool, org_id, "Till 2", UserRole::Teller, "t2@t.com").await;
+    let claims = |uid: Uuid, role: UserRole| Claims {
+        sub: uid.to_string(),
+        org_id: Some(org_id.to_string()),
+        role,
+        branch_id: None,
+        exp: 9_999_999_999,
+        iat: 0,
+    };
+    let t = claims(teller, UserRole::Teller);
+
+    // Out of the box a teller does all three (no approval flow).
+    for (res, act) in [
+        ("orders", "create"),
+        ("orders", "delete"),
+        ("open_tickets", "delete"),
+        ("refunds", "create"),
+    ] {
+        assert!(
+            check_permission(&pool, &t, res, act).await.is_ok(),
+            "teller should be allowed {res}:{act} by default"
+        );
+    }
+
+    // The shop takes voiding away from THIS teller. Selling is untouched.
+    for res in ["orders", "open_tickets"] {
+        sqlx::query(
+            "INSERT INTO permissions (user_id, resource, action, granted) \
+             VALUES ($1, $2::permission_resource, 'delete', false)",
+        )
+        .bind(teller)
+        .bind(res)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    assert!(
+        check_permission(&pool, &t, "orders", "delete")
+            .await
+            .is_err()
+    );
+    assert!(
+        check_permission(&pool, &t, "open_tickets", "delete")
+            .await
+            .is_err()
+    );
+    assert!(
+        check_permission(&pool, &t, "orders", "create")
+            .await
+            .is_ok()
+    );
+    assert!(
+        check_permission(&pool, &t, "open_tickets", "update")
+            .await
+            .is_ok()
+    );
+    assert!(
+        check_permission(&pool, &t, "refunds", "create")
+            .await
+            .is_ok(),
+        "revoking the void does not touch refunds"
+    );
+
+    // Nobody without a drawer refunds.
+    let waiter = seed_user(&pool, org_id, "W", UserRole::Waiter, "w@t.com").await;
+    let kitchen = seed_user(&pool, org_id, "K", UserRole::Kitchen, "k@t.com").await;
+    for (uid, role) in [(waiter, UserRole::Waiter), (kitchen, UserRole::Kitchen)] {
+        let c = claims(uid, role);
+        assert!(
+            check_permission(&pool, &c, "refunds", "create")
+                .await
+                .is_err(),
+            "{:?} must not refund",
+            c.role
+        );
+    }
+    // …but a waiter may still tear up their own unpaid bill.
+    let w = claims(waiter, UserRole::Waiter);
+    assert!(
+        check_permission(&pool, &w, "open_tickets", "delete")
+            .await
+            .is_ok()
+    );
+}

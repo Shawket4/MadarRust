@@ -188,13 +188,16 @@ where
         .collect())
 }
 
-/// Tables that are physically taken right now (seated or waiting to be bussed).
+/// Tables that are physically taken right now: anything the occupancy ledger
+/// says is not `free` (a party or ticket on it, a hold, or plates waiting to
+/// be bussed). Read from `v_table_status`, never `branch_tables.status` — that
+/// column is a transitional projection of the same view.
 pub async fn occupied_now<'e, E>(exec: E, branch_id: Uuid) -> Result<HashSet<Uuid>, AppError>
 where
     E: PgExecutor<'e>,
 {
     let rows: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM branch_tables WHERE branch_id = $1 AND status IN ('seated', 'dirty')",
+        "SELECT table_id FROM v_table_status WHERE branch_id = $1 AND status <> 'free'",
     )
     .bind(branch_id)
     .fetch_all(exec)

@@ -670,3 +670,152 @@ async fn test_list_timezones(pool: PgPool) {
         "posix aliases must be filtered out"
     );
 }
+
+/// The table rule resolves like the tax overrides: NULL inherits the org, and
+/// an explicit branch value wins in EITHER direction.
+///
+/// Mirrors `a_branch_override_beats_the_org_rate` for the flag. The three
+/// states matter separately: a branch that never asked to differ must follow
+/// an org that changes its mind; a counter with two stools must be able to
+/// say `false` under an org that says `true`; a dining room must be able to
+/// say `true` under an org that says `false`; and clearing the override must
+/// put the branch back UNDER the org, not pin it to whatever was true that day.
+#[sqlx::test]
+async fn the_table_rule_resolves_branch_first_and_null_inherits(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    grant_permission(&pool, "org_admin", "branches", "create").await;
+    grant_permission(&pool, "org_admin", "branches", "update").await;
+    let token = generate_org_admin_token(Uuid::new_v4(), org_id);
+
+    let set_org = |value: bool| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("UPDATE organizations SET require_table_for_orders = $2 WHERE id = $1")
+                .bind(org_id)
+                .bind(value)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    let put = |branch_id: &str, body: serde_json::Value| {
+        let uri = format!("/branches/{branch_id}");
+        let token = token.clone();
+        let app = &app;
+        async move {
+            let resp = test::call_service(
+                app,
+                test::TestRequest::put()
+                    .uri(&uri)
+                    .insert_header(("Authorization", format!("Bearer {token}")))
+                    .set_json(&body)
+                    .to_request(),
+            )
+            .await;
+            assert!(resp.status().is_success(), "got {}", resp.status());
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            body
+        }
+    };
+
+    // A new branch inherits — the field is null, not false.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/branches")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(&serde_json::json!({ "org_id": org_id, "name": "Counter" }))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let branch_id = body["id"].as_str().unwrap().to_string();
+    let branch_uuid: Uuid = branch_id.parse().unwrap();
+    assert!(
+        body["require_table_for_orders"].is_null(),
+        "inherit is null, never false"
+    );
+
+    let resolved = || async {
+        crate::branches::policy::require_table_for_orders(&pool, branch_uuid)
+            .await
+            .unwrap()
+    };
+
+    // NULL inherits, in both directions of the org flag.
+    assert_eq!(resolved().await, Some(false), "org default is off");
+    set_org(true).await;
+    assert_eq!(
+        resolved().await,
+        Some(true),
+        "switching the org on reaches a branch that never asked to differ"
+    );
+
+    // Branch false overrides a true org.
+    let body = put(
+        &branch_id,
+        serde_json::json!({ "require_table_for_orders": false }),
+    )
+    .await;
+    assert_eq!(body["require_table_for_orders"], serde_json::json!(false));
+    assert_eq!(
+        resolved().await,
+        Some(false),
+        "an explicit branch false is not 'inherit'"
+    );
+
+    // A PUT that does not mention the field leaves the override alone.
+    let body = put(
+        &branch_id,
+        serde_json::json!({ "name": "Counter (window)" }),
+    )
+    .await;
+    assert_eq!(body["require_table_for_orders"], serde_json::json!(false));
+    assert_eq!(resolved().await, Some(false));
+
+    // Branch true overrides a false org.
+    set_org(false).await;
+    let body = put(
+        &branch_id,
+        serde_json::json!({ "require_table_for_orders": true }),
+    )
+    .await;
+    assert_eq!(body["require_table_for_orders"], serde_json::json!(true));
+    assert_eq!(
+        resolved().await,
+        Some(true),
+        "a dining room seats everyone under an org that does not"
+    );
+
+    // Clearing the override returns the branch to the org — and it FOLLOWS
+    // the org from then on, rather than staying pinned to that day's value.
+    let body = put(
+        &branch_id,
+        serde_json::json!({ "require_table_for_orders": null }),
+    )
+    .await;
+    assert!(
+        body["require_table_for_orders"].is_null(),
+        "cleared means inherit again"
+    );
+    assert_eq!(resolved().await, Some(false), "back under the org");
+    set_org(true).await;
+    assert_eq!(resolved().await, Some(true), "and moves with it");
+
+    // A branch that is gone has no rule; the caller decides what that means.
+    sqlx::query("UPDATE branches SET deleted_at = NOW() WHERE id = $1")
+        .bind(branch_uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(resolved().await, None);
+}

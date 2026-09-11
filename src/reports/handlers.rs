@@ -60,8 +60,13 @@ pub struct ShiftSummary {
     pub cash_discrepancy: Option<i64>,
     pub total_orders: i64,
     pub voided_orders: i64,
+    /// What this shift's sales are worth after refunds: `gross_sales` less
+    /// `refunded_amount`. Same definition as `total_revenue` on the branch
+    /// sales report, so the two reconcile.
     pub total_revenue: i64,
-    /// Goods only, by method actually tendered. Tips are in `total_tips`.
+    /// Goods only, by method actually tendered — money IN. Tips are in
+    /// `total_tips`; refunds are not netted from these buckets (they are money
+    /// OUT, with their own tender — see `refunds_issued_*`).
     pub revenue_by_method: serde_json::Value,
     pub total_discount: i64,
     pub total_tax: i64,
@@ -71,6 +76,33 @@ pub struct ShiftSummary {
     /// The cash slice of `total_tips`.
     #[serde(default)]
     pub cash_tips: i64,
+    /// This shift's sales as rung up, before any refund. Was what
+    /// `total_revenue` meant until 2026-09.
+    #[serde(default)]
+    pub gross_sales: i64,
+    /// Money refunded AGAINST this shift's sales, whenever and from whichever
+    /// drawer it was issued. `gross_sales − refunded_amount = total_revenue`.
+    /// A fully refunded sale is out of all three (its status is `refunded`).
+    #[serde(default)]
+    pub refunded_amount: i64,
+    /// Service charge added to this shift's dine-in bills. Inside
+    /// `total_revenue` as the shop's income; see `analytics::schema` for why.
+    #[serde(default)]
+    pub total_service_charge: i64,
+    /// Delivery fees on this shift's sales. Inside `total_revenue` (the
+    /// customer paid them) but outside the tax base and not food revenue.
+    #[serde(default)]
+    pub total_delivery_fees: i64,
+    /// Refunds ISSUED IN THIS SHIFT — keyed on `order_refunds.shift_id`, the
+    /// drawer the money left, which need not be the shift that made the sale.
+    /// This is the Z-report's money-out line: `refunds_issued_cash` is what the
+    /// drawer is short by relative to its cash sales.
+    #[serde(default)]
+    pub refunds_issued_count: i64,
+    #[serde(default)]
+    pub refunds_issued_amount: i64,
+    #[serde(default)]
+    pub refunds_issued_cash: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -119,14 +151,36 @@ pub struct BranchSalesReport {
     pub subtotal: i64,
     pub total_discount: i64,
     pub total_tax: i64,
+    /// What the sales in range are worth after refunds: `gross_sales` less
+    /// `refunded_amount`. A refund is attributed to the sale it was against,
+    /// whenever it was issued — the same restatement a full refund makes by
+    /// flipping the order's status out of the sold set.
     pub total_revenue: i64,
+    /// Sales in range as rung up, before any refund. Was what `total_revenue`
+    /// meant until 2026-09.
+    #[serde(default)]
+    pub gross_sales: i64,
+    /// Money refunded against the sales in range (partial refunds; a fully
+    /// refunded order is out of every figure here by status).
+    #[serde(default)]
+    pub refunded_amount: i64,
+    /// Service charge on the dine-in bills in range — inside `total_revenue`
+    /// as the shop's income, not a pass-through.
+    #[serde(default)]
+    pub total_service_charge: i64,
+    /// Delivery fees on the sales in range — inside `total_revenue`, outside
+    /// the tax base, not food revenue.
+    #[serde(default)]
+    pub total_delivery_fees: i64,
     /// Units sold (SUM of order_items.quantity) across non-voided orders in
     /// range. Counts units, not distinct lines ("3× burger" contributes 3),
     /// matching quantity_sold in the item/category breakdowns.
     #[serde(default)]
     pub total_line_items: i64,
     /// Money collected FOR GOODS, bucketed by the method actually tendered
-    /// (`order_payments`). Tips are not in here — see `total_tips`.
+    /// (`order_payments`) — money IN. Tips are not in here — see `total_tips`
+    /// — and refunds are not netted out: they are money OUT with a tender of
+    /// their own, on `GET /shifts/{id}/refunds` and the refunds dataset.
     pub revenue_by_method: serde_json::Value,
     /// Tips, standalone — never folded into a method bucket and never part of
     /// `total_revenue`. Same definition as `total_tips` on the shift report, so
@@ -167,7 +221,10 @@ pub struct BranchStockReport {
 pub struct TimeseriesPoint {
     pub period: String,
     pub orders: i64,
+    /// Net of refunds against the period's sales; `refunded` is what came off.
     pub revenue: i64,
+    #[serde(default)]
+    pub refunded: i64,
     pub voided: i64,
     pub discount: i64,
     pub tax: i64,
@@ -179,7 +236,9 @@ pub struct TellerStats {
     pub teller_id: Uuid,
     pub teller_name: String,
     pub orders: i64,
+    /// Net of refunds against this teller's sales.
     pub revenue: i64,
+    /// Average bill as rung up — a refund does not shrink what was ordered.
     pub avg_order_value: i64,
     pub voided: i64,
     pub shifts: i64,
@@ -195,7 +254,9 @@ pub struct WaiterStats {
     pub waiter_id: Uuid,
     pub waiter_name: String,
     pub orders: i64,
+    /// Net of refunds against this waiter's sales.
     pub revenue: i64,
+    /// Average bill as rung up — a refund does not shrink what was ordered.
     pub avg_order_value: i64,
     pub voided: i64,
     /// Units sold (SUM of order_items.quantity) on this waiter's non-voided
@@ -233,8 +294,14 @@ pub struct BranchComparison {
     pub branch_name: String,
     pub total_orders: i64,
     pub voided_orders: i64,
+    /// Net of refunds: `gross_sales − refunded_amount`.
     pub total_revenue: i64,
-    /// Goods only, by method actually tendered. Tips are in `total_tips`.
+    #[serde(default)]
+    pub gross_sales: i64,
+    #[serde(default)]
+    pub refunded_amount: i64,
+    /// Goods only, by method actually tendered — money in. Tips are in
+    /// `total_tips`; refunds are not netted from the buckets.
     pub revenue_by_method: serde_json::Value,
     /// Tips, standalone — same definition as on the branch sales + shift reports.
     #[serde(default)]
@@ -290,7 +357,13 @@ pub async fn shift_summary(
             s.cash_discrepancy::bigint,
             COUNT(o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint     AS total_orders,
             COUNT(o.id) FILTER (WHERE o.status = 'voided')::bigint      AS voided_orders,
-            COALESCE(SUM(o.total_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_revenue,
+            -- Net of refunds against each sale. A fully refunded order is
+            -- already out by status; a partial one stays in and its refunds
+            -- come off here, the way the analytics `revenue` measure does it.
+            COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0))
+                     FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_revenue,
+            COALESCE(SUM(o.total_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS gross_sales,
+            COALESCE(SUM(rf.refunded_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS refunded_amount,
             COALESCE((
               SELECT json_object_agg(method, rev) FROM (
                 SELECT op.method, SUM(op.amount)::bigint AS rev
@@ -302,16 +375,25 @@ pub async fn shift_summary(
             ), '{}'::json) AS revenue_by_method,
             COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_discount,
             COALESCE(SUM(o.tax_amount)      FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_tax,
+            COALESCE(SUM(o.service_charge_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_service_charge,
+            COALESCE(SUM(o.delivery_fee)    FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_delivery_fees,
             COALESCE(SUM(o.tip_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_tips,
             COALESCE(SUM(o.tip_amount) FILTER (
                 WHERE o.status NOT IN ('voided', 'refunded')
                   AND COALESCE(o.tip_is_cash,
                                COALESCE(o.tip_payment_method, o.payment_method) = 'cash')
-            ), 0)::bigint AS cash_tips
+            ), 0)::bigint AS cash_tips,
+            -- The drawer's side: refunds issued from THIS shift, by
+            -- order_refunds.shift_id. Not filtered on the order's status — a
+            -- fully refunded sale's refund left this drawer all the same.
+            COALESCE((SELECT COUNT(*)                            FROM order_refunds r WHERE r.shift_id = s.id), 0)::bigint AS refunds_issued_count,
+            COALESCE((SELECT SUM(r.amount)                       FROM order_refunds r WHERE r.shift_id = s.id), 0)::bigint AS refunds_issued_amount,
+            COALESCE((SELECT SUM(r.amount) FILTER (WHERE r.is_cash) FROM order_refunds r WHERE r.shift_id = s.id), 0)::bigint AS refunds_issued_cash
         FROM shifts s
         JOIN branches b ON b.id = s.branch_id
         JOIN users    u ON u.id = s.teller_id
         LEFT JOIN orders o          ON o.shift_id  = s.id
+        LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
         WHERE s.id = $1
         GROUP BY s.id, b.name, u.name
         "#,
@@ -394,15 +476,44 @@ pub async fn branch_sales(
         None => None,
     };
 
-    let totals: (i64, i64, i64, i64, i64, i64, i64, serde_json::Value, i64, i64) = sqlx::query_as(
+    // Named rather than a positional tuple: at fourteen money columns a
+    // mis-ordered index is a wrong figure on a dashboard, not a compile error.
+    #[derive(sqlx::FromRow)]
+    struct Totals {
+        total_orders: i64,
+        voided_orders: i64,
+        subtotal: i64,
+        total_discount: i64,
+        total_tax: i64,
+        total_revenue: i64,
+        gross_sales: i64,
+        refunded_amount: i64,
+        total_service_charge: i64,
+        total_delivery_fees: i64,
+        total_line_items: i64,
+        revenue_by_method: serde_json::Value,
+        total_tips: i64,
+        cash_tips: i64,
+    }
+
+    let totals = sqlx::query_as::<_, Totals>(
         r#"
         SELECT
-            COUNT(*) FILTER (WHERE status NOT IN ('voided', 'refunded'))::bigint,
-            COUNT(*) FILTER (WHERE status = 'voided')::bigint,
-            COALESCE(SUM(subtotal)        FILTER (WHERE status NOT IN ('voided', 'refunded')), 0)::bigint,
-            COALESCE(SUM(discount_amount) FILTER (WHERE status NOT IN ('voided', 'refunded')), 0)::bigint,
-            COALESCE(SUM(tax_amount)      FILTER (WHERE status NOT IN ('voided', 'refunded')), 0)::bigint,
-            COALESCE(SUM(total_amount)    FILTER (WHERE status NOT IN ('voided', 'refunded')), 0)::bigint,
+            COUNT(*) FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint AS total_orders,
+            COUNT(*) FILTER (WHERE o.status = 'voided')::bigint AS voided_orders,
+            COALESCE(SUM(o.subtotal)        FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS subtotal,
+            COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_discount,
+            COALESCE(SUM(o.tax_amount)      FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_tax,
+            -- Net of refunds against each sale; the two lines after it are the
+            -- identity `gross_sales − refunded_amount = total_revenue`. The join
+            -- on v_order_refund_totals is one row per order, so nothing here
+            -- fans out — the V17 lesson still holds.
+            COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0))
+                     FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_revenue,
+            COALESCE(SUM(o.total_amount)    FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS gross_sales,
+            COALESCE(SUM(rf.refunded_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS refunded_amount,
+            COALESCE(SUM(o.service_charge_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_service_charge,
+            COALESCE(SUM(o.delivery_fee)    FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_delivery_fees,
             COALESCE((
               SELECT SUM(oi.quantity)::bigint
               FROM order_items oi
@@ -411,7 +522,7 @@ pub async fn branch_sales(
                 AND ($2::timestamptz IS NULL OR o3.created_at >= $2)
                 AND ($3::timestamptz IS NULL OR o3.created_at <= $3)
                 AND ($4::uuid[] IS NULL OR COALESCE(oi.menu_item_id, oi.bundle_id) != ALL($4::uuid[]))
-            ), 0)::bigint,
+            ), 0)::bigint AS total_line_items,
             COALESCE((
               SELECT json_object_agg(method, rev) FROM (
                 SELECT op.method, SUM(op.amount)::bigint AS rev
@@ -422,20 +533,21 @@ pub async fn branch_sales(
                   AND ($3::timestamptz IS NULL OR o2.created_at <= $3)
                 GROUP BY op.method
               ) sub
-            ), '{}'::json),
+            ), '{}'::json) AS revenue_by_method,
             -- Tips, standalone. Deliberately NOT added into total_amount or into
             -- any method bucket above: `revenue_by_method` is goods-only so it
             -- lines up with the shift report's payment_summary.
-            COALESCE(SUM(tip_amount) FILTER (WHERE status NOT IN ('voided', 'refunded')), 0)::bigint,
-            COALESCE(SUM(tip_amount) FILTER (
-                WHERE status NOT IN ('voided', 'refunded')
-                  AND COALESCE(tip_is_cash,
-                               COALESCE(tip_payment_method, payment_method) = 'cash')
-            ), 0)::bigint
-        FROM orders
-        WHERE branch_id = ANY($1)
-          AND ($2::timestamptz IS NULL OR created_at >= $2)
-          AND ($3::timestamptz IS NULL OR created_at <= $3)
+            COALESCE(SUM(o.tip_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_tips,
+            COALESCE(SUM(o.tip_amount) FILTER (
+                WHERE o.status NOT IN ('voided', 'refunded')
+                  AND COALESCE(o.tip_is_cash,
+                               COALESCE(o.tip_payment_method, o.payment_method) = 'cash')
+            ), 0)::bigint AS cash_tips
+        FROM orders o
+        LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
+        WHERE o.branch_id = ANY($1)
+          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
+          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         "#,
     )
     .bind(&branch_ids)
@@ -555,16 +667,20 @@ pub async fn branch_sales(
         branch_name,
         from: query.from,
         to: query.to,
-        total_orders: totals.0,
-        voided_orders: totals.1,
-        subtotal: totals.2,
-        total_discount: totals.3,
-        total_tax: totals.4,
-        total_revenue: totals.5,
-        total_line_items: totals.6,
-        revenue_by_method: totals.7,
-        total_tips: totals.8,
-        cash_tips: totals.9,
+        total_orders: totals.total_orders,
+        voided_orders: totals.voided_orders,
+        subtotal: totals.subtotal,
+        total_discount: totals.total_discount,
+        total_tax: totals.total_tax,
+        total_revenue: totals.total_revenue,
+        gross_sales: totals.gross_sales,
+        refunded_amount: totals.refunded_amount,
+        total_service_charge: totals.total_service_charge,
+        total_delivery_fees: totals.total_delivery_fees,
+        total_line_items: totals.total_line_items,
+        revenue_by_method: totals.revenue_by_method,
+        total_tips: totals.total_tips,
+        cash_tips: totals.cash_tips,
         top_items,
         by_category,
     }))
@@ -703,11 +819,15 @@ pub async fn branch_sales_timeseries(
                     'YYYY-MM-DD"T"HH24:MI:SS'
                 ) AS period_str,
                 COUNT(o.id)   FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint  AS orders,
-                COALESCE(SUM(o.total_amount)    FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS revenue,
+                -- Net of refunds, attributed to the period the SALE fell in.
+                COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0))
+                         FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS revenue,
+                COALESCE(SUM(rf.refunded_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS refunded,
                 COUNT(o.id)   FILTER (WHERE o.status  = 'voided')::bigint  AS voided,
                 COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS discount,
                 COALESCE(SUM(o.tax_amount)      FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS tax
             FROM orders o
+            LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
             WHERE o.branch_id = ANY($1)
               AND ($2::timestamptz IS NULL OR o.created_at >= $2)
               AND ($3::timestamptz IS NULL OR o.created_at <= $3)
@@ -745,6 +865,7 @@ pub async fn branch_sales_timeseries(
             p.period_str AS period,
             p.orders,
             p.revenue,
+            p.refunded,
             p.voided,
             p.discount,
             p.tax,
@@ -849,11 +970,13 @@ pub async fn branch_sales_peak_hours(
             SELECT
                 EXTRACT(hour FROM o.created_at AT TIME ZONE $4)::int AS hour,
                 COUNT(o.id)   FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint  AS orders,
-                COALESCE(SUM(o.total_amount)    FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS revenue,
+                COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0))
+                         FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS revenue,
                 COUNT(o.id)   FILTER (WHERE o.status  = 'voided')::bigint  AS voided,
                 COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS discount,
                 COALESCE(SUM(o.tax_amount)      FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS tax
             FROM orders o
+            LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
             WHERE o.branch_id = ANY($1)
               AND ($2::timestamptz IS NULL OR o.created_at >= $2)
               AND ($3::timestamptz IS NULL OR o.created_at <= $3)
@@ -926,7 +1049,8 @@ pub async fn branch_teller_stats(
             o.teller_id,
             u.name AS teller_name,
             COUNT(o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint AS orders,
-            COALESCE(SUM(o.total_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS revenue,
+            COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0))
+                     FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS revenue,
             CASE
                 WHEN COUNT(o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded')) = 0 THEN 0
                 ELSE (
@@ -938,6 +1062,7 @@ pub async fn branch_teller_stats(
             COUNT(DISTINCT o.shift_id)::bigint AS shifts
         FROM orders o
         JOIN users u ON u.id = o.teller_id
+        LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
         WHERE o.branch_id = ANY($1)
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
@@ -984,7 +1109,8 @@ pub async fn branch_waiter_stats(
             o.waiter_id,
             w.name AS waiter_name,
             COUNT(o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint AS orders,
-            COALESCE(SUM(o.total_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS revenue,
+            COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0))
+                     FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS revenue,
             CASE
                 WHEN COUNT(o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded')) = 0 THEN 0
                 ELSE (
@@ -1005,6 +1131,7 @@ pub async fn branch_waiter_stats(
             SELECT SUM(oi.quantity)::bigint AS qty
             FROM order_items oi WHERE oi.order_id = o.id
         ) iq ON true
+        LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
         WHERE o.waiter_id IS NOT NULL
           AND o.branch_id = ANY($1)
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
@@ -1129,6 +1256,8 @@ pub async fn org_branch_comparison(
         total_orders: i64,
         voided_orders: i64,
         total_revenue: i64,
+        gross_sales: i64,
+        refunded_amount: i64,
         revenue_by_method: serde_json::Value,
         total_tips: i64,
         cash_tips: i64,
@@ -1141,7 +1270,10 @@ pub async fn org_branch_comparison(
             b.name AS branch_name,
             COUNT(DISTINCT o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint AS total_orders,
             COUNT(DISTINCT o.id) FILTER (WHERE o.status  = 'voided')::bigint AS voided_orders,
-            COALESCE(SUM(o.total_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_revenue,
+            COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0))
+                     FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_revenue,
+            COALESCE(SUM(o.total_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS gross_sales,
+            COALESCE(SUM(rf.refunded_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS refunded_amount,
             COALESCE((
               SELECT json_object_agg(method, rev) FROM (
                 SELECT op.method, SUM(op.amount)::bigint AS rev
@@ -1163,6 +1295,7 @@ pub async fn org_branch_comparison(
         LEFT JOIN orders o          ON o.branch_id = b.id
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+        LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
         WHERE b.org_id = $1 AND b.deleted_at IS NULL
         GROUP BY b.id, b.name
         ORDER BY total_revenue DESC
@@ -1182,13 +1315,16 @@ pub async fn org_branch_comparison(
             total_orders: r.total_orders,
             voided_orders: r.voided_orders,
             total_revenue: r.total_revenue,
+            gross_sales: r.gross_sales,
+            refunded_amount: r.refunded_amount,
             revenue_by_method: r.revenue_by_method,
             total_tips: r.total_tips,
             cash_tips: r.cash_tips,
+            // The average bill is what was ordered, not what was kept.
             avg_order_value: if r.total_orders == 0 {
                 0
             } else {
-                r.total_revenue / r.total_orders
+                r.gross_sales / r.total_orders
             },
             void_rate_pct: if (r.total_orders + r.voided_orders) == 0 {
                 0.0
@@ -1208,24 +1344,40 @@ pub async fn org_branch_comparison(
 
 // ── GET /reports/branches/:branch_id/delivery-sales ──────────
 
-/// Delivery sales for one delivery channel (`in_mall` / `outside`). Revenue and
-/// order counts are over **delivered** orders only; `cancelled_orders` is shown
-/// separately so the UI can surface drop-off without inflating revenue.
+/// Every delivery channel, in the order the report emits them. The report
+/// zero-fills the ones with no orders so the dashboard shape never shifts;
+/// until 2026-09 it only knew the first two and silently dropped umbrella and
+/// pickup rows from the totals.
+const DELIVERY_CHANNELS: [&str; 4] = ["in_mall", "outside", "umbrella", "pickup"];
+
+/// Delivery sales for one delivery channel. Revenue and order counts are over
+/// **delivered** orders only; `cancelled_orders` is shown separately so the UI
+/// can surface drop-off without inflating revenue.
+///
+/// Read from `delivery_orders` — the quote — not from `orders`: a delivery that
+/// never settled into a sale still tells the shop something about its
+/// channels. Refunds are against the sale and are not netted here.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct DeliveryChannelSales {
-    /// Delivery channel: `in_mall` or `outside`.
+    /// Delivery channel: `in_mall`, `outside`, `umbrella` or `pickup`.
     pub channel: String,
     pub orders: i64,
-    /// Sum of `total` (piastres) over delivered orders on this channel.
+    /// Sum of `total` (piastres) over delivered orders on this channel — the
+    /// whole bill, delivery fee included.
     pub revenue: i64,
-    /// Sum of `delivery_fee` (piastres) over delivered orders.
+    /// Sum of `delivery_fee` (piastres) over delivered orders. Outside the tax
+    /// base and not food revenue; a pickup carries none.
     pub delivery_fees: i64,
+    /// `revenue − delivery_fees`: the bill for the goods (tax included), the
+    /// figure comparable with dine-in and takeaway revenue.
+    #[serde(default)]
+    pub goods_revenue: i64,
     pub avg_order_value: i64,
     pub cancelled_orders: i64,
 }
 
 /// Delivery sales rolled up across channels, plus a per-channel breakdown.
-/// Always returns both `in_mall` and `outside` channels (zero-filled) so the
+/// Always returns every channel in [`DELIVERY_CHANNELS`] (zero-filled) so the
 /// dashboard renders a stable shape.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct DeliverySalesReport {
@@ -1234,6 +1386,9 @@ pub struct DeliverySalesReport {
     pub total_orders: i64,
     pub total_revenue: i64,
     pub total_delivery_fees: i64,
+    /// `total_revenue − total_delivery_fees`.
+    #[serde(default)]
+    pub total_goods_revenue: i64,
     pub cancelled_orders: i64,
     pub avg_order_value: i64,
     pub channels: Vec<DeliveryChannelSales>,
@@ -1290,19 +1445,21 @@ pub async fn branch_delivery_sales(
     .fetch_all(pool.get_ref())
     .await?;
 
-    // Always emit both channels in a fixed order, zero-filling any that had no
-    // orders in the period, so the dashboard shape never shifts.
-    let channels: Vec<DeliveryChannelSales> = ["in_mall", "outside"]
+    // Every channel in a fixed order, zero-filling any that had no orders in
+    // the period, so the dashboard shape never shifts.
+    let channels: Vec<DeliveryChannelSales> = DELIVERY_CHANNELS
         .iter()
         .map(|&name| {
             let row = rows.iter().find(|r| r.channel == name);
             let orders = row.map(|r| r.orders).unwrap_or(0);
             let revenue = row.map(|r| r.revenue).unwrap_or(0);
+            let delivery_fees = row.map(|r| r.delivery_fees).unwrap_or(0);
             DeliveryChannelSales {
                 channel: name.to_string(),
                 orders,
                 revenue,
-                delivery_fees: row.map(|r| r.delivery_fees).unwrap_or(0),
+                delivery_fees,
+                goods_revenue: revenue - delivery_fees,
                 avg_order_value: if orders == 0 { 0 } else { revenue / orders },
                 cancelled_orders: row.map(|r| r.cancelled_orders).unwrap_or(0),
             }
@@ -1320,6 +1477,7 @@ pub async fn branch_delivery_sales(
         total_orders,
         total_revenue,
         total_delivery_fees,
+        total_goods_revenue: total_revenue - total_delivery_fees,
         cancelled_orders,
         avg_order_value: if total_orders == 0 {
             0
@@ -1603,9 +1761,12 @@ pub async fn branch_consumption(
         FROM inventory_movements m
         JOIN org_ingredients oi ON oi.id = m.org_ingredient_id
         WHERE m.branch_id = ANY($1)
-          -- void_restock (positive qty) nets out a voided-and-restocked sale's
-          -- negative 'sale' movement so consumption reflects real usage.
-          AND m.type IN ('sale','waste','void_restock')
+          -- void_restock and refund_restock (positive qty) net out a sale's
+          -- negative 'sale' movement when the goods came back — a voided
+          -- sale, or a refunded line marked restock — so consumption reflects
+          -- real usage. A refund whose lines were not restocked (the plate
+          -- was eaten, or thrown away) writes no movement and stays consumed.
+          AND m.type IN ('sale','waste','void_restock','refund_restock')
           AND ($2::timestamptz IS NULL OR m.created_at >= $2)
           AND ($3::timestamptz IS NULL OR m.created_at <= $3)
         GROUP BY m.org_ingredient_id, oi.name, oi.unit
@@ -1698,8 +1859,8 @@ pub async fn org_consumption(
         FROM inventory_movements m
         JOIN org_ingredients oi ON oi.id = m.org_ingredient_id
         JOIN branches b ON b.id = m.branch_id AND b.org_id = $1 AND b.deleted_at IS NULL
-        -- void_restock nets out voided-and-restocked sales (see branch_consumption).
-        WHERE m.type IN ('sale','waste','void_restock')
+        -- void_restock / refund_restock net out restocked sales (see branch_consumption).
+        WHERE m.type IN ('sale','waste','void_restock','refund_restock')
           AND ($2::timestamptz IS NULL OR m.created_at >= $2)
           AND ($3::timestamptz IS NULL OR m.created_at <= $3)
         GROUP BY m.org_ingredient_id, oi.name, oi.unit

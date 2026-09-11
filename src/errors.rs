@@ -26,6 +26,13 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    /// A 409 the client must branch on. Same status as `Conflict`, with a
+    /// stable `code` in the body: the ops a till queues offline replay with
+    /// nobody reading the prose, and without a code every conflict collapsed
+    /// into "done" on the device (see `floor_ops::refusal`).
+    #[error("{reason}")]
+    Refused { code: &'static str, reason: String },
+
     #[error("Database error: {0}")]
     Db(sqlx::Error),
 
@@ -92,6 +99,7 @@ impl AppError {
             // The dashboard branches on this to say "wait a moment" rather
             // than showing a raw error for something that is not a fault.
             AppError::TooManyRequests(_) => Some("EXPORT_RATE_LIMITED".to_string()),
+            AppError::Refused { code, .. } => Some((*code).to_string()),
             _ => None,
         }
     }
@@ -165,6 +173,7 @@ impl actix_web::ResponseError for AppError {
             AppError::NotFound(_) => HttpResponse::NotFound().json(body),
             AppError::BadRequest(_) => HttpResponse::BadRequest().json(body),
             AppError::Conflict(_) => HttpResponse::Conflict().json(body),
+            AppError::Refused { .. } => HttpResponse::Conflict().json(body),
             AppError::Db(e) => HttpResponse::build(Self::db_status(e)).json(body),
             AppError::ServiceUnavailable(_) => HttpResponse::ServiceUnavailable().json(body),
             AppError::TooManyRequests(_) => HttpResponse::TooManyRequests().json(body),

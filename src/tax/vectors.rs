@@ -21,22 +21,46 @@ use std::path::PathBuf;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::tax::engine::{TaxPolicy, compute};
+use crate::tax::engine::{Discount, TaxPolicy, compute, discount_amount};
 
 /// One priced bill: the inputs, and every figure they must produce.
+///
+/// The discount is stated the way the policy states it — a kind and a value —
+/// rather than as the amount it comes to. The amount is an OUTPUT, because
+/// deriving it is a rounding point, and a fixture that carried it ready-made
+/// let the two engines derive it differently (one in `f64`, one in `Decimal`)
+/// while both conformance tests stayed green.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct Vector {
     pub subtotal: i64,
-    pub discount: i64,
+    /// `"none"`, `"percentage"` or `"fixed"` — the `discount_type` column's words.
+    pub discount_kind: String,
+    /// A fraction for `percentage`, minor units for `fixed`, `"0"` for none.
+    pub discount_value: String,
     pub tax_rate: String,
     pub tax_inclusive: bool,
     pub service_charge_rate: String,
     pub service_charge_taxable: bool,
     // Expected:
+    pub discount: i64,
     pub service_charge: i64,
     pub tax: i64,
     pub total: i64,
     pub net: i64,
+}
+
+/// The fixture's words for a discount, as the engine's type. Mirrored in the
+/// till's conformance test; an unknown kind is a fixture bug, not a bill.
+pub fn discount_from_wire(kind: &str, value: &str) -> Discount {
+    let value = value
+        .parse::<Decimal>()
+        .unwrap_or_else(|e| panic!("discount_value {value:?} is not a decimal: {e}"));
+    match kind {
+        "none" => Discount::None,
+        "percentage" => Discount::Percentage(value),
+        "fixed" => Discount::Fixed(value),
+        other => panic!("unknown discount_kind {other:?} in tax_vectors.json"),
+    }
 }
 
 pub fn fixture_path() -> PathBuf {
@@ -46,32 +70,56 @@ pub fn fixture_path() -> PathBuf {
 /// Every combination worth pinning: both modes, both service-charge
 /// treatments, the rates a shop plausibly sets (including 14.5%, where f64 and
 /// decimal rounding part company), and bills that exercise the rounding
-/// boundaries rather than only round numbers.
+/// boundaries rather than only round numbers — with discounts stated as the
+/// policy states them, so the derivation is pinned as well as the tax on it.
 pub fn generate() -> Vec<Vector> {
     let rates = ["0", "0.05", "0.10", "0.14", "0.145", "0.20", "0.255", "1"];
     let charges = ["0", "0.10", "0.125"];
-    let bills: &[(i64, i64)] = &[
-        (0, 0),
-        (1, 0),
-        (7, 0),
-        (100, 0),
-        (333, 0),
-        (999, 0),
-        (1000, 0),
-        (1500, 0),
-        (4999, 0),
-        (5000, 0),
-        (5700, 0),
-        (12_345, 0),
-        (99_999, 0),
-        (1_000_000, 0),
-        // Discounts, including ones that swallow the bill.
-        (5000, 1),
-        (5000, 500),
-        (5000, 4999),
-        (5000, 5000),
-        (5000, 99_999),
-        (1, 1),
+    let bills: &[(i64, &str, &str)] = &[
+        // Plain bills.
+        (0, "none", "0"),
+        (1, "none", "0"),
+        (7, "none", "0"),
+        (100, "none", "0"),
+        (333, "none", "0"),
+        (999, "none", "0"),
+        (1000, "none", "0"),
+        (1500, "none", "0"),
+        (4999, "none", "0"),
+        (5000, "none", "0"),
+        (5700, "none", "0"),
+        (12_345, "none", "0"),
+        (99_999, "none", "0"),
+        (1_000_000, "none", "0"),
+        // Fixed amounts off, including ones that swallow the bill, and one
+        // with a fraction of a piastre — the column is NUMERIC, so it can arrive.
+        (5000, "fixed", "1"),
+        (5000, "fixed", "500"),
+        (5000, "fixed", "250.5"),
+        (5000, "fixed", "4999"),
+        (5000, "fixed", "5000"),
+        (5000, "fixed", "99999"),
+        (1, "fixed", "1"),
+        // Percentages. Every one of these lands on or near a half-piastre, which
+        // is where a derivation in binary floating point parts company with one
+        // in decimal — 100 at 14.5% is the case that actually bit.
+        (100, "percentage", "0.145"),
+        (5, "percentage", "0.10"),
+        (25, "percentage", "0.10"),
+        (105, "percentage", "0.10"),
+        (1000, "percentage", "0.125"),
+        (333, "percentage", "0.333"),
+        (12_345, "percentage", "0.075"),
+        (5000, "percentage", "0.145"),
+        (1_000_000, "percentage", "0.145"),
+        // An inclusive shop's gross with a discount on it: 5700 is 5000 at 14%.
+        (5700, "percentage", "0.10"),
+        // Discounts that swallow the bill, or would take more than it.
+        (1, "percentage", "0.5"),
+        (1, "percentage", "0.145"),
+        (0, "percentage", "0.10"),
+        (5000, "percentage", "1"),
+        (5000, "percentage", "1.5"),
     ];
 
     let mut out = Vec::new();
@@ -79,21 +127,24 @@ pub fn generate() -> Vec<Vector> {
         for c in charges {
             for &taxable in &[true, false] {
                 for &inclusive in &[true, false] {
-                    for &(subtotal, discount) in bills {
+                    for &(subtotal, kind, value) in bills {
                         let policy = TaxPolicy {
                             tax_rate: r.parse::<Decimal>().unwrap(),
                             tax_inclusive: inclusive,
                             service_charge_rate: c.parse::<Decimal>().unwrap(),
                             service_charge_taxable: taxable,
                         };
+                        let discount = discount_amount(subtotal, discount_from_wire(kind, value));
                         let b = compute(subtotal, discount, &policy);
                         out.push(Vector {
                             subtotal,
-                            discount,
+                            discount_kind: kind.to_string(),
+                            discount_value: value.to_string(),
                             tax_rate: r.to_string(),
                             tax_inclusive: inclusive,
                             service_charge_rate: c.to_string(),
                             service_charge_taxable: taxable,
+                            discount: b.discount,
                             service_charge: b.service_charge,
                             tax: b.tax,
                             total: b.total,

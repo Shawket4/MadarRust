@@ -10,18 +10,28 @@
 //! Pricing for public orders is 100% server-side (untrusted browser, live menu)
 //! and frozen at intake, so dashboard edits between order and delivery can never
 //! change an in-flight order — the opposite of the POS pricing-integrity model.
+//! That freeze includes the TAX: the quote is priced through the shared engine
+//! under [`online_tax_policy`] at intake and the figures are written onto the
+//! row, and finalize replays them verbatim. A rate the shop changes between
+//! the quote and the door does not move a bill the customer already agreed.
 
 use chrono::NaiveTime;
+use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
+use serde::Serialize;
 use sqlx::PgPool;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::auth::jwt::Claims;
 use crate::errors::AppError;
 use crate::models::UserRole;
+use crate::tax::TaxPolicy;
 
 pub(crate) use crate::orgs::handlers::extract_claims;
 
 pub mod gateway;
+pub mod jobs;
 pub mod public;
 pub mod routes;
 pub mod settings;
@@ -62,6 +72,76 @@ pub fn channel_discount_col(channel: &str) -> &'static str {
         CHANNEL_UMBRELLA => "umbrella_discount_id",
         CHANNEL_PICKUP => "pickup_discount_id",
         _ => "in_mall_discount_id",
+    }
+}
+
+// ── The tax policy an online order is priced under ─────────────
+//
+// One flag governs inclusivity everywhere (`organizations.tax_inclusive`,
+// branch override, NULL inherits) — there is no online-specific setting, so
+// this is the till's own resolver. The one thing an online order does NOT
+// carry is the service charge: it is dine-in only, by the owner's ruling, and
+// `delivery_orders` pins its amount and rate at zero by CHECK. Pinning the rate
+// here, before the engine runs, is what makes the engine's answer the one the
+// database will accept — computing a charge and then dropping it would leave
+// the tax base wrong in inclusive mode, where the charge enters the gross.
+//
+// `service_charge_taxable` is left as resolved. With the rate at zero it cannot
+// influence a figure, and the quote deliberately does not record it.
+
+/// The policy in force at a branch for an online order: the branch's tax,
+/// with the service charge pinned to zero.
+pub async fn online_tax_policy(pool: &PgPool, branch_id: Uuid) -> Result<TaxPolicy, AppError> {
+    let mut policy = crate::tax::policy::for_branch(pool, branch_id).await?;
+    policy.service_charge_rate = Decimal::ZERO;
+    Ok(policy)
+}
+
+/// What the storefront needs to render a bill honestly: the rate, and whether
+/// the menu prices already contain it. Sent with the branch list and with every
+/// quote so a page can show a tax line (exclusive) or an "includes VAT" note
+/// (inclusive) instead of quietly under-quoting. No service-charge fields: an
+/// online order never carries one, and a field that is always zero invites a
+/// page to render a line for it.
+#[derive(Serialize, ToSchema, Clone, Copy, Debug, PartialEq)]
+pub struct OnlineTaxPolicy {
+    /// Fraction, NOT a percentage: `0.14` is 14%.
+    #[schema(example = 0.14)]
+    pub tax_rate: f64,
+    /// `true` = menu prices already contain the tax; the total will not grow.
+    pub tax_inclusive: bool,
+}
+
+impl From<TaxPolicy> for OnlineTaxPolicy {
+    fn from(p: TaxPolicy) -> Self {
+        Self {
+            tax_rate: p.tax_rate.to_f64().unwrap_or(0.0),
+            tax_inclusive: p.tax_inclusive,
+        }
+    }
+}
+
+/// How a delivery order's `road_distance_meters` was measured. Recorded on the
+/// row (`distance_source`) because a straight line can be a good deal shorter
+/// than the road, and a zone ring matched on it is a fee the shop did not set
+/// for that address — a distance whose provenance is unknown is one nobody can
+/// act on. The database CHECKs the two spellings and that a distance and its
+/// source arrive together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DistanceSource {
+    /// Routed road distance from the routing service.
+    Osrm,
+    /// Straight line: the routing fallback, and always the in-mall walking
+    /// distance.
+    Haversine,
+}
+
+impl DistanceSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DistanceSource::Osrm => "osrm",
+            DistanceSource::Haversine => "haversine",
+        }
     }
 }
 

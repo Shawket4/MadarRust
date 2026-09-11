@@ -12,7 +12,10 @@ use super::{
     publish_table_status, require_branch_access,
 };
 use crate::errors::{AppError, AppErrorResponse};
-use crate::orders::handlers::{CreateOrderRequest, OrderItemInput, create_order_inner};
+use crate::orders::VoidReason;
+use crate::orders::handlers::{
+    CreateOrderRequest, OrderItemInput, PaymentSplitInput, SettledTicket, create_order_inner,
+};
 use crate::permissions::checker::check_permission;
 use crate::realtime::event::{BranchEvent, Topic};
 use crate::realtime::hub::BranchEventHub;
@@ -60,11 +63,19 @@ pub struct AddRoundRequest {
     pub items: Vec<OrderItemInput>,
 }
 
+/// The literal a cashier sends as `discount_type` to settle WITHOUT the
+/// waiter's discount. Absent means inherit it; anything else overrides it.
+pub const DISCOUNT_NONE: &str = "none";
+
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct SettleOpenTicketRequest {
     pub shift_id: Uuid,
     pub payment_method: String,
-    /// Settle-time overrides (else the ticket's own discount / no tip).
+    /// Settle-time discount. ABSENT (all three fields) means the waiter's
+    /// ticket discount is inherited, as it always was — but the till can now
+    /// see that discount on the ticket view. The literal `discount_type:
+    /// "none"` settles with no discount at all; any other value (or a
+    /// `discount_id`) replaces the waiter's.
     #[serde(default)]
     pub discount_id: Option<Uuid>,
     #[serde(default)]
@@ -77,6 +88,30 @@ pub struct SettleOpenTicketRequest {
     pub tip_payment_method: Option<String>,
     #[serde(default)]
     pub amount_tendered: Option<i32>,
+    /// What the till handed back. Recorded as the drawer saw it, like a
+    /// counter sale's; absent, it is derived from `amount_tendered` and the
+    /// server's total.
+    #[serde(default)]
+    pub change_given: Option<i32>,
+    /// When the bill was paid, as the till says. An offline settle replayed
+    /// later keeps its real time — it becomes the order's `created_at` and the
+    /// ticket's `settled_at`, one instant on both rows. Absent means now; a
+    /// future clock is refused.
+    #[serde(default)]
+    pub settled_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// What the till says the bill came to — the figure its drawer collected.
+    /// Checked against the server's own total exactly as a counter checkout is
+    /// (`create_order_inner`'s drift check); a disagreement is refused, not
+    /// recorded. Absent on older builds, which then get no check. The figure
+    /// to send is `OpenTicketView::bill.total`, which is priced by the same
+    /// engine under the same policy — a till that shows that number cannot
+    /// disagree with the books.
+    #[serde(default)]
+    pub total_amount: Option<i32>,
+    /// Split tenders, when the party paid with more than one. Carried to the
+    /// order's payment legs like a counter sale's; they must sum to the total.
+    #[serde(default)]
+    pub payment_splits: Option<Vec<PaymentSplitInput>>,
     /// The member spending a balance on this settle, when rewards are applied.
     #[serde(default)]
     pub loyalty_customer_id: Option<Uuid>,
@@ -86,10 +121,61 @@ pub struct SettleOpenTicketRequest {
     pub loyalty_redemptions: Vec<crate::orders::handlers::LoyaltyRedemptionInput>,
 }
 
+/// Why a bill is torn up. `reason` is typed; `note` is what actually happened,
+/// required when the reason is `other`.
+///
+/// Deserialised leniently, because a void queued offline by an older till
+/// arrives here months later with the picker's LABEL (`"Order mistake"`, or
+/// `"Order mistake — burnt"`) where the enum now is, and a queued op that fails
+/// to parse dead-letters. Those spellings map exactly as migration
+/// `20260912020000` mapped the stored rows; an unrecognised string is `other`
+/// with the whole text as the note, so nothing the waiter wrote is lost.
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
+#[serde(from = "VoidOpenTicketWire")]
 pub struct VoidOpenTicketRequest {
     #[serde(default)]
-    pub reason: Option<String>,
+    pub reason: Option<VoidReason>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct VoidOpenTicketWire {
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+impl From<VoidOpenTicketWire> for VoidOpenTicketRequest {
+    fn from(w: VoidOpenTicketWire) -> Self {
+        let clean = |s: Option<String>| s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let note = clean(w.note);
+        let Some(raw) = clean(w.reason) else {
+            return Self { reason: None, note };
+        };
+        if let Some(reason) = VoidReason::parse(&raw) {
+            return Self {
+                reason: Some(reason),
+                note,
+            };
+        }
+        // The legacy picker: `<label>` or `<label> — <note>` (em dash, spaced).
+        let (label, tail) = match raw.split_once(" — ") {
+            Some((l, n)) => (l, clean(Some(n.to_string()))),
+            None => (raw.as_str(), None),
+        };
+        match VoidReason::from_legacy_label(label) {
+            Some(reason) => Self {
+                reason: Some(reason),
+                note: note.or(tail),
+            },
+            None => Self {
+                reason: Some(VoidReason::Other),
+                note: Some(note.unwrap_or(raw)),
+            },
+        }
+    }
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -235,17 +321,7 @@ pub(crate) async fn create_open_ticket_inner(
     // bussed it, and a fire silently clearing that would send the next party to
     // somebody else's plates.
     let claimable = match body.table_id {
-        Some(t) => {
-            crate::floor_ops::lock_table(&mut tx, t, body.branch_id).await?
-                && crate::floor_ops::occupant_of(&mut tx, t, None)
-                    .await?
-                    .is_none()
-                && sqlx::query_scalar::<_, String>("SELECT status FROM branch_tables WHERE id = $1")
-                    .bind(t)
-                    .fetch_one(&mut *tx)
-                    .await?
-                    != "dirty"
-        }
+        Some(t) => crate::floor_ops::ticket_may_claim(&mut tx, t, body.branch_id).await?,
         None => false,
     };
     let table_id = if claimable { body.table_id } else { None };
@@ -274,7 +350,18 @@ pub(crate) async fn create_open_ticket_inner(
     .await?;
 
     if let Some(t) = table_id {
-        crate::floor_ops::seat_table(&mut *tx, t).await?;
+        let hand = crate::floor_ops::Hand::of(&mut *tx, actor.teller_id, body.branch_id).await?;
+        crate::floor_ops::take_table(
+            &mut tx,
+            t,
+            crate::floor_ops::Holder::Ticket {
+                id: open_ticket_id,
+                booking_id: body.booking_id,
+            },
+            crate::floor_ops::party_size(body.guest_count),
+            &hand,
+        )
+        .await?;
     }
     // A booked party sat down: the booking becomes `seated` with this ticket.
     if let Some(b) = body.booking_id {
@@ -287,7 +374,6 @@ pub(crate) async fn create_open_ticket_inner(
             org_id,
             body.branch_id,
             open_ticket_id,
-            1,
             actor.teller_id,
             body.round_idempotency_key,
             &body.items,
@@ -388,7 +474,7 @@ pub(crate) async fn add_round_inner(
         }
     }
 
-    if status == "settled" || status == "voided" {
+    if status != "open" {
         return Err(AppError::Conflict(format!(
             "Cannot add a round to a {status} ticket"
         )));
@@ -396,19 +482,14 @@ pub(crate) async fn add_round_inner(
 
     let label = table_label(pool.get_ref(), table_id).await?;
     let mut tx = pool.get_ref().begin().await?;
-    let next_round: i32 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(round_number), 0) + 1 FROM open_ticket_rounds WHERE open_ticket_id = $1",
-    )
-    .bind(id)
-    .fetch_one(&mut *tx)
-    .await?;
+    // The round number is allocated by the database under the ticket's row
+    // lock (see `fire_round`) — never computed here from MAX + 1.
     let kt_id = fire_round(
         &mut tx,
         pool.get_ref(),
         org_id,
         branch_id,
         id,
-        next_round,
         actor.teller_id,
         body.idempotency_key,
         &body.items,
@@ -493,66 +574,114 @@ pub async fn void_open_ticket(
     body: web::Json<VoidOpenTicketRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "open_tickets", "update").await?;
+    // Tearing up a bill is the ticket's void rung, `open_tickets:delete`, kept
+    // apart from adding to it. `sync::ReplayOp::required_permissions` asks the
+    // same of a queued void; keep the two in step.
+    check_permission(pool.get_ref(), &claims, "open_tickets", "delete").await?;
     require_ticket_branch_access(pool.get_ref(), &claims, *id).await?;
-    void_open_ticket_inner(pool.clone(), id.into_inner(), body, Some(hub.get_ref())).await
+    void_open_ticket_inner(
+        pool.clone(),
+        id.into_inner(),
+        body,
+        ActingContext::live(&claims)?,
+        Some(hub.get_ref()),
+    )
+    .await
 }
 
-/// Void core. Marks the ticket voided and pulls its kitchen tickets off the KDS.
-/// Shared by the live route and `/sync/replay` (a queued offline void). No actor
-/// attribution (the void carries only a reason), so it takes no `ActingContext`.
+/// Void core. A void is an EVENT — who, when, a categorised reason and a note
+/// — recorded on the bill exactly as an order void is, and it pulls the
+/// ticket's kitchen copies off the KDS (closed `voided`). Shared by the live
+/// route and `/sync/replay` (a queued offline void), attributed to `actor`.
+///
+/// LIVE requires a reason, and a note when the reason is `other`. REPLAY is
+/// recorded history: a void an older till queued without a reason is applied
+/// with none, which is the truth about it, rather than dead-lettered over a
+/// field it could not have known to send.
+///
+/// Idempotent: voiding a voided ticket returns it unchanged (a lost-ack retry
+/// must not re-stamp `voided_at`). A settled bill cannot be voided here — that
+/// is a void or refund on its ORDER.
 pub(crate) async fn void_open_ticket_inner(
     pool: crate::db::Db,
     id: Uuid,
     body: web::Json<VoidOpenTicketRequest>,
+    actor: ActingContext,
     hub: Option<&BranchEventHub>,
 ) -> Result<HttpResponse, AppError> {
     let id = &id;
     let view = open_ticket_view(pool.get_ref(), *id)
         .await?
         .ok_or_else(|| AppError::NotFound("Open ticket not found".into()))?;
-    if view.status == "settled" {
-        return Err(AppError::Conflict("Cannot void a settled ticket".into()));
+    match view.status.as_str() {
+        "settled" => return Err(AppError::Conflict("Cannot void a settled ticket".into())),
+        "voided" => return Ok(HttpResponse::Ok().json(view)),
+        _ => {}
     }
+    if !actor.replay {
+        if body.reason.is_none() {
+            return Err(AppError::BadRequest("A void needs a reason".into()));
+        }
+        if body.reason == Some(VoidReason::Other) && body.note.is_none() {
+            return Err(AppError::BadRequest(
+                "A note is required when the void reason is 'other'".into(),
+            ));
+        }
+    }
+
     let mut tx = pool.get_ref().begin().await?;
-    sqlx::query(
-        "UPDATE open_tickets SET status = 'voided', voided_at = now(), void_reason = $2, updated_at = now() \
-         WHERE id = $1 AND status <> 'settled'",
+    let voided = sqlx::query(
+        "UPDATE open_tickets SET status = 'voided', voided_at = now(), voided_by = $2, \
+             void_reason = $3::void_reason, void_note = $4, updated_at = now() \
+         WHERE id = $1 AND status = 'open'",
     )
     .bind(*id)
-    .bind(body.reason.as_deref())
+    .bind(actor.teller_id)
+    .bind(body.reason.map(VoidReason::as_str))
+    .bind(body.note.as_deref())
     .execute(&mut *tx)
     .await?;
-    // Void the kitchen tickets too so they leave the KDS.
-    sqlx::query(
-        "UPDATE kitchen_ticket_items SET voided_at = now() \
-         FROM kitchen_tickets kt \
-         WHERE kitchen_ticket_items.kitchen_ticket_id = kt.id \
-           AND kt.source_type = 'open_ticket' AND kt.source_id = $1 \
-           AND kitchen_ticket_items.voided_at IS NULL",
+    if voided.rows_affected() == 0 {
+        // Settled or voided between the read above and this write. Report it
+        // the way the read would have: idempotent for a void, a conflict for a
+        // settle.
+        tx.rollback().await?;
+        let current = open_ticket_view(pool.get_ref(), *id).await?;
+        return match current.as_ref().map(|v| v.status.as_str()) {
+            Some("voided") => Ok(HttpResponse::Ok().json(current)),
+            _ => Err(AppError::Conflict("Cannot void a settled ticket".into())),
+        };
+    }
+    // Every round's kitchen ticket is voided with the bill and leaves the KDS.
+    let closed_kitchen = crate::kitchen::close_kitchen_tickets(
+        &mut tx,
+        crate::kitchen::KitchenSourceRef::OpenTicket(*id),
+        crate::kitchen::CloseReason::Voided,
+        Some(actor.teller_id),
     )
-    .bind(*id)
-    .execute(&mut *tx)
     .await?;
-    sqlx::query(
-        "UPDATE kitchen_tickets SET status = 'voided', voided_at = now() \
-         WHERE source_type = 'open_ticket' AND source_id = $1 AND status <> 'voided'",
-    )
-    .bind(*id)
-    .execute(&mut *tx)
-    .await?;
-    // The party left the floor: free its table and drop its transfer wish.
+    // The party left the floor: end its occupancy and drop its transfer wish.
     //
-    // FREE, not bus. A void is not a checkout -- nobody ate and left plates
+    // Nothing to bus. A void is not a checkout -- nobody ate and left plates
     // behind, so the table is genuinely ready for the next party. Only a
     // settle buses (see `settle_open_ticket_inner`).
-    if let Some(t) = view.table_id {
-        crate::floor_ops::free_table(&mut *tx, t).await?;
-    }
+    let hand = crate::floor_ops::Hand::of(&mut *tx, actor.teller_id, view.branch_id).await?;
+    let freed_table = crate::floor_ops::end_ticket_occupancy(
+        &mut *tx,
+        *id,
+        crate::floor_ops::EndReason::Voided,
+        false,
+        &hand,
+    )
+    .await?;
     let cancelled = crate::floor_ops::cancel_waiting_transfers(&mut tx, *id).await?;
+    // A booked party whose only bill was torn up did not eat under their
+    // booking: it is `cancelled`, by the system, in this same transaction.
+    // The rule (and the "unless a sibling bill is still open or paid" clause)
+    // lives with the bookings, in the one query the nightly sweep also runs.
+    let cancelled_bookings =
+        crate::bookings::handlers::cancel_for_voided_tickets(&mut *tx, Some(*id)).await?;
     tx.commit().await?;
-
-    let freed_table = view.table_id;
     let view = open_ticket_view(pool.get_ref(), *id).await?;
     if let Some(hub) = hub
         && let Some(v) = &view
@@ -561,8 +690,15 @@ pub(crate) async fn void_open_ticket_inner(
             v.branch_id,
             BranchEvent::new(Topic::Tickets, "ticket.voided", v),
         );
+        for kt in closed_kitchen {
+            crate::kitchen::publish_kitchen(pool.get_ref(), hub, v.branch_id, "kitchen.voided", kt)
+                .await;
+        }
         if let Some(t) = freed_table {
             publish_table_status(pool.get_ref(), hub, v.branch_id, t).await;
+        }
+        for b in cancelled_bookings {
+            crate::bookings::publish_booking(pool.get_ref(), hub, "booking.changed", b).await;
         }
         for tid in cancelled {
             hub.publish(
@@ -606,14 +742,14 @@ pub async fn move_ticket_table(
     check_permission(pool.get_ref(), &claims, "open_tickets", "update").await?;
     require_ticket_branch_access(pool.get_ref(), &claims, *id).await?;
 
-    let row: Option<(Uuid, Option<Uuid>, String)> =
-        sqlx::query_as("SELECT branch_id, table_id, status::text FROM open_tickets WHERE id = $1")
+    let row: Option<(Uuid, String)> =
+        sqlx::query_as("SELECT branch_id, status::text FROM open_tickets WHERE id = $1")
             .bind(*id)
             .fetch_optional(pool.get_ref())
             .await?;
-    let (branch_id, old_table, status) =
+    let (branch_id, status) =
         row.ok_or_else(|| AppError::NotFound("Open ticket not found".into()))?;
-    if status == "settled" || status == "voided" {
+    if status != "open" {
         return Err(AppError::Conflict(
             "Cannot move a settled or voided ticket".into(),
         ));
@@ -633,19 +769,17 @@ pub async fn move_ticket_table(
     {
         return Err(AppError::Conflict("Table is already occupied".into()));
     }
-    sqlx::query("UPDATE open_tickets SET table_id = $2, updated_at = now() WHERE id = $1")
-        .bind(*id)
-        .bind(body.table_id)
-        .execute(&mut *tx)
-        .await?;
-    if let Some(old) = old_table
-        && old != body.table_id
-    {
-        crate::floor_ops::free_table(&mut *tx, old).await?;
-    }
-    crate::floor_ops::seat_table(&mut *tx, body.table_id).await?;
-    // The move may be exactly what this party's transfer wish asked for.
-    let fulfilled = crate::floor_ops::autofulfill_transfers(&mut tx, *id, body.table_id).await?;
+    // The old table's row ends `moved`, a row opens on the new one, and the
+    // move may be exactly what this party's transfer wish asked for.
+    let old_table: Option<Uuid> = sqlx::query_scalar(
+        "SELECT table_id FROM table_occupancies WHERE open_ticket_id = $1 AND ended_at IS NULL",
+    )
+    .bind(*id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let hand = crate::floor_ops::Hand::of(&mut *tx, claims.user_id(), branch_id).await?;
+    let fulfilled =
+        crate::floor_ops::relocate_ticket(&mut tx, *id, Some(body.table_id), &hand).await?;
     tx.commit().await?;
 
     let view = open_ticket_view(pool.get_ref(), *id).await?;
@@ -712,11 +846,13 @@ pub async fn settle_open_ticket(
 }
 
 /// Settle core. Materializes the ticket's stored client-priced lines into one
-/// paid order via `create_order_inner` (with the ticket id as the order
-/// idempotency key → a retried/concurrent/replayed settle dedups to one order),
-/// landing it in the SETTLING cashier's open shift. Shared by the live route and
-/// `/sync/replay` (a queued offline settle).
-#[allow(clippy::type_complexity)]
+/// paid `dine_in` order via `create_order_inner`, which writes BOTH sides of
+/// the ticket↔order link in the order's own transaction (see `SettledTicket`),
+/// landing it in the SETTLING cashier's open shift. The ticket id doubles as
+/// the order idempotency key so a retried/concurrent/replayed settle dedups to
+/// one order; the LINK is the explicit `orders.open_ticket_id`, not that
+/// convention. Shared by the live route and `/sync/replay` (a queued offline
+/// settle).
 pub(crate) async fn settle_open_ticket_inner(
     pool: crate::db::Db,
     id: Uuid,
@@ -725,6 +861,7 @@ pub(crate) async fn settle_open_ticket_inner(
     hub: Option<&BranchEventHub>,
 ) -> Result<HttpResponse, AppError> {
     let id = &id;
+    #[allow(clippy::type_complexity)]
     let row: Option<(
         Uuid,
         Uuid,
@@ -764,11 +901,11 @@ pub(crate) async fn settle_open_ticket_inner(
     }
     if status == "settled" || order_id.is_some() {
         // Already settled. A REPLAYED (lost-ack) settle is idempotent — return the
-        // existing paid order (the order idempotency key is the ticket id). A LIVE
-        // double-settle (two cashiers racing the same ticket) is a clean conflict.
+        // existing paid order, found by the link. A LIVE double-settle (two
+        // cashiers racing the same ticket) is a clean conflict.
         if actor.replay
             && let Some(order) =
-                crate::orders::handlers::fetch_order_by_idempotency_key(pool.get_ref(), *id, org_id)
+                crate::orders::handlers::fetch_order_by_open_ticket(pool.get_ref(), *id, org_id)
                     .await?
         {
             return Ok(HttpResponse::Ok().json(order));
@@ -823,15 +960,32 @@ pub(crate) async fn settle_open_ticket_inner(
         })?);
     }
 
-    // Discount: the cashier's settle override wins, else the waiter's ticket discount.
-    let discount_id = body.discount_id.or(t_disc_id);
-    let discount_type = body.discount_type.clone().or(t_disc_type);
-    let discount_value = body.discount_value.or(t_disc_value);
+    // The discount, explicitly. The cashier says nothing → the waiter's ticket
+    // discount is inherited (and the ticket view shows it, so "nothing" is a
+    // choice). `discount_type: "none"` → no discount, whatever the waiter set.
+    // Anything else the cashier sends replaces the waiter's outright — never a
+    // field-by-field merge, which is how a settle used to end up with the
+    // waiter's `discount_type` under the cashier's `discount_value`.
+    let cashier_spoke =
+        body.discount_id.is_some() || body.discount_type.is_some() || body.discount_value.is_some();
+    let (discount_id, discount_type, discount_value) =
+        if body.discount_type.as_deref() == Some(DISCOUNT_NONE) {
+            (None, None, None)
+        } else if cashier_spoke {
+            (
+                body.discount_id,
+                body.discount_type.clone(),
+                body.discount_value,
+            )
+        } else {
+            (t_disc_id, t_disc_type, t_disc_value)
+        };
 
     // Build a POS order request. The TICKET ID is the order idempotency key, so a
     // retried/concurrent settle dedups to one paid order. `create_order_inner`
     // enforces the cashier's open shift, validates the payment method, computes
-    // deductions/inventory/tax, and lands the sale in the cashier's drawer.
+    // deductions/inventory/tax, refuses a total the till disagrees with, and
+    // lands the sale in the cashier's drawer.
     let request = CreateOrderRequest {
         branch_id,
         loyalty_customer_id: body.loyalty_customer_id,
@@ -846,84 +1000,53 @@ pub(crate) async fn settle_open_ticket_inner(
         amount_tendered: body.amount_tendered,
         tip_amount: body.tip_amount,
         tip_payment_method: body.tip_payment_method.clone(),
-        payment_splits: None,
+        // Split tenders ride to the order's payment legs, as a counter sale's
+        // do; the legs are what the drawer maths sums, so dropping them here
+        // used to book a half-cash bill as all cash.
+        payment_splits: body.payment_splits.clone(),
         items,
-        created_at: Some(chrono::Utc::now()),
+        // The till's clock, or now. `create_order_inner` refuses a future one
+        // and stamps the same instant on the ticket's `settled_at`.
+        created_at: Some(body.settled_at.unwrap_or_else(chrono::Utc::now)),
         subtotal: None,
         discount_amount: None,
         tax_amount: None,
-        total_amount: None,
-        change_given: None,
+        // The till's figure, through the same drift check a counter checkout
+        // gets. A drawer that collected the ticket SUBTOTAL for a bill the
+        // server prices with tax on top is refused here, not discovered at
+        // shift close.
+        total_amount: body.total_amount,
+        change_given: body.change_given,
         idempotency_key: Some(*id),
         order_number: None,
         order_ref: None,
     };
 
-    // The settling cashier (`actor`) owns the materialized order + drawer. Capture
-    // the id before `create_order_inner` consumes the context.
-    let settled_by = actor.teller_id;
-    // hub = None → don't re-fire the kitchen (the items already fired at order time).
-    // Stamp the order with the ticket's WAITER (opened_by) so the dashboard can
-    // segment/export sales by the waiter who took the table.
-    let _ = create_order_inner(
+    // hub = None → don't re-fire the kitchen (the items already fired at order
+    // time). The ticket rides along so the order is stamped `dine_in`, carries
+    // the WAITER (opened_by) the dashboard segments by, links both ways, ends
+    // the party's table, drops their transfer wish and completes their booking
+    // — all in the order's own transaction. What the floor did comes back in
+    // `ticket.floor`; on the idempotency shortcut (a concurrent settle already
+    // committed this order) it stays empty, because that settle did the work.
+    let mut ticket = SettledTicket {
+        open_ticket_id: *id,
+        waiter_id: opened_by,
+        floor: Default::default(),
+    };
+    create_order_inner(
         pool.clone(),
         web::Json(request),
         actor,
         None,
-        Some(opened_by),
+        Some(&mut ticket),
     )
     .await?;
+    let floor = ticket.floor;
 
-    let created =
-        crate::orders::handlers::fetch_order_by_idempotency_key(pool.get_ref(), *id, org_id)
-            .await?
-            .ok_or(AppError::Internal)?;
-
-    // Link ticket → order (idempotent; a concurrent settle that lost the race is a no-op).
-    let settled = sqlx::query(
-        "UPDATE open_tickets SET status = 'settled', settled_at = now(), order_id = $2, \
-             settled_by = $3, settled_shift_id = $4, updated_at = now() \
-         WHERE id = $1 AND status <> 'settled'",
-    )
-    .bind(*id)
-    .bind(created.id)
-    .bind(settled_by)
-    .bind(body.shift_id)
-    .execute(pool.get_ref())
-    .await?;
-
-    // The winner of the settle race buses the table and drops the party's
-    // transfer wish (best-effort, mirroring the non-transactional link above).
-    // The party CHECKED OUT, so the table lands in `dirty` — it still holds
-    // their plates. A human clears it: the POS prompts the teller right after
-    // the sale, and the tables screen keeps a one-tap clear until they do.
-    let mut freed_table: Option<Uuid> = None;
-    let mut cancelled: Vec<Uuid> = Vec::new();
-    let mut completed_booking: Option<Uuid> = None;
-    if settled.rows_affected() > 0 {
-        // The booked party paid: their booking is done.
-        completed_booking =
-            crate::bookings::handlers::complete_by_ticket(pool.get_ref(), *id).await?;
-        freed_table = sqlx::query_scalar("SELECT table_id FROM open_tickets WHERE id = $1")
-            .bind(*id)
-            .fetch_one(pool.get_ref())
-            .await?;
-        if let Some(t) = freed_table {
-            // The shared walk, not a local copy of the UPDATE. This path is
-            // non-transactional (best-effort, mirroring the link above), which
-            // is why the helper is generic over the executor.
-            crate::floor_ops::bus_table(pool.get_ref(), t).await?;
-        }
-        cancelled = sqlx::query_scalar(
-            "UPDATE table_transfer_requests \
-             SET status = 'cancelled', resolved_at = now(), updated_at = now() \
-             WHERE occupant_kind = 'open_ticket' AND occupant_id = $1 AND status = 'waiting' \
-             RETURNING id",
-        )
-        .bind(*id)
-        .fetch_all(pool.get_ref())
-        .await?;
-    }
+    let created = crate::orders::handlers::fetch_order_by_open_ticket(pool.get_ref(), *id, org_id)
+        .await?
+        .ok_or(AppError::Internal)?;
 
     if let Some(hub) = hub {
         if let Ok(Some(view)) = open_ticket_view(pool.get_ref(), *id).await {
@@ -932,13 +1055,16 @@ pub(crate) async fn settle_open_ticket_inner(
                 BranchEvent::new(Topic::Tickets, "ticket.settled", &view),
             );
         }
-        if let Some(t) = freed_table {
+        // The party CHECKED OUT, so the table reads `dirty` — it still holds
+        // their plates. A human clears it: the POS prompts the teller right
+        // after the sale, and the tables screen keeps a one-tap clear.
+        if let Some(t) = floor.freed_table {
             publish_table_status(pool.get_ref(), hub, branch_id, t).await;
         }
-        if let Some(b) = completed_booking {
+        if let Some(b) = floor.completed_booking {
             crate::bookings::publish_booking(pool.get_ref(), hub, "booking.changed", b).await;
         }
-        for tid in cancelled {
+        for tid in floor.cancelled_transfers {
             hub.publish(
                 branch_id,
                 BranchEvent::new(

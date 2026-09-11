@@ -219,3 +219,82 @@ async fn cannot_delete_till_with_open_shift(pool: PgPool) {
         "delete with open shift should 409"
     );
 }
+
+/// The standard float is what should stay in the drawer. Validated on the way
+/// in (a 400, not a CHECK violation), settable on create, and on PATCH it can be
+/// set, left alone, or cleared — `null` is a real instruction, not an omission.
+#[sqlx::test]
+async fn standard_float_is_validated_set_and_cleared(pool: PgPool) {
+    let app = app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    grant(&pool, "org_admin", "create").await;
+    grant(&pool, "org_admin", "update").await;
+    let token = org_admin_token(Uuid::new_v4(), org_id);
+
+    let create = |body: serde_json::Value| {
+        let token = token.clone();
+        let app = &app;
+        async move {
+            test::call_service(
+                app,
+                test::TestRequest::post()
+                    .uri("/tills")
+                    .insert_header(("Authorization", format!("Bearer {token}")))
+                    .set_json(&body)
+                    .to_request(),
+            )
+            .await
+        }
+    };
+
+    let resp = create(serde_json::json!({
+        "branch_id": branch_id, "name": "Neg", "standard_float": -1
+    }))
+    .await;
+    assert_eq!(resp.status(), 400, "a negative float is refused with words");
+
+    let resp = create(serde_json::json!({
+        "branch_id": branch_id, "name": "Front", "standard_float": 5000
+    }))
+    .await;
+    assert_eq!(resp.status(), 201);
+    let till: Till = test::read_body_json(resp).await;
+    assert_eq!(till.standard_float, Some(5000));
+
+    let patch = |body: serde_json::Value| {
+        let token = token.clone();
+        let app = &app;
+        let id = till.id;
+        async move {
+            let resp = test::call_service(
+                app,
+                test::TestRequest::patch()
+                    .uri(&format!("/tills/{id}"))
+                    .insert_header(("Authorization", format!("Bearer {token}")))
+                    .set_json(&body)
+                    .to_request(),
+            )
+            .await;
+            let status = resp.status();
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            (status, body)
+        }
+    };
+
+    // Absent → unchanged.
+    let (status, body) = patch(serde_json::json!({ "name": "Front desk" })).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["standard_float"], 5000);
+    // A value → set.
+    let (status, body) = patch(serde_json::json!({ "standard_float": 3000 })).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["standard_float"], 3000);
+    // Negative → refused, nothing written.
+    let (status, _) = patch(serde_json::json!({ "standard_float": -5 })).await;
+    assert_eq!(status, 400);
+    // null → cleared: the shop no longer proposes a closing figure.
+    let (status, body) = patch(serde_json::json!({ "standard_float": null })).await;
+    assert_eq!(status, 200);
+    assert!(body["standard_float"].is_null(), "null clears the float");
+}

@@ -13,10 +13,11 @@ use super::snapshot::{self, CartLineInput};
 use super::staff::DeliveryOrder;
 use super::whatsapp;
 use super::{
-    CHANNEL_IN_MALL, CHANNEL_OUTSIDE, CHANNEL_PICKUP, CHANNEL_UMBRELLA, MAX_ADDRESS_LEN,
-    MAX_NAME_LEN, MAX_NOTES_LEN, MAX_OTP_CODE_LEN, MAX_SHORT_TEXT_LEN, channel_discount_col,
-    channel_fee_col, channel_is_flat, channel_open, normalize_phone, validate_channel,
-    validate_coords, validate_optional_text, validate_payment_hint, validate_required_text,
+    CHANNEL_IN_MALL, CHANNEL_OUTSIDE, CHANNEL_PICKUP, CHANNEL_UMBRELLA, DistanceSource,
+    MAX_ADDRESS_LEN, MAX_NAME_LEN, MAX_NOTES_LEN, MAX_OTP_CODE_LEN, MAX_SHORT_TEXT_LEN,
+    OnlineTaxPolicy, channel_discount_col, channel_fee_col, channel_is_flat, channel_open,
+    normalize_phone, online_tax_policy, validate_channel, validate_coords, validate_optional_text,
+    validate_payment_hint, validate_required_text,
 };
 use crate::auth::jwt::JwtSecret;
 use crate::errors::{AppError, AppErrorResponse};
@@ -44,6 +45,10 @@ pub struct PublicBranch {
     pub otp_required: bool,
     /// When false, in-mall ordering does not require a device GPS location.
     pub in_mall_require_location: bool,
+    /// The tax this branch prices online orders under. The storefront renders
+    /// a tax line from it (exclusive) or an "includes VAT" note (inclusive) —
+    /// the same policy intake will freeze onto the order.
+    pub tax_policy: OnlineTaxPolicy,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -160,9 +165,14 @@ pub async fn public_branches(
     .fetch_all(pool.get_ref())
     .await?;
 
-    let branches: Vec<PublicBranch> = rows
-        .into_iter()
-        .map(|r| PublicBranch {
+    // The policy comes from the one resolver the till and intake use, per
+    // branch, rather than a COALESCE repeated here: a list of an org's
+    // branches is a handful of rows, and a second copy of the inherit rule is
+    // a second place for it to drift.
+    let mut branches: Vec<PublicBranch> = Vec::with_capacity(rows.len());
+    for r in rows {
+        let tax_policy = online_tax_policy(pool.get_ref(), r.id).await?.into();
+        branches.push(PublicBranch {
             in_mall_open_now: r.open_for(CHANNEL_IN_MALL),
             outside_open_now: r.open_for(CHANNEL_OUTSIDE),
             umbrella_open_now: r.open_for(CHANNEL_UMBRELLA),
@@ -173,11 +183,12 @@ pub async fn public_branches(
             pickup_enabled: r.pickup_enabled,
             otp_required: r.otp_required,
             in_mall_require_location: r.in_mall_require_location,
+            tax_policy,
             id: r.id,
             name: r.name,
             code: r.code,
-        })
-        .collect();
+        });
+    }
     Ok(HttpResponse::Ok().json(branches))
 }
 
@@ -821,6 +832,12 @@ pub struct QuoteResponse {
     pub zone_name: Option<String>,
     pub distance_meters: Option<i32>,
     pub fee: Option<i32>,
+    /// The tax the cart will be priced under at this branch. A quote is a fee
+    /// quote — it has no cart, so no tax amount — but the page rendering the
+    /// checkout total needs the rate and the inclusivity beside the fee, or it
+    /// shows the customer one number and intake records another. Present on
+    /// every outcome: the policy is the branch's, not the address's.
+    pub tax_policy: OnlineTaxPolicy,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -836,6 +853,8 @@ pub enum FeeOutcome {
         zone_id: Uuid,
         zone_name: String,
         distance_meters: i32,
+        /// How `distance_meters` was measured; frozen onto the order beside it.
+        distance_source: DistanceSource,
     },
     OutOfRange,
     Unavailable,
@@ -862,7 +881,14 @@ pub struct ZoneRow {
 
 /// Pure zone match (no OSRM, no DB) so it can be unit-tested. `zones` must be
 /// ordered by ring_order ASC — the smallest covering ring's flat fee wins.
-pub fn select_zone_fee(distance_i: i32, max_dist: Option<i32>, zones: &[ZoneRow]) -> FeeOutcome {
+/// `source` says how `distance_i` was measured and rides through unchanged: the
+/// match does not care, but the row the fee lands on must say.
+pub fn select_zone_fee(
+    distance_i: i32,
+    source: DistanceSource,
+    max_dist: Option<i32>,
+    zones: &[ZoneRow],
+) -> FeeOutcome {
     if max_dist.is_some_and(|m| distance_i > m) {
         return FeeOutcome::OutOfRange;
     }
@@ -875,6 +901,7 @@ pub fn select_zone_fee(distance_i: i32, max_dist: Option<i32>, zones: &[ZoneRow]
             zone_id: zone.id,
             zone_name: zone.name.clone(),
             distance_meters: distance_i,
+            distance_source: source,
         },
         None => FeeOutcome::OutOfRange,
     }
@@ -906,11 +933,13 @@ async fn compute_outside_fee(
         lat: blat,
         lng: blng,
     };
-    let distance = match road_distance_meters(branch_pt, cust).await {
-        Ok(d) => d,
+    let (distance, source) = match road_distance_meters(branch_pt, cust).await {
+        Ok(d) => (d, DistanceSource::Osrm),
         Err(OsrmError::NotConfigured)
         | Err(OsrmError::Unreachable)
-        | Err(OsrmError::BadResponse) => haversine_meters(branch_pt, cust),
+        | Err(OsrmError::BadResponse) => {
+            (haversine_meters(branch_pt, cust), DistanceSource::Haversine)
+        }
         Err(OsrmError::NoRoute) => return Ok(FeeOutcome::OutOfRange),
     };
     let distance_i = distance.round() as i32;
@@ -923,7 +952,7 @@ async fn compute_outside_fee(
     .fetch_all(pool)
     .await?;
 
-    Ok(select_zone_fee(distance_i, max_dist, &zones))
+    Ok(select_zone_fee(distance_i, source, max_dist, &zones))
 }
 
 #[utoipa::path(
@@ -963,6 +992,7 @@ pub async fn delivery_quote(
             "This channel is closed right now.".into(),
         ));
     }
+    let tax_policy: OnlineTaxPolicy = online_tax_policy(pool.get_ref(), branch_id).await?.into();
 
     // Flat-fee channels (in-mall / umbrella / pickup): a flat per-branch fee, no
     // zones/OSRM. Only in-mall reports a walking (haversine) distance from the
@@ -999,6 +1029,7 @@ pub async fn delivery_quote(
             zone_name: None,
             distance_meters,
             fee: Some(flat_fee),
+            tax_policy,
         }));
     }
 
@@ -1017,12 +1048,14 @@ pub async fn delivery_quote(
             zone_id,
             zone_name,
             distance_meters,
+            ..
         } => QuoteResponse {
             status: "ok".into(),
             zone_id: Some(zone_id),
             zone_name: Some(zone_name),
             distance_meters: Some(distance_meters),
             fee: Some(fee),
+            tax_policy,
         },
         FeeOutcome::OutOfRange => QuoteResponse {
             status: "out_of_range".into(),
@@ -1030,6 +1063,7 @@ pub async fn delivery_quote(
             zone_name: None,
             distance_meters: None,
             fee: None,
+            tax_policy,
         },
         FeeOutcome::Unavailable => QuoteResponse {
             status: "unavailable".into(),
@@ -1037,6 +1071,7 @@ pub async fn delivery_quote(
             zone_name: None,
             distance_meters: None,
             fee: None,
+            tax_policy,
         },
     };
     Ok(HttpResponse::Ok().json(resp))
@@ -1344,90 +1379,101 @@ pub async fn create_delivery_order(
     )
     .await?;
 
-    // Server-authoritative delivery fee.
-    let (delivery_fee, zone_id, road_distance): (i32, Option<Uuid>, Option<i32>) = if is_outside {
-        let (Some(lat), Some(lng)) = (body.customer_lat, body.customer_lng) else {
-            return Err(AppError::BadRequest(
-                "A delivery location is required for outside delivery".into(),
-            ));
-        };
-        match compute_outside_fee(pool.get_ref(), body.branch_id, LatLng { lat, lng }).await? {
-            FeeOutcome::Ok {
-                fee,
-                zone_id,
-                distance_meters,
-                ..
-            } => (fee, Some(zone_id), Some(distance_meters)),
-            FeeOutcome::OutOfRange => {
+    // Server-authoritative delivery fee. A recorded distance always arrives
+    // with how it was measured (`distance_source`): the outside ring may have
+    // been matched on the road or, with routing down, on the straight line,
+    // and the in-mall walking distance is a straight line by design. The row
+    // refuses one without the other.
+    let (delivery_fee, zone_id, road_distance): (i32, Option<Uuid>, Option<(i32, DistanceSource)>) =
+        if is_outside {
+            let (Some(lat), Some(lng)) = (body.customer_lat, body.customer_lng) else {
                 return Err(AppError::BadRequest(
-                    "This location is outside the delivery range".into(),
+                    "A delivery location is required for outside delivery".into(),
                 ));
+            };
+            match compute_outside_fee(pool.get_ref(), body.branch_id, LatLng { lat, lng }).await? {
+                FeeOutcome::Ok {
+                    fee,
+                    zone_id,
+                    distance_meters,
+                    distance_source,
+                    ..
+                } => (fee, Some(zone_id), Some((distance_meters, distance_source))),
+                FeeOutcome::OutOfRange => {
+                    return Err(AppError::BadRequest(
+                        "This location is outside the delivery range".into(),
+                    ));
+                }
+                FeeOutcome::Unavailable => {
+                    return Err(AppError::Conflict(
+                        "Delivery distance is temporarily unavailable. Please try again.".into(),
+                    ));
+                }
             }
-            FeeOutcome::Unavailable => {
-                return Err(AppError::Conflict(
-                    "Delivery distance is temporarily unavailable. Please try again.".into(),
-                ));
-            }
-        }
-    } else if channel_is_flat(&body.channel) {
-        // Umbrella / pickup: a flat per-branch fee — no GPS, no zone, no distance.
-        let fee: i32 = sqlx::query_scalar(&format!(
-            "SELECT COALESCE({fee_col}, 0) FROM branch_delivery_settings WHERE branch_id = $1",
-            fee_col = channel_fee_col(&body.channel),
-        ))
-        .bind(body.branch_id)
-        .fetch_optional(pool.get_ref())
-        .await?
-        .unwrap_or(0);
-        (fee, None, None)
-    } else {
-        // In-mall: the customer confirms they're at the branch with device GPS
-        // (never a manual pin). Whether that location is *required* is a per-branch
-        // manager toggle (`in_mall_require_location`) — indoor GPS is noisy, so a
-        // branch may relax it. When a location IS sent it's registered for the
-        // teller as a spam signal (walking/haversine distance); it never blocks.
-        let settings: Option<(i32, bool)> = sqlx::query_as(
-            "SELECT COALESCE(in_mall_fee, 0), COALESCE(in_mall_require_location, true) \
-             FROM branch_delivery_settings WHERE branch_id = $1",
-        )
-        .bind(body.branch_id)
-        .fetch_optional(pool.get_ref())
-        .await?;
-        let (fee, require_location) = settings.unwrap_or((0, true));
-
-        let coords = match (body.customer_lat, body.customer_lng) {
-            (Some(lat), Some(lng)) => Some((lat, lng)),
-            _ if require_location => {
-                return Err(AppError::BadRequest(
-                    "A location is required to confirm you're at the branch.".into(),
-                ));
-            }
-            _ => None,
-        };
-
-        let distance = if let Some((lat, lng)) = coords {
-            let branch_coords: Option<(Option<f64>, Option<f64>)> =
-                sqlx::query_as("SELECT latitude, longitude FROM branches WHERE id = $1")
-                    .bind(body.branch_id)
-                    .fetch_optional(pool.get_ref())
-                    .await?;
-            branch_coords.and_then(|(blat, blng)| match (blat, blng) {
-                (Some(blat), Some(blng)) => Some(
-                    haversine_meters(
-                        LatLng {
-                            lat: blat,
-                            lng: blng,
-                        },
-                        LatLng { lat, lng },
-                    )
-                    .round() as i32,
-                ),
-                _ => None,
-            })
+        } else if channel_is_flat(&body.channel) {
+            // Umbrella / pickup: a flat per-branch fee — no GPS, no zone, no distance.
+            let fee: i32 = sqlx::query_scalar(&format!(
+                "SELECT COALESCE({fee_col}, 0) FROM branch_delivery_settings WHERE branch_id = $1",
+                fee_col = channel_fee_col(&body.channel),
+            ))
+            .bind(body.branch_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .unwrap_or(0);
+            (fee, None, None)
         } else {
-            None
+            // In-mall: the customer confirms they're at the branch with device GPS
+            // (never a manual pin). Whether that location is *required* is a per-branch
+            // manager toggle (`in_mall_require_location`) — indoor GPS is noisy, so a
+            // branch may relax it. When a location IS sent it's registered for the
+            // teller as a spam signal (walking/haversine distance); it never blocks.
+            let settings: Option<(i32, bool)> = sqlx::query_as(
+                "SELECT COALESCE(in_mall_fee, 0), COALESCE(in_mall_require_location, true) \
+             FROM branch_delivery_settings WHERE branch_id = $1",
+            )
+            .bind(body.branch_id)
+            .fetch_optional(pool.get_ref())
+            .await?;
+            let (fee, require_location) = settings.unwrap_or((0, true));
+
+            let coords = match (body.customer_lat, body.customer_lng) {
+                (Some(lat), Some(lng)) => Some((lat, lng)),
+                _ if require_location => {
+                    return Err(AppError::BadRequest(
+                        "A location is required to confirm you're at the branch.".into(),
+                    ));
+                }
+                _ => None,
+            };
+
+            let distance = if let Some((lat, lng)) = coords {
+                let branch_coords: Option<(Option<f64>, Option<f64>)> =
+                    sqlx::query_as("SELECT latitude, longitude FROM branches WHERE id = $1")
+                        .bind(body.branch_id)
+                        .fetch_optional(pool.get_ref())
+                        .await?;
+                branch_coords.and_then(|(blat, blng)| match (blat, blng) {
+                    (Some(blat), Some(blng)) => Some((
+                        haversine_meters(
+                            LatLng {
+                                lat: blat,
+                                lng: blng,
+                            },
+                            LatLng { lat, lng },
+                        )
+                        .round() as i32,
+                        DistanceSource::Haversine,
+                    )),
+                    _ => None,
+                })
+            } else {
+                None
+            };
+            (fee, None, distance)
         };
-        (fee, None, distance)
+    let (road_distance_meters, distance_source) = match road_distance {
+        Some((m, src)) => (Some(m), Some(src.as_str())),
+        None => (None, None),
     };
 
     let subtotal = resolved.subtotal;
@@ -1470,7 +1516,23 @@ pub async fn create_delivery_order(
         None => (None, None, rust_decimal::Decimal::ZERO, 0),
     };
 
-    let total = subtotal - discount_amount + delivery_fee;
+    // The tax, priced HERE and frozen. This used to be `subtotal - discount +
+    // fee` with no tax in it, while finalize priced the same cart through the
+    // engine under the policy of THAT moment and booked the larger figure
+    // without writing it back — two totals for one sale, and the one the
+    // customer was shown was the smaller. Nobody noticed because every branch
+    // charged zero; the default for a new organisation is 14% exclusive.
+    //
+    // Same engine, same policy resolution as the till (`online_tax_policy`
+    // pins the service charge, which an online order never carries). The fee
+    // is added after the engine has settled the tax: it is carriage on a
+    // sale, not part of it, and stays outside the tax base. In inclusive mode
+    // the tax is inside the base and the total does not grow; the identity
+    // the row CHECKs is exactly this sum.
+    let policy = online_tax_policy(pool.get_ref(), body.branch_id).await?;
+    let breakdown = crate::tax::compute(subtotal as i64, discount_amount as i64, &policy);
+    let tax_amount = breakdown.tax as i32;
+    let total = breakdown.total as i32 + delivery_fee;
 
     // Mint the delivery_ref from its own counter (business date in branch tz).
     let mut tx = pool.get_ref().begin().await?;
@@ -1497,6 +1559,9 @@ pub async fn create_delivery_order(
     let deductions_json =
         serde_json::to_value(&resolved.deductions).map_err(|_| AppError::Internal)?;
 
+    // The service-charge pair is written as an explicit zero rather than left
+    // to the column default: finalize replays the whole policy from this row,
+    // and zero IS the rate this quote was priced under.
     let id: Uuid = sqlx::query_scalar(
         r#"INSERT INTO delivery_orders
             (org_id, branch_id, channel, delivery_ref, customer_name, customer_phone,
@@ -1504,10 +1569,13 @@ pub async fn create_delivery_order(
              customer_lat, customer_lng, delivery_zone_id, road_distance_meters,
              subtotal, delivery_fee, total, cart, deductions_snapshot,
              payment_method_hint, otp_verified, idempotency_key,
-             discount_id, discount_type, discount_value, discount_amount)
+             discount_id, discount_type, discount_value, discount_amount,
+             tax_amount, tax_rate_applied, tax_inclusive,
+             service_charge_amount, service_charge_rate_applied, distance_source)
            VALUES ($1, $2, $3::delivery_channel, $4, $5, $6, $7, $8, $9, $10, $11, $12,
                    $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, true, $23,
-                   $24, $25::discount_type, $26, $27)
+                   $24, $25::discount_type, $26, $27,
+                   $28, $29, $30, 0, 0, $31)
            RETURNING id"#,
     )
     .bind(org_id)
@@ -1525,7 +1593,7 @@ pub async fn create_delivery_order(
     .bind(body.customer_lat)
     .bind(body.customer_lng)
     .bind(zone_id)
-    .bind(road_distance)
+    .bind(road_distance_meters)
     .bind(subtotal)
     .bind(delivery_fee)
     .bind(total)
@@ -1537,6 +1605,10 @@ pub async fn create_delivery_order(
     .bind(&discount_type)
     .bind(discount_value)
     .bind(discount_amount)
+    .bind(tax_amount) // $28
+    .bind(policy.tax_rate) // $29
+    .bind(policy.tax_inclusive) // $30
+    .bind(distance_source) // $31
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -1586,6 +1658,10 @@ pub struct OrderHistorySummary {
     pub subtotal: i32,
     pub delivery_fee: i32,
     pub discount_amount: i32,
+    /// Tax as frozen at intake: inside `total` when `tax_inclusive`, added to
+    /// it otherwise.
+    pub tax_amount: i32,
+    pub tax_inclusive: bool,
     pub total: i32,
     pub address_line: Option<String>,
     pub place_name: Option<String>,
@@ -1608,6 +1684,8 @@ struct OrderHistoryRow {
     subtotal: i32,
     delivery_fee: i32,
     discount_amount: i32,
+    tax_amount: i32,
+    tax_inclusive: bool,
     total: i32,
     address_line: Option<String>,
     place_name: Option<String>,
@@ -1641,7 +1719,8 @@ pub async fn guest_order_history(
     let rows: Vec<OrderHistoryRow> = sqlx::query_as(
         "SELECT d.id, d.delivery_ref, d.status::text AS status, d.channel::text AS channel,
                 d.created_at, d.branch_id, b.name AS branch_name,
-                d.subtotal, d.delivery_fee, d.discount_amount, d.total,
+                d.subtotal, d.delivery_fee, d.discount_amount,
+                d.tax_amount, d.tax_inclusive, d.total,
                 d.address_line, d.place_name,
                 d.customer_lat, d.customer_lng, d.customer_name, d.cart
          FROM delivery_orders d
@@ -1684,6 +1763,8 @@ pub async fn guest_order_history(
                 subtotal: r.subtotal,
                 delivery_fee: r.delivery_fee,
                 discount_amount: r.discount_amount,
+                tax_amount: r.tax_amount,
+                tax_inclusive: r.tax_inclusive,
                 total: r.total,
                 address_line: r.address_line,
                 place_name: r.place_name,
@@ -1816,6 +1897,12 @@ pub struct DeliveryTracking {
     pub subtotal: i32,
     pub delivery_fee: i32,
     pub discount_amount: i32,
+    /// The tax line, frozen at intake. Inside `total` when `tax_inclusive`
+    /// (render "includes VAT"), added to it otherwise (render a tax line).
+    pub tax_amount: i32,
+    #[schema(value_type = f64)]
+    pub tax_rate_applied: rust_decimal::Decimal,
+    pub tax_inclusive: bool,
     pub total: i32,
     pub payment_method_hint: Option<String>,
     pub customer_name: String,
@@ -1841,7 +1928,8 @@ pub async fn track_delivery_order(
                 d.out_for_delivery_at, d.delivered_at, d.cancelled_at, d.rejected_at, \
                 d.cancel_reason, \
                 COALESCE(s.prep_time_minutes, 0) + d.extra_prep_minutes AS estimated_prep_minutes, \
-                d.subtotal, d.delivery_fee, d.discount_amount, d.total, \
+                d.subtotal, d.delivery_fee, d.discount_amount, \
+                d.tax_amount, d.tax_rate_applied, d.tax_inclusive, d.total, \
                 d.payment_method_hint, d.customer_name, \
                 d.place_name, d.floor, d.unit_number, d.address_line \
          FROM delivery_orders d \

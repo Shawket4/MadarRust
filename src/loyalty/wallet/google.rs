@@ -1147,6 +1147,39 @@ pub async fn add_message(member: &MemberRow, body: &str) -> Result<(), AppError>
     )))
 }
 
+/// Retire a forgotten member's card.
+///
+/// Google keeps an object for ever unless told otherwise, and a PUT would need
+/// the member's name and token — which is exactly what a forget has just
+/// scrubbed. `EXPIRED` is the state Google provides for a card that is no
+/// longer valid: it moves to the wallet's archive and stops rendering a live
+/// barcode. PATCH, so nothing else on the object is touched.
+///
+/// A member with no object (never opened the card page) has nothing to expire,
+/// and that is `Ok`. Google refusing is returned rather than swallowed — the
+/// caller decides whether that is worth a log or a retry.
+pub async fn expire_object(member: &MemberRow) -> Result<(), AppError> {
+    let Some(object_id) = member.google_object_id.clone() else {
+        return Ok(());
+    };
+    if issuer_id().is_none() {
+        return Ok(());
+    }
+    let token = access_token().await?;
+    let resp = reqwest::Client::new()
+        .patch(format!("{WALLET_API}/loyaltyObject/{object_id}"))
+        .bearer_auth(token)
+        .json(&json!({ "state": "EXPIRED" }))
+        .send()
+        .await
+        .map_err(|e| AppError::ServiceUnavailable(format!("Google Wallet PATCH: {e}")))?;
+    // Already gone is the outcome that was asked for.
+    if resp.status().is_success() || resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(());
+    }
+    Err(google_error("expiring the loyalty object", resp).await)
+}
+
 /// Has this member actually saved their Google card?
 ///
 /// Holding a `google_object_id` only means WE created an object; a customer who

@@ -29,6 +29,9 @@ pub struct BookingView {
     pub source: String,
     pub locale: String,
     pub section_id: Option<Uuid>,
+    /// The ticket this party is (or was) eating on. DERIVED from
+    /// `open_tickets.booking_id` — the live one if there is one, else the
+    /// latest — never stored on the booking.
     pub open_ticket_id: Option<Uuid>,
     pub table_ids: Vec<Uuid>,
     pub table_labels: Vec<String>,
@@ -119,10 +122,15 @@ impl From<Row> for BookingView {
     }
 }
 
+// The ticket→booking link is the one that is written (`open_tickets.booking_id`,
+// stamped when the waiter fires); the booking's side is read back from it here.
+// `bookings.open_ticket_id` still exists as a column but nothing writes it any
+// more — it goes with the next schema pass.
 const VIEW_SELECT: &str = "SELECT b.id, b.branch_id, b.status::text AS status, b.party_size, \
     b.starts_at, b.ends_at, COALESCE(s.hold_minutes, 15)::smallint AS hold_minutes, \
     b.guest_name, b.guest_phone, b.phone_verified, b.notes, b.source, b.locale, b.section_id, \
-    b.open_ticket_id, \
+    (SELECT ot.id FROM open_tickets ot WHERE ot.booking_id = b.id \
+      ORDER BY (ot.status = 'open') DESC, ot.opened_at DESC LIMIT 1) AS open_ticket_id, \
     ARRAY(SELECT bt.table_id FROM booking_tables bt JOIN branch_tables t ON t.id = bt.table_id \
           WHERE bt.booking_id = b.id ORDER BY lower(t.label)) AS table_ids, \
     ARRAY(SELECT t.label FROM booking_tables bt JOIN branch_tables t ON t.id = bt.table_id \

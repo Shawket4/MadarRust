@@ -165,6 +165,7 @@ async fn greet(pool: &PgPool, m: &Greetable) -> Result<(), AppError> {
                 branch_id,
                 mode,
                 amount,
+                crate::loyalty::model::Source::Birthday,
                 Some("Birthday gift".to_string()),
                 None,
             )

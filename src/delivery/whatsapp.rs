@@ -158,6 +158,20 @@ pub fn build_delivered_message(delivery_ref: &str, order_id: Uuid) -> String {
     )
 }
 
+/// Sent by the sweep (`jobs::reject_unaccepted`) when nobody at the branch
+/// accepted the order inside its auto-reject window. It says the order will
+/// not come and that nothing was paid — money only changes hands at the door,
+/// so a rejected order never took any — and not why: "no teller was free" is
+/// nothing the customer can act on.
+pub fn build_order_rejected_message(delivery_ref: &str, order_id: Uuid) -> String {
+    with_tracking(
+        format!(
+            "Sorry — we couldn't take your order {delivery_ref} right now. You have not been charged."
+        ),
+        order_id,
+    )
+}
+
 // ── Reservations & waitlist nudges ────────────────────────────────────────────
 
 /// Flat departure nudge: fires `lead_minutes` before a reservation's time.

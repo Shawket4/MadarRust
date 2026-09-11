@@ -165,8 +165,10 @@ pub struct Order {
     pub discount_id: Option<Uuid>,
     pub customer_name: Option<String>,
     pub notes: Option<String>,
-    /// Order origin: "dine_in" (POS sale) or "delivery" (finalized delivery
-    /// order). Defaults to "dine_in" for every POS sale.
+    /// What kind of sale: "dine_in" (settled from a waiter's ticket — the only
+    /// kind that carries a service charge), "takeaway" (rung straight through
+    /// the till) or "delivery" (a finalized delivery order). Till sales before
+    /// 2026-09 say "dine_in" because "takeaway" could not be expressed.
     pub order_type: String,
     /// Delivery charge in piastres, shown separately from the item subtotal.
     /// Always 0 for dine-in orders; for delivery orders
@@ -348,7 +350,7 @@ pub struct OrderItemFull {
     pub bundle_components: Vec<OrderBundleComponentFull>,
 }
 
-#[derive(Deserialize, Serialize, ToSchema)]
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct PaymentSplitInput {
     pub method: String,
     pub amount: i32,
@@ -357,7 +359,7 @@ pub struct PaymentSplitInput {
 
 pub use crate::orders::component_resolve::AddonInput;
 
-#[derive(Deserialize, Serialize, Default, ToSchema)]
+#[derive(Deserialize, Serialize, Clone, Default, ToSchema)]
 pub struct OrderItemInput {
     #[serde(default)]
     pub menu_item_id: Option<Uuid>,
@@ -617,6 +619,595 @@ pub struct ExportOrdersQuery {
 // and fuzzed without a DB. Imported here so construction sites read unchanged.
 use crate::orders::cost_math::{InventoryDeduction, summarize_line_costs};
 
+// ── One cart line, resolved and priced ────────────────────────
+//
+// The catalog lookups, the branch overrides, the addon/optional/bundle
+// arithmetic and the inventory deductions for ONE line of a cart. This is
+// the single pricing path: the till's checkout (`create_order_inner`) walks
+// it per line, and so does a waiter's fire (`tickets::resolve_ticket_lines`),
+// so the bill printed at the table and the order settled from it can no
+// longer disagree about what a line costs. They used to: the ticket priced
+// a line as `(unit + addons) × qty` and the settle then charged the
+// optionals and bundle surcharges the bill had never shown.
+
+pub(crate) struct ResolvedOptional {
+    pub(crate) optional_field_id: Uuid,
+    pub(crate) field_name: String,
+    pub(crate) name_translations: serde_json::Value,
+    pub(crate) price: i32,
+    pub(crate) org_ingredient_id: Option<Uuid>,
+    pub(crate) ingredient_name: Option<String>,
+    pub(crate) ingredient_unit: Option<String>,
+    pub(crate) quantity_used: Option<f64>,
+}
+
+#[allow(dead_code)]
+pub(crate) struct ResolvedBundleComponent {
+    pub(crate) item_id: Uuid,
+    pub(crate) item_name: String,
+    pub(crate) name_translations: serde_json::Value,
+    pub(crate) quantity: i32,
+    pub(crate) size_label: Option<String>,
+    pub(crate) addons: Vec<ResolvedAddon>,
+    pub(crate) optionals: Vec<ResolvedOptional>,
+}
+
+pub(crate) struct ResolvedItem {
+    /// The catalog + branch-override unit price — what the server expected.
+    pub(crate) expected_unit_price: i32,
+    /// Catalog addon total per unit (0 for a bundle), kept for the price flag.
+    pub(crate) expected_addon_per_unit: i32,
+    /// This branch has the item turned off. Flagged, never rejected.
+    pub(crate) branch_disabled: bool,
+    pub(crate) menu_item_id: Option<Uuid>,
+    pub(crate) item_name: String,
+    pub(crate) name_translations: serde_json::Value,
+    pub(crate) size_label: Option<String>,
+    /// Charged unit price recorded on the line (client value, else expected).
+    pub(crate) unit_price: i32,
+    /// True when this line's charged price/availability deviated from the catalog.
+    pub(crate) price_flagged: bool,
+    /// A reward paid for some or all of this line.
+    pub(crate) is_reward: bool,
+    /// Piastres the reward covered on this line. Subtracted from the stored
+    /// line total so the persisted order agrees with the subtotal the
+    /// customer was charged — the receipt and the books read the same.
+    pub(crate) reward_covered: i32,
+    pub(crate) quantity: i32,
+    pub(crate) notes: Option<String>,
+    pub(crate) addons: Vec<ResolvedAddon>,
+    pub(crate) optionals: Vec<ResolvedOptional>,
+    pub(crate) deductions: Vec<InventoryDeduction>,
+    pub(crate) bundle_id: Option<Uuid>,
+    pub(crate) bundle_unit_price: Option<i32>,
+    pub(crate) bundle_components: Vec<ResolvedBundleComponent>,
+    pub(crate) component_surcharge: i32,
+}
+
+pub(crate) struct ResolvedAddon {
+    pub(crate) addon_item_id: Uuid,
+    pub(crate) addon_name: String,
+    pub(crate) name_translations: serde_json::Value,
+    pub(crate) unit_price: i32,
+    pub(crate) quantity: i32,
+    /// False when the addon has no ingredient rows (additive addons only
+    /// — swap addons fold into the recipe). No ingredients ⟹ cost-missing.
+    pub(crate) has_ingredients: bool,
+    /// True when this addon acted as a milk/coffee swap (cost lives in
+    /// the recipe-scope deduction it replaced).
+    pub(crate) is_swap: bool,
+}
+
+impl ResolvedItem {
+    /// Charged addon total per unit of the parent item. Zero for a bundle,
+    /// whose component addons are already inside `component_surcharge`.
+    fn charged_addon_per_unit(&self) -> i32 {
+        if self.bundle_id.is_some() {
+            0
+        } else {
+            self.addons.iter().map(|a| a.unit_price * a.quantity).sum()
+        }
+    }
+
+    /// Optional-field prices per unit; zero for a bundle for the same reason.
+    fn optional_per_unit(&self) -> i32 {
+        if self.bundle_id.is_some() {
+            0
+        } else {
+            self.optionals.iter().map(|o| o.price).sum()
+        }
+    }
+
+    /// What one unit of this line costs the customer, modifiers included.
+    pub(crate) fn charged_per_unit(&self) -> i32 {
+        self.unit_price + self.charged_addon_per_unit() + self.optional_per_unit()
+    }
+
+    /// The line as charged, before any reward: per-unit × quantity plus the
+    /// bundle component surcharge. THE figure a bill line shows.
+    pub(crate) fn charged_subtotal(&self) -> i32 {
+        self.charged_per_unit() * self.quantity + self.component_surcharge
+    }
+
+    /// The same line at catalog + branch-override prices — what the server
+    /// expected. Used only to flag a deviation, never to overrule the till.
+    fn expected_subtotal(&self) -> i32 {
+        (self.expected_unit_price + self.expected_addon_per_unit + self.optional_per_unit())
+            * self.quantity
+            + self.component_surcharge
+    }
+
+    /// Addon names as the kitchen and the bill display them (`2× Oat milk`).
+    pub(crate) fn kitchen_modifiers(&self) -> Vec<String> {
+        self.addons
+            .iter()
+            .map(|a| {
+                if a.quantity > 1 {
+                    format!("{}× {}", a.quantity, a.addon_name)
+                } else {
+                    a.addon_name.clone()
+                }
+            })
+            .collect()
+    }
+}
+
+/// Resolve one cart line against the catalog at `branch_id` and price it.
+///
+/// `unit_price` and the addon prices come back CHARGED — the till's figure
+/// where it sent one, the catalog's otherwise — with the catalog expectation
+/// kept alongside for the price flag. Rewards are not this function's
+/// business: `is_reward` / `reward_covered` / `price_flagged` come back
+/// zeroed and the caller sets them once it knows the whole cart.
+///
+/// `order_time` is when the sale happened (a bundle's availability window is
+/// judged against it) — the order's `created_at`, or now for a fire.
+pub(crate) async fn resolve_order_line(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Uuid,
+    order_time: chrono::DateTime<Utc>,
+    item_input: &OrderItemInput,
+) -> Result<ResolvedItem, AppError> {
+    if item_input.quantity <= 0 {
+        return Err(AppError::BadRequest("Item quantity must be > 0".into()));
+    }
+
+    let mut deductions: Vec<InventoryDeduction> = Vec::new();
+    let mut resolved_addons: Vec<ResolvedAddon> = Vec::new();
+    let mut resolved_optionals: Vec<ResolvedOptional> = Vec::new();
+    let mut bundle_components = Vec::new();
+
+    let mut component_surcharge: i32 = 0;
+    // Note: `unit_price` returned here is the EXPECTED (catalog + branch override)
+    // price; the client's charged price is overlaid after this block.
+    // `expected_addon_per_unit` is the catalog addon total per single item unit
+    // (0 for bundles, whose surcharge is computed separately); `branch_disabled`
+    // is true when this branch has the item turned off (flagged, not rejected).
+    let (
+        resolved_menu_item_id,
+        item_name,
+        name_translations,
+        unit_price,
+        bundle_id,
+        bundle_unit_price,
+        expected_addon_per_unit,
+        branch_disabled,
+    ) = if let Some(b_id) = item_input.bundle_id {
+        // ── 1. Resolve Bundle ─────────────────────────────
+        let bundle: (Uuid, String, i32, String) = sqlx::query_as(
+            "SELECT id, name, price, status::text FROM bundles WHERE id = $1 AND org_id = $2",
+        )
+        .bind(b_id)
+        .bind(org_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Bundle {} not found", b_id)))?;
+
+        if bundle.3 != "active" {
+            return Err(AppError::BadRequest(format!(
+                "Bundle {} is not active",
+                bundle.1
+            )));
+        }
+
+        // Branch availability
+        let available_in_branch: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM bundle_branch_availability WHERE bundle_id = $1 AND branch_id = $2
+             ) OR NOT EXISTS(
+                SELECT 1 FROM bundle_branch_availability WHERE bundle_id = $1
+             )",
+        )
+        .bind(bundle.0)
+        .bind(branch_id)
+        .fetch_one(pool)
+        .await?;
+
+        if !available_in_branch {
+            return Err(AppError::BadRequest(format!(
+                "Bundle {} is not available in branch {}",
+                bundle.1, branch_id
+            )));
+        }
+
+        // Date / Time window validation
+        let branch_tz: String = sqlx::query_scalar(
+            "SELECT COALESCE(b.timezone, o.timezone)::text
+             FROM branches b JOIN organizations o ON o.id = b.org_id WHERE b.id = $1",
+        )
+        .bind(branch_id)
+        .fetch_one(pool)
+        .await?;
+
+        let local_dt_rows: Option<(chrono::NaiveDate, chrono::NaiveTime)> = sqlx::query_as(
+            "SELECT ($1::timestamptz AT TIME ZONE $2)::date, ($1::timestamptz AT TIME ZONE $2)::time"
+        )
+        .bind(order_time)
+        .bind(&branch_tz)
+        .fetch_optional(pool)
+        .await?;
+
+        if let Some((local_date, local_time)) = local_dt_rows {
+            let bundle_limits: (Option<chrono::NaiveDate>, Option<chrono::NaiveDate>, Option<chrono::NaiveTime>, Option<chrono::NaiveTime>) = sqlx::query_as(
+                "SELECT available_from_date, available_until_date, available_from_time, available_until_time \
+                 FROM bundles WHERE id = $1"
+            )
+            .bind(bundle.0)
+            .fetch_one(pool)
+            .await?;
+
+            if let Some(from_d) = bundle_limits.0
+                && local_date < from_d
+            {
+                return Err(AppError::BadRequest(format!(
+                    "Bundle {} is not yet available",
+                    bundle.1
+                )));
+            }
+            if let Some(until_d) = bundle_limits.1
+                && local_date > until_d
+            {
+                return Err(AppError::BadRequest(format!(
+                    "Bundle {} availability has expired",
+                    bundle.1
+                )));
+            }
+            if let Some(from_t) = bundle_limits.2
+                && local_time < from_t
+            {
+                return Err(AppError::BadRequest(format!(
+                    "Bundle {} is not available at this hour",
+                    bundle.1
+                )));
+            }
+            if let Some(until_t) = bundle_limits.3
+                && local_time > until_t
+            {
+                return Err(AppError::BadRequest(format!(
+                    "Bundle {} is not available at this hour",
+                    bundle.1
+                )));
+            }
+        }
+
+        // Resolve components (client snapshot or catalog defaults)
+        let catalog: Vec<(Uuid, i32, String, serde_json::Value)> = sqlx::query_as(
+            "SELECT bc.item_id, bc.quantity, mi.name, mi.name_translations \
+             FROM bundle_components bc \
+             JOIN menu_items mi ON mi.id = bc.item_id \
+             WHERE bc.bundle_id = $1 \
+             ORDER BY bc.position ASC",
+        )
+        .bind(bundle.0)
+        .fetch_all(pool)
+        .await?;
+
+        if catalog.is_empty() {
+            return Err(AppError::BadRequest(format!(
+                "Bundle {} has no components",
+                bundle.1
+            )));
+        }
+
+        let catalog_map: std::collections::HashMap<Uuid, (i32, String, serde_json::Value)> =
+            catalog
+                .iter()
+                .map(|(id, qty, name, tr)| (*id, (*qty, name.clone(), tr.clone())))
+                .collect();
+
+        let component_inputs: Vec<crate::orders::component_resolve::BundleComponentInput> =
+            if item_input.bundle_components.is_empty() {
+                catalog
+                    .iter()
+                    .map(
+                        |(id, qty, _, _)| crate::orders::component_resolve::BundleComponentInput {
+                            item_id: *id,
+                            quantity: *qty,
+                            size_label: None,
+                            addons: vec![],
+                            optional_field_ids: vec![],
+                        },
+                    )
+                    .collect()
+            } else {
+                item_input.bundle_components.clone()
+            };
+
+        for comp_in in component_inputs {
+            let Some((catalog_qty, item_name, name_translations)) =
+                catalog_map.get(&comp_in.item_id)
+            else {
+                return Err(AppError::BadRequest(format!(
+                    "Item {} is not a component of bundle {}",
+                    comp_in.item_id, bundle.1
+                )));
+            };
+            if comp_in.quantity != *catalog_qty {
+                return Err(AppError::BadRequest(format!(
+                    "Invalid quantity for component {} in bundle {}",
+                    item_name, bundle.1
+                )));
+            }
+
+            let line_qty = comp_in.quantity * item_input.quantity;
+            let config = crate::orders::component_resolve::resolve_menu_item_configuration(
+                pool,
+                comp_in.item_id,
+                comp_in.size_label.clone(),
+                line_qty,
+                &comp_in.addons,
+                &comp_in.optional_field_ids,
+                branch_id,
+            )
+            .await?;
+
+            component_surcharge +=
+                (config.addon_line + config.optional_line) * comp_in.quantity * item_input.quantity;
+
+            for d in config.deductions {
+                deductions.push(InventoryDeduction {
+                    org_ingredient_id: d.org_ingredient_id,
+                    ingredient_name: d.ingredient_name,
+                    unit: d.unit,
+                    quantity: d.quantity,
+                    source: format!("bundle_component:{}", item_name),
+                    category: d.category,
+                    addon_item_id: d.addon_item_id,
+                    optional_field_id: d.optional_field_id,
+                    component_item_id: Some(comp_in.item_id),
+                    cost_per_unit: None,
+                    line_cost: None,
+                });
+            }
+
+            let comp_addons: Vec<ResolvedAddon> = config
+                .addons
+                .into_iter()
+                .map(|a| ResolvedAddon {
+                    addon_item_id: a.addon_item_id,
+                    addon_name: a.addon_name,
+                    name_translations: a.name_translations,
+                    unit_price: a.unit_price,
+                    quantity: a.quantity,
+                    has_ingredients: true, // component-level costing rolls up via deductions
+                    is_swap: false,
+                })
+                .collect();
+
+            let comp_optionals: Vec<ResolvedOptional> = config
+                .optionals
+                .into_iter()
+                .map(|o| ResolvedOptional {
+                    optional_field_id: o.optional_field_id,
+                    field_name: o.field_name,
+                    name_translations: o.name_translations,
+                    price: o.price,
+                    org_ingredient_id: o.org_ingredient_id,
+                    ingredient_name: o.ingredient_name,
+                    ingredient_unit: o.ingredient_unit,
+                    quantity_used: o.quantity_used,
+                })
+                .collect();
+
+            bundle_components.push(ResolvedBundleComponent {
+                item_id: comp_in.item_id,
+                item_name: item_name.clone(),
+                name_translations: name_translations.clone(),
+                quantity: comp_in.quantity,
+                size_label: comp_in.size_label.clone(),
+                addons: comp_addons,
+                optionals: comp_optionals,
+            });
+        }
+
+        (
+            None,
+            bundle.1,
+            serde_json::json!({}),
+            bundle.2,
+            Some(bundle.0),
+            Some(bundle.2),
+            0,
+            false,
+        )
+    } else if let Some(m_item_id) = item_input.menu_item_id {
+        // ── 2. Resolve Menu Item ──────────────────────────
+        // Pull the branch override alongside the catalog row: the branch layer can
+        // replace the price (price_override, piastres) and/or disable the item at
+        // this branch. A disabled item is flagged (price_flagged) but NOT rejected
+        // — an offline/stale POS may legitimately still be selling it.
+        let (item_name, name_translations, base_price, branch_price_override, branch_disabled): (
+            String,
+            serde_json::Value,
+            i32,
+            Option<i32>,
+            bool,
+        ) = sqlx::query_as(
+            "SELECT mi.name, mi.name_translations, mi.base_price,
+                    bmo.price_override,
+                    COALESCE(bmo.is_available, true) = false AS branch_disabled
+             FROM menu_items mi
+             LEFT JOIN branch_menu_overrides bmo
+                    ON bmo.menu_item_id = mi.id AND bmo.branch_id = $2
+             WHERE mi.id = $1 AND mi.deleted_at IS NULL",
+        )
+        .bind(m_item_id)
+        .bind(branch_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Menu item {} not found", m_item_id)))?;
+
+        // Branch-effective base: the override price replaces the catalog base_price.
+        let base_price = branch_price_override.unwrap_or(base_price);
+
+        let unit_price: i32 = match &item_input.size_label {
+            Some(size) => {
+                // A per-(branch, item, size) override wins for that size; otherwise the
+                // catalog size price; otherwise the branch-effective base. (A branch base
+                // override never silently changes an explicitly-priced size.)
+                let branch_size: Option<i32> = sqlx::query_scalar(
+                    "SELECT price_override FROM branch_menu_size_overrides \
+                     WHERE branch_id = $1 AND menu_item_id = $2 AND size_label = $3",
+                )
+                .bind(branch_id)
+                .bind(m_item_id)
+                .bind(size)
+                .fetch_optional(pool)
+                .await?;
+
+                match branch_size {
+                    Some(bs) => bs,
+                    None => {
+                        let p: Option<i32> = sqlx::query_scalar(
+                            "SELECT price_override FROM item_sizes \
+                             WHERE menu_item_id = $1 AND label = $2 AND is_active = true",
+                        )
+                        .bind(m_item_id)
+                        .bind(size)
+                        .fetch_optional(pool)
+                        .await?
+                        .flatten();
+                        p.unwrap_or(base_price)
+                    }
+                }
+            }
+            None => base_price,
+        };
+
+        // Resolve recipe + addons (incl. milk/coffee swaps) + optionals via the
+        // SHARED resolver that bundle components also use, so the deduction +
+        // swap rules live in exactly one place. Map its output into the
+        // order-line structs (which additionally carry cost fields).
+        let config = crate::orders::component_resolve::resolve_menu_item_configuration(
+            pool,
+            m_item_id,
+            item_input.size_label.clone(),
+            item_input.quantity,
+            &item_input.addons,
+            &item_input.optional_field_ids,
+            branch_id,
+        )
+        .await?;
+        for d in config.deductions {
+            deductions.push(InventoryDeduction {
+                org_ingredient_id: d.org_ingredient_id,
+                ingredient_name: d.ingredient_name,
+                unit: d.unit,
+                quantity: d.quantity,
+                source: d.source,
+                category: d.category,
+                addon_item_id: d.addon_item_id,
+                optional_field_id: d.optional_field_id,
+                component_item_id: None,
+                cost_per_unit: None,
+                line_cost: None,
+            });
+        }
+        for a in config.addons {
+            resolved_addons.push(ResolvedAddon {
+                addon_item_id: a.addon_item_id,
+                addon_name: a.addon_name,
+                name_translations: a.name_translations,
+                unit_price: a.unit_price,
+                quantity: a.quantity,
+                has_ingredients: a.has_ingredients,
+                is_swap: a.is_swap,
+            });
+        }
+        for o in config.optionals {
+            resolved_optionals.push(ResolvedOptional {
+                optional_field_id: o.optional_field_id,
+                field_name: o.field_name,
+                name_translations: o.name_translations,
+                price: o.price,
+                org_ingredient_id: o.org_ingredient_id,
+                ingredient_name: o.ingredient_name,
+                ingredient_unit: o.ingredient_unit,
+                quantity_used: o.quantity_used,
+            });
+        }
+
+        // Capture the catalog (expected) addon total per single item unit, then
+        // overlay the POS's charged addon prices — recorded verbatim, with any
+        // deviation surfaced via the line price flag below.
+        let expected_addon_per_unit: i32 = resolved_addons
+            .iter()
+            .map(|a| a.unit_price * a.quantity)
+            .sum();
+        for (i, a) in resolved_addons.iter_mut().enumerate() {
+            if let Some(p) = item_input.addons.get(i).and_then(|ai| ai.unit_price) {
+                a.unit_price = p;
+            }
+        }
+
+        (
+            Some(m_item_id),
+            item_name,
+            name_translations,
+            unit_price,
+            None,
+            None,
+            expected_addon_per_unit,
+            branch_disabled,
+        )
+    } else {
+        return Err(AppError::BadRequest(
+            "Each line item must have either menu_item_id or bundle_id".into(),
+        ));
+    };
+
+    // `unit_price` from the resolution is the EXPECTED (catalog + branch override)
+    // price; overlay the POS's charged price so the recorded line equals the
+    // receipt. `resolved_addons` already carry charged prices (overlaid above for
+    // menu items; bundle components stay server-priced via the surcharge).
+    let expected_unit_price = unit_price;
+    let unit_price = item_input.unit_price.unwrap_or(expected_unit_price);
+
+    Ok(ResolvedItem {
+        menu_item_id: resolved_menu_item_id,
+        item_name,
+        name_translations,
+        size_label: item_input.size_label.clone(),
+        unit_price,
+        expected_unit_price,
+        expected_addon_per_unit,
+        branch_disabled,
+        price_flagged: false,
+        is_reward: false,
+        reward_covered: 0,
+        quantity: item_input.quantity,
+        notes: item_input.notes.clone(),
+        addons: resolved_addons,
+        optionals: resolved_optionals,
+        deductions,
+        bundle_id,
+        bundle_unit_price,
+        bundle_components,
+        component_surcharge,
+    })
+}
+
 // ── POST /orders ──────────────────────────────────────────────
 
 #[utoipa::path(
@@ -674,6 +1265,38 @@ pub async fn create_order(
     .await
 }
 
+/// The floor ticket a settle is turning into this order. Only the ticket-settle
+/// path supplies one; a direct POS sale passes `None` and is a `takeaway`.
+///
+/// An internal parameter rather than a field on `CreateOrderRequest`, so a POS
+/// client can neither spoof the waiter attribution nor claim a ticket it did
+/// not settle — both are derived server-side from the ticket row.
+pub(crate) struct SettledTicket {
+    pub open_ticket_id: Uuid,
+    /// `open_tickets.opened_by` — the waiter the dashboard segments sales by.
+    pub waiter_id: Uuid,
+    /// What the settle did to the floor, filled in by `create_order_inner`
+    /// for the caller to publish after the commit. Empty when the order came
+    /// back from the idempotency shortcut — the settle that won did the work.
+    pub floor: SettledFloor,
+}
+
+/// The floor-side of a settle, done in the ORDER's transaction and reported
+/// back so the ticket handler can publish it. It used to run after the order
+/// had committed, best-effort: a sale on the books with the party still shown
+/// at the table, or the booking still `seated`, whenever the second step
+/// failed. A settle is one event and this is the rest of it.
+#[derive(Debug, Default)]
+pub(crate) struct SettledFloor {
+    /// The table the party checked out of (left `dirty`), if it was on one.
+    pub freed_table: Option<Uuid>,
+    /// The booking this bill closed, if the party had one and no sibling bill
+    /// is still open.
+    pub completed_booking: Option<Uuid>,
+    /// Transfer wishes the party no longer needs.
+    pub cancelled_transfers: Vec<Uuid>,
+}
+
 /// Create-order core. LIVE attributes the order to the JWT teller and requires
 /// the target shift to belong to them; REPLAY attributes it to the queued op's
 /// embedded teller and drops that ownership filter (a different teller may be
@@ -681,6 +1304,11 @@ pub async fn create_order(
 /// a queued order whose shift was force-closed server-side genuinely has nowhere
 /// to land and must surface, not silently vanish — and dedup on the in-body
 /// idempotency key.
+///
+/// With a `ticket`, the order is a `dine_in` sale and BOTH sides of the link —
+/// `orders.open_ticket_id` and `open_tickets.order_id` (with the ticket's
+/// `settled` event) — are written in this one transaction. No trigger keeps the
+/// two columns honest; this transaction is the only thing that does.
 pub(crate) async fn create_order_inner(
     pool: crate::db::Db,
     body: web::Json<CreateOrderRequest>,
@@ -688,11 +1316,8 @@ pub(crate) async fn create_order_inner(
     // The realtime bus, for firing a LIVE order to the KDS. `None` on replay (a
     // queued offline order is historical and must not re-appear on the kitchen).
     hub: Option<&crate::realtime::hub::BranchEventHub>,
-    // The WAITER who opened the settled ticket (`open_tickets.opened_by`). Only the
-    // ticket-settle path supplies it; direct POS sales and delivery pass `None`.
-    // Kept as an internal param (not on `CreateOrderRequest`) so a POS client can't
-    // spoof the attribution — it's derived server-side from the ticket.
-    waiter_id: Option<Uuid>,
+    // `&mut` so the floor outcome can be handed back; see `SettledFloor`.
+    ticket: Option<&mut SettledTicket>,
 ) -> Result<HttpResponse, AppError> {
     if let Some(key) = body.idempotency_key
         && let Some(existing) =
@@ -794,69 +1419,21 @@ pub(crate) async fn create_order_inner(
     // org's otherwise. Read once, applied to both the expected and the recorded
     // breakdown, and recorded ON the order so a later rate change cannot
     // restate this bill.
-    let policy = crate::tax::policy::for_branch(pool.get_ref(), body.branch_id).await?;
+    let mut policy = crate::tax::policy::for_branch(pool.get_ref(), body.branch_id).await?;
 
-    // ── Local types ───────────────────────────────────────────
-    struct ResolvedOptional {
-        optional_field_id: Uuid,
-        field_name: String,
-        name_translations: serde_json::Value,
-        price: i32,
-        org_ingredient_id: Option<Uuid>,
-        ingredient_name: Option<String>,
-        ingredient_unit: Option<String>,
-        quantity_used: Option<f64>,
-    }
-
-    #[allow(dead_code)]
-    struct ResolvedBundleComponent {
-        item_id: Uuid,
-        item_name: String,
-        name_translations: serde_json::Value,
-        quantity: i32,
-        size_label: Option<String>,
-        addons: Vec<ResolvedAddon>,
-        optionals: Vec<ResolvedOptional>,
-    }
-
-    struct ResolvedItem {
-        menu_item_id: Option<Uuid>,
-        item_name: String,
-        name_translations: serde_json::Value,
-        size_label: Option<String>,
-        /// Charged unit price recorded on the line (client value, else expected).
-        unit_price: i32,
-        /// True when this line's charged price/availability deviated from the catalog.
-        price_flagged: bool,
-        /// A reward paid for some or all of this line.
-        is_reward: bool,
-        /// Piastres the reward covered on this line. Subtracted from the stored
-        /// line total so the persisted order agrees with the subtotal the
-        /// customer was charged — the receipt and the books read the same.
-        reward_covered: i32,
-        quantity: i32,
-        notes: Option<String>,
-        addons: Vec<ResolvedAddon>,
-        optionals: Vec<ResolvedOptional>,
-        deductions: Vec<InventoryDeduction>,
-        bundle_id: Option<Uuid>,
-        bundle_unit_price: Option<i32>,
-        bundle_components: Vec<ResolvedBundleComponent>,
-        component_surcharge: i32,
-    }
-
-    struct ResolvedAddon {
-        addon_item_id: Uuid,
-        addon_name: String,
-        name_translations: serde_json::Value,
-        unit_price: i32,
-        quantity: i32,
-        /// False when the addon has no ingredient rows (additive addons only
-        /// — swap addons fold into the recipe). No ingredients ⟹ cost-missing.
-        has_ingredients: bool,
-        /// True when this addon acted as a milk/coffee swap (cost lives in
-        /// the recipe-scope deduction it replaced).
-        is_swap: bool,
+    // What kind of sale this is. A ticket settle is the party who ate here;
+    // anything rung straight through the till is carried out. The service
+    // charge is DINE-IN ONLY (owner ruling 2), so a takeaway is priced under a
+    // zero rate — and the zero is what gets recorded, because the rate an order
+    // was priced under IS zero whatever the branch setting says, and the books
+    // CHECK that a non-dine-in row carries neither the charge nor a rate for one.
+    let order_type = if ticket.is_some() {
+        "dine_in"
+    } else {
+        "takeaway"
+    };
+    if order_type != "dine_in" {
+        policy.service_charge_rate = Decimal::ZERO;
     }
 
     // ── Loyalty redemptions ─────────────────────────────────────────────────
@@ -881,452 +1458,25 @@ pub(crate) async fn create_order_inner(
     let mut subtotal: i32 = 0;
     let mut expected_subtotal: i32 = 0;
 
+    let order_time = body.created_at.unwrap_or_else(Utc::now);
     for (line_index, item_input) in body.items.iter().enumerate() {
-        if item_input.quantity <= 0 {
-            return Err(AppError::BadRequest("Item quantity must be > 0".into()));
-        }
-
-        let mut deductions: Vec<InventoryDeduction> = Vec::new();
-        let mut resolved_addons: Vec<ResolvedAddon> = Vec::new();
-        let mut resolved_optionals: Vec<ResolvedOptional> = Vec::new();
-        let mut bundle_components = Vec::new();
-
-        let mut component_surcharge: i32 = 0;
-        // Note: `unit_price` returned here is the EXPECTED (catalog + branch override)
-        // price; the client's charged price is overlaid after this block.
-        // `expected_addon_per_unit` is the catalog addon total per single item unit
-        // (0 for bundles, whose surcharge is computed separately); `branch_disabled`
-        // is true when this branch has the item turned off (flagged, not rejected).
-        let (
-            resolved_menu_item_id,
-            item_name,
-            name_translations,
-            unit_price,
-            bundle_id,
-            bundle_unit_price,
-            expected_addon_per_unit,
-            branch_disabled,
-        ) = if let Some(b_id) = item_input.bundle_id {
-            // ── 1. Resolve Bundle ─────────────────────────────
-            let bundle: (Uuid, String, i32, String) = sqlx::query_as(
-                "SELECT id, name, price, status::text FROM bundles WHERE id = $1 AND org_id = $2",
-            )
-            .bind(b_id)
-            .bind(org_id)
-            .fetch_optional(pool.get_ref())
-            .await?
-            .ok_or_else(|| AppError::NotFound(format!("Bundle {} not found", b_id)))?;
-
-            if bundle.3 != "active" {
-                return Err(AppError::BadRequest(format!(
-                    "Bundle {} is not active",
-                    bundle.1
-                )));
-            }
-
-            // Branch availability
-            let available_in_branch: bool = sqlx::query_scalar(
-                "SELECT EXISTS(
-                    SELECT 1 FROM bundle_branch_availability WHERE bundle_id = $1 AND branch_id = $2
-                 ) OR NOT EXISTS(
-                    SELECT 1 FROM bundle_branch_availability WHERE bundle_id = $1
-                 )",
-            )
-            .bind(bundle.0)
-            .bind(body.branch_id)
-            .fetch_one(pool.get_ref())
-            .await?;
-
-            if !available_in_branch {
-                return Err(AppError::BadRequest(format!(
-                    "Bundle {} is not available in branch {}",
-                    bundle.1, body.branch_id
-                )));
-            }
-
-            // Date / Time window validation
-            let order_time = body.created_at.unwrap_or_else(Utc::now);
-            let branch_tz: String = sqlx::query_scalar(
-                "SELECT COALESCE(b.timezone, o.timezone)::text
-                 FROM branches b JOIN organizations o ON o.id = b.org_id WHERE b.id = $1",
-            )
-            .bind(body.branch_id)
-            .fetch_one(pool.get_ref())
-            .await?;
-
-            let local_dt_rows: Option<(chrono::NaiveDate, chrono::NaiveTime)> = sqlx::query_as(
-                "SELECT ($1::timestamptz AT TIME ZONE $2)::date, ($1::timestamptz AT TIME ZONE $2)::time"
-            )
-            .bind(order_time)
-            .bind(&branch_tz)
-            .fetch_optional(pool.get_ref())
-            .await?;
-
-            if let Some((local_date, local_time)) = local_dt_rows {
-                let bundle_limits: (Option<chrono::NaiveDate>, Option<chrono::NaiveDate>, Option<chrono::NaiveTime>, Option<chrono::NaiveTime>) = sqlx::query_as(
-                    "SELECT available_from_date, available_until_date, available_from_time, available_until_time \
-                     FROM bundles WHERE id = $1"
-                )
-                .bind(bundle.0)
-                .fetch_one(pool.get_ref())
-                .await?;
-
-                if let Some(from_d) = bundle_limits.0
-                    && local_date < from_d
-                {
-                    return Err(AppError::BadRequest(format!(
-                        "Bundle {} is not yet available",
-                        bundle.1
-                    )));
-                }
-                if let Some(until_d) = bundle_limits.1
-                    && local_date > until_d
-                {
-                    return Err(AppError::BadRequest(format!(
-                        "Bundle {} availability has expired",
-                        bundle.1
-                    )));
-                }
-                if let Some(from_t) = bundle_limits.2
-                    && local_time < from_t
-                {
-                    return Err(AppError::BadRequest(format!(
-                        "Bundle {} is not available at this hour",
-                        bundle.1
-                    )));
-                }
-                if let Some(until_t) = bundle_limits.3
-                    && local_time > until_t
-                {
-                    return Err(AppError::BadRequest(format!(
-                        "Bundle {} is not available at this hour",
-                        bundle.1
-                    )));
-                }
-            }
-
-            // Resolve components (client snapshot or catalog defaults)
-            let catalog: Vec<(Uuid, i32, String, serde_json::Value)> = sqlx::query_as(
-                "SELECT bc.item_id, bc.quantity, mi.name, mi.name_translations \
-                 FROM bundle_components bc \
-                 JOIN menu_items mi ON mi.id = bc.item_id \
-                 WHERE bc.bundle_id = $1 \
-                 ORDER BY bc.position ASC",
-            )
-            .bind(bundle.0)
-            .fetch_all(pool.get_ref())
-            .await?;
-
-            if catalog.is_empty() {
-                return Err(AppError::BadRequest(format!(
-                    "Bundle {} has no components",
-                    bundle.1
-                )));
-            }
-
-            let catalog_map: std::collections::HashMap<Uuid, (i32, String, serde_json::Value)> =
-                catalog
-                    .iter()
-                    .map(|(id, qty, name, tr)| (*id, (*qty, name.clone(), tr.clone())))
-                    .collect();
-
-            let component_inputs: Vec<crate::orders::component_resolve::BundleComponentInput> =
-                if item_input.bundle_components.is_empty() {
-                    catalog
-                        .iter()
-                        .map(|(id, qty, _, _)| {
-                            crate::orders::component_resolve::BundleComponentInput {
-                                item_id: *id,
-                                quantity: *qty,
-                                size_label: None,
-                                addons: vec![],
-                                optional_field_ids: vec![],
-                            }
-                        })
-                        .collect()
-                } else {
-                    item_input.bundle_components.clone()
-                };
-
-            for comp_in in component_inputs {
-                let Some((catalog_qty, item_name, name_translations)) =
-                    catalog_map.get(&comp_in.item_id)
-                else {
-                    return Err(AppError::BadRequest(format!(
-                        "Item {} is not a component of bundle {}",
-                        comp_in.item_id, bundle.1
-                    )));
-                };
-                if comp_in.quantity != *catalog_qty {
-                    return Err(AppError::BadRequest(format!(
-                        "Invalid quantity for component {} in bundle {}",
-                        item_name, bundle.1
-                    )));
-                }
-
-                let line_qty = comp_in.quantity * item_input.quantity;
-                let config = crate::orders::component_resolve::resolve_menu_item_configuration(
-                    pool.get_ref(),
-                    comp_in.item_id,
-                    comp_in.size_label.clone(),
-                    line_qty,
-                    &comp_in.addons,
-                    &comp_in.optional_field_ids,
-                    body.branch_id,
-                )
-                .await?;
-
-                component_surcharge += (config.addon_line + config.optional_line)
-                    * comp_in.quantity
-                    * item_input.quantity;
-
-                for d in config.deductions {
-                    deductions.push(InventoryDeduction {
-                        org_ingredient_id: d.org_ingredient_id,
-                        ingredient_name: d.ingredient_name,
-                        unit: d.unit,
-                        quantity: d.quantity,
-                        source: format!("bundle_component:{}", item_name),
-                        category: d.category,
-                        addon_item_id: d.addon_item_id,
-                        optional_field_id: d.optional_field_id,
-                        component_item_id: Some(comp_in.item_id),
-                        cost_per_unit: None,
-                        line_cost: None,
-                    });
-                }
-
-                let comp_addons: Vec<ResolvedAddon> = config
-                    .addons
-                    .into_iter()
-                    .map(|a| ResolvedAddon {
-                        addon_item_id: a.addon_item_id,
-                        addon_name: a.addon_name,
-                        name_translations: a.name_translations,
-                        unit_price: a.unit_price,
-                        quantity: a.quantity,
-                        has_ingredients: true, // component-level costing rolls up via deductions
-                        is_swap: false,
-                    })
-                    .collect();
-
-                let comp_optionals: Vec<ResolvedOptional> = config
-                    .optionals
-                    .into_iter()
-                    .map(|o| ResolvedOptional {
-                        optional_field_id: o.optional_field_id,
-                        field_name: o.field_name,
-                        name_translations: o.name_translations,
-                        price: o.price,
-                        org_ingredient_id: o.org_ingredient_id,
-                        ingredient_name: o.ingredient_name,
-                        ingredient_unit: o.ingredient_unit,
-                        quantity_used: o.quantity_used,
-                    })
-                    .collect();
-
-                bundle_components.push(ResolvedBundleComponent {
-                    item_id: comp_in.item_id,
-                    item_name: item_name.clone(),
-                    name_translations: name_translations.clone(),
-                    quantity: comp_in.quantity,
-                    size_label: comp_in.size_label.clone(),
-                    addons: comp_addons,
-                    optionals: comp_optionals,
-                });
-            }
-
-            (
-                None,
-                bundle.1,
-                serde_json::json!({}),
-                bundle.2,
-                Some(bundle.0),
-                Some(bundle.2),
-                0,
-                false,
-            )
-        } else if let Some(m_item_id) = item_input.menu_item_id {
-            // ── 2. Resolve Menu Item ──────────────────────────
-            // Pull the branch override alongside the catalog row: the branch layer can
-            // replace the price (price_override, piastres) and/or disable the item at
-            // this branch. A disabled item is flagged (price_flagged) but NOT rejected
-            // — an offline/stale POS may legitimately still be selling it.
-            let (item_name, name_translations, base_price, branch_price_override, branch_disabled):
-                (String, serde_json::Value, i32, Option<i32>, bool) = sqlx::query_as(
-                "SELECT mi.name, mi.name_translations, mi.base_price,
-                        bmo.price_override,
-                        COALESCE(bmo.is_available, true) = false AS branch_disabled
-                 FROM menu_items mi
-                 LEFT JOIN branch_menu_overrides bmo
-                        ON bmo.menu_item_id = mi.id AND bmo.branch_id = $2
-                 WHERE mi.id = $1 AND mi.deleted_at IS NULL",
-            )
-            .bind(m_item_id)
-            .bind(body.branch_id)
-            .fetch_optional(pool.get_ref())
-            .await?
-            .ok_or_else(|| AppError::NotFound(
-                format!("Menu item {} not found", m_item_id)
-            ))?;
-
-            // Branch-effective base: the override price replaces the catalog base_price.
-            let base_price = branch_price_override.unwrap_or(base_price);
-
-            let unit_price: i32 = match &item_input.size_label {
-                Some(size) => {
-                    // A per-(branch, item, size) override wins for that size; otherwise the
-                    // catalog size price; otherwise the branch-effective base. (A branch base
-                    // override never silently changes an explicitly-priced size.)
-                    let branch_size: Option<i32> = sqlx::query_scalar(
-                        "SELECT price_override FROM branch_menu_size_overrides \
-                         WHERE branch_id = $1 AND menu_item_id = $2 AND size_label = $3",
-                    )
-                    .bind(body.branch_id)
-                    .bind(m_item_id)
-                    .bind(size)
-                    .fetch_optional(pool.get_ref())
-                    .await?;
-
-                    match branch_size {
-                        Some(bs) => bs,
-                        None => {
-                            let p: Option<i32> = sqlx::query_scalar(
-                                "SELECT price_override FROM item_sizes \
-                                 WHERE menu_item_id = $1 AND label = $2 AND is_active = true",
-                            )
-                            .bind(m_item_id)
-                            .bind(size)
-                            .fetch_optional(pool.get_ref())
-                            .await?
-                            .flatten();
-                            p.unwrap_or(base_price)
-                        }
-                    }
-                }
-                None => base_price,
-            };
-
-            // Resolve recipe + addons (incl. milk/coffee swaps) + optionals via the
-            // SHARED resolver that bundle components also use, so the deduction +
-            // swap rules live in exactly one place. Map its output into the
-            // order-line structs (which additionally carry cost fields).
-            let config = crate::orders::component_resolve::resolve_menu_item_configuration(
-                pool.get_ref(),
-                m_item_id,
-                item_input.size_label.clone(),
-                item_input.quantity,
-                &item_input.addons,
-                &item_input.optional_field_ids,
-                body.branch_id,
-            )
-            .await?;
-            for d in config.deductions {
-                deductions.push(InventoryDeduction {
-                    org_ingredient_id: d.org_ingredient_id,
-                    ingredient_name: d.ingredient_name,
-                    unit: d.unit,
-                    quantity: d.quantity,
-                    source: d.source,
-                    category: d.category,
-                    addon_item_id: d.addon_item_id,
-                    optional_field_id: d.optional_field_id,
-                    component_item_id: None,
-                    cost_per_unit: None,
-                    line_cost: None,
-                });
-            }
-            for a in config.addons {
-                resolved_addons.push(ResolvedAddon {
-                    addon_item_id: a.addon_item_id,
-                    addon_name: a.addon_name,
-                    name_translations: a.name_translations,
-                    unit_price: a.unit_price,
-                    quantity: a.quantity,
-                    has_ingredients: a.has_ingredients,
-                    is_swap: a.is_swap,
-                });
-            }
-            for o in config.optionals {
-                resolved_optionals.push(ResolvedOptional {
-                    optional_field_id: o.optional_field_id,
-                    field_name: o.field_name,
-                    name_translations: o.name_translations,
-                    price: o.price,
-                    org_ingredient_id: o.org_ingredient_id,
-                    ingredient_name: o.ingredient_name,
-                    ingredient_unit: o.ingredient_unit,
-                    quantity_used: o.quantity_used,
-                });
-            }
-
-            // Capture the catalog (expected) addon total per single item unit, then
-            // overlay the POS's charged addon prices — recorded verbatim, with any
-            // deviation surfaced via the line price flag below.
-            let expected_addon_per_unit: i32 = resolved_addons
-                .iter()
-                .map(|a| a.unit_price * a.quantity)
-                .sum();
-            for (i, a) in resolved_addons.iter_mut().enumerate() {
-                if let Some(p) = item_input.addons.get(i).and_then(|ai| ai.unit_price) {
-                    a.unit_price = p;
-                }
-            }
-
-            (
-                Some(m_item_id),
-                item_name,
-                name_translations,
-                unit_price,
-                None,
-                None,
-                expected_addon_per_unit,
-                branch_disabled,
-            )
-        } else {
-            return Err(AppError::BadRequest(
-                "Each line item must have either menu_item_id or bundle_id".into(),
-            ));
-        };
-
-        // `unit_price` from the resolution is the EXPECTED (catalog + branch override)
-        // price; overlay the POS's charged price so the recorded line equals the
-        // receipt. `resolved_addons` already carry charged prices (overlaid above for
-        // menu items; bundle components stay server-priced via the surcharge).
-        let expected_unit_price = unit_price;
-        let unit_price = item_input.unit_price.unwrap_or(expected_unit_price);
-
-        let charged_addon_per_unit: i32 = if bundle_id.is_some() {
-            0
-        } else {
-            resolved_addons
-                .iter()
-                .map(|a| a.unit_price * a.quantity)
-                .sum()
-        };
-        let optional_per_unit: i32 = if bundle_id.is_some() {
-            0
-        } else {
-            resolved_optionals.iter().map(|o| o.price).sum()
-        };
-
-        let charged_line_subtotal = (unit_price + charged_addon_per_unit + optional_per_unit)
-            * item_input.quantity
-            + component_surcharge;
-        let expected_line_subtotal =
-            (expected_unit_price + expected_addon_per_unit + optional_per_unit)
-                * item_input.quantity
-                + component_surcharge;
+        let mut resolved = resolve_order_line(
+            pool.get_ref(),
+            org_id,
+            body.branch_id,
+            order_time,
+            item_input,
+        )
+        .await?;
+        let charged_line_subtotal = resolved.charged_subtotal();
+        let expected_line_subtotal = resolved.expected_subtotal();
 
         // A reward pays for whole units of this line, modifiers included — the
         // customer chose oat milk and the reward is the drink they chose. The
         // charge is reduced, never taken below zero.
         let covered = redemption_plan
             .units_for(line_index)
-            .map(|units| {
-                let per_unit = unit_price + charged_addon_per_unit + optional_per_unit;
-                (per_unit * units).min(charged_line_subtotal)
-            })
+            .map(|units| (resolved.charged_per_unit() * units).min(charged_line_subtotal))
             .unwrap_or(0);
         let charged_line_subtotal = charged_line_subtotal - covered;
         let is_reward_line = covered > 0;
@@ -1335,31 +1485,14 @@ pub(crate) async fn create_order_inner(
         // was disabled at this branch (a stale/offline sale — recorded, not rejected).
         // A reward line is EXEMPT: it is meant to differ from the catalog price,
         // and flagging it would bury the real price anomalies in noise.
-        let line_price_flagged =
-            !is_reward_line && (branch_disabled || charged_line_subtotal != expected_line_subtotal);
+        resolved.price_flagged = !is_reward_line
+            && (resolved.branch_disabled || charged_line_subtotal != expected_line_subtotal);
+        resolved.is_reward = is_reward_line;
+        resolved.reward_covered = covered;
 
         subtotal += charged_line_subtotal;
         expected_subtotal += expected_line_subtotal;
-
-        resolved_items.push(ResolvedItem {
-            menu_item_id: resolved_menu_item_id,
-            item_name,
-            name_translations,
-            size_label: item_input.size_label.clone(),
-            unit_price,
-            is_reward: is_reward_line,
-            reward_covered: covered,
-            price_flagged: line_price_flagged,
-            quantity: item_input.quantity,
-            notes: item_input.notes.clone(),
-            addons: resolved_addons,
-            optionals: resolved_optionals,
-            deductions,
-            bundle_id,
-            bundle_unit_price,
-            bundle_components,
-            component_surcharge,
-        });
+        resolved_items.push(resolved);
     }
 
     // Shared with the delivery-order discount path so the two can never drift.
@@ -1644,10 +1777,10 @@ pub(crate) async fn create_order_inner(
              idempotency_key, created_at, tip_is_cash, order_ref,
              price_flagged, price_expected_total, waiter_id, loyalty_customer_id,
              service_charge_amount, tax_rate_applied, service_charge_rate_applied,
-             tax_inclusive)
+             tax_inclusive, service_charge_taxable_applied, order_type, open_ticket_id)
         VALUES ($1, $2, $3, $4, $5, $6, $7::discount_type, $8,
                 $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'completed', $19, $20, $21, $22,
-                $23, $24, $25, $26, $27, $28, $29, $30)
+                $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)
         RETURNING
             id, branch_id, shift_id, teller_id,
             (SELECT name FROM users WHERE id = $3) AS teller_name,
@@ -1690,7 +1823,7 @@ pub(crate) async fn create_order_inner(
     .bind(&order_ref)
     .bind(price_flagged)
     .bind(expected_total)
-    .bind(waiter_id)
+    .bind(ticket.as_ref().map(|t| t.waiter_id))
     // Whose card was scanned at the till, whether or not they spent anything.
     //
     // Recorded here so collecting points afterwards does NOT need a second
@@ -1698,13 +1831,17 @@ pub(crate) async fn create_order_inner(
     // receipt already knows who. Scanning twice for one customer is the part of
     // this that read as two unrelated features.
     .bind(body.loyalty_customer_id)
-    // The policy AS APPLIED. Recorded per order so a rate change next month
-    // cannot restate this month's books, and so a reprint years later shows
-    // the rate the customer was actually charged.
+    // The policy AS APPLIED — all four halves of it. Recorded per order so a
+    // rate change next month cannot restate this month's books, and so a
+    // reprint years later shows the rate the customer was actually charged
+    // and whether the service charge sat inside the tax base.
     .bind(service_charge_amount)
     .bind(policy.tax_rate)
     .bind(policy.service_charge_rate)
     .bind(policy.tax_inclusive)
+    .bind(policy.service_charge_taxable)
+    .bind(order_type)
+    .bind(ticket.as_ref().map(|t| t.open_ticket_id))
     .fetch_one(&mut *tx)
     .await
     {
@@ -1739,6 +1876,67 @@ pub(crate) async fn create_order_inner(
         }
         Err(e) => return Err(e.into()),
     };
+
+    // The other side of the link, in the same transaction as the order row.
+    //
+    // `settled` is terminal for a ticket and it is an EVENT: the status flips
+    // together with who settled it, when, into which shift, and into which
+    // order (the CHECK `open_tickets_settled_is_an_event` refuses the flip
+    // without them). Only a ticket still `open` can settle; a concurrent
+    // settle that lost the race — or a void that landed first — finds no row
+    // and this whole transaction, order included, is rolled back. The kitchen
+    // copies close as `settled` here too, so a bill paid under a still-firing
+    // ticket leaves the till queue with the sale rather than never.
+    //
+    // `settled_at` is the order's `created_at`, not `now()`: an offline till
+    // replays a settle hours later and the bill was paid when it says it was.
+    // One instant on both rows, so a report joining them never sees a ticket
+    // settled after the sale it settled into.
+    if let Some(t) = ticket {
+        let linked = sqlx::query(
+            "UPDATE open_tickets SET status = 'settled', settled_at = $5, order_id = $2, \
+                 settled_by = $3, settled_shift_id = $4, updated_at = now() \
+             WHERE id = $1 AND status = 'open'",
+        )
+        .bind(t.open_ticket_id)
+        .bind(order.id)
+        .bind(actor.teller_id)
+        .bind(body.shift_id)
+        .bind(created_at)
+        .execute(&mut *tx)
+        .await?;
+        if linked.rows_affected() == 0 {
+            return Err(AppError::Conflict("Ticket is already settled".into()));
+        }
+        crate::kitchen::close_kitchen_tickets(
+            &mut tx,
+            crate::kitchen::KitchenSourceRef::OpenTicket(t.open_ticket_id),
+            crate::kitchen::CloseReason::Settled,
+            Some(actor.teller_id),
+        )
+        .await?;
+
+        // The party CHECKED OUT, under the same commit as their sale. The
+        // table lands in `dirty` — it still holds their plates, and a person
+        // clears it (the POS prompts the teller right after the sale). Their
+        // transfer wish is moot, and their booking, if they had one, is done
+        // unless a sibling bill is still open on it. All three used to run
+        // after the order had committed and could each be the step that did
+        // not happen; now the sale and the floor agree or neither is written.
+        let hand = crate::floor_ops::Hand::of(&mut *tx, actor.teller_id, shift_branch_id).await?;
+        t.floor.freed_table = crate::floor_ops::end_ticket_occupancy(
+            &mut *tx,
+            t.open_ticket_id,
+            crate::floor_ops::EndReason::Settled,
+            true,
+            &hand,
+        )
+        .await?;
+        t.floor.cancelled_transfers =
+            crate::floor_ops::cancel_waiting_transfers(&mut tx, t.open_ticket_id).await?;
+        t.floor.completed_booking =
+            crate::bookings::handlers::complete_by_ticket(&mut *tx, t.open_ticket_id).await?;
+    }
 
     // Payment splits
     if let Some(splits) = &body.payment_splits {
@@ -1805,23 +2003,12 @@ pub(crate) async fn create_order_inner(
         resolved_items
             .iter()
             .map(|ri| {
-                let modifiers: Vec<String> = ri
-                    .addons
-                    .iter()
-                    .map(|a| {
-                        if a.quantity > 1 {
-                            format!("{}× {}", a.quantity, a.addon_name)
-                        } else {
-                            a.addon_name.clone()
-                        }
-                    })
-                    .collect();
                 crate::kitchen::KitchenLine {
                     menu_item_id: ri.menu_item_id,
                     name: ri.item_name.clone(),
                     qty: ri.quantity,
                     size_label: ri.size_label.clone(),
-                    modifiers,
+                    modifiers: ri.kitchen_modifiers(),
                     notes: ri.notes.clone(),
                     // Teller orders fire to the KDS LIVE (online) only → server ids.
                     kitchen_item_id: None,
@@ -2102,8 +2289,7 @@ pub(crate) async fn create_order_inner(
             &crate::kitchen::EmitKitchen {
                 org_id: actor.org_id,
                 branch_id: body.branch_id,
-                source_type: "order",
-                source_id: order.id,
+                source: crate::kitchen::KitchenSource::Order(order.id),
                 round_number: 1,
                 table_label: None,
                 kitchen_ref: order.order_ref.as_deref(),
@@ -2203,7 +2389,7 @@ pub async fn list_orders(
     // branch_id is absent or the all-zeros (nil) UUID — every branch in the
     // caller's org (the "All branches" view). org_id was validated above, so
     // the org roll-up stays inside the caller's own org.
-    let all_branches = query.shift_id.is_none() && query.branch_id.map_or(true, |b| b.is_nil());
+    let all_branches = query.shift_id.is_none() && query.branch_id.is_none_or(|b| b.is_nil());
 
     let (scope_condition, scope_id): (&str, Uuid) = if let Some(shift_id) = query.shift_id {
         let bid: Option<Uuid> = sqlx::query_scalar("SELECT branch_id FROM shifts WHERE id = $1")
@@ -2435,7 +2621,10 @@ pub async fn void_order(
     body: web::Json<VoidOrderRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "orders", "update").await?;
+    // Voiding is its own rung, `orders:delete`, split from ringing up — see
+    // `permissions::seeder` and `sync::ReplayOp::required_permissions`, which
+    // asks the same question of a queued void. The two must not drift.
+    check_permission(pool.get_ref(), &claims, "orders", "delete").await?;
     let order = fetch_order_or_404(pool.get_ref(), *order_id).await?;
     require_branch_access(pool.get_ref(), &claims, order.branch_id).await?;
     void_order_inner(
@@ -2491,6 +2680,22 @@ pub(crate) async fn void_order_inner(
         return Err(AppError::BadRequest(
             "A note is required when void reason is 'other'".into(),
         ));
+    }
+    // A void says the sale never happened; a sale that has given money back
+    // demonstrably did (owner ruling 4). `orders_status_respects_refunds`
+    // refuses the flip in any case — this is the same rule said in the till's
+    // words instead of a SQLSTATE, before anything else is touched.
+    let refunded: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(amount), 0) FROM order_refunds WHERE order_id = $1",
+    )
+    .bind(order_id)
+    .fetch_one(pool.get_ref())
+    .await?;
+    if refunded > 0 {
+        return Err(AppError::Conflict(format!(
+            "{refunded} has already been refunded against this sale, so it cannot be voided \
+             — refund the remainder instead."
+        )));
     }
     let voided_at = body.voided_at.unwrap_or_else(chrono::Utc::now);
     // Offline voids carry their real time; reject only a future device clock.
@@ -2610,6 +2815,40 @@ pub(crate) async fn void_order_inner(
             }
         }
     }
+
+    // The kitchen copy of a voided sale is voided with it and leaves the
+    // screen: its lines are voided (off every station's queue) and the ticket
+    // closes `voided` unless something closed it first.
+    crate::kitchen::close_kitchen_tickets(
+        &mut tx,
+        crate::kitchen::KitchenSourceRef::Order(order_id),
+        crate::kitchen::CloseReason::Voided,
+        Some(actor.teller_id),
+    )
+    .await?;
+
+    // Everything else a void undoes is already inside this transaction, and
+    // deliberately NOT written here a second time:
+    //
+    //   * LOYALTY. `orders_reverse_loyalty_on_void` (20260912060000) fires on
+    //     the status UPDATE above and reverses every earn and redeem the sale
+    //     wrote, via `loyalty_reverse()` under the clawback policy. A second
+    //     writer here would hit "never more than the original" and fail the
+    //     void — the trigger's own comment says so.
+    //
+    //   * THE TICKET this sale settled stays `settled`. `open_tickets.order_id`
+    //     (20260912020000) is the walk back from a voided order to its bill;
+    //     the status is never mirrored. Its table was freed and its booking
+    //     completed when it settled — the party came and ate, and voiding the
+    //     money afterwards does not un-seat them.
+    //
+    //   * THE DELIVERY ORDER this sale finalized stays `delivered`, with its
+    //     `order_id`. `delivery_orders_sale_means_delivered` and
+    //     `_paid_when_delivered` (20260912050000) make any other row a CHECK
+    //     violation, on purpose: that row is the quote and the fact that food
+    //     was carried and paid for at the door; the SALE is this row, and the
+    //     void is on it. "Was this delivery's sale voided" is a join through
+    //     `orders.status`, the same as for a ticket.
 
     tx.commit().await?;
     Ok(HttpResponse::Ok().json(updated))
@@ -2853,6 +3092,26 @@ pub(crate) async fn fetch_order_by_idempotency_key(
     );
     Ok(sqlx::query_as::<_, Order>(&sql)
         .bind(key)
+        .bind(org_id)
+        .fetch_optional(pool)
+        .await?)
+}
+
+/// The order a floor ticket settled into, by the explicit link
+/// (`orders.open_ticket_id`, unique where set). Org-scoped like the other two
+/// lookups; a ticket id from another org finds nothing.
+pub(crate) async fn fetch_order_by_open_ticket(
+    pool: &PgPool,
+    open_ticket_id: Uuid,
+    org_id: Uuid,
+) -> Result<Option<Order>, AppError> {
+    let sql = format!(
+        "{} WHERE o.open_ticket_id = $1 \
+           AND o.branch_id IN (SELECT id FROM branches WHERE org_id = $2)",
+        ORDER_SELECT
+    );
+    Ok(sqlx::query_as::<_, Order>(&sql)
+        .bind(open_ticket_id)
         .bind(org_id)
         .fetch_optional(pool)
         .await?)
@@ -3260,9 +3519,10 @@ fn validate_discount_value(dt: &str, value: Decimal) -> Result<(), AppError> {
 }
 
 fn validate_void_reason(reason: &str) -> Result<(), AppError> {
-    match reason {
-        "customer_request" | "wrong_order" | "quality_issue" | "other" => Ok(()),
-        _ => Err(AppError::BadRequest("Invalid void_reason".into())),
+    // The vocabulary is `VoidReason`'s — one enum for counter and dine-in voids.
+    match crate::orders::VoidReason::parse(reason) {
+        Some(_) => Ok(()),
+        None => Err(AppError::BadRequest("Invalid void_reason".into())),
     }
 }
 
@@ -3289,7 +3549,7 @@ pub async fn export_orders(
 
     // Same scope rule as list_orders: shift, single branch, or every branch in
     // the org when no shift is given and branch_id is absent or the nil UUID.
-    let all_branches = query.shift_id.is_none() && query.branch_id.map_or(true, |b| b.is_nil());
+    let all_branches = query.shift_id.is_none() && query.branch_id.is_none_or(|b| b.is_nil());
 
     let (scope_condition, scope_id): (&str, Uuid) = if let Some(shift_id) = query.shift_id {
         let bid: Option<Uuid> = sqlx::query_scalar("SELECT branch_id FROM shifts WHERE id = $1")

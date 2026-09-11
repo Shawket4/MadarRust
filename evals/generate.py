@@ -159,6 +159,11 @@ CUSTOM = [
  ("ar","متوسط البقشيش لكل ويتر الشهر ده","orders",["waiter"],["avg_tip"],"this_month"),
  ("en","tip rate per branch","orders",["branch"],["tip_rate"],"last_30_days"),
  ("ar","نسبة البقشيش لكل فرع","orders",["branch"],["tip_rate"],"last_30_days"),
+ # The refunds dataset is the returns ledger itself (one row per refund, on the
+ # day it was issued) — "refund value per branch" above stays on `orders`
+ # because that is revenue net of refunds; this is the money-out view.
+ ("en","refunds by reason last month","refunds",["refund_reason"],["refund_count","refund_amount"],"last_month"),
+ ("ar","المرتجعات حسب السبب الشهر اللي فات","refunds",["refund_reason"],["refund_count","refund_amount"],"last_month"),
 ]
 for i,(lang,q,ds,dims,meas,per) in enumerate(CUSTOM,1):
     add(f"custom-{i:03d}",lang,q,query(ds,dims,meas,per),"custom_query")

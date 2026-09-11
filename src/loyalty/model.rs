@@ -13,6 +13,45 @@ use super::earn::{self, EarnRule, Mode, OrderAmounts};
 use super::settings::{LoyaltySettings, RewardItem, load_effective, load_effective_rewards};
 use crate::errors::AppError;
 
+/// Why a ledger row exists — `loyalty_transactions.source`.
+///
+/// The kind says what a row IS (an earn, a redeem, an adjustment, a reversal);
+/// this says what CAUSED it. The two are paired by a CHECK in the database, so
+/// an earn can only ever be a sale and a gift can never masquerade as one. Kept
+/// as an enum here so a caller cannot misspell its way past that CHECK into a
+/// 500 at the counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// Points or stamps for a settled order.
+    Sale,
+    /// A reward handed over against an order line.
+    Redemption,
+    /// The order was torn up; its movements are undone.
+    Void,
+    /// Money went back to the customer; some or all of the earn follows it.
+    Refund,
+    /// The birthday gift.
+    Birthday,
+    /// The "we've missed you" sweetener.
+    Winback,
+    /// A person typed it.
+    Manual,
+}
+
+impl Source {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Source::Sale => "sale",
+            Source::Redemption => "redemption",
+            Source::Void => "void",
+            Source::Refund => "refund",
+            Source::Birthday => "birthday",
+            Source::Winback => "winback",
+            Source::Manual => "manual",
+        }
+    }
+}
+
 /// A member as the teller, the admin and the pass all see them.
 ///
 /// Both balances travel, because an org may switch mode (or run points at one
@@ -305,8 +344,8 @@ pub async fn award_for_order(
     let inserted = sqlx::query(
         "INSERT INTO loyalty_transactions \
             (org_id, customer_id, branch_id, kind, currency, points, order_id, basis_piastres, \
-             rate_piastres_per_point, created_by) \
-         VALUES ($1,$2,$3,'earn',$4,$5,$6,$7,$8,$9) \
+             rate_piastres_per_point, created_by, source) \
+         VALUES ($1,$2,$3,'earn',$4,$5,$6,$7,$8,$9,'sale') \
          ON CONFLICT DO NOTHING",
     )
     .bind(org_id)
@@ -328,13 +367,25 @@ pub async fn award_for_order(
     })
 }
 
-/// An admin correction, in either direction.
+/// A movement that is a decision rather than a consequence of a sale: an
+/// admin's correction in either direction, or a gift the programme hands out.
+///
+/// `source` says which — the ledger's CHECK only lets an `adjust` claim
+/// `manual`, `birthday` or `winback`, and a report on "what did the programme
+/// give away" is built on that column, so a gift must not arrive as `manual`.
+///
+/// A deduction may not overdraw. The database refuses that too (the balance
+/// trigger lets only a void or refund clawback go below zero, and only where
+/// the programme allows it); the check here is so an admin gets a sentence
+/// rather than a constraint name.
+#[allow(clippy::too_many_arguments)]
 pub async fn adjust(
     pool: &PgPool,
     member: &MemberRow,
     branch_id: Uuid,
     mode: Mode,
     points: i32,
+    source: Source,
     note: Option<String>,
     created_by: Option<Uuid>,
 ) -> Result<MemberView, AppError> {
@@ -343,7 +394,7 @@ pub async fn adjust(
             "An adjustment of zero points changes nothing".into(),
         ));
     }
-    if member.balance_in(mode) + points < 0 {
+    if points < 0 && member.balance_in(mode) + points < 0 {
         return Err(AppError::BadRequest(format!(
             "{} has {}; that adjustment would go negative",
             member.name,
@@ -352,8 +403,8 @@ pub async fn adjust(
     }
     sqlx::query(
         "INSERT INTO loyalty_transactions \
-            (org_id, customer_id, branch_id, kind, currency, points, note, created_by) \
-         VALUES ($1,$2,$3,'adjust',$4,$5,$6,$7)",
+            (org_id, customer_id, branch_id, kind, currency, points, note, created_by, source) \
+         VALUES ($1,$2,$3,'adjust',$4,$5,$6,$7,$8)",
     )
     .bind(member.org_id)
     .bind(member.id)
@@ -362,6 +413,7 @@ pub async fn adjust(
     .bind(points)
     .bind(note)
     .bind(created_by)
+    .bind(source.as_str())
     .execute(pool)
     .await?;
     let fresh = find_by_id(pool, member.id)
@@ -374,7 +426,15 @@ pub async fn adjust(
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
 pub struct LedgerEntry {
     pub id: Uuid,
+    /// `earn`, `redeem`, `adjust`, or `reverse_earn` / `reverse_redeem` /
+    /// `reverse_adjust` — the last three undo the row named in `reverses_id`.
     pub kind: String,
+    /// Why the row exists: `sale`, `redemption`, `void`, `refund`, `birthday`,
+    /// `winback` or `manual`. What a till or a dashboard should print as the
+    /// reason, instead of guessing from the kind and the note.
+    pub source: String,
+    /// For a reversal, the row it undoes.
+    pub reverses_id: Option<Uuid>,
     /// `"points"` or `"visits"` — which balance this row moved.
     pub currency: String,
     pub points: i32,
@@ -394,7 +454,8 @@ pub async fn ledger(
     limit: i64,
 ) -> Result<Vec<LedgerEntry>, AppError> {
     Ok(sqlx::query_as(
-        "SELECT t.id, t.kind::text AS kind, t.currency, t.points, t.branch_id, b.name AS branch_name, \
+        "SELECT t.id, t.kind::text AS kind, t.source, t.reverses_id, t.currency, t.points, \
+                t.branch_id, b.name AS branch_name, \
                 t.order_id, t.basis_piastres, m.name AS reward_name, t.note, t.created_at \
            FROM loyalty_transactions t \
            LEFT JOIN branches b ON b.id = t.branch_id \
@@ -406,6 +467,80 @@ pub async fn ledger(
     .fetch_all(pool)
     .await?)
 }
+/// Forget a member: the person goes, the books stay.
+///
+/// The ledger is the SHOP's record of what it gave away and what it was owed —
+/// deleting it would change the meaning of every past report, and the database
+/// refuses to anyway (`loyalty_transactions` is append-only, and its FK to the
+/// member is RESTRICT). So the row is soft-deleted and everything that is about
+/// the PERSON rather than the money is scrubbed in place:
+///
+///   * name and birthday go — there is nothing to greet;
+///   * the phone is redacted, not nulled (the column is NOT NULL, and the
+///     partial unique index only covers live rows, so the same number can join
+///     again tomorrow as a fresh member);
+///   * the member token is rotated, so the barcode on a pass that is still in a
+///     wallet resolves to nobody — `find_by_token` already skips deleted rows,
+///     but a token that no longer exists cannot be un-skipped by a later bug;
+///   * the Apple auth token goes with it, so a device holding the old pass can
+///     no longer authenticate a refetch;
+///   * pass devices are dropped, so no update is ever pushed to the phone again;
+///   * any notice waiting on the card is cleared, and marketing is switched
+///     off, because a person who asked to be forgotten has also asked not to be
+///     written to.
+///
+/// Orders keep their `loyalty_customer_id`: which member a sale earned for is
+/// part of the sale's history, and the row it points at now says nothing about
+/// anyone. Google's object is expired by the caller AFTER commit — it is a
+/// network call, and the rule everywhere here is that those happen outside the
+/// transaction.
+///
+/// Returns the row as it was before the scrub, so the caller still knows the
+/// Google object to expire. `None` when the member was already gone.
+pub async fn forget(pool: &PgPool, member_id: Uuid) -> Result<Option<MemberRow>, AppError> {
+    let mut tx = pool.begin().await?;
+    // Locked, so two admins forgetting the same member — or a sweep messaging
+    // them at the same moment — serialise on the row.
+    let before: Option<MemberRow> = sqlx::query_as(&format!(
+        "SELECT {MEMBER_COLS} FROM loyalty_customers \
+          WHERE id = $1 AND deleted_at IS NULL FOR UPDATE"
+    ))
+    .bind(member_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(before) = before else {
+        return Ok(None);
+    };
+    sqlx::query(
+        "UPDATE loyalty_customers \
+            SET deleted_at = now(), \
+                name = 'Deleted member', \
+                phone = $2, \
+                member_token = $3, \
+                apple_auth_token = NULL, \
+                birth_month = NULL, \
+                birth_day = NULL, \
+                marketing_opt_out = true, \
+                pass_notice = NULL, pass_notice_at = NULL, pass_notice_seen_at = NULL, \
+                pass_notice_wallets = NULL, pass_notice_fallback = NULL, \
+                updated_at = now() \
+          WHERE id = $1",
+    )
+    .bind(member_id)
+    // Distinct per member so a report joining on phone cannot merge every
+    // forgotten member into one; not a phone, so it cannot collide with one.
+    .bind(format!("deleted:{member_id}"))
+    .bind(super::mint_member_token())
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM loyalty_pass_devices WHERE customer_id = $1")
+        .bind(member_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Some(before))
+}
+
 #[cfg(test)]
 mod overflow_tests {
     use super::*;

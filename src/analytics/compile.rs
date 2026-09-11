@@ -674,6 +674,49 @@ mod tests {
     }
 
     #[test]
+    fn revenue_nets_refunds_through_the_per_order_view() {
+        // The status filter alone cannot subtract a partial refund (the order
+        // stays `completed`), so every money measure that claims to be net of
+        // refunds must pull in the refunds join and subtract from it.
+        for m in [
+            "revenue",
+            "net_revenue",
+            "profit",
+            "margin_pct",
+            "refund_amount",
+        ] {
+            let mut s = spec("orders");
+            s.measures = vec![m.into()];
+            let q = compile(&s, &ctx()).unwrap();
+            assert!(
+                q.sql
+                    .contains("LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id"),
+                "{m} compiled without the refunds join"
+            );
+            assert!(
+                q.sql.contains("rf.refunded_amount"),
+                "{m} does not read the refund"
+            );
+        }
+        // And the one that says it is BEFORE refunds does not.
+        let mut s = spec("orders");
+        s.measures = vec!["gross_sales".into()];
+        let q = compile(&s, &ctx()).unwrap();
+        assert!(!q.sql.contains("v_order_refund_totals"));
+    }
+
+    #[test]
+    fn the_refunds_dataset_runs_on_the_issue_date_not_the_sale() {
+        let mut s = spec("refunds");
+        s.dimensions = vec!["day".into()];
+        let q = compile(&s, &ctx()).unwrap();
+        assert!(q.sql.contains("r.issued_at"));
+        assert!(!q.sql.contains("o.created_at"));
+        // The branch fence is the refund's branch — the drawer the money left.
+        assert!(q.sql.contains("r.branch_id = ANY(:branch_ids)"));
+    }
+
+    #[test]
     fn the_branch_fence_is_always_present() {
         // Every dataset, every shape: there is no compiled query without it.
         for ds in schema::DATASETS {

@@ -18,15 +18,48 @@
 //! one-open-per-branch / cash-continuity guards (it's recorded history, not a new
 //! action). Structural integrity — FKs, unique indexes, idempotency early-returns,
 //! org scoping, and the shift-must-be-open guard for orders — still holds.
+//!
+//! WHO MAY DO WHAT is decided in exactly one place: the permission tables
+//! (`role_permissions` + the per-user `permissions` overrides), consulted through
+//! `permissions::checker::check_permission_for` against the op's EMBEDDED actor.
+//! Replay asks the table the same `(resource, action)` question the live route
+//! asks (`ReplayOp::required_permissions`), so a grant made in the dashboard works
+//! offline and a revocation stops a queued op the same as a live one. The only
+//! thing replay decides on its own is ATTRIBUTION — whether the embedded actor is
+//! a real, active till user of the bearer's org at all ([`can_sign_in_at_a_till`]).
+//! There used to be a third answer, a hard-coded role → op table in the replay
+//! path; it is gone, because three answers to one question is how a per-user
+//! grant came to work online and be ignored offline.
 
 pub mod handlers;
 pub mod routes;
+
+#[cfg(test)]
+mod tests;
 
 use uuid::Uuid;
 
 use crate::auth::jwt::Claims;
 use crate::errors::AppError;
 use crate::models::UserRole;
+
+/// The roles that sign in at a till and so can be the ORIGINAL author of a
+/// queued op. This is attribution, not authorization: it says whose name may
+/// go on a replayed write, and nothing about what that write may be — the
+/// permission table answers that, per op, in `ReplayOp::required_permissions`.
+///
+/// Mirrors the role filter on PIN login (`auth::handlers::login`): a queued op
+/// can only have been made by someone who could unlock the device. Tellers,
+/// waiters and kitchen screens always could; the BRANCH MANAGER is here because
+/// the owner ruled that a manager may work the till — PIN login, drawer, sales,
+/// and a force-close — with no approval flow. Admins are not: they never PIN in,
+/// and a super admin has no org to be attributed within.
+pub fn can_sign_in_at_a_till(role: &UserRole) -> bool {
+    matches!(
+        role,
+        UserRole::Teller | UserRole::Waiter | UserRole::Kitchen | UserRole::BranchManager
+    )
+}
 
 /// Who a write is attributed to, and whether the live ownership/state guards
 /// apply. The live route builds this from the caller's JWT; replay builds it from
@@ -65,9 +98,10 @@ impl ActingContext {
     }
 
     /// A replay attributed to an embedded actor of a known role. Waiter ops
-    /// (fire / round / void) and teller ops (settle, orders, shifts) replay
-    /// through this so the ownership/state guards keyed on `role` behave the
-    /// same as the live action that originally produced the op.
+    /// (fire / round / void), teller ops (settle, orders, shifts) and a branch
+    /// manager working the till all replay through this so the ownership/state
+    /// guards keyed on `role` behave the same as the live action that
+    /// originally produced the op.
     pub fn replay_with_role(teller_id: Uuid, org_id: Uuid, role: UserRole) -> Self {
         Self {
             teller_id,

@@ -57,11 +57,73 @@ pub struct Shift {
     pub till_name: Option<String>,
 }
 
+/// What a cash movement IS, which fixes its sign. The DB holds this as a text
+/// column under `shift_cash_movements_kind_is_known` (same convention as
+/// `order_type`), so the wire value is the snake_case label and the model
+/// carries it as a plain `String`; this enum exists so the handler can validate
+/// a request before the CHECK turns a teller's mistake into a 500.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CashMovementKind {
+    /// Non-sale cash placed in the drawer (a float top-up, a platform
+    /// settlement handed over in notes). Always positive.
+    PayIn,
+    /// Cash taken to pay for something — the shift's running costs. Always
+    /// negative.
+    PayOut,
+    /// Cash moved from the drawer to the safe. Not spent — the shop still has
+    /// it — so the report never counts it as a cost. Always negative.
+    SafeDrop,
+    /// Reverses a movement recorded by mistake; either sign. `corrects_id`
+    /// names the row it undoes so the report can net the pair.
+    Correction,
+}
+
+impl CashMovementKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PayIn => "pay_in",
+            Self::PayOut => "pay_out",
+            Self::SafeDrop => "safe_drop",
+            Self::Correction => "correction",
+        }
+    }
+
+    /// The kind the trigger `shift_cash_movements_fill_kind` would assign a
+    /// bare signed amount — what the two In/Out chips have always meant.
+    /// Clients in the field still send only the amount; the handler resolves
+    /// the kind itself so the row is always written explicitly.
+    pub fn from_sign(amount: i32) -> Self {
+        if amount < 0 {
+            Self::PayOut
+        } else {
+            Self::PayIn
+        }
+    }
+
+    /// Mirrors `shift_cash_movements_kind_matches_sign`. Zero is rejected
+    /// before this is consulted.
+    fn allows_sign(self, amount: i32) -> bool {
+        match self {
+            Self::PayIn => amount > 0,
+            Self::PayOut | Self::SafeDrop => amount < 0,
+            Self::Correction => amount != 0,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct CashMovement {
     pub id: Uuid,
     pub shift_id: Uuid,
     pub amount: i32,
+    /// One of `pay_in` / `pay_out` / `safe_drop` / `correction` — see
+    /// [`CashMovementKind`].
+    pub kind: String,
+    /// For a `correction`: the movement it reverses. NULL for every other kind,
+    /// and for a correction of something never recorded as a row.
+    #[serde(default)]
+    pub corrects_id: Option<Uuid>,
     pub note: String,
     pub moved_by: Uuid,
     pub moved_by_name: String,
@@ -90,10 +152,31 @@ pub struct PaymentSummaryRow {
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct CashMovementSummaryRow {
+    pub id: Uuid,
     pub amount: i32,
+    pub kind: String,
+    #[serde(default)]
+    pub corrects_id: Option<Uuid>,
+    /// The kind of the movement `corrects_id` points at, so a printed report
+    /// can say "correction of pay-out" and the totals can net the pair inside
+    /// the bucket the mistake was made in.
+    #[serde(default)]
+    pub corrects_kind: Option<String>,
     pub note: String,
     pub moved_by_name: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl CashMovementSummaryRow {
+    /// The bucket this row's money is counted under. A linked correction lands
+    /// in the bucket of the row it reverses, so the pair sums to nothing there
+    /// instead of showing as phantom cash in AND phantom cash out.
+    fn bucket(&self) -> &str {
+        match (self.kind.as_str(), self.corrects_kind.as_deref()) {
+            ("correction", Some(corrected)) => corrected,
+            (kind, _) => kind,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
@@ -117,10 +200,48 @@ pub struct ShiftReportResponse {
     /// `total_tips - cash_tips` — tips added onto a card/wallet tender.
     pub non_cash_tips: i64,
     pub cash_movements: Vec<CashMovementSummaryRow>,
+    /// Non-sale cash placed in the drawer (`pay_in`), net of any correction
+    /// that reversed one. Positive.
     pub cash_movements_in: i64,
+    /// What the shift SPENT (`pay_out`), net of corrections. Positive. A safe
+    /// drop is NOT in here — that money left the drawer but not the shop.
     pub cash_movements_out: i64,
-    /// Net of all cash movements (in - out) as a signed integer
+    /// Cash moved from the drawer to the safe (`safe_drop`), net of
+    /// corrections. Positive. Out of the drawer, still the shop's.
+    pub safe_drops: i64,
+    /// Signed sum of corrections that reverse nothing on record (a miscounted
+    /// float). Kept apart so a fix-up is never mistaken for a receipt or a cost.
+    pub cash_adjustments: i64,
+    /// Signed net effect of EVERY movement on the drawer — the figure
+    /// `compute_system_cash` adds to the float and the cash sales:
+    /// `in − out − safe_drops + cash_adjustments`.
     pub cash_movements_net: i64,
+    /// Refunds ISSUED FROM THIS DRAWER — keyed on `order_refunds.shift_id`,
+    /// which need not be the shift that made the sale. Money OUT; the Z-report's
+    /// returns line. `refunds_issued_cash` is what `compute_system_cash`
+    /// subtracts.
+    #[serde(default)]
+    pub refunds_issued_count: i64,
+    #[serde(default)]
+    pub refunds_issued_amount: i64,
+    #[serde(default)]
+    pub refunds_issued_cash: i64,
+    /// Cash tenders and cash tips on this shift's sales that were later FULLY
+    /// refunded. `payment_summary` and `cash_tips` leave those sales out (they
+    /// are revenue figures and match the sales report), but the notes did go
+    /// into the drawer, so `expected_cash` counts them. Reported so the sheet
+    /// adds up: `expected_cash = opening_cash + cash bucket + cash_tips +
+    /// cash_in_refunded_sales + cash_movements_net − refunds_issued_cash`.
+    #[serde(default)]
+    pub cash_in_refunded_sales: i64,
+    /// The till's standard float, when the shop has set one: what should stay
+    /// in the drawer at close. `None` means "not decided" — propose nothing.
+    pub standard_float: Option<i64>,
+    /// For an OPEN shift on a till with a standard float: how much of
+    /// `expected_cash` to drop into the safe so the drawer closes at the
+    /// float. Never negative — a drawer under its float has nothing to drop.
+    /// `None` when the shift is closed or the till has no float.
+    pub suggested_safe_drop: Option<i64>,
     /// Authoritative system (expected) cash in the drawer. For a closed shift
     /// this is the snapshot taken at close (`closing_cash_system`); for an open
     /// shift it is computed live via the same formula. Clients should display
@@ -171,6 +292,17 @@ pub struct OpenShiftRequest {
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CashMovementRequest {
     pub amount: i32,
+    /// What the movement is. Optional for the clients already in the field,
+    /// which send only a signed amount: an omitted kind resolves by sign
+    /// (negative → `pay_out`, positive → `pay_in`), exactly what the In/Out
+    /// chips have always meant. A supplied kind must agree with the sign.
+    #[serde(default)]
+    pub kind: Option<CashMovementKind>,
+    /// For a `correction` only: the movement on this shift it reverses. The
+    /// amount must be the exact opposite of that row's, and a row may be
+    /// corrected once. Omit for a correction of something never recorded.
+    #[serde(default)]
+    pub corrects_id: Option<Uuid>,
     pub note: String,
     /// When the movement actually happened. Omit for live (online) movements —
     /// the server stamps `now()`. The POS sends this for movements made OFFLINE
@@ -328,9 +460,20 @@ async fn resolve_open_till(
 }
 
 /// The **system (expected) cash** in a shift's drawer:
-///   opening float
-/// + cash taken in via orders (cash payments + cash tips, excluding voided/refunded)
-/// + net manual cash movements (cash in − cash out).
+///
+/// - opening float
+/// - plus cash taken in via orders (cash payments + cash tips, excluding voided)
+/// - plus net manual cash movements (cash in − cash out)
+/// - minus cash refunds ISSUED IN THIS SHIFT (`order_refunds.shift_id`, `is_cash`).
+///
+/// A sale that was later fully refunded (`status = 'refunded'`) is NOT
+/// excluded from the cash-in: its notes went into this drawer when it was
+/// rung, and the refund that took them out again is a row of its own, in the
+/// drawer of whichever shift issued it — the same shift or a later one. Only
+/// a VOID says the money never arrived. Filtering on `refunded` here as the
+/// revenue reports do would make a cash sale refunded in cash net to −total
+/// instead of zero. `refunds::handlers::shift_cash_refunds` is this same
+/// subtraction on its own, for callers that want the figure by itself.
 ///
 /// Single source of truth shared by `close_shift` (snapshotted into
 /// `closing_cash_system`) and the live shift report's `expected_cash`, so the
@@ -343,7 +486,9 @@ pub(crate) async fn compute_system_cash<'e, E>(
 where
     E: sqlx::PgExecutor<'e>,
 {
-    sqlx::query_scalar::<_, i64>(
+    // `TENDERED`, not `SOLD`: the drawer counts every note that came in, a
+    // fully refunded sale's included — see the constant's doc.
+    let sql = format!(
         r#"
         SELECT (
             (SELECT opening_cash FROM shifts WHERE id = $1)
@@ -353,24 +498,29 @@ where
                 JOIN orders o ON o.id = op.order_id
                 WHERE o.shift_id = $1
                   AND COALESCE(op.is_cash, op.method = 'cash') = true
-                  AND o.status NOT IN ('voided', 'refunded')
+                  AND o.{TENDERED}
             ), 0)
           + COALESCE((
                 SELECT SUM(o.tip_amount)
                 FROM orders o
                 WHERE o.shift_id = $1
                   AND COALESCE(o.tip_is_cash, COALESCE(o.tip_payment_method, o.payment_method) = 'cash') = true
-                  AND o.status NOT IN ('voided', 'refunded')
+                  AND o.{TENDERED}
             ), 0)
           + COALESCE((
                 SELECT SUM(amount) FROM shift_cash_movements WHERE shift_id = $1
             ), 0)
+          - COALESCE((
+                SELECT SUM(r.amount) FROM order_refunds r WHERE r.shift_id = $1 AND r.is_cash
+            ), 0)
         )::bigint
         "#,
-    )
-    .bind(shift_id)
-    .fetch_one(executor)
-    .await
+        TENDERED = crate::orders::TENDERED
+    );
+    sqlx::query_scalar::<_, i64>(&sql)
+        .bind(shift_id)
+        .fetch_one(executor)
+        .await
 }
 
 // ── GET /shifts/branches/:branch_id/current ───────────────────
@@ -412,6 +562,11 @@ pub async fn get_current_shift(
     // or another teller's open shift can never bounce them. Managers (non-tellers)
     // see an open shift for the branch (optionally narrowed to a till); with
     // multiple tills open per branch this returns the most recently opened.
+    //
+    // A branch manager may work the till themselves (ruling 3), so the same
+    // rule protects them at the device: when they hold an open shift here it is
+    // returned ahead of anyone else's, otherwise the branch view stands. The
+    // dashboard's "is this branch open" reading is unchanged by the ordering.
     let teller_filter = if claims.role == UserRole::Teller {
         Some(claims.user_id())
     } else {
@@ -436,13 +591,14 @@ pub async fn get_current_shift(
         WHERE s.branch_id = $1 AND s.status = 'open'
           AND ($2::uuid IS NULL OR s.teller_id = $2)
           AND ($3::uuid IS NULL OR s.till_id = $3)
-        ORDER BY s.opened_at DESC
+        ORDER BY (s.teller_id = $4) DESC, s.opened_at DESC
         LIMIT 1
         "#,
     )
     .bind(*branch_id)
     .bind(teller_filter)
     .bind(query.till_id)
+    .bind(claims.user_id())
     .fetch_optional(pool.get_ref())
     .await?;
 
@@ -931,15 +1087,22 @@ pub async fn get_shift_report(
     .fetch_one(pool.get_ref())
     .await?;
 
+    // Each row carries the kind of the movement it corrects (if any), which is
+    // what decides the bucket the correction nets against — see `bucket()`.
     let cash_movements = sqlx::query_as::<_, CashMovementSummaryRow>(
         r#"
         SELECT
+            m.id,
             m.amount,
+            m.kind,
+            m.corrects_id,
+            c.kind AS corrects_kind,
             m.note,
             u.name AS moved_by_name,
             m.created_at
         FROM shift_cash_movements m
         JOIN users u ON u.id = m.moved_by
+        LEFT JOIN shift_cash_movements c ON c.id = m.corrects_id
         WHERE m.shift_id = $1
         ORDER BY m.created_at ASC
         "#,
@@ -948,17 +1111,26 @@ pub async fn get_shift_report(
     .fetch_all(pool.get_ref())
     .await?;
 
-    let cash_movements_in: i64 = cash_movements
-        .iter()
-        .filter(|m| m.amount > 0)
-        .map(|m| m.amount as i64)
-        .sum();
-
-    let cash_movements_out: i64 = cash_movements
-        .iter()
-        .filter(|m| m.amount < 0)
-        .map(|m| m.amount.unsigned_abs() as i64)
-        .sum();
+    // Bucketed by KIND, not by sign. Before kinds existed this was "positives
+    // are in, negatives are out", and the backfill assigned every existing row
+    // the kind its sign implied, so for a shift with no safe drops and no
+    // corrections these two figures are exactly what they were. What changes:
+    // a safe drop no longer inflates `out` (it is not spend), and a correction
+    // pair nets to zero inside the bucket of the mistake instead of adding the
+    // same money to `in` AND `out`. Signed sums per bucket; `out` and
+    // `safe_drops` are reported as positive magnitudes like before.
+    let bucket_total = |bucket: &str| -> i64 {
+        cash_movements
+            .iter()
+            .filter(|m| m.bucket() == bucket)
+            .map(|m| m.amount as i64)
+            .sum()
+    };
+    let cash_movements_in = bucket_total("pay_in");
+    let cash_movements_out = -bucket_total("pay_out");
+    let safe_drops = -bucket_total("safe_drop");
+    // Only UNLINKED corrections remain under their own kind after bucketing.
+    let cash_adjustments = bucket_total("correction");
 
     // Goods only — tips are reported separately in `total_tips` and are NOT
     // added here, so this equals the sales report's revenue for the same orders.
@@ -967,7 +1139,48 @@ pub async fn get_shift_report(
     // not subtracted. total_payments already excludes voided orders.
     let net_payments = total_payments;
 
-    let cash_movements_net_signed: i64 = cash_movements_in as i64 - cash_movements_out as i64;
+    // The drawer does not care about kinds: every movement moved real notes.
+    // This is the same SUM(amount) `compute_system_cash` adds, so a client
+    // re-deriving expected cash from the report still lands on the same number.
+    let cash_movements_net_signed: i64 = cash_movements.iter().map(|m| m.amount as i64).sum();
+
+    // The returns line: refunds issued out of THIS drawer, whatever shift the
+    // sale was in. `refunds_issued_cash` is the figure `compute_system_cash`
+    // subtracts; the other two are for the printout.
+    let refund_totals = {
+        let mut conn = pool.acquire().await?;
+        crate::refunds::handlers::shift_refund_totals(&mut conn, *shift_id).await?
+    };
+
+    // What the sold filter above dropped but the drawer took: cash tenders and
+    // cash tips on this shift's sales that were later fully refunded. Zero for
+    // any shift with no full refund against it, so the report is unchanged
+    // for every shift that existed before refunds did.
+    let cash_in_refunded_sales: i64 = sqlx::query_scalar(
+        r#"
+        SELECT (
+            COALESCE((
+                SELECT SUM(op.amount)
+                FROM order_payments op
+                JOIN orders o ON o.id = op.order_id
+                WHERE o.shift_id = $1
+                  AND o.status = 'refunded'
+                  AND COALESCE(op.is_cash, op.method = 'cash') = true
+            ), 0)
+          + COALESCE((
+                SELECT SUM(o.tip_amount)
+                FROM orders o
+                WHERE o.shift_id = $1
+                  AND o.status = 'refunded'
+                  AND COALESCE(o.tip_is_cash,
+                               COALESCE(o.tip_payment_method, o.payment_method) = 'cash')
+            ), 0)
+        )::bigint
+        "#,
+    )
+    .bind(*shift_id)
+    .fetch_one(pool.get_ref())
+    .await?;
 
     // Authoritative expected cash: a closed shift uses its snapshot; an open
     // shift is computed live with the SAME formula close_shift will use, so the
@@ -975,6 +1188,26 @@ pub async fn get_shift_report(
     let expected_cash: i64 = match shift.closing_cash_system {
         Some(v) => v as i64,
         None => compute_system_cash(pool.get_ref(), *shift_id).await?,
+    };
+
+    // What the close should leave in the drawer. The pre-close screen is this
+    // report, so the proposal ("leave the float, drop the rest") rides on it
+    // rather than on a number the teller has to remember. Shifts from before
+    // tills have no till; a till with no float set proposes nothing.
+    let standard_float: Option<i64> = match shift.till_id {
+        Some(till_id) => {
+            sqlx::query_scalar::<_, Option<i32>>("SELECT standard_float FROM tills WHERE id = $1")
+                .bind(till_id)
+                .fetch_optional(pool.get_ref())
+                .await?
+                .flatten()
+                .map(i64::from)
+        }
+        None => None,
+    };
+    let suggested_safe_drop = match (shift.status.as_str(), standard_float) {
+        ("open", Some(float)) => Some((expected_cash - float).max(0)),
+        _ => None,
     };
 
     Ok(HttpResponse::Ok().json(ShiftReportResponse {
@@ -989,7 +1222,15 @@ pub async fn get_shift_report(
         cash_movements,
         cash_movements_in,
         cash_movements_out,
+        safe_drops,
+        cash_adjustments,
         cash_movements_net: cash_movements_net_signed,
+        refunds_issued_count: refund_totals.refund_count,
+        refunds_issued_amount: refund_totals.refunded_amount,
+        refunds_issued_cash: refund_totals.refunded_cash,
+        cash_in_refunded_sales,
+        standard_float,
+        suggested_safe_drop,
         expected_cash,
         printed_at: chrono::Utc::now(),
     }))
@@ -1006,7 +1247,7 @@ async fn fetch_cash_movement_by_client_ref(
     let m = sqlx::query_as::<_, CashMovement>(
         r#"
         SELECT
-            m.id, m.shift_id, m.amount, m.note, m.moved_by,
+            m.id, m.shift_id, m.amount, m.kind, m.corrects_id, m.note, m.moved_by,
             (SELECT name FROM users WHERE id = m.moved_by) AS moved_by_name,
             m.created_at, m.client_ref
         FROM shift_cash_movements m
@@ -1090,6 +1331,30 @@ pub(crate) async fn add_cash_movement_inner(
         crate::clock::reject_if_future(ts, "created_at")?;
     }
 
+    // The kind fixes the sign (`shift_cash_movements_kind_matches_sign`). A
+    // client that names a kind must agree with it; one that sends only an
+    // amount gets the kind its sign has always meant. Checked here so a
+    // mismatch is a 400 with words, not a CHECK violation. Replay is NOT
+    // exempt: a queued movement that disagrees with itself was wrong on the
+    // device too, and there is no history to preserve in a row that could
+    // never have been written.
+    let kind = body
+        .kind
+        .unwrap_or_else(|| CashMovementKind::from_sign(body.amount));
+    if !kind.allows_sign(body.amount) {
+        return Err(AppError::BadRequest(match kind {
+            CashMovementKind::PayIn => "A pay-in must be a positive amount".into(),
+            CashMovementKind::PayOut => "A pay-out must be a negative amount".into(),
+            CashMovementKind::SafeDrop => "A safe drop must be a negative amount".into(),
+            CashMovementKind::Correction => "Amount cannot be zero".into(),
+        }));
+    }
+    if body.corrects_id.is_some() && kind != CashMovementKind::Correction {
+        return Err(AppError::BadRequest(
+            "Only a correction can name the movement it corrects".into(),
+        ));
+    }
+
     // Idempotent replay: a queued offline movement that already landed returns
     // the original instead of double-applying (which corrupts expected_cash).
     if let Some(cref) = body.client_ref
@@ -1121,18 +1386,67 @@ pub(crate) async fn add_cash_movement_inner(
         ));
     }
 
+    // A linked correction must undo exactly one movement ON THIS SHIFT, once.
+    // The report nets the pair inside this shift's totals, so a correction
+    // pointing at another shift's row would fix nothing anyone can see and
+    // quietly move this drawer's expected cash; a second correction of the same
+    // row would "reverse" money that is already back. The amount must be the
+    // exact opposite so the pair really does sum to nothing — a different
+    // figure is a new movement, not a correction. Read under the advisory lock
+    // so two corrections racing for one row serialise on the shift.
+    if let Some(corrects_id) = body.corrects_id {
+        let corrected: Option<(Uuid, i32, bool)> = sqlx::query_as(
+            r#"
+            SELECT m.shift_id, m.amount,
+                   EXISTS(SELECT 1 FROM shift_cash_movements x WHERE x.corrects_id = m.id)
+            FROM shift_cash_movements m
+            WHERE m.id = $1
+            "#,
+        )
+        .bind(corrects_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        match corrected {
+            None => {
+                return Err(AppError::NotFound(
+                    "The movement to correct was not found".into(),
+                ));
+            }
+            Some((other_shift, _, _)) if other_shift != shift_id => {
+                return Err(AppError::BadRequest(
+                    "A correction must undo a movement on the same shift".into(),
+                ));
+            }
+            Some((_, _, true)) => {
+                return Err(AppError::Conflict(
+                    "That movement has already been corrected".into(),
+                ));
+            }
+            Some((_, original, _)) if original.checked_neg() != Some(body.amount) => {
+                return Err(AppError::BadRequest(format!(
+                    "A correction must reverse the movement exactly: expected {}",
+                    -(original as i64)
+                )));
+            }
+            Some(_) => {}
+        }
+    }
+
     let movement = match sqlx::query_as::<_, CashMovement>(
         r#"
-        INSERT INTO shift_cash_movements (shift_id, amount, note, moved_by, created_at, client_ref)
-        VALUES ($1, $2, $3, $4, COALESCE($5, now()), $6)
+        INSERT INTO shift_cash_movements
+            (shift_id, amount, kind, corrects_id, note, moved_by, created_at, client_ref)
+        VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, now()), $8)
         RETURNING
-            id, shift_id, amount, note, moved_by,
-            (SELECT name FROM users WHERE id = $4) AS moved_by_name,
+            id, shift_id, amount, kind, corrects_id, note, moved_by,
+            (SELECT name FROM users WHERE id = $6) AS moved_by_name,
             created_at, client_ref
         "#,
     )
     .bind(shift_id)
     .bind(body.amount)
+    .bind(kind.as_str())
+    .bind(body.corrects_id)
     .bind(&body.note)
     .bind(actor.teller_id)
     .bind(body.created_at)
@@ -1188,7 +1502,7 @@ pub async fn list_cash_movements(
     let movements = sqlx::query_as::<_, CashMovement>(
         r#"
         SELECT
-            m.id, m.shift_id, m.amount, m.note, m.moved_by,
+            m.id, m.shift_id, m.amount, m.kind, m.corrects_id, m.note, m.moved_by,
             u.name AS moved_by_name,
             m.created_at, m.client_ref
         FROM shift_cash_movements m
@@ -1332,6 +1646,13 @@ pub(crate) async fn close_shift_inner(
     .fetch_one(&mut *tx)
     .await?;
 
+    // Default (c): at a branch with no kitchen screen nothing is ever bumped,
+    // so the kitchen tickets still on the till queue close with the branch's
+    // last shift — `settled` where the bill was paid, `retired` otherwise.
+    // After the status write, in the same tx, so "no shift still open" holds.
+    crate::kitchen::retire_unbumped_at_shift_close(&mut tx, shift.branch_id, Some(actor.teller_id))
+        .await?;
+
     tx.commit().await?;
 
     Ok(HttpResponse::Ok().json(CloseShiftResponse {
@@ -1362,6 +1683,11 @@ pub async fn force_close_shift(
     let shift = fetch_shift_or_404(pool.get_ref(), *shift_id).await?;
     require_branch_access(pool.get_ref(), &claims, shift.branch_id).await?;
 
+    // A teller cannot force-close — that is the path for an ABSENT teller, and
+    // the teller present closes their own shift properly. Everyone above a
+    // teller may, the branch manager included (ruling 3: a manager works the
+    // till and needs no one's approval); `require_branch_access` above already
+    // held them to their assigned branches.
     if claims.role == UserRole::Teller {
         return Err(AppError::Forbidden(
             "Only managers can force close a shift".into(),
@@ -1428,6 +1754,15 @@ pub async fn force_close_shift(
     .bind(&body.reason)
     .bind(closing_cash_system)
     .fetch_one(&mut *tx)
+    .await?;
+
+    // Same end for the till queue as a normal close — the shift is over
+    // either way (default (c); see close_shift_inner).
+    crate::kitchen::retire_unbumped_at_shift_close(
+        &mut tx,
+        shift.branch_id,
+        Some(claims.user_id()),
+    )
     .await?;
 
     tx.commit().await?;

@@ -17,8 +17,8 @@ use madar_rust::openapi::ApiDoc;
 use madar_rust::{
     ai, analytics, auth, bookings, branches, bundles, costing, delivery, demo, discounts, insights,
     integrations, inventory, kitchen, loyalty, menu, orders, orgs, payment_methods, permissions,
-    purchasing, qr_card, realtime, recipes, reports, reservations, shifts, staff, stocktakes, sync,
-    tickets, tills, uploads, users,
+    purchasing, qr_card, realtime, recipes, refunds, reports, reservations, shifts, staff,
+    stocktakes, sync, tickets, tills, uploads, users,
 };
 
 use utoipa::OpenApi;
@@ -283,6 +283,7 @@ async fn run() -> std::io::Result<()> {
             .configure(sync::routes::configure)
             .configure(purchasing::routes::configure)
             .configure(orders::routes::configure)
+            .configure(refunds::routes::configure)
             .configure(discounts::routes::configure)
             .configure(|cfg| reports::routes::configure(cfg, read_pool.clone()))
             // Metrics share the read replica with reports: both are read-only

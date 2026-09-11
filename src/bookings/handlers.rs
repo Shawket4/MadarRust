@@ -17,6 +17,7 @@ use super::whatsapp::{Kind, notify};
 use super::{branch_tz, publish_booking};
 use crate::delivery::{normalize_phone, require_branch_access};
 use crate::errors::{AppError, AppErrorResponse};
+use crate::floor_ops::{FloorEvents, Hand, Holder, lock_table, release_party_hold, take_table};
 use crate::orgs::handlers::extract_claims;
 use crate::permissions::checker::check_permission;
 use crate::realtime::hub::BranchEventHub;
@@ -425,6 +426,15 @@ pub(crate) async fn update_booking_inner(
             "A {status} booking cannot be changed"
         )));
     }
+    // A seated party is on the floor: their table is the ledger's fact now
+    // (seating placed a hold there, or their ticket sits there), and a claim
+    // edit here would leave that hold behind on a table the booking no longer
+    // names. Move the party on the floor instead; the claim follows.
+    if status == "seated" && body.table_ids.is_some() {
+        return Err(AppError::Conflict(
+            "The party is already seated — move them on the floor".into(),
+        ));
+    }
     let settings = load_settings(&mut *tx, branch_id).await?;
     let party = body.party_size.unwrap_or(party0 as i32);
     validate_party(&settings, party, host)?;
@@ -575,7 +585,117 @@ pub async fn update_booking(
     Ok(HttpResponse::Ok().json(view))
 }
 
+// ── The floor: what seating writes ───────────────────────────────────────────
+//
+// A booking's HOLD — the minutes before it starts when the floor shows its
+// table as reserved — is never written to the occupancy ledger. The floor
+// derives it from `booking_tables` and the clock (ruling 7), so a booking that
+// is cancelled or no-shows frees that hold by ceasing to be active; there is
+// nothing to undo.
+//
+// SEATING is a different fact: the party is physically at the table. That is
+// the same thing as a walk-in sitting down before they order, and it goes
+// through the same primitive, `floor_ops::take_table` with a bare `party`
+// hold, in the hand of whoever seated them. When the waiter fires the first
+// round with `booking_id`, `take_table` ends that hold `seated` and the
+// ticket's own row carries the booking — so until the bill starts, a seated
+// booking looks on the ledger exactly like a walk-in who has not ordered yet.
+//
+// The ledger cannot tell a booking's `party` hold from any other, by design.
+// So a hold is let go of only from the transitions that mean "the party is
+// no longer sitting under this booking" and only on the booking's own claimed
+// tables — where, while the booking is seated, the only bare hold that can be
+// live is the one seating placed (any other hand is refused `TABLE_HELD`).
+
+/// The booking's claimed tables in a fixed order, so two paths locking the
+/// same set cannot deadlock.
+async fn claimed_tables(
+    tx: &mut Transaction<'_, Postgres>,
+    booking_id: Uuid,
+) -> Result<Vec<Uuid>, AppError> {
+    Ok(sqlx::query_scalar(
+        "SELECT table_id FROM booking_tables WHERE booking_id = $1 ORDER BY table_id",
+    )
+    .bind(booking_id)
+    .fetch_all(&mut **tx)
+    .await?)
+}
+
+/// Put the party on the booking's tables. A table already held by this same
+/// hand is a no-op (the double-tap, the replayed op); anything else on it is a
+/// refusal from `take_table` with a code the POS can branch on — a walk-in's
+/// ticket, another till's hold, plates not yet cleared — and the host either
+/// clears the table or seats the party elsewhere with `table_ids`. Returns the
+/// tables whose status changed.
+async fn take_claimed_tables(
+    tx: &mut Transaction<'_, Postgres>,
+    booking_id: Uuid,
+    branch_id: Uuid,
+    party_size: i16,
+    by: &Hand,
+) -> Result<Vec<Uuid>, AppError> {
+    let mut landed = Vec::new();
+    for t in claimed_tables(tx, booking_id).await? {
+        if !lock_table(tx, t, branch_id).await? {
+            continue;
+        }
+        let taken = take_table(tx, t, Holder::Party, Some(party_size), by).await?;
+        if taken.landed {
+            landed.push(t);
+        }
+    }
+    Ok(landed)
+}
+
+/// Let go of the bare holds on the booking's tables. A ticket's row is never
+/// touched (`release_party_hold` will not), so a party that has started a bill
+/// keeps its table whatever happens to the booking. `needs_bussing` is false:
+/// a party that ate has a ticket, and the ticket's settle is what buses.
+/// Returns the tables whose status changed.
+async fn release_claimed_tables(
+    tx: &mut Transaction<'_, Postgres>,
+    booking_id: Uuid,
+    branch_id: Uuid,
+    by: &Hand,
+) -> Result<Vec<Uuid>, AppError> {
+    let mut released = Vec::new();
+    for t in claimed_tables(tx, booking_id).await? {
+        if !lock_table(tx, t, branch_id).await? {
+            continue;
+        }
+        if release_party_hold(tx, t, false, by).await? {
+            released.push(t);
+        }
+    }
+    Ok(released)
+}
+
+/// Floor events for the tables a booking transition touched, after commit.
+async fn publish_tables(pool: &PgPool, hub: &BranchEventHub, branch_id: Uuid, tables: Vec<Uuid>) {
+    if tables.is_empty() {
+        return;
+    }
+    FloorEvents {
+        tables,
+        ..Default::default()
+    }
+    .publish(pool, hub, branch_id)
+    .await;
+}
+
 // ── Status transitions ────────────────────────────────────────────────────────
+//
+// confirmed → seated     host/waiter seats the party, or a ticket fires with
+//                        `booking_id`
+// confirmed → no_show    host tap, or the sweep after the grace
+// confirmed → cancelled  guest link, host, system
+// seated    → completed  the ticket settles; host tap; the sweep after the window
+// seated    → cancelled  host (the party left before ordering), or the party's
+//                        ticket was voided
+//
+// A seated party never becomes a no-show — they showed. A party that sat and
+// left, or whose bill was torn up, is a cancellation; that keeps the no-show
+// rate honest and the ledger release on one exit.
 
 #[derive(Deserialize, ToSchema, Default)]
 pub struct CancelBookingRequest {
@@ -586,25 +706,67 @@ pub struct CancelBookingRequest {
     pub notify_guest: Option<bool>,
 }
 
-/// `confirmed`/`seated` → `cancelled`. Returns false when it already was.
+/// What `cancel_inner` found.
+pub(crate) enum Cancelled {
+    /// Moved to `cancelled` now. `tables` are the ones whose hold was released.
+    Done { branch_id: Uuid, tables: Vec<Uuid> },
+    /// It already was. Not a failure: the caller's wish is the current state.
+    Already,
+}
+
+/// `confirmed`/`seated` → `cancelled`.
+///
+/// `hand` is who is doing it on the floor, when someone is: cancelling a
+/// SEATED booking releases the party's hold on its tables, which is a ledger
+/// write and needs a person to attribute it to. A caller with no hand (the
+/// guest link, a system path) may cancel a `confirmed` booking — that frees
+/// nothing but a derived hold — and is refused a seated one, which is the
+/// venue's to deal with. `completed` and `no_show` are terminal and refused
+/// too; only `cancelled` twice is a clean `Already`.
 pub(crate) async fn cancel_inner(
     pool: &PgPool,
     id: Uuid,
     by: &str,
     reason: Option<&str>,
-) -> Result<bool, AppError> {
-    let n = sqlx::query(
+    hand: Option<Uuid>,
+) -> Result<Cancelled, AppError> {
+    let mut tx = pool.begin().await?;
+    let cur: Option<(Uuid, String)> =
+        sqlx::query_as("SELECT branch_id, status::text FROM bookings WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some((branch_id, status)) = cur else {
+        return Err(AppError::NotFound("Booking not found".into()));
+    };
+    let tables = match (status.as_str(), hand) {
+        ("cancelled", _) => return Ok(Cancelled::Already),
+        ("confirmed", _) => Vec::new(),
+        ("seated", Some(user)) => {
+            let hand = Hand::of(&mut *tx, user, branch_id).await?;
+            release_claimed_tables(&mut tx, id, branch_id, &hand).await?
+        }
+        ("seated", None) => {
+            return Err(AppError::Conflict(
+                "The party has been seated — the venue must cancel this booking".into(),
+            ));
+        }
+        (other, _) => {
+            return Err(AppError::Conflict(format!("Booking is already {other}")));
+        }
+    };
+    sqlx::query(
         "UPDATE bookings SET status = 'cancelled', cancelled_at = now(), cancelled_by = $2, \
              cancel_reason = $3, updated_at = now() \
-         WHERE id = $1 AND status IN ('confirmed', 'seated')",
+         WHERE id = $1",
     )
     .bind(id)
     .bind(by)
     .bind(reason.map(str::trim).filter(|s| !s.is_empty()))
-    .execute(pool)
-    .await?
-    .rows_affected();
-    Ok(n > 0)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Cancelled::Done { branch_id, tables })
 }
 
 #[utoipa::path(post, path = "/bookings/{id}/cancel", tag = "bookings", request_body = CancelBookingRequest,
@@ -622,14 +784,20 @@ pub async fn cancel_booking(
     check_permission(pool.get_ref(), &claims, "bookings", "update").await?;
     let before = load_for_access(pool.get_ref(), &claims, *id).await?;
     let body = body.map(|b| b.into_inner()).unwrap_or_default();
-    if !before.is_active() {
-        return Err(AppError::Conflict(format!(
-            "Booking is already {}",
-            before.status
-        )));
-    }
-    cancel_inner(pool.get_ref(), *id, "host", body.reason.as_deref()).await?;
+    let outcome = cancel_inner(
+        pool.get_ref(),
+        *id,
+        "host",
+        body.reason.as_deref(),
+        Some(claims.user_id()),
+    )
+    .await?;
+    let Cancelled::Done { branch_id, tables } = outcome else {
+        // Already cancelled: the same answer as the tap that did it.
+        return Ok(HttpResponse::Ok().json(before));
+    };
     publish_booking(pool.get_ref(), hub.get_ref(), "booking.changed", *id).await;
+    publish_tables(pool.get_ref(), hub.get_ref(), branch_id, tables).await;
     let view = booking_view(pool.get_ref(), *id)
         .await?
         .ok_or(AppError::Internal)?;
@@ -639,11 +807,14 @@ pub async fn cancel_booking(
     Ok(HttpResponse::Ok().json(view))
 }
 
-/// `confirmed`/`seated` → `no_show`. Shared with `/sync/replay`.
+/// `confirmed` → `no_show`. Shared with `/sync/replay`. Idempotent on
+/// `no_show`; anything else that is not `confirmed` is a 409 — a seated party
+/// showed up, and if they then left that is a cancellation (see the table
+/// above), which is also the exit that gives their table back.
 pub(crate) async fn no_show_inner(pool: &PgPool, id: Uuid) -> Result<HttpResponse, AppError> {
     let n = sqlx::query(
         "UPDATE bookings SET status = 'no_show', no_show_at = now(), updated_at = now() \
-         WHERE id = $1 AND status IN ('confirmed', 'seated')",
+         WHERE id = $1 AND status = 'confirmed'",
     )
     .bind(id)
     .execute(pool)
@@ -653,10 +824,10 @@ pub(crate) async fn no_show_inner(pool: &PgPool, id: Uuid) -> Result<HttpRespons
         .await?
         .ok_or_else(|| AppError::NotFound("Booking not found".into()))?;
     if n == 0 && view.status != "no_show" {
-        return Err(AppError::Conflict(format!(
-            "Booking is already {}",
-            view.status
-        )));
+        return Err(AppError::Conflict(match view.status.as_str() {
+            "seated" => "The party was seated — cancel the booking if they left".to_string(),
+            other => format!("Booking is already {other}"),
+        }));
     }
     Ok(HttpResponse::Ok().json(view))
 }
@@ -687,26 +858,54 @@ pub struct SeatBookingRequest {
     pub table_ids: Option<Vec<Uuid>>,
 }
 
-/// `confirmed` → `seated` (idempotent when already seated). The ticket the
-/// POS fires afterwards carries `booking_id` and links itself. Shared with
-/// `/sync/replay` so a waiter can seat a party while the cloud is unreachable.
-pub(crate) async fn seat_inner(
+/// What seating did: the booking as it now reads, and the tables whose
+/// status changed (for the floor topic, after commit).
+pub(crate) struct Seated {
+    pub view: BookingView,
+    pub tables: Vec<Uuid>,
+}
+
+/// `confirmed` → `seated`, taking the booking's tables for the party in the
+/// actor's hand. Already `seated` is a clean no-op (the double-tap, a replayed
+/// op after a lost ack) — unless it comes with different tables, because the
+/// party is on the floor now and moving them is the floor's job (move the
+/// ticket, or release and re-seat), not a booking edit.
+pub(crate) async fn seat_core(
     pool: &PgPool,
     id: Uuid,
     body: &SeatBookingRequest,
-    _actor: &ActingContext,
-) -> Result<HttpResponse, AppError> {
+    actor: &ActingContext,
+) -> Result<Seated, AppError> {
     let mut tx = pool.begin().await?;
-    let cur: Option<(Uuid, String)> =
-        sqlx::query_as("SELECT branch_id, status::text FROM bookings WHERE id = $1 FOR UPDATE")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    let Some((branch_id, status)) = cur else {
+    let cur: Option<(Uuid, String, i16)> = sqlx::query_as(
+        "SELECT branch_id, status::text, party_size FROM bookings WHERE id = $1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((branch_id, status, party_size)) = cur else {
         return Err(AppError::NotFound("Booking not found".into()));
     };
-    if !matches!(status.as_str(), "confirmed" | "seated") {
-        return Err(AppError::Conflict(format!("Booking is {status}")));
+    match status.as_str() {
+        "confirmed" => {}
+        "seated" => {
+            if let Some(ids) = &body.table_ids {
+                let mut want = ids.clone();
+                want.sort();
+                if want != claimed_tables(&mut tx, id).await? {
+                    return Err(AppError::Conflict(
+                        "The party is already seated — move them on the floor".into(),
+                    ));
+                }
+            }
+            tx.commit().await?;
+            let view = booking_view(pool, id).await?.ok_or(AppError::Internal)?;
+            return Ok(Seated {
+                view,
+                tables: Vec::new(),
+            });
+        }
+        other => return Err(AppError::Conflict(format!("Booking is {other}"))),
     }
     if let Some(ids) = &body.table_ids {
         validate_tables(&mut tx, branch_id, ids).await?;
@@ -716,6 +915,8 @@ pub(crate) async fn seat_inner(
             .await?;
         insert_claims(&mut tx, id, ids).await?;
     }
+    let hand = Hand::of(&mut *tx, actor.teller_id, branch_id).await?;
+    let tables = take_claimed_tables(&mut tx, id, branch_id, party_size, &hand).await?;
     sqlx::query(
         "UPDATE bookings SET status = 'seated', seated_at = COALESCE(seated_at, now()), updated_at = now() \
          WHERE id = $1",
@@ -725,7 +926,39 @@ pub(crate) async fn seat_inner(
     .await?;
     tx.commit().await?;
     let view = booking_view(pool, id).await?.ok_or(AppError::Internal)?;
-    Ok(HttpResponse::Ok().json(view))
+    Ok(Seated { view, tables })
+}
+
+/// The replay-safe half: seat, then publish on both topics when a hub is
+/// given. `/sync/replay` flushes a waiter's queued seat through this so a
+/// party seated while the cloud was unreachable lands on the floor the same
+/// way a live tap does.
+pub(crate) async fn seat_booking_inner(
+    pool: &PgPool,
+    id: Uuid,
+    body: &SeatBookingRequest,
+    actor: &ActingContext,
+    hub: Option<&BranchEventHub>,
+) -> Result<HttpResponse, AppError> {
+    let seated = seat_core(pool, id, body, actor).await?;
+    if let Some(hub) = hub {
+        publish_booking(pool, hub, "booking.changed", id).await;
+        publish_tables(pool, hub, seated.view.branch_id, seated.tables).await;
+    }
+    Ok(HttpResponse::Ok().json(seated.view))
+}
+
+/// The pre-ledger entry point `/sync/replay` still calls: seats without
+/// publishing (the replay handler publishes `booking.changed` itself). Kept
+/// only until sync moves to [`seat_booking_inner`] with its hub, which also
+/// carries the floor's `table.status_changed`.
+pub(crate) async fn seat_inner(
+    pool: &PgPool,
+    id: Uuid,
+    body: &SeatBookingRequest,
+    actor: &ActingContext,
+) -> Result<HttpResponse, AppError> {
+    seat_booking_inner(pool, id, body, actor, None).await
 }
 
 #[utoipa::path(post, path = "/bookings/{id}/seat", tag = "bookings", request_body = SeatBookingRequest,
@@ -744,11 +977,13 @@ pub async fn seat_booking(
     load_for_access(pool.get_ref(), &claims, *id).await?;
     let body = body.map(|b| b.into_inner()).unwrap_or_default();
     let actor = ActingContext::live(&claims)?;
-    let resp = seat_inner(pool.get_ref(), *id, &body, &actor).await?;
-    publish_booking(pool.get_ref(), hub.get_ref(), "booking.changed", *id).await;
-    Ok(resp)
+    seat_booking_inner(pool.get_ref(), *id, &body, &actor, Some(hub.get_ref())).await
 }
 
+/// `seated` → `completed` by hand. The party is done with the booking; if
+/// they never started a bill under it, the hold seating placed is let go of
+/// too (a bill, had there been one, would have ended it `seated` already and
+/// its settle buses the table). Already `completed` is a clean 200.
 #[utoipa::path(post, path = "/bookings/{id}/complete", tag = "bookings",
     params(("id" = Uuid, Path, description = "Booking ID")),
     responses((status = 200, body = BookingView), AppErrorResponse),
@@ -762,30 +997,64 @@ pub async fn complete_booking(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "bookings", "update").await?;
     let before = load_for_access(pool.get_ref(), &claims, *id).await?;
-    if before.status != "seated" && before.status != "completed" {
-        return Err(AppError::Conflict(
-            "Only a seated booking can be completed".into(),
-        ));
+    match before.status.as_str() {
+        "seated" => {}
+        "completed" => return Ok(HttpResponse::Ok().json(before)),
+        _ => {
+            return Err(AppError::Conflict(
+                "Only a seated booking can be completed".into(),
+            ));
+        }
     }
+    let mut tx = pool.get_ref().begin().await?;
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status::text FROM bookings WHERE id = $1 FOR UPDATE")
+            .bind(*id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let tables = if status.as_deref() == Some("seated") {
+        let hand = Hand::of(&mut *tx, claims.user_id(), before.branch_id).await?;
+        release_claimed_tables(&mut tx, *id, before.branch_id, &hand).await?
+    } else {
+        Vec::new()
+    };
     sqlx::query(
         "UPDATE bookings SET status = 'completed', completed_at = COALESCE(completed_at, now()), \
              updated_at = now() WHERE id = $1 AND status = 'seated'",
     )
     .bind(*id)
-    .execute(pool.get_ref())
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     publish_booking(pool.get_ref(), hub.get_ref(), "booking.changed", *id).await;
+    publish_tables(pool.get_ref(), hub.get_ref(), before.branch_id, tables).await;
     let view = booking_view(pool.get_ref(), *id)
         .await?
         .ok_or(AppError::Internal)?;
     Ok(HttpResponse::Ok().json(view))
 }
 
-// ── Ticket hooks (called from the tickets module inside its transaction) ──────
+// ── Ticket hooks (called from the tickets module) ─────────────────────────────
+//
+// The link between a ticket and its booking is written ONCE, on the ticket:
+// `open_tickets.booking_id`, stamped when the waiter fires. Everything on the
+// booking's side — which ticket it is eating on, whether that bill was paid or
+// torn up — is read back through that column. `bookings.open_ticket_id` is
+// not written any more.
 
-/// Link a fired ticket to its booking and mark the party seated. The booking
-/// must be active on the same branch; anything else is a 409 so a stale POS
-/// cannot seat a cancelled booking by accident.
+/// A ticket fired with `booking_id`: the party is seated under this booking.
+/// Called inside the fire's transaction, after the ticket row exists. The
+/// booking must be active on the same branch; anything else is a 409 so a
+/// stale POS cannot seat a cancelled booking by accident.
+///
+/// The table the ticket landed on is where the party actually is. If that is
+/// not one of the booking's claimed tables (a walk-in took theirs and the
+/// waiter sat them elsewhere), the claim follows the party — so the floor's
+/// derived hint and availability agree with the ledger — and any hold seating
+/// had placed on the old tables is let go of, in the hand of the waiter who
+/// fired. A ticket that landed on a claimed table changes nothing here: the
+/// ledger already ended that table's hold `seated` under this ticket, and a
+/// large party's other claimed tables keep theirs.
 pub(crate) async fn link_ticket(
     tx: &mut Transaction<'_, Postgres>,
     booking_id: Uuid,
@@ -810,17 +1079,50 @@ pub(crate) async fn link_ticket(
     }
     sqlx::query(
         "UPDATE bookings SET status = 'seated', seated_at = COALESCE(seated_at, now()), \
-             open_ticket_id = $2, updated_at = now() WHERE id = $1",
+             updated_at = now() WHERE id = $1",
     )
     .bind(booking_id)
-    .bind(ticket_id)
+    .execute(&mut **tx)
+    .await?;
+
+    let ticket: Option<(Option<Uuid>, Option<Uuid>)> =
+        sqlx::query_as("SELECT table_id, opened_by FROM open_tickets WHERE id = $1")
+            .bind(ticket_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    let Some((Some(table), opened_by)) = ticket else {
+        return Ok(());
+    };
+    let claimed = claimed_tables(tx, booking_id).await?;
+    if claimed.contains(&table) {
+        return Ok(());
+    }
+    if let Some(user) = opened_by {
+        let hand = Hand::of(&mut **tx, user, branch_id).await?;
+        release_claimed_tables(tx, booking_id, branch_id, &hand).await?;
+    }
+    sqlx::query("DELETE FROM booking_tables WHERE booking_id = $1")
+        .bind(booking_id)
+        .execute(&mut **tx)
+        .await?;
+    // The party is on this table whatever the claims say; if another booking
+    // holds it for an overlapping window the exclusion constraint keeps that
+    // claim and this booking simply carries none. The ticket's own ledger row
+    // is the truth about the table either way.
+    sqlx::query(
+        "INSERT INTO booking_tables (booking_id, table_id) VALUES ($1, $2) \
+         ON CONFLICT ON CONSTRAINT booking_tables_no_overlap DO NOTHING",
+    )
+    .bind(booking_id)
+    .bind(table)
     .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
 /// The ticket settled: its booking is done. Returns the booking id when one
-/// moved, so the caller can publish after its own commit.
+/// moved, so the caller can publish after its own commit. A booking with
+/// another bill still open (a split party) waits for that one.
 pub(crate) async fn complete_by_ticket<'e, E>(
     exec: E,
     ticket_id: Uuid,
@@ -829,13 +1131,47 @@ where
     E: sqlx::PgExecutor<'e>,
 {
     let id: Option<Uuid> = sqlx::query_scalar(
-        "UPDATE bookings SET status = 'completed', completed_at = now(), updated_at = now() \
-         WHERE open_ticket_id = $1 AND status = 'seated' RETURNING id",
+        "UPDATE bookings b SET status = 'completed', completed_at = now(), updated_at = now() \
+         FROM open_tickets ot \
+         WHERE ot.id = $1 AND ot.booking_id = b.id AND b.status = 'seated' \
+           AND NOT EXISTS (SELECT 1 FROM open_tickets o2 \
+                           WHERE o2.booking_id = b.id AND o2.id <> ot.id AND o2.status = 'open') \
+         RETURNING b.id",
     )
     .bind(ticket_id)
     .fetch_optional(exec)
     .await?;
     Ok(id)
+}
+
+/// A voided bill is a party that did not eat under its booking: the booking
+/// is `cancelled` (the ruling), by the system, with the void as its reason.
+/// Called by the ticket void inside its transaction with the ticket's id, and
+/// by the sweep with `None` as the backstop for a void that got past the
+/// hook. One query for both so there is one writer of the rule. A booking
+/// with a bill still open or already paid is not touched — the void was one
+/// of several bills. Returns the bookings that moved.
+pub(crate) async fn cancel_for_voided_tickets<'e, E>(
+    exec: E,
+    ticket_id: Option<Uuid>,
+) -> Result<Vec<Uuid>, AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    Ok(sqlx::query_scalar(
+        "UPDATE bookings b SET status = 'cancelled', cancelled_at = now(), cancelled_by = 'system', \
+             cancel_reason = COALESCE(cancel_reason, 'Ticket voided'), updated_at = now() \
+         WHERE b.status IN ('confirmed', 'seated') \
+           AND ($1::uuid IS NULL OR b.id = (SELECT booking_id FROM open_tickets WHERE id = $1)) \
+           AND EXISTS (SELECT 1 FROM open_tickets ot \
+                       WHERE ot.booking_id = b.id AND ot.status = 'voided') \
+           AND NOT EXISTS (SELECT 1 FROM open_tickets ot \
+                           WHERE ot.booking_id = b.id AND ot.status IN ('open', 'settled')) \
+         RETURNING b.id",
+    )
+    .bind(ticket_id)
+    .fetch_all(exec)
+    .await?)
 }
 
 // ── Availability + stats ──────────────────────────────────────────────────────

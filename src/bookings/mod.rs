@@ -5,16 +5,29 @@
 //! claims (`booking_tables`) for its time window, guarded by a DB exclusion
 //! constraint so two active bookings can never hold one table at once.
 //!
-//! Lifecycle: `confirmed` → `seated` (the POS parks the party; the fired ticket
-//! carries `booking_id`) → `completed` (the ticket settles, or the sweep closes
-//! it after its window). Side exits: `no_show` (host tap or the sweep after the
-//! grace) and `cancelled` (guest link, host, or system).
+//! Lifecycle: `confirmed` → `seated` (the host seats the party, or the fired
+//! ticket carries `booking_id`) → `completed` (the ticket settles, or the sweep
+//! closes it after its window). Side exits: `no_show` (host tap or the sweep
+//! after the grace — from `confirmed` only, a seated party showed) and
+//! `cancelled` (guest link, host, system; also a seated party whose ticket was
+//! voided, or who left before ordering).
 //!
 //! "Held" is DERIVED, never scheduled: `GET /floor/tables` returns the table's
 //! `next_booking` with `held_from = starts_at - hold_minutes`; the dashboard and
 //! the POS compare it with their clock. No cron is needed for the floor to be
 //! right — the only periodic work (`jobs`) is reminders, the "party arriving"
-//! nudge, and the no-show / completion roll-overs.
+//! nudge, and the no-show / cancellation / completion roll-overs.
+//!
+//! The occupancy ledger (`table_occupancies`, `src/floor_ops`) is touched at
+//! exactly one point: SEATING. A seated booking's party is on its tables the
+//! way a walk-in is, as a bare `party` hold in the seater's hand, and the exits
+//! from `seated` that mean "the party is gone without a bill" release it. The
+//! derived hold before the party arrives writes nothing (ruling 7).
+//!
+//! The ticket ↔ booking link is written ONCE, on the ticket
+//! (`open_tickets.booking_id`). The booking's `open_ticket_id` in every read
+//! model is derived from it; the column of that name on `bookings` is dead and
+//! goes with the next schema pass.
 //!
 //! Capacity is SEATS-BASED with automatic best-fit table assignment at
 //! confirmation (one table first, then two tables in the same section), so the

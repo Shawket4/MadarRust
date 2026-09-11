@@ -37,6 +37,10 @@ pub const RESOURCES: &[&str] = &[
     "purchase_orders",
     "orders",
     "order_items",
+    // A refund is not a void. Voiding corrects a mistake on a bill nobody has
+    // paid yet; refunding returns money that has already left the customer, so
+    // a shop may well want a different person holding that authority.
+    "refunds",
     "payments",
     "payment_methods",
     "shifts",

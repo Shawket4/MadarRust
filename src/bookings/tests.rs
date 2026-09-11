@@ -526,12 +526,15 @@ async fn public_guest_books_manages_and_cancels(pool: PgPool) {
     .await;
     assert_eq!(st, StatusCode::OK, "{m}");
     assert_eq!(m["status"], "cancelled");
-    let (st, _) = send(
+    // A second tap is the same wish, already granted: 200 with the same page,
+    // not an error the guest has to read.
+    let (st, m) = send(
         &app,
         test::TestRequest::post().uri(&format!("/public/bookings/{token}/cancel")),
     )
     .await;
-    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(st, StatusCode::OK, "{m}");
+    assert_eq!(m["status"], "cancelled");
     let (st, _) = send(
         &app,
         test::TestRequest::get().uri("/public/bookings/deadbeefdeadbeefdeadbeefdeadbeef"),
@@ -877,4 +880,488 @@ async fn sweep_reminds_announces_arrivals_and_rolls_no_shows(pool: PgPool) {
     // A second tick is a no-op (idempotent stamps).
     super::jobs::run_tick(&pool, &hub).await.unwrap();
     assert!(rx.try_recv().is_err(), "nothing new to publish");
+}
+
+// ── Seating on the occupancy ledger ───────────────────────────────────────────
+
+async fn table_state(pool: &PgPool, table: Uuid) -> (String, Option<String>, Option<Uuid>) {
+    sqlx::query_as("SELECT status, held_by, booking_id FROM v_table_status WHERE table_id = $1")
+        .bind(table)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Seating a booked party takes their table the way a walk-in sitting down
+/// does — a `party` hold in the host's hand — and the exits that mean "the
+/// party is gone with no bill" give it back. Before the party arrives the
+/// booking's hold is derived and writes nothing.
+#[sqlx::test]
+async fn seating_takes_the_table_and_cancelling_releases_it(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let t1 = seed_table(&pool, org, branch, "T1", 4).await;
+    let t2 = seed_table(&pool, org, branch, "T2", 4).await;
+    let admin = seed_user(&pool, org, "org_admin").await;
+    let tok = token(admin, org, UserRole::OrgAdmin, None);
+    let hub = BranchEventHub::new();
+    let mut rx = hub.subscribe(branch);
+    let app = app!(pool, hub);
+
+    let (st, b) = send(
+        &app,
+        auth(test::TestRequest::post().uri("/bookings"), &tok).set_json(create_body(
+            branch,
+            3,
+            Utc::now() + Duration::minutes(5),
+        )),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{b}");
+    let id = b["id"].as_str().unwrap().to_string();
+    assert_eq!(b["table_ids"], json!([t1]));
+    assert_eq!(
+        table_state(&pool, t1).await.0,
+        "free",
+        "a claim writes no ledger row"
+    );
+    while rx.try_recv().is_ok() {}
+
+    // Seat: the table is taken under a bare party hold, in the host's hand.
+    let (st, b) = send(
+        &app,
+        auth(
+            test::TestRequest::post().uri(&format!("/bookings/{id}/seat")),
+            &tok,
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    assert_eq!(b["status"], "seated");
+    let (status, held_by, _) = table_state(&pool, t1).await;
+    assert_eq!(
+        (status.as_str(), held_by.as_deref()),
+        ("seated", Some("party"))
+    );
+    let (started_by, size): (Option<Uuid>, Option<i16>) = sqlx::query_as(
+        "SELECT started_by, party_size FROM table_occupancies WHERE table_id = $1 AND ended_at IS NULL",
+    )
+    .bind(t1)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((started_by, size), (Some(admin), Some(3)));
+    // Both topics heard about it.
+    let mut kinds = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        kinds.push((ev.topic, ev.event_type));
+    }
+    assert!(
+        kinds.contains(&(Topic::Bookings, "booking.changed".into())),
+        "{kinds:?}"
+    );
+    assert!(
+        kinds.contains(&(Topic::Floor, "table.status_changed".into())),
+        "{kinds:?}"
+    );
+
+    // Seating again is a yes; re-seating on a different table is not a booking edit.
+    let (st, _) = send(
+        &app,
+        auth(
+            test::TestRequest::post().uri(&format!("/bookings/{id}/seat")),
+            &tok,
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _) = send(
+        &app,
+        auth(
+            test::TestRequest::post().uri(&format!("/bookings/{id}/seat")),
+            &tok,
+        )
+        .set_json(json!({ "table_ids": [t2] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    let (st, _) = send(
+        &app,
+        auth(
+            test::TestRequest::patch().uri(&format!("/bookings/{id}")),
+            &tok,
+        )
+        .set_json(json!({ "table_ids": [t2] })),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::CONFLICT,
+        "claims of a seated party follow the floor"
+    );
+
+    // A seated party is not a no-show; they left before ordering — cancel.
+    let (st, b) = send(
+        &app,
+        auth(
+            test::TestRequest::post().uri(&format!("/bookings/{id}/no-show")),
+            &tok,
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{b}");
+    let (st, b) = send(
+        &app,
+        auth(
+            test::TestRequest::post().uri(&format!("/bookings/{id}/cancel")),
+            &tok,
+        )
+        .set_json(json!({ "reason": "left" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    assert_eq!(b["status"], "cancelled");
+    assert_eq!(
+        table_state(&pool, t1).await.0,
+        "free",
+        "the hold went with the party"
+    );
+    let (reason, ended_by): (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT end_reason, ended_by FROM table_occupancies WHERE table_id = $1 AND ended_at IS NOT NULL",
+    )
+    .bind(t1)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((reason.as_str(), ended_by), ("released", Some(admin)));
+
+    // Cancelling again is the same answer, not a failure.
+    let (st, b) = send(
+        &app,
+        auth(
+            test::TestRequest::post().uri(&format!("/bookings/{id}/cancel")),
+            &tok,
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    assert_eq!(b["status"], "cancelled");
+}
+
+/// The floor's refusals reach the host with a code: a table with plates on it
+/// cannot seat a party, and seating them elsewhere moves the claim.
+#[sqlx::test]
+async fn seating_onto_a_dirty_table_is_refused_with_a_code(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let t1 = seed_table(&pool, org, branch, "T1", 4).await;
+    let t2 = seed_table(&pool, org, branch, "T2", 4).await;
+    let admin = seed_user(&pool, org, "org_admin").await;
+    let tok = token(admin, org, UserRole::OrgAdmin, None);
+    let hub = BranchEventHub::new();
+    let app = app!(pool, hub);
+
+    let (_, b) = send(
+        &app,
+        auth(test::TestRequest::post().uri("/bookings"), &tok).set_json(create_body(
+            branch,
+            2,
+            Utc::now() + Duration::minutes(5),
+        )),
+    )
+    .await;
+    let id = b["id"].as_str().unwrap().to_string();
+    assert_eq!(b["table_ids"], json!([t1]));
+    // The last party paid and left T1 uncleared.
+    sqlx::query(
+        "INSERT INTO table_occupancies (org_id, branch_id, table_id, held_by, started_at, \
+             ended_at, end_reason, needs_bussing) \
+         VALUES ($1, $2, $3, 'party', now() - interval '1 hour', now(), 'released', true)",
+    )
+    .bind(org)
+    .bind(branch)
+    .bind(t1)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(table_state(&pool, t1).await.0, "dirty");
+
+    let (st, b) = send(
+        &app,
+        auth(
+            test::TestRequest::post().uri(&format!("/bookings/{id}/seat")),
+            &tok,
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{b}");
+    assert_eq!(b["code"], "TABLE_DIRTY");
+    let status: String = sqlx::query_scalar("SELECT status::text FROM bookings WHERE id = $1")
+        .bind(Uuid::parse_str(&id).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "confirmed", "a refused seat changes nothing");
+
+    let (st, b) = send(
+        &app,
+        auth(
+            test::TestRequest::post().uri(&format!("/bookings/{id}/seat")),
+            &tok,
+        )
+        .set_json(json!({ "table_ids": [t2] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    assert_eq!(b["table_ids"], json!([t2]));
+    assert_eq!(table_state(&pool, t2).await.0, "seated");
+    assert_eq!(
+        table_state(&pool, t1).await.0,
+        "dirty",
+        "still someone's to clear"
+    );
+}
+
+/// The link is written once, on the ticket. A party seated by the host and
+/// then fired on ANOTHER table (a walk-in took theirs): the claim follows the
+/// party, the old hold is let go of, and the booking's `open_ticket_id` reads
+/// back from the ticket.
+#[sqlx::test]
+async fn a_ticket_fired_elsewhere_moves_the_party_and_its_claim(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let t1 = seed_table(&pool, org, branch, "T1", 4).await;
+    let t2 = seed_table(&pool, org, branch, "T2", 4).await;
+    let item = seed_menu_item(&pool, org, 1000).await;
+    let admin = seed_user(&pool, org, "org_admin").await;
+    let waiter = seed_user(&pool, org, "waiter").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    // A round only fires against an open shift on the branch.
+    open_shift_row(&pool, branch, teller).await;
+    let admin_t = token(admin, org, UserRole::OrgAdmin, None);
+    let waiter_t = token(waiter, org, UserRole::Waiter, Some(branch));
+    let hub = BranchEventHub::new();
+    let app = app!(pool, hub);
+
+    let (_, b) = send(
+        &app,
+        auth(test::TestRequest::post().uri("/bookings"), &admin_t).set_json(create_body(
+            branch,
+            2,
+            Utc::now() + Duration::minutes(5),
+        )),
+    )
+    .await;
+    let id = b["id"].as_str().unwrap().to_string();
+    assert_eq!(b["table_ids"], json!([t1]));
+    let (st, _) = send(
+        &app,
+        auth(
+            test::TestRequest::post().uri(&format!("/bookings/{id}/seat")),
+            &admin_t,
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(table_state(&pool, t1).await.0, "seated");
+
+    let (st, t) = send(
+        &app,
+        auth(test::TestRequest::post().uri("/open-tickets"), &waiter_t).set_json(json!({
+            "branch_id": branch, "table_id": t2, "booking_id": id, "guest_count": 2,
+            "items": [{ "menu_item_id": item, "quantity": 1 }]
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{t}");
+    let ticket_id = t["id"].as_str().unwrap().to_string();
+
+    let (_, b) = send(
+        &app,
+        auth(
+            test::TestRequest::get().uri(&format!("/bookings/{id}")),
+            &admin_t,
+        ),
+    )
+    .await;
+    assert_eq!(b["status"], "seated");
+    assert_eq!(b["table_ids"], json!([t2]), "the claim followed the party");
+    assert_eq!(
+        b["open_ticket_id"],
+        json!(ticket_id),
+        "derived from the ticket"
+    );
+    let stored: Option<Uuid> =
+        sqlx::query_scalar("SELECT open_ticket_id FROM bookings WHERE id = $1")
+            .bind(Uuid::parse_str(&id).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stored, None,
+        "the booking's own column is no longer written"
+    );
+    assert_eq!(
+        table_state(&pool, t1).await.0,
+        "free",
+        "the host's hold went with them"
+    );
+    let (status, held_by, booking) = table_state(&pool, t2).await;
+    assert_eq!(
+        (status.as_str(), held_by.as_deref()),
+        ("seated", Some("ticket"))
+    );
+    assert_eq!(booking, Some(Uuid::parse_str(&id).unwrap()));
+}
+
+/// A host booking with no table (forced), starting in five minutes.
+async fn book_forced<S>(app: &S, tok: &str, branch: Uuid) -> Uuid
+where
+    S: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse,
+            Error = actix_web::Error,
+        >,
+{
+    let (st, b) = send(
+        app,
+        auth(test::TestRequest::post().uri("/bookings"), tok).set_json(json!({
+            "branch_id": branch, "party_size": 2, "starts_at": Utc::now() + Duration::minutes(5),
+            "guest_name": "Ahmed", "guest_phone": "01000000001", "force": true, "table_ids": []
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{b}");
+    Uuid::parse_str(b["id"].as_str().unwrap()).unwrap()
+}
+
+/// Fire a one-line ticket under `booking`, on `table` if given.
+async fn fire_under<S>(
+    app: &S,
+    tok: &str,
+    branch: Uuid,
+    item: Uuid,
+    booking: Uuid,
+    table: Option<Uuid>,
+) -> Uuid
+where
+    S: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse,
+            Error = actix_web::Error,
+        >,
+{
+    let (st, t) = send(
+        app,
+        auth(test::TestRequest::post().uri("/open-tickets"), tok).set_json(json!({
+            "branch_id": branch, "table_id": table, "booking_id": booking,
+            "items": [{ "menu_item_id": item, "quantity": 1 }]
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{t}");
+    Uuid::parse_str(t["id"].as_str().unwrap()).unwrap()
+}
+
+async fn void_ticket<S>(app: &S, tok: &str, ticket: Uuid)
+where
+    S: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse,
+            Error = actix_web::Error,
+        >,
+{
+    let (st, t) = send(
+        app,
+        auth(
+            test::TestRequest::post().uri(&format!("/open-tickets/{ticket}/void")),
+            tok,
+        )
+        .set_json(json!({ "reason": "customer_request" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{t}");
+}
+
+/// `(status, cancelled_by, cancel_reason)`.
+async fn booking_status(pool: &PgPool, b: Uuid) -> (String, Option<String>, Option<String>) {
+    sqlx::query_as("SELECT status::text, cancelled_by, cancel_reason FROM bookings WHERE id = $1")
+        .bind(b)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// A booking whose seated party's ticket is voided is CANCELLED, by the
+/// system, and it is one rule whether the void hook or the sweep applies it.
+#[sqlx::test]
+async fn a_voided_ticket_cancels_its_booking(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let table = seed_table(&pool, org, branch, "T1", 4).await;
+    let item = seed_menu_item(&pool, org, 1000).await;
+    let admin = seed_user(&pool, org, "org_admin").await;
+    let waiter = seed_user(&pool, org, "waiter").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    open_shift_row(&pool, branch, teller).await;
+    let admin_t = token(admin, org, UserRole::OrgAdmin, None);
+    let waiter_t = token(waiter, org, UserRole::Waiter, Some(branch));
+    let hub = BranchEventHub::new();
+    let app = app!(pool, hub);
+
+    // The void itself moves the booking, inside its own transaction.
+    let b1 = book_forced(&app, &admin_t, branch).await;
+    let tk1 = fire_under(&app, &waiter_t, branch, item, b1, Some(table)).await;
+    assert_eq!(booking_status(&pool, b1).await.0, "seated");
+    void_ticket(&app, &waiter_t, tk1).await;
+    assert_eq!(
+        booking_status(&pool, b1).await,
+        (
+            "cancelled".into(),
+            Some("system".into()),
+            Some("Ticket voided".into())
+        )
+    );
+    assert_eq!(
+        table_state(&pool, table).await.0,
+        "free",
+        "the void freed the table"
+    );
+    // The hook is idempotent: a second application for the same ticket
+    // finds nothing to move.
+    assert!(
+        super::handlers::cancel_for_voided_tickets(&pool, Some(tk1))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // A party with a second bill still open waits for that one.
+    let b2 = book_forced(&app, &admin_t, branch).await;
+    let tk2a = fire_under(&app, &waiter_t, branch, item, b2, None).await;
+    let _tk2b = fire_under(&app, &waiter_t, branch, item, b2, None).await;
+    void_ticket(&app, &waiter_t, tk2a).await;
+    assert_eq!(booking_status(&pool, b2).await.0, "seated");
+
+    // The sweep applies the same rule as the backstop: a void that reached
+    // the ticket without the hook (here, written straight to the row).
+    let b3 = book_forced(&app, &admin_t, branch).await;
+    let tk3 = fire_under(&app, &waiter_t, branch, item, b3, None).await;
+    sqlx::query(
+        "UPDATE open_tickets SET status = 'voided', voided_at = now(), voided_by = $2 WHERE id = $1",
+    )
+    .bind(tk3)
+    .bind(waiter)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(booking_status(&pool, b3).await.0, "seated");
+    let hub2 = BranchEventHub::new();
+    super::jobs::run_tick(&pool, &hub2).await.unwrap();
+    assert_eq!(booking_status(&pool, b2).await.0, "seated");
+    assert_eq!(booking_status(&pool, b3).await.0, "cancelled");
 }

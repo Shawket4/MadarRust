@@ -67,6 +67,13 @@ pub struct BranchDeliverySettings {
     pub pickup_fee: i32,
     pub umbrella_discount_id: Option<Uuid>,
     pub pickup_discount_id: Option<Uuid>,
+    /// Minutes a `received` order may wait for a teller before the sweeper
+    /// rejects it and tells the customer. `null` = never: the order waits until
+    /// someone acts on it. Read at sweep time rather than frozen on the order,
+    /// so a branch that shortens it means the change to apply to what is
+    /// already waiting.
+    #[serde(default)]
+    pub auto_reject_minutes: Option<i32>,
 }
 
 impl BranchDeliverySettings {
@@ -100,6 +107,7 @@ impl BranchDeliverySettings {
             pickup_fee: 0,
             umbrella_discount_id: None,
             pickup_discount_id: None,
+            auto_reject_minutes: None,
         }
     }
 }
@@ -111,7 +119,7 @@ const BRANCH_SETTINGS_SELECT: &str = "SELECT branch_id, in_mall_enabled, outside
     in_mall_require_location, \
     umbrella_enabled, pickup_enabled, umbrella_override, pickup_override, \
     umbrella_open_time, umbrella_close_time, pickup_open_time, pickup_close_time, \
-    umbrella_fee, pickup_fee, umbrella_discount_id, pickup_discount_id \
+    umbrella_fee, pickup_fee, umbrella_discount_id, pickup_discount_id, auto_reject_minutes \
     FROM branch_delivery_settings WHERE branch_id = $1";
 
 #[derive(Deserialize, IntoParams)]
@@ -208,6 +216,10 @@ pub struct BranchSettingsInput {
     pub umbrella_discount_id: Option<Uuid>,
     #[serde(default)]
     pub pickup_discount_id: Option<Uuid>,
+    /// Minutes before an unaccepted order is rejected automatically. `null`
+    /// (and omitted, for older clients) = never.
+    #[serde(default)]
+    pub auto_reject_minutes: Option<i32>,
 }
 
 #[utoipa::path(
@@ -236,6 +248,13 @@ pub async fn put_branch_settings(
     if body.max_road_distance_meters.is_some_and(|d| d <= 0) {
         return Err(AppError::BadRequest(
             "max_road_distance_meters must be > 0".into(),
+        ));
+    }
+    // Zero would reject every order the instant it arrived; "never" is spelled
+    // null, and the database CHECKs the same bound.
+    if body.auto_reject_minutes.is_some_and(|m| m <= 0) {
+        return Err(AppError::BadRequest(
+            "auto_reject_minutes must be > 0, or null to never auto-reject".into(),
         ));
     }
 
@@ -275,9 +294,9 @@ pub async fn put_branch_settings(
              in_mall_require_location,
              umbrella_enabled, pickup_enabled, umbrella_open_time, umbrella_close_time,
              pickup_open_time, pickup_close_time, umbrella_fee, pickup_fee,
-             umbrella_discount_id, pickup_discount_id, updated_at)
+             umbrella_discount_id, pickup_discount_id, auto_reject_minutes, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                 $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, now())
+                 $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, now())
          ON CONFLICT (branch_id) DO UPDATE SET
              in_mall_enabled = EXCLUDED.in_mall_enabled,
              outside_enabled = EXCLUDED.outside_enabled,
@@ -302,6 +321,7 @@ pub async fn put_branch_settings(
              pickup_fee = EXCLUDED.pickup_fee,
              umbrella_discount_id = EXCLUDED.umbrella_discount_id,
              pickup_discount_id = EXCLUDED.pickup_discount_id,
+             auto_reject_minutes = EXCLUDED.auto_reject_minutes,
              updated_at = now()",
     )
     .bind(body.branch_id)
@@ -328,6 +348,7 @@ pub async fn put_branch_settings(
     .bind(body.pickup_fee)
     .bind(body.umbrella_discount_id)
     .bind(body.pickup_discount_id)
+    .bind(body.auto_reject_minutes)
     .execute(pool.get_ref())
     .await?;
 

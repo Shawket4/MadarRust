@@ -489,6 +489,7 @@ pub async fn adjust(
         body.branch_id,
         mode,
         body.points,
+        model::Source::Manual,
         body.note.clone(),
         claims.user_id_safe().ok(),
     )
@@ -612,6 +613,62 @@ pub async fn list_members(
         members: rows.into_iter().map(|r| r.view(mode, target)).collect(),
         total,
     }))
+}
+
+/// Forget a member. **Admin only.**
+///
+/// A void corrects a sale; this corrects a membership — someone asked the shop
+/// to stop holding their details, or an admin is clearing a test signup. The
+/// person is scrubbed and the books are kept: see [`model::forget`] for exactly
+/// what goes and what stays, and why the ledger is not the member's data.
+///
+/// 204 twice in a row: forgetting someone already forgotten is not a failure,
+/// and telling the caller "no such member" would confirm that a phone number
+/// used to be one.
+#[utoipa::path(delete, path = "/loyalty/members/{id}", tag = "loyalty",
+    operation_id = "delete_loyalty_member",
+    params(("id" = Uuid, Path, description = "Member ID")),
+    responses((status = 204, description = "Forgotten"), AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn delete_member(
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
+    id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "loyalty", "update").await?;
+    // Above the till, like `adjust`: a teller identifies the person in front of
+    // them, and does not erase people.
+    if !matches!(claims.role, UserRole::OrgAdmin | UserRole::SuperAdmin) {
+        return Err(AppError::Forbidden(
+            "Only an admin may delete a member".into(),
+        ));
+    }
+    let Some(member) = model::find_by_id(pool.get_ref(), *id).await? else {
+        return Ok(HttpResponse::NoContent().finish());
+    };
+    if let Some(org) = claims.org_id()
+        && member.org_id != org
+    {
+        return Err(AppError::NotFound("Member not found".into()));
+    }
+
+    let Some(before) = model::forget(pool.get_ref(), member.id).await? else {
+        return Ok(HttpResponse::NoContent().finish());
+    };
+
+    // After the commit, never inside it — the same rule every wallet call here
+    // follows. The card is already dead on our side (token rotated, devices
+    // dropped); this tells Google to stop rendering it. A failure is reported,
+    // not surfaced: the forget has happened, and nothing the admin could do
+    // with a 503 would make it more so.
+    tokio::spawn(async move {
+        if let Err(e) = wallet::google::expire_object(&before).await {
+            use crate::observability::report::{Failure, report};
+            report(Failure::new("loyalty", "expire_google_object"), &e);
+        }
+    });
+    Ok(HttpResponse::NoContent().finish())
 }
 
 #[derive(Debug, Serialize, ToSchema)]

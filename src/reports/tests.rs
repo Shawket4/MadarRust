@@ -1669,6 +1669,9 @@ async fn sales_and_shift_reports_reconcile(pool: PgPool) {
 /// Guard against a fourth revenue-status dialect appearing. Every money
 /// aggregate must scope on [`crate::orders::SOLD`]; the historical variants
 /// (`= 'completed'`, `!= 'voided'`) are what let three screens drift apart.
+/// The one sanctioned exception is the DRAWER — `compute_system_cash` scopes
+/// on [`crate::orders::TENDERED`] (defined beside `SOLD`, with the reason),
+/// because a fully refunded sale's notes did enter the till.
 // Fully qualified: `actix_web::test` is imported into this module, which would
 // otherwise shadow the attribute and demand an async fn.
 #[::core::prelude::v1::test]
@@ -1722,4 +1725,305 @@ fn status_predicates_are_unified() {
             }
         }
     }
+}
+
+// ── Refunds ───────────────────────────────────────────────────
+//
+// A refund is a row against a sale (20260912090000). Two keys matter and the
+// reports must not confuse them: the SALE it was against (the revenue lens —
+// what did we keep of this shift's sales) and the SHIFT it was issued in (the
+// drawer lens — what left this drawer). A refund issued tomorrow against
+// today's sale restates today's revenue and tomorrow's drawer.
+
+/// Money back against `order_id`, issued from `shift_id` by `issued_by`.
+/// Straight into the table — the triggers fill org/branch and enforce the
+/// ceiling; the refunds module's own tests cover the HTTP path.
+async fn seed_refund(
+    pool: &PgPool,
+    order_id: Uuid,
+    shift_id: Uuid,
+    issued_by: Uuid,
+    amount: i32,
+    method: &str,
+) {
+    sqlx::query(
+        "INSERT INTO order_refunds (order_id, shift_id, amount, method, is_cash, reason, issued_by)
+         VALUES ($1, $2, $3, $4, $4 = 'cash', 'customer_request', $5)",
+    )
+    .bind(order_id)
+    .bind(shift_id)
+    .bind(amount)
+    .bind(method)
+    .bind(issued_by)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test]
+async fn a_partial_refund_comes_off_revenue_but_not_off_money_in(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    grant_permission(&pool, "org_admin", "shifts", "read").await;
+
+    // Two shifts on the branch: the sale is made in A, one of the refunds is
+    // issued from B's drawer.
+    let shift_a = seed_shift(&pool, branch_id, user_id).await;
+    // A teller has one open shift at a time (`idx_shifts_one_open_per_teller`);
+    // B is an earlier, closed one on the same branch.
+    let shift_b = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO shifts (id, branch_id, teller_id, status, opening_cash, closed_at)
+         VALUES ($1, $2, $3, 'closed', 10000, now())",
+    )
+    .bind(shift_b)
+    .bind(branch_id)
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let sale = seed_paid_order(
+        &pool,
+        branch_id,
+        user_id,
+        shift_a,
+        1,
+        "completed",
+        &[("cash", 570)],
+        None,
+    )
+    .await;
+    seed_paid_order(
+        &pool,
+        branch_id,
+        user_id,
+        shift_a,
+        2,
+        "completed",
+        &[("card", 1000)],
+        None,
+    )
+    .await;
+
+    // 200 back in cash from A's own drawer, then 70 back onto a card from B.
+    seed_refund(&pool, sale, shift_a, user_id, 200, "cash").await;
+    seed_refund(&pool, sale, shift_b, user_id, 70, "card").await;
+
+    let get = |uri: String| {
+        test::TestRequest::get()
+            .uri(&uri)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request()
+    };
+
+    // ── Shift A: sold 1570, 270 of it went back; its own drawer paid out 200.
+    let a: ShiftSummary = test::read_body_json(
+        test::call_service(&app, get(format!("/reports/shifts/{shift_a}/summary"))).await,
+    )
+    .await;
+    assert_eq!(
+        a.total_orders, 2,
+        "a partially refunded sale is still a sale"
+    );
+    assert_eq!(a.gross_sales, 1570);
+    assert_eq!(
+        a.refunded_amount, 270,
+        "refunds against A's sales, whichever drawer paid"
+    );
+    assert_eq!(a.total_revenue, 1300, "gross_sales − refunded_amount");
+    // Money IN is untouched: the buckets say how the customer paid.
+    assert_eq!(a.revenue_by_method["cash"], json!(570));
+    assert_eq!(a.revenue_by_method["card"], json!(1000));
+    // Money OUT of THIS drawer: the cash refund only.
+    assert_eq!(a.refunds_issued_count, 1);
+    assert_eq!(a.refunds_issued_amount, 200);
+    assert_eq!(a.refunds_issued_cash, 200);
+
+    // ── Shift B: sold nothing, handed 70 back on a card.
+    let b: ShiftSummary = test::read_body_json(
+        test::call_service(&app, get(format!("/reports/shifts/{shift_b}/summary"))).await,
+    )
+    .await;
+    assert_eq!(b.total_orders, 0);
+    assert_eq!(b.total_revenue, 0);
+    assert_eq!(
+        b.refunded_amount, 0,
+        "B made no sale, so nothing was refunded against one"
+    );
+    assert_eq!(b.refunds_issued_count, 1);
+    assert_eq!(b.refunds_issued_amount, 70);
+    assert_eq!(
+        b.refunds_issued_cash, 0,
+        "a card refund does not touch the drawer"
+    );
+
+    // ── The branch, over the period: same identity as the shift.
+    let sales: BranchSalesReport = test::read_body_json(
+        test::call_service(&app, get(format!("/reports/branches/{branch_id}/sales"))).await,
+    )
+    .await;
+    assert_eq!(sales.gross_sales, 1570);
+    assert_eq!(sales.refunded_amount, 270);
+    assert_eq!(sales.total_revenue, 1300);
+    assert_eq!(
+        sales.total_revenue, a.total_revenue,
+        "shift and sales report describe the same money"
+    );
+    assert_eq!(sales.revenue_by_method["cash"], json!(570));
+
+    let series: Vec<TimeseriesPoint> = test::read_body_json(
+        test::call_service(
+            &app,
+            get(format!(
+                "/reports/branches/{branch_id}/sales/timeseries?granularity=daily"
+            )),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(series.len(), 1);
+    assert_eq!(series[0].revenue, 1300);
+    assert_eq!(series[0].refunded, 270);
+
+    // ── Refund the rest. The status flips to `refunded` (the trigger's rule)
+    // and the sale leaves every revenue figure; the drawer still remembers.
+    seed_refund(&pool, sale, shift_a, user_id, 300, "cash").await;
+    let a: ShiftSummary = test::read_body_json(
+        test::call_service(&app, get(format!("/reports/shifts/{shift_a}/summary"))).await,
+    )
+    .await;
+    assert_eq!(
+        a.total_orders, 1,
+        "a fully refunded order is no longer a sale"
+    );
+    assert_eq!(a.gross_sales, 1000);
+    assert_eq!(
+        a.refunded_amount, 0,
+        "its refunds leave with it — nothing partial remains"
+    );
+    assert_eq!(a.total_revenue, 1000);
+    assert_eq!(
+        a.revenue_by_method.get("cash"),
+        None,
+        "and so does its cash leg"
+    );
+    assert_eq!(a.refunds_issued_count, 2);
+    assert_eq!(a.refunds_issued_amount, 500);
+    assert_eq!(a.refunds_issued_cash, 500);
+}
+
+#[sqlx::test]
+async fn test_consumption_nets_refund_restock(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "inventory", "read").await;
+    let ing = seed_ingredient(&pool, org_id, "Beans", "g").await;
+    // Sold 10; a refunded line whose goods came back restocks 4. Consumed: 6.
+    ins_movement(&pool, branch_id, ing, "sale", -10.0, Some(100), None).await;
+    ins_movement(
+        &pool,
+        branch_id,
+        ing,
+        "refund_restock",
+        4.0,
+        Some(100),
+        None,
+    )
+    .await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    for url in [
+        format!("/reports/branches/{branch_id}/consumption"),
+        format!("/reports/orgs/{org_id}/consumption"),
+    ] {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&url)
+                .insert_header(auth.clone())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        let rows: Vec<ConsumptionRow> = test::read_body_json(resp).await;
+        let consumed = rows
+            .iter()
+            .find(|r| r.org_ingredient_id == ing)
+            .map(|r| r.consumed_qty)
+            .unwrap_or(0.0);
+        assert_eq!(
+            consumed, 6.0,
+            "a restocked refund line must net out of consumption ({url})"
+        );
+    }
+}
+
+#[sqlx::test]
+async fn delivery_sales_report_every_channel_and_the_fee_apart(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    let token = generate_org_admin_token(user_id, org_id);
+
+    // One delivered order per channel. The fee is part of `total`; a pickup
+    // carries none.
+    for (channel, subtotal, fee) in [
+        ("in_mall", 1000, 100),
+        ("outside", 2000, 300),
+        ("umbrella", 1500, 0),
+        ("pickup", 800, 0),
+    ] {
+        sqlx::query(
+            "INSERT INTO delivery_orders (org_id, branch_id, channel, status, customer_name, customer_phone,
+                 cart, subtotal, delivery_fee, total, tax_amount, tax_rate_applied, tax_inclusive, delivered_at, payment_method)
+             VALUES ($1, $2, $3::delivery_channel, 'delivered', 'C', '0100', '[]'::jsonb, $4, $5, $4 + $5, 0, 0, false, now(), 'cash')",
+        )
+        .bind(org_id)
+        .bind(branch_id)
+        .bind(channel)
+        .bind(subtotal)
+        .bind(fee)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/reports/branches/{branch_id}/delivery-sales"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+
+    // Until 2026-09 umbrella and pickup were dropped on the floor here.
+    assert_eq!(body["total_orders"], 4);
+    assert_eq!(body["total_revenue"], 5700);
+    assert_eq!(body["total_delivery_fees"], 400);
+    assert_eq!(body["total_goods_revenue"], 5300);
+
+    let channels = body["channels"].as_array().unwrap();
+    let names: Vec<&str> = channels
+        .iter()
+        .map(|c| c["channel"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["in_mall", "outside", "umbrella", "pickup"]);
+    let outside = &channels[1];
+    assert_eq!(outside["revenue"], 2300);
+    assert_eq!(outside["delivery_fees"], 300);
+    assert_eq!(outside["goods_revenue"], 2000);
+    assert_eq!(channels[3]["delivery_fees"], 0, "a pickup has no fee");
 }
