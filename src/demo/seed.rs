@@ -230,43 +230,68 @@ pub async fn seed_full(
         .await?;
     }
 
-    // ── Add-ons (unified model: one reusable group + its options) ───────────
-    let group_id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO modifier_groups \
-             (id, org_id, name, selection_type, min_selections, is_required, legacy_addon_type) \
-         VALUES ($1, $2, 'Extras', 'multi', 0, false, 'extras')",
-    )
-    .bind(group_id)
-    .bind(org_id)
-    .execute(&mut *conn)
-    .await?;
-    let addons = [("Extra Shot", 1500i32, 0i32), ("Oat Milk", 1000, 1)];
-    for (name, price, sort) in addons.iter() {
+    // ── Add-ons (unified model: reusable groups + their options) ────────────
+    // Milk is a SWAP, not an extra: it replaces the recipe's milk, so it lives in
+    // its own single-choice `milk_type` group (max 1). Putting it in the multi
+    // `Extras` group let a line carry two milks.
+    let groups = [
+        (
+            "Extras",
+            "multi",
+            None::<i32>,
+            "extras",
+            &[("Extra Shot", 1500i32, 0i32)][..],
+        ),
+        (
+            "Milk",
+            "single",
+            Some(1),
+            "milk_type",
+            &[("Oat Milk", 1000, 0)][..],
+        ),
+    ];
+    for (gsort, (gname, selection, max, legacy, options)) in groups.iter().enumerate() {
+        let group_id = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO modifier_options (id, group_id, name, price, sort, legacy_source) \
-             VALUES ($1, $2, $3, $4, $5, 'addon')",
+            "INSERT INTO modifier_groups \
+                 (id, org_id, name, selection_type, min_selections, max_selections, is_required, legacy_addon_type) \
+             VALUES ($1, $2, $3, $4, 0, $5, false, $6)",
         )
-        .bind(Uuid::new_v4())
         .bind(group_id)
-        .bind(name)
-        .bind(price)
-        .bind(sort)
+        .bind(org_id)
+        .bind(gname)
+        .bind(selection)
+        .bind(max)
+        .bind(legacy)
         .execute(&mut *conn)
         .await?;
-    }
-    // Offer the group on the drink items (0..=3) so the demo shows grouped
-    // modifiers in the new clients; old clients see the same options through
-    // the shim's flat addon catalog.
-    for item_id in item_ids.iter().take(4) {
-        sqlx::query(
-            "INSERT INTO menu_item_modifier_groups (menu_item_id, group_id, sort) \
-             VALUES ($1, $2, 0)",
-        )
-        .bind(item_id)
-        .bind(group_id)
-        .execute(&mut *conn)
-        .await?;
+        for (name, price, sort) in options.iter() {
+            sqlx::query(
+                "INSERT INTO modifier_options (id, group_id, name, price, sort, legacy_source) \
+                 VALUES ($1, $2, $3, $4, $5, 'addon')",
+            )
+            .bind(Uuid::new_v4())
+            .bind(group_id)
+            .bind(name)
+            .bind(price)
+            .bind(sort)
+            .execute(&mut *conn)
+            .await?;
+        }
+        // Offer the group on the drink items (0..=3) so the demo shows grouped
+        // modifiers in the new clients; old clients see the same options through
+        // the shim's flat addon catalog.
+        for item_id in item_ids.iter().take(4) {
+            sqlx::query(
+                "INSERT INTO menu_item_modifier_groups (menu_item_id, group_id, sort) \
+                 VALUES ($1, $2, $3)",
+            )
+            .bind(item_id)
+            .bind(group_id)
+            .bind(gsort as i32)
+            .execute(&mut *conn)
+            .await?;
+        }
     }
     // Seed the org's catalog revision so new clients can revision-gate syncs.
     sqlx::query(

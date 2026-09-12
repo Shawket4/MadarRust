@@ -239,6 +239,12 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
         .ok_or_else(|| AppError::Unauthorized("Missing claims".into()))
 }
 
+/// Groups whose options REPLACE a recipe ingredient (milk, coffee bean): a line
+/// can carry one of them at most, so the group is always `single`, max 1.
+pub(crate) fn is_swap_family(legacy_addon_type: Option<&str>) -> bool {
+    matches!(legacy_addon_type, Some("milk_type" | "coffee_type"))
+}
+
 const VALID_CHANNELS: [&str; 4] = ["in_mall", "outside", "umbrella", "pickup"];
 
 /// Load a group's `(org_id, is_active)` — the auth + soft/hard-delete gate.
@@ -440,11 +446,17 @@ pub async fn create_group(
         .org_id()
         .ok_or_else(|| AppError::Forbidden("A super admin must scope this to an org".into()))?;
 
-    let b = body.into_inner();
+    let mut b = body.into_inner();
     if b.selection_type != "single" && b.selection_type != "multi" {
         return Err(AppError::BadRequest(
             "selection_type must be 'single' or 'multi'".into(),
         ));
+    }
+    // A swap family replaces the recipe's ingredient: one choice, at most.
+    if is_swap_family(b.legacy_addon_type.as_deref()) {
+        b.selection_type = "single".into();
+        b.max_selections = Some(1);
+        b.min_selections = b.min_selections.clamp(0, 1);
     }
 
     let mut tx = pool.begin().await?;
@@ -522,9 +534,13 @@ pub async fn patch_group(
         "UPDATE modifier_groups SET \
              name = COALESCE($2, name), \
              name_translations = COALESCE($3, name_translations), \
-             selection_type = COALESCE($4, selection_type), \
-             min_selections = COALESCE($5, min_selections), \
-             max_selections = COALESCE($6, max_selections), \
+             selection_type = CASE WHEN legacy_addon_type IN ('milk_type','coffee_type') \
+                                   THEN 'single' ELSE COALESCE($4, selection_type) END, \
+             min_selections = CASE WHEN legacy_addon_type IN ('milk_type','coffee_type') \
+                                   THEN LEAST(COALESCE($5, min_selections), 1) \
+                                   ELSE COALESCE($5, min_selections) END, \
+             max_selections = CASE WHEN legacy_addon_type IN ('milk_type','coffee_type') \
+                                   THEN 1 ELSE COALESCE($6, max_selections) END, \
              is_required = COALESCE($7, is_required), \
              sort = COALESCE($8, sort), \
              updated_at = now() \

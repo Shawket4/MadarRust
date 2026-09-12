@@ -3873,3 +3873,68 @@ async fn test_void_reason_from_an_old_till_is_read_not_refused(pool: PgPool) {
     assert_eq!(reason.as_deref(), Some("customer_request"));
     assert_eq!(note, None);
 }
+
+/// A line with two milks (or two coffees) cannot be made: each swap replaces
+/// the recipe's ingredient. Refused with a 400 naming the family; one milk plus
+/// one coffee is fine.
+#[sqlx::test]
+async fn a_line_with_two_milks_is_refused(pool: PgPool) {
+    use crate::orders::component_resolve::{AddonInput, resolve_menu_item_configuration};
+    let org_id = seed_org(&pool).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+    let oat = seed_addon_item(&pool, org_id, "Oat Milk", "milk_type", 1000).await;
+    let almond = seed_addon_item(&pool, org_id, "Almond Milk", "milk_type", 1000).await;
+    let decaf = seed_addon_item(&pool, org_id, "Decaf", "coffee_type", 0).await;
+    let input = |id| AddonInput {
+        addon_item_id: id,
+        quantity: 1,
+        unit_price: None,
+    };
+
+    let err = resolve_menu_item_configuration(
+        &pool,
+        menu_item_id,
+        None,
+        1,
+        &[input(oat), input(almond)],
+        &[],
+        Uuid::new_v4(),
+    )
+    .await
+    .err()
+    .expect("two milks must be refused");
+    match err {
+        crate::errors::AppError::BadRequest(m) => assert!(m.contains("milk"), "{m}"),
+        other => panic!("expected 400, got {other:?}"),
+    }
+
+    resolve_menu_item_configuration(
+        &pool,
+        menu_item_id,
+        None,
+        1,
+        &[input(oat), input(decaf)],
+        &[],
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("one milk and one coffee is a normal drink");
+
+    // And no writer can make a milk group multi-select again.
+    let gid: Uuid = sqlx::query_scalar(
+        "INSERT INTO modifier_groups (org_id, name, selection_type, min_selections, legacy_addon_type) \
+         VALUES ($1, 'Milk', 'multi', 0, 'milk_type') RETURNING id",
+    )
+    .bind(org_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (sel, max): (String, Option<i32>) =
+        sqlx::query_as("SELECT selection_type, max_selections FROM modifier_groups WHERE id = $1")
+            .bind(gid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((sel.as_str(), max), ("single", Some(1)));
+}

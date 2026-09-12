@@ -121,16 +121,19 @@ pub async fn backfill_menu_unification(
     // ── Step B: modifier_groups ────────────────────────────────────────────────
     // B1 — one reusable group per (org, addon_items.type). selection_type='single'
     //      iff at least one slot for the type exists and none has max_selections<>1.
+    //      A swap family (milk_type / coffee_type) is ALWAYS single, max 1: each
+    //      option replaces the recipe's ingredient, so two cannot coexist.
     let g1 = sqlx::query(
         "INSERT INTO modifier_groups \
            (id, org_id, name, name_translations, selection_type, min_selections, max_selections, is_required, sort, is_active, legacy_addon_type) \
          SELECT (md5($1::text || ':addon:' || a.type))::uuid, $1, a.type, '{}'::jsonb, \
-           CASE WHEN EXISTS (SELECT 1 FROM menu_item_addon_slots sl JOIN menu_items m2 ON m2.id=sl.menu_item_id \
+           CASE WHEN a.type IN ('milk_type','coffee_type') THEN 'single' \
+                WHEN EXISTS (SELECT 1 FROM menu_item_addon_slots sl JOIN menu_items m2 ON m2.id=sl.menu_item_id \
                              WHERE m2.org_id=$1 AND sl.addon_type=a.type) \
                  AND NOT EXISTS (SELECT 1 FROM menu_item_addon_slots sl JOIN menu_items m2 ON m2.id=sl.menu_item_id \
                              WHERE m2.org_id=$1 AND sl.addon_type=a.type AND sl.max_selections IS DISTINCT FROM 1) \
                 THEN 'single' ELSE 'multi' END, \
-           0, NULL, false, 0, true, a.type \
+           0, CASE WHEN a.type IN ('milk_type','coffee_type') THEN 1 END, false, 0, true, a.type \
          FROM addon_items a WHERE a.org_id=$1 GROUP BY a.type",
     )
     .bind(org)

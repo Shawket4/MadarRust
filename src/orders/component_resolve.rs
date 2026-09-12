@@ -83,6 +83,39 @@ pub struct MenuItemResolution {
     pub optional_line: i32,
 }
 
+/// A drink has ONE milk and ONE coffee: a swap-family addon (`milk_type` /
+/// `coffee_type`) REPLACES the recipe's ingredient, so two of one family on a
+/// line cannot be made, costed or deducted — the second swap silently
+/// overwrote the first while both were charged. Refused with a 400 naming the
+/// family rather than guessed at.
+pub(crate) fn swap_family_conflict(types: &[String]) -> Option<&'static str> {
+    for (family, label) in [("milk_type", "milk"), ("coffee_type", "coffee")] {
+        if types.iter().filter(|t| t.as_str() == family).count() > 1 {
+            return Some(label);
+        }
+    }
+    None
+}
+
+async fn reject_double_swap(pool: &PgPool, addons: &[AddonInput]) -> Result<(), AppError> {
+    if addons.len() < 2 {
+        return Ok(());
+    }
+    let ids: Vec<Uuid> = addons.iter().map(|a| a.addon_item_id).collect();
+    let types: Vec<String> = sqlx::query_scalar(
+        "SELECT a.type FROM unnest($1::uuid[]) AS x(id) JOIN addon_items a ON a.id = x.id",
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await?;
+    if let Some(family) = swap_family_conflict(&types) {
+        return Err(AppError::BadRequest(format!(
+            "A line can carry only one {family} choice: {family} options replace each other"
+        )));
+    }
+    Ok(())
+}
+
 /// Resolve a menu item configuration (same rules as a standalone POS line).
 /// [line_quantity] is the total multiplier for inventory (e.g. bundle line qty × component qty per bundle).
 pub async fn resolve_menu_item_configuration(
@@ -99,6 +132,8 @@ pub async fn resolve_menu_item_configuration(
     if line_quantity <= 0 {
         return Err(AppError::BadRequest("Quantity must be > 0".into()));
     }
+
+    reject_double_swap(pool, addons).await?;
 
     let mut deductions: Vec<InventoryDeduction> = Vec::new();
     let mut resolved_addons: Vec<ResolvedAddon> = Vec::new();
@@ -382,4 +417,33 @@ pub async fn resolve_menu_item_configuration(
         addon_line,
         optional_line,
     })
+}
+
+#[cfg(test)]
+mod swap_family_tests {
+    use super::swap_family_conflict;
+
+    fn v(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn one_of_each_family_is_fine() {
+        assert_eq!(
+            swap_family_conflict(&v(&["milk_type", "coffee_type", "extra", "extra"])),
+            None
+        );
+    }
+
+    #[test]
+    fn two_milks_or_two_coffees_conflict() {
+        assert_eq!(
+            swap_family_conflict(&v(&["milk_type", "extra", "milk_type"])),
+            Some("milk")
+        );
+        assert_eq!(
+            swap_family_conflict(&v(&["coffee_type", "coffee_type"])),
+            Some("coffee")
+        );
+    }
 }
