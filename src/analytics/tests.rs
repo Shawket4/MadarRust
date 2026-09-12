@@ -774,3 +774,94 @@ async fn a_partial_refund_is_netted_from_revenue_and_reported_apart(pool: PgPool
     assert_eq!(issued["fully_refunded_orders"], 1);
     assert_eq!(issued["orders_refunded"], 1);
 }
+
+/// The tables dataset reads the sale's own table, covers and seating time.
+#[sqlx::test]
+async fn the_tables_dataset_measures_turns_covers_and_dwell(pool: PgPool) {
+    let s = seed(&pool, "t").await;
+    let section = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO floor_sections (id, org_id, branch_id, name) VALUES ($1,$2,$3,'Patio')",
+    )
+    .bind(section)
+    .bind(s.org)
+    .bind(s.branch)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let orders: Vec<(Uuid, i32)> = sqlx::query_as(
+        "SELECT id, order_number FROM orders WHERE branch_id = $1 ORDER BY order_number",
+    )
+    .bind(s.branch)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    for ((order, _), (label, covers, minutes)) in orders.iter().zip([("T1", 2, 30), ("T2", 3, 60)])
+    {
+        let table: Uuid = sqlx::query_scalar(
+            "INSERT INTO branch_tables (org_id, branch_id, section_id, label) \
+             VALUES ($1,$2,$3,$4) RETURNING id",
+        )
+        .bind(s.org)
+        .bind(s.branch)
+        .bind(section)
+        .bind(label)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE orders SET table_id = $2, covers = $3, \
+                    seated_at = created_at - make_interval(mins => $4) WHERE id = $1",
+        )
+        .bind(order)
+        .bind(table)
+        .bind(covers)
+        .bind(minutes)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let app = metrics_app(&pool).await;
+    let body = post_query(
+        &app,
+        &org_admin_token(s.org),
+        json!({
+            "widgets": [
+                { "key": "total", "spec": {
+                    "dataset": "tables",
+                    "measures": ["turns", "covers", "table_revenue", "revenue_per_cover",
+                                 "avg_dwell_minutes", "active_tables", "revenue_per_table"],
+                    "period": { "preset": "all_time" } } },
+                { "key": "by_table", "spec": {
+                    "dataset": "tables", "dimensions": ["section", "table"],
+                    "measures": ["turns", "avg_dwell_minutes"],
+                    "period": { "preset": "all_time" },
+                    "sort": { "measure": "avg_dwell_minutes", "dir": "desc" } } }
+            ]
+        }),
+    )
+    .await;
+    let t = &body["results"]["total"];
+    assert_eq!(t["status"], "ok", "{t}");
+    let row = &t["rows"][0];
+    assert_eq!(row["turns"], 2);
+    assert_eq!(row["covers"], 5);
+    assert_eq!(row["active_tables"], 2);
+    let revenue = row["table_revenue"].as_i64().unwrap();
+    assert_eq!(
+        row["revenue_per_cover"].as_i64().unwrap(),
+        (revenue as f64 / 5.0).round() as i64
+    );
+    assert_eq!(row["revenue_per_table"].as_i64().unwrap(), revenue / 2);
+    assert_eq!(row["avg_dwell_minutes"].as_f64().unwrap(), 45.0);
+
+    let rows = body["results"]["by_table"]["rows"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["table"], "T2");
+    assert_eq!(rows[0]["section"], "Patio");
+    assert_eq!(rows[0]["avg_dwell_minutes"].as_f64().unwrap(), 60.0);
+}

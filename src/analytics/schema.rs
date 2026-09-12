@@ -757,6 +757,137 @@ const ORDERS_DIMS: &[Dim] = dims_with_time!(
     ]
 );
 
+// ── Dataset: tables (one row per settled sale that was eaten at a table) ─────
+
+const TABLE_JOINS: &[Join] = &[
+    Join {
+        id: "branch",
+        sql: "LEFT JOIN branches b ON b.id = o.branch_id",
+    },
+    Join {
+        id: "section",
+        sql: "LEFT JOIN floor_sections fs ON fs.id = tb.section_id",
+    },
+    Join {
+        id: "refunds",
+        sql: "LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id",
+    },
+];
+
+/// Minutes from the party sitting down to the bill being paid.
+macro_rules! dwell_minutes_sql {
+    () => {
+        "GREATEST(EXTRACT(EPOCH FROM (o.created_at - COALESCE(o.seated_at, o.created_at))) / 60.0, 0)"
+    };
+}
+
+const TABLE_MEASURES: &[Meas] = &[
+    Meas {
+        id: "turns",
+        label: "Turns",
+        expr: "COUNT(DISTINCT o.id)",
+        kind: ColumnKind::Count,
+        joins: &[],
+        help: "Parties served: settled bills eaten at a table.",
+    },
+    Meas {
+        id: "turns_per_day",
+        label: "Turns per day",
+        expr: "ROUND(COUNT(DISTINCT o.id)::numeric \
+               / NULLIF(COUNT(DISTINCT (o.table_id, (o.created_at AT TIME ZONE :tz)::date)), 0), 2)::float8",
+        kind: ColumnKind::Number,
+        joins: &[],
+        help: "Parties per table per trading day (a day the table sat at least one party). \
+               Grouped by table it is that table's turns on the days it was used.",
+    },
+    Meas {
+        id: "covers",
+        label: "Covers",
+        expr: "COALESCE(SUM(o.covers),0)",
+        kind: ColumnKind::Count,
+        joins: &[],
+        help: "Guests seated, from the bill's guest count (bills with no count add none).",
+    },
+    Meas {
+        id: "table_revenue",
+        label: "Revenue",
+        expr: "COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount,0)),0)::bigint",
+        kind: ColumnKind::Money,
+        joins: &["refunds"],
+        help: "What the table's bills brought in after refunds (tax and service charge included).",
+    },
+    Meas {
+        id: "revenue_per_table",
+        label: "Revenue per table",
+        expr: "COALESCE(ROUND(SUM(o.total_amount - COALESCE(rf.refunded_amount,0))::numeric \
+               / NULLIF(COUNT(DISTINCT o.table_id),0)),0)::bigint",
+        kind: ColumnKind::Money,
+        joins: &["refunds"],
+        help: "Revenue divided by the number of distinct tables that took money in the group.",
+    },
+    Meas {
+        id: "revenue_per_cover",
+        label: "Revenue per cover",
+        expr: "COALESCE(ROUND(SUM(o.total_amount - COALESCE(rf.refunded_amount,0))::numeric \
+               / NULLIF(SUM(o.covers),0)),0)::bigint",
+        kind: ColumnKind::Money,
+        joins: &["refunds"],
+        help: "Revenue divided by covers. Bills with no guest count still add revenue, so \
+               record covers for this to be fair.",
+    },
+    Meas {
+        id: "avg_dwell_minutes",
+        label: "Avg minutes seated",
+        expr: concat!(
+            "COALESCE(ROUND(AVG(",
+            dwell_minutes_sql!(),
+            ")::numeric, 1),0)::float8"
+        ),
+        kind: ColumnKind::Minutes,
+        joins: &[],
+        help: "Mean minutes from the party sitting down (the seat, else the bill opening) to \
+               paying.",
+    },
+    Meas {
+        id: "active_tables",
+        label: "Tables used",
+        expr: "COUNT(DISTINCT o.table_id)",
+        kind: ColumnKind::Count,
+        joins: &[],
+        help: "Distinct tables that sat at least one paying party.",
+    },
+];
+
+const TABLE_DIMS: &[Dim] = dims_with_time!(
+    "o.created_at",
+    [
+        Dim {
+            id: "table",
+            label: "Table",
+            expr: "tb.label",
+            kind: ColumnKind::Label,
+            joins: &[],
+            time: false
+        },
+        Dim {
+            id: "section",
+            label: "Section",
+            expr: "COALESCE(fs.name, 'No section')",
+            kind: ColumnKind::Label,
+            joins: &["section"],
+            time: false
+        },
+        Dim {
+            id: "branch",
+            label: "Branch",
+            expr: "b.name",
+            kind: ColumnKind::Label,
+            joins: &["branch"],
+            time: false
+        },
+    ]
+);
+
 // ── Dataset: order_items (one row per order line) ────────────────────────────
 
 const ITEM_JOINS: &[Join] = &[
@@ -1999,6 +2130,25 @@ pub const DATASETS: &[Dataset] = &[
         measures: ITEM_MEASURES,
         filters: &[F_ORDER_STATUS, F_ORDER_TYPE],
         default_measures: &["units_sold", "item_revenue"],
+        default_viz: Viz::Bar,
+    },
+    Dataset {
+        id: "tables",
+        title: "Tables",
+        help: "One row per settled dine-in bill that was eaten at a table. Use for table \
+               turns, covers, dwell time (seated to paid), revenue per table and per cover, \
+               and busiest tables, sections and hours. Counter and delivery sales are not \
+               here — use orders.",
+        from: "orders o JOIN branch_tables tb ON tb.id = o.table_id",
+        branch_col: "o.branch_id",
+        time_col: "o.created_at",
+        time_is_date: false,
+        base_pred: "",
+        joins: TABLE_JOINS,
+        dims: TABLE_DIMS,
+        measures: TABLE_MEASURES,
+        filters: &[F_ORDER_STATUS],
+        default_measures: &["turns", "covers", "table_revenue"],
         default_viz: Viz::Bar,
     },
     Dataset {

@@ -317,6 +317,19 @@ pub const PRESETS: &[Preset] = &[
         filters: [("po_status", "received")], sort: Some(("purchase_cost", Dir::Desc)), limit: 30,
         viz: Viz::Bar, period: PeriodPreset::Last90Days, share: false,
         "Purchase spend by ingredient, with quantity received and average unit cost."),
+    // ── Tables ───────────────────────────────────────────────────────────────
+    preset!("table_summary", "Table summary", "Tables", "reports", "tables",
+        dims: [], measures: ["turns", "covers", "table_revenue", "revenue_per_cover", "avg_dwell_minutes", "turns_per_day", "active_tables"],
+        filters: [], sort: None, limit: 1, viz: Viz::Table, period: PeriodPreset::Last30Days, share: false,
+        "Parties served at tables, covers, table revenue, revenue per cover, average minutes seated and turns per table per day."),
+    preset!("busiest_tables", "Busiest tables", "Tables", "reports", "tables",
+        dims: ["table"], measures: ["turns", "covers", "table_revenue", "avg_dwell_minutes"],
+        filters: [], sort: Some(("turns", Dir::Desc)), limit: 25, viz: Viz::Bar, period: PeriodPreset::Last30Days, share: false,
+        "Tables ranked by parties served, with covers, revenue and how long parties stay."),
+    preset!("table_turns_by_hour", "Table turns by hour", "Tables", "reports", "tables",
+        dims: ["hour"], measures: ["turns", "covers"],
+        filters: [], sort: None, limit: 24, viz: Viz::Bar, period: PeriodPreset::Last30Days, share: false,
+        "When the room is busiest: parties settled at tables by hour of day."),
     // ── Reservations ─────────────────────────────────────────────────────────
 ];
 
