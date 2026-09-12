@@ -342,6 +342,7 @@ paths(
         crate::loyalty::public::join_info,
         crate::loyalty::public::join,
         crate::orgs::public::brand,
+        crate::orgs::public::favicon,
         crate::loyalty::public::card,
         crate::loyalty::public::set_preferences,
         crate::loyalty::public::card_orders,

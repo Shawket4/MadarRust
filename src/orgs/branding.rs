@@ -719,6 +719,53 @@ mod tests {
         assert_eq!(Palette::default().background, MADAR_TEAL);
     }
 
+    /// A favicon of a WIDE wordmark must still be the whole wordmark.
+    ///
+    /// This is the failure worth pinning: `resize_to_fill` would cover-crop a
+    /// 4:1 logo to a square and eat the ends off — which on a wordmark is the
+    /// shop's name. The artwork is fitted whole and sits as a band.
+    #[test]
+    fn a_wide_wordmark_keeps_both_of_its_ends() {
+        // A 400×100 mark: red at the left end, blue at the right.
+        let logo = on_transparency(400, &[]);
+        let mut img = logo.to_rgba8();
+        let wide = image::imageops::crop_imm(&mut img, 0, 0, 400, 100).to_image();
+        let mut wide = wide;
+        for y in 20..80 {
+            for x in 10..60 {
+                wide.put_pixel(x, y, Rgba([255, 0, 0, 255]));
+            }
+            for x in 340..390 {
+                wide.put_pixel(x, y, Rgba([0, 0, 255, 255]));
+            }
+        }
+        let out = on_ground(
+            &DynamicImage::ImageRgba8(wide),
+            "#FFFFFF",
+            None,
+            256,
+            0.82,
+        );
+        let px = out.to_rgba8();
+        assert_eq!(out.width(), 256, "square");
+        assert_eq!(out.height(), 256);
+        // Both ends survived, and the ground is opaque everywhere.
+        let reddish = px.pixels().any(|p| p[0] > 180 && p[2] < 80);
+        let bluish = px.pixels().any(|p| p[2] > 180 && p[0] < 80);
+        assert!(reddish, "the left end of the wordmark was cropped away");
+        assert!(bluish, "the right end of the wordmark was cropped away");
+        // The corners are pure ground — nothing shows through them — and
+        // nowhere on the canvas is meaningfully transparent. (Resampling
+        // leaves the odd pixel at alpha 254 where the artwork blends; that is
+        // a rounding artefact, not a hole.)
+        assert_eq!(px.get_pixel(0, 0), &Rgba([255, 255, 255, 255]));
+        assert_eq!(px.get_pixel(255, 255), &Rgba([255, 255, 255, 255]));
+        assert!(
+            px.pixels().all(|p| p[3] >= 250),
+            "a favicon is drawn on a background the browser picks; it carries its own"
+        );
+    }
+
     #[test]
     fn an_empty_image_does_not_panic() {
         assert!(palette_from_image(&solid(1, 1, [0, 0, 0, 0])).is_none());

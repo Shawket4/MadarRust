@@ -6,6 +6,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     // browser makes, before any session exists, and everything it returns is
     // already on the shopfront.
     cfg.route("/public/orgs/brand", web::get().to(super::public::brand));
+    cfg.route(
+        "/public/orgs/favicon",
+        web::get().to(super::public::favicon),
+    );
     cfg.service(
         web::scope("/orgs")
             .wrap(JwtMiddleware)
