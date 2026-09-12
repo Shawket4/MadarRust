@@ -1,0 +1,99 @@
+# One-shot repair for the demo database's migration checksum.
+#
+# MANUAL ONLY — `workflow_dispatch`, never on push. It exists because the demo
+# box applied `20260912050000` before that migration was corrected, so sqlx
+# refuses to boot against a recorded checksum that no longer matches the file.
+# Prod never applied the original and is unaffected.
+#
+# The script it runs is the safety: it verifies the migration's whole effect is
+# already present on that database before re-stamping anything, and refuses if
+# it is not. See `scripts/repair-demo-migration-checksum.sh` for the reasoning.
+#
+# This should be needed exactly once. When the demo box is healthy, this file
+# can be deleted along with the script.
+name: Repair demo DB
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "repair" to confirm — this rewrites one row in _sqlx_migrations'
+        required: true
+        default: ''
+
+jobs:
+  repair:
+    name: re-stamp the demo migration checksum
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Refuse without confirmation
+        if: inputs.confirm != 'repair'
+        run: |
+          echo "::error::Type 'repair' in the confirm box to run this."
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "${{ secrets.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+
+      # The script and the migration it checks both travel, so the checksum is
+      # computed from the file this repo actually holds rather than one the box
+      # happens to have lying around.
+      - name: Copy the repair script and the migration
+        run: |
+          ssh -i ~/.ssh/deploy_key -p ${{ secrets.SSH_PORT }} \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+            'rm -rf /tmp/madar-repair && mkdir -p /tmp/madar-repair/migrations /tmp/madar-repair/scripts'
+          scp -i ~/.ssh/deploy_key -P ${{ secrets.SSH_PORT }} \
+            scripts/repair-demo-migration-checksum.sh \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/tmp/madar-repair/scripts/
+          scp -i ~/.ssh/deploy_key -P ${{ secrets.SSH_PORT }} \
+            migrations/20260912050000_a_delivery_order_freezes_its_tax.sql \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/tmp/madar-repair/migrations/
+
+      - name: Run it against the demo database
+        run: |
+          ssh -i ~/.ssh/deploy_key -p ${{ secrets.SSH_PORT }} \
+              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} 'bash -s' << 'SCRIPT'
+          set -euo pipefail
+          cd /tmp/madar-repair
+
+          # The demo's own connection string, from the file the demo container
+          # already uses. Never prod's — this must not be able to touch it.
+          if [ ! -f /opt/madar-demo/.env ]; then
+            echo "::error::/opt/madar-demo/.env missing — see deploy/demo/SETUP.md"
+            exit 1
+          fi
+          DATABASE_URL=$(grep -E '^DATABASE_URL=' /opt/madar-demo/.env | head -1 | cut -d= -f2-)
+          DATABASE_URL=${DATABASE_URL%\"}; DATABASE_URL=${DATABASE_URL#\"}
+          case "$DATABASE_URL" in
+            *madar_demo*) : ;;
+            *) echo "::error::That connection string is not the demo database. Refusing."; exit 1 ;;
+          esac
+
+          chmod +x scripts/repair-demo-migration-checksum.sh
+          DATABASE_URL="$DATABASE_URL" scripts/repair-demo-migration-checksum.sh
+          rm -rf /tmp/madar-repair
+          SCRIPT
+
+      - name: Restart the demo backend
+        run: |
+          ssh -i ~/.ssh/deploy_key -p ${{ secrets.SSH_PORT }} \
+              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} 'bash -s' << 'SCRIPT'
+          set -e
+          docker compose -f /opt/madar-demo/docker-compose.demo.yml \
+            up -d --no-deps --pull never madar-demo-backend
+          sleep 5
+          curl -sf http://127.0.0.1:8083/health && echo "✅ demo healthy" || {
+            docker compose -f /opt/madar-demo/docker-compose.demo.yml \
+              logs madar-demo-backend --tail 40
+            exit 1
+          }
+          SCRIPT
