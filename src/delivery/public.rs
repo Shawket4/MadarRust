@@ -348,9 +348,13 @@ pub struct DeliveryMenuDiscount {
     pub name_translations: serde_json::Value,
     /// "percentage" | "fixed".
     pub dtype: String,
-    /// A FRACTION for `percentage` (0.14 = 14%, like every other rate here);
-    /// piastres for `fixed`.
+    /// LEGACY SPELLING — an integer, 0-100 for a percentage; piastres for
+    /// `fixed`. See `discounts::wire`.
+    #[serde(serialize_with = "crate::discounts::wire::ser_legacy")]
+    #[schema(value_type = i64)]
     pub value: rust_decimal::Decimal,
+    /// The stored fraction, for clients that know to ask.
+    pub value_rate: rust_decimal::Decimal,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -456,6 +460,8 @@ pub(crate) async fn load_public_menu(
             name_translations,
             dtype,
             value,
+            // The same number, in the spelling the engine holds it.
+            value_rate: value,
         },
     );
 

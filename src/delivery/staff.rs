@@ -51,8 +51,17 @@ pub struct DeliveryOrder {
     /// when none.
     pub discount_id: Option<Uuid>,
     pub discount_type: Option<String>,
-    #[serde(default)]
+    /// LEGACY SPELLING on the wire — an integer, 0-100 for a percentage. See
+    /// `discounts::wire`: a double here fails to deserialise the whole
+    /// DELIVERY ORDER on every shipped till, not just this field.
+    #[serde(default, serialize_with = "crate::discounts::wire::ser_legacy")]
+    #[schema(value_type = i64)]
     pub discount_value: rust_decimal::Decimal,
+    /// The stored value — a fraction for a percentage. Same column as
+    /// [`DeliveryOrder::discount_value`].
+    #[sqlx(rename = "discount_value")]
+    #[serde(default)]
+    pub discount_rate: rust_decimal::Decimal,
     #[serde(default)]
     pub discount_amount: i32,
     /// The tax as priced at intake, under the policy frozen beside it. Inside

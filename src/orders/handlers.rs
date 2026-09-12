@@ -150,7 +150,18 @@ pub struct Order {
     pub payment_legs: Vec<PaymentLeg>,
     pub subtotal: i32,
     pub discount_type: Option<String>,
+    /// LEGACY SPELLING — an integer, 0-100 for a percentage. See
+    /// `discounts::wire`: every shipped till was generated against `integer`,
+    /// and a double here fails to deserialise the whole ORDER, not just this
+    /// field. Read [`Order::discount_rate`] for the stored number.
+    #[serde(serialize_with = "crate::discounts::wire::ser_legacy")]
+    #[schema(value_type = i64)]
     pub discount_value: Decimal,
+    /// The stored value — a fraction for a percentage. Same column as
+    /// [`Order::discount_value`].
+    #[sqlx(rename = "discount_value")]
+    #[serde(default)]
+    pub discount_rate: Decimal,
     pub discount_amount: i32,
     pub tax_amount: i32,
     /// The service charge on this bill; `0` where the branch charges none.

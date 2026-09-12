@@ -21,9 +21,19 @@ pub struct Discount {
     #[schema(value_type = Object)]
     pub name_translations: serde_json::Value,
     pub dtype: String,
-    /// Polymorphic by `dtype`: a FRACTION for `percentage` (0.14 = 14%, like
-    /// every other rate in this schema), or minor units for `fixed`.
+    /// LEGACY SPELLING — an integer, 0-100 for a percentage, minor units for
+    /// `fixed`. What every shipped client was generated against; see
+    /// `discounts::wire`. Read [`Discount::value_rate`] for the real stored
+    /// number.
+    #[serde(serialize_with = "crate::discounts::wire::ser_legacy")]
+    #[schema(value_type = i64)]
     pub value: Decimal,
+    /// The stored value: a FRACTION for `percentage` (0.14 = 14%, like every
+    /// other rate in this schema), or minor units for `fixed`. The same
+    /// column as [`Discount::value`], spelled the way the engine holds it.
+    #[sqlx(rename = "value")]
+    #[serde(default)]
+    pub value_rate: Decimal,
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
