@@ -78,6 +78,12 @@ jobs:
             *) echo "::error::That connection string is not the demo database. Refusing."; exit 1 ;;
           esac
 
+          # `host.docker.internal` is how the CONTAINER reaches Postgres on the
+          # host (compose maps it to host-gateway). We are on the host itself,
+          # where that name does not resolve at all, so psql fails before it
+          # ever opens a connection. Same database, the name the host uses.
+          DATABASE_URL=${DATABASE_URL//host.docker.internal/127.0.0.1}
+
           chmod +x scripts/repair-demo-migration-checksum.sh
           DATABASE_URL="$DATABASE_URL" scripts/repair-demo-migration-checksum.sh
           rm -rf /tmp/madar-repair
