@@ -3779,3 +3779,91 @@ async fn a_sale_that_has_refunded_money_cannot_be_voided(pool: PgPool) {
         "a partial refund leaves the status alone"
     );
 }
+
+/// An old till's void reason is READ, not refused.
+///
+/// The same break as the discount convention, on the next field along. Void
+/// reasons became an enum; the TICKET void has read the old picker's labels
+/// leniently since that landed, and the ORDER void validated strictly — so a
+/// till still on the previous build could not void a counter sale at all.
+///
+/// Nothing a person typed is thrown away: an unrecognised reason lands as
+/// `other` carrying the whole string as the note.
+#[sqlx::test]
+async fn test_void_reason_from_an_old_till_is_read_not_refused(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    for a in ["create", "read", "update", "delete"] {
+        grant_permission(&pool, "org_admin", "orders", a).await;
+    }
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item = seed_menu_item(&pool, org_id, cat_id).await;
+
+    async fn void_with(
+        app: &impl actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse,
+            Error = actix_web::Error,
+        >,
+        pool: &PgPool,
+        token: &str,
+        order_id: Uuid,
+        reason: &str,
+    ) -> (Option<String>, Option<String>) {
+        let resp = test::call_service(
+            app,
+            test::TestRequest::post()
+                .uri(&format!("/orders/{order_id}/void"))
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .set_json(&serde_json::json!({ "reason": reason }))
+                .to_request(),
+        )
+        .await;
+        assert!(resp.status().is_success(), "{:?}", resp.status());
+        sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT void_reason::text, void_note FROM orders WHERE id = $1",
+        )
+        .bind(order_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    let mut fresh = async || {
+        create_order_ok!(app, token, simple_order(branch_id, shift_id, item))
+            .order
+            .id
+    };
+
+    // The old picker's own label.
+    let (reason, note) = void_with(&app, &pool, &token, fresh().await, "Order mistake").await;
+    assert_eq!(reason.as_deref(), Some("wrong_order"));
+    assert_eq!(note, None);
+
+    // Label and note, the way the old picker composed them.
+    let (reason, note) =
+        void_with(&app, &pool, &token, fresh().await, "Quality issue — cold").await;
+    assert_eq!(reason.as_deref(), Some("quality_issue"));
+    assert_eq!(note.as_deref(), Some("cold"));
+
+    // Something nobody anticipated: kept verbatim rather than dropped.
+    let (reason, note) = void_with(
+        &app,
+        &pool,
+        &token,
+        fresh().await,
+        "cat walked across the till",
+    )
+    .await;
+    assert_eq!(reason.as_deref(), Some("other"));
+    assert_eq!(note.as_deref(), Some("cat walked across the till"));
+
+    // And today's spelling still means what it says.
+    let (reason, note) = void_with(&app, &pool, &token, fresh().await, "customer_request").await;
+    assert_eq!(reason.as_deref(), Some("customer_request"));
+    assert_eq!(note, None);
+}

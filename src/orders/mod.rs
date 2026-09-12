@@ -67,6 +67,34 @@ impl VoidReason {
         }
     }
 
+    /// Read a void reason off the wire, in whatever vocabulary the client
+    /// speaks.
+    ///
+    /// The enum's own four values first; then the LEGACY picker's labels,
+    /// which older builds send either alone or as `<label> — <note>`; and
+    /// failing both, `other` carrying the whole string as the note, so nothing
+    /// a person typed is thrown away.
+    ///
+    /// Shared, because both void paths meet the same field from the same field
+    /// devices. The ticket's wire type has read it leniently since the enum
+    /// landed; the ORDER's validated strictly, so an old till voiding a
+    /// counter sale got a 400 for the reason it had always sent — the same
+    /// shape of break as the discount convention, on the next field along.
+    pub fn read(raw: &str) -> (Self, Option<String>) {
+        let raw = raw.trim();
+        if let Some(reason) = Self::parse(raw) {
+            return (reason, None);
+        }
+        let (label, tail) = match raw.split_once(" — ") {
+            Some((l, n)) => (l, Some(n.trim().to_string()).filter(|s| !s.is_empty())),
+            None => (raw, None),
+        };
+        match Self::from_legacy_label(label) {
+            Some(reason) => (reason, tail),
+            None => (Self::Other, Some(raw.to_string()).filter(|s| !s.is_empty())),
+        }
+    }
+
     /// The labels the ticket-void picker used before the reason was typed,
     /// mapped exactly as migration `20260912020000` mapped the stored rows, so
     /// a void queued offline by an older till lands as the same reason the

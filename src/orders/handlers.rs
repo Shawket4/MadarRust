@@ -2758,13 +2758,20 @@ pub(crate) async fn void_order_inner(
         }
     }
 
-    validate_void_reason(&body.reason)?;
+    // Read in whatever vocabulary the till speaks — the enum's four values, or
+    // the labels an older build sends. The ticket's void has read it leniently
+    // since the enum landed; this one validated strictly, so an old till
+    // voiding a counter sale got a 400 for the reason it had always sent.
+    let (reason, legacy_note) = crate::orders::VoidReason::read(&body.reason);
+    let reason = reason.as_str();
     let void_note = body
         .note
         .as_deref()
         .map(str::trim)
-        .filter(|s| !s.is_empty());
-    if body.reason == "other" && void_note.is_none() {
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or(legacy_note);
+    if reason == "other" && void_note.is_none() {
         return Err(AppError::BadRequest(
             "A note is required when void reason is 'other'".into(),
         ));
@@ -2824,10 +2831,10 @@ pub(crate) async fn void_order_inner(
             price_flagged, price_expected_total, created_at"#,
     )
     .bind(order_id)
-    .bind(&body.reason)
+    .bind(reason)
     .bind(voided_at)
     .bind(actor.teller_id)
-    .bind(void_note)
+    .bind(void_note.as_deref())
     .fetch_optional(&mut *tx)
     .await?;
 
@@ -3639,14 +3646,6 @@ pub(crate) fn resolve_discount_value(
          running an old build and should be updated"
     );
     Ok(converted)
-}
-
-fn validate_void_reason(reason: &str) -> Result<(), AppError> {
-    // The vocabulary is `VoidReason`'s — one enum for counter and dine-in voids.
-    match crate::orders::VoidReason::parse(reason) {
-        Some(_) => Ok(()),
-        None => Err(AppError::BadRequest("Invalid void_reason".into())),
-    }
 }
 
 #[allow(unused_assignments)]
