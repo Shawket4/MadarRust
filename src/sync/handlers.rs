@@ -617,11 +617,18 @@ pub async fn replay(
                 .and_then(|v| v.as_str())
                 .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
                 .map(|v| v.with_timezone(&chrono::Utc));
+            // Covers, when the till counted them; anything unreadable is
+            // simply not recorded.
+            let party_size = request
+                .get("party_size")
+                .and_then(|v| v.as_i64())
+                .and_then(|v| i32::try_from(v).ok());
             crate::floor_ops::handlers::hold_table_inner(
                 pool.clone(),
                 table_id,
                 None,
                 seated_at,
+                party_size,
                 actor,
                 Some(hub.get_ref()),
             )

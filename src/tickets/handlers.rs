@@ -986,6 +986,16 @@ pub async fn move_ticket_table(
     {
         return Err(AppError::Conflict("Table is already occupied".into()));
     }
+    // A party waiting to order is sitting there too: moving a bill onto them
+    // would end their hold and lose them. That is a swap, not a move.
+    if let Some(live) = crate::floor_ops::live_occupancy(&mut tx, body.table_id).await?
+        && live.held_by != "ticket"
+    {
+        return Err(crate::floor_ops::refused(
+            crate::floor_ops::refusal::TABLE_HELD,
+            "A party is holding this table -- swap the tables instead",
+        ));
+    }
     // The old table's row ends `moved`, a row opens on the new one, and the
     // move may be exactly what this party's transfer wish asked for.
     let old_table: Option<Uuid> = sqlx::query_scalar(

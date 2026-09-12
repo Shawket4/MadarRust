@@ -1627,3 +1627,219 @@ async fn the_seating_clock_survives_from_hold_to_sale(pool: PgPool) {
     let body: serde_json::Value = test::read_body_json(r).await;
     assert!(body["average_minutes"].as_i64().unwrap() >= 19);
 }
+
+// ── Moves carry parties with no bill yet ─────────────────────────────────────
+
+/// `(party_size, seated_at)` of the live row on `table`.
+async fn live_party(
+    pool: &PgPool,
+    table: Uuid,
+) -> Option<(String, Option<i16>, Option<chrono::DateTime<chrono::Utc>>)> {
+    sqlx::query_as(
+        "SELECT held_by, party_size, COALESCE(seated_at, started_at) FROM table_occupancies \
+          WHERE table_id = $1 AND ended_at IS NULL",
+    )
+    .bind(table)
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test]
+async fn a_hold_records_its_covers(pool: PgPool) {
+    grant_defaults(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let t1 = seed_table(&pool, org, branch, None, "T1").await;
+    let t2 = seed_table(&pool, org, branch, None, "T2").await;
+    let app = app!(pool);
+    let t = token(teller, org, UserRole::Teller);
+
+    let resp = post_json!(
+        app,
+        t,
+        &format!("/floor/tables/{t1}/hold"),
+        serde_json::json!({ "branch_id": branch, "party_size": 4 })
+    );
+    assert_eq!(resp.status(), 200);
+    assert_eq!(live_party(&pool, t1).await.unwrap().1, Some(4));
+
+    // A recount on the same hold corrects it.
+    let resp = post_json!(
+        app,
+        t,
+        &format!("/floor/tables/{t1}/hold"),
+        serde_json::json!({ "branch_id": branch, "party_size": 5 })
+    );
+    assert_eq!(resp.status(), 200);
+    assert_eq!(live_party(&pool, t1).await.unwrap().1, Some(5));
+
+    // A queued hold carries it through replay too; nonsense is not recorded.
+    let resp = post_json!(
+        app,
+        t,
+        "/sync/replay",
+        serde_json::json!({ "op": "hold_table", "teller_id": teller, "table_id": t2,
+                            "request": { "party_size": 3 } })
+    );
+    assert_eq!(resp.status(), 200);
+    assert_eq!(live_party(&pool, t2).await.unwrap().1, Some(3));
+}
+
+#[sqlx::test]
+async fn swap_exchanges_two_parties_with_no_bill(pool: PgPool) {
+    grant_defaults(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let t1 = seed_table(&pool, org, branch, None, "T1").await;
+    let t2 = seed_table(&pool, org, branch, None, "T2").await;
+    let t3 = seed_table(&pool, org, branch, None, "T3").await;
+    let app = app!(pool);
+    let t = token(teller, org, UserRole::Teller);
+
+    let early = chrono::Utc::now() - chrono::Duration::minutes(40);
+    for (table, size) in [(t1, 2), (t2, 6)] {
+        let resp = post_json!(
+            app,
+            t,
+            &format!("/floor/tables/{table}/hold"),
+            serde_json::json!({ "branch_id": branch, "party_size": size,
+                                "seated_at": if size == 2 { Some(early) } else { None } })
+        );
+        assert_eq!(resp.status(), 200);
+    }
+    let clock_1 = live_party(&pool, t1).await.unwrap().2;
+    let clock_2 = live_party(&pool, t2).await.unwrap().2;
+
+    // Move the party on T1 to the empty T3: the table follows the party.
+    let resp = post_json!(
+        app,
+        t,
+        "/floor/tables/swap",
+        serde_json::json!({ "branch_id": branch, "table_a": t1, "table_b": t3 })
+    );
+    assert_eq!(resp.status(), 200, "a party with no bill is an occupant");
+    assert_eq!(table_status(&pool, t1).await, "free");
+    assert_eq!(table_status(&pool, t3).await, "seated");
+    let landed = live_party(&pool, t3).await.unwrap();
+    assert_eq!(landed.1, Some(2), "covers travel");
+    assert_eq!(landed.2, clock_1, "the seating clock travels");
+    let moved: String = sqlx::query_scalar(
+        "SELECT end_reason FROM table_occupancies WHERE table_id = $1 AND ended_at IS NOT NULL",
+    )
+    .bind(t1)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(moved, "moved");
+
+    // Swap the two parties.
+    let resp = post_json!(
+        app,
+        t,
+        "/floor/tables/swap",
+        serde_json::json!({ "branch_id": branch, "table_a": t3, "table_b": t2 })
+    );
+    assert_eq!(resp.status(), 200);
+    assert_eq!(live_party(&pool, t2).await.unwrap().1, Some(2));
+    assert_eq!(live_party(&pool, t3).await.unwrap().1, Some(6));
+    assert_eq!(live_party(&pool, t3).await.unwrap().2, clock_2);
+
+    // The till that placed the hold still owns it where it landed.
+    let resp = post_json!(
+        app,
+        t,
+        &format!("/floor/tables/{t2}/hold"),
+        serde_json::json!({ "branch_id": branch })
+    );
+    assert_eq!(
+        resp.status(),
+        200,
+        "re-holding your own moved hold is a yes"
+    );
+
+    // Nobody lands on plates.
+    let t4 = seed_table(&pool, org, branch, None, "T4").await;
+    seed_dirty(&pool, t4).await;
+    let resp = post_json!(
+        app,
+        t,
+        "/floor/tables/swap",
+        serde_json::json!({ "branch_id": branch, "table_a": t2, "table_b": t4 })
+    );
+    assert_eq!(resp.status(), 409);
+    assert_eq!(refusal_code(resp).await.as_deref(), Some("TABLE_DIRTY"));
+    assert_eq!(
+        live_party(&pool, t2).await.unwrap().1,
+        Some(2),
+        "nothing moved"
+    );
+}
+
+#[sqlx::test]
+async fn a_bill_swaps_with_a_waiting_party_instead_of_wiping_it(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let waiter = seed_user(&pool, org, "waiter").await;
+    let item = seed_menu_item(&pool, org, 1000).await;
+    shift_row(&pool, branch, teller).await;
+    grant_defaults(&pool).await;
+    let t = token(teller, org, UserRole::Teller);
+    let w = token(waiter, org, UserRole::Waiter);
+    let t1 = seed_table(&pool, org, branch, None, "T1").await;
+    let t2 = seed_table(&pool, org, branch, None, "T2").await;
+
+    let bill = fire_on!(app, w, branch, item, t1);
+    let resp = post_json!(
+        app,
+        t,
+        &format!("/floor/tables/{t2}/hold"),
+        serde_json::json!({ "branch_id": branch, "party_size": 3 })
+    );
+    assert_eq!(resp.status(), 200);
+
+    // The interactive single-ticket move refuses to land on them...
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri(&format!("/open-tickets/{}/table", bill.id))
+            .insert_header(("Authorization", format!("Bearer {w}")))
+            .set_json(&serde_json::json!({ "table_id": t2 }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 409);
+    assert_eq!(refusal_code(resp).await.as_deref(), Some("TABLE_HELD"));
+
+    // ...and the swap exchanges them.
+    let resp = post_json!(
+        app,
+        t,
+        "/floor/tables/swap",
+        serde_json::json!({ "branch_id": branch, "table_a": t1, "table_b": t2 })
+    );
+    assert_eq!(resp.status(), 200);
+    let seat: Option<Uuid> = sqlx::query_scalar("SELECT table_id FROM open_tickets WHERE id=$1")
+        .bind(bill.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(seat, Some(t2), "the bill moved");
+    let on_1 = live_party(&pool, t1)
+        .await
+        .expect("the waiting party was kept");
+    assert_eq!((on_1.0.as_str(), on_1.1), ("party", Some(3)));
+    assert_eq!(live_party(&pool, t2).await.unwrap().0, "ticket");
+    let ended_seated: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM table_occupancies WHERE end_reason = 'seated' AND branch_id = $1",
+    )
+    .bind(branch)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ended_seated, 0, "no party was swallowed by the bill");
+}

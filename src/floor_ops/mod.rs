@@ -274,6 +274,7 @@ pub(crate) struct Occupancy {
     pub booking_id: Option<Uuid>,
     pub started_by: Option<Uuid>,
     pub started_till_id: Option<Uuid>,
+    pub party_size: Option<i16>,
 }
 
 /// Lock `table_id` (the per-table occupancy mutex) and confirm it belongs to
@@ -321,21 +322,25 @@ pub(crate) async fn live_occupancy(
         Option<Uuid>,
         Option<Uuid>,
         Option<Uuid>,
+        Option<i16>,
     )> = sqlx::query_as(
-        "SELECT id, held_by, open_ticket_id, booking_id, started_by, started_till_id \
+        "SELECT id, held_by, open_ticket_id, booking_id, started_by, started_till_id, party_size \
                FROM table_occupancies WHERE table_id = $1 AND ended_at IS NULL",
     )
     .bind(table_id)
     .fetch_optional(&mut **tx)
     .await?;
     Ok(row.map(
-        |(id, held_by, open_ticket_id, booking_id, started_by, started_till_id)| Occupancy {
-            id,
-            held_by,
-            open_ticket_id,
-            booking_id,
-            started_by,
-            started_till_id,
+        |(id, held_by, open_ticket_id, booking_id, started_by, started_till_id, party_size)| {
+            Occupancy {
+                id,
+                held_by,
+                open_ticket_id,
+                booking_id,
+                started_by,
+                started_till_id,
+                party_size,
+            }
         },
     ))
 }
@@ -423,6 +428,7 @@ pub(crate) async fn take_table(
     // A ticket taking over a bare party hold keeps the party's clock: they sat
     // down when the hold says, not when their first round went in.
     let mut seated_from: Option<Uuid> = None;
+    let mut party_size = party_size;
     match (&live, holder) {
         (Some(o), Holder::Ticket { id, .. }) if o.open_ticket_id == Some(id) => {
             return Ok(Taken { landed: false });
@@ -453,6 +459,9 @@ pub(crate) async fn take_table(
             if o.held_by == "party" {
                 seated_from = Some(o.id);
             }
+            // The covers the host counted at the door stay with the party
+            // when their first round opens the bill without a guest count.
+            party_size = party_size.or(o.party_size);
             end_occupancy_row(&mut **tx, o.id, EndReason::Seated, false, by).await?;
         }
         (None, _) => {
@@ -686,6 +695,65 @@ pub(crate) async fn relocate_ticket(
     )
     .await?;
     autofulfill_transfers(tx, ticket_id, t).await
+}
+
+/// What a swap can pick up off a table and carry to another.
+#[derive(Debug, Clone)]
+pub(crate) enum Movable {
+    /// A party with a bill.
+    Ticket(Uuid),
+    /// A party sitting with no bill yet (or a till's parked draft).
+    Party(Occupancy),
+}
+
+/// The occupant a move/swap would carry off `table_id`. A booking's claim is
+/// not a party at the table and cannot be moved: refused `TABLE_HELD`.
+pub(crate) async fn movable_on(
+    tx: &mut Transaction<'_, Postgres>,
+    table_id: Uuid,
+) -> Result<Option<Movable>, AppError> {
+    match live_occupancy(tx, table_id).await? {
+        None => Ok(None),
+        Some(o) if o.held_by == "ticket" => Ok(o.open_ticket_id.map(Movable::Ticket)),
+        Some(o) if o.held_by == "party" => Ok(Some(Movable::Party(o))),
+        Some(_) => Err(refused(
+            refusal::TABLE_HELD,
+            "This table is held for a booking",
+        )),
+    }
+}
+
+/// A bare party hold leaves its table: its row ends `moved`, nothing to bus.
+pub(crate) async fn end_party_hold_moved(
+    tx: &mut Transaction<'_, Postgres>,
+    hold: &Occupancy,
+    by: &Hand,
+) -> Result<(), AppError> {
+    end_occupancy_row(&mut **tx, hold.id, EndReason::Moved, false, by).await
+}
+
+/// Open `hold` again on `to_table`: same owner (so the till that placed it
+/// can still release it), same covers, same seating clock. The caller holds
+/// the lock on `to_table` and has already emptied it.
+pub(crate) async fn land_party_hold(
+    tx: &mut Transaction<'_, Postgres>,
+    hold: &Occupancy,
+    to_table: Uuid,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "INSERT INTO table_occupancies \
+            (org_id, branch_id, table_id, held_by, party_size, started_by, started_till_id, \
+             started_device, seated_at) \
+         SELECT bt.org_id, bt.branch_id, bt.id, 'party', p.party_size, p.started_by, \
+                p.started_till_id, p.started_device, COALESCE(p.seated_at, p.started_at) \
+           FROM branch_tables bt, table_occupancies p \
+          WHERE bt.id = $1 AND p.id = $2",
+    )
+    .bind(to_table)
+    .bind(hold.id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 /// A ticket's `guest_count` as the ledger's `party_size`: a smallint that

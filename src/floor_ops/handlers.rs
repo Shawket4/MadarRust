@@ -15,9 +15,10 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use super::{
-    FloorEvents, Hand, Holder, TransferView, TransfersSyncResponse, clear_bussing, extract_claims,
-    live_occupancy, lock_table, occupant_of, refusal, refused, release_party_hold, relocate_ticket,
-    require_branch_access, take_table, transfer_view,
+    FloorEvents, Hand, Holder, Movable, TransferView, TransfersSyncResponse, clear_bussing,
+    end_party_hold_moved, extract_claims, land_party_hold, live_occupancy, lock_table, movable_on,
+    occupant_of, refusal, refused, release_party_hold, relocate_ticket, require_branch_access,
+    table_status, take_table, transfer_view,
 };
 use crate::errors::{AppError, AppErrorResponse};
 use crate::permissions::checker::{check_permission, check_permission_for};
@@ -138,10 +139,14 @@ pub async fn swap_tables(
     .await
 }
 
-/// Swap core: exchange the tickets on two tables in ONE transaction. One
-/// empty side degenerates to a move; both empty is a 400. A bare hold on the
-/// "empty" side is not an occupant to swap -- the arriving ticket takes it
-/// over, as a fire would.
+/// Swap core: exchange whatever sits on two tables in ONE transaction -- a
+/// party with a bill (a ticket) or a party with none yet (a bare hold), in any
+/// combination. One empty side degenerates to a move; both empty is a 400.
+///
+/// A hold is a party at the table, so it is carried, never overwritten: a bill
+/// moved onto a table where a party is waiting to order sends that party to
+/// the bill's old table. Landing on a table with plates still on it is
+/// refused `TABLE_DIRTY`; a booking's claim cannot be moved (`TABLE_HELD`).
 pub(crate) async fn swap_tables_inner(
     pool: crate::db::Db,
     body: web::Json<SwapTablesRequest>,
@@ -165,10 +170,19 @@ pub(crate) async fn swap_tables_inner(
             return Err(AppError::BadRequest("Table is not in this branch".into()));
         }
     }
-    let occ_a = occupant_of(&mut tx, body.table_a, None).await?;
-    let occ_b = occupant_of(&mut tx, body.table_b, None).await?;
+    let occ_a = movable_on(&mut tx, body.table_a).await?;
+    let occ_b = movable_on(&mut tx, body.table_b).await?;
     if occ_a.is_none() && occ_b.is_none() {
         return Err(AppError::BadRequest("Both tables are empty".into()));
+    }
+    // An empty side must be ready for a party: nobody lands on plates.
+    for (occ, table) in [(&occ_a, body.table_a), (&occ_b, body.table_b)] {
+        if occ.is_none() && table_status(&mut *tx, table).await?.as_deref() == Some("dirty") {
+            return Err(refused(
+                refusal::TABLE_DIRTY,
+                "Table has not been cleared since the last party",
+            ));
+        }
     }
     check_permission_for(
         pool.get_ref(),
@@ -182,18 +196,22 @@ pub(crate) async fn swap_tables_inner(
     let hand = Hand::of(&mut *tx, actor.teller_id, body.branch_id).await?;
     // Clear both sides before landing either: the live-per-table and
     // live-per-ticket indexes would refuse the second landing otherwise, and a
-    // concurrent read never sees two tickets on one table.
-    if let Some(t) = occ_a {
-        move_ticket(&mut tx, t, None, &hand, &mut events).await?;
+    // concurrent read never sees two occupants on one table.
+    for occ in [&occ_a, &occ_b] {
+        match occ {
+            Some(Movable::Ticket(t)) => move_ticket(&mut tx, *t, None, &hand, &mut events).await?,
+            Some(Movable::Party(h)) => end_party_hold_moved(&mut tx, h, &hand).await?,
+            None => {}
+        }
     }
-    if let Some(t) = occ_b {
-        move_ticket(&mut tx, t, None, &hand, &mut events).await?;
-    }
-    if let Some(t) = occ_a {
-        move_ticket(&mut tx, t, Some(body.table_b), &hand, &mut events).await?;
-    }
-    if let Some(t) = occ_b {
-        move_ticket(&mut tx, t, Some(body.table_a), &hand, &mut events).await?;
+    for (occ, to) in [(&occ_a, body.table_b), (&occ_b, body.table_a)] {
+        match occ {
+            Some(Movable::Ticket(t)) => {
+                move_ticket(&mut tx, *t, Some(to), &hand, &mut events).await?
+            }
+            Some(Movable::Party(h)) => land_party_hold(&mut tx, h, to).await?,
+            None => {}
+        }
     }
     events.tables.push(body.table_a);
     events.tables.push(body.table_b);
@@ -329,6 +347,11 @@ pub struct HoldTableRequest {
     /// -- it moves no status.
     #[serde(default)]
     pub seated_at: Option<DateTime<Utc>>,
+    /// How many people sat down (covers), as the host counted them. Recorded
+    /// on the hold and inherited by the bill's first round when it carries no
+    /// guest count of its own. Anything not positive is not recorded.
+    #[serde(default)]
+    pub party_size: Option<i32>,
 }
 
 #[derive(Debug, Default, Deserialize, ToSchema)]
@@ -391,6 +414,7 @@ pub async fn hold_table(
         *id,
         Some(body.branch_id),
         body.seated_at,
+        body.party_size,
         ActingContext::live(&claims)?,
         Some(hub.get_ref()),
     )
@@ -404,6 +428,7 @@ pub(crate) async fn hold_table_inner(
     table_id: Uuid,
     branch_id: Option<Uuid>,
     seated_at: Option<DateTime<Utc>>,
+    party_size: Option<i32>,
     actor: ActingContext,
     hub: Option<&BranchEventHub>,
 ) -> Result<HttpResponse, AppError> {
@@ -424,11 +449,24 @@ pub(crate) async fn hold_table_inner(
     // Already ours is the common double-tap and the replayed op after a
     // reconnect; saying yes twice is correct. Anything else that is not a free
     // table is a coded refusal -- see `take_table`.
-    let taken = take_table(&mut tx, table_id, Holder::Party, None, &hand).await?;
+    let party_size = super::party_size(party_size);
+    let taken = take_table(&mut tx, table_id, Holder::Party, party_size, &hand).await?;
     if taken.landed
         && let Some(at) = seated_at
     {
         super::stamp_party_seated_at(&mut tx, table_id, at).await?;
+    }
+    // Re-holding our own table with a corrected count (the host miscounted, a
+    // straggler arrived) updates the covers rather than being dropped.
+    if !taken.landed && party_size.is_some() {
+        sqlx::query(
+            "UPDATE table_occupancies SET party_size = $2, updated_at = now() \
+              WHERE table_id = $1 AND ended_at IS NULL AND held_by = 'party'",
+        )
+        .bind(table_id)
+        .bind(party_size)
+        .execute(&mut *tx)
+        .await?;
     }
     tx.commit().await?;
 
