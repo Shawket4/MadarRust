@@ -1950,6 +1950,27 @@
       }
     },
     {
+      "id": "custom-tables-001",
+      "lang": "en",
+      "question": "which tables turn the most, with covers and average stay, last 30 days",
+      "now": "2026-09-03T10:00:00Z",
+      "category": "custom_query",
+      "confidence": "high",
+      "expect": {
+        "tool": "query_metrics",
+        "dataset": "tables",
+        "dimensions": [
+          "table"
+        ],
+        "measures": [
+          "turns",
+          "covers",
+          "avg_dwell_minutes"
+        ],
+        "period": "last_30_days"
+      }
+    },
+    {
       "id": "custom-023",
       "lang": "en",
       "question": "refunds by reason last month",
