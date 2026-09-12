@@ -54,6 +54,12 @@ pub struct KitchenLine {
     /// before insert; `#[serde(skip)]` keeps it out of the display `line` JSON.
     #[serde(skip)]
     pub kitchen_item_id: Option<Uuid>,
+    /// The BILL line this was fired from (`open_ticket_items.id`), so voiding
+    /// that line can take this one off the board. `None` for a counter order,
+    /// which has no bill lines. `#[serde(skip)]` — it is a link, not something
+    /// the kitchen reads.
+    #[serde(skip)]
+    pub open_ticket_item_id: Option<Uuid>,
 }
 
 /// Fixed namespace for deterministic kitchen ids — MUST match the client's
@@ -349,8 +355,9 @@ pub(crate) async fn emit_kitchen_ticket(
             Some(iid) => {
                 sqlx::query(
                     "INSERT INTO kitchen_ticket_items \
-                        (id, kitchen_ticket_id, station_id, menu_item_id, line, qty) \
-                     VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (id) DO NOTHING",
+                        (id, kitchen_ticket_id, station_id, menu_item_id, line, qty, \
+                         open_ticket_item_id) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO NOTHING",
                 )
                 .bind(iid)
                 .bind(ticket_id)
@@ -358,20 +365,23 @@ pub(crate) async fn emit_kitchen_ticket(
                 .bind(line.menu_item_id)
                 .bind(serde_json::to_value(line).unwrap_or(serde_json::Value::Null))
                 .bind(line.qty)
+                .bind(line.open_ticket_item_id)
                 .execute(&mut **tx)
                 .await?;
             }
             None => {
                 sqlx::query(
                     "INSERT INTO kitchen_ticket_items \
-                        (kitchen_ticket_id, station_id, menu_item_id, line, qty) \
-                     VALUES ($1, $2, $3, $4, $5)",
+                        (kitchen_ticket_id, station_id, menu_item_id, line, qty, \
+                         open_ticket_item_id) \
+                     VALUES ($1, $2, $3, $4, $5, $6)",
                 )
                 .bind(ticket_id)
                 .bind(station_id)
                 .bind(line.menu_item_id)
                 .bind(serde_json::to_value(line).unwrap_or(serde_json::Value::Null))
                 .bind(line.qty)
+                .bind(line.open_ticket_item_id)
                 .execute(&mut **tx)
                 .await?;
             }

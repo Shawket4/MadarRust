@@ -11,6 +11,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/{id}", web::get().to(handlers::get_open_ticket))
             .route("/{id}/rounds", web::post().to(handlers::add_round))
             .route("/{id}/void", web::post().to(handlers::void_open_ticket))
+            // Two fixed segments, so it cannot be shadowed by `/{id}/…`.
+            .route(
+                "/{id}/items/{item_id}/void",
+                web::post().to(handlers::void_ticket_line),
+            )
             .route("/{id}/table", web::patch().to(handlers::move_ticket_table))
             .route("/{id}/settle", web::post().to(handlers::settle_open_ticket)),
     );

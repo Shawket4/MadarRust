@@ -1802,3 +1802,301 @@ async fn a_cashier_inherits_clears_or_replaces_the_waiters_discount(pool: PgPool
     assert_eq!(o.discount_type.as_deref(), Some("fixed"));
     assert_eq!((o.discount_amount, o.total_amount), (500, 1710));
 }
+
+// ── One line off a bill ───────────────────────────────────────
+
+/// "Take the calamari off" — the party changed their mind about one thing.
+///
+/// The money leaves the bill, the plate leaves the board, and the rest of the
+/// round is untouched. Before this existed the only answer was to void the
+/// whole bill and re-ring it, which lost the round's timestamps and told the
+/// kitchen to start again on food already being made.
+#[sqlx::test]
+async fn a_line_comes_off_the_bill_and_off_the_board(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 2500).await;
+    let waiter = seed_user(&pool, org, "waiter").await;
+    let _shift = open_shift_row(&pool, branch, waiter).await;
+    let table = seed_table(&pool, org, branch, "T7").await;
+    grant(&pool, "teller", "open_tickets", "create").await;
+    grant(&pool, "teller", "open_tickets", "read").await;
+    grant(&pool, "teller", "open_tickets", "delete").await;
+    let t = token(waiter, org, UserRole::Teller);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/open-tickets")
+            .insert_header(("Authorization", format!("Bearer {t}")))
+            .set_json(&serde_json::json!({
+                "branch_id": branch,
+                "table_id": table,
+                "items": [
+                    { "menu_item_id": item, "quantity": 2 },
+                    { "menu_item_id": item, "quantity": 1 }
+                ]
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 201);
+    let view: OpenTicketView = test::read_body_json(resp).await;
+    assert_eq!(view.subtotal, 7500, "two plus one, at 25 each");
+
+    // The line to take off, and the kitchen copy that knows it.
+    let lines: Vec<(Uuid, i32)> = sqlx::query_as(
+        "SELECT id, line_total FROM open_ticket_items WHERE open_ticket_id = $1 \
+         ORDER BY line_total DESC",
+    )
+    .bind(view.id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(lines.len(), 2);
+    let (big_line, big_total) = lines[0];
+    assert_eq!(big_total, 5000);
+    let linked: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM kitchen_ticket_items WHERE open_ticket_item_id = $1",
+    )
+    .bind(big_line)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(linked, 1, "the kitchen copy knows which bill line it is");
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/open-tickets/{}/items/{big_line}/void", view.id))
+            .insert_header(("Authorization", format!("Bearer {t}")))
+            .set_json(&serde_json::json!({ "reason": "customer_request" }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let view: OpenTicketView = test::read_body_json(resp).await;
+    assert_eq!(
+        view.subtotal, 2500,
+        "the bill dropped by exactly what that line added"
+    );
+
+    // The void is an event, not a flag: who, when, and why.
+    let (voided_by, reason): (Option<Uuid>, Option<String>) =
+        sqlx::query_as("SELECT voided_by, void_reason::text FROM open_ticket_items WHERE id = $1")
+            .bind(big_line)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(voided_by, Some(waiter));
+    assert_eq!(reason.as_deref(), Some("customer_request"));
+
+    // And it left the kitchen's board, while the other line stayed on it.
+    let live: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM kitchen_ticket_items kti \
+         JOIN kitchen_tickets kt ON kt.id = kti.kitchen_ticket_id \
+         WHERE kt.open_ticket_id = $1 AND kti.voided_at IS NULL",
+    )
+    .bind(view.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(live, 1, "one plate cancelled, one still cooking");
+}
+
+/// A retried drain must not subtract the price twice.
+///
+/// This is the failure the whole handler is shaped around: the bill's subtotal
+/// is a running column, so a second void of the same line would quietly leave
+/// the bill short by the price of a plate and nothing downstream would notice
+/// until somebody counted the drawer.
+#[sqlx::test]
+async fn voiding_a_voided_line_does_not_take_the_money_twice(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 2500).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let _shift = open_shift_row(&pool, branch, teller).await;
+    let table = seed_table(&pool, org, branch, "T8").await;
+    grant(&pool, "teller", "open_tickets", "create").await;
+    grant(&pool, "teller", "open_tickets", "read").await;
+    grant(&pool, "teller", "open_tickets", "delete").await;
+    let t = token(teller, org, UserRole::Teller);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/open-tickets")
+            .insert_header(("Authorization", format!("Bearer {t}")))
+            .set_json(&serde_json::json!({
+                "branch_id": branch,
+                "table_id": table,
+                "items": [
+                    { "menu_item_id": item, "quantity": 2 },
+                    { "menu_item_id": item, "quantity": 1 }
+                ]
+            }))
+            .to_request(),
+    )
+    .await;
+    let view: OpenTicketView = test::read_body_json(resp).await;
+    let line: Uuid = sqlx::query_scalar(
+        "SELECT id FROM open_ticket_items WHERE open_ticket_id = $1 AND line_total = 5000",
+    )
+    .bind(view.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let void = || {
+        test::TestRequest::post()
+            .uri(&format!("/open-tickets/{}/items/{line}/void", view.id))
+            .insert_header(("Authorization", format!("Bearer {t}")))
+            .set_json(&serde_json::json!({ "reason": "wrong_order" }))
+            .to_request()
+    };
+    assert_eq!(test::call_service(&app, void()).await.status(), 200);
+    let resp = test::call_service(&app, void()).await;
+    assert_eq!(resp.status(), 200, "a lost-ack retry reads as success");
+    let view: OpenTicketView = test::read_body_json(resp).await;
+    assert_eq!(view.subtotal, 2500, "and takes nothing the second time");
+}
+
+/// A line void needs a reason, like every other void in the system — and a
+/// note when the reason is `other`, because "other" on its own says nothing a
+/// report can count.
+#[sqlx::test]
+async fn a_line_void_names_its_reason(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 2500).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let _shift = open_shift_row(&pool, branch, teller).await;
+    let table = seed_table(&pool, org, branch, "T9").await;
+    grant(&pool, "teller", "open_tickets", "create").await;
+    grant(&pool, "teller", "open_tickets", "read").await;
+    grant(&pool, "teller", "open_tickets", "delete").await;
+    let t = token(teller, org, UserRole::Teller);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/open-tickets")
+            .insert_header(("Authorization", format!("Bearer {t}")))
+            .set_json(&serde_json::json!({
+                "branch_id": branch, "table_id": table,
+                "items": [{ "menu_item_id": item, "quantity": 1 }]
+            }))
+            .to_request(),
+    )
+    .await;
+    let view: OpenTicketView = test::read_body_json(resp).await;
+    let line: Uuid =
+        sqlx::query_scalar("SELECT id FROM open_ticket_items WHERE open_ticket_id = $1")
+            .bind(view.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let post = |body: serde_json::Value| {
+        test::TestRequest::post()
+            .uri(&format!("/open-tickets/{}/items/{line}/void", view.id))
+            .insert_header(("Authorization", format!("Bearer {t}")))
+            .set_json(&body)
+            .to_request()
+    };
+    assert_eq!(
+        test::call_service(&app, post(serde_json::json!({})))
+            .await
+            .status(),
+        400,
+        "no reason"
+    );
+    assert_eq!(
+        test::call_service(&app, post(serde_json::json!({ "reason": "other" })))
+            .await
+            .status(),
+        400,
+        "'other' with nothing said"
+    );
+    assert_eq!(
+        test::call_service(
+            &app,
+            post(serde_json::json!({ "reason": "other", "note": "sent back cold" }))
+        )
+        .await
+        .status(),
+        200
+    );
+}
+
+/// A line of a settled bill is an ORDER's line now. Giving money back on it is
+/// a refund, and saying otherwise would let a paid sale quietly shrink.
+#[sqlx::test]
+async fn a_settled_bill_has_no_lines_to_void(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 2500).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    let table = seed_table(&pool, org, branch, "T10").await;
+    seed_cash_method(&pool, org).await;
+    for a in ["create", "read", "update", "delete"] {
+        grant(&pool, "teller", "open_tickets", a).await;
+    }
+    for (r, a) in [
+        ("orders", "create"),
+        ("orders", "read"),
+        ("order_items", "create"),
+        ("payments", "create"),
+    ] {
+        grant(&pool, "teller", r, a).await;
+    }
+    let t = token(teller, org, UserRole::Teller);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/open-tickets")
+            .insert_header(("Authorization", format!("Bearer {t}")))
+            .set_json(&serde_json::json!({
+                "branch_id": branch, "table_id": table,
+                "items": [{ "menu_item_id": item, "quantity": 1 }]
+            }))
+            .to_request(),
+    )
+    .await;
+    let view: OpenTicketView = test::read_body_json(resp).await;
+    let line: Uuid =
+        sqlx::query_scalar("SELECT id FROM open_ticket_items WHERE open_ticket_id = $1")
+            .bind(view.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/open-tickets/{}/settle", view.id))
+            .insert_header(("Authorization", format!("Bearer {t}")))
+            .set_json(&serde_json::json!({
+                "shift_id": shift, "payment_method": "cash", "total_amount": 2850
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 200, "settled");
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/open-tickets/{}/items/{line}/void", view.id))
+            .insert_header(("Authorization", format!("Bearer {t}")))
+            .set_json(&serde_json::json!({ "reason": "quality_issue" }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 409);
+}

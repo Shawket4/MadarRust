@@ -103,6 +103,16 @@ pub enum ReplayOp {
         ticket_id: Uuid,
         request: VoidOpenTicketRequest,
     },
+    // One line off a bill — "take the calamari off". Same request shape and
+    // same rung as voiding the whole bill; `item_id` names the line and is the
+    // idempotency key (a replayed void of a voided line is a no-op, which is
+    // what stops a retried drain subtracting the price twice).
+    VoidTicketLine {
+        teller_id: Uuid,
+        ticket_id: Uuid,
+        item_id: Uuid,
+        request: VoidOpenTicketRequest,
+    },
     // KDS bump/unbump (kitchen device, or a teller on the till queue). `item_id`
     // is the kitchen line; it doubles as the idempotency key (re-bumping a bumped
     // line is a no-op, and a bump for a gone line replays as a clean no-op).
@@ -189,6 +199,7 @@ impl ReplayOp {
             | ReplayOp::AddTicketRound { teller_id, .. }
             | ReplayOp::SettleOpenTicket { teller_id, .. }
             | ReplayOp::VoidOpenTicket { teller_id, .. }
+            | ReplayOp::VoidTicketLine { teller_id, .. }
             | ReplayOp::BumpKitchenItem { teller_id, .. }
             | ReplayOp::UnbumpKitchenItem { teller_id, .. }
             | ReplayOp::SwapTables { teller_id, .. }
@@ -263,7 +274,9 @@ impl ReplayOp {
             ],
             // Tearing up a bill is the ticket's void rung, same reasoning as
             // the order's: separate from adding to it.
-            ReplayOp::VoidOpenTicket { .. } => &[("open_tickets", "delete")],
+            ReplayOp::VoidOpenTicket { .. } | ReplayOp::VoidTicketLine { .. } => {
+                &[("open_tickets", "delete")]
+            }
             ReplayOp::BumpKitchenItem { .. } | ReplayOp::UnbumpKitchenItem { .. } => {
                 &[("kitchen_orders", "update")]
             }
@@ -499,6 +512,22 @@ pub async fn replay(
             )
             .await
         }
+        ReplayOp::VoidTicketLine {
+            ticket_id,
+            item_id,
+            request,
+            ..
+        } => {
+            crate::tickets::handlers::void_ticket_line_inner(
+                pool.clone(),
+                ticket_id,
+                item_id,
+                web::Json(request),
+                actor,
+                Some(hub.get_ref()),
+            )
+            .await
+        }
         // Bump/unbump: publish so other KDS/till devices reflect the bump live.
         ReplayOp::BumpKitchenItem { item_id, .. } => {
             crate::kitchen::kds::set_bump_inner(
@@ -690,7 +719,8 @@ async fn op_branch_must_be_in_org(pool: &PgPool, op: &ReplayOp, org: Uuid) -> Re
         }
         ReplayOp::AddTicketRound { ticket_id, .. }
         | ReplayOp::SettleOpenTicket { ticket_id, .. }
-        | ReplayOp::VoidOpenTicket { ticket_id, .. } => {
+        | ReplayOp::VoidOpenTicket { ticket_id, .. }
+        | ReplayOp::VoidTicketLine { ticket_id, .. } => {
             sqlx::query_scalar(
                 "SELECT b.org_id FROM open_tickets ot JOIN branches b ON b.id = ot.branch_id WHERE ot.id = $1",
             )

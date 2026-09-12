@@ -714,6 +714,185 @@ pub(crate) async fn void_open_ticket_inner(
     Ok(HttpResponse::Ok().json(view))
 }
 
+// ── Void one line ─────────────────────────────────────────────
+
+/// Take ONE line off an open bill. Reuses the ticket void's request shape —
+/// the same reason enum and note, so a report counts a sent-back plate beside
+/// a torn-up bill without translating between two vocabularies.
+pub type VoidTicketLineRequest = VoidOpenTicketRequest;
+
+#[utoipa::path(post, path = "/open-tickets/{id}/items/{item_id}/void", tag = "open_tickets",
+    request_body = VoidOpenTicketRequest,
+    params(
+        ("id" = Uuid, Path, description = "Open ticket ID"),
+        ("item_id" = Uuid, Path, description = "Bill line ID"),
+    ),
+    responses((status = 200, body = OpenTicketView), AppErrorResponse), security(("bearer_jwt" = [])))]
+pub async fn void_ticket_line(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    hub: web::Data<BranchEventHub>,
+    path: web::Path<(Uuid, Uuid)>,
+    body: web::Json<VoidOpenTicketRequest>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    // The same rung as tearing the whole bill up: both take money off a bill
+    // nobody has paid yet. The seeder has said so since the columns landed.
+    check_permission(pool.get_ref(), &claims, "open_tickets", "delete").await?;
+    let (id, item_id) = path.into_inner();
+    require_ticket_branch_access(pool.get_ref(), &claims, id).await?;
+    void_ticket_line_inner(
+        pool.clone(),
+        id,
+        item_id,
+        body,
+        ActingContext::live(&claims)?,
+        Some(hub.get_ref()),
+    )
+    .await
+}
+
+/// Line-void core. "Take the calamari off" — the party changed their mind, or
+/// it came back. The line leaves the bill, the running subtotal drops by
+/// exactly what it added, and the plate comes off the board so the kitchen
+/// stops making it.
+///
+/// Shared by the live route and `/sync/replay`, attributed to `actor`, and
+/// idempotent: voiding a voided line returns the bill unchanged rather than
+/// re-stamping it or subtracting the money twice. That second part is the one
+/// that matters — a retried drain that took the line off the subtotal again
+/// would leave the bill short by the price of a plate, and nothing downstream
+/// would notice until someone counted the drawer.
+///
+/// LIVE requires a reason, and a note when the reason is `other`; REPLAY is
+/// recorded history and takes what the till queued, exactly as a ticket void
+/// does.
+pub(crate) async fn void_ticket_line_inner(
+    pool: crate::db::Db,
+    id: Uuid,
+    item_id: Uuid,
+    body: web::Json<VoidOpenTicketRequest>,
+    actor: ActingContext,
+    hub: Option<&BranchEventHub>,
+) -> Result<HttpResponse, AppError> {
+    let view = open_ticket_view(pool.get_ref(), id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Open ticket not found".into()))?;
+    // A settled bill's lines are an ORDER's now; a voided bill has no lines
+    // left to take anything off.
+    match view.status.as_str() {
+        "settled" => {
+            return Err(AppError::Conflict(
+                "That bill is settled — a paid line is a refund, not a void".into(),
+            ));
+        }
+        "voided" => return Err(AppError::Conflict("That bill was voided".into())),
+        _ => {}
+    }
+    if !actor.replay {
+        if body.reason.is_none() {
+            return Err(AppError::BadRequest("A void needs a reason".into()));
+        }
+        if body.reason == Some(VoidReason::Other) && body.note.is_none() {
+            return Err(AppError::BadRequest(
+                "A note is required when the void reason is 'other'".into(),
+            ));
+        }
+    }
+
+    let mut tx = pool.get_ref().begin().await?;
+    // Lock the line and read what it is worth IN THE SAME STATEMENT that finds
+    // it still live. Two tills voiding the same line race here otherwise, and
+    // the loser would subtract a second time.
+    let line: Option<(i32,)> = sqlx::query_as(
+        "SELECT line_total FROM open_ticket_items \
+         WHERE id = $1 AND open_ticket_id = $2 AND voided_at IS NULL FOR UPDATE",
+    )
+    .bind(item_id)
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((line_total,)) = line else {
+        tx.rollback().await?;
+        // Either it is not this bill's line, or it is already void. The second
+        // is a lost-ack retry and must read as success.
+        let known: Option<bool> = sqlx::query_scalar(
+            "SELECT voided_at IS NOT NULL FROM open_ticket_items \
+             WHERE id = $1 AND open_ticket_id = $2",
+        )
+        .bind(item_id)
+        .bind(id)
+        .fetch_optional(pool.get_ref())
+        .await?;
+        return match known {
+            Some(true) => Ok(HttpResponse::Ok().json(open_ticket_view(pool.get_ref(), id).await?)),
+            _ => Err(AppError::NotFound("That line is not on this bill".into())),
+        };
+    };
+
+    sqlx::query(
+        "UPDATE open_ticket_items \
+            SET voided_at = now(), voided_by = $2, void_reason = $3::void_reason, void_note = $4 \
+          WHERE id = $1",
+    )
+    .bind(item_id)
+    .bind(actor.teller_id)
+    .bind(body.reason.map(VoidReason::as_str))
+    .bind(body.note.as_deref())
+    .execute(&mut *tx)
+    .await?;
+
+    // The bill's running subtotal is a column, not a sum over the lines, so it
+    // has to be told. Exactly what this line added, never a recomputation:
+    // re-summing would silently re-price a bill under today's menu.
+    sqlx::query(
+        "UPDATE open_tickets SET subtotal = subtotal - $2, updated_at = now() WHERE id = $1",
+    )
+    .bind(id)
+    .bind(line_total)
+    .execute(&mut *tx)
+    .await?;
+
+    // And off the board, so nobody cooks it. Only lines still live: a plate
+    // the kitchen already bumped is made, and taking a finished line off a
+    // screen tells the cook nothing they can act on.
+    //
+    // A round fired before the link column existed has no kitchen row to find
+    // (see the migration). The money still comes off the bill — the honest
+    // half — and the board keeps a plate someone has to call off by voice,
+    // which is what happened before this feature existed anyway.
+    let kitchen_ids: Vec<Uuid> = sqlx::query_scalar(
+        "UPDATE kitchen_ticket_items SET voided_at = now() \
+          WHERE open_ticket_item_id = $1 AND voided_at IS NULL AND bumped_at IS NULL \
+        RETURNING kitchen_ticket_id",
+    )
+    .bind(item_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let view = open_ticket_view(pool.get_ref(), id).await?;
+    if let Some(hub) = hub
+        && let Some(v) = &view
+    {
+        hub.publish(
+            v.branch_id,
+            BranchEvent::new(Topic::Tickets, "ticket.changed", v),
+        );
+        for kt in kitchen_ids {
+            crate::kitchen::publish_kitchen(
+                pool.get_ref(),
+                hub,
+                v.branch_id,
+                "kitchen.changed",
+                kt,
+            )
+            .await;
+        }
+    }
+    Ok(HttpResponse::Ok().json(view))
+}
+
 // ── Move to another table ─────────────────────────────────────
 
 #[derive(Deserialize, Serialize, ToSchema)]

@@ -415,6 +415,7 @@ fn to_kitchen_line(l: &StoredTicketLine) -> KitchenLine {
         modifiers: l.modifiers.clone(),
         notes,
         kitchen_item_id: None, // assigned by `fire_round` from the round idem key
+        open_ticket_item_id: None, // assigned by `fire_round` from the INSERT
     }
 }
 
@@ -497,6 +498,7 @@ pub(crate) async fn fire_round(
     .await?;
 
     let mut round_subtotal: i32 = 0;
+    let mut bill_line_ids: Vec<Uuid> = Vec::with_capacity(lines.len());
     for line in &lines {
         let menu_item_id = line
             .input
@@ -505,18 +507,21 @@ pub(crate) async fn fire_round(
             .and_then(|s| Uuid::parse_str(s).ok());
         // `line_total` the column and `line_total` inside the snapshot are the
         // same figure from the same struct; the CHECK on the table holds them to it.
-        sqlx::query(
+        // The id comes back so the kitchen copy can carry it: voiding this
+        // bill line has to be able to find the plate it ordered.
+        let item_id: Uuid = sqlx::query_scalar(
             "INSERT INTO open_ticket_items \
                 (open_ticket_id, round_id, menu_item_id, line, line_total) \
-             VALUES ($1, $2, $3, $4, $5)",
+             VALUES ($1, $2, $3, $4, $5) RETURNING id",
         )
         .bind(open_ticket_id)
         .bind(round_id)
         .bind(menu_item_id)
         .bind(serde_json::to_value(line).unwrap_or(serde_json::Value::Null))
         .bind(line.line_total)
-        .execute(&mut **tx)
+        .fetch_one(&mut **tx)
         .await?;
+        bill_line_ids.push(item_id);
         round_subtotal += line.line_total;
     }
 
@@ -536,6 +541,13 @@ pub(crate) async fn fire_round(
     // server generates ids as before.
     let kitchen_ticket_id = round_idem.map(crate::kitchen::derive_kitchen_ticket_id);
     let mut klines: Vec<KitchenLine> = lines.iter().map(to_kitchen_line).collect();
+    // Same order, same loop, same list — the nth kitchen line IS the nth bill
+    // line here. It stops being true inside `emit_kitchen_ticket`, which drops
+    // unrouted lines in `kds` mode, which is why the link is carried on the row
+    // rather than recomputed from a position later.
+    for (kl, id) in klines.iter_mut().zip(bill_line_ids.iter()) {
+        kl.open_ticket_item_id = Some(*id);
+    }
     if let Some(kt) = kitchen_ticket_id {
         for (i, kl) in klines.iter_mut().enumerate() {
             kl.kitchen_item_id = Some(crate::kitchen::derive_kitchen_item_id(kt, i));

@@ -842,6 +842,8 @@ pub fn kitchen_lines(cart: &CartSnapshot) -> Vec<crate::kitchen::KitchenLine> {
                 modifiers,
                 notes: line.notes.clone(),
                 kitchen_item_id: None,
+                // A delivery order has no bill lines to void one of.
+                open_ticket_item_id: None,
             }
         })
         .collect()

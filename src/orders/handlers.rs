@@ -2012,6 +2012,8 @@ pub(crate) async fn create_order_inner(
                     notes: ri.notes.clone(),
                     // Teller orders fire to the KDS LIVE (online) only → server ids.
                     kitchen_item_id: None,
+                    // A counter order has no bill lines to void one of.
+                    open_ticket_item_id: None,
                 }
             })
             .collect()
