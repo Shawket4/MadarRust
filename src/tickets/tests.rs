@@ -1111,6 +1111,175 @@ async fn replay_fire_publishes_realtime(pool: PgPool) {
     );
 }
 
+/// A fire's events name who caused it. The server mints its own ticket id, so
+/// the `id` on the event is nothing the firing device knows; `origin` carries
+/// what it does know — its device id and its client keys — so that device can
+/// skip its own ping while every other device still alerts. Covers a queued
+/// fire and round (replay envelope) and a live round (header).
+#[sqlx::test]
+async fn fired_events_carry_their_origin(pool: PgPool) {
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 1000).await;
+    let waiter = seed_user(&pool, org, "waiter").await;
+    grant(&pool, "waiter", "open_tickets", "create").await;
+    grant(&pool, "waiter", "open_tickets", "update").await;
+    grant(&pool, "waiter", "open_tickets", "read").await;
+
+    let hub = BranchEventHub::new();
+    let mut rx = hub.subscribe(branch);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(secret()))
+            .app_data(web::Data::new(hub.clone()))
+            .configure(crate::tickets::routes::configure)
+            .configure(crate::kitchen::routes::configure)
+            .configure(crate::sync::routes::configure),
+    )
+    .await;
+    let waiter_t = token(waiter, org, UserRole::Waiter);
+    let (ticket_key, round1, round2, round3) = (
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
+    let replay = |body: serde_json::Value| {
+        test::TestRequest::post()
+            .uri("/sync/replay")
+            .insert_header(("Authorization", format!("Bearer {waiter_t}")))
+            .set_json(body)
+            .to_request()
+    };
+    let drain = |rx: &mut tokio::sync::broadcast::Receiver<_>| {
+        let mut out: Vec<crate::realtime::event::BranchEvent> = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            out.push(ev);
+        }
+        out
+    };
+
+    // A queued fire, drained by device "till-A".
+    let resp = test::call_service(
+        &app,
+        replay(serde_json::json!({
+            "op": "fire_open_ticket", "teller_id": waiter, "origin_device_id": "till-A",
+            "request": {
+                "branch_id": branch,
+                "items": [{ "menu_item_id": item, "quantity": 1 }],
+                "idempotency_key": ticket_key, "round_idempotency_key": round1,
+            }
+        })),
+    )
+    .await;
+    assert!(resp.status().is_success(), "fire: {}", resp.status());
+    let evs = drain(&mut rx);
+    let fired = evs
+        .iter()
+        .find(|e| e.event_type == "ticket.fired")
+        .expect("ticket.fired");
+    let server_id = fired.data["id"].as_str().unwrap().to_string();
+    assert_ne!(
+        server_id,
+        ticket_key.to_string(),
+        "the event id is the SERVER's"
+    );
+    assert_eq!(fired.data["origin"]["device_id"], "till-A");
+    assert_eq!(
+        fired.data["origin"]["ticket_idempotency_key"],
+        ticket_key.to_string()
+    );
+    assert_eq!(
+        fired.data["origin"]["round_idempotency_key"],
+        round1.to_string()
+    );
+    assert_eq!(
+        fired.data["ticket_ref"].is_string(),
+        true,
+        "the view stays top-level"
+    );
+    let kitchen = evs
+        .iter()
+        .find(|e| e.event_type == "kitchen.fired")
+        .expect("kitchen.fired");
+    assert_eq!(kitchen.data["origin"]["device_id"], "till-A");
+    assert_eq!(
+        kitchen.data["origin"]["round_idempotency_key"],
+        round1.to_string()
+    );
+
+    // Round 2 queued by ANOTHER device: its own origin, its own round key.
+    let resp = test::call_service(
+        &app,
+        replay(serde_json::json!({
+            "op": "add_ticket_round", "teller_id": waiter, "ticket_id": server_id,
+            "origin_device_id": "till-B",
+            "request": { "idempotency_key": round2, "items": [{ "menu_item_id": item, "quantity": 1 }] }
+        })),
+    )
+    .await;
+    assert!(resp.status().is_success(), "round: {}", resp.status());
+    let evs = drain(&mut rx);
+    let added = evs
+        .iter()
+        .find(|e| e.event_type == "ticket.round_added")
+        .expect("round_added");
+    assert_eq!(added.data["id"], server_id.as_str());
+    assert_eq!(added.data["origin"]["device_id"], "till-B");
+    assert_eq!(
+        added.data["origin"]["round_idempotency_key"],
+        round2.to_string()
+    );
+
+    // A re-drained round dedups and publishes nothing — no second ping anywhere.
+    let resp = test::call_service(
+        &app,
+        replay(serde_json::json!({
+            "op": "add_ticket_round", "teller_id": waiter, "ticket_id": server_id,
+            "origin_device_id": "till-B",
+            "request": { "idempotency_key": round2, "items": [{ "menu_item_id": item, "quantity": 1 }] }
+        })),
+    )
+    .await;
+    assert!(resp.status().is_success());
+    assert!(
+        drain(&mut rx)
+            .iter()
+            .all(|e| e.event_type != "ticket.round_added")
+    );
+
+    // A live round names its device in the header; an old client with none
+    // gets a null origin device (and so alerts everywhere, as before).
+    let _shift = open_shift_row(&pool, branch, waiter).await;
+    for (header, round) in [(Some("till-C"), round3), (None, Uuid::new_v4())] {
+        let mut req = test::TestRequest::post()
+            .uri(&format!("/open-tickets/{server_id}/rounds"))
+            .insert_header(("Authorization", format!("Bearer {waiter_t}")))
+            .set_json(serde_json::json!({
+                "idempotency_key": round, "items": [{ "menu_item_id": item, "quantity": 1 }]
+            }));
+        if let Some(h) = header {
+            req = req.insert_header((crate::tickets::DEVICE_ID_HEADER, h));
+        }
+        let resp = test::call_service(&app, req.to_request()).await;
+        assert!(resp.status().is_success(), "live round: {}", resp.status());
+        let evs = drain(&mut rx);
+        let added = evs
+            .iter()
+            .find(|e| e.event_type == "ticket.round_added")
+            .expect("live round");
+        match header {
+            Some(h) => assert_eq!(added.data["origin"]["device_id"], h),
+            None => assert!(added.data["origin"]["device_id"].is_null()),
+        }
+        assert_eq!(
+            added.data["origin"]["round_idempotency_key"],
+            round.to_string()
+        );
+    }
+}
+
 /// A reward on a ticket names its LINE, and the server turns that into the
 /// position the line lands at.
 ///

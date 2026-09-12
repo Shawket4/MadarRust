@@ -244,6 +244,7 @@ pub async fn create_open_ticket(
         body,
         ActingContext::live(&claims)?,
         Some(hub.get_ref()),
+        super::device_id_from(&req),
     )
     .await
 }
@@ -260,6 +261,8 @@ pub(crate) async fn create_open_ticket_inner(
     // The realtime bus, for firing a LIVE ticket to the KDS. `None` on replay (a
     // queued offline fire is historical; cloud consumers re-seed via snapshot).
     hub: Option<&BranchEventHub>,
+    // The device that fired it — stamped on the events so it can skip its own ping.
+    origin_device_id: Option<String>,
 ) -> Result<HttpResponse, AppError> {
     // A TICKET IS A BILL. It exists because somebody ordered something.
     //
@@ -415,6 +418,11 @@ pub(crate) async fn create_open_ticket_inner(
                 open_ticket_id,
                 kt_id,
                 "ticket.fired",
+                &super::EventOrigin {
+                    device_id: origin_device_id,
+                    ticket_idempotency_key: body.idempotency_key,
+                    round_idempotency_key: body.round_idempotency_key,
+                },
             )
             .await;
         }
@@ -450,6 +458,7 @@ pub async fn add_round(
         body,
         ActingContext::live(&claims)?,
         Some(hub.get_ref()),
+        super::device_id_from(&req),
     )
     .await
 }
@@ -463,6 +472,7 @@ pub(crate) async fn add_round_inner(
     body: web::Json<AddRoundRequest>,
     actor: ActingContext,
     hub: Option<&BranchEventHub>,
+    origin_device_id: Option<String>,
 ) -> Result<HttpResponse, AppError> {
     if body.items.is_empty() {
         return Err(AppError::BadRequest(
@@ -530,6 +540,11 @@ pub(crate) async fn add_round_inner(
             id,
             kt_id,
             "ticket.round_added",
+            &super::EventOrigin {
+                device_id: origin_device_id,
+                ticket_idempotency_key: None,
+                round_idempotency_key: body.idempotency_key,
+            },
         )
         .await;
     }

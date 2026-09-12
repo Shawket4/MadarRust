@@ -84,14 +84,20 @@ pub enum ReplayOp {
     // settles, and either may void — but "typically" is not enforced here:
     // whoever holds the grant does the op, and a teller or manager seating a
     // party fires too. `teller_id` carries the acting user.
+    // `origin_device_id`: the device that queued the op, stamped on the events
+    // it publishes so that device skips its own ping (absent on older clients).
     FireOpenTicket {
         teller_id: Uuid,
         request: CreateOpenTicketRequest,
+        #[serde(default)]
+        origin_device_id: Option<String>,
     },
     AddTicketRound {
         teller_id: Uuid,
         ticket_id: Uuid,
         request: AddRoundRequest,
+        #[serde(default)]
+        origin_device_id: Option<String>,
     },
     SettleOpenTicket {
         teller_id: Uuid,
@@ -467,17 +473,25 @@ pub async fn replay(
         // at-least-once retry re-applies as a no-op and emits nothing; only the
         // first apply fires the event. A consumer that was offline still re-seeds
         // via the realtime snapshot on reconnect.
-        ReplayOp::FireOpenTicket { request, .. } => {
+        ReplayOp::FireOpenTicket {
+            request,
+            origin_device_id,
+            ..
+        } => {
             crate::tickets::handlers::create_open_ticket_inner(
                 pool.clone(),
                 web::Json(request),
                 actor,
                 Some(hub.get_ref()),
+                crate::tickets::clean_device_id(origin_device_id.as_deref()),
             )
             .await
         }
         ReplayOp::AddTicketRound {
-            ticket_id, request, ..
+            ticket_id,
+            request,
+            origin_device_id,
+            ..
         } => {
             crate::tickets::handlers::add_round_inner(
                 pool.clone(),
@@ -485,6 +499,7 @@ pub async fn replay(
                 web::Json(request),
                 actor,
                 Some(hub.get_ref()),
+                crate::tickets::clean_device_id(origin_device_id.as_deref()),
             )
             .await
         }

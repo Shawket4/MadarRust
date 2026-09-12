@@ -326,6 +326,8 @@ pub async fn create_table_order(
                 }),
                 actor,
                 Some(hub.get_ref()),
+                // A guest's phone is never a device on this branch's bus.
+                None,
             )
             .await
         }
@@ -357,6 +359,7 @@ pub async fn create_table_order(
                 web::Json(req),
                 actor,
                 Some(hub.get_ref()),
+                None,
             )
             .await?;
             // Stamp how it was started, after the insert rather than through

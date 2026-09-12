@@ -580,9 +580,59 @@ pub(crate) async fn fire_round(
     Ok(kt_id)
 }
 
+/// Who caused a fire, carried on its `ticket.*` / `kitchen.fired` events.
+///
+/// The server mints its own ticket id, so the id on the event is never one the
+/// firing device knows — it cannot recognise its own echo by id. What it DOES
+/// know is what it sent: its device id and the client-minted keys. They ride
+/// along under `origin`, and a device skips the alert (never the board update)
+/// for an event whose origin is itself. Per ROUND, so a later round fired on
+/// the same ticket by another device still alerts here.
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+pub struct EventOrigin {
+    /// The firing device's stable id (`X-Madar-Device-Id` live, the replay
+    /// envelope's `origin_device_id` for a queued op).
+    pub device_id: Option<String>,
+    /// The ticket's client idempotency key.
+    pub ticket_idempotency_key: Option<Uuid>,
+    /// The round's client idempotency key.
+    pub round_idempotency_key: Option<Uuid>,
+}
+
+/// The header a device names itself with on a live ticket write.
+pub const DEVICE_ID_HEADER: &str = "X-Madar-Device-Id";
+
+/// The device id a live request names, if any (trimmed, capped, never empty).
+pub(crate) fn device_id_from(req: &actix_web::HttpRequest) -> Option<String> {
+    clean_device_id(
+        req.headers()
+            .get(DEVICE_ID_HEADER)
+            .and_then(|v| v.to_str().ok()),
+    )
+}
+
+pub(crate) fn clean_device_id(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(128).collect())
+}
+
+/// `payload` with `origin` added (the payload's own fields stay top-level, so
+/// every existing consumer decodes it unchanged).
+pub(crate) fn with_origin(payload: &impl Serialize, origin: &EventOrigin) -> serde_json::Value {
+    let mut v = serde_json::to_value(payload).unwrap_or(serde_json::Value::Null);
+    if let serde_json::Value::Object(map) = &mut v {
+        map.insert(
+            "origin".into(),
+            serde_json::to_value(origin).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    v
+}
+
 /// Publish ticket + kitchen events after a fire commits. The ticket event always
 /// fires; the kitchen event only when a kitchen ticket was actually emitted (it
-/// isn't, e.g., in `off` mode).
+/// isn't, e.g., in `off` mode). Both carry `origin`.
 pub(crate) async fn publish_fired(
     pool: &sqlx::PgPool,
     hub: &BranchEventHub,
@@ -590,15 +640,21 @@ pub(crate) async fn publish_fired(
     open_ticket_id: Uuid,
     kitchen_ticket_id: Option<Uuid>,
     event_type: &str,
+    origin: &EventOrigin,
 ) {
     if let Ok(Some(view)) = open_ticket_view(pool, open_ticket_id).await {
         hub.publish(
             branch_id,
-            BranchEvent::new(Topic::Tickets, event_type, &view),
+            BranchEvent::new(Topic::Tickets, event_type, &with_origin(&view, origin)),
         );
     }
     if let Some(kt_id) = kitchen_ticket_id {
-        crate::kitchen::publish_kitchen(pool, hub, branch_id, "kitchen.fired", kt_id).await;
+        if let Ok(Some(view)) = crate::kitchen::kitchen_ticket_view(pool, kt_id).await {
+            hub.publish(
+                branch_id,
+                BranchEvent::new(Topic::Kitchen, "kitchen.fired", &with_origin(&view, origin)),
+            );
+        }
     }
 }
 
