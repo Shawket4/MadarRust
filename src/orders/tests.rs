@@ -1493,9 +1493,15 @@ async fn test_discount_percentage_over_one_is_read_as_the_old_convention(pool: P
     assert_eq!(resp.status().as_u16(), 201);
     let of: OrderFull = test::read_body_json(resp).await;
     assert_eq!(
-        of.order.discount_value,
+        of.order.discount_rate,
         dec!(0.14),
         "recorded in today's convention, so a report can read it beside a new row"
+    );
+    assert_eq!(
+        of.order.discount_value,
+        dec!(14),
+        "and handed back in the spelling every shipped till was built for — \
+         an old client sent 14, and 14 is what it reads back"
     );
     assert_eq!((of.order.discount_amount, of.order.total_amount), (70, 490));
 }

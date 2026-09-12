@@ -97,7 +97,17 @@ async fn test_discounts_crud_success(pool: PgPool) {
     let discount: Discount = test::read_body_json(resp_create).await;
     assert_eq!(discount.name, "Summer Sale");
     assert_eq!(discount.dtype, "percentage");
-    assert_eq!(discount.value, dec!(0.20));
+    // `value` is the LEGACY integer on the wire — 20 for 20% — and
+    // `value_rate` carries the fraction beside it. Reading the response back
+    // into this struct therefore lands 20 in `value`: the response type no
+    // longer round-trips through itself, which is fine (nothing but a test
+    // ever deserialises one) and is the price of keeping the fleet working.
+    assert_eq!(
+        discount.value,
+        dec!(20),
+        "the spelling shipped tills expect"
+    );
+    assert_eq!(discount.value_rate, dec!(0.20), "what the engine stores");
     assert!(discount.is_active);
 
     // 2. List Discounts

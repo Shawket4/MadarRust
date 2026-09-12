@@ -1926,7 +1926,11 @@ mod it {
         assert_eq!(b["subtotal"], 1000);
         assert_eq!(b["discount_amount"], 100); // 10% of 1000
         assert_eq!(b["discount_type"], "percentage");
-        assert_eq!(b["discount_value"], 0.10);
+        // The LEGACY spelling on the wire — an integer — because every till
+        // in the field was generated against `integer`, and the fraction
+        // beside it for clients that know to ask. See `discounts::wire`.
+        assert_eq!(b["discount_value"], 10);
+        assert_eq!(b["discount_rate"], 0.10);
         assert_eq!(b["delivery_fee"], 300); // fee always charged in full
         // 1000 - 100 = 900, taxed at 14% = 126, plus the fee. The tax follows
         // the discount and the fee stays outside the tax base.
@@ -2147,7 +2151,8 @@ mod it {
         .await;
         assert_eq!(st, StatusCode::OK, "{b}");
         assert_eq!(b["discount"]["dtype"], "percentage");
-        assert_eq!(b["discount"]["value"], 0.15);
+        assert_eq!(b["discount"]["value"], 15, "legacy spelling for the fleet");
+        assert_eq!(b["discount"]["value_rate"], 0.15, "the stored fraction");
         assert_eq!(b["discount"]["id"].as_str().unwrap(), disc.to_string());
     }
 
