@@ -317,18 +317,35 @@ ALTER TABLE delivery_orders
 -- fee the shop did not set for that address. In-mall records a walking
 -- distance as a spam signal, and that is a straight line by design. Until
 -- now the row could not say which it had; a distance whose provenance is
--- unknown is one nobody can act on. No existing row records a distance at
--- all, so nothing is backfilled and the pairing rule holds from here on.
+-- unknown is one nobody can act on.
+--
+-- ROWS THAT ALREADY CARRY A DISTANCE GET `legacy`, and this migration failed
+-- in production for want of it. An earlier draft asserted "no existing row
+-- records a distance at all" — true of the development copy it was checked
+-- against, and false of production, which had drifted. The deploy got as far
+-- as ATRewriteTable and stopped, so nothing shipped.
+--
+-- `legacy` rather than guessing 'haversine': we do not know how those
+-- distances were measured, and writing a provenance we invented is precisely
+-- what this pair of constraints exists to prevent. A fee dispute on an old
+-- order should read "recorded before we tracked how", not a confident answer
+-- nobody checked. Intake never writes it, so the value can only shrink.
+UPDATE delivery_orders
+   SET distance_source = 'legacy'
+ WHERE road_distance_meters IS NOT NULL
+   AND distance_source IS NULL;
+
 ALTER TABLE delivery_orders
     ADD CONSTRAINT delivery_orders_distance_source_is_known
-        CHECK (distance_source IS NULL OR distance_source IN ('osrm', 'haversine')),
+        CHECK (distance_source IS NULL OR distance_source IN ('osrm', 'haversine', 'legacy')),
     ADD CONSTRAINT delivery_orders_distance_has_a_source
         CHECK ((distance_source IS NULL) = (road_distance_meters IS NULL));
 
 COMMENT ON COLUMN delivery_orders.distance_source IS
     'How road_distance_meters was measured: osrm = routed road distance, '
     'haversine = straight line (the routing fallback, and always the in-mall '
-    'walking distance). NULL exactly when no distance was recorded.';
+    'walking distance), legacy = recorded before provenance was tracked. '
+    'NULL exactly when no distance was recorded.';
 
 -- ── Giving up on an order nobody accepted ───────────────────────────────────
 ALTER TABLE branch_delivery_settings
