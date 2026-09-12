@@ -140,16 +140,15 @@ pub struct TicketBill {
 /// A discount id that no longer resolves (deleted, deactivated) prices as no
 /// discount here — the settle will refuse it with a message, and a preview
 /// that guessed a figure would only make that refusal a surprise.
-pub(crate) async fn price_open_bill(
+async fn price_bill_under(
     pool: &PgPool,
+    policy: &crate::tax::TaxPolicy,
     org_id: Uuid,
-    branch_id: Uuid,
     subtotal: i32,
     discount_id: Option<Uuid>,
     discount_type: Option<&str>,
     discount_value: Option<Decimal>,
 ) -> Result<TicketBill, AppError> {
-    let policy = crate::tax::policy::for_branch(pool, branch_id).await?;
     let (dtype, dvalue): (Option<String>, Decimal) = match discount_id {
         Some(id) => sqlx::query_as::<_, (String, Decimal)>(
             "SELECT type::text, value FROM discounts WHERE id = $1 AND org_id = $2 AND is_active = true",
@@ -168,7 +167,7 @@ pub(crate) async fn price_open_bill(
     let discount_amount =
         crate::discounts::handlers::calc_discount(dtype.as_deref(), dvalue, subtotal)
             .clamp(0, subtotal);
-    let b = crate::tax::compute(subtotal as i64, discount_amount as i64, &policy);
+    let b = crate::tax::compute(subtotal as i64, discount_amount as i64, policy);
     Ok(TicketBill {
         subtotal,
         discount_amount,
@@ -261,9 +260,23 @@ pub(crate) async fn open_ticket_view(
     executor: &PgPool,
     ticket_id: Uuid,
 ) -> Result<Option<OpenTicketView>, AppError> {
+    Ok(open_ticket_views(executor, &[ticket_id]).await?.pop())
+}
+
+/// Many views in a fixed number of queries -- one for the tickets, one for all
+/// their lines, and one tax policy per branch -- in the order of `ids`
+/// (missing ids are skipped). The list endpoint used to build each view on its
+/// own, several queries a ticket.
+pub(crate) async fn open_ticket_views(
+    executor: &PgPool,
+    ids: &[Uuid],
+) -> Result<Vec<OpenTicketView>, AppError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
     // `ready` is the per-round readiness folded over the whole bill: at least
     // one kitchen ticket exists and none of them has a live line still to bump.
-    let row: Option<TicketRow> = sqlx::query_as(
+    let rows: Vec<TicketRow> = sqlx::query_as(
         "SELECT ot.org_id, ot.id, ot.branch_id, ot.table_id, ot.ticket_ref, ot.status::text AS status, \
                 EXISTS (SELECT 1 FROM kitchen_tickets kt WHERE kt.open_ticket_id = ot.id) \
                 AND NOT EXISTS ( \
@@ -275,62 +288,40 @@ pub(crate) async fn open_ticket_view(
                 ot.subtotal, ot.discount_id, ot.discount_type, ot.discount_value, \
                 ot.order_id, ot.booking_id, ot.opened_at, ot.ready_at, ot.settled_at, \
                 ot.voided_at, ot.void_reason::text AS void_reason, ot.void_note \
-         FROM open_tickets ot LEFT JOIN users u ON u.id = ot.opened_by WHERE ot.id = $1",
+         FROM open_tickets ot LEFT JOIN users u ON u.id = ot.opened_by WHERE ot.id = ANY($1)",
     )
-    .bind(ticket_id)
-    .fetch_optional(executor)
+    .bind(ids)
+    .fetch_all(executor)
     .await?;
-    let Some(r) = row else {
-        return Ok(None);
-    };
 
-    // Settled: what was booked. Otherwise: what would be, under today's
-    // policy — for a voided ticket that is history's curiosity, but a bill
-    // that prices to nothing would read as a defect.
-    let bill = match r.order_id {
-        Some(order_id) => booked_bill(executor, order_id).await?,
-        None => None,
-    };
-    let bill = match bill {
-        Some(b) => b,
-        None => {
-            price_open_bill(
-                executor,
-                r.org_id,
-                r.branch_id,
-                r.subtotal,
-                r.discount_id,
-                r.discount_type.as_deref(),
-                r.discount_value,
-            )
-            .await?
-        }
-    };
-
-    let items = sqlx::query_as::<
-        _,
-        (
-            Uuid,
-            i32,
-            DateTime<Utc>,
-            Option<Uuid>,
-            serde_json::Value,
-            i32,
-            bool,
-        ),
-    >(
-        "SELECT oti.id, r.round_number, r.fired_at, oti.menu_item_id, oti.line, \
+    #[allow(clippy::type_complexity)]
+    let lines: Vec<(
+        Uuid,
+        Uuid,
+        i32,
+        DateTime<Utc>,
+        Option<Uuid>,
+        serde_json::Value,
+        i32,
+        bool,
+    )> = sqlx::query_as(
+        "SELECT oti.open_ticket_id, oti.id, r.round_number, r.fired_at, oti.menu_item_id, oti.line, \
                 oti.line_total, (oti.voided_at IS NOT NULL) AS voided \
          FROM open_ticket_items oti JOIN open_ticket_rounds r ON r.id = oti.round_id \
-         WHERE oti.open_ticket_id = $1 ORDER BY r.round_number, oti.created_at",
+         WHERE oti.open_ticket_id = ANY($1) ORDER BY r.round_number, oti.created_at",
     )
-    .bind(r.id)
+    .bind(ids)
     .fetch_all(executor)
-    .await?
-    .into_iter()
-    .map(
-        |(id, round_number, round_fired_at, menu_item_id, line, line_total, voided)| {
-            OpenTicketItemView {
+    .await?;
+    let mut items_of: std::collections::HashMap<Uuid, Vec<OpenTicketItemView>> =
+        std::collections::HashMap::new();
+    for (ticket_id, id, round_number, round_fired_at, menu_item_id, line, line_total, voided) in
+        lines
+    {
+        items_of
+            .entry(ticket_id)
+            .or_default()
+            .push(OpenTicketItemView {
                 id,
                 round_number,
                 round_fired_at,
@@ -338,38 +329,74 @@ pub(crate) async fn open_ticket_view(
                 line,
                 line_total,
                 voided,
-            }
-        },
-    )
-    .collect();
+            });
+    }
 
-    Ok(Some(OpenTicketView {
-        id: r.id,
-        branch_id: r.branch_id,
-        table_id: r.table_id,
-        ticket_ref: r.ticket_ref,
-        status: r.status,
-        ready: r.ready,
-        opened_by: r.opened_by,
-        opened_by_name: r.opened_by_name,
-        customer_name: r.customer_name,
-        notes: r.notes,
-        guest_count: r.guest_count,
-        subtotal: r.subtotal,
-        discount_id: r.discount_id,
-        discount_type: r.discount_type,
-        discount_value: r.discount_value,
-        bill,
-        order_id: r.order_id,
-        booking_id: r.booking_id,
-        opened_at: r.opened_at,
-        ready_at: r.ready_at,
-        settled_at: r.settled_at,
-        voided_at: r.voided_at,
-        void_reason: r.void_reason,
-        void_note: r.void_note,
-        items,
-    }))
+    let mut policies: std::collections::HashMap<Uuid, crate::tax::TaxPolicy> =
+        std::collections::HashMap::new();
+    let mut by_id: std::collections::HashMap<Uuid, OpenTicketView> =
+        std::collections::HashMap::with_capacity(rows.len());
+    for r in rows {
+        // Settled: what was booked. Otherwise: what would be, under today's
+        // policy — for a voided ticket that is history's curiosity, but a bill
+        // that prices to nothing would read as a defect.
+        let bill = match r.order_id {
+            Some(order_id) => booked_bill(executor, order_id).await?,
+            None => None,
+        };
+        let bill = match bill {
+            Some(b) => b,
+            None => {
+                #[allow(clippy::map_entry)] // the insert awaits
+                if !policies.contains_key(&r.branch_id) {
+                    let p = crate::tax::policy::for_branch(executor, r.branch_id).await?;
+                    policies.insert(r.branch_id, p);
+                }
+                price_bill_under(
+                    executor,
+                    &policies[&r.branch_id],
+                    r.org_id,
+                    r.subtotal,
+                    r.discount_id,
+                    r.discount_type.as_deref(),
+                    r.discount_value,
+                )
+                .await?
+            }
+        };
+        let items = items_of.remove(&r.id).unwrap_or_default();
+        by_id.insert(
+            r.id,
+            OpenTicketView {
+                id: r.id,
+                branch_id: r.branch_id,
+                table_id: r.table_id,
+                ticket_ref: r.ticket_ref,
+                status: r.status,
+                ready: r.ready,
+                opened_by: r.opened_by,
+                opened_by_name: r.opened_by_name,
+                customer_name: r.customer_name,
+                notes: r.notes,
+                guest_count: r.guest_count,
+                subtotal: r.subtotal,
+                discount_id: r.discount_id,
+                discount_type: r.discount_type,
+                discount_value: r.discount_value,
+                bill,
+                order_id: r.order_id,
+                booking_id: r.booking_id,
+                opened_at: r.opened_at,
+                ready_at: r.ready_at,
+                settled_at: r.settled_at,
+                voided_at: r.voided_at,
+                void_reason: r.void_reason,
+                void_note: r.void_note,
+                items,
+            },
+        );
+    }
+    Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
 }
 
 // ── Shared fire logic (CLIENT-authoritative, like the teller) ─────

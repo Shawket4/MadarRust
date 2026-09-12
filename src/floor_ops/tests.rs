@@ -1843,3 +1843,53 @@ async fn a_bill_swaps_with_a_waiting_party_instead_of_wiping_it(pool: PgPool) {
     .unwrap();
     assert_eq!(ended_seated, 0, "no party was swallowed by the bill");
 }
+
+#[sqlx::test]
+async fn the_ticket_list_is_live_bills_unless_asked(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let waiter = seed_user(&pool, org, "waiter").await;
+    let item = seed_menu_item(&pool, org, 1000).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    shift_row(&pool, branch, teller).await;
+    grant_defaults(&pool).await;
+    let w = token(waiter, org, UserRole::Waiter);
+    let t1 = seed_table(&pool, org, branch, None, "T1").await;
+
+    let live = fire_on!(app, w, branch, item, t1);
+    let t2 = seed_table(&pool, org, branch, None, "T2").await;
+    let dead = fire_on!(app, w, branch, item, t2);
+    let resp = post_json!(
+        app,
+        w,
+        &format!("/open-tickets/{}/void", dead.id),
+        serde_json::json!({ "reason": "test" })
+    );
+    assert_eq!(resp.status(), 200);
+
+    let resp = get_req!(app, w, &format!("/open-tickets?branch_id={branch}"));
+    assert_eq!(resp.status(), 200);
+    let list: Vec<OpenTicketView> = test::read_body_json(resp).await;
+    assert_eq!(list.iter().map(|t| t.id).collect::<Vec<_>>(), vec![live.id]);
+    assert_eq!(list[0].items.len(), 1, "lines come with the batch");
+    assert!(list[0].bill.total >= 1000);
+
+    let resp = get_req!(
+        app,
+        w,
+        &format!("/open-tickets?branch_id={branch}&status=all")
+    );
+    let all: Vec<OpenTicketView> = test::read_body_json(resp).await;
+    assert_eq!(all.len(), 2);
+    let resp = get_req!(
+        app,
+        w,
+        &format!("/open-tickets?branch_id={branch}&status=voided")
+    );
+    let voided: Vec<OpenTicketView> = test::read_body_json(resp).await;
+    assert_eq!(
+        voided.iter().map(|t| t.id).collect::<Vec<_>>(),
+        vec![dead.id]
+    );
+}

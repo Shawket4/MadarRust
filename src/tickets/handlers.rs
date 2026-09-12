@@ -193,6 +193,7 @@ impl From<VoidOpenTicketWire> for VoidOpenTicketRequest {
 #[into_params(parameter_in = Query)]
 pub struct ListQuery {
     pub branch_id: Uuid,
+    /// `open` (the default: live bills only), `settled`, `voided`, or `all`.
     #[serde(default)]
     pub status: Option<String>,
 }
@@ -564,21 +565,25 @@ pub async fn list_open_tickets(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "open_tickets", "read").await?;
     require_branch_access(pool.get_ref(), &claims, query.branch_id).await?;
+    // The floor's question is "which bills are live", so that is the default.
+    // It used to be every ticket the branch ever opened, newest first, capped
+    // at 500 -- a busy branch's still-open bills from last week fell off the
+    // end. `status=all` keeps the old reach for anyone who wants history.
+    let status = match query.status.as_deref() {
+        None | Some("") => Some("open"),
+        Some("all") => None,
+        Some(s) => Some(s),
+    };
     let ids: Vec<Uuid> = sqlx::query_scalar(
         "SELECT id FROM open_tickets \
          WHERE branch_id = $1 AND ($2::text IS NULL OR status::text = $2) \
          ORDER BY opened_at DESC LIMIT 500",
     )
     .bind(query.branch_id)
-    .bind(query.status.as_deref())
+    .bind(status)
     .fetch_all(pool.get_ref())
     .await?;
-    let mut out = Vec::with_capacity(ids.len());
-    for id in ids {
-        if let Some(v) = open_ticket_view(pool.get_ref(), id).await? {
-            out.push(v);
-        }
-    }
+    let out = super::open_ticket_views(pool.get_ref(), &ids).await?;
     Ok(HttpResponse::Ok().json(out))
 }
 
