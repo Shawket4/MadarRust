@@ -20466,6 +20466,7 @@
           {
             "name": "status",
             "in": "query",
+            "description": "`open` (the default: live bills only), `settled`, `voided`, or `all`.",
             "required": false,
             "schema": {
               "type": "string"
@@ -51941,6 +51942,14 @@
           "branch_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "party_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How many people sat down (covers), as the host counted them. Recorded\non the hold and inherited by the bill's first round when it carries no\nguest count of its own. Anything not positive is not recorded."
           },
           "seated_at": {
             "type": [
