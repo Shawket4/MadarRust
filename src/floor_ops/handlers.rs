@@ -322,6 +322,13 @@ pub(crate) async fn clear_table_inner(
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct HoldTableRequest {
     pub branch_id: Uuid,
+    /// When the party actually sat down, by the till's clock. An offline seat
+    /// replays later than it happened; this keeps every device's table clock
+    /// on the seating. Clamped server-side to the last 12 hours, never in the
+    /// future, and never before the table's previous party left. Recorded only
+    /// -- it moves no status.
+    #[serde(default)]
+    pub seated_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Default, Deserialize, ToSchema)]
@@ -383,6 +390,7 @@ pub async fn hold_table(
         pool,
         *id,
         Some(body.branch_id),
+        body.seated_at,
         ActingContext::live(&claims)?,
         Some(hub.get_ref()),
     )
@@ -395,6 +403,7 @@ pub(crate) async fn hold_table_inner(
     pool: crate::db::Db,
     table_id: Uuid,
     branch_id: Option<Uuid>,
+    seated_at: Option<DateTime<Utc>>,
     actor: ActingContext,
     hub: Option<&BranchEventHub>,
 ) -> Result<HttpResponse, AppError> {
@@ -416,6 +425,11 @@ pub(crate) async fn hold_table_inner(
     // reconnect; saying yes twice is correct. Anything else that is not a free
     // table is a coded refusal -- see `take_table`.
     let taken = take_table(&mut tx, table_id, Holder::Party, None, &hand).await?;
+    if taken.landed
+        && let Some(at) = seated_at
+    {
+        super::stamp_party_seated_at(&mut tx, table_id, at).await?;
+    }
     tx.commit().await?;
 
     if let Some(hub) = hub
@@ -923,9 +937,12 @@ pub struct TableSitting {
     /// When the party's bill was opened — the closest thing the server has to
     /// when they sat down.
     pub opened_at: DateTime<Utc>,
+    /// When the party sat down: the seat hold's stamp when they were seated
+    /// before ordering, else the bill's opening.
+    pub seated_at: DateTime<Utc>,
     /// When the bill was settled or voided; `None` while it is still open.
     pub closed_at: Option<DateTime<Utc>>,
-    /// Minutes between the two, or to now while the bill is still open.
+    /// Minutes from `seated_at` to the close, or to now while still open.
     pub minutes: i64,
     pub status: String,
     pub customer_name: Option<String>,
@@ -1023,11 +1040,13 @@ pub async fn table_history(
         Option<Uuid>,
         Option<i32>,
         Option<i32>,
+        DateTime<Utc>,
     )> = sqlx::query_as(
         "SELECT t.id, t.ticket_ref, t.opened_at, COALESCE(t.settled_at, t.voided_at), \
                 t.status::text, \
                 t.customer_name, t.guest_count, o.id, o.order_number, \
-                CASE WHEN o.voided_at IS NULL THEN o.total_amount ELSE NULL END \
+                CASE WHEN o.voided_at IS NULL THEN o.total_amount ELSE NULL END, \
+                LEAST(COALESCE(o.seated_at, t.seated_at, t.opened_at), t.opened_at) \
            FROM open_tickets t \
            LEFT JOIN orders o ON o.open_ticket_id = t.id \
           WHERE t.table_id = $1 AND t.opened_at >= $2 AND t.opened_at < $3 \
@@ -1044,11 +1063,12 @@ pub async fn table_history(
         .into_iter()
         .map(|r| {
             let closed = r.3;
-            let minutes = (closed.unwrap_or(now) - r.2).num_minutes().max(0);
+            let minutes = (closed.unwrap_or(now) - r.10).num_minutes().max(0);
             TableSitting {
                 open_ticket_id: r.0,
                 ticket_ref: r.1,
                 opened_at: r.2,
+                seated_at: r.10,
                 closed_at: closed,
                 minutes,
                 status: r.4,

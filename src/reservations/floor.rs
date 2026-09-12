@@ -57,6 +57,11 @@ pub struct FloorTable {
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// When the party at this table sat down — the hold's stamp, else the
+    /// bill's opening. `null` unless the table is seated. Every device renders
+    /// its table clock from this, so they all agree.
+    #[serde(default)]
+    pub seated_at: Option<DateTime<Utc>>,
     /// The next active booking claiming this table (today's service, or the
     /// one in progress). The floor renders "held" from `held_from` by its own
     /// clock; nothing here is written to `status`. Only the list endpoint fills
@@ -131,7 +136,8 @@ pub(crate) async fn attach_next_bookings(
 }
 
 const TABLE_COLS: &str = "id, org_id, branch_id, section_id, label, seats, shape, \
-     pos_x, pos_y, width, height, rotation, status, is_active, created_at, updated_at";
+     pos_x, pos_y, width, height, rotation, status, is_active, created_at, updated_at, \
+     (SELECT v.seated_at FROM v_table_status v WHERE v.table_id = branch_tables.id) AS seated_at";
 
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]

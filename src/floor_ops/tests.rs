@@ -1507,3 +1507,123 @@ async fn seed_order_for_ticket(
     .await
     .unwrap();
 }
+
+/// A party seated with nothing ordered carries the till's seating stamp: the
+/// floor shows it, the bill that takes over the hold inherits it, and the sale
+/// the bill settles into remembers the table, the stamp and the covers.
+#[sqlx::test]
+async fn the_seating_clock_survives_from_hold_to_sale(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let item = seed_menu_item(&pool, org, 1000).await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    seed_cash_method(&pool, org).await;
+    grant_defaults(&pool).await;
+    for (resource, action) in [
+        ("orders", "create"),
+        ("payments", "create"),
+        ("open_tickets", "create"),
+        ("kitchen_orders", "read"),
+        ("kitchen_orders", "update"),
+    ] {
+        grant(&pool, "teller", resource, action).await;
+    }
+    let t = token(teller, org, UserRole::Teller);
+    let t1 = seed_table(&pool, org, branch, None, "T1").await;
+    let t2 = seed_table(&pool, org, branch, None, "T2").await;
+
+    // Seated offline 20 minutes ago; the op drains now.
+    let sat = chrono::Utc::now() - chrono::Duration::minutes(20);
+    let resp = post_json!(
+        app,
+        t,
+        "/sync/replay",
+        serde_json::json!({ "op": "hold_table", "teller_id": teller, "table_id": t1,
+                            "request": { "seated_at": sat.to_rfc3339() } })
+    );
+    assert_eq!(resp.status(), 200);
+    assert_eq!(table_status(&pool, t1).await, "seated");
+    let shown: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT seated_at FROM v_table_status WHERE table_id = $1")
+            .bind(t1)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let shown = shown.expect("a seated table has a clock");
+    assert!(
+        (shown - sat).num_seconds().abs() <= 1,
+        "the floor shows the seating"
+    );
+
+    // A stamp from the future is clamped to the hold itself.
+    let future = chrono::Utc::now() + chrono::Duration::hours(3);
+    let resp = post_json!(
+        app,
+        t,
+        "/sync/replay",
+        serde_json::json!({ "op": "hold_table", "teller_id": teller, "table_id": t2,
+                            "request": { "seated_at": future.to_rfc3339() } })
+    );
+    assert_eq!(resp.status(), 200);
+    let clamped: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT seated_at FROM v_table_status WHERE table_id = $1")
+            .bind(t2)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        clamped.unwrap() <= chrono::Utc::now(),
+        "never in the future"
+    );
+
+    // The first round takes over the hold and keeps the party's clock.
+    let resp = post_json!(
+        app,
+        t,
+        "/open-tickets",
+        serde_json::json!({
+            "branch_id": branch, "table_id": t1, "guest_count": 3,
+            "items": [{ "menu_item_id": item, "quantity": 1 }]
+        })
+    );
+    assert_eq!(resp.status(), 201);
+    let ticket: OpenTicketView = test::read_body_json(resp).await;
+    let ticket_seated: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT seated_at FROM open_tickets WHERE id = $1")
+            .bind(ticket.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        (ticket_seated.unwrap() - sat).num_seconds().abs() <= 1,
+        "the bill inherits the seating"
+    );
+
+    let resp = post_json!(
+        app,
+        t,
+        &format!("/open-tickets/{}/settle", ticket.id),
+        serde_json::json!({ "shift_id": shift, "payment_method": "cash" })
+    );
+    assert_eq!(resp.status(), 200);
+    let (table_id, seated_at, covers): (
+        Option<Uuid>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<i32>,
+    ) = sqlx::query_as("SELECT table_id, seated_at, covers FROM orders WHERE open_ticket_id = $1")
+        .bind(ticket.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(table_id, Some(t1));
+    assert!((seated_at.unwrap() - sat).num_seconds().abs() <= 1);
+    assert_eq!(covers, Some(3));
+
+    // And the history measures dwell from the seating, not the bill.
+    let r = get_req!(app, t, &format!("/floor/tables/{t1}/history"));
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = test::read_body_json(r).await;
+    assert!(body["average_minutes"].as_i64().unwrap() >= 19);
+}

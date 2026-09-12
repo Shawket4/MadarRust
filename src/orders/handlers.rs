@@ -2005,6 +2005,18 @@ pub(crate) async fn create_order_inner(
         if linked.rows_affected() == 0 {
             return Err(AppError::Conflict("Ticket is already settled".into()));
         }
+        // The sale remembers where it was eaten, when the party sat and how
+        // many they were — table analytics read these, not the ticket chain.
+        sqlx::query(
+            "UPDATE orders o SET table_id = ot.table_id, \
+                    seated_at = COALESCE(ot.seated_at, ot.opened_at), \
+                    covers = CASE WHEN ot.guest_count > 0 THEN ot.guest_count END \
+               FROM open_tickets ot WHERE o.id = $1 AND ot.id = $2",
+        )
+        .bind(order.id)
+        .bind(t.open_ticket_id)
+        .execute(&mut *tx)
+        .await?;
         crate::kitchen::close_kitchen_tickets(
             &mut tx,
             crate::kitchen::KitchenSourceRef::OpenTicket(t.open_ticket_id),

@@ -607,11 +607,21 @@ pub async fn replay(
             )
             .await
         }
-        ReplayOp::HoldTable { table_id, .. } => {
+        ReplayOp::HoldTable {
+            table_id, request, ..
+        } => {
+            // The till stamps when the party sat; a malformed or absent stamp
+            // just means "now", never a refused op.
+            let seated_at = request
+                .get("seated_at")
+                .and_then(|v| v.as_str())
+                .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+                .map(|v| v.with_timezone(&chrono::Utc));
             crate::floor_ops::handlers::hold_table_inner(
                 pool.clone(),
                 table_id,
                 None,
+                seated_at,
                 actor,
                 Some(hub.get_ref()),
             )

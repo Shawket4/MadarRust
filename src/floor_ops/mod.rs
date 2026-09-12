@@ -420,6 +420,9 @@ pub(crate) async fn take_table(
         Holder::Ticket { booking_id, .. } => booking_id,
         Holder::Party => None,
     };
+    // A ticket taking over a bare party hold keeps the party's clock: they sat
+    // down when the hold says, not when their first round went in.
+    let mut seated_from: Option<Uuid> = None;
     match (&live, holder) {
         (Some(o), Holder::Ticket { id, .. }) if o.open_ticket_id == Some(id) => {
             return Ok(Taken { landed: false });
@@ -447,6 +450,9 @@ pub(crate) async fn take_table(
         }
         (Some(o), Holder::Ticket { .. }) => {
             booking_id = booking_id.or(o.booking_id);
+            if o.held_by == "party" {
+                seated_from = Some(o.id);
+            }
             end_occupancy_row(&mut **tx, o.id, EndReason::Seated, false, by).await?;
         }
         (None, _) => {
@@ -465,8 +471,12 @@ pub(crate) async fn take_table(
     sqlx::query(
         "INSERT INTO table_occupancies \
             (org_id, branch_id, table_id, held_by, open_ticket_id, booking_id, party_size, \
-             started_by, started_till_id) \
-         SELECT bt.org_id, bt.branch_id, bt.id, $2, $3, $4, $5, $6, $7 \
+             started_by, started_till_id, seated_at) \
+         SELECT bt.org_id, bt.branch_id, bt.id, $2, $3, $4, $5, $6, $7, \
+                CASE WHEN $3::uuid IS NOT NULL THEN COALESCE( \
+                    (SELECT ot.seated_at FROM open_tickets ot WHERE ot.id = $3), \
+                    (SELECT COALESCE(p.seated_at, p.started_at) FROM table_occupancies p WHERE p.id = $8), \
+                    (SELECT ot.opened_at FROM open_tickets ot WHERE ot.id = $3)) END \
            FROM branch_tables bt WHERE bt.id = $1",
     )
     .bind(table_id)
@@ -476,9 +486,47 @@ pub(crate) async fn take_table(
     .bind(party_size)
     .bind(by.user_id)
     .bind(by.till_id)
+    .bind(seated_from)
     .execute(&mut **tx)
     .await?;
+    if let Some(ticket_id) = open_ticket_id {
+        // The bill carries the same instant, so a settle can copy it onto the
+        // sale and a later move inherits it.
+        sqlx::query(
+            "UPDATE open_tickets t SET seated_at = o.seated_at \
+               FROM table_occupancies o \
+              WHERE t.id = $1 AND t.seated_at IS NULL \
+                AND o.open_ticket_id = t.id AND o.ended_at IS NULL",
+        )
+        .bind(ticket_id)
+        .execute(&mut **tx)
+        .await?;
+    }
     Ok(Taken { landed: true })
+}
+
+/// Stamp the live party hold on `table_id` with when the party sat, by the
+/// till's clock. Clamped: never in the future, never more than 12 hours back,
+/// never before the table's previous occupancy ended (or was cleared). Only
+/// the clock is written; status is the ledger's, not this.
+pub(crate) async fn stamp_party_seated_at(
+    tx: &mut Transaction<'_, Postgres>,
+    table_id: Uuid,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE table_occupancies o \
+            SET seated_at = LEAST(o.started_at, GREATEST($2, o.started_at - interval '12 hours', \
+                    COALESCE((SELECT MAX(COALESCE(p.cleared_at, p.ended_at)) FROM table_occupancies p \
+                               WHERE p.table_id = o.table_id AND p.id <> o.id AND p.ended_at IS NOT NULL), \
+                             '-infinity'::timestamptz))) \
+          WHERE o.table_id = $1 AND o.ended_at IS NULL AND o.held_by = 'party'",
+    )
+    .bind(table_id)
+    .bind(at)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 /// End one row: when, by whom, why, and whether the party left plates behind.

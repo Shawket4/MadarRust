@@ -51403,6 +51403,14 @@
             "type": "number",
             "format": "double"
           },
+          "seated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the party at this table sat down — the hold's stamp, else the\nbill's opening. `null` unless the table is seated. Every device renders\nits table clock from this, so they all agree."
+          },
           "seats": {
             "type": "integer",
             "format": "int32"
@@ -51933,6 +51941,14 @@
           "branch_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "seated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the party actually sat down, by the till's clock. An offline seat\nreplays later than it happened; this keeps every device's table clock\non the seating. Clamped server-side to the last 12 hours, never in the\nfuture, and never before the table's previous party left. Recorded only\n-- it moves no status."
           }
         }
       },
@@ -62698,6 +62714,7 @@
         "required": [
           "open_ticket_id",
           "opened_at",
+          "seated_at",
           "minutes",
           "status"
         ],
@@ -62726,7 +62743,7 @@
           "minutes": {
             "type": "integer",
             "format": "int64",
-            "description": "Minutes between the two, or to now while the bill is still open."
+            "description": "Minutes from `seated_at` to the close, or to now while still open."
           },
           "open_ticket_id": {
             "type": "string",
@@ -62751,6 +62768,11 @@
               "null"
             ],
             "format": "int32"
+          },
+          "seated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the party sat down: the seat hold's stamp when they were seated\nbefore ordering, else the bill's opening."
           },
           "status": {
             "type": "string"
