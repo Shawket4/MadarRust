@@ -307,6 +307,7 @@ paths(
         crate::floor_ops::handlers::create_floor_transfer,
         crate::floor_ops::handlers::cancel_transfer,
         crate::floor_ops::handlers::fulfill_transfer,
+        crate::floor_ops::handlers::table_history,
         // ── bookings ──────────────────────────────────────────────────
         crate::bookings::settings::get_settings,
         crate::bookings::settings::put_settings,
@@ -646,6 +647,8 @@ paths(
         crate::floor_ops::handlers::ReleaseTableRequest,
         crate::floor_ops::handlers::CreateFloorTransferRequest,
         crate::floor_ops::handlers::FulfillTransferRequest,
+        crate::floor_ops::handlers::TableHistory,
+        crate::floor_ops::handlers::TableSitting,
         crate::kitchen::stations::KitchenStation,
         crate::kitchen::stations::StationRoutes,
         crate::kitchen::stations::RoutingModeResponse,

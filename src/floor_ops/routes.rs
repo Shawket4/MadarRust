@@ -34,6 +34,12 @@ pub fn register(cfg: &mut web::ServiceConfig) {
             "/tables/{id}/release",
             web::post().to(handlers::release_table),
         )
+        // Read-only: what this table has done and what it earns. The link
+        // (order -> open_ticket -> table) always existed and nothing read it.
+        .route(
+            "/tables/{id}/history",
+            web::get().to(handlers::table_history),
+        )
         .route("/transfers", web::get().to(handlers::list_floor_transfers))
         .route(
             "/transfers",

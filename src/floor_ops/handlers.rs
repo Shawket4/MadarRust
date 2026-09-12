@@ -912,3 +912,193 @@ pub(crate) async fn fulfill_transfer_inner(
         .ok_or(AppError::Internal)?;
     Ok(HttpResponse::Ok().json(view))
 }
+
+// ── a table's own history ────────────────────────────────────────────────────
+
+/// One sitting at a table: the bill that was opened on it and what it came to.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TableSitting {
+    pub open_ticket_id: Uuid,
+    pub ticket_ref: Option<String>,
+    /// When the party's bill was opened — the closest thing the server has to
+    /// when they sat down.
+    pub opened_at: DateTime<Utc>,
+    /// When the bill was settled or voided; `None` while it is still open.
+    pub closed_at: Option<DateTime<Utc>>,
+    /// Minutes between the two, or to now while the bill is still open.
+    pub minutes: i64,
+    pub status: String,
+    pub customer_name: Option<String>,
+    pub guest_count: Option<i32>,
+    /// The settled sale, when the bill became one.
+    pub order_id: Option<Uuid>,
+    pub order_number: Option<i32>,
+    /// What the sale came to, in minor units. `None` for an unsettled or
+    /// voided bill — a table's takings only count money that was taken.
+    pub total_amount: Option<i32>,
+}
+
+/// What a table has done over the window asked for.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TableHistory {
+    pub table_id: Uuid,
+    pub label: String,
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    /// Bills opened on this table in the window, newest first.
+    pub sittings: Vec<TableSitting>,
+    /// Settled bills only.
+    pub covers: i64,
+    pub settled_count: i64,
+    pub total_minor: i64,
+    /// Mean spend per settled bill, minor units.
+    pub average_bill_minor: i64,
+    /// Mean minutes a party occupied the table, over settled bills — the
+    /// number that says whether a table turns.
+    pub average_minutes: i64,
+    /// Settled bills per day over the window, x100 so the wire stays integer.
+    pub turns_per_day_x100: i64,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct TableHistoryQuery {
+    /// Inclusive lower bound; defaults to 30 days back.
+    pub from: Option<DateTime<Utc>>,
+    /// Exclusive upper bound; defaults to now.
+    pub to: Option<DateTime<Utc>>,
+}
+
+/// A table's history and what it earns.
+///
+/// The link was always there and nothing ever read it: a settled bill carries
+/// `orders.open_ticket_id`, and the ticket carries `table_id`. So a table's
+/// takings are one join away, and until now a shop could see a room full of
+/// tables and not answer "which of these actually earns".
+///
+/// Covers and money count SETTLED bills only. An open bill is still running
+/// and a voided one took nothing — folding either into the averages would
+/// flatter a table that lost money.
+#[utoipa::path(
+    get,
+    path = "/floor/tables/{id}/history",
+    params(("id" = Uuid, Path, description = "Table id"), TableHistoryQuery),
+    responses((status = 200, body = TableHistory)),
+    tag = "floor"
+)]
+pub async fn table_history(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    id: web::Path<Uuid>,
+    q: web::Query<TableHistoryQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "open_tickets", "read").await?;
+
+    let to = q.to.unwrap_or_else(Utc::now);
+    let from = q.from.unwrap_or_else(|| to - chrono::Duration::days(30));
+    if from >= to {
+        return Err(AppError::BadRequest(
+            "`from` must be before `to`".to_string(),
+        ));
+    }
+
+    let table: Option<(Uuid, String, Uuid)> =
+        sqlx::query_as("SELECT id, label, branch_id FROM branch_tables WHERE id = $1")
+            .bind(*id)
+            .fetch_optional(pool.get_ref())
+            .await?;
+    let Some((table_id, label, branch_id)) = table else {
+        return Err(AppError::NotFound("table not found".to_string()));
+    };
+    require_branch_access(pool.get_ref(), &claims, branch_id).await?;
+
+    let rows: Vec<(
+        Uuid,
+        Option<String>,
+        DateTime<Utc>,
+        Option<DateTime<Utc>>,
+        String,
+        Option<String>,
+        Option<i32>,
+        Option<Uuid>,
+        Option<i32>,
+        Option<i32>,
+    )> = sqlx::query_as(
+        "SELECT t.id, t.ticket_ref, t.opened_at, COALESCE(t.settled_at, t.voided_at), \
+                t.status::text, \
+                t.customer_name, t.guest_count, o.id, o.order_number, \
+                CASE WHEN o.voided_at IS NULL THEN o.total_amount ELSE NULL END \
+           FROM open_tickets t \
+           LEFT JOIN orders o ON o.open_ticket_id = t.id \
+          WHERE t.table_id = $1 AND t.opened_at >= $2 AND t.opened_at < $3 \
+          ORDER BY t.opened_at DESC",
+    )
+    .bind(table_id)
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    let now = Utc::now();
+    let sittings: Vec<TableSitting> = rows
+        .into_iter()
+        .map(|r| {
+            let closed = r.3;
+            let minutes = (closed.unwrap_or(now) - r.2).num_minutes().max(0);
+            TableSitting {
+                open_ticket_id: r.0,
+                ticket_ref: r.1,
+                opened_at: r.2,
+                closed_at: closed,
+                minutes,
+                status: r.4,
+                customer_name: r.5,
+                guest_count: r.6,
+                order_id: r.7,
+                order_number: r.8,
+                total_amount: r.9,
+            }
+        })
+        .collect();
+
+    // Settled only: an open bill has not finished and a voided one took
+    // nothing, so neither belongs in an average that answers "what does this
+    // table earn".
+    let settled: Vec<&TableSitting> = sittings
+        .iter()
+        .filter(|s| s.total_amount.is_some())
+        .collect();
+    let settled_count = settled.len() as i64;
+    let total_minor: i64 = settled
+        .iter()
+        .map(|s| i64::from(s.total_amount.unwrap_or(0)))
+        .sum();
+    let covers: i64 = settled
+        .iter()
+        .map(|s| i64::from(s.guest_count.unwrap_or(0)))
+        .sum();
+    let minutes_sum: i64 = settled.iter().map(|s| s.minutes).sum();
+    let days = ((to - from).num_minutes() as f64 / (24.0 * 60.0)).max(1.0 / 24.0);
+
+    Ok(HttpResponse::Ok().json(TableHistory {
+        table_id,
+        label,
+        from,
+        to,
+        covers,
+        settled_count,
+        total_minor,
+        average_bill_minor: if settled_count == 0 {
+            0
+        } else {
+            total_minor / settled_count
+        },
+        average_minutes: if settled_count == 0 {
+            0
+        } else {
+            minutes_sum / settled_count
+        },
+        turns_per_day_x100: ((settled_count as f64 / days) * 100.0).round() as i64,
+        sittings,
+    }))
+}

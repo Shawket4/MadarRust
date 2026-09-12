@@ -10280,6 +10280,66 @@
         ]
       }
     },
+    "/floor/tables/{id}/history": {
+      "get": {
+        "tags": [
+          "floor"
+        ],
+        "summary": "A table's history and what it earns.",
+        "description": "The link was always there and nothing ever read it: a settled bill carries\n`orders.open_ticket_id`, and the ticket carries `table_id`. So a table's\ntakings are one join away, and until now a shop could see a room full of\ntables and not answer \"which of these actually earns\".\n\nCovers and money count SETTLED bills only. An open bill is still running\nand a voided one took nothing — folding either into the averages would\nflatter a table that lost money.",
+        "operationId": "table_history",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Table id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Inclusive lower bound; defaults to 30 days back.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Exclusive upper bound; defaults to now.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TableHistory"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/floor/tables/{id}/hold": {
       "post": {
         "tags": [
@@ -62451,6 +62511,75 @@
           }
         }
       },
+      "TableHistory": {
+        "type": "object",
+        "description": "What a table has done over the window asked for.",
+        "required": [
+          "table_id",
+          "label",
+          "from",
+          "to",
+          "sittings",
+          "covers",
+          "settled_count",
+          "total_minor",
+          "average_bill_minor",
+          "average_minutes",
+          "turns_per_day_x100"
+        ],
+        "properties": {
+          "average_bill_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Mean spend per settled bill, minor units."
+          },
+          "average_minutes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Mean minutes a party occupied the table, over settled bills — the\nnumber that says whether a table turns."
+          },
+          "covers": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Settled bills only."
+          },
+          "from": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "label": {
+            "type": "string"
+          },
+          "settled_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sittings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TableSitting"
+            },
+            "description": "Bills opened on this table in the window, newest first."
+          },
+          "table_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "total_minor": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "turns_per_day_x100": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Settled bills per day over the window, x100 so the wire stays integer."
+          }
+        }
+      },
       "TableOrderRequest": {
         "type": "object",
         "description": "One scan's worth of order.",
@@ -62537,6 +62666,85 @@
           "width": {
             "type": "number",
             "format": "double"
+          }
+        }
+      },
+      "TableSitting": {
+        "type": "object",
+        "description": "One sitting at a table: the bill that was opened on it and what it came to.",
+        "required": [
+          "open_ticket_id",
+          "opened_at",
+          "minutes",
+          "status"
+        ],
+        "properties": {
+          "closed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the bill was settled or voided; `None` while it is still open."
+          },
+          "customer_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "guest_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "minutes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Minutes between the two, or to now while the bill is still open."
+          },
+          "open_ticket_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "opened_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the party's bill was opened — the closest thing the server has to\nwhen they sat down."
+          },
+          "order_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The settled sale, when the bill became one."
+          },
+          "order_number": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "status": {
+            "type": "string"
+          },
+          "ticket_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "total_amount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "What the sale came to, in minor units. `None` for an unsettled or\nvoided bill — a table's takings only count money that was taken."
           }
         }
       },

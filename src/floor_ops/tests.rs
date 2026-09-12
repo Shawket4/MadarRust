@@ -1130,6 +1130,11 @@ async fn the_whole_floor_scope_is_reachable(pool: PgPool) {
     // Cross-table operations: the half a shadowed prefix used to eat.
     let r = get_req!(app, tok, &format!("/floor/transfers?branch_id={branch}"));
     assert_eq!(r.status(), 200, "/floor/transfers");
+
+    // A table's own history. `{id}` also matches the literal `swap`, so this
+    // has to stay reachable as its own shape rather than being eaten by it.
+    let r = get_req!(app, tok, &format!("/floor/tables/{table}/history"));
+    assert_eq!(r.status(), 200, "/floor/tables/{{id}}/history");
     let r = post_json!(
         app,
         tok,
@@ -1363,4 +1368,142 @@ async fn replay_clear_cannot_reach_another_orgs_table(pool: PgPool) {
         "cross-org clear rejected, got {}",
         resp.status()
     );
+}
+
+/// A table's takings come from a join nobody was reading: a settled bill
+/// carries `orders.open_ticket_id` and the ticket carries `table_id`. Until
+/// this endpoint a shop could look at a room full of tables and not answer
+/// which of them actually earns.
+///
+/// Only SETTLED bills count toward money and covers. An open bill has not
+/// finished and a voided one took nothing; folding either in would flatter a
+/// table that lost money.
+#[sqlx::test]
+async fn table_history_counts_only_what_the_table_actually_took(pool: PgPool) {
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    grant_defaults(&pool).await;
+    let tok = token(teller, org, UserRole::Teller);
+    let table = seed_table(&pool, org, branch, None, "T1").await;
+
+    let opened = chrono::Utc::now() - chrono::Duration::hours(3);
+    let closed = chrono::Utc::now() - chrono::Duration::hours(2);
+
+    // A settled bill: two covers, 5000.
+    let settled: Uuid = sqlx::query_scalar(
+        "INSERT INTO open_tickets (org_id, branch_id, table_id, ticket_ref, opened_by, \
+             guest_count, status, opened_at, settled_at, settled_by) \
+         VALUES ($1,$2,$3,'T-1',$4,2,'settled',$5,$6,$4) RETURNING id",
+    )
+    .bind(org)
+    .bind(branch)
+    .bind(table)
+    .bind(teller)
+    .bind(opened)
+    .bind(closed)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    seed_order_for_ticket(&pool, org, branch, teller, settled, 5000, false).await;
+
+    // A VOIDED bill on the same table: it took nothing.
+    let voided: Uuid = sqlx::query_scalar(
+        "INSERT INTO open_tickets (org_id, branch_id, table_id, ticket_ref, opened_by, \
+             guest_count, status, opened_at, voided_at) \
+         VALUES ($1,$2,$3,'T-2',$4,9,'voided',$5,$6) RETURNING id",
+    )
+    .bind(org)
+    .bind(branch)
+    .bind(table)
+    .bind(teller)
+    .bind(opened)
+    .bind(closed)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    seed_order_for_ticket(&pool, org, branch, teller, voided, 9999, true).await;
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(secret()))
+            .app_data(web::Data::new(BranchEventHub::new()))
+            .configure(crate::reservations::routes::configure),
+    )
+    .await;
+
+    let r = get_req!(app, tok, &format!("/floor/tables/{table}/history"));
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = test::read_body_json(r).await;
+
+    assert_eq!(body["label"], "T1");
+    assert_eq!(
+        body["sittings"].as_array().unwrap().len(),
+        2,
+        "both sittings are listed — the history shows what happened"
+    );
+    assert_eq!(body["settled_count"], 1, "only the settled bill counts");
+    assert_eq!(body["total_minor"], 5000, "the voided bill took nothing");
+    assert_eq!(body["covers"], 2, "and brought nobody");
+    assert_eq!(body["average_bill_minor"], 5000);
+    assert_eq!(
+        body["average_minutes"], 60,
+        "opened_at -> settled_at, not to now"
+    );
+}
+
+/// A settled sale against an open ticket, so the history has something to
+/// join to. `voided` writes the `voided_at` that must keep it out of takings.
+async fn seed_order_for_ticket(
+    pool: &PgPool,
+    org: Uuid,
+    branch: Uuid,
+    teller: Uuid,
+    ticket: Uuid,
+    total: i32,
+    voided: bool,
+) {
+    // One open shift per teller, so reuse this teller's if it already has one.
+    let shift: Uuid = sqlx::query_scalar(
+        "INSERT INTO shifts (branch_id, teller_id, opening_cash, status) \
+         VALUES ($1,$2,0,'open') \
+         ON CONFLICT DO NOTHING RETURNING id",
+    )
+    .bind(branch)
+    .bind(teller)
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+    .unwrap_or(
+        sqlx::query_scalar("SELECT id FROM shifts WHERE teller_id = $1 AND status = 'open'")
+            .bind(teller)
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+    );
+    let _ = org;
+    sqlx::query(
+        "INSERT INTO orders (branch_id, shift_id, teller_id, order_number, order_ref, \
+             status, payment_method, subtotal, total_amount, open_ticket_id, \
+             voided_at, voided_by) \
+         VALUES ($1,$2,$3,$7,'O-' || $7::text, \
+                 CASE WHEN $6::timestamptz IS NULL THEN 'completed' ELSE 'voided' END::order_status, \
+                 'cash',$4,$4,$5,$6, \
+                 CASE WHEN $6::timestamptz IS NULL THEN NULL ELSE $3::uuid END)",
+    )
+    .bind(branch)
+    .bind(shift)
+    .bind(teller)
+    .bind(total)
+    .bind(ticket)
+    .bind(if voided {
+        Some(chrono::Utc::now())
+    } else {
+        None
+    })
+    .bind(if voided { 2_i32 } else { 1_i32 })
+    .execute(pool)
+    .await
+    .unwrap();
 }
