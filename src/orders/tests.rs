@@ -1448,16 +1448,21 @@ async fn seed_discount(
     id
 }
 
-/// A percentage over 100% — a fraction above 1 — is REFUSED at intake.
+/// A percentage above 1 is READ as the old convention, not refused.
 ///
-/// `calc_discount` still clamps (the engine must never produce a negative
-/// total), but under the fraction convention an out-of-range value is no longer
-/// an absurdity to absorb quietly: `14` is exactly what a till still speaking
-/// the old "14 means 14%" convention sends, and clamping it would hand over the
-/// whole bill. The clamp stays as the engine's floor; the 400 is what a stale
-/// client actually needs to hear.
+/// This used to be a 400, on the reasoning that `14` is what a till still
+/// speaking the old "14 means 14%" convention sends and clamping it would hand
+/// over the whole bill. Both halves of that are true; the conclusion was not.
+/// Shops were still running the previous build, and refusing the value stopped
+/// them selling a discounted item at all while stranding every such order
+/// already queued in a till's outbox.
+///
+/// So it is converted. A value above 1 cannot be a fraction, so the reading is
+/// not a guess — and the till's own `total_amount` is checked against the
+/// server's arithmetic afterwards, which is what makes it safe rather than
+/// merely convenient. The clamp stays as the engine's floor underneath.
 #[sqlx::test]
-async fn test_discount_percentage_over_one_is_refused(pool: PgPool) {
+async fn test_discount_percentage_over_one_is_read_as_the_old_convention(pool: PgPool) {
     let app = order_app!(pool);
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
@@ -1472,6 +1477,9 @@ async fn test_discount_percentage_over_one_is_refused(pool: PgPool) {
     req_body.discount_type = Some("percentage".to_string());
     // The old convention's "14%".
     req_body.discount_value = Some(dec!(14));
+    // 500 less 14% is 430, and 14% tax on top makes 490 — what that till
+    // computed, and what it sends.
+    req_body.total_amount = Some(490);
 
     let resp = test::call_service(
         &app,
@@ -1482,7 +1490,14 @@ async fn test_discount_percentage_over_one_is_refused(pool: PgPool) {
             .to_request(),
     )
     .await;
-    assert_eq!(resp.status().as_u16(), 400);
+    assert_eq!(resp.status().as_u16(), 201);
+    let of: OrderFull = test::read_body_json(resp).await;
+    assert_eq!(
+        of.order.discount_value,
+        dec!(0.14),
+        "recorded in today's convention, so a report can read it beside a new row"
+    );
+    assert_eq!((of.order.discount_amount, of.order.total_amount), (70, 490));
 }
 
 /// V15: a negative discount_value must clamp to 0 (no inflated total).

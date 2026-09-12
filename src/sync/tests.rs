@@ -4,6 +4,7 @@
 //! hard-coded role → op match used to disagree with that table.
 
 use actix_web::{App, test, web};
+use rust_decimal::Decimal;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -527,4 +528,222 @@ async fn a_replayed_offline_sale_keeps_the_price_it_charged_and_is_flagged(pool:
     assert_eq!(subtotal, 600, "what the customer actually paid");
     assert!(flagged, "and it is findable afterwards");
     assert_eq!(expected, Some(570), "what the menu says today: 500 + 14%");
+}
+
+/// The sync app plus the live `/orders` route, for the two tests below that
+/// have to prove the SAME reading on both paths.
+macro_rules! app_with_orders {
+    ($pool:expr) => {
+        test::init_service(
+            App::new()
+                .app_data(web::Data::new($pool.clone()))
+                .app_data(web::Data::new(secret()))
+                .app_data(web::Data::new(BranchEventHub::new()))
+                .configure(crate::orders::routes::configure)
+                .configure(crate::tickets::routes::configure)
+                .configure(crate::kitchen::routes::configure)
+                .configure(crate::sync::routes::configure),
+        )
+        .await
+    };
+}
+
+/// A sale queued BEFORE the fraction migration still lands.
+///
+/// This blocked a production shop. Percentage discounts moved from `14` to
+/// `0.14`, and the live path refuses the old spelling on purpose — a till
+/// making a claim about a sale happening NOW in a language the server no
+/// longer speaks must resync rather than sell. But the same refusal met every
+/// order already sitting in a till's outbox, written before its app updated:
+/// the money was in the drawer, the customer had gone, and the sale could not
+/// reach the books at all.
+///
+/// A queued op is a RECORD, not a claim, and the convention it was written
+/// under is knowable — under the new one a percentage cannot exceed 1.
+#[sqlx::test]
+async fn a_sale_queued_under_the_old_discount_model_still_lands(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 1000).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    sqlx::query(
+        "INSERT INTO org_payment_methods (org_id, name, color, icon, is_cash, is_active) \
+         VALUES ($1, 'cash', '#000', 'cash', true, true)",
+    )
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (r, a) in [
+        ("orders", "create"),
+        ("orders", "read"),
+        ("order_items", "create"),
+        ("payments", "create"),
+    ] {
+        grant(&pool, "teller", r, a).await;
+    }
+    let bearer = token(teller, org, UserRole::Teller);
+
+    // The old app's spelling: `14` meaning 14%. Ten pounds less 14% is 8.60,
+    // and 14% tax on top makes 9.80 — which is the total it sent at the time.
+    let resp = replay(
+        &app,
+        &bearer,
+        &serde_json::json!({
+            "op": "create_order",
+            "teller_id": teller,
+            "request": {
+                "branch_id": branch,
+                "shift_id": shift,
+                "payment_method": "cash",
+                "discount_type": "percentage",
+                "discount_value": "14",
+                "items": [{ "menu_item_id": item, "quantity": 1 }],
+                "total_amount": 980
+            }
+        }),
+    )
+    .await;
+    assert!(resp.status().is_success(), "{:?}", resp.status());
+
+    let (dtype, dvalue, discount, total): (Option<String>, Decimal, i32, i32) = sqlx::query_as(
+        "SELECT discount_type::text, discount_value, discount_amount, total_amount \
+           FROM orders WHERE branch_id = $1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(branch)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(dtype.as_deref(), Some("percentage"));
+    // Recorded in TODAY's convention, so a report reading this row beside a
+    // new one is comparing the same kind of number.
+    assert_eq!(dvalue, Decimal::new(14, 2), "0.14, not 14");
+    assert_eq!(discount, 140, "14% of ten pounds");
+    assert_eq!(total, 980);
+}
+
+/// A LIVE till on the old build can still sell.
+///
+/// This is the half that took a shop down. The server refused the old spelling
+/// outright, so a branch that had not updated could not take a discounted sale
+/// at all — not a sync problem, a till that would not ring. The reading is the
+/// same on both paths now, and the total check below is what would catch it if
+/// the till ever meant something else.
+#[sqlx::test]
+async fn a_live_till_on_the_old_build_can_still_sell(pool: PgPool) {
+    let app = app_with_orders!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 1000).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    sqlx::query(
+        "INSERT INTO org_payment_methods (org_id, name, color, icon, is_cash, is_active) \
+         VALUES ($1, 'cash', '#000', 'cash', true, true)",
+    )
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (r, a) in [
+        ("orders", "create"),
+        ("orders", "read"),
+        ("order_items", "create"),
+        ("payments", "create"),
+    ] {
+        grant(&pool, "teller", r, a).await;
+    }
+    let bearer = token(teller, org, UserRole::Teller);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {bearer}")))
+            .set_json(&serde_json::json!({
+                "branch_id": branch,
+                "shift_id": shift,
+                "payment_method": "cash",
+                "discount_type": "percentage",
+                "discount_value": "14",
+                "items": [{ "menu_item_id": item, "quantity": 1 }],
+                "total_amount": 980
+            }))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success(), "{:?}", resp.status());
+    let (dvalue, discount, total): (Decimal, i32, i32) = sqlx::query_as(
+        "SELECT discount_value, discount_amount, total_amount FROM orders \
+           WHERE branch_id = $1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(branch)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        dvalue,
+        Decimal::new(14, 2),
+        "recorded in today's convention"
+    );
+    assert_eq!((discount, total), (140, 980));
+}
+
+/// A till that disagrees about the money is still refused.
+///
+/// The conversion is safe BECAUSE of this: reading `14` as 14% is only ever
+/// accepted when the till's own total agrees with the server's arithmetic
+/// afterwards. A payload that means something else fails here, loudly, rather
+/// than giving a bill away.
+#[sqlx::test]
+async fn a_converted_discount_still_has_to_add_up(pool: PgPool) {
+    let app = app_with_orders!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 1000).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    sqlx::query(
+        "INSERT INTO org_payment_methods (org_id, name, color, icon, is_cash, is_active) \
+         VALUES ($1, 'cash', '#000', 'cash', true, true)",
+    )
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (r, a) in [
+        ("orders", "create"),
+        ("orders", "read"),
+        ("order_items", "create"),
+        ("payments", "create"),
+    ] {
+        grant(&pool, "teller", r, a).await;
+    }
+    let bearer = token(teller, org, UserRole::Teller);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {bearer}")))
+            .set_json(&serde_json::json!({
+                "branch_id": branch,
+                "shift_id": shift,
+                "payment_method": "cash",
+                "discount_type": "percentage",
+                "discount_value": "14",
+                "items": [{ "menu_item_id": item, "quantity": 1 }],
+                // What a till would have sent if it really meant 1400% off.
+                "total_amount": 0
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        409,
+        "the totals disagree, so the sale is refused"
+    );
 }

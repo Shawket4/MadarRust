@@ -1418,9 +1418,21 @@ pub(crate) async fn create_order_inner(
     let org_id = actor.org_id;
 
     validate_payment_method(pool.get_ref(), org_id, &body.payment_method).await?;
-    if let Some(dt) = &body.discount_type {
-        validate_discount_type(dt)?;
-        validate_discount_value(dt, body.discount_value.unwrap_or(Decimal::ZERO))?;
+    // Normalised ONCE, here, so everything downstream sees a fraction — live
+    // and replayed alike. Only an ad-hoc discount on the request can carry the
+    // old convention; one named by `discount_id` is read from the table, which
+    // the migration converted.
+    let mut body = body;
+    if let Some(dt) = body.discount_type.clone() {
+        validate_discount_type(&dt)?;
+        let resolved = resolve_discount_value(
+            &dt,
+            body.discount_value.unwrap_or(Decimal::ZERO),
+            body.branch_id,
+        )?;
+        if body.discount_value.is_some() {
+            body.discount_value = Some(resolved);
+        }
     }
     if let Some(tpm) = &body.tip_payment_method {
         validate_payment_method(pool.get_ref(), org_id, tpm).await?;
@@ -3579,20 +3591,54 @@ fn validate_discount_type(dt: &str) -> Result<(), AppError> {
     }
 }
 
-/// A percentage on the wire is a FRACTION, like every other rate here.
+/// A percentage on the wire is a FRACTION — and what to do about one that
+/// plainly is not.
 ///
-/// `calc_discount` clamps, so an out-of-range value can never drive a total
-/// negative — but under the fraction convention the clamp is no longer a safe
-/// silence: a till still speaking the old convention sends `14` for 14%, which
-/// clamps to the WHOLE subtotal and gives the bill away. A stale client has to
-/// hear about it, so this is a 400 and not a quiet correction.
-fn validate_discount_value(dt: &str, value: Decimal) -> Result<(), AppError> {
-    if dt == "percentage" && value > Decimal::ONE {
-        return Err(AppError::BadRequest(
-            "discount_value for a percentage is a fraction between 0 and 1 (0.14 = 14%)".into(),
-        ));
+/// Percentage discounts moved from `14` to `0.14`. This refused the old
+/// spelling outright, on the reasoning that a till speaking a language the
+/// server no longer understands should resync rather than sell. That was
+/// wrong in production, and expensively: shops still running the previous
+/// build could not take a discounted sale AT ALL, and every such order already
+/// sitting in a till's outbox dead-lettered — money in the drawer, nothing in
+/// the books.
+///
+/// The old spelling is READ instead. Under the current convention a percentage
+/// cannot exceed `1`, so a value above it can only be the old one, and
+/// converting it is not a guess.
+///
+/// Two things make that safe rather than merely convenient:
+///
+///   * The till's own `total_amount` is checked against the server's
+///     arithmetic further down. A misreading produces a total that disagrees
+///     and the sale is refused, so the failure mode is the loud one we already
+///     had — never a bill quietly given away.
+///   * It is the same reading on every path. A counter sale, a waiter's fire
+///     and a replayed backlog cannot disagree about what `14` means.
+///
+/// The one genuinely ambiguous value is exactly `1`: 100% under today's
+/// convention, 1% under the old. It is NOT converted — a comp is a real thing
+/// a till sends and a 1% discount is close to unheard of — and the total check
+/// is what catches it if a stale till ever means the other.
+///
+/// The warning names the branch, because the fix is to update that till and
+/// somebody has to be able to find it.
+pub(crate) fn resolve_discount_value(
+    dt: &str,
+    value: Decimal,
+    branch_id: Uuid,
+) -> Result<Decimal, AppError> {
+    if dt != "percentage" || value <= Decimal::ONE {
+        return Ok(value);
     }
-    Ok(())
+    let converted = value / Decimal::ONE_HUNDRED;
+    tracing::warn!(
+        %branch_id,
+        legacy_value = %value,
+        converted = %converted,
+        "read a percentage discount in the pre-2026-09 convention — this till is \
+         running an old build and should be updated"
+    );
+    Ok(converted)
 }
 
 fn validate_void_reason(reason: &str) -> Result<(), AppError> {

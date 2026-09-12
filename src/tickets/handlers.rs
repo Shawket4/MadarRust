@@ -302,12 +302,22 @@ pub(crate) async fn create_open_ticket_inner(
     // rather than only at the settle: a waiter's discount that the till will
     // refuse hours later, with the party waiting to pay, is a bad place to
     // discover a stale client.
-    if body.discount_type.as_deref() == Some("percentage")
-        && body.discount_value.unwrap_or(rust_decimal::Decimal::ZERO) > rust_decimal::Decimal::ONE
-    {
-        return Err(AppError::BadRequest(
-            "discount_value for a percentage is a fraction between 0 and 1 (0.14 = 14%)".into(),
-        ));
+    //
+    // The OLD spelling (`14` for 14%) is read rather than refused — shops are
+    // still running the previous build, and refusing it stops them selling.
+    // `resolve_discount_value` carries the whole reasoning, and this path
+    // shares it so a fire and a counter sale cannot disagree about what `14`
+    // means.
+    let mut body = body;
+    if let Some(dt) = body.discount_type.clone() {
+        let resolved = crate::orders::handlers::resolve_discount_value(
+            &dt,
+            body.discount_value.unwrap_or(rust_decimal::Decimal::ZERO),
+            body.branch_id,
+        )?;
+        if body.discount_value.is_some() {
+            body.discount_value = Some(resolved);
+        }
     }
 
     let org_id: Uuid =
