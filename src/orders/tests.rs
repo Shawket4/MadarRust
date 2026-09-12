@@ -3878,7 +3878,7 @@ async fn test_void_reason_from_an_old_till_is_read_not_refused(pool: PgPool) {
 /// the recipe's ingredient. Refused with a 400 naming the family; one milk plus
 /// one coffee is fine.
 #[sqlx::test]
-async fn a_line_with_two_milks_is_refused(pool: PgPool) {
+async fn a_line_with_two_milks_keeps_the_last(pool: PgPool) {
     use crate::orders::component_resolve::{AddonInput, resolve_menu_item_configuration};
     let org_id = seed_org(&pool).await;
     let cat_id = seed_category(&pool, org_id).await;
@@ -3892,22 +3892,29 @@ async fn a_line_with_two_milks_is_refused(pool: PgPool) {
         unit_price: None,
     };
 
-    let err = resolve_menu_item_configuration(
+    // An old till in the field (or its outbox) still sends two: not refused,
+    // the last pick wins at quantity 1.
+    let two = AddonInput {
+        quantity: 2,
+        ..input(almond)
+    };
+    let res = resolve_menu_item_configuration(
         &pool,
         menu_item_id,
         None,
         1,
-        &[input(oat), input(almond)],
+        &[input(oat), two],
         &[],
         Uuid::new_v4(),
     )
     .await
-    .err()
-    .expect("two milks must be refused");
-    match err {
-        crate::errors::AppError::BadRequest(m) => assert!(m.contains("milk"), "{m}"),
-        other => panic!("expected 400, got {other:?}"),
-    }
+    .expect("a line from an old till still syncs");
+    let kept: Vec<(Uuid, i32)> = res
+        .addons
+        .iter()
+        .map(|a| (a.addon_item_id, a.quantity))
+        .collect();
+    assert_eq!(kept, vec![(almond, 1)]);
 
     resolve_menu_item_configuration(
         &pool,

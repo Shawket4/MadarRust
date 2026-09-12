@@ -86,34 +86,59 @@ pub struct MenuItemResolution {
 /// A drink has ONE milk and ONE coffee: a swap-family addon (`milk_type` /
 /// `coffee_type`) REPLACES the recipe's ingredient, so two of one family on a
 /// line cannot be made, costed or deducted — the second swap silently
-/// overwrote the first while both were charged. Refused with a 400 naming the
-/// family rather than guessed at.
-pub(crate) fn swap_family_conflict(types: &[String]) -> Option<&'static str> {
-    for (family, label) in [("milk_type", "milk"), ("coffee_type", "coffee")] {
-        if types.iter().filter(|t| t.as_str() == family).count() > 1 {
-            return Some(label);
+/// overwrote the first while both were charged. Tills already in the field sent
+/// such lines (and replay them from their outbox), so the line is not refused —
+/// the LAST choice of each family wins, at quantity 1, which is what the till
+/// shows the customer after picking a second milk.
+pub(crate) fn collapse_swap_families(types: &[Option<String>]) -> Vec<bool> {
+    let mut keep = vec![true; types.len()];
+    for family in ["milk_type", "coffee_type"] {
+        let hits: Vec<usize> = (0..types.len())
+            .filter(|&i| types[i].as_deref() == Some(family))
+            .collect();
+        if let Some((_, earlier)) = hits.split_last() {
+            for &i in earlier {
+                keep[i] = false;
+            }
         }
     }
-    None
+    keep
 }
 
-async fn reject_double_swap(pool: &PgPool, addons: &[AddonInput]) -> Result<(), AppError> {
+async fn one_choice_per_swap_family(
+    pool: &PgPool,
+    addons: &[AddonInput],
+) -> Result<Vec<AddonInput>, AppError> {
     if addons.len() < 2 {
-        return Ok(());
+        return Ok(addons.to_vec());
     }
     let ids: Vec<Uuid> = addons.iter().map(|a| a.addon_item_id).collect();
-    let types: Vec<String> = sqlx::query_scalar(
-        "SELECT a.type FROM unnest($1::uuid[]) AS x(id) JOIN addon_items a ON a.id = x.id",
-    )
-    .bind(&ids)
-    .fetch_all(pool)
-    .await?;
-    if let Some(family) = swap_family_conflict(&types) {
-        return Err(AppError::BadRequest(format!(
-            "A line can carry only one {family} choice: {family} options replace each other"
-        )));
+    let rows: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT id, type FROM addon_items WHERE id = ANY($1)")
+            .bind(&ids)
+            .fetch_all(pool)
+            .await?;
+    let types: Vec<Option<String>> = ids
+        .iter()
+        .map(|id| rows.iter().find(|(r, _)| r == id).map(|(_, t)| t.clone()))
+        .collect();
+    let keep = collapse_swap_families(&types);
+    if keep.iter().any(|k| !k) {
+        tracing::warn!("order line carried more than one milk/coffee swap; kept the last");
     }
-    Ok(())
+    Ok(addons
+        .iter()
+        .zip(&types)
+        .zip(keep)
+        .filter(|(_, k)| *k)
+        .map(|((a, t), _)| {
+            let mut a = a.clone();
+            if matches!(t.as_deref(), Some("milk_type" | "coffee_type")) {
+                a.quantity = 1;
+            }
+            a
+        })
+        .collect())
 }
 
 /// Resolve a menu item configuration (same rules as a standalone POS line).
@@ -133,7 +158,7 @@ pub async fn resolve_menu_item_configuration(
         return Err(AppError::BadRequest("Quantity must be > 0".into()));
     }
 
-    reject_double_swap(pool, addons).await?;
+    let addons = &one_choice_per_swap_family(pool, addons).await?[..];
 
     let mut deductions: Vec<InventoryDeduction> = Vec::new();
     let mut resolved_addons: Vec<ResolvedAddon> = Vec::new();
@@ -421,29 +446,29 @@ pub async fn resolve_menu_item_configuration(
 
 #[cfg(test)]
 mod swap_family_tests {
-    use super::swap_family_conflict;
+    use super::collapse_swap_families;
 
-    fn v(xs: &[&str]) -> Vec<String> {
-        xs.iter().map(|s| s.to_string()).collect()
+    fn v(xs: &[&str]) -> Vec<Option<String>> {
+        xs.iter().map(|s| Some(s.to_string())).collect()
     }
 
     #[test]
-    fn one_of_each_family_is_fine() {
+    fn one_of_each_family_keeps_everything() {
         assert_eq!(
-            swap_family_conflict(&v(&["milk_type", "coffee_type", "extra", "extra"])),
-            None
+            collapse_swap_families(&v(&["milk_type", "coffee_type", "extra", "extra"])),
+            vec![true; 4]
         );
     }
 
     #[test]
-    fn two_milks_or_two_coffees_conflict() {
+    fn the_last_milk_and_the_last_coffee_win() {
         assert_eq!(
-            swap_family_conflict(&v(&["milk_type", "extra", "milk_type"])),
-            Some("milk")
+            collapse_swap_families(&v(&["milk_type", "extra", "milk_type"])),
+            vec![false, true, true]
         );
         assert_eq!(
-            swap_family_conflict(&v(&["coffee_type", "coffee_type"])),
-            Some("coffee")
+            collapse_swap_families(&v(&["coffee_type", "coffee_type"])),
+            vec![false, true]
         );
     }
 }
