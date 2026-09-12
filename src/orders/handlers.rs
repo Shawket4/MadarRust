@@ -37,7 +37,8 @@ const ORDER_SELECT: &str =
      o.amount_tendered, o.change_given, o.tip_amount, o.tip_payment_method, o.discount_id,
      o.customer_name, o.notes, o.order_type, o.delivery_fee, o.delivery_order_id,
      d.channel::text AS delivery_channel, d.customer_lat AS delivery_lat, d.customer_lng AS delivery_lng,
-     o.voided_at, o.void_reason::text, o.void_note, o.voided_by, o.created_at
+     o.voided_at, o.void_reason::text, o.void_note, o.voided_by,
+     o.price_flagged, o.price_expected_total, o.created_at
      FROM orders o JOIN users u ON u.id = o.teller_id
      LEFT JOIN users w ON w.id = o.waiter_id
      LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id ";
@@ -190,6 +191,21 @@ pub struct Order {
     pub void_reason: Option<String>,
     pub void_note: Option<String>,
     pub voided_by: Option<Uuid>,
+    /// This sale was rung against a catalogue that has since moved: a line was
+    /// charged at a price the menu no longer says, or the item was disabled at
+    /// this branch. Both mean a till that was OFFLINE when something changed —
+    /// a live sale is priced by the server and cannot deviate.
+    ///
+    /// Recorded, never rejected: the money already changed hands. It is here so
+    /// the POS and the dashboard can SHOW it, which is the whole point of
+    /// flagging something.
+    #[serde(default)]
+    pub price_flagged: bool,
+    /// What the catalogue says this sale should have come to, when it differs.
+    /// Beside `subtotal` it is the size of the drift, which is the question
+    /// anyone looking at a flagged sale asks next.
+    #[serde(default)]
+    pub price_expected_total: Option<i32>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -376,11 +392,12 @@ pub struct OrderItemInput {
     pub bundle_components: Vec<crate::orders::component_resolve::BundleComponentInput>,
     #[serde(default)]
     pub notes: Option<String>,
-    /// Charged unit price (piastres) the POS applied for this item/bundle line. When
-    /// present it is RECORDED as the line's unit_price; absent → the server's expected
-    /// (catalog + branch override) price is used. Recording what the customer was
-    /// actually charged keeps the DB equal to the printed receipt even when the POS's
-    /// synced menu/override prices are stale or it was offline at sale time.
+    /// What the customer was actually charged, in piastres.
+    ///
+    /// Read ONLY when a queued offline sale is replayed — see [`ClientPrices`].
+    /// On the live path the server prices the line and this is ignored, so a
+    /// till cannot charge a price of its own choosing and no manual override
+    /// exists to let anyone try.
     #[serde(default)]
     pub unit_price: Option<i32>,
 }
@@ -752,11 +769,33 @@ impl ResolvedItem {
     }
 }
 
+/// Whose price a line is recorded at.
+///
+/// A sale that is happening NOW is priced by the server, full stop. The till
+/// sends what it believes and is told to re-sync if it disagrees — the same
+/// answer it already gets when its tax settings are stale — and there is no
+/// control anywhere in the POS for a person to type a price.
+///
+/// A sale that ALREADY HAPPENED is different. A till that was offline when the
+/// customer paid took real money at the price on its screen, and repricing it
+/// against today's catalogue at replay time would make the books disagree with
+/// the receipt in the customer's hand. So the charged figure is recorded, and
+/// the line is flagged (`price_flagged`) so a person can see that this sale
+/// was rung against a menu that has since moved.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ClientPrices {
+    /// Live: the catalogue prices the line.
+    Ignore,
+    /// Replay: record what was charged, and flag the difference.
+    AsCharged,
+}
+
 /// Resolve one cart line against the catalog at `branch_id` and price it.
 ///
-/// `unit_price` and the addon prices come back CHARGED — the till's figure
-/// where it sent one, the catalog's otherwise — with the catalog expectation
-/// kept alongside for the price flag. Rewards are not this function's
+/// `unit_price` and the addon prices come back from the CATALOGUE, with the
+/// catalogue expectation kept alongside for the price flag. A price on the
+/// request is honoured only under [`ClientPrices::AsCharged`]. Rewards are not
+/// this function's
 /// business: `is_reward` / `reward_covered` / `price_flagged` come back
 /// zeroed and the caller sets them once it knows the whole cart.
 ///
@@ -768,6 +807,7 @@ pub(crate) async fn resolve_order_line(
     branch_id: Uuid,
     order_time: chrono::DateTime<Utc>,
     item_input: &OrderItemInput,
+    prices: ClientPrices,
 ) -> Result<ResolvedItem, AppError> {
     if item_input.quantity <= 0 {
         return Err(AppError::BadRequest("Item quantity must be > 0".into()));
@@ -1148,16 +1188,17 @@ pub(crate) async fn resolve_order_line(
             });
         }
 
-        // Capture the catalog (expected) addon total per single item unit, then
-        // overlay the POS's charged addon prices — recorded verbatim, with any
-        // deviation surfaced via the line price flag below.
+        // Same rule as the item's own price: the catalogue's, unless this is a
+        // sale being replayed, in which case what was charged.
         let expected_addon_per_unit: i32 = resolved_addons
             .iter()
             .map(|a| a.unit_price * a.quantity)
             .sum();
-        for (i, a) in resolved_addons.iter_mut().enumerate() {
-            if let Some(p) = item_input.addons.get(i).and_then(|ai| ai.unit_price) {
-                a.unit_price = p;
+        if prices == ClientPrices::AsCharged {
+            for (i, a) in resolved_addons.iter_mut().enumerate() {
+                if let Some(p) = item_input.addons.get(i).and_then(|ai| ai.unit_price) {
+                    a.unit_price = p;
+                }
             }
         }
 
@@ -1177,12 +1218,18 @@ pub(crate) async fn resolve_order_line(
         ));
     };
 
-    // `unit_price` from the resolution is the EXPECTED (catalog + branch override)
-    // price; overlay the POS's charged price so the recorded line equals the
-    // receipt. `resolved_addons` already carry charged prices (overlaid above for
-    // menu items; bundle components stay server-priced via the surcharge).
+    // The catalogue's price, and then — only for a sale that already happened —
+    // the one the customer was actually charged.
+    //
+    // See [`ClientPrices`]. Live, the request's price is read by nothing: the
+    // server prices the sale and a till that disagrees is told to re-sync. On
+    // REPLAY the charged figure is recorded as history, because it is history,
+    // and the line is flagged so it can be found.
     let expected_unit_price = unit_price;
-    let unit_price = item_input.unit_price.unwrap_or(expected_unit_price);
+    let unit_price = match prices {
+        ClientPrices::Ignore => expected_unit_price,
+        ClientPrices::AsCharged => item_input.unit_price.unwrap_or(expected_unit_price),
+    };
 
     Ok(ResolvedItem {
         menu_item_id: resolved_menu_item_id,
@@ -1459,6 +1506,23 @@ pub(crate) async fn create_order_inner(
     let mut expected_subtotal: i32 = 0;
 
     let order_time = body.created_at.unwrap_or_else(Utc::now);
+    // Whose prices these are. Two cases take the ones on the request, and
+    // neither of them is a till naming a price for a sale happening now:
+    //
+    //   * REPLAY — the sale already happened, offline, at the price on the
+    //     screen in front of the customer. Repricing it against today's
+    //     catalogue would make the books disagree with their receipt.
+    //   * A TICKET SETTLE — the lines are the bill's own, frozen by THIS
+    //     SERVER when each round was fired. Repricing them would collect a
+    //     different number than the one printed at the table an hour ago.
+    //
+    // Everything else is priced here, from the catalogue, and a till that
+    // disagrees is told to re-sync rather than believed.
+    let prices = if actor.replay || ticket.is_some() {
+        ClientPrices::AsCharged
+    } else {
+        ClientPrices::Ignore
+    };
     for (line_index, item_input) in body.items.iter().enumerate() {
         let mut resolved = resolve_order_line(
             pool.get_ref(),
@@ -1466,6 +1530,7 @@ pub(crate) async fn create_order_inner(
             body.branch_id,
             order_time,
             item_input,
+            prices,
         )
         .await?;
         let charged_line_subtotal = resolved.charged_subtotal();
@@ -1481,10 +1546,18 @@ pub(crate) async fn create_order_inner(
         let charged_line_subtotal = charged_line_subtotal - covered;
         let is_reward_line = covered > 0;
 
-        // Flag the line when the charged price deviated from the catalog, or the item
-        // was disabled at this branch (a stale/offline sale — recorded, not rejected).
-        // A reward line is EXEMPT: it is meant to differ from the catalog price,
-        // and flagging it would bury the real price anomalies in noise.
+        // Flag the line when what was charged differs from what the menu says,
+        // or the item was disabled at this branch. Both mean the same thing —
+        // a sale rung against a catalogue that has since moved — and both are
+        // RECORDED rather than rejected, because the money already changed
+        // hands.
+        //
+        // Live, the first term cannot fire: the server priced the line and
+        // nothing was overlaid. It fires on REPLAY, which is exactly the case
+        // it exists for: a till that was offline when the price changed.
+        //
+        // A reward line is exempt; its coverage is meant to move the charged
+        // subtotal, and flagging it would bury the real anomalies in noise.
         resolved.price_flagged = !is_reward_line
             && (resolved.branch_disabled || charged_line_subtotal != expected_line_subtotal);
         resolved.is_reward = is_reward_line;
@@ -1796,7 +1869,8 @@ pub(crate) async fn create_order_inner(
             (SELECT channel::text FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_channel,
             (SELECT customer_lat FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_lat,
             (SELECT customer_lng FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_lng,
-            voided_at, void_reason::text, void_note, voided_by, created_at
+            voided_at, void_reason::text, void_note, voided_by,
+            price_flagged, price_expected_total, created_at
         "#,
     )
     .bind(shift_branch_id) // authoritative: the order's branch IS its shift's branch
@@ -2734,7 +2808,8 @@ pub(crate) async fn void_order_inner(
                (SELECT channel::text FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_channel,
                (SELECT customer_lat FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_lat,
                (SELECT customer_lng FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_lng,
-               voided_at, void_reason::text, void_note, voided_by, created_at"#,
+               voided_at, void_reason::text, void_note, voided_by,
+            price_flagged, price_expected_total, created_at"#,
     )
     .bind(order_id)
     .bind(&body.reason)

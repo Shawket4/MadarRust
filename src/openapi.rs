@@ -280,6 +280,9 @@ paths(
         crate::tickets::handlers::get_open_ticket,
         crate::tickets::handlers::void_open_ticket,
         crate::tickets::handlers::void_ticket_line,
+        crate::tickets::public::table,
+        crate::tickets::public::table_menu,
+        crate::tickets::public::create_table_order,
         crate::tickets::handlers::settle_open_ticket,
         crate::tickets::handlers::move_ticket_table,
         // ── reservations + floor plan ─────────────────────────────────

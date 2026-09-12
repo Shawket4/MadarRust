@@ -297,18 +297,20 @@ fn order_base(shop: Option<&str>, org_id: Uuid) -> Result<String, AppError> {
 }
 
 /// One table's code: the menu, pre-bound to where the customer is sitting.
-fn table_order_url(
-    shop: Option<&str>,
-    org_id: Uuid,
-    branch_id: Uuid,
-    table_id: Uuid,
-) -> Result<String, AppError> {
-    Ok(format!(
-        "{}?branch={}&table={}",
-        order_base(shop, org_id)?,
-        branch_id,
-        table_id
-    ))
+/// The address the code on a table opens.
+///
+/// The TABLE alone, and nothing else. It used to carry `?branch=&table=`,
+/// which read as belt-and-braces and was in fact two sources of truth: the
+/// page trusted the branch from the URL, so a code with a table from one
+/// branch and the branch id of another described a place that does not exist.
+/// The table knows its own branch; the page asks it.
+///
+/// The customer cannot change it either, which is the point of a code on a
+/// table. There is no branch to switch and no channel to pick — a scan is
+/// "this table, this menu", and anything else on the address is something a
+/// curious person can edit into someone else's meal.
+fn table_order_url(shop: Option<&str>, org_id: Uuid, table_id: Uuid) -> Result<String, AppError> {
+    Ok(format!("{}?table={}", order_base(shop, org_id)?, table_id))
 }
 
 /// Validate a relative marketing path — must start with `/`, no scheme or
@@ -932,7 +934,7 @@ pub async fn table_qr(
     }
 
     let shop = shop_origin(pool.get_ref(), org_id).await?;
-    let long_url = table_order_url(shop.as_deref(), org_id, branch_id, path.tid)?;
+    let long_url = table_order_url(shop.as_deref(), org_id, path.tid)?;
     let caption = q.caption.clone().unwrap_or_else(|| table.label.clone());
     let q_with_caption = QrRenderQuery {
         caption: Some(caption),
@@ -1304,9 +1306,11 @@ mod address_tests {
             branch_order_url(shop, ORG, BRANCH).unwrap(),
             format!("https://drops.madar-pos.cloud/order/?branch={BRANCH}")
         );
+        // The TABLE alone — it knows its own branch, and a second source of
+        // truth on the address is a second thing that can disagree.
         assert_eq!(
-            table_order_url(shop, ORG, BRANCH, TABLE).unwrap(),
-            format!("https://drops.madar-pos.cloud/order/?branch={BRANCH}&table={TABLE}")
+            table_order_url(shop, ORG, TABLE).unwrap(),
+            format!("https://drops.madar-pos.cloud/order/?table={TABLE}")
         );
         assert_eq!(
             org_order_url(shop, ORG).unwrap(),
@@ -1343,7 +1347,7 @@ mod address_tests {
         // And no form on a shop host mentions the org anywhere.
         for url in [
             branch_order_url(shop, ORG, BRANCH).unwrap(),
-            table_order_url(shop, ORG, BRANCH, TABLE).unwrap(),
+            table_order_url(shop, ORG, TABLE).unwrap(),
             org_order_url(shop, ORG).unwrap(),
             branch_loyalty_url(shop, BRANCH).unwrap(),
             org_loyalty_url(shop, ORG).unwrap(),

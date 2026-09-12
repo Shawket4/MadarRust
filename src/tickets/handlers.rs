@@ -63,6 +63,17 @@ pub struct AddRoundRequest {
     pub items: Vec<OrderItemInput>,
 }
 
+/// Whose price a fired round is recorded at: the catalogue's now, or what was
+/// charged at the table if this round is being replayed off a till's outbox.
+/// One place, so a fire and a later round cannot answer it differently.
+fn client_prices(actor: &ActingContext) -> crate::orders::handlers::ClientPrices {
+    if actor.replay {
+        crate::orders::handlers::ClientPrices::AsCharged
+    } else {
+        crate::orders::handlers::ClientPrices::Ignore
+    }
+}
+
 /// The literal a cashier sends as `discount_type` to settle WITHOUT the
 /// waiter's discount. Absent means inherit it; anything else overrides it.
 pub const DISCOUNT_NONE: &str = "none";
@@ -379,6 +390,7 @@ pub(crate) async fn create_open_ticket_inner(
             &body.items,
             label.as_deref(),
             Some(ticket_ref.as_str()),
+            client_prices(&actor),
         )
         .await?,
     );
@@ -495,6 +507,7 @@ pub(crate) async fn add_round_inner(
         &body.items,
         label.as_deref(),
         ticket_ref.as_deref(),
+        client_prices(&actor),
     )
     .await?;
     tx.commit().await?;

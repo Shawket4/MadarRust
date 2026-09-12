@@ -27004,6 +27004,284 @@
         }
       }
     },
+    "/public/table-orders": {
+      "post": {
+        "tags": [
+          "open_tickets"
+        ],
+        "summary": "Send this table's order to the kitchen.",
+        "description": "Opens the bill if the table has none, adds a round if it does. Both answer\nwith the bill as it now stands, so the page can show what the table has\nordered so far — including the rounds somebody else at the table sent.",
+        "operationId": "public_table_order",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TableOrderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The bill as it now stands",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenTicketView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/public/tables/{id}": {
+      "get": {
+        "tags": [
+          "open_tickets"
+        ],
+        "operationId": "public_table",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Table ID, from the QR",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicTable"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/public/tables/{id}/menu": {
+      "get": {
+        "tags": [
+          "open_tickets"
+        ],
+        "summary": "The menu at this table.",
+        "description": "The DINE-IN menu — branch prices, the whole catalogue, no channel discount\n— because a table's order settles as a dine-in bill. Quoting a customer the\nin-mall delivery menu and then charging them the till's prices is the same\nclass of mistake as letting the till price its own sales, and it would be\ninvisible until someone compared a receipt to a phone.",
+        "operationId": "public_table_menu",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Table ID, from the QR",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliveryMenu"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/purchasing/branches/{branch_id}/orders": {
       "get": {
         "tags": [
@@ -54675,6 +54953,18 @@
             "type": "string",
             "description": "The order's NOMINAL payment label. For a split order this is the literal\n`'mixed'` — a label that exists in no money report, because reports bucket\nby what was actually tendered. Use [`Order::payment_legs`] for the real\nmethods; treat this as a display badge only."
           },
+          "price_expected_total": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "What the catalogue says this sale should have come to, when it differs.\nBeside `subtotal` it is the size of the drift, which is the question\nanyone looking at a flagged sale asks next."
+          },
+          "price_flagged": {
+            "type": "boolean",
+            "description": "This sale was rung against a catalogue that has since moved: a line was\ncharged at a price the menu no longer says, or the item was disabled at\nthis branch. Both mean a till that was OFFLINE when something changed —\na live sale is priced by the server and cannot deviate.\n\nRecorded, never rejected: the money already changed hands. It is here so\nthe POS and the dashboard can SHOW it, which is the whole point of\nflagging something."
+          },
           "service_charge_amount": {
             "type": "integer",
             "format": "int32",
@@ -55395,7 +55685,7 @@
               "null"
             ],
             "format": "int32",
-            "description": "Charged unit price (piastres) the POS applied for this item/bundle line. When\npresent it is RECORDED as the line's unit_price; absent → the server's expected\n(catalog + branch override) price is used. Recording what the customer was\nactually charged keeps the DB equal to the printed receipt even when the POS's\nsynced menu/override prices are stale or it was offline at sale time."
+            "description": "What the customer was actually charged, in piastres.\n\nRead ONLY when a queued offline sale is replayed — see [`ClientPrices`].\nOn the live path the server prices the line and this is ignored, so a\ntill cannot charge a price of its own choosing and no manual override\nexists to let anyone try."
           }
         }
       },
@@ -57785,6 +58075,148 @@
           "url": {
             "type": "string",
             "description": "`https://…` and nothing else — checked on write and again on read, see\n`orgs::social::links_of`."
+          }
+        }
+      },
+      "PublicTable": {
+        "type": "object",
+        "description": "A table, as the page that opened from its code needs to know it.",
+        "required": [
+          "table_id",
+          "branch_id",
+          "org_id",
+          "label",
+          "branch_name",
+          "accepting"
+        ],
+        "properties": {
+          "accepting": {
+            "type": "boolean",
+            "description": "The branch is not serving right now — no till is open. The page says so\ninstead of letting someone build a basket the kitchen will refuse."
+          },
+          "bill": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PublicTableBill",
+                "description": "The meal in progress, when there is one. `None` means the table is\nfree and this scan will start the bill."
+              }
+            ]
+          },
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "branch_name": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string",
+            "description": "What the table is called in the room — \"7\", \"T7\", \"Terrace 2\"."
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "table_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "PublicTableBill": {
+        "type": "object",
+        "description": "What the table has ordered so far.\n\nThe page draws this above the menu, so a customer who scans halfway through\na meal sees what is already on their bill rather than an empty basket that\nlooks like a fresh start. It is also how the second, third and fourth\nperson at the table see each other's rounds.\n\nPublic and unauthenticated, like everything else here. Whoever can read the\ncode stuck to the table can see what that table ordered — which is the\npeople sitting at it.",
+        "required": [
+          "ticket_id",
+          "opened_at",
+          "ready",
+          "subtotal",
+          "total",
+          "rounds"
+        ],
+        "properties": {
+          "opened_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the party's bill was opened. The page counts up from this; a\nduration computed here would be wrong by the time it arrived."
+          },
+          "ready": {
+            "type": "boolean",
+            "description": "The kitchen has finished everything fired so far."
+          },
+          "rounds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PublicTableRound"
+            },
+            "description": "Every round fired, oldest first, with what went to the kitchen in each."
+          },
+          "subtotal": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Lines as charged, before discount — the bill's first line, not the bill."
+          },
+          "ticket_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "What the table will be asked to pay, as the SERVER prices it: the\ndiscount, the service charge and the tax are all in here, and none of\nthem is something this page should be recomputing."
+          }
+        }
+      },
+      "PublicTableLine": {
+        "type": "object",
+        "required": [
+          "name",
+          "quantity",
+          "line_total",
+          "voided"
+        ],
+        "properties": {
+          "line_total": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "name": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "voided": {
+            "type": "boolean",
+            "description": "Taken off the bill after it was ordered — struck through rather than\nhidden, so a customer who watches a plate go back sees it go."
+          }
+        }
+      },
+      "PublicTableRound": {
+        "type": "object",
+        "required": [
+          "number",
+          "fired_at",
+          "items"
+        ],
+        "properties": {
+          "fired_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PublicTableLine"
+            }
+          },
+          "number": {
+            "type": "integer",
+            "format": "int32"
           }
         }
       },
@@ -62016,6 +62448,42 @@
           "status": {
             "type": "string",
             "description": "`confirmed` | `seated`."
+          }
+        }
+      },
+      "TableOrderRequest": {
+        "type": "object",
+        "description": "One scan's worth of order.",
+        "required": [
+          "table_id",
+          "items"
+        ],
+        "properties": {
+          "customer_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Who is at the table, if they offered a name. Shown on the bill so the\nwaiter can find them."
+          },
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Client-minted, so a phone that resends on a flaky connection does not\norder twice. This is the ONLY protection against a double-send, because\na customer's browser has no outbox to dedup against."
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrderItemInput"
+            },
+            "description": "What they want. Named, never priced — see the module docs."
+          },
+          "table_id": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },

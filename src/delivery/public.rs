@@ -401,26 +401,54 @@ pub async fn public_menu(
             "This channel is closed right now.".into(),
         ));
     }
+    let menu = load_public_menu(pool.get_ref(), org_id, branch_id, Some(&query.channel)).await?;
+    Ok(HttpResponse::Ok().json(menu))
+}
 
+/// The menu a customer sees, with or without a delivery channel.
+///
+/// `channel: None` is the DINE-IN menu — what the till itself would ring:
+/// branch prices, the whole catalogue, and no channel discount. A table's QR
+/// menu must be this one, because a table's order settles as a dine-in bill;
+/// showing it a delivery channel's prices would quote the customer one number
+/// and charge them another.
+///
+/// The channel-specific joins all hang off a single bind, so `None` simply
+/// never matches one and the `COALESCE` falls through to the branch override
+/// and then the catalogue. One builder, one shape — the alternative was a
+/// second copy of two hundred lines that would agree with this one until the
+/// day somebody changed a price rule in only one of them.
+pub(crate) async fn load_public_menu(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Uuid,
+    channel: Option<&str>,
+) -> Result<DeliveryMenu, AppError> {
     // The channel's active discount (customer-facing), if any.
-    let discount_col = channel_discount_col(&query.channel);
-    let discount: Option<DeliveryMenuDiscount> = sqlx::query_as::<
-        _,
-        (
-            Uuid,
-            String,
-            serde_json::Value,
-            String,
-            rust_decimal::Decimal,
-        ),
-    >(&format!(
-        "SELECT d.id, d.name, d.name_translations, d.type::text, d.value \
-             FROM branch_delivery_settings s JOIN discounts d ON d.id = s.{discount_col} \
-             WHERE s.branch_id = $1 AND d.is_active = true"
-    ))
-    .bind(branch_id)
-    .fetch_optional(pool.get_ref())
-    .await?
+    // A dine-in bill carries no channel discount: the waiter's or the
+    // cashier's discount is applied on the bill itself, at the till.
+    let discount: Option<DeliveryMenuDiscount> = match channel.map(channel_discount_col) {
+        None => None,
+        Some(discount_col) => {
+            sqlx::query_as::<
+                _,
+                (
+                    Uuid,
+                    String,
+                    serde_json::Value,
+                    String,
+                    rust_decimal::Decimal,
+                ),
+            >(&format!(
+                "SELECT d.id, d.name, d.name_translations, d.type::text, d.value \
+                 FROM branch_delivery_settings s JOIN discounts d ON d.id = s.{discount_col} \
+                 WHERE s.branch_id = $1 AND d.is_active = true"
+            ))
+            .bind(branch_id)
+            .fetch_optional(pool)
+            .await?
+        }
+    }
     .map(
         |(id, name, name_translations, dtype, value)| DeliveryMenuDiscount {
             id,
@@ -437,7 +465,7 @@ pub async fn public_menu(
          WHERE org_id = $1 AND is_active = true AND deleted_at IS NULL ORDER BY name",
         )
         .bind(org_id)
-        .fetch_all(pool.get_ref())
+        .fetch_all(pool)
         .await?
         .into_iter()
         .map(
@@ -466,9 +494,9 @@ pub async fn public_menu(
                ORDER BY mi.name"#,
         )
         .bind(branch_id)
-        .bind(&query.channel)
+        .bind(channel)
         .bind(org_id)
-        .fetch_all(pool.get_ref())
+        .fetch_all(pool)
         .await?;
 
     let item_ids: Vec<Uuid> = item_rows.iter().map(|r| r.0).collect();
@@ -479,7 +507,7 @@ pub async fn public_menu(
          WHERE is_active = true AND menu_item_id = ANY($1) ORDER BY label",
     )
     .bind(&item_ids)
-    .fetch_all(pool.get_ref())
+    .fetch_all(pool)
     .await?;
     let branch_sizes: Vec<(Uuid, String, i32)> = sqlx::query_as(
         "SELECT menu_item_id, size_label::text, price_override FROM branch_menu_size_overrides \
@@ -487,7 +515,7 @@ pub async fn public_menu(
     )
     .bind(branch_id)
     .bind(&item_ids)
-    .fetch_all(pool.get_ref())
+    .fetch_all(pool)
     .await?;
     let branch_size_map: std::collections::HashMap<(Uuid, String), i32> = branch_sizes
         .into_iter()
@@ -508,18 +536,18 @@ pub async fn public_menu(
     }
 
     // Global org-wide addon catalog (channel-effective), loaded once per request.
-    let addons = load_addon_catalog(pool.get_ref(), org_id, branch_id, &query.channel).await?;
+    let addons = load_addon_catalog(pool, org_id, branch_id, channel).await?;
 
     // Optional fields per item.
-    let mut optionals_by_item = load_optional_fields(pool.get_ref(), &item_ids).await?;
+    let mut optionals_by_item = load_optional_fields(pool, &item_ids).await?;
 
     // Default/base milk per item (POS pre-select), batched over the item list.
-    let mut default_milk_by_item = load_default_milk(pool.get_ref(), &item_ids).await?;
-    let mut allowed_addons_by_item = load_allowed_addon_ids(pool.get_ref(), &item_ids).await?;
+    let mut default_milk_by_item = load_default_milk(pool, &item_ids).await?;
+    let mut allowed_addons_by_item = load_allowed_addon_ids(pool, &item_ids).await?;
     // Per-item modifier groups (unified model), channel-effective — empty until
     // the org's catalog is backfilled onto the unified tables.
     let mut modifier_groups_by_item =
-        load_modifier_groups(pool.get_ref(), &item_ids, branch_id, &query.channel).await?;
+        load_modifier_groups(pool, &item_ids, branch_id, channel).await?;
 
     let items: Vec<DeliveryMenuItem> = item_rows
         .into_iter()
@@ -543,12 +571,12 @@ pub async fn public_menu(
         )
         .collect();
 
-    Ok(HttpResponse::Ok().json(DeliveryMenu {
+    Ok(DeliveryMenu {
         categories,
         items,
         addons,
         discount,
-    }))
+    })
 }
 
 /// Load the org-wide global addon catalog (the POS model: one catalog for every
@@ -559,7 +587,9 @@ async fn load_addon_catalog(
     pool: &PgPool,
     org_id: Uuid,
     branch_id: Uuid,
-    channel: &str,
+    // `None` for the dine-in menu: the channel joins simply never match, so
+    // the chain falls through to the branch override and the catalogue.
+    channel: Option<&str>,
 ) -> Result<Vec<DeliveryAddonOption>, AppError> {
     // Resolve the override chain in SQL and drop options whose channel
     // availability is false.
@@ -688,7 +718,8 @@ async fn load_modifier_groups(
     pool: &PgPool,
     item_ids: &[Uuid],
     branch_id: Uuid,
-    channel: &str,
+    // `None` for the dine-in menu — see `load_public_menu`.
+    channel: Option<&str>,
 ) -> Result<std::collections::HashMap<Uuid, Vec<DeliveryModifierGroup>>, AppError> {
     if item_ids.is_empty() {
         return Ok(std::collections::HashMap::new());

@@ -458,3 +458,73 @@ async fn a_queued_refund_lands_once_under_its_author(pool: PgPool) {
         "a per-user revocation of refunds:create holds offline"
     );
 }
+
+/// A sale that ALREADY HAPPENED keeps the price the customer was charged.
+///
+/// This is the other half of the rule that stops a till pricing its own sales.
+/// Live, the catalogue prices everything and a till's figure is ignored. But a
+/// till that was offline when the shop changed a price took real money at the
+/// number on its screen, and repricing that at replay time would make the
+/// books disagree with the receipt in the customer's hand.
+///
+/// So the charged figure is recorded and the line is FLAGGED — which is what
+/// makes it findable afterwards, and the reason the flag is worth having at
+/// all now that it can only ever mean this.
+#[sqlx::test]
+async fn a_replayed_offline_sale_keeps_the_price_it_charged_and_is_flagged(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 500).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    sqlx::query(
+        "INSERT INTO org_payment_methods (org_id, name, color, icon, is_cash, is_active) \
+         VALUES ($1, 'cash', '#000', 'cash', true, true)",
+    )
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (r, a) in [
+        ("orders", "create"),
+        ("orders", "read"),
+        ("order_items", "create"),
+        ("payments", "create"),
+    ] {
+        grant(&pool, "teller", r, a).await;
+    }
+    let bearer = token(teller, org, UserRole::Teller);
+
+    // The shop's menu says 500. This till sold it for 600 while it was offline,
+    // because 600 was the price when it last synced.
+    let resp = replay(
+        &app,
+        &bearer,
+        &serde_json::json!({
+            "op": "create_order",
+            "teller_id": teller,
+            "request": {
+                "branch_id": branch,
+                "shift_id": shift,
+                "payment_method": "cash",
+                "items": [{ "menu_item_id": item, "quantity": 1, "unit_price": 600 }],
+                "total_amount": 684
+            }
+        }),
+    )
+    .await;
+    assert!(resp.status().is_success(), "{:?}", resp.status());
+
+    let (subtotal, flagged, expected): (i32, bool, Option<i32>) = sqlx::query_as(
+        "SELECT subtotal, price_flagged, price_expected_total FROM orders \
+          WHERE branch_id = $1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(branch)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(subtotal, 600, "what the customer actually paid");
+    assert!(flagged, "and it is findable afterwards");
+    assert_eq!(expected, Some(570), "what the menu says today: 500 + 14%");
+}

@@ -92,6 +92,26 @@ impl ActingContext {
         })
     }
 
+    /// A customer acting for themselves — the code on a table, not a member of
+    /// staff and not a queued op.
+    ///
+    /// `replay: false` is the load-bearing part. It was briefly `true`, chosen
+    /// for the one thing replay skips that a guest needs skipped (the
+    /// ownership guards, which a guest can satisfy none of), and it quietly
+    /// brought the OTHER thing replay means with it: that the prices on the
+    /// request are history and should be recorded as sent. A customer's phone
+    /// then got to name its own prices. The branch-open gate that `replay`
+    /// also skips is re-checked by the caller, so nothing is lost by being
+    /// honest about what this is.
+    pub fn guest(user_id: Uuid, org_id: Uuid) -> Self {
+        Self {
+            teller_id: user_id,
+            org_id,
+            role: UserRole::Waiter,
+            replay: false,
+        }
+    }
+
     /// A replay of a historical op, attributed to its embedded teller.
     pub fn replay(teller_id: Uuid, org_id: Uuid) -> Self {
         Self::replay_with_role(teller_id, org_id, UserRole::Teller)

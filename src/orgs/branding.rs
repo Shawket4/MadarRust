@@ -739,13 +739,7 @@ mod tests {
                 wide.put_pixel(x, y, Rgba([0, 0, 255, 255]));
             }
         }
-        let out = on_ground(
-            &DynamicImage::ImageRgba8(wide),
-            "#FFFFFF",
-            None,
-            256,
-            0.82,
-        );
+        let out = on_ground(&DynamicImage::ImageRgba8(wide), "#FFFFFF", None, 256, 0.82);
         let px = out.to_rgba8();
         assert_eq!(out.width(), 256, "square");
         assert_eq!(out.height(), 256);

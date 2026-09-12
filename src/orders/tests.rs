@@ -2107,7 +2107,13 @@ async fn test_create_order_records_charged_prices_and_flags(pool: PgPool) {
         }
     };
 
-    // (1) POS charges 600 for a 500-catalog item → recorded verbatim and flagged.
+    // (1) A LIVE sale sends 600 for a 500-catalog item → the catalogue wins.
+    //
+    // This used to record 600 and flag it. A till that believes it charged a
+    // different price than the menu says is a till running a stale menu, and
+    // the answer to that is to refuse the figure, not to file it. The charged
+    // price is still honoured where it is HISTORY rather than a claim about
+    // now — see the replay test below.
     let of = post(
         CreateOrderRequest {
             branch_id,
@@ -2124,14 +2130,8 @@ async fn test_create_order_records_charged_prices_and_flags(pool: PgPool) {
         token.clone(),
     )
     .await;
-    assert_eq!(
-        of.order.subtotal, 600,
-        "recorded subtotal = what was charged"
-    );
-    assert_eq!(
-        of.items[0].item.unit_price, 600,
-        "recorded line price = what was charged"
-    );
+    assert_eq!(of.order.subtotal, 500, "the menu's price, not the till's");
+    assert_eq!(of.items[0].item.unit_price, 500);
 
     let (flagged, expected_total): (bool, Option<i32>) =
         sqlx::query_as("SELECT price_flagged, price_expected_total FROM orders WHERE id = $1")
@@ -2140,17 +2140,10 @@ async fn test_create_order_records_charged_prices_and_flags(pool: PgPool) {
             .await
             .unwrap();
     assert!(
-        flagged,
-        "a charged price above the catalog must flag the order"
+        !flagged,
+        "nothing deviated — the server priced it, so it cannot have"
     );
     assert_eq!(expected_total, Some(570), "expected = 500 + 14% tax");
-    let line_flagged: bool =
-        sqlx::query_scalar("SELECT price_flagged FROM order_items WHERE order_id = $1")
-            .bind(of.order.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert!(line_flagged, "the deviating line must be flagged");
 
     // (2) Branch override sets the price to 700. POS sends NO price → the branch-effective
     // expected (700) is recorded (NOT the 500 catalog) and the order is not flagged.
@@ -2310,13 +2303,15 @@ async fn test_create_order_charged_below_catalog_flags(pool: PgPool) {
     body.items[0].unit_price = Some(400);
     let of = create_order_ok!(app, token, body);
 
-    assert_eq!(of.order.subtotal, 400, "recorded = charged (below catalog)");
-    assert_eq!(of.items[0].item.unit_price, 400);
+    // Below the catalogue is the interesting direction: an undercharge is what
+    // a manual discount would look like if one were possible. It is not.
+    assert_eq!(of.order.subtotal, 500, "the menu's price, not the till's");
+    assert_eq!(of.items[0].item.unit_price, 500);
     assert!(
-        order_flagged(&pool, of.order.id).await,
-        "any deviation flags the order"
+        !order_flagged(&pool, of.order.id).await,
+        "the server priced it, so nothing deviated"
     );
-    assert!(line_flagged(&pool, of.order.id).await);
+    assert!(!line_flagged(&pool, of.order.id).await);
     assert_eq!(order_expected_total(&pool, of.order.id).await, Some(570));
 }
 
@@ -2585,7 +2580,7 @@ async fn a_till_sale_is_refused_where_the_shop_puts_everyone_on_a_table(pool: Pg
     );
 }
 
-/// A charged ADDON price is recorded verbatim and flags the order.
+/// A live sale ignores a charged ADDON price, exactly as it ignores the item's.
 #[sqlx::test]
 async fn test_create_order_addon_charged_price_recorded_and_flags(pool: PgPool) {
     let app = pricing_app(pool.clone()).await;
@@ -2602,13 +2597,13 @@ async fn test_create_order_addon_charged_price_recorded_and_flags(pool: PgPool) 
     let of = create_order_ok!(app, token, body);
 
     assert_eq!(
-        of.items[0].addons[0].unit_price, 150,
-        "charged addon price recorded"
+        of.items[0].addons[0].unit_price, 100,
+        "the catalogue's addon price, not the till's"
     );
-    assert_eq!(of.order.subtotal, 650, "500 item + 150 charged addon");
+    assert_eq!(of.order.subtotal, 600, "500 item + 100 catalogue addon");
     assert!(
-        order_flagged(&pool, of.order.id).await,
-        "addon deviation flags the order"
+        !order_flagged(&pool, of.order.id).await,
+        "the server priced it, so nothing deviated"
     );
     assert_eq!(
         order_expected_total(&pool, of.order.id).await,
@@ -2674,18 +2669,18 @@ async fn test_create_order_multiline_only_deviating_line_flagged(pool: PgPool) {
     let item2 = seed_item_priced(&pool, org, cat, "Mocha", 700).await;
 
     let mut body = simple_order(branch, shift, item1);
-    body.items[0].unit_price = Some(600); // deviation on line 1
+    body.items[0].unit_price = Some(600); // a price the till has no business sending
     body.items.push(OrderItemInput {
         menu_item_id: Some(item2),
         quantity: 1,
         ..Default::default()
-    }); // line 2 compliant
+    });
     let of = create_order_ok!(app, token, body);
 
-    assert_eq!(of.order.subtotal, 1300, "600 + 700");
+    assert_eq!(of.order.subtotal, 1200, "500 + 700, both from the menu");
     assert!(
-        order_flagged(&pool, of.order.id).await,
-        "one deviating line flags the whole order"
+        !order_flagged(&pool, of.order.id).await,
+        "no line could deviate: the server priced every one of them"
     );
 
     let rows: Vec<(i32, bool)> = sqlx::query_as(
@@ -2697,7 +2692,7 @@ async fn test_create_order_multiline_only_deviating_line_flagged(pool: PgPool) {
     .unwrap();
     assert_eq!(
         rows,
-        vec![(600, true), (700, false)],
+        vec![(500, false), (700, false)],
         "only the deviating line is flagged"
     );
 }
@@ -2730,16 +2725,14 @@ async fn test_create_order_branch_size_override_applied(pool: PgPool) {
         "charged matches expected → not flagged"
     );
 
-    // Charging something else for that size is recorded verbatim and flagged.
+    // Sending something else for that size changes nothing: the branch size
+    // override is the price, whoever asks and whatever they send.
     let mut sized = simple_order(branch, shift, item);
     sized.items[0].size_label = Some("large".to_string());
     sized.items[0].unit_price = Some(1000);
     let of2 = create_order_ok!(app, token, sized);
-    assert_eq!(of2.items[0].item.unit_price, 1000);
-    assert!(
-        order_flagged(&pool, of2.order.id).await,
-        "1000 != expected 950 → flagged"
-    );
+    assert_eq!(of2.items[0].item.unit_price, 950);
+    assert!(!order_flagged(&pool, of2.order.id).await);
 }
 
 /// A branch addon override feeds the expected addon price, so an order charging that

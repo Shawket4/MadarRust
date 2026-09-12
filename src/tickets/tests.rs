@@ -2100,3 +2100,387 @@ async fn a_settled_bill_has_no_lines_to_void(pool: PgPool) {
     .await;
     assert_eq!(resp.status(), 409);
 }
+
+// ── Ordering from the code on the table ───────────────────────
+
+/// Mount the public table routes beside the staff ones.
+macro_rules! public_app {
+    ($pool:expr) => {
+        test::init_service(
+            App::new()
+                .app_data(web::Data::new($pool.clone()))
+                .app_data(web::Data::new(secret()))
+                .app_data(web::Data::new(BranchEventHub::new()))
+                .configure(crate::tickets::routes::configure)
+                .configure(crate::kitchen::routes::configure),
+        )
+        .await
+    };
+}
+
+/// The scan that starts a meal, and the scan that joins one.
+///
+/// The whole design in one test: a customer's order is a DINE-IN BILL on their
+/// table, and a second scan adds a round to it rather than opening a second
+/// bill for the same table of people.
+#[sqlx::test]
+async fn a_scan_opens_the_bill_and_the_next_scan_joins_it(pool: PgPool) {
+    let app = public_app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 2500).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let _shift = open_shift_row(&pool, branch, teller).await;
+    let table = seed_table(&pool, org, branch, "T7").await;
+
+    let send = |qty: i32, key: Uuid| {
+        test::TestRequest::post()
+            .uri("/public/table-orders")
+            .set_json(&serde_json::json!({
+                "table_id": table,
+                "idempotency_key": key,
+                "items": [{ "menu_item_id": item, "quantity": qty }]
+            }))
+            .to_request()
+    };
+
+    // No token, no branch, no channel, no phone. Just the table.
+    let resp = test::call_service(&app, send(2, Uuid::new_v4())).await;
+    assert!(resp.status().is_success());
+    let view: OpenTicketView = test::read_body_json(resp).await;
+    assert_eq!(view.table_id, Some(table), "the bill took their table");
+    assert_eq!(view.subtotal, 5000);
+
+    // The room knows they are there.
+    assert_eq!(table_status(&pool, table).await, "seated");
+
+    // Someone else at the same table scans and adds to the SAME bill.
+    let resp = test::call_service(&app, send(1, Uuid::new_v4())).await;
+    assert!(resp.status().is_success());
+    let joined: OpenTicketView = test::read_body_json(resp).await;
+    assert_eq!(joined.id, view.id, "one table, one bill");
+    assert_eq!(joined.subtotal, 7500, "and the round was added to it");
+
+    let bills: i64 = sqlx::query_scalar("SELECT count(*) FROM open_tickets WHERE table_id = $1")
+        .bind(table)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(bills, 1);
+
+    // It is marked as theirs, and attributed to a principal that is not staff
+    // and cannot be signed in as.
+    let (via, opened_by): (Option<String>, Uuid) =
+        sqlx::query_as("SELECT opened_via, opened_by FROM open_tickets WHERE id = $1")
+            .bind(view.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(via.as_deref(), Some("qr_table"));
+    let (is_guest, pw, pin): (bool, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT is_guest_principal, password_hash, pin_hash FROM users WHERE id = $1",
+    )
+    .bind(opened_by)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(is_guest);
+    assert!(pw.is_none() && pin.is_none(), "it is not an account");
+}
+
+/// A customer names menu items. The SERVER prices them.
+///
+/// The one thing a public write must never believe. A price in the request is
+/// not rejected — it is simply not read, the same as it is not read from a
+/// waiter's fire, because both go down the one pricing path.
+#[sqlx::test]
+async fn a_customer_cannot_price_their_own_order(pool: PgPool) {
+    let app = public_app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 2500).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let _shift = open_shift_row(&pool, branch, teller).await;
+    let table = seed_table(&pool, org, branch, "T7").await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/table-orders")
+            .set_json(&serde_json::json!({
+                "table_id": table,
+                "items": [{
+                    "menu_item_id": item, "quantity": 2,
+                    // A burger for a piastre, and a discount they invented.
+                    "unit_price": 1, "line_total": 2
+                }]
+            }))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let view: OpenTicketView = test::read_body_json(resp).await;
+    assert_eq!(view.subtotal, 5000, "the menu's price, not the customer's");
+}
+
+/// A scan while the shop is shut is refused, rather than building a basket the
+/// kitchen will never see.
+#[sqlx::test]
+async fn a_scan_with_no_till_open_is_told_so(pool: PgPool) {
+    let app = public_app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 2500).await;
+    let table = seed_table(&pool, org, branch, "T7").await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/table-orders")
+            .set_json(&serde_json::json!({
+                "table_id": table,
+                "items": [{ "menu_item_id": item, "quantity": 1 }]
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 409);
+    let bills: i64 = sqlx::query_scalar("SELECT count(*) FROM open_tickets")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(bills, 0, "and nothing was written");
+}
+
+/// The page asks the table who it is; the table answers for its own branch.
+#[sqlx::test]
+async fn a_table_names_its_own_branch_so_the_url_does_not_have_to(pool: PgPool) {
+    let app = public_app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let table = seed_table(&pool, org, branch, "T7").await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/public/tables/{table}"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(v["branch_id"], serde_json::json!(branch));
+    assert_eq!(v["org_id"], serde_json::json!(org));
+    assert_eq!(v["label"], "T7");
+    assert!(v["bill"].is_null(), "nobody is sitting there");
+    assert_eq!(v["accepting"], serde_json::json!(false), "no till open yet");
+
+    // A code on a wall for a table that no longer exists gets nothing, and no
+    // explanation of which of the two it is.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/public/tables/{}", Uuid::new_v4()))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 404);
+}
+
+/// A resend on a flaky phone connection must not order twice. It is the only
+/// protection there is: a customer's browser has no outbox to dedup against.
+#[sqlx::test]
+async fn a_resent_scan_does_not_order_twice(pool: PgPool) {
+    let app = public_app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 2500).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let _shift = open_shift_row(&pool, branch, teller).await;
+    let table = seed_table(&pool, org, branch, "T7").await;
+    let key = Uuid::new_v4();
+
+    let send = || {
+        test::TestRequest::post()
+            .uri("/public/table-orders")
+            .set_json(&serde_json::json!({
+                "table_id": table,
+                "idempotency_key": key,
+                "items": [{ "menu_item_id": item, "quantity": 2 }]
+            }))
+            .to_request()
+    };
+    assert!(test::call_service(&app, send()).await.status().is_success());
+    let resp = test::call_service(&app, send()).await;
+    assert!(resp.status().is_success());
+    let view: OpenTicketView = test::read_body_json(resp).await;
+    assert_eq!(view.subtotal, 5000, "one order, sent twice");
+}
+
+/// A scan halfway through a meal shows the meal.
+///
+/// The customer sees when they sat down, every round that has gone to the
+/// kitchen, and what the bill comes to — the server's total, not a sum of the
+/// lines, so the figure on the phone is the figure at the till.
+#[sqlx::test]
+async fn a_scan_mid_meal_shows_what_the_table_has_ordered(pool: PgPool) {
+    let app = public_app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 2500).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let _shift = open_shift_row(&pool, branch, teller).await;
+    let table = seed_table(&pool, org, branch, "T7").await;
+
+    let send = |qty: i32| {
+        test::TestRequest::post()
+            .uri("/public/table-orders")
+            .set_json(&serde_json::json!({
+                "table_id": table,
+                "idempotency_key": Uuid::new_v4(),
+                "items": [{ "menu_item_id": item, "quantity": qty }]
+            }))
+            .to_request()
+    };
+    assert!(
+        test::call_service(&app, send(2))
+            .await
+            .status()
+            .is_success()
+    );
+    assert!(
+        test::call_service(&app, send(1))
+            .await
+            .status()
+            .is_success()
+    );
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/public/tables/{table}"))
+            .to_request(),
+    )
+    .await;
+    let v: serde_json::Value = test::read_body_json(resp).await;
+    let bill = &v["bill"];
+    assert!(!bill.is_null(), "a meal is in progress");
+    // When they sat down — the page counts up from this rather than being
+    // handed a duration that is stale on arrival.
+    assert!(bill["opened_at"].as_str().is_some());
+    assert_eq!(bill["subtotal"], serde_json::json!(7500));
+    // 75 at 14% = 85.50. The SERVER's total, tax and all.
+    assert_eq!(bill["total"], serde_json::json!(8550));
+
+    // Two rounds, in the order they were ordered.
+    let rounds = bill["rounds"].as_array().unwrap();
+    assert_eq!(rounds.len(), 2);
+    assert_eq!(rounds[0]["number"], serde_json::json!(1));
+    assert_eq!(rounds[1]["number"], serde_json::json!(2));
+    assert_eq!(rounds[0]["items"][0]["quantity"], serde_json::json!(2));
+    assert_eq!(rounds[1]["items"][0]["quantity"], serde_json::json!(1));
+    assert_eq!(rounds[0]["items"][0]["name"], "Burger");
+    assert!(rounds[0]["fired_at"].as_str().is_some());
+}
+
+/// The table's state changes on the FIRST order and never again.
+///
+/// A round added to a bill in progress must not re-seat the table, re-claim
+/// it, or touch the occupancy ledger: the party was already there, and a
+/// second row for the same party would make the floor and the reports
+/// disagree about how long the table has been in use.
+#[sqlx::test]
+async fn only_the_first_order_takes_the_table(pool: PgPool) {
+    let app = public_app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 2500).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let _shift = open_shift_row(&pool, branch, teller).await;
+    let table = seed_table(&pool, org, branch, "T7").await;
+    assert_eq!(table_status(&pool, table).await, "free");
+
+    let send = || {
+        test::TestRequest::post()
+            .uri("/public/table-orders")
+            .set_json(&serde_json::json!({
+                "table_id": table,
+                "idempotency_key": Uuid::new_v4(),
+                "items": [{ "menu_item_id": item, "quantity": 1 }]
+            }))
+            .to_request()
+    };
+    assert!(test::call_service(&app, send()).await.status().is_success());
+    let occupancies = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM table_occupancies WHERE table_id = $1 AND ended_at IS NULL",
+        )
+        .bind(table)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(table_status(&pool, table).await, "seated");
+    assert_eq!(occupancies().await, 1, "the first order took the table");
+
+    for _ in 0..3 {
+        assert!(test::call_service(&app, send()).await.status().is_success());
+    }
+    assert_eq!(table_status(&pool, table).await, "seated");
+    assert_eq!(
+        occupancies().await,
+        1,
+        "three more rounds, still one party at one table"
+    );
+}
+
+/// The guest principal is not staff, and nothing that lists staff shows it.
+///
+/// It exists so a bill a customer opened has an actor; it is not an account.
+/// The database refuses it credentials, and the two sign-in paths refuse it on
+/// their own terms (no email, no PIN, not active) — so this pins the one place
+/// that would otherwise have shown it: the people list.
+#[sqlx::test]
+async fn the_guest_principal_is_not_one_of_the_staff(pool: PgPool) {
+    let app = public_app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 2500).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let _shift = open_shift_row(&pool, branch, teller).await;
+    let table = seed_table(&pool, org, branch, "T7").await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/table-orders")
+            .set_json(&serde_json::json!({
+                "table_id": table,
+                "items": [{ "menu_item_id": item, "quantity": 1 }]
+            }))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success());
+
+    // It exists, exactly once, and holds nothing to sign in with.
+    let (count, creds): (i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(*) FILTER (WHERE password_hash IS NOT NULL OR pin_hash IS NOT NULL)            FROM users WHERE org_id = $1 AND is_guest_principal",
+    )
+    .bind(org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(creds, 0);
+
+    // And the people list — the query the dashboard reads — does not carry it.
+    let listed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM users WHERE org_id = $1 AND deleted_at IS NULL            AND NOT is_guest_principal",
+    )
+    .bind(org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(listed, 1, "the teller, and nobody invented");
+}

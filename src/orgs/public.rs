@@ -198,7 +198,10 @@ pub async fn favicon(
         .unwrap_or(FAVICON_SIZES[FAVICON_SIZES.len() - 1]);
 
     let brand = crate::orgs::branding::load(pool.get_ref(), org_id).await?;
-    let logo = brand.logo_url.as_deref().and_then(crate::orgs::branding::read_upload);
+    let logo = brand
+        .logo_url
+        .as_deref()
+        .and_then(crate::orgs::branding::read_upload);
     let logo = logo.ok_or_else(|| AppError::NotFound("That shop has no logo".into()))?;
     let tint = brand
         .logo_is_mark

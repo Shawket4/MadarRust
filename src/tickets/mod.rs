@@ -10,6 +10,7 @@
 //! round, and never copied onto the bill where it could drift.
 
 pub mod handlers;
+pub mod public;
 pub mod routes;
 
 #[cfg(test)]
@@ -434,11 +435,12 @@ async fn resolve_ticket_lines(
     org_id: Uuid,
     branch_id: Uuid,
     items: &[OrderItemInput],
+    prices: crate::orders::handlers::ClientPrices,
 ) -> Result<Vec<StoredTicketLine>, AppError> {
     let fired_at = Utc::now();
     let mut out = Vec::with_capacity(items.len());
     for it in items {
-        let resolved = resolve_order_line(pool, org_id, branch_id, fired_at, it).await?;
+        let resolved = resolve_order_line(pool, org_id, branch_id, fired_at, it, prices).await?;
 
         let mut frozen = it.clone();
         frozen.unit_price = Some(resolved.unit_price);
@@ -484,8 +486,12 @@ pub(crate) async fn fire_round(
     items: &[OrderItemInput],
     table_label: Option<&str>,
     ticket_ref: Option<&str>,
+    // A round fired NOW is priced by the catalogue; one being replayed off a
+    // till's outbox keeps what the customer was told at the table. Same rule as
+    // a counter sale — see `ClientPrices`.
+    prices: crate::orders::handlers::ClientPrices,
 ) -> Result<Option<Uuid>, AppError> {
-    let lines = resolve_ticket_lines(pool, org_id, branch_id, items).await?;
+    let lines = resolve_ticket_lines(pool, org_id, branch_id, items, prices).await?;
 
     let (round_id, round_number): (Uuid, i32) = sqlx::query_as(
         "INSERT INTO open_ticket_rounds (open_ticket_id, round_number, fired_by, idempotency_key) \

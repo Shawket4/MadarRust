@@ -301,6 +301,10 @@ pub async fn list_users(
                     LEFT JOIN user_branch_assignments uba ON uba.user_id = u.id
                     WHERE u.org_id = $1
                       AND u.deleted_at IS NULL
+                      -- Not a person: the actor a self-service order is
+                      -- attributed to. It has no credentials and belongs in
+                      -- no staff list.
+                      AND NOT u.is_guest_principal
                       AND (
                           u.id = $2
                           OR uba.branch_id IN (
@@ -323,6 +327,7 @@ pub async fn list_users(
                            created_at, updated_at, deleted_at
                     FROM users
                     WHERE org_id = $1 AND deleted_at IS NULL
+                      AND NOT is_guest_principal
                     ORDER BY name
                     "#,
                 )
@@ -340,7 +345,7 @@ pub async fn list_users(
                    is_active, last_login_at,
                    created_at, updated_at, deleted_at
             FROM users
-            WHERE deleted_at IS NULL
+            WHERE deleted_at IS NULL AND NOT is_guest_principal
             ORDER BY name
             "#,
             )
