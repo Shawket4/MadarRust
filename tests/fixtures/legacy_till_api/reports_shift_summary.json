@@ -1,42 +1,40 @@
 {
   "body": {
-    "branch_id": "37bda2d8-8a0d-43a2-a088-38ec0961429c",
-    "branch_name": "Test2",
+    "branch_id": "10000000-0000-4000-8000-0000000000a1",
+    "branch_name": "Golden A",
     "cash_discrepancy": null,
-    "cash_tips": 10000,
+    "cash_tips": 0,
     "closed_at": null,
     "closing_cash_declared": null,
     "closing_cash_system": null,
-    "gross_sales": 521500,
+    "gross_sales": 20000,
     "opened_at": "2026-01-01T00:00:00Z",
-    "opening_cash": 8000,
+    "opening_cash": 2000,
     "refunded_amount": 0,
     "refunds_issued_amount": 0,
     "refunds_issued_cash": 0,
     "refunds_issued_count": 0,
     "revenue_by_method": {
-      "card": 352000,
-      "cash": 56500,
-      "digital_wallet": 96000,
-      "talabat_online": 17000
+      "card": 5000,
+      "cash": 15000
     },
-    "shift_id": "28c01d00-5076-4f89-b2ab-d0b045e27f63",
+    "shift_id": "20000000-0000-4000-8000-0000000000a1",
     "status": "open",
-    "teller_id": "7f01b66f-a048-4bcc-b552-60d0d8c64d44",
-    "teller_name": "Test2",
+    "teller_id": "10000000-0000-4000-8000-00000000ee0a",
+    "teller_name": "Teller Alpha",
     "total_delivery_fees": 0,
     "total_discount": 0,
-    "total_orders": 29,
-    "total_revenue": 521500,
+    "total_orders": 3,
+    "total_revenue": 20000,
     "total_service_charge": 0,
     "total_tax": 0,
-    "total_tips": 10000,
+    "total_tips": 0,
     "voided_orders": 0
   },
   "request": {
     "body": null,
     "method": "GET",
-    "path": "/reports/shifts/28c01d00-5076-4f89-b2ab-d0b045e27f63/summary"
+    "path": "/reports/shifts/20000000-0000-4000-8000-0000000000a1/summary"
   },
   "status": 200
 }

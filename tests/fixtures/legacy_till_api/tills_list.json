@@ -1,13 +1,13 @@
 {
   "body": [
     {
-      "branch_id": "37bda2d8-8a0d-43a2-a088-38ec0961429c",
+      "branch_id": "10000000-0000-4000-8000-0000000000a1",
       "created_at": "2026-01-01T00:00:00Z",
-      "id": "441b694d-1400-42f5-8672-f4c721d08efc",
+      "id": "c61aff83-056c-49ec-84ed-9911204a8465",
       "is_active": true,
       "is_default": true,
       "name": "Till 1",
-      "org_id": "685f6bfa-0d44-4a9f-bb3e-50eec96d50c9",
+      "org_id": "10000000-0000-4000-8000-000000000001",
       "standard_float": null,
       "updated_at": "2026-01-01T00:00:00Z"
     }
@@ -15,7 +15,7 @@
   "request": {
     "body": null,
     "method": "GET",
-    "path": "/tills?branch_id=37bda2d8-8a0d-43a2-a088-38ec0961429c"
+    "path": "/tills?branch_id=10000000-0000-4000-8000-0000000000a1"
   },
   "status": 200
 }

@@ -1,8 +1,10 @@
 {
   "volatile_timestamp_keys": [
+    "accepted_at",
     "bumped_at",
     "closed_at",
     "created_at",
+    "delivered_at",
     "ended_at",
     "finalized_at",
     "fired_at",
@@ -10,26 +12,25 @@
     "generated_at",
     "issued_at",
     "last_activity_at",
+    "moved_at",
     "opened_at",
+    "printed_at",
+    "received_at",
+    "round_fired_at",
     "seated_at",
     "server_time",
     "settled_at",
     "started_at",
+    "status_changed_at",
     "updated_at",
     "voided_at"
   ],
-  "pii_keys": [
-    "address",
-    "address_line",
-    "cash_note",
-    "customer_address",
-    "customer_name",
-    "customer_phone",
-    "email",
-    "note",
-    "notes",
-    "phone"
+  "dated_ref_keys": [
+    "delivery_ref",
+    "order_ref",
+    "ticket_ref"
   ],
+  "pii_keys": [],
   "fixed_timestamp": "2026-01-01T00:00:00Z",
   "files": [
     {

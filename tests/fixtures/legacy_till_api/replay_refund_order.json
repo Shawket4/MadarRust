@@ -1,38 +1,38 @@
 {
   "body": {
     "amount": 1000,
-    "branch_id": "37bda2d8-8a0d-43a2-a088-38ec0961429c",
-    "client_ref": "1c542cd7-9c1b-4abe-b5e5-d4758d4a7e51",
+    "branch_id": "10000000-0000-4000-8000-0000000000a1",
+    "client_ref": "50000000-0000-4000-8000-000000000001",
     "created_at": "2026-01-01T00:00:00Z",
-    "id": "056e3c18-e5fd-4a05-b168-c119cf463399",
+    "id": "2e568016-60e0-413e-b5b5-483d75edcedf",
     "is_cash": true,
     "issued_at": "2026-01-01T00:00:00Z",
-    "issued_by": "7f01b66f-a048-4bcc-b552-60d0d8c64d44",
-    "issued_by_name": "Test2",
+    "issued_by": "10000000-0000-4000-8000-00000000ee0a",
+    "issued_by_name": "Teller Alpha",
     "lines": [],
     "method": "cash",
     "note": null,
-    "order_id": "00000000-0000-0000-0000-000000000003",
+    "order_id": "61baf8b3-9965-4365-a63e-e810b6d7ad8f",
     "order_status": "completed",
     "reason": "quality_issue",
     "refund_count": 1,
-    "refundable_remaining": 24500,
+    "refundable_remaining": 4000,
     "refunded_amount": 1000,
     "refunded_cash": 1000,
-    "shift_id": "28c01d00-5076-4f89-b2ab-d0b045e27f63"
+    "shift_id": "20000000-0000-4000-8000-0000000000a1"
   },
   "request": {
     "body": {
       "op": "refund_order",
       "request": {
         "amount": 1000,
-        "client_ref": "1c542cd7-9c1b-4abe-b5e5-d4758d4a7e51",
+        "client_ref": "50000000-0000-4000-8000-000000000001",
         "method": "cash",
-        "order_id": "00000000-0000-0000-0000-000000000003",
+        "order_id": "61baf8b3-9965-4365-a63e-e810b6d7ad8f",
         "reason": "quality_issue",
-        "shift_id": "28c01d00-5076-4f89-b2ab-d0b045e27f63"
+        "shift_id": "20000000-0000-4000-8000-0000000000a1"
       },
-      "teller_id": "7f01b66f-a048-4bcc-b552-60d0d8c64d44"
+      "teller_id": "10000000-0000-4000-8000-00000000ee0a"
     },
     "method": "POST",
     "path": "/sync/replay"

@@ -1,8 +1,8 @@
 {
   "body": {
-    "amount_tendered": null,
-    "branch_id": "37bda2d8-8a0d-43a2-a088-38ec0961429c",
-    "change_given": null,
+    "amount_tendered": 10000,
+    "branch_id": "10000000-0000-4000-8000-0000000000a1",
+    "change_given": 0,
     "created_at": "2026-01-01T00:00:00Z",
     "customer_name": null,
     "delivery_channel": null,
@@ -15,203 +15,71 @@
     "discount_rate": 0.0,
     "discount_type": null,
     "discount_value": 0,
-    "id": "724f0d51-8db3-47b9-a935-4ec6edd1448e",
+    "id": "763c81db-2d24-424a-a34e-0fd915cd8e82",
     "items": [
       {
-        "addons": [
-          {
-            "addon_item_id": "c891cdc7-bd0a-4f6e-88ba-c7ac08e039c6",
-            "addon_name": "Full Fat Milk",
-            "id": "ecf97563-5375-41f5-b299-385e9c26a624",
-            "line_cost": null,
-            "line_total": 0,
-            "name_translations": {
-              "ar": "حليب كامل الدسم",
-              "en": "Full Fat Milk"
-            },
-            "order_item_id": "482ac6a4-040c-4485-ae27-3dc1b6d8bbc3",
-            "quantity": 1,
-            "unit_price": 0
-          }
-        ],
+        "addons": [],
         "bundle_components": [],
         "bundle_id": null,
         "bundle_unit_price": null,
         "cost_missing": true,
-        "deductions_snapshot": [
-          {
-            "category": "milk",
-            "cost_per_unit": 5.0,
-            "ingredient_name": "Full Fat Milk",
-            "line_cost": 850,
-            "org_ingredient_id": "b28fe767-e9ca-4f9c-9931-82517a1d95bc",
-            "quantity": 170.0,
-            "source": "drink_recipe",
-            "unit": "g"
-          },
-          {
-            "category": "general",
-            "cost_per_unit": 80.0,
-            "ingredient_name": "Espresso",
-            "line_cost": 1440,
-            "org_ingredient_id": "e63029fa-4ab6-4ccd-99e2-0c8bb32e503d",
-            "quantity": 18.0,
-            "source": "drink_recipe",
-            "unit": "g"
-          },
-          {
-            "category": "general",
-            "cost_per_unit": null,
-            "ingredient_name": "8oz Cups",
-            "line_cost": null,
-            "org_ingredient_id": "c1e1ef94-80fb-4054-a57b-f9c25966b723",
-            "quantity": 1.0,
-            "source": "drink_recipe",
-            "unit": "pcs"
-          }
-        ],
-        "id": "482ac6a4-040c-4485-ae27-3dc1b6d8bbc3",
+        "deductions_snapshot": [],
+        "id": "f0e0d6c6-20f4-4f93-8230-e781d7a9c6b3",
         "is_reward": false,
-        "item_name": "Cappucino",
+        "item_name": "Latte",
         "line_cost": null,
-        "line_total": 11500,
-        "menu_item_id": "9c434de3-3f18-4f42-9dbb-c02d53680714",
-        "name_translations": {
-          "ar": "كابتشينو",
-          "en": "Cappucino"
-        },
+        "line_total": 10000,
+        "menu_item_id": "10000000-0000-4000-8000-0000000e0001",
+        "name_translations": {},
         "notes": null,
         "optionals": [],
-        "order_id": "724f0d51-8db3-47b9-a935-4ec6edd1448e",
-        "quantity": 1,
+        "order_id": "763c81db-2d24-424a-a34e-0fd915cd8e82",
+        "quantity": 2,
         "reward_covered": 0,
         "reward_units": 0,
         "size_label": null,
         "unit_cost": null,
-        "unit_price": 11500
-      },
-      {
-        "addons": [
-          {
-            "addon_item_id": "c891cdc7-bd0a-4f6e-88ba-c7ac08e039c6",
-            "addon_name": "Full Fat Milk",
-            "id": "c0f2c41a-2c49-4f86-8034-d05b161e2250",
-            "line_cost": null,
-            "line_total": 0,
-            "name_translations": {
-              "ar": "حليب كامل الدسم",
-              "en": "Full Fat Milk"
-            },
-            "order_item_id": "96fbb5c2-f2bb-41ce-b14a-6261bf3379c4",
-            "quantity": 1,
-            "unit_price": 0
-          }
-        ],
-        "bundle_components": [],
-        "bundle_id": null,
-        "bundle_unit_price": null,
-        "cost_missing": true,
-        "deductions_snapshot": [
-          {
-            "category": "general",
-            "cost_per_unit": 80.0,
-            "ingredient_name": "Espresso",
-            "line_cost": 1440,
-            "org_ingredient_id": "e63029fa-4ab6-4ccd-99e2-0c8bb32e503d",
-            "quantity": 18.0,
-            "source": "drink_recipe",
-            "unit": "g"
-          },
-          {
-            "category": "general",
-            "cost_per_unit": 400.0,
-            "ingredient_name": "16oz Cups",
-            "line_cost": 400,
-            "org_ingredient_id": "6356e6e9-7f2f-4324-a597-c392a856cd5c",
-            "quantity": 1.0,
-            "source": "drink_recipe",
-            "unit": "pcs"
-          },
-          {
-            "category": "general",
-            "cost_per_unit": null,
-            "ingredient_name": "Frappe Powder",
-            "line_cost": null,
-            "org_ingredient_id": "7e639288-0808-42ed-90fa-c0e60fcf6e1e",
-            "quantity": 25.0,
-            "source": "drink_recipe",
-            "unit": "g"
-          },
-          {
-            "category": "milk",
-            "cost_per_unit": 5.0,
-            "ingredient_name": "Full Fat Milk",
-            "line_cost": 500,
-            "org_ingredient_id": "b28fe767-e9ca-4f9c-9931-82517a1d95bc",
-            "quantity": 100.0,
-            "source": "drink_recipe",
-            "unit": "g"
-          }
-        ],
-        "id": "96fbb5c2-f2bb-41ce-b14a-6261bf3379c4",
-        "is_reward": false,
-        "item_name": "Blended Latte",
-        "line_cost": null,
-        "line_total": 14000,
-        "menu_item_id": "9c594788-e502-4ca5-9852-d390dd438139",
-        "name_translations": {
-          "ar": "لاتيه مخلوط",
-          "en": "Blended Latte"
-        },
-        "notes": null,
-        "optionals": [],
-        "order_id": "724f0d51-8db3-47b9-a935-4ec6edd1448e",
-        "quantity": 1,
-        "reward_covered": 0,
-        "reward_units": 0,
-        "size_label": null,
-        "unit_cost": null,
-        "unit_price": 14000
+        "unit_price": 5000
       }
     ],
     "loyalty_customer_id": null,
     "loyalty_member_name": null,
     "notes": null,
-    "order_number": 29,
-    "order_ref": "TEST2-260913-28C01D-029",
-    "order_type": "dine_in",
+    "order_number": 1,
+    "order_ref": "GLDA-YYMMDD-200000-001",
+    "order_type": "takeaway",
     "payment_legs": [
       {
-        "amount": 25500,
-        "method": "card"
+        "amount": 10000,
+        "method": "cash"
       }
     ],
-    "payment_method": "card",
-    "price_expected_total": 25500,
+    "payment_method": "cash",
+    "price_expected_total": 10000,
     "price_flagged": false,
     "service_charge_amount": 0,
-    "shift_id": "28c01d00-5076-4f89-b2ab-d0b045e27f63",
+    "shift_id": "20000000-0000-4000-8000-0000000000a1",
     "status": "completed",
-    "subtotal": 25500,
+    "subtotal": 10000,
     "tax_amount": 0,
-    "teller_id": "7f01b66f-a048-4bcc-b552-60d0d8c64d44",
-    "teller_name": "Test2",
+    "teller_id": "10000000-0000-4000-8000-00000000ee0a",
+    "teller_name": "Teller Alpha",
     "timezone": "Africa/Cairo",
     "tip_amount": 0,
     "tip_payment_method": null,
-    "total_amount": 25500,
+    "total_amount": 10000,
     "void_note": null,
     "void_reason": null,
     "voided_at": null,
     "voided_by": null,
-    "waiter_id": "7f01b66f-a048-4bcc-b552-60d0d8c64d44",
-    "waiter_name": "Test2",
+    "waiter_id": null,
+    "waiter_name": null,
     "warnings": []
   },
   "request": {
     "body": null,
     "method": "GET",
-    "path": "/orders/724f0d51-8db3-47b9-a935-4ec6edd1448e"
+    "path": "/orders/763c81db-2d24-424a-a34e-0fd915cd8e82"
   },
   "status": 200
 }

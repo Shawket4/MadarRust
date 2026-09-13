@@ -3,7 +3,7 @@
   "request": {
     "body": null,
     "method": "GET",
-    "path": "/reports/shifts/28c01d00-5076-4f89-b2ab-d0b045e27f63/deductions"
+    "path": "/reports/shifts/20000000-0000-4000-8000-0000000000a1/deductions"
   },
   "status": 200
 }

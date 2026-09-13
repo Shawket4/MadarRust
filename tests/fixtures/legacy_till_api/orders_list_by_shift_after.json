@@ -2,8 +2,8 @@
   "body": {
     "data": [
       {
-        "amount_tendered": 25500,
-        "branch_id": "37bda2d8-8a0d-43a2-a088-38ec0961429c",
+        "amount_tendered": 5000,
+        "branch_id": "10000000-0000-4000-8000-0000000000a1",
         "change_given": 0,
         "created_at": "2026-01-01T00:00:00Z",
         "customer_name": null,
@@ -17,33 +17,33 @@
         "discount_rate": 0.0,
         "discount_type": null,
         "discount_value": 0,
-        "id": "00000000-0000-0000-0000-000000000003",
+        "id": "61baf8b3-9965-4365-a63e-e810b6d7ad8f",
         "loyalty_customer_id": null,
         "loyalty_member_name": null,
         "notes": null,
-        "order_number": 30,
-        "order_ref": "TEST2-260913-28C01D-030",
+        "order_number": 4,
+        "order_ref": "GLDA-YYMMDD-200000-004",
         "order_type": "takeaway",
         "payment_legs": [
           {
-            "amount": 25500,
+            "amount": 5000,
             "method": "cash"
           }
         ],
         "payment_method": "cash",
-        "price_expected_total": 25500,
+        "price_expected_total": 5000,
         "price_flagged": false,
         "service_charge_amount": 0,
-        "shift_id": "28c01d00-5076-4f89-b2ab-d0b045e27f63",
+        "shift_id": "20000000-0000-4000-8000-0000000000a1",
         "status": "completed",
-        "subtotal": 25500,
+        "subtotal": 5000,
         "tax_amount": 0,
-        "teller_id": "7f01b66f-a048-4bcc-b552-60d0d8c64d44",
-        "teller_name": "Test2",
+        "teller_id": "10000000-0000-4000-8000-00000000ee0a",
+        "teller_name": "Teller Alpha",
         "timezone": "Africa/Cairo",
         "tip_amount": 0,
         "tip_payment_method": null,
-        "total_amount": 25500,
+        "total_amount": 5000,
         "void_note": null,
         "void_reason": null,
         "voided_at": null,
@@ -53,7 +53,7 @@
       },
       {
         "amount_tendered": null,
-        "branch_id": "37bda2d8-8a0d-43a2-a088-38ec0961429c",
+        "branch_id": "10000000-0000-4000-8000-0000000000a1",
         "change_given": null,
         "created_at": "2026-01-01T00:00:00Z",
         "customer_name": null,
@@ -67,45 +67,45 @@
         "discount_rate": 0.0,
         "discount_type": null,
         "discount_value": 0,
-        "id": "724f0d51-8db3-47b9-a935-4ec6edd1448e",
+        "id": "969c9537-6c01-4748-bd61-377e952f0502",
         "loyalty_customer_id": null,
         "loyalty_member_name": null,
         "notes": null,
-        "order_number": 29,
-        "order_ref": "TEST2-260913-28C01D-029",
+        "order_number": 3,
+        "order_ref": "GLDA-YYMMDD-200000-003",
         "order_type": "dine_in",
         "payment_legs": [
           {
-            "amount": 25500,
-            "method": "card"
+            "amount": 5000,
+            "method": "cash"
           }
         ],
-        "payment_method": "card",
-        "price_expected_total": 25500,
+        "payment_method": "cash",
+        "price_expected_total": 5000,
         "price_flagged": false,
         "service_charge_amount": 0,
-        "shift_id": "28c01d00-5076-4f89-b2ab-d0b045e27f63",
+        "shift_id": "20000000-0000-4000-8000-0000000000a1",
         "status": "completed",
-        "subtotal": 25500,
+        "subtotal": 5000,
         "tax_amount": 0,
-        "teller_id": "7f01b66f-a048-4bcc-b552-60d0d8c64d44",
-        "teller_name": "Test2",
+        "teller_id": "10000000-0000-4000-8000-00000000ee0a",
+        "teller_name": "Teller Alpha",
         "timezone": "Africa/Cairo",
         "tip_amount": 0,
         "tip_payment_method": null,
-        "total_amount": 25500,
+        "total_amount": 5000,
         "void_note": null,
         "void_reason": null,
         "voided_at": null,
         "voided_by": null,
-        "waiter_id": "7f01b66f-a048-4bcc-b552-60d0d8c64d44",
-        "waiter_name": "Test2"
+        "waiter_id": "10000000-0000-4000-8000-00000000aa01",
+        "waiter_name": "Waiter Whisky"
       }
     ],
     "page": 1,
     "per_page": 2,
     "summary": {
-      "completed": 30,
+      "completed": 4,
       "delivery_fees": 0,
       "delivery_orders": 0,
       "delivery_revenue": 0,
@@ -113,21 +113,21 @@
       "in_mall_fees": 0,
       "in_mall_orders": 0,
       "in_mall_revenue": 0,
-      "line_items": 42,
+      "line_items": 5,
       "outside_fees": 0,
       "outside_orders": 0,
       "outside_revenue": 0,
-      "revenue": 547000,
-      "tips": 10000,
+      "revenue": 25000,
+      "tips": 0,
       "voided": 0
     },
-    "total": 30,
-    "total_pages": 15
+    "total": 4,
+    "total_pages": 2
   },
   "request": {
     "body": null,
     "method": "GET",
-    "path": "/orders?branch_id=37bda2d8-8a0d-43a2-a088-38ec0961429c&shift_id=28c01d00-5076-4f89-b2ab-d0b045e27f63&page=1&per_page=2"
+    "path": "/orders?branch_id=10000000-0000-4000-8000-0000000000a1&shift_id=20000000-0000-4000-8000-0000000000a1&page=1&per_page=2"
   },
   "status": 200
 }

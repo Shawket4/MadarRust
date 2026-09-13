@@ -1,27 +1,27 @@
 {
   "body": {
     "amount": -1500,
-    "client_ref": "00000000-0000-0000-0000-000000000001",
+    "client_ref": "30000000-0000-4000-8000-000000000002",
     "corrects_id": null,
     "created_at": "2026-01-01T00:00:00Z",
-    "id": "178158b2-ac94-4fb7-9187-dacac322355c",
+    "id": "e40eef9b-15d0-4901-984f-b1446c1ec289",
     "kind": "pay_out",
-    "moved_by": "7f01b66f-a048-4bcc-b552-60d0d8c64d44",
-    "moved_by_name": "Test2",
-    "note": "REDACTED",
-    "shift_id": "28c01d00-5076-4f89-b2ab-d0b045e27f63"
+    "moved_by": "10000000-0000-4000-8000-00000000ee0a",
+    "moved_by_name": "Teller Alpha",
+    "note": "golden pay out",
+    "shift_id": "20000000-0000-4000-8000-0000000000a1"
   },
   "request": {
     "body": {
       "op": "cash_movement",
       "request": {
         "amount": -1500,
-        "client_ref": "00000000-0000-0000-0000-000000000001",
+        "client_ref": "30000000-0000-4000-8000-000000000002",
         "kind": "pay_out",
         "note": "golden pay out"
       },
-      "shift_id": "28c01d00-5076-4f89-b2ab-d0b045e27f63",
-      "teller_id": "7f01b66f-a048-4bcc-b552-60d0d8c64d44"
+      "shift_id": "20000000-0000-4000-8000-0000000000a1",
+      "teller_id": "10000000-0000-4000-8000-00000000ee0a"
     },
     "method": "POST",
     "path": "/sync/replay"

@@ -1,6 +1,6 @@
 {
   "body": {
-    "branch_id": "37bda2d8-8a0d-43a2-a088-38ec0961429c",
+    "branch_id": "10000000-0000-4000-8000-0000000000a1",
     "branch_name": null,
     "cash_discrepancy": null,
     "closed_at": null,
@@ -10,24 +10,24 @@
     "force_close_reason": null,
     "force_closed_at": null,
     "force_closed_by": null,
-    "id": "28c01d00-5076-4f89-b2ab-d0b045e27f63",
+    "id": "20000000-0000-4000-8000-0000000000a1",
     "notes": null,
     "opened_at": "2026-01-01T00:00:00Z",
-    "opening_cash": 8000,
+    "opening_cash": 2000,
     "opening_cash_edit_reason": null,
-    "opening_cash_original": 8000,
+    "opening_cash_original": 2000,
     "opening_cash_was_edited": false,
     "status": "open",
-    "teller_id": "7f01b66f-a048-4bcc-b552-60d0d8c64d44",
-    "teller_name": "Test2",
-    "till_id": "441b694d-1400-42f5-8672-f4c721d08efc",
+    "teller_id": "10000000-0000-4000-8000-00000000ee0a",
+    "teller_name": "Teller Alpha",
+    "till_id": "c61aff83-056c-49ec-84ed-9911204a8465",
     "till_name": "Till 1",
     "timezone": "Africa/Cairo"
   },
   "request": {
     "body": null,
     "method": "GET",
-    "path": "/shifts/28c01d00-5076-4f89-b2ab-d0b045e27f63"
+    "path": "/shifts/20000000-0000-4000-8000-0000000000a1"
   },
   "status": 200
 }
