@@ -1,0 +1,41 @@
+{
+  "body": {
+    "branch_id": "37bda2d8-8a0d-43a2-a088-38ec0961429c",
+    "branch_name": null,
+    "cash_discrepancy": null,
+    "closed_at": null,
+    "closed_by": null,
+    "closing_cash_declared": null,
+    "closing_cash_system": null,
+    "force_close_reason": null,
+    "force_closed_at": null,
+    "force_closed_by": null,
+    "id": "00000000-0000-0000-0000-000000000004",
+    "notes": null,
+    "opened_at": "2026-01-01T00:00:00Z",
+    "opening_cash": 10000,
+    "opening_cash_edit_reason": null,
+    "opening_cash_original": 10000,
+    "opening_cash_was_edited": false,
+    "status": "open",
+    "teller_id": "7f01b66f-a048-4bcc-b552-60d0d8c64d44",
+    "teller_name": "Test2",
+    "till_id": "441b694d-1400-42f5-8672-f4c721d08efc",
+    "till_name": "Till 1",
+    "timezone": "Africa/Cairo"
+  },
+  "request": {
+    "body": {
+      "branch_id": "37bda2d8-8a0d-43a2-a088-38ec0961429c",
+      "op": "open_shift",
+      "request": {
+        "id": "00000000-0000-0000-0000-000000000004",
+        "opening_cash": 10000
+      },
+      "teller_id": "7f01b66f-a048-4bcc-b552-60d0d8c64d44"
+    },
+    "method": "POST",
+    "path": "/sync/replay"
+  },
+  "status": 200
+}

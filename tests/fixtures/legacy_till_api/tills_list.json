@@ -1,0 +1,21 @@
+{
+  "body": [
+    {
+      "branch_id": "37bda2d8-8a0d-43a2-a088-38ec0961429c",
+      "created_at": "2026-01-01T00:00:00Z",
+      "id": "441b694d-1400-42f5-8672-f4c721d08efc",
+      "is_active": true,
+      "is_default": true,
+      "name": "Till 1",
+      "org_id": "685f6bfa-0d44-4a9f-bb3e-50eec96d50c9",
+      "standard_float": null,
+      "updated_at": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/tills?branch_id=37bda2d8-8a0d-43a2-a088-38ec0961429c"
+  },
+  "status": 200
+}

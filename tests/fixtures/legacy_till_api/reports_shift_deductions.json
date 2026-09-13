@@ -1,0 +1,9 @@
+{
+  "body": [],
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/reports/shifts/28c01d00-5076-4f89-b2ab-d0b045e27f63/deductions"
+  },
+  "status": 200
+}

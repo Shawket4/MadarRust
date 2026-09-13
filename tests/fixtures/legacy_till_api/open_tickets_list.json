@@ -1,0 +1,520 @@
+{
+  "body": [
+    {
+      "bill": {
+        "discount_amount": 0,
+        "service_charge_amount": 0,
+        "service_charge_rate": 0.0,
+        "subtotal": 30500,
+        "tax_amount": 0,
+        "tax_inclusive": false,
+        "tax_rate": 0.0,
+        "total": 30500
+      },
+      "booking_id": null,
+      "branch_id": "6c368d6d-093a-46c1-a569-9ee3f6f2644c",
+      "customer_name": null,
+      "discount_id": null,
+      "discount_type": null,
+      "discount_value": null,
+      "guest_count": 1,
+      "id": "3f199238-0520-4270-83fa-5fdd56af8de8",
+      "items": [
+        {
+          "id": "5a02325b-75b6-4dc1-ae70-2cf9a4938244",
+          "line": {
+            "input": {
+              "addons": [
+                {
+                  "addon_item_id": "535993b9-1a04-4417-9277-8770370c6e4f",
+                  "quantity": 1,
+                  "unit_price": 6000
+                },
+                {
+                  "addon_item_id": "11c5f02a-a8a4-414d-b79c-e76d4b169da6",
+                  "quantity": 1,
+                  "unit_price": 4000
+                }
+              ],
+              "bundle_components": [],
+              "bundle_id": null,
+              "menu_item_id": "9c434de3-5d3b-49a9-b0eb-210940072be9",
+              "notes": null,
+              "optional_field_ids": [],
+              "quantity": 1,
+              "size_label": null,
+              "unit_price": 17000
+            },
+            "line_total": 27000,
+            "modifiers": [
+              "Coconut Milk",
+              "Honey"
+            ],
+            "name": "Iced Latte",
+            "qty": 1,
+            "size_label": null,
+            "unit_price": 17000
+          },
+          "line_total": 27000,
+          "menu_item_id": "9c434de3-5d3b-49a9-b0eb-210940072be9",
+          "round_fired_at": "2026-08-29T15:08:18.280454Z",
+          "round_number": 1,
+          "voided": false
+        },
+        {
+          "id": "2f1d9226-d611-4270-a758-4101ceebc3d6",
+          "line": {
+            "input": {
+              "addons": [],
+              "bundle_components": [],
+              "bundle_id": null,
+              "menu_item_id": "9c434de3-d394-4a89-a6f9-d9038dbf6fb6",
+              "notes": null,
+              "optional_field_ids": [],
+              "quantity": 1,
+              "size_label": null,
+              "unit_price": 3500
+            },
+            "line_total": 3500,
+            "modifiers": [],
+            "name": "Water",
+            "qty": 1,
+            "size_label": null,
+            "unit_price": 3500
+          },
+          "line_total": 3500,
+          "menu_item_id": "9c434de3-d394-4a89-a6f9-d9038dbf6fb6",
+          "round_fired_at": "2026-08-29T15:09:28.145093Z",
+          "round_number": 2,
+          "voided": false
+        }
+      ],
+      "notes": null,
+      "opened_at": "2026-01-01T00:00:00Z",
+      "opened_by": "23d43974-46fa-4533-aa41-061ca36c6e6b",
+      "opened_by_name": "Forkesha",
+      "order_id": null,
+      "ready": false,
+      "ready_at": null,
+      "settled_at": null,
+      "status": "open",
+      "subtotal": 30500,
+      "table_id": null,
+      "ticket_ref": "T-SIDIHE-260829-0029",
+      "timezone": "Africa/Cairo",
+      "void_note": null,
+      "void_reason": null,
+      "voided_at": null
+    },
+    {
+      "bill": {
+        "discount_amount": 0,
+        "service_charge_amount": 0,
+        "service_charge_rate": 0.0,
+        "subtotal": 15000,
+        "tax_amount": 0,
+        "tax_inclusive": false,
+        "tax_rate": 0.0,
+        "total": 15000
+      },
+      "booking_id": null,
+      "branch_id": "6c368d6d-093a-46c1-a569-9ee3f6f2644c",
+      "customer_name": null,
+      "discount_id": null,
+      "discount_type": null,
+      "discount_value": null,
+      "guest_count": 1,
+      "id": "2b86ca32-6e4a-4f83-8ff5-ffcc8e525461",
+      "items": [
+        {
+          "id": "5ee7ac35-3617-406c-95d9-e5544f377862",
+          "line": {
+            "input": {
+              "addons": [
+                {
+                  "addon_item_id": "c891cdc7-bd0a-4f6e-88ba-c7ac08e039c6",
+                  "quantity": 1,
+                  "unit_price": 0
+                }
+              ],
+              "bundle_components": [],
+              "bundle_id": null,
+              "menu_item_id": "9c434de3-3f18-4f42-9dbb-c02d53680714",
+              "notes": null,
+              "optional_field_ids": [],
+              "quantity": 1,
+              "size_label": null,
+              "unit_price": 15000
+            },
+            "line_total": 15000,
+            "modifiers": [
+              "Full Fat Milk"
+            ],
+            "name": "Cappucino",
+            "qty": 1,
+            "size_label": null,
+            "unit_price": 15000
+          },
+          "line_total": 15000,
+          "menu_item_id": "9c434de3-3f18-4f42-9dbb-c02d53680714",
+          "round_fired_at": "2026-08-29T15:06:11.444060Z",
+          "round_number": 1,
+          "voided": false
+        }
+      ],
+      "notes": null,
+      "opened_at": "2026-01-01T00:00:00Z",
+      "opened_by": "23d43974-46fa-4533-aa41-061ca36c6e6b",
+      "opened_by_name": "Forkesha",
+      "order_id": null,
+      "ready": false,
+      "ready_at": null,
+      "settled_at": null,
+      "status": "open",
+      "subtotal": 15000,
+      "table_id": null,
+      "ticket_ref": "T-SIDIHE-260829-0028",
+      "timezone": "Africa/Cairo",
+      "void_note": null,
+      "void_reason": null,
+      "voided_at": null
+    },
+    {
+      "bill": {
+        "discount_amount": 0,
+        "service_charge_amount": 0,
+        "service_charge_rate": 0.0,
+        "subtotal": 159000,
+        "tax_amount": 0,
+        "tax_inclusive": false,
+        "tax_rate": 0.0,
+        "total": 159000
+      },
+      "booking_id": null,
+      "branch_id": "6c368d6d-093a-46c1-a569-9ee3f6f2644c",
+      "customer_name": "REDACTED",
+      "discount_id": null,
+      "discount_type": null,
+      "discount_value": null,
+      "guest_count": 5,
+      "id": "83a4ef6f-616d-4e08-a2fc-d1f5a2f4e63a",
+      "items": [
+        {
+          "id": "61c8933e-ecaa-4833-8c7d-a6ce8bfc5124",
+          "line": {
+            "input": {
+              "addons": [
+                {
+                  "addon_item_id": "c891cdc7-bd0a-4f6e-88ba-c7ac08e039c6",
+                  "quantity": 1,
+                  "unit_price": 0
+                }
+              ],
+              "bundle_components": [],
+              "bundle_id": null,
+              "menu_item_id": "9c594788-e502-4ca5-9852-d390dd438139",
+              "notes": null,
+              "optional_field_ids": [],
+              "quantity": 1,
+              "size_label": null,
+              "unit_price": 19000
+            },
+            "line_total": 19000,
+            "modifiers": [
+              "Full Fat Milk"
+            ],
+            "name": "Blended Latte",
+            "qty": 1,
+            "size_label": null,
+            "unit_price": 19000
+          },
+          "line_total": 19000,
+          "menu_item_id": "9c594788-e502-4ca5-9852-d390dd438139",
+          "round_fired_at": "2026-08-08T12:07:13.369374Z",
+          "round_number": 1,
+          "voided": false
+        },
+        {
+          "id": "eb5fc572-2d89-4fb6-ade4-5510c3208eda",
+          "line": {
+            "input": {
+              "addons": [
+                {
+                  "addon_item_id": "c891cdc7-bd0a-4f6e-88ba-c7ac08e039c6",
+                  "quantity": 1,
+                  "unit_price": 0
+                },
+                {
+                  "addon_item_id": "f69c8e1f-ec5d-42ae-b935-f7ef24e2492a",
+                  "quantity": 1,
+                  "unit_price": 4000
+                }
+              ],
+              "bundle_components": [],
+              "bundle_id": null,
+              "menu_item_id": "9c594788-e502-4ca5-9852-d390dd438139",
+              "notes": null,
+              "optional_field_ids": [],
+              "quantity": 1,
+              "size_label": null,
+              "unit_price": 19000
+            },
+            "line_total": 23000,
+            "modifiers": [
+              "Full Fat Milk",
+              "French Vanilla Syrup"
+            ],
+            "name": "Blended Latte",
+            "qty": 1,
+            "size_label": null,
+            "unit_price": 19000
+          },
+          "line_total": 23000,
+          "menu_item_id": "9c594788-e502-4ca5-9852-d390dd438139",
+          "round_fired_at": "2026-08-08T12:07:13.369374Z",
+          "round_number": 1,
+          "voided": false
+        },
+        {
+          "id": "f491dfcd-254d-46c3-828b-40a35151a5e5",
+          "line": {
+            "input": {
+              "addons": [
+                {
+                  "addon_item_id": "b263905f-6f10-4d4f-8ada-c36d58a417c0",
+                  "quantity": 1,
+                  "unit_price": 5000
+                },
+                {
+                  "addon_item_id": "f69c8e1f-ec5d-42ae-b935-f7ef24e2492a",
+                  "quantity": 1,
+                  "unit_price": 4000
+                }
+              ],
+              "bundle_components": [],
+              "bundle_id": null,
+              "menu_item_id": "9c594788-e502-4ca5-9852-d390dd438139",
+              "notes": null,
+              "optional_field_ids": [],
+              "quantity": 1,
+              "size_label": null,
+              "unit_price": 19000
+            },
+            "line_total": 28000,
+            "modifiers": [
+              "Oat Milk",
+              "French Vanilla Syrup"
+            ],
+            "name": "Blended Latte",
+            "qty": 1,
+            "size_label": null,
+            "unit_price": 19000
+          },
+          "line_total": 28000,
+          "menu_item_id": "9c594788-e502-4ca5-9852-d390dd438139",
+          "round_fired_at": "2026-08-08T12:07:13.369374Z",
+          "round_number": 1,
+          "voided": false
+        },
+        {
+          "id": "97ac29d0-f465-4606-992d-4577de37708e",
+          "line": {
+            "input": {
+              "addons": [
+                {
+                  "addon_item_id": "c891cdc7-bd0a-4f6e-88ba-c7ac08e039c6",
+                  "quantity": 1,
+                  "unit_price": 0
+                }
+              ],
+              "bundle_components": [],
+              "bundle_id": null,
+              "menu_item_id": "9c434de3-a257-4466-961a-90817f21b080",
+              "notes": null,
+              "optional_field_ids": [],
+              "quantity": 1,
+              "size_label": null,
+              "unit_price": 16000
+            },
+            "line_total": 16000,
+            "modifiers": [
+              "Full Fat Milk"
+            ],
+            "name": "Chai Latte",
+            "qty": 1,
+            "size_label": null,
+            "unit_price": 16000
+          },
+          "line_total": 16000,
+          "menu_item_id": "9c434de3-a257-4466-961a-90817f21b080",
+          "round_fired_at": "2026-08-08T12:07:13.369374Z",
+          "round_number": 1,
+          "voided": false
+        },
+        {
+          "id": "02faa862-091b-4030-b4fb-131cc7df8ca6",
+          "line": {
+            "input": {
+              "addons": [],
+              "bundle_components": [],
+              "bundle_id": null,
+              "menu_item_id": "9c434de3-983d-4b08-ab0c-6b59f3afb5c5",
+              "notes": null,
+              "optional_field_ids": [],
+              "quantity": 1,
+              "size_label": null,
+              "unit_price": 13000
+            },
+            "line_total": 13000,
+            "modifiers": [],
+            "name": "Peach Iced Tea",
+            "qty": 1,
+            "size_label": null,
+            "unit_price": 13000
+          },
+          "line_total": 13000,
+          "menu_item_id": "9c434de3-983d-4b08-ab0c-6b59f3afb5c5",
+          "round_fired_at": "2026-08-08T12:07:13.369374Z",
+          "round_number": 1,
+          "voided": false
+        },
+        {
+          "id": "746545ac-f479-485b-be26-0fd2b0b1afd7",
+          "line": {
+            "input": {
+              "addons": [
+                {
+                  "addon_item_id": "c891cdc7-bd0a-4f6e-88ba-c7ac08e039c6",
+                  "quantity": 1,
+                  "unit_price": 0
+                }
+              ],
+              "bundle_components": [],
+              "bundle_id": null,
+              "menu_item_id": "9c434de3-703c-458d-a843-6c7aa544bc9f",
+              "notes": null,
+              "optional_field_ids": [],
+              "quantity": 3,
+              "size_label": null,
+              "unit_price": 20000
+            },
+            "line_total": 60000,
+            "modifiers": [
+              "Full Fat Milk"
+            ],
+            "name": "Iced Spanish Latte",
+            "qty": 3,
+            "size_label": null,
+            "unit_price": 20000
+          },
+          "line_total": 60000,
+          "menu_item_id": "9c434de3-703c-458d-a843-6c7aa544bc9f",
+          "round_fired_at": "2026-08-11T13:34:05.710876Z",
+          "round_number": 2,
+          "voided": false
+        }
+      ],
+      "notes": null,
+      "opened_at": "2026-01-01T00:00:00Z",
+      "opened_by": "749b3578-f140-4b2d-9633-2210e99756ca",
+      "opened_by_name": "Boody@W",
+      "order_id": null,
+      "ready": false,
+      "ready_at": null,
+      "settled_at": null,
+      "status": "open",
+      "subtotal": 159000,
+      "table_id": null,
+      "ticket_ref": "T-SIDIHE-260808-0051",
+      "timezone": "Africa/Cairo",
+      "void_note": null,
+      "void_reason": null,
+      "voided_at": null
+    },
+    {
+      "bill": {
+        "discount_amount": 0,
+        "service_charge_amount": 0,
+        "service_charge_rate": 0.0,
+        "subtotal": 23000,
+        "tax_amount": 0,
+        "tax_inclusive": false,
+        "tax_rate": 0.0,
+        "total": 23000
+      },
+      "booking_id": null,
+      "branch_id": "6c368d6d-093a-46c1-a569-9ee3f6f2644c",
+      "customer_name": null,
+      "discount_id": null,
+      "discount_type": null,
+      "discount_value": null,
+      "guest_count": 2,
+      "id": "fc92e047-df7f-49a9-8e81-46be9bff8b55",
+      "items": [
+        {
+          "id": "834671df-9996-4f1c-a603-cb9ba82289d1",
+          "line": {
+            "input": {
+              "addons": [
+                {
+                  "addon_item_id": "c891cdc7-bd0a-4f6e-88ba-c7ac08e039c6",
+                  "quantity": 1,
+                  "unit_price": 0
+                },
+                {
+                  "addon_item_id": "f69c8e1f-ec5d-42ae-b935-f7ef24e2492a",
+                  "quantity": 1,
+                  "unit_price": 4000
+                }
+              ],
+              "bundle_components": [],
+              "bundle_id": null,
+              "menu_item_id": "9c594788-e502-4ca5-9852-d390dd438139",
+              "notes": null,
+              "optional_field_ids": [],
+              "quantity": 1,
+              "size_label": null,
+              "unit_price": 19000
+            },
+            "line_total": 23000,
+            "modifiers": [
+              "Full Fat Milk",
+              "French Vanilla Syrup"
+            ],
+            "name": "Blended Latte",
+            "qty": 1,
+            "size_label": null,
+            "unit_price": 19000
+          },
+          "line_total": 23000,
+          "menu_item_id": "9c594788-e502-4ca5-9852-d390dd438139",
+          "round_fired_at": "2026-08-04T10:25:06.682372Z",
+          "round_number": 1,
+          "voided": false
+        }
+      ],
+      "notes": null,
+      "opened_at": "2026-01-01T00:00:00Z",
+      "opened_by": "749b3578-f140-4b2d-9633-2210e99756ca",
+      "opened_by_name": "Boody@W",
+      "order_id": null,
+      "ready": false,
+      "ready_at": null,
+      "settled_at": null,
+      "status": "open",
+      "subtotal": 23000,
+      "table_id": null,
+      "ticket_ref": "T-SIDIHE-260804-0021",
+      "timezone": "Africa/Cairo",
+      "void_note": null,
+      "void_reason": null,
+      "voided_at": null
+    }
+  ],
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/open-tickets?branch_id=6c368d6d-093a-46c1-a569-9ee3f6f2644c"
+  },
+  "status": 200
+}

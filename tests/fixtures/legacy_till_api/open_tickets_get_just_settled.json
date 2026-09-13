@@ -1,0 +1,87 @@
+{
+  "body": {
+    "bill": {
+      "discount_amount": 0,
+      "service_charge_amount": 0,
+      "service_charge_rate": 0.0,
+      "subtotal": 23000,
+      "tax_amount": 0,
+      "tax_inclusive": false,
+      "tax_rate": 0.0,
+      "total": 23000
+    },
+    "booking_id": null,
+    "branch_id": "6c368d6d-093a-46c1-a569-9ee3f6f2644c",
+    "customer_name": null,
+    "discount_id": null,
+    "discount_type": null,
+    "discount_value": null,
+    "guest_count": 2,
+    "id": "fc92e047-df7f-49a9-8e81-46be9bff8b55",
+    "items": [
+      {
+        "id": "834671df-9996-4f1c-a603-cb9ba82289d1",
+        "line": {
+          "input": {
+            "addons": [
+              {
+                "addon_item_id": "c891cdc7-bd0a-4f6e-88ba-c7ac08e039c6",
+                "quantity": 1,
+                "unit_price": 0
+              },
+              {
+                "addon_item_id": "f69c8e1f-ec5d-42ae-b935-f7ef24e2492a",
+                "quantity": 1,
+                "unit_price": 4000
+              }
+            ],
+            "bundle_components": [],
+            "bundle_id": null,
+            "menu_item_id": "9c594788-e502-4ca5-9852-d390dd438139",
+            "notes": null,
+            "optional_field_ids": [],
+            "quantity": 1,
+            "size_label": null,
+            "unit_price": 19000
+          },
+          "line_total": 23000,
+          "modifiers": [
+            "Full Fat Milk",
+            "French Vanilla Syrup"
+          ],
+          "name": "Blended Latte",
+          "qty": 1,
+          "size_label": null,
+          "unit_price": 19000
+        },
+        "line_total": 23000,
+        "menu_item_id": "9c594788-e502-4ca5-9852-d390dd438139",
+        "round_fired_at": "2026-08-04T10:25:06.682372Z",
+        "round_number": 1,
+        "voided": false
+      }
+    ],
+    "notes": null,
+    "opened_at": "2026-01-01T00:00:00Z",
+    "opened_by": "749b3578-f140-4b2d-9633-2210e99756ca",
+    "opened_by_name": "Boody@W",
+    "order_id": "d496b44b-a78b-4264-a454-e48a74065896",
+    "ready": false,
+    "ready_at": null,
+    "settled_at": "2026-01-01T00:00:00Z",
+    "status": "settled",
+    "subtotal": 23000,
+    "table_id": null,
+    "ticket_ref": "T-SIDIHE-260804-0021",
+    "timezone": "Africa/Cairo",
+    "void_note": null,
+    "void_reason": null,
+    "voided_at": null
+  },
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/open-tickets/fc92e047-df7f-49a9-8e81-46be9bff8b55"
+  },
+  "status": 200
+}

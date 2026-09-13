@@ -1,0 +1,116 @@
+{
+  "body": {
+    "bill": {
+      "discount_amount": 0,
+      "service_charge_amount": 0,
+      "service_charge_rate": 0.0,
+      "subtotal": 25500,
+      "tax_amount": 0,
+      "tax_inclusive": false,
+      "tax_rate": 0.0,
+      "total": 25500
+    },
+    "booking_id": null,
+    "branch_id": "37bda2d8-8a0d-43a2-a088-38ec0961429c",
+    "customer_name": null,
+    "discount_id": null,
+    "discount_type": null,
+    "discount_value": null,
+    "guest_count": null,
+    "id": "9c18ce4d-fa62-4994-a605-ab21cdff3b4d",
+    "items": [
+      {
+        "id": "9ec88057-0233-4524-aaae-6dee15d364e9",
+        "line": {
+          "input": {
+            "addons": [
+              {
+                "addon_item_id": "c891cdc7-bd0a-4f6e-88ba-c7ac08e039c6",
+                "quantity": 1,
+                "unit_price": 0
+              }
+            ],
+            "bundle_components": [],
+            "bundle_id": null,
+            "menu_item_id": "9c434de3-3f18-4f42-9dbb-c02d53680714",
+            "notes": null,
+            "optional_field_ids": [],
+            "quantity": 1,
+            "size_label": null,
+            "unit_price": 11500
+          },
+          "line_total": 11500,
+          "modifiers": [
+            "Full Fat Milk"
+          ],
+          "name": "Cappucino",
+          "qty": 1,
+          "size_label": null,
+          "unit_price": 11500
+        },
+        "line_total": 11500,
+        "menu_item_id": "9c434de3-3f18-4f42-9dbb-c02d53680714",
+        "round_fired_at": "2026-09-13T07:16:25.539581Z",
+        "round_number": 1,
+        "voided": false
+      },
+      {
+        "id": "76a723e7-d271-4f52-920e-fa24cda35b8f",
+        "line": {
+          "input": {
+            "addons": [
+              {
+                "addon_item_id": "c891cdc7-bd0a-4f6e-88ba-c7ac08e039c6",
+                "quantity": 1,
+                "unit_price": 0
+              }
+            ],
+            "bundle_components": [],
+            "bundle_id": null,
+            "menu_item_id": "9c594788-e502-4ca5-9852-d390dd438139",
+            "notes": null,
+            "optional_field_ids": [],
+            "quantity": 1,
+            "size_label": null,
+            "unit_price": 14000
+          },
+          "line_total": 14000,
+          "modifiers": [
+            "Full Fat Milk"
+          ],
+          "name": "Blended Latte",
+          "qty": 1,
+          "size_label": null,
+          "unit_price": 14000
+        },
+        "line_total": 14000,
+        "menu_item_id": "9c594788-e502-4ca5-9852-d390dd438139",
+        "round_fired_at": "2026-09-13T08:25:59.830630Z",
+        "round_number": 2,
+        "voided": false
+      }
+    ],
+    "notes": null,
+    "opened_at": "2026-01-01T00:00:00Z",
+    "opened_by": "7f01b66f-a048-4bcc-b552-60d0d8c64d44",
+    "opened_by_name": "Test2",
+    "order_id": "724f0d51-8db3-47b9-a935-4ec6edd1448e",
+    "ready": false,
+    "ready_at": null,
+    "settled_at": "2026-01-01T00:00:00Z",
+    "status": "settled",
+    "subtotal": 25500,
+    "table_id": "7899411c-16db-4f57-bd21-779b545dbb93",
+    "ticket_ref": "T-TEST2-260913-0011",
+    "timezone": "Africa/Cairo",
+    "void_note": null,
+    "void_reason": null,
+    "voided_at": null
+  },
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/open-tickets/9c18ce4d-fa62-4994-a605-ab21cdff3b4d"
+  },
+  "status": 200
+}

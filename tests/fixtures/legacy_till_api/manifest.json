@@ -1,0 +1,322 @@
+{
+  "volatile_timestamp_keys": [
+    "bumped_at",
+    "closed_at",
+    "created_at",
+    "ended_at",
+    "finalized_at",
+    "fired_at",
+    "force_closed_at",
+    "generated_at",
+    "issued_at",
+    "last_activity_at",
+    "opened_at",
+    "seated_at",
+    "server_time",
+    "settled_at",
+    "started_at",
+    "updated_at",
+    "voided_at"
+  ],
+  "pii_keys": [
+    "address",
+    "address_line",
+    "cash_note",
+    "customer_address",
+    "customer_name",
+    "customer_phone",
+    "email",
+    "note",
+    "notes",
+    "phone"
+  ],
+  "fixed_timestamp": "2026-01-01T00:00:00Z",
+  "files": [
+    {
+      "file": "shifts_current.json",
+      "status": 200,
+      "model": "ShiftPreFill",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "shifts_list_branch.json",
+      "status": 200,
+      "model": "PaginatedShifts",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "shifts_get_open.json",
+      "status": 200,
+      "model": "Shift",
+      "clients": []
+    },
+    {
+      "file": "shifts_report_open.json",
+      "status": 200,
+      "model": "ShiftReportResponse",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "shifts_report_closed.json",
+      "status": 200,
+      "model": "ShiftReportResponse",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "shifts_cash_movements.json",
+      "status": 200,
+      "model": "Vec<CashMovement>",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "tills_list.json",
+      "status": 200,
+      "model": "Vec<Till>",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "orders_list_by_shift.json",
+      "status": 200,
+      "model": "PaginatedOrders",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "orders_get.json",
+      "status": 200,
+      "model": "OrderFull",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "refunds_by_shift_empty.json",
+      "status": 200,
+      "model": "ShiftRefunds",
+      "clients": [
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "reports_shift_summary.json",
+      "status": 200,
+      "model": "ShiftSummary",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "reports_shift_deductions.json",
+      "status": 200,
+      "model": null,
+      "clients": []
+    },
+    {
+      "file": "open_tickets_list.json",
+      "status": 200,
+      "model": "Vec<OpenTicketView>",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "open_tickets_get_settled.json",
+      "status": 200,
+      "model": "OpenTicketView",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "delivery_orders_list.json",
+      "status": 200,
+      "model": "Vec<DeliveryOrder>",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "replay_cash_movement.json",
+      "status": 201,
+      "model": "CashMovement",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "replay_cash_movement_dedup.json",
+      "status": 200,
+      "model": "CashMovement",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "replay_create_order.json",
+      "status": 201,
+      "model": "ReplayCreateOrderAck",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "orders_get_created.json",
+      "status": 200,
+      "model": "OrderFull",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "replay_refund_order.json",
+      "status": 201,
+      "model": "RefundIssued",
+      "clients": [
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "refunds_by_order.json",
+      "status": 200,
+      "model": "OrderRefunds",
+      "clients": [
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "refunds_by_shift.json",
+      "status": 200,
+      "model": "ShiftRefunds",
+      "clients": [
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "orders_list_by_shift_after.json",
+      "status": 200,
+      "model": "PaginatedOrders",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "replay_settle_open_ticket.json",
+      "status": 200,
+      "model": "Order",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "open_tickets_get_just_settled.json",
+      "status": 200,
+      "model": "OpenTicketView",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "delivery_finalize.json",
+      "status": 200,
+      "model": "FinalizeResponse",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "shifts_report_after_mutations.json",
+      "status": 200,
+      "model": "ShiftReportResponse",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "replay_close_shift.json",
+      "status": 200,
+      "model": "CloseShiftResponse",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "replay_close_shift_again.json",
+      "status": 200,
+      "model": "CloseShiftResponse",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "shifts_current_after_close.json",
+      "status": 200,
+      "model": "ShiftPreFill",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "replay_open_shift.json",
+      "status": 201,
+      "model": "Shift",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "replay_open_shift_dedup.json",
+      "status": 200,
+      "model": "Shift",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
+      "file": "shifts_force_close.json",
+      "status": 200,
+      "model": "Shift",
+      "clients": [
+        "v0.6.0"
+      ]
+    }
+  ]
+}

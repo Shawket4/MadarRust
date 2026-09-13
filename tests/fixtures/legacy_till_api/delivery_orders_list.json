@@ -1,0 +1,715 @@
+{
+  "body": [
+    {
+      "address_line": null,
+      "branch_id": "6c368d6d-093a-46c1-a569-9ee3f6f2644c",
+      "cancel_reason": null,
+      "cancel_restocked": null,
+      "cancelled_at": null,
+      "cart": {
+        "lines": [
+          {
+            "addons": [
+              {
+                "addon_item_id": "c891cdc7-bd0a-4f6e-88ba-c7ac08e039c6",
+                "addon_name": "Full Fat Milk",
+                "line_cost": null,
+                "name_translations": {
+                  "ar": "حليب كامل الدسم",
+                  "en": "Full Fat Milk"
+                },
+                "quantity": 1,
+                "unit_price": 0
+              }
+            ],
+            "cost_missing": true,
+            "item_name": "Cherry Vanilla Latte",
+            "line_cost": null,
+            "line_total": 22000,
+            "menu_item_id": "9d84aa22-9be9-4722-bd00-370bba4687cd",
+            "name_translations": {
+              "ar": "لاتيه كرز وفانيليا",
+              "en": "Cherry Vanilla Latte"
+            },
+            "notes": null,
+            "optionals": [],
+            "quantity": 1,
+            "size_label": null,
+            "unit_cost": null,
+            "unit_price": 22000
+          }
+        ]
+      },
+      "channel": "umbrella",
+      "confirmed_at": null,
+      "created_at": "2026-01-01T00:00:00Z",
+      "customer_lat": null,
+      "customer_lng": null,
+      "customer_name": "REDACTED",
+      "customer_phone": "REDACTED",
+      "delivered_at": null,
+      "delivery_fee": 0,
+      "delivery_notes": null,
+      "delivery_ref": "D-SIDIHE-260909-0001",
+      "delivery_zone_id": null,
+      "discount_amount": 0,
+      "discount_id": null,
+      "discount_rate": 0.0,
+      "discount_type": null,
+      "discount_value": 0,
+      "distance_source": null,
+      "extra_prep_minutes": 0,
+      "floor": null,
+      "id": "9c46d774-74e4-4237-9ad0-589486422194",
+      "landmark": null,
+      "order_id": null,
+      "org_id": "685f6bfa-0d44-4a9f-bb3e-50eec96d50c9",
+      "otp_verified": true,
+      "out_for_delivery_at": null,
+      "payment_method": null,
+      "payment_method_hint": "cash",
+      "place_name": "15",
+      "preparing_at": null,
+      "ready_at": null,
+      "receipt_printed_at": null,
+      "rejected_at": null,
+      "road_distance_meters": null,
+      "service_charge_amount": 0,
+      "service_charge_rate_applied": 0.0,
+      "status": "received",
+      "subtotal": 22000,
+      "tax_amount": 0,
+      "tax_inclusive": false,
+      "tax_rate_applied": 0.0,
+      "total": 22000,
+      "unit_number": null,
+      "updated_at": "2026-01-01T00:00:00Z"
+    },
+    {
+      "address_line": null,
+      "branch_id": "6c368d6d-093a-46c1-a569-9ee3f6f2644c",
+      "cancel_reason": "كنسيلت",
+      "cancel_restocked": true,
+      "cancelled_at": null,
+      "cart": {
+        "lines": [
+          {
+            "addons": [
+              {
+                "addon_item_id": "c891cdc7-bd0a-4f6e-88ba-c7ac08e039c6",
+                "addon_name": "Full Fat Milk",
+                "line_cost": null,
+                "name_translations": {
+                  "ar": "حليب كامل الدسم",
+                  "en": "Full Fat Milk"
+                },
+                "quantity": 1,
+                "unit_price": 0
+              }
+            ],
+            "cost_missing": true,
+            "item_name": "Spanish Latte Blended",
+            "line_cost": null,
+            "line_total": 22000,
+            "menu_item_id": "9c595c0a-beb3-42cf-8dc6-df1f799bd4e1",
+            "name_translations": {
+              "ar": "لاتيه أسباني مخلوط",
+              "en": "Spanish Latte Blended"
+            },
+            "notes": null,
+            "optionals": [],
+            "quantity": 1,
+            "size_label": null,
+            "unit_cost": null,
+            "unit_price": 22000
+          },
+          {
+            "addons": [
+              {
+                "addon_item_id": "d6e43a13-aa4c-4bc5-b590-2599abdc6c2e",
+                "addon_name": "Skimmed Milk",
+                "line_cost": null,
+                "name_translations": {
+                  "ar": "حليب منزوع الدسم",
+                  "en": "Skimmed Milk"
+                },
+                "quantity": 1,
+                "unit_price": 0
+              }
+            ],
+            "cost_missing": true,
+            "item_name": "Cortado",
+            "line_cost": null,
+            "line_total": 13000,
+            "menu_item_id": "9c434de3-1493-498d-9b5e-33dc7ef551f8",
+            "name_translations": {
+              "ar": "كورتادو",
+              "en": "Cortado"
+            },
+            "notes": null,
+            "optionals": [],
+            "quantity": 1,
+            "size_label": null,
+            "unit_cost": null,
+            "unit_price": 13000
+          }
+        ]
+      },
+      "channel": "umbrella",
+      "confirmed_at": null,
+      "created_at": "2026-01-01T00:00:00Z",
+      "customer_lat": null,
+      "customer_lng": null,
+      "customer_name": "REDACTED",
+      "customer_phone": "REDACTED",
+      "delivered_at": null,
+      "delivery_fee": 0,
+      "delivery_notes": null,
+      "delivery_ref": "D-SIDIHE-260821-0001",
+      "delivery_zone_id": null,
+      "discount_amount": 0,
+      "discount_id": null,
+      "discount_rate": 0.0,
+      "discount_type": null,
+      "discount_value": 0,
+      "distance_source": null,
+      "extra_prep_minutes": 0,
+      "floor": null,
+      "id": "d524e53e-03e1-4c39-a399-32fe3782faa6",
+      "landmark": "Beach",
+      "order_id": null,
+      "org_id": "685f6bfa-0d44-4a9f-bb3e-50eec96d50c9",
+      "otp_verified": true,
+      "out_for_delivery_at": null,
+      "payment_method": null,
+      "payment_method_hint": "card",
+      "place_name": "3",
+      "preparing_at": null,
+      "ready_at": null,
+      "receipt_printed_at": null,
+      "rejected_at": "2026-08-21T15:46:06.740865Z",
+      "road_distance_meters": null,
+      "service_charge_amount": 0,
+      "service_charge_rate_applied": 0.0,
+      "status": "rejected",
+      "subtotal": 35000,
+      "tax_amount": 0,
+      "tax_inclusive": false,
+      "tax_rate_applied": 0.0,
+      "total": 35000,
+      "unit_number": null,
+      "updated_at": "2026-01-01T00:00:00Z"
+    },
+    {
+      "address_line": null,
+      "branch_id": "6c368d6d-093a-46c1-a569-9ee3f6f2644c",
+      "cancel_reason": null,
+      "cancel_restocked": null,
+      "cancelled_at": null,
+      "cart": {
+        "lines": [
+          {
+            "addons": [
+              {
+                "addon_item_id": "c891cdc7-bd0a-4f6e-88ba-c7ac08e039c6",
+                "addon_name": "Full Fat Milk",
+                "line_cost": null,
+                "name_translations": {
+                  "ar": "حليب كامل الدسم",
+                  "en": "Full Fat Milk"
+                },
+                "quantity": 1,
+                "unit_price": 0
+              }
+            ],
+            "cost_missing": true,
+            "item_name": "Cappucino",
+            "line_cost": null,
+            "line_total": 15000,
+            "menu_item_id": "9c434de3-3f18-4f42-9dbb-c02d53680714",
+            "name_translations": {
+              "ar": "كابتشينو",
+              "en": "Cappucino"
+            },
+            "notes": null,
+            "optionals": [],
+            "quantity": 1,
+            "size_label": null,
+            "unit_cost": null,
+            "unit_price": 15000
+          },
+          {
+            "addons": [
+              {
+                "addon_item_id": "c891cdc7-bd0a-4f6e-88ba-c7ac08e039c6",
+                "addon_name": "Full Fat Milk",
+                "line_cost": null,
+                "name_translations": {
+                  "ar": "حليب كامل الدسم",
+                  "en": "Full Fat Milk"
+                },
+                "quantity": 1,
+                "unit_price": 0
+              },
+              {
+                "addon_item_id": "d6e43a13-aa4c-4bc5-b590-2599abdc6c2e",
+                "addon_name": "Skimmed Milk",
+                "line_cost": null,
+                "name_translations": {
+                  "ar": "حليب منزوع الدسم",
+                  "en": "Skimmed Milk"
+                },
+                "quantity": 1,
+                "unit_price": 0
+              }
+            ],
+            "cost_missing": true,
+            "item_name": "Cappucino",
+            "line_cost": null,
+            "line_total": 15000,
+            "menu_item_id": "9c434de3-3f18-4f42-9dbb-c02d53680714",
+            "name_translations": {
+              "ar": "كابتشينو",
+              "en": "Cappucino"
+            },
+            "notes": null,
+            "optionals": [],
+            "quantity": 1,
+            "size_label": null,
+            "unit_cost": null,
+            "unit_price": 15000
+          },
+          {
+            "addons": [
+              {
+                "addon_item_id": "535993b9-1a04-4417-9277-8770370c6e4f",
+                "addon_name": "Coconut Milk",
+                "line_cost": null,
+                "name_translations": {
+                  "ar": "حليب جوز الهند",
+                  "en": "Coconut Milk"
+                },
+                "quantity": 1,
+                "unit_price": 6000
+              }
+            ],
+            "cost_missing": false,
+            "item_name": "Iced Americano",
+            "line_cost": 2110,
+            "line_total": 19000,
+            "menu_item_id": "9c434de3-669b-4a21-89a7-01d303eeafa5",
+            "name_translations": {
+              "ar": "أمريكانو مثلج",
+              "en": "Iced Americano"
+            },
+            "notes": null,
+            "optionals": [],
+            "quantity": 1,
+            "size_label": null,
+            "unit_cost": 2110,
+            "unit_price": 13000
+          },
+          {
+            "addons": [
+              {
+                "addon_item_id": "c891cdc7-bd0a-4f6e-88ba-c7ac08e039c6",
+                "addon_name": "Full Fat Milk",
+                "line_cost": null,
+                "name_translations": {
+                  "ar": "حليب كامل الدسم",
+                  "en": "Full Fat Milk"
+                },
+                "quantity": 1,
+                "unit_price": 0
+              },
+              {
+                "addon_item_id": "7af73582-5eef-4f1d-bd31-40ce6258f9ac",
+                "addon_name": "Salted Caramel",
+                "line_cost": 520,
+                "name_translations": {
+                  "ar": "كراميل مملح",
+                  "en": "Salted Caramel"
+                },
+                "quantity": 1,
+                "unit_price": 4000
+              }
+            ],
+            "cost_missing": false,
+            "item_name": "Iced Latte",
+            "line_cost": 3430,
+            "line_total": 21000,
+            "menu_item_id": "9c434de3-5d3b-49a9-b0eb-210940072be9",
+            "name_translations": {
+              "ar": "لاتيه مثلج",
+              "en": "Iced Latte"
+            },
+            "notes": null,
+            "optionals": [],
+            "quantity": 1,
+            "size_label": null,
+            "unit_cost": 2910,
+            "unit_price": 17000
+          },
+          {
+            "addons": [
+              {
+                "addon_item_id": "535993b9-1a04-4417-9277-8770370c6e4f",
+                "addon_name": "Coconut Milk",
+                "line_cost": null,
+                "name_translations": {
+                  "ar": "حليب جوز الهند",
+                  "en": "Coconut Milk"
+                },
+                "quantity": 1,
+                "unit_price": 6000
+              }
+            ],
+            "cost_missing": true,
+            "item_name": "Blended Matcha Latte",
+            "line_cost": null,
+            "line_total": 28000,
+            "menu_item_id": "9ca13fae-f8f7-4f68-942b-1c5d37fefcbf",
+            "name_translations": {
+              "ar": "ماتشا لاتيه ممزوج",
+              "en": "Blended Matcha Latte"
+            },
+            "notes": null,
+            "optionals": [],
+            "quantity": 1,
+            "size_label": null,
+            "unit_cost": null,
+            "unit_price": 22000
+          },
+          {
+            "addons": [],
+            "cost_missing": true,
+            "item_name": "Water",
+            "line_cost": null,
+            "line_total": 14000,
+            "menu_item_id": "9c434de3-d394-4a89-a6f9-d9038dbf6fb6",
+            "name_translations": {
+              "ar": "ماء",
+              "en": "Water"
+            },
+            "notes": null,
+            "optionals": [],
+            "quantity": 4,
+            "size_label": null,
+            "unit_cost": null,
+            "unit_price": 3500
+          }
+        ]
+      },
+      "channel": "umbrella",
+      "confirmed_at": null,
+      "created_at": "2026-01-01T00:00:00Z",
+      "customer_lat": null,
+      "customer_lng": null,
+      "customer_name": "REDACTED",
+      "customer_phone": "REDACTED",
+      "delivered_at": "2026-08-01T12:45:17.065803Z",
+      "delivery_fee": 0,
+      "delivery_notes": null,
+      "delivery_ref": "D-SIDIHE-260801-0001",
+      "delivery_zone_id": null,
+      "discount_amount": 0,
+      "discount_id": null,
+      "discount_rate": 0.0,
+      "discount_type": null,
+      "discount_value": 0,
+      "distance_source": null,
+      "extra_prep_minutes": 0,
+      "floor": null,
+      "id": "aa64812a-2b75-4629-80e9-a65142728c63",
+      "landmark": "Near blue umbrellas",
+      "order_id": "86daaac9-2680-4ae6-ab44-31c8d6094fca",
+      "org_id": "685f6bfa-0d44-4a9f-bb3e-50eec96d50c9",
+      "otp_verified": true,
+      "out_for_delivery_at": "2026-08-01T09:57:14.072396Z",
+      "payment_method": "card",
+      "payment_method_hint": "card",
+      "place_name": "36",
+      "preparing_at": null,
+      "ready_at": null,
+      "receipt_printed_at": "2026-08-01T09:28:52.693146Z",
+      "rejected_at": null,
+      "road_distance_meters": null,
+      "service_charge_amount": 0,
+      "service_charge_rate_applied": 0.0,
+      "status": "delivered",
+      "subtotal": 112000,
+      "tax_amount": 0,
+      "tax_inclusive": false,
+      "tax_rate_applied": 0.0,
+      "total": 112000,
+      "unit_number": null,
+      "updated_at": "2026-01-01T00:00:00Z"
+    },
+    {
+      "address_line": null,
+      "branch_id": "6c368d6d-093a-46c1-a569-9ee3f6f2644c",
+      "cancel_reason": null,
+      "cancel_restocked": true,
+      "cancelled_at": "2026-07-24T16:27:17.896238Z",
+      "cart": {
+        "lines": [
+          {
+            "addons": [
+              {
+                "addon_item_id": "c891cdc7-bd0a-4f6e-88ba-c7ac08e039c6",
+                "addon_name": "Full Fat Milk",
+                "line_cost": null,
+                "name_translations": {
+                  "ar": "حليب كامل الدسم",
+                  "en": "Full Fat Milk"
+                },
+                "quantity": 1,
+                "unit_price": 0
+              }
+            ],
+            "cost_missing": true,
+            "item_name": "Creme Brullee Latte",
+            "line_cost": null,
+            "line_total": 21000,
+            "menu_item_id": "a04a5bfc-eaaa-4d42-b753-de38b46fecda",
+            "name_translations": {
+              "ar": "كريم برولي لاتيه",
+              "en": "Creme Brullee Latte"
+            },
+            "notes": null,
+            "optionals": [],
+            "quantity": 1,
+            "size_label": null,
+            "unit_cost": null,
+            "unit_price": 21000
+          },
+          {
+            "addons": [
+              {
+                "addon_item_id": "c891cdc7-bd0a-4f6e-88ba-c7ac08e039c6",
+                "addon_name": "Full Fat Milk",
+                "line_cost": null,
+                "name_translations": {
+                  "ar": "حليب كامل الدسم",
+                  "en": "Full Fat Milk"
+                },
+                "quantity": 1,
+                "unit_price": 0
+              }
+            ],
+            "cost_missing": true,
+            "item_name": "Spanish Latte Blended",
+            "line_cost": null,
+            "line_total": 22000,
+            "menu_item_id": "9c595c0a-beb3-42cf-8dc6-df1f799bd4e1",
+            "name_translations": {
+              "ar": "لاتيه أسباني مخلوط",
+              "en": "Spanish Latte Blended"
+            },
+            "notes": null,
+            "optionals": [],
+            "quantity": 1,
+            "size_label": null,
+            "unit_cost": null,
+            "unit_price": 22000
+          }
+        ]
+      },
+      "channel": "umbrella",
+      "confirmed_at": null,
+      "created_at": "2026-01-01T00:00:00Z",
+      "customer_lat": null,
+      "customer_lng": null,
+      "customer_name": "REDACTED",
+      "customer_phone": "REDACTED",
+      "delivered_at": null,
+      "delivery_fee": 0,
+      "delivery_notes": null,
+      "delivery_ref": "D-SIDIHE-260724-0001",
+      "delivery_zone_id": null,
+      "discount_amount": 0,
+      "discount_id": null,
+      "discount_rate": 0.0,
+      "discount_type": null,
+      "discount_value": 0,
+      "distance_source": null,
+      "extra_prep_minutes": 0,
+      "floor": null,
+      "id": "02688f02-ad48-4ed4-833a-f0ec1a6b8a51",
+      "landmark": "Peace hotel beach",
+      "order_id": null,
+      "org_id": "685f6bfa-0d44-4a9f-bb3e-50eec96d50c9",
+      "otp_verified": true,
+      "out_for_delivery_at": "2026-07-24T16:27:14.017524Z",
+      "payment_method": null,
+      "payment_method_hint": "card",
+      "place_name": "0",
+      "preparing_at": null,
+      "ready_at": null,
+      "receipt_printed_at": "2026-07-24T15:38:16.420888Z",
+      "rejected_at": null,
+      "road_distance_meters": null,
+      "service_charge_amount": 0,
+      "service_charge_rate_applied": 0.0,
+      "status": "cancelled",
+      "subtotal": 43000,
+      "tax_amount": 0,
+      "tax_inclusive": false,
+      "tax_rate_applied": 0.0,
+      "total": 43000,
+      "unit_number": null,
+      "updated_at": "2026-01-01T00:00:00Z"
+    },
+    {
+      "address_line": null,
+      "branch_id": "6c368d6d-093a-46c1-a569-9ee3f6f2644c",
+      "cancel_reason": null,
+      "cancel_restocked": null,
+      "cancelled_at": null,
+      "cart": {
+        "lines": [
+          {
+            "addons": [
+              {
+                "addon_item_id": "d6e43a13-aa4c-4bc5-b590-2599abdc6c2e",
+                "addon_name": "Skimmed Milk",
+                "line_cost": null,
+                "name_translations": {
+                  "ar": "حليب منزوع الدسم",
+                  "en": "Skimmed Milk"
+                },
+                "quantity": 1,
+                "unit_price": 0
+              }
+            ],
+            "cost_missing": true,
+            "item_name": "Blended Latte",
+            "line_cost": null,
+            "line_total": 19000,
+            "menu_item_id": "9c594788-e502-4ca5-9852-d390dd438139",
+            "name_translations": {
+              "ar": "لاتيه مخلوط",
+              "en": "Blended Latte"
+            },
+            "notes": null,
+            "optionals": [],
+            "quantity": 1,
+            "size_label": null,
+            "unit_cost": null,
+            "unit_price": 19000
+          },
+          {
+            "addons": [
+              {
+                "addon_item_id": "c891cdc7-bd0a-4f6e-88ba-c7ac08e039c6",
+                "addon_name": "Full Fat Milk",
+                "line_cost": null,
+                "name_translations": {
+                  "ar": "حليب كامل الدسم",
+                  "en": "Full Fat Milk"
+                },
+                "quantity": 1,
+                "unit_price": 0
+              }
+            ],
+            "cost_missing": true,
+            "item_name": "Blended Latte",
+            "line_cost": null,
+            "line_total": 19000,
+            "menu_item_id": "9c594788-e502-4ca5-9852-d390dd438139",
+            "name_translations": {
+              "ar": "لاتيه مخلوط",
+              "en": "Blended Latte"
+            },
+            "notes": null,
+            "optionals": [],
+            "quantity": 1,
+            "size_label": null,
+            "unit_cost": null,
+            "unit_price": 19000
+          },
+          {
+            "addons": [
+              {
+                "addon_item_id": "535993b9-1a04-4417-9277-8770370c6e4f",
+                "addon_name": "Coconut Milk",
+                "line_cost": null,
+                "name_translations": {
+                  "ar": "حليب جوز الهند",
+                  "en": "Coconut Milk"
+                },
+                "quantity": 1,
+                "unit_price": 6000
+              }
+            ],
+            "cost_missing": true,
+            "item_name": "Iced Matcha Latte",
+            "line_cost": null,
+            "line_total": 26000,
+            "menu_item_id": "9c434de3-83dc-4223-9144-eaad7aa90945",
+            "name_translations": {
+              "ar": "ماتشا لاتيه مثلج",
+              "en": "Iced Matcha Latte"
+            },
+            "notes": null,
+            "optionals": [],
+            "quantity": 1,
+            "size_label": null,
+            "unit_cost": null,
+            "unit_price": 20000
+          }
+        ]
+      },
+      "channel": "umbrella",
+      "confirmed_at": null,
+      "created_at": "2026-01-01T00:00:00Z",
+      "customer_lat": null,
+      "customer_lng": null,
+      "customer_name": "REDACTED",
+      "customer_phone": "REDACTED",
+      "delivered_at": "2026-07-22T15:34:04.535107Z",
+      "delivery_fee": 0,
+      "delivery_notes": null,
+      "delivery_ref": "D-SIDIHE-260722-0001",
+      "delivery_zone_id": null,
+      "discount_amount": 0,
+      "discount_id": null,
+      "discount_rate": 0.0,
+      "discount_type": null,
+      "discount_value": 0,
+      "distance_source": null,
+      "extra_prep_minutes": 0,
+      "floor": null,
+      "id": "e0a6127d-4510-4735-9cde-7d0b4c1b540b",
+      "landmark": "Rentals side",
+      "order_id": "ff695b4c-f32f-4331-b78a-16843fe5259d",
+      "org_id": "685f6bfa-0d44-4a9f-bb3e-50eec96d50c9",
+      "otp_verified": true,
+      "out_for_delivery_at": "2026-07-22T14:38:30.730183Z",
+      "payment_method": "digital_wallet",
+      "payment_method_hint": "digital_wallet",
+      "place_name": "42",
+      "preparing_at": null,
+      "ready_at": null,
+      "receipt_printed_at": "2026-07-22T14:31:53.901627Z",
+      "rejected_at": null,
+      "road_distance_meters": null,
+      "service_charge_amount": 0,
+      "service_charge_rate_applied": 0.0,
+      "status": "delivered",
+      "subtotal": 64000,
+      "tax_amount": 0,
+      "tax_inclusive": false,
+      "tax_rate_applied": 0.0,
+      "total": 64000,
+      "unit_number": null,
+      "updated_at": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/delivery-orders?branch_id=6c368d6d-093a-46c1-a569-9ee3f6f2644c&limit=5"
+  },
+  "status": 200
+}

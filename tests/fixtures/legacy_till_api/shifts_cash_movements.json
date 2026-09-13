@@ -1,0 +1,70 @@
+{
+  "body": [
+    {
+      "amount": -20000,
+      "client_ref": "5e0b2dc3-e477-47a7-870d-67c4f12e2216",
+      "corrects_id": null,
+      "created_at": "2026-01-01T00:00:00Z",
+      "id": "48e20cbf-17c6-4ccc-a7ac-c95ca31db300",
+      "kind": "pay_out",
+      "moved_by": "7f01b66f-a048-4bcc-b552-60d0d8c64d44",
+      "moved_by_name": "Test2",
+      "note": "REDACTED",
+      "shift_id": "28c01d00-5076-4f89-b2ab-d0b045e27f63"
+    },
+    {
+      "amount": -20000,
+      "client_ref": "be61d6c7-aa59-4874-ae9c-4b6c2efdc972",
+      "corrects_id": null,
+      "created_at": "2026-01-01T00:00:00Z",
+      "id": "68aef075-d09e-436e-ae07-c186bd3f748b",
+      "kind": "pay_out",
+      "moved_by": "7f01b66f-a048-4bcc-b552-60d0d8c64d44",
+      "moved_by_name": "Test2",
+      "note": "REDACTED",
+      "shift_id": "28c01d00-5076-4f89-b2ab-d0b045e27f63"
+    },
+    {
+      "amount": -10000,
+      "client_ref": "16ef90b6-437f-45d1-b9e2-6f2334168aa6",
+      "corrects_id": null,
+      "created_at": "2026-01-01T00:00:00Z",
+      "id": "2f5117cc-404f-4826-9a83-d2c1ed60f83c",
+      "kind": "pay_out",
+      "moved_by": "7f01b66f-a048-4bcc-b552-60d0d8c64d44",
+      "moved_by_name": "Test2",
+      "note": "REDACTED",
+      "shift_id": "28c01d00-5076-4f89-b2ab-d0b045e27f63"
+    },
+    {
+      "amount": -1000,
+      "client_ref": "9802bc76-1214-49da-a631-0ff68489beed",
+      "corrects_id": null,
+      "created_at": "2026-01-01T00:00:00Z",
+      "id": "0e737431-29a8-456c-a1c2-052611ad7043",
+      "kind": "pay_out",
+      "moved_by": "7f01b66f-a048-4bcc-b552-60d0d8c64d44",
+      "moved_by_name": "Test2",
+      "note": "REDACTED",
+      "shift_id": "28c01d00-5076-4f89-b2ab-d0b045e27f63"
+    },
+    {
+      "amount": 50000,
+      "client_ref": "8575cfca-b6d6-473f-b43a-276bba33d268",
+      "corrects_id": null,
+      "created_at": "2026-01-01T00:00:00Z",
+      "id": "ea8f0f05-23d1-4500-9ded-852826caee5f",
+      "kind": "pay_in",
+      "moved_by": "7f01b66f-a048-4bcc-b552-60d0d8c64d44",
+      "moved_by_name": "Test2",
+      "note": "REDACTED",
+      "shift_id": "28c01d00-5076-4f89-b2ab-d0b045e27f63"
+    }
+  ],
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/shifts/28c01d00-5076-4f89-b2ab-d0b045e27f63/cash-movements"
+  },
+  "status": 200
+}

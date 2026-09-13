@@ -1,0 +1,66 @@
+{
+  "body": {
+    "amount_tendered": null,
+    "branch_id": "6c368d6d-093a-46c1-a569-9ee3f6f2644c",
+    "change_given": null,
+    "created_at": "2026-01-01T00:00:00Z",
+    "customer_name": null,
+    "delivery_channel": null,
+    "delivery_fee": 0,
+    "delivery_lat": null,
+    "delivery_lng": null,
+    "delivery_order_id": null,
+    "discount_amount": 0,
+    "discount_id": null,
+    "discount_rate": 0.0,
+    "discount_type": null,
+    "discount_value": 0,
+    "id": "d496b44b-a78b-4264-a454-e48a74065896",
+    "loyalty_customer_id": null,
+    "loyalty_member_name": null,
+    "notes": null,
+    "order_number": 66,
+    "order_ref": "SIDIHE-260913-93D9DC-066",
+    "order_type": "dine_in",
+    "payment_legs": [
+      {
+        "amount": 23000,
+        "method": "card"
+      }
+    ],
+    "payment_method": "card",
+    "price_expected_total": 23000,
+    "price_flagged": false,
+    "service_charge_amount": 0,
+    "shift_id": "93d9dc66-58cd-4b9d-a076-968faaf7274c",
+    "status": "completed",
+    "subtotal": 23000,
+    "tax_amount": 0,
+    "teller_id": "52e96e3d-7b77-40b0-a388-e304ab06b879",
+    "teller_name": "Nour",
+    "timezone": "Africa/Cairo",
+    "tip_amount": 0,
+    "tip_payment_method": null,
+    "total_amount": 23000,
+    "void_note": null,
+    "void_reason": null,
+    "voided_at": null,
+    "voided_by": null,
+    "waiter_id": "749b3578-f140-4b2d-9633-2210e99756ca",
+    "waiter_name": "Boody@W"
+  },
+  "request": {
+    "body": {
+      "op": "settle_open_ticket",
+      "request": {
+        "payment_method": "card",
+        "shift_id": "93d9dc66-58cd-4b9d-a076-968faaf7274c"
+      },
+      "teller_id": "52e96e3d-7b77-40b0-a388-e304ab06b879",
+      "ticket_id": "fc92e047-df7f-49a9-8e81-46be9bff8b55"
+    },
+    "method": "POST",
+    "path": "/sync/replay"
+  },
+  "status": 200
+}

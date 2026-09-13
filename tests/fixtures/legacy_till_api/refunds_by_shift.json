@@ -1,0 +1,33 @@
+{
+  "body": {
+    "refund_count": 1,
+    "refunded_amount": 1000,
+    "refunded_cash": 1000,
+    "refunds": [
+      {
+        "amount": 1000,
+        "branch_id": "37bda2d8-8a0d-43a2-a088-38ec0961429c",
+        "client_ref": "1c542cd7-9c1b-4abe-b5e5-d4758d4a7e51",
+        "created_at": "2026-01-01T00:00:00Z",
+        "id": "056e3c18-e5fd-4a05-b168-c119cf463399",
+        "is_cash": true,
+        "issued_at": "2026-01-01T00:00:00Z",
+        "issued_by": "7f01b66f-a048-4bcc-b552-60d0d8c64d44",
+        "issued_by_name": "Test2",
+        "lines": [],
+        "method": "cash",
+        "note": null,
+        "order_id": "00000000-0000-0000-0000-000000000003",
+        "reason": "quality_issue",
+        "shift_id": "28c01d00-5076-4f89-b2ab-d0b045e27f63"
+      }
+    ],
+    "shift_id": "28c01d00-5076-4f89-b2ab-d0b045e27f63"
+  },
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/refunds/shift/28c01d00-5076-4f89-b2ab-d0b045e27f63"
+  },
+  "status": 200
+}

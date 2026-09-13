@@ -1,0 +1,30 @@
+{
+  "body": {
+    "amount": -1500,
+    "client_ref": "00000000-0000-0000-0000-000000000001",
+    "corrects_id": null,
+    "created_at": "2026-01-01T00:00:00Z",
+    "id": "178158b2-ac94-4fb7-9187-dacac322355c",
+    "kind": "pay_out",
+    "moved_by": "7f01b66f-a048-4bcc-b552-60d0d8c64d44",
+    "moved_by_name": "Test2",
+    "note": "REDACTED",
+    "shift_id": "28c01d00-5076-4f89-b2ab-d0b045e27f63"
+  },
+  "request": {
+    "body": {
+      "op": "cash_movement",
+      "request": {
+        "amount": -1500,
+        "client_ref": "00000000-0000-0000-0000-000000000001",
+        "kind": "pay_out",
+        "note": "golden pay out"
+      },
+      "shift_id": "28c01d00-5076-4f89-b2ab-d0b045e27f63",
+      "teller_id": "7f01b66f-a048-4bcc-b552-60d0d8c64d44"
+    },
+    "method": "POST",
+    "path": "/sync/replay"
+  },
+  "status": 201
+}

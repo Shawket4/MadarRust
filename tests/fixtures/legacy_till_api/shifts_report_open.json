@@ -1,0 +1,133 @@
+{
+  "body": {
+    "cash_adjustments": 0,
+    "cash_in_refunded_sales": 0,
+    "cash_movements": [
+      {
+        "amount": -20000,
+        "corrects_id": null,
+        "corrects_kind": null,
+        "created_at": "2026-01-01T00:00:00Z",
+        "id": "48e20cbf-17c6-4ccc-a7ac-c95ca31db300",
+        "kind": "pay_out",
+        "moved_by_name": "Test2",
+        "note": "REDACTED"
+      },
+      {
+        "amount": -20000,
+        "corrects_id": null,
+        "corrects_kind": null,
+        "created_at": "2026-01-01T00:00:00Z",
+        "id": "68aef075-d09e-436e-ae07-c186bd3f748b",
+        "kind": "pay_out",
+        "moved_by_name": "Test2",
+        "note": "REDACTED"
+      },
+      {
+        "amount": -10000,
+        "corrects_id": null,
+        "corrects_kind": null,
+        "created_at": "2026-01-01T00:00:00Z",
+        "id": "2f5117cc-404f-4826-9a83-d2c1ed60f83c",
+        "kind": "pay_out",
+        "moved_by_name": "Test2",
+        "note": "REDACTED"
+      },
+      {
+        "amount": -1000,
+        "corrects_id": null,
+        "corrects_kind": null,
+        "created_at": "2026-01-01T00:00:00Z",
+        "id": "0e737431-29a8-456c-a1c2-052611ad7043",
+        "kind": "pay_out",
+        "moved_by_name": "Test2",
+        "note": "REDACTED"
+      },
+      {
+        "amount": 50000,
+        "corrects_id": null,
+        "corrects_kind": null,
+        "created_at": "2026-01-01T00:00:00Z",
+        "id": "ea8f0f05-23d1-4500-9ded-852826caee5f",
+        "kind": "pay_in",
+        "moved_by_name": "Test2",
+        "note": "REDACTED"
+      }
+    ],
+    "cash_movements_in": 50000,
+    "cash_movements_net": -1000,
+    "cash_movements_out": 51000,
+    "cash_tips": 10000,
+    "expected_cash": 73500,
+    "net_payments": 521500,
+    "non_cash_tips": 0,
+    "payment_summary": [
+      {
+        "is_cash": false,
+        "order_count": 18,
+        "payment_method": "card",
+        "total": 352000
+      },
+      {
+        "is_cash": true,
+        "order_count": 5,
+        "payment_method": "cash",
+        "total": 56500
+      },
+      {
+        "is_cash": false,
+        "order_count": 5,
+        "payment_method": "digital_wallet",
+        "total": 96000
+      },
+      {
+        "is_cash": false,
+        "order_count": 1,
+        "payment_method": "talabat_online",
+        "total": 17000
+      }
+    ],
+    "printed_at": "2026-09-13T13:29:57.019814Z",
+    "refunds_issued_amount": 0,
+    "refunds_issued_cash": 0,
+    "refunds_issued_count": 0,
+    "safe_drops": 0,
+    "shift": {
+      "branch_id": "37bda2d8-8a0d-43a2-a088-38ec0961429c",
+      "branch_name": null,
+      "cash_discrepancy": null,
+      "closed_at": null,
+      "closed_by": null,
+      "closing_cash_declared": null,
+      "closing_cash_system": null,
+      "force_close_reason": null,
+      "force_closed_at": null,
+      "force_closed_by": null,
+      "id": "28c01d00-5076-4f89-b2ab-d0b045e27f63",
+      "notes": null,
+      "opened_at": "2026-01-01T00:00:00Z",
+      "opening_cash": 8000,
+      "opening_cash_edit_reason": null,
+      "opening_cash_original": 8000,
+      "opening_cash_was_edited": false,
+      "status": "open",
+      "teller_id": "7f01b66f-a048-4bcc-b552-60d0d8c64d44",
+      "teller_name": "Test2",
+      "till_id": "441b694d-1400-42f5-8672-f4c721d08efc",
+      "till_name": "Till 1",
+      "timezone": "Africa/Cairo"
+    },
+    "standard_float": null,
+    "suggested_safe_drop": null,
+    "timezone": "Africa/Cairo",
+    "total_payments": 521500,
+    "total_tips": 10000,
+    "voided_amount": 0
+  },
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/shifts/28c01d00-5076-4f89-b2ab-d0b045e27f63/report"
+  },
+  "status": 200
+}
