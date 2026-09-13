@@ -18,7 +18,9 @@ fn tile_hash(group_col: &str) -> String {
     format!("(SELECT a.hash FROM assets a WHERE a.group_id = {group_col} AND a.variant = 'tile' ORDER BY a.created_at DESC LIMIT 1)")
 }
 
-/// Run `SELECT id, <json>` and key the objects by id.
+/// Run `SELECT id, <json>` and key the objects by id. The builders are `json_*`,
+/// not `jsonb_*`: the value is only ever re-serialized, and skipping jsonb's
+/// binary conversion is a third of the cost of a 25k-order window.
 async fn by_sql(conn: &mut PgConnection, sql: &str, ids: &[Uuid]) -> Result<HashMap<Uuid, Value>, AppError> {
     let rows: Vec<(Uuid, Value)> = sqlx::query_as(sql).bind(ids).fetch_all(&mut *conn).await?;
     Ok(rows.into_iter().collect())
@@ -131,7 +133,7 @@ pub async fn project(
     Ok(match ty {
         "category" => {
             let sql = format!(
-                "SELECT c.id, jsonb_build_object('id', c.id, 'name', c.name, 'name_translations', c.name_translations, \
+                "SELECT c.id, json_build_object('id', c.id, 'name', c.name, 'name_translations', c.name_translations, \
                         'is_active', c.is_active, 'image_hash', {}) \
                    FROM categories c WHERE c.id = ANY($1) AND c.deleted_at IS NULL AND c.is_active",
                 tile_hash("c.image_group_id")
@@ -188,7 +190,7 @@ pub async fn project(
         "ingredient" => {
             by_sql(
                 conn,
-                "SELECT i.id, jsonb_build_object('id', i.id, 'name', i.name, 'unit', i.unit::text, 'is_active', i.is_active) \
+                "SELECT i.id, json_build_object('id', i.id, 'name', i.name, 'unit', i.unit::text, 'is_active', i.is_active) \
                    FROM org_ingredients i WHERE i.id = ANY($1) AND i.deleted_at IS NULL",
                 ids,
             )
@@ -197,7 +199,7 @@ pub async fn project(
         "payment_method" => {
             by_sql(
                 conn,
-                "SELECT p.id, jsonb_build_object('id', p.id, 'name', p.name, 'label_translations', p.label_translations, \
+                "SELECT p.id, json_build_object('id', p.id, 'name', p.name, 'label_translations', p.label_translations, \
                         'color', p.color, 'icon', p.icon, 'is_cash', p.is_cash, 'is_active', p.is_active) \
                    FROM org_payment_methods p WHERE p.id = ANY($1)",
                 ids,
@@ -222,7 +224,7 @@ pub async fn project(
         "discount" => {
             by_sql(
                 conn,
-                "SELECT d.id, jsonb_build_object('id', d.id, 'name', d.name, 'name_translations', d.name_translations, \
+                "SELECT d.id, json_build_object('id', d.id, 'name', d.name, 'name_translations', d.name_translations, \
                         'type', d.type::text, 'value', d.value, 'is_active', d.is_active) \
                    FROM discounts d WHERE d.id = ANY($1)",
                 ids,
@@ -231,7 +233,7 @@ pub async fn project(
         }
         "branch_settings" => {
             let sql = format!(
-                "SELECT b.id, jsonb_build_object('id', b.id, 'name', b.name, 'code', b.code, \
+                "SELECT b.id, json_build_object('id', b.id, 'name', b.name, 'code', b.code, \
                         'timezone', effective_timezone(b.id), 'tax_rate', b.tax_rate, 'tax_inclusive', b.tax_inclusive, \
                         'service_charge_rate', b.service_charge_rate, 'service_charge_taxable', b.service_charge_taxable, \
                         'require_table_for_orders', b.require_table_for_orders, 'kitchen_routing_mode', b.kitchen_routing_mode, \
@@ -245,7 +247,7 @@ pub async fn project(
         "device" => {
             by_sql(
                 conn,
-                "SELECT d.id, jsonb_build_object('id', d.id, 'code', d.code, 'label', d.label, 'kind', d.kind) \
+                "SELECT d.id, json_build_object('id', d.id, 'code', d.code, 'label', d.label, 'kind', d.kind) \
                    FROM devices d WHERE d.id = ANY($1) AND d.retired_at IS NULL",
                 ids,
             )
@@ -254,7 +256,7 @@ pub async fn project(
         "teller" => {
             by_sql(
                 conn,
-                "SELECT u.id, jsonb_build_object('id', u.id, 'user_id', u.id, 'name', u.name, 'role', u.role::text, \
+                "SELECT u.id, json_build_object('id', u.id, 'user_id', u.id, 'name', u.name, 'role', u.role::text, \
                         'is_active', u.is_active, 'offline_pin_hash', u.offline_pin_hash) \
                    FROM users u WHERE u.id = ANY($1) AND u.deleted_at IS NULL",
                 ids,
@@ -264,7 +266,7 @@ pub async fn project(
         "floor_section" => {
             by_sql(
                 conn,
-                "SELECT s.id, jsonb_build_object('id', s.id, 'branch_id', s.branch_id, 'name', s.name, 'ordering', s.ordering, \
+                "SELECT s.id, json_build_object('id', s.id, 'branch_id', s.branch_id, 'name', s.name, 'ordering', s.ordering, \
                         'canvas_w', s.canvas_w, 'canvas_h', s.canvas_h) \
                    FROM floor_sections s WHERE s.id = ANY($1)",
                 ids,
@@ -278,7 +280,7 @@ pub async fn project(
         "table_occupancy" => {
             by_sql(
                 conn,
-                "SELECT o.id, jsonb_build_object('id', o.id, 'table_id', o.table_id, 'held_by', o.held_by, \
+                "SELECT o.id, json_build_object('id', o.id, 'table_id', o.table_id, 'held_by', o.held_by, \
                         'open_ticket_id', o.open_ticket_id, 'booking_id', o.booking_id, 'party_size', o.party_size, \
                         'started_at', o.started_at, 'started_by', o.started_by, 'started_till_id', o.started_till_id, \
                         'seated_at', o.seated_at, 'ended_at', o.ended_at, 'end_reason', o.end_reason, \
@@ -330,7 +332,7 @@ keyed(crate::kitchen::kitchen_ticket_views(&mut *conn, ids).await?, &["org_id"])
         "cash_movement" => {
             by_sql(
                 conn,
-                "SELECT m.id, jsonb_build_object('id', m.id, 'till_id', m.till_id, 'amount', m.amount, 'kind', m.kind, \
+                "SELECT m.id, json_build_object('id', m.id, 'till_id', m.till_id, 'amount', m.amount, 'kind', m.kind, \
                         'corrects_id', m.corrects_id, 'note', m.note, 'moved_by', m.moved_by, \
                         'moved_by_name', (SELECT name FROM users WHERE id = m.moved_by), 'created_at', m.created_at, \
                         'client_ref', m.client_ref, 'device_id', m.device_id) \
@@ -342,7 +344,7 @@ keyed(crate::kitchen::kitchen_ticket_views(&mut *conn, ids).await?, &["org_id"])
         "order" => {
             by_sql(
                 conn,
-                "SELECT o.id, jsonb_build_object('id', o.id, 'branch_id', o.branch_id, 'till_id', o.till_id, \
+                "SELECT o.id, json_build_object('id', o.id, 'branch_id', o.branch_id, 'till_id', o.till_id, \
                         'teller_id', o.teller_id, 'teller_name', u.name, 'waiter_id', o.waiter_id, \
                         'order_number', o.order_number, 'device_code', o.device_code, \
                         'display_number', CASE WHEN o.device_code IS NOT NULL THEN o.device_code || '-' || o.order_number \
@@ -352,8 +354,8 @@ keyed(crate::kitchen::kitchen_ticket_views(&mut *conn, ids).await?, &["org_id"])
                         'service_charge_amount', o.service_charge_amount, 'delivery_fee', o.delivery_fee, \
                         'total_amount', o.total_amount, 'tip_amount', o.tip_amount, 'tip_payment_method', o.tip_payment_method, \
                         'payment_method', o.payment_method::text, \
-                        'payment_legs', COALESCE((SELECT jsonb_agg(jsonb_build_object('method', p.method, 'amount', p.amount, \
-                                                   'is_cash', p.is_cash) ORDER BY p.id) FROM order_payments p WHERE p.order_id = o.id), '[]'::jsonb), \
+                        'payment_legs', COALESCE((SELECT json_agg(json_build_object('method', p.method, 'amount', p.amount, \
+                                                   'is_cash', p.is_cash) ORDER BY p.id) FROM order_payments p WHERE p.order_id = o.id), '[]'::json), \
                         'open_ticket_id', o.open_ticket_id, 'table_id', o.table_id, 'customer_name', o.customer_name, \
                         'created_at', o.created_at, 'voided_at', o.voided_at, 'idempotency_key', o.idempotency_key, \
                         'device_id', o.device_id) \
@@ -365,7 +367,7 @@ keyed(crate::kitchen::kitchen_ticket_views(&mut *conn, ids).await?, &["org_id"])
         "refund" => {
             by_sql(
                 conn,
-                "SELECT r.id, jsonb_build_object('id', r.id, 'order_id', r.order_id, 'till_id', r.till_id, 'amount', r.amount, \
+                "SELECT r.id, json_build_object('id', r.id, 'order_id', r.order_id, 'till_id', r.till_id, 'amount', r.amount, \
                         'method', r.method, 'is_cash', r.is_cash, 'reason', r.reason, 'note', r.note, \
                         'issued_by', r.issued_by, 'issued_at', r.issued_at, 'client_ref', r.client_ref) \
                    FROM order_refunds r WHERE r.id = ANY($1)",
