@@ -1674,6 +1674,17 @@ async fn a_hold_records_its_covers(pool: PgPool) {
     );
     assert_eq!(resp.status(), 200);
     assert_eq!(live_party(&pool, t1).await.unwrap().1, Some(5));
+    // Every device's floor reads the covers off the table list.
+    let resp = get_req!(app, t, &format!("/floor/tables?branch_id={branch}"));
+    assert_eq!(resp.status(), 200);
+    let tables: serde_json::Value = test::read_body_json(resp).await;
+    let row = tables
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == serde_json::json!(t1))
+        .unwrap();
+    assert_eq!(row["party_size"], 5);
 
     // A queued hold carries it through replay too; nonsense is not recorded.
     let resp = post_json!(

@@ -51392,6 +51392,14 @@
             "type": "string",
             "format": "uuid"
           },
+          "party_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How many sat down (covers) on the live occupancy, when the host counted\nthem or the bill carries a guest count. `null` when free or unknown."
+          },
           "pos_x": {
             "type": "number",
             "format": "double"
