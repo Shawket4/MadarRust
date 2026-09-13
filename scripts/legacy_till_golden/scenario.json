@@ -91,6 +91,10 @@
      "body": {"op": "refund_order", "teller_id": "{{teller_a}}", "request": {
               "order_id": "{{new_order}}", "amount": 1000, "method": "cash", "reason": "quality_issue",
               "client_ref": "{{refund_ref}}", "shift_id": "{{s_a}}"}}},
+    {"save": "replay_refund_order_dedup", "model": "RefundIssued", "clients": ["v0.6.0"], "method": "POST", "path": "/sync/replay", "as": "teller_a",
+     "body": {"op": "refund_order", "teller_id": "{{teller_a}}", "request": {
+              "order_id": "{{new_order}}", "amount": 1000, "method": "cash", "reason": "quality_issue",
+              "client_ref": "{{refund_ref}}", "shift_id": "{{s_a}}"}}},
     {"save": "refunds_by_order", "model": "OrderRefunds", "clients": ["v0.6.0"], "method": "GET", "path": "/refunds/order/{{new_order}}", "as": "teller_a"},
     {"save": "refunds_by_shift", "model": "ShiftRefunds", "clients": ["v0.6.0"], "method": "GET", "path": "/refunds/shift/{{s_a}}", "as": "teller_a"},
     {"save": "orders_list_by_shift_after", "model": "PaginatedOrders", "method": "GET", "path": "/orders?branch_id={{branch_a}}&shift_id={{s_a}}&page=1&per_page=2", "as": "teller_a"},

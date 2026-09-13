@@ -15,7 +15,7 @@
     "discount_rate": 0.0,
     "discount_type": null,
     "discount_value": 0,
-    "id": "487a2ddb-9f86-46d8-b4e9-a102a646e6a8",
+    "id": "7e6bf7a5-5a83-426c-9027-ef47340749c8",
     "items": [
       {
         "addons": [],
@@ -24,7 +24,7 @@
         "bundle_unit_price": null,
         "cost_missing": true,
         "deductions_snapshot": [],
-        "id": "f517e584-fdc3-46a2-875d-3be39e90f9a4",
+        "id": "7906e8c2-cd79-4184-a631-4ef654a38dcc",
         "is_reward": false,
         "item_name": "Latte",
         "line_cost": null,
@@ -33,7 +33,7 @@
         "name_translations": {},
         "notes": null,
         "optionals": [],
-        "order_id": "487a2ddb-9f86-46d8-b4e9-a102a646e6a8",
+        "order_id": "7e6bf7a5-5a83-426c-9027-ef47340749c8",
         "quantity": 2,
         "reward_covered": 0,
         "reward_units": 0,
@@ -79,7 +79,7 @@
   "request": {
     "body": null,
     "method": "GET",
-    "path": "/orders/487a2ddb-9f86-46d8-b4e9-a102a646e6a8"
+    "path": "/orders/7e6bf7a5-5a83-426c-9027-ef47340749c8"
   },
   "status": 200
 }

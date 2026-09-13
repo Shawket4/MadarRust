@@ -206,6 +206,14 @@
       ]
     },
     {
+      "file": "replay_refund_order_dedup.json",
+      "status": 200,
+      "model": "RefundIssued",
+      "clients": [
+        "v0.6.0"
+      ]
+    },
+    {
       "file": "refunds_by_order.json",
       "status": 200,
       "model": "OrderRefunds",

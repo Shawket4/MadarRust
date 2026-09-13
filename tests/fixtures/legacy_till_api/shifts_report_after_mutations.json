@@ -8,7 +8,7 @@
         "corrects_id": null,
         "corrects_kind": null,
         "created_at": "2026-01-01T00:00:00Z",
-        "id": "4c615cdf-748a-4a36-9e3b-cd4fbf1c5f07",
+        "id": "a2cda637-40a8-48ab-9360-c4a112442ff6",
         "kind": "pay_in",
         "moved_by_name": "Teller Alpha",
         "note": "coins"
@@ -18,7 +18,7 @@
         "corrects_id": null,
         "corrects_kind": null,
         "created_at": "2026-01-01T00:00:00Z",
-        "id": "fc3a370c-4e79-4cff-9826-3146d714931e",
+        "id": "1cad9248-aa01-4834-9b65-429d28ad5b82",
         "kind": "pay_out",
         "moved_by_name": "Teller Alpha",
         "note": "golden pay out"
@@ -65,7 +65,7 @@
       "status": "open",
       "teller_id": "10000000-0000-4000-8000-00000000ee0a",
       "teller_name": "Teller Alpha",
-      "till_id": "690769f8-2652-4d48-ab5e-4285d5bbe091",
+      "till_id": "5ffc3444-9414-422a-9114-b95466f27bcc",
       "till_name": "Till 1",
       "timezone": "Africa/Cairo"
     },

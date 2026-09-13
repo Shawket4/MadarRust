@@ -37,5 +37,5 @@
     "method": "POST",
     "path": "/sync/replay"
   },
-  "status": 201
+  "status": 200
 }
