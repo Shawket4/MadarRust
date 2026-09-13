@@ -1,5 +1,6 @@
 -- ROLLBACK of the tills rework (NOT a sqlx migration). Reverses, in order:
 --   20260914090400_assets.sql
+--   20260914090500_asset_internal_tables_rls.sql
 --   20260914090300_sync_changefeed.sql
 --   20260914090200_till_reconciliation.sql
 --   20260914090100_payment_method_availability.sql
@@ -407,4 +408,4 @@ BEGIN
 END $$;
 
 DELETE FROM _sqlx_migrations WHERE version IN
-    (20260914090000, 20260914090100, 20260914090200, 20260914090300, 20260914090400);
+    (20260914090000, 20260914090100, 20260914090200, 20260914090300, 20260914090400, 20260914090500);
