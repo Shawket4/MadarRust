@@ -2224,3 +2224,105 @@ async fn at_most_one_open_till_per_person(pool: PgPool) {
         .unwrap();
     assert_eq!(n, 1);
 }
+
+/// Decision 7 / R1: an offline open that could not be checked is ACCEPTED on
+/// replay even though the person already has an open till at the branch; the
+/// replayed one is FLAGGED and linked, both stay open, and both are visible —
+/// on T1 `/current` (`open_at_branch`, `open_elsewhere`) and on the dashboard's
+/// T3 list with `flagged=true`.
+#[sqlx::test]
+async fn replay_open_till_duplicate_flags_and_both_are_visible(pool: PgPool) {
+    use crate::sync::ActingContext;
+    use crate::tills::handlers::{OpenMeta, OpenTillRequest, PaginatedTills, TillPreFill, open_till_inner};
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "tills", "read").await;
+    let (dev_a, dev_b) = (Uuid::new_v4(), Uuid::new_v4());
+    let open = |replay: bool, device: Uuid| OpenTillRequest {
+        id: Some(Uuid::new_v4()),
+        opening_cash: 1000,
+        opening_cash_edited: None,
+        edit_reason: Some("float".into()),
+        opened_at: None,
+        device_id: Some(device),
+        verification: if replay { Some("unverified".into()) } else { None },
+    };
+    let actor = |replay: bool| ActingContext { teller_id: user_id, org_id, role: UserRole::OrgAdmin, replay };
+
+    let (first, created) =
+        open_till_inner(&pool, None, branch_id, open(false, dev_a), actor(false), OpenMeta::default()).await.unwrap();
+    assert!(created && !first.opened_while_another_open);
+
+    // Live, the second open is refused…
+    let live = open_till_inner(&pool, None, branch_id, open(false, dev_b), actor(false), OpenMeta::default()).await;
+    assert!(matches!(live, Err(crate::errors::AppError::RefusedWith { code: "TILL_OPEN_ELSEWHERE", .. })));
+    // …but the offline one, replayed, is accepted and flagged.
+    let (second, created) =
+        open_till_inner(&pool, None, branch_id, open(true, dev_b), actor(true), OpenMeta::default()).await.unwrap();
+    assert!(created);
+    assert!(second.opened_while_another_open, "the replayed second open is flagged");
+    assert_eq!(second.other_till_id, Some(first.id), "and linked to the till that was already open");
+    assert!(second.flagged_at.is_some());
+    let open_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM tills WHERE teller_id = $1 AND branch_id = $2 AND status = 'open'")
+            .bind(user_id)
+            .bind(branch_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(open_count, 2, "both stay open");
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(crate::tills::routes::configure),
+    )
+    .await;
+    let token = generate_org_admin_token(user_id, org_id);
+
+    // T1 from device A: resumes A, and still shows the flagged B.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/tills/branches/{branch_id}/current"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("X-Madar-Device", dev_a.to_string()))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let pre: TillPreFill = test::read_body_json(resp).await;
+    assert_eq!(pre.open_till.as_ref().map(|t| t.id), Some(first.id));
+    let at_branch: Vec<(Uuid, bool)> = pre.open_at_branch.iter().map(|t| (t.id, t.opened_while_another_open)).collect();
+    assert_eq!(at_branch, vec![(second.id, true), (first.id, false)], "both, newest first, flag visible");
+    assert!(pre.open_elsewhere.iter().any(|t| t.id == second.id && t.opened_while_another_open));
+
+    // T1 with no device header: still both.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/tills/branches/{branch_id}/current"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
+    let pre: TillPreFill = test::read_body_json(resp).await;
+    assert_eq!(pre.open_at_branch.len(), 2);
+
+    // Dashboard (T3): the flagged filter finds the second till; the open list has both.
+    let list = |q: &'static str| {
+        let req = test::TestRequest::get()
+            .uri(&format!("/tills/branches/{branch_id}?{q}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        test::call_service(&app, req)
+    };
+    let flagged: PaginatedTills = test::read_body_json(list("status=open&flagged=true").await).await;
+    assert_eq!(flagged.data.iter().map(|t| t.id).collect::<Vec<_>>(), vec![second.id]);
+    assert_eq!(flagged.data[0].other_till_id, Some(first.id));
+    let all_open: PaginatedTills = test::read_body_json(list("status=open").await).await;
+    assert_eq!(all_open.data.len(), 2);
+}

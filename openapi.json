@@ -67078,6 +67078,13 @@
             ],
             "format": "int32"
           },
+          "open_at_branch": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TillBrief"
+            },
+            "description": "EVERY open till of the person at THIS branch, newest first (whatever the\ndevice). Normally zero or one; two or more only after an offline open\nwas replayed while another was open — the newer is flagged\n(`opened_while_another_open`) and both stay open, so both are listed."
+          },
           "open_bills_notice": {
             "$ref": "#/components/schemas/OpenBillsNotice"
           },

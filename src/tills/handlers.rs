@@ -207,6 +207,12 @@ pub struct TillPreFill {
     pub has_open_till: bool,
     pub open_till: Option<Till>,
     pub open_elsewhere: Vec<TillBrief>,
+    /// EVERY open till of the person at THIS branch, newest first (whatever the
+    /// device). Normally zero or one; two or more only after an offline open
+    /// was replayed while another was open — the newer is flagged
+    /// (`opened_while_another_open`) and both stay open, so both are listed.
+    #[serde(default)]
+    pub open_at_branch: Vec<TillBrief>,
     pub suggested_opening_cash: i32,
     pub last_close_declared: Option<i32>,
     pub open_bills_notice: OpenBillsNotice,
@@ -593,6 +599,7 @@ pub(crate) async fn current_till(
         .filter(|t| device.is_none() || t.device_id != device)
         .map(TillBrief::from)
         .collect();
+    let open_at_branch = open.iter().filter(|t| t.branch_id == branch_id).map(TillBrief::from).collect();
     let last = last_close_declared(pool, person, branch_id).await?;
     let float: Option<i32> = sqlx::query_scalar("SELECT standard_float FROM branches WHERE id = $1")
         .bind(branch_id)
@@ -603,6 +610,7 @@ pub(crate) async fn current_till(
         has_open_till: open_till.is_some(),
         open_till,
         open_elsewhere,
+        open_at_branch,
         suggested_opening_cash: last.or(float).unwrap_or(0),
         last_close_declared: last,
         open_bills_notice: open_bills_notice(pool, branch_id).await?,
