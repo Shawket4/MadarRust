@@ -57,54 +57,64 @@ pub fn spawn(pool: PgPool) {
 
 /// One member with a birthday today, and the programme that greets them.
 #[derive(sqlx::FromRow)]
-struct Greetable {
-    id: Uuid,
-    org_id: Uuid,
-    name: String,
-    locale: String,
-    year: i32,
+pub(crate) struct Greetable {
+    pub(crate) id: Uuid,
+    pub(crate) org_id: Uuid,
+    pub(crate) name: String,
+    pub(crate) locale: String,
+    pub(crate) year: i32,
 }
 
-async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
-    // Today in the ORG's timezone, not the server's. A shop in Cairo greeting
-    // its customers on UTC's calendar would send some of them a day early.
-    // Today in the ORG's timezone, not the server's. A shop in Cairo greeting
-    // its customers on UTC's calendar would send some of them a day early.
-    //
-    // The 29th of February is greeted on the 28th in a common year. Matching it
-    // exactly would mean a leap-day customer hears from the shop once every
-    // four years, which is not a birthday programme — and the alternative,
-    // storing them as the 1st of March, would be us quietly changing when their
-    // birthday is.
-    let due: Vec<Greetable> = sqlx::query_as(
-        "WITH today AS ( \
-             SELECT o.id AS org_id, \
-                    (now() AT TIME ZONE o.timezone)::date AS d \
-               FROM organizations o WHERE o.deleted_at IS NULL) \
-         SELECT c.id, c.org_id, c.name, c.locale, \
-                EXTRACT(YEAR FROM t.d)::int AS year \
-           FROM loyalty_customers c \
-           JOIN today t ON t.org_id = c.org_id \
-           JOIN loyalty_settings s ON s.org_id = c.org_id AND s.branch_id IS NULL \
-          WHERE c.birth_month IS NOT NULL \
-            AND s.enabled AND s.birthday_enabled \
-            AND ( \
-                (c.birth_month = EXTRACT(MONTH FROM t.d)::smallint \
-                 AND c.birth_day = EXTRACT(DAY FROM t.d)::smallint) \
-                -- A leap-day birthday, in a year that has no leap day. \
-                OR (c.birth_month = 2 AND c.birth_day = 29 \
-                    AND EXTRACT(MONTH FROM t.d) = 2 AND EXTRACT(DAY FROM t.d) = 28 \
-                    AND NOT (EXTRACT(DAY FROM (date_trunc('month', t.d) \
-                             + interval '1 month - 1 day')) = 29)) \
-            ) \
-            AND NOT EXISTS ( \
-                SELECT 1 FROM loyalty_birthday_greetings g \
-                 WHERE g.customer_id = c.id \
-                   AND g.year = EXTRACT(YEAR FROM t.d)::int) \
-          LIMIT 500",
-    )
-    .fetch_all(pool)
-    .await?;
+/// Members to greet on `on` (default: today in each ORG's timezone), at most 500.
+///
+/// Today in the ORG's timezone, not the server's. A shop in Cairo greeting its
+/// customers on UTC's calendar would send some of them a day early.
+///
+/// The 29th of February is greeted on the 28th in a common year. Matching it
+/// exactly would mean a leap-day customer hears from the shop once every four
+/// years, which is not a birthday programme — and the alternative, storing them
+/// as the 1st of March, would be us quietly changing when their birthday is.
+///
+/// The SQL is one plain string literal with no `\` line continuations and no
+/// `--` comments: a continuation joins the lines, so a SQL comment used to
+/// swallow the rest of the query and the sweep failed on every tick. (Behind
+/// that it would have failed anyway: `organizations.timezone` is the
+/// `timezone_name` domain, which `AT TIME ZONE` only takes as `text`.)
+pub(crate) async fn due_greetings(
+    pool: &PgPool,
+    on: Option<chrono::NaiveDate>,
+) -> Result<Vec<Greetable>, AppError> {
+    Ok(sqlx::query_as(DUE_SQL).bind(on).fetch_all(pool).await?)
+}
+
+const DUE_SQL: &str = "
+WITH today AS (
+    SELECT o.id AS org_id,
+           COALESCE($1::date, (now() AT TIME ZONE o.timezone::text)::date) AS d
+      FROM organizations o WHERE o.deleted_at IS NULL)
+SELECT c.id, c.org_id, c.name, c.locale,
+       EXTRACT(YEAR FROM t.d)::int AS year
+  FROM loyalty_customers c
+  JOIN today t ON t.org_id = c.org_id
+  JOIN loyalty_settings s ON s.org_id = c.org_id AND s.branch_id IS NULL
+ WHERE c.birth_month IS NOT NULL
+   AND s.enabled AND s.birthday_enabled
+   AND (
+       (c.birth_month = EXTRACT(MONTH FROM t.d)::smallint
+        AND c.birth_day = EXTRACT(DAY FROM t.d)::smallint)
+       OR (c.birth_month = 2 AND c.birth_day = 29
+           AND EXTRACT(MONTH FROM t.d) = 2 AND EXTRACT(DAY FROM t.d) = 28
+           AND NOT (EXTRACT(DAY FROM (date_trunc('month', t.d)
+                    + interval '1 month - 1 day')) = 29))
+   )
+   AND NOT EXISTS (
+       SELECT 1 FROM loyalty_birthday_greetings g
+        WHERE g.customer_id = c.id
+          AND g.year = EXTRACT(YEAR FROM t.d)::int)
+ LIMIT 500";
+
+pub(crate) async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
+    let due = due_greetings(pool, None).await?;
 
     for m in due {
         if let Err(e) = greet(pool, &m).await {
