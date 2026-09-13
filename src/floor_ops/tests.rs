@@ -1453,6 +1453,64 @@ async fn table_history_counts_only_what_the_table_actually_took(pool: PgPool) {
     );
 }
 
+#[sqlx::test]
+async fn table_history_counts_the_covers_the_host_counted(pool: PgPool) {
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    grant_defaults(&pool).await;
+    let tok = token(teller, org, UserRole::Teller);
+    let table = seed_table(&pool, org, branch, None, "T1").await;
+    let opened = chrono::Utc::now() - chrono::Duration::hours(3);
+    let closed = chrono::Utc::now() - chrono::Duration::hours(2);
+
+    // The bill carried no guest count; the party's hold said four.
+    let bill: Uuid = sqlx::query_scalar(
+        "INSERT INTO open_tickets (org_id, branch_id, table_id, ticket_ref, opened_by, \
+             status, opened_at, settled_at, settled_by) \
+         VALUES ($1,$2,$3,'T-1',$4,'settled',$5,$6,$4) RETURNING id",
+    )
+    .bind(org)
+    .bind(branch)
+    .bind(table)
+    .bind(teller)
+    .bind(opened)
+    .bind(closed)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    seed_order_for_ticket(&pool, org, branch, teller, bill, 5000, false).await;
+    sqlx::query(
+        "INSERT INTO table_occupancies \
+            (org_id, branch_id, table_id, held_by, open_ticket_id, party_size, started_at, \
+             ended_at, end_reason, needs_bussing) \
+         VALUES ($1,$2,$3,'ticket',$4,4,$5,$6,'settled',false)",
+    )
+    .bind(org)
+    .bind(branch)
+    .bind(table)
+    .bind(bill)
+    .bind(opened)
+    .bind(closed)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(secret()))
+            .app_data(web::Data::new(BranchEventHub::new()))
+            .configure(crate::reservations::routes::configure),
+    )
+    .await;
+    let r = get_req!(app, tok, &format!("/floor/tables/{table}/history"));
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = test::read_body_json(r).await;
+    assert_eq!(body["covers"], 4);
+    assert_eq!(body["sittings"][0]["guest_count"], 4);
+}
+
 /// A settled sale against an open ticket, so the history has something to
 /// join to. `voided` writes the `voided_at` that must keep it out of takings.
 async fn seed_order_for_ticket(

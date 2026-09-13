@@ -1082,7 +1082,9 @@ pub async fn table_history(
     )> = sqlx::query_as(
         "SELECT t.id, t.ticket_ref, t.opened_at, COALESCE(t.settled_at, t.voided_at), \
                 t.status::text, \
-                t.customer_name, t.guest_count, o.id, o.order_number, \
+                t.customer_name, \
+                COALESCE(t.guest_count, (SELECT max(oc.party_size)::int FROM table_occupancies oc \
+                                          WHERE oc.open_ticket_id = t.id)), o.id, o.order_number, \
                 CASE WHEN o.voided_at IS NULL THEN o.total_amount ELSE NULL END, \
                 LEAST(COALESCE(o.seated_at, t.seated_at, t.opened_at), t.opened_at) \
            FROM open_tickets t \
