@@ -1352,7 +1352,10 @@ pub(crate) async fn close_till_inner(
     )
     .await?;
     let other_open = branch_has_open_till(&mut *tx, till.branch_id).await?;
-    crate::kitchen::retire_unbumped_at_till_close(&mut tx, till.branch_id, Some(actor.teller_id)).await?;
+    // Unbumped kitchen tickets retire only when the LAST till at the branch closes.
+    if !other_open {
+        crate::kitchen::retire_unbumped_at_till_close(&mut tx, till.branch_id, Some(actor.teller_id)).await?;
+    }
     tx.commit().await?;
 
     let closed = fetch_till_or_404(pool, till_id).await?;
@@ -1424,7 +1427,9 @@ pub async fn force_close_till(
     )
     .await?;
     let other_open = branch_has_open_till(&mut *tx, till.branch_id).await?;
-    crate::kitchen::retire_unbumped_at_till_close(&mut tx, till.branch_id, Some(claims.user_id())).await?;
+    if !other_open {
+        crate::kitchen::retire_unbumped_at_till_close(&mut tx, till.branch_id, Some(claims.user_id())).await?;
+    }
     tx.commit().await?;
     let closed = fetch_till_or_404(pool.get_ref(), *till_id).await?;
     publish(hub.as_ref().map(|h| h.get_ref()), closed.branch_id, "till.closed", serde_json::json!({

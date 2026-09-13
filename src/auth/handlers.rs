@@ -113,6 +113,10 @@ pub struct LoginResponse {
     pub require_table_for_orders: bool,
     #[schema(example = "EGP")]
     pub currency_code: String,
+    /// The person's open till at the branch they signed into (any device), so
+    /// the device can resume it or show where it is open.
+    #[serde(default)]
+    pub open_till: Option<crate::tills::handlers::TillBrief>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -404,6 +408,21 @@ pub async fn login(
     let mut user_public = UserPublic::from(user);
     user_public.branch_id = branch_id_for_response;
 
+    let open_till = match branch_id_for_response {
+        Some(b) => sqlx::query_as::<_, crate::tills::handlers::Till>(&format!(
+            "SELECT {} {} WHERE s.teller_id = $1 AND s.branch_id = $2 AND s.status = 'open' ORDER BY s.opened_at DESC LIMIT 1",
+            crate::tills::handlers::TILL_COLUMNS,
+            crate::tills::handlers::TILL_FROM
+        ))
+        .bind(user_public.id)
+        .bind(b)
+        .fetch_optional(pool.get_ref())
+        .await?
+        .as_ref()
+        .map(crate::tills::handlers::TillBrief::from),
+        None => None,
+    };
+
     Ok(HttpResponse::Ok().json(LoginResponse {
         token,
         user: user_public,
@@ -411,6 +430,7 @@ pub async fn login(
         tax_policy,
         require_table_for_orders,
         currency_code,
+        open_till,
     }))
 }
 
@@ -625,6 +645,16 @@ pub async fn permissions(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRe
             });
         }
     }
+
+    // POS v0.5.1 / v0.6.0 gate on `has_permission("shifts", …)`: mirror every
+    // `tills:<action>` as `shifts:<action>` while those builds are in the field.
+    // Checks in this codebase use `tills` only.
+    let legacy: Vec<UserPermissionItem> = permissions
+        .iter()
+        .filter(|p| p.resource == "tills")
+        .map(|p| UserPermissionItem { resource: "shifts".into(), action: p.action.clone(), granted: p.granted })
+        .collect();
+    permissions.extend(legacy);
 
     Ok(HttpResponse::Ok().json(AuthPermissionsResponse { permissions }))
 }
