@@ -408,6 +408,12 @@ async fn test_order_ref_generated_and_decoded(pool: PgPool) {
         Some(ref1.as_str()),
         "ref stable on read"
     );
+    // The order carries the zone it is shown in (create response and read).
+    assert!(o1.order.timezone.is_some(), "timezone on create");
+    assert_eq!(
+        fetched.order.timezone, o1.order.timezone,
+        "timezone on read"
+    );
 
     // Void (void RETURNING decode path) — ref preserved on the voided row.
     let void_req = VoidOrderRequest {

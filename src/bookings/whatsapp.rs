@@ -120,14 +120,13 @@ pub fn build(
 /// and zone; never fails the caller (a booking exists whether or not the
 /// message goes out — the gateway helper reports failures on its own).
 pub async fn notify(pool: &PgPool, view: &BookingView, kind: Kind) {
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT b.name, effective_timezone(b.id) FROM branches b WHERE b.id = $1",
-    )
-    .bind(view.branch_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT b.name, effective_timezone(b.id) FROM branches b WHERE b.id = $1")
+            .bind(view.branch_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
     let Some((branch, tz_name)) = row else { return };
     let tz: Tz = crate::tz::parse(&tz_name);
     let when = format_when(view.starts_at, tz, &view.locale);

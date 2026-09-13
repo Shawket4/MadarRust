@@ -55,6 +55,12 @@ pub struct Shift {
     #[serde(default)]
     #[sqlx(default)]
     pub till_name: Option<String>,
+    /// The branch's effective IANA timezone (see `crate::tz`) — the zone every
+    /// timestamp on this payload is shown and printed in. Additive: older
+    /// clients ignore it; `null` only where a write path does not resolve it.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub timezone: Option<String>,
 }
 
 /// What a cash movement IS, which fixes its sign. The DB holds this as a text
@@ -248,6 +254,10 @@ pub struct ShiftReportResponse {
     /// this directly instead of re-deriving it from the payment breakdown.
     pub expected_cash: i64,
     pub printed_at: chrono::DateTime<chrono::Utc>,
+    /// The zone this report's times print in (the shift's branch) — see
+    /// `crate::tz`. Additive; mirrors `shift.timezone`.
+    #[serde(default)]
+    pub timezone: Option<String>,
 }
 
 /// Paginated envelope for the shifts list. When the request omits `page`/`per_page`,
@@ -584,7 +594,7 @@ pub async fn get_current_shift(
             s.opened_at, s.closed_at, s.closed_by,
             s.force_closed_by, s.force_closed_at, s.force_close_reason,
             s.notes,
-            s.till_id, t.name AS till_name
+            s.till_id, t.name AS till_name, effective_timezone(s.branch_id) AS timezone
         FROM shifts s
         JOIN users u ON u.id = s.teller_id
         LEFT JOIN tills t ON t.id = s.till_id
@@ -692,7 +702,7 @@ pub(crate) async fn open_shift_inner(
             s.opened_at, s.closed_at, s.closed_by,
             s.force_closed_by, s.force_closed_at, s.force_close_reason,
             s.notes,
-            s.till_id, t.name AS till_name
+            s.till_id, t.name AS till_name, effective_timezone(s.branch_id) AS timezone
         FROM shifts s
         JOIN users u ON u.id = s.teller_id
         LEFT JOIN tills t ON t.id = s.till_id
@@ -801,7 +811,8 @@ pub(crate) async fn open_shift_inner(
             force_closed_by, force_closed_at, force_close_reason,
             notes,
             till_id,
-            (SELECT name FROM tills WHERE id = $9) AS till_name
+            (SELECT name FROM tills WHERE id = $9) AS till_name,
+            effective_timezone(branch_id) AS timezone
         "#,
     )
     .bind(shift_id)
@@ -840,7 +851,7 @@ pub(crate) async fn open_shift_inner(
                     s.opened_at, s.closed_at, s.closed_by,
                     s.force_closed_by, s.force_closed_at, s.force_close_reason,
                     s.notes,
-                    s.till_id, t.name AS till_name
+                    s.till_id, t.name AS till_name, effective_timezone(s.branch_id) AS timezone
                 FROM shifts s
                 JOIN users u ON u.id = s.teller_id
                 LEFT JOIN tills t ON t.id = s.till_id
@@ -952,7 +963,7 @@ pub async fn list_shifts(
             s.opened_at, s.closed_at, s.closed_by,
             s.force_closed_by, s.force_closed_at, s.force_close_reason,
             s.notes,
-            s.till_id, t.name AS till_name
+            s.till_id, t.name AS till_name, effective_timezone(s.branch_id) AS timezone
         FROM shifts s
         JOIN users u    ON u.id = s.teller_id
         JOIN branches b ON b.id = s.branch_id
@@ -1210,8 +1221,10 @@ pub async fn get_shift_report(
         _ => None,
     };
 
+    let timezone = shift.timezone.clone();
     Ok(HttpResponse::Ok().json(ShiftReportResponse {
         shift,
+        timezone,
         payment_summary,
         total_payments,
         voided_amount: total_returns,
@@ -1634,7 +1647,7 @@ pub(crate) async fn close_shift_inner(
             closing_cash_declared, closing_cash_system, cash_discrepancy,
             opened_at, closed_at, closed_by,
             force_closed_by, force_closed_at, force_close_reason,
-            notes
+            notes, effective_timezone(branch_id) AS timezone
         "#,
     )
     .bind(shift_id)
@@ -1746,7 +1759,7 @@ pub async fn force_close_shift(
             closing_cash_declared, closing_cash_system, cash_discrepancy,
             opened_at, closed_at, closed_by,
             force_closed_by, force_closed_at, force_close_reason,
-            notes
+            notes, effective_timezone(branch_id) AS timezone
         "#,
     )
     .bind(*shift_id)
@@ -1881,7 +1894,7 @@ async fn fetch_shift_or_404(pool: &PgPool, shift_id: Uuid) -> Result<Shift, AppE
             s.opened_at, s.closed_at, s.closed_by,
             s.force_closed_by, s.force_closed_at, s.force_close_reason,
             s.notes,
-            s.till_id, t.name AS till_name
+            s.till_id, t.name AS till_name, effective_timezone(s.branch_id) AS timezone
         FROM shifts s
         JOIN users u ON u.id = s.teller_id
         LEFT JOIN tills t ON t.id = s.till_id

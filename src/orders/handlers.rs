@@ -38,7 +38,8 @@ const ORDER_SELECT: &str =
      o.customer_name, o.notes, o.order_type, o.delivery_fee, o.delivery_order_id,
      d.channel::text AS delivery_channel, d.customer_lat AS delivery_lat, d.customer_lng AS delivery_lng,
      o.voided_at, o.void_reason::text, o.void_note, o.voided_by,
-     o.price_flagged, o.price_expected_total, o.created_at
+     o.price_flagged, o.price_expected_total, o.created_at,
+     effective_timezone(o.branch_id) AS timezone
      FROM orders o JOIN users u ON u.id = o.teller_id
      LEFT JOIN users w ON w.id = o.waiter_id
      LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id ";
@@ -218,6 +219,12 @@ pub struct Order {
     #[serde(default)]
     pub price_expected_total: Option<i32>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// The branch's effective IANA timezone (see `crate::tz`) — the zone every
+    /// timestamp on this payload is shown and printed in. Additive: older
+    /// clients ignore it; `null` only where a write path does not resolve it.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub timezone: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -1932,7 +1939,8 @@ pub(crate) async fn create_order_inner(
             (SELECT customer_lat FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_lat,
             (SELECT customer_lng FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_lng,
             voided_at, void_reason::text, void_note, voided_by,
-            price_flagged, price_expected_total, created_at
+            price_flagged, price_expected_total, created_at,
+            effective_timezone(branch_id) AS timezone
         "#,
     )
     .bind(shift_branch_id) // authoritative: the order's branch IS its shift's branch
@@ -2926,7 +2934,8 @@ pub(crate) async fn void_order_inner(
                (SELECT customer_lat FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_lat,
                (SELECT customer_lng FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_lng,
                voided_at, void_reason::text, void_note, voided_by,
-            price_flagged, price_expected_total, created_at"#,
+            price_flagged, price_expected_total, created_at,
+            effective_timezone(branch_id) AS timezone"#,
     )
     .bind(order_id)
     .bind(reason)

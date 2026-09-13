@@ -101,6 +101,10 @@ pub struct OpenTicketView {
     #[serde(default)]
     pub void_note: Option<String>,
     pub items: Vec<OpenTicketItemView>,
+    /// The branch's effective IANA timezone (see `crate::tz`) — the zone this
+    /// ticket's times are shown in. Additive.
+    #[serde(default)]
+    pub timezone: Option<String>,
 }
 
 /// What the party owes, priced where the books are priced.
@@ -252,6 +256,7 @@ struct TicketRow {
     voided_at: Option<DateTime<Utc>>,
     void_reason: Option<String>,
     void_note: Option<String>,
+    timezone: Option<String>,
 }
 
 /// Takes the pool rather than an executor because the bill is priced through
@@ -287,7 +292,8 @@ pub(crate) async fn open_ticket_views(
                 ot.opened_by, u.name AS opened_by_name, ot.customer_name, ot.notes, ot.guest_count, \
                 ot.subtotal, ot.discount_id, ot.discount_type, ot.discount_value, \
                 ot.order_id, ot.booking_id, ot.opened_at, ot.ready_at, ot.settled_at, \
-                ot.voided_at, ot.void_reason::text AS void_reason, ot.void_note \
+                ot.voided_at, ot.void_reason::text AS void_reason, ot.void_note, \
+                effective_timezone(ot.branch_id) AS timezone \
          FROM open_tickets ot LEFT JOIN users u ON u.id = ot.opened_by WHERE ot.id = ANY($1)",
     )
     .bind(ids)
@@ -393,6 +399,7 @@ pub(crate) async fn open_ticket_views(
                 void_reason: r.void_reason,
                 void_note: r.void_note,
                 items,
+                timezone: r.timezone,
             },
         );
     }
