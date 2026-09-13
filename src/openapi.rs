@@ -109,6 +109,7 @@ paths(
         crate::branches::handlers::get_branch,
         crate::branches::handlers::create_branch,
         crate::branches::handlers::update_branch,
+        crate::branches::handlers::patch_branch,
         crate::branches::handlers::delete_branch,
         crate::branches::handlers::list_timezones,
         // ── orgs ────────────────────────────────────────────────────
@@ -264,6 +265,7 @@ paths(
         // ── devices ──────────────────────────────────────────────────
         crate::devices::handlers::register_device,
         crate::devices::handlers::list_devices,
+        crate::client_seen::handlers::list_client_versions,
         crate::devices::handlers::update_device,
         // ── legacy /shifts + /tills entity adapters (until cutover) ──
         crate::tills::legacy_routes::get_current_shift,
@@ -625,6 +627,8 @@ paths(
         // Delivery context nested on the single-order detail (GET /orders/{id}).
         crate::orders::handlers::OrderDeliveryInfo,
         crate::tills::handlers::Till,
+        crate::tills::handlers::TillStatus,
+        crate::tills::handlers::TillVerification,
         crate::tills::handlers::TillBrief,
         crate::tills::handlers::PaginatedTills,
         crate::tills::reconcile::TillReconciliationLine,
@@ -632,6 +636,8 @@ paths(
         crate::tills::legacy::Shift,
         crate::tills::legacy::PaginatedShifts,
         crate::devices::handlers::Device,
+        crate::devices::handlers::DeviceKind,
+        crate::client_seen::handlers::ClientSeen,
         // ── reservations + floor plan ─────────────────────────────────
         crate::reservations::floor::FloorSection,
         crate::reservations::floor::FloorTable,

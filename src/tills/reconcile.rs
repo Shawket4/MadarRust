@@ -261,18 +261,22 @@ pub fn plan_lines(
                     Some(a) => a,
                     None if replay => system_total,
                     None => {
-                        return Err(AppError::BadRequest(format!(
-                            "{CODE_AMOUNT_REQUIRED}: enter the amount you see for {method}"
-                        )));
+                        return Err(AppError::Coded {
+                            status: 400,
+                            code: CODE_AMOUNT_REQUIRED,
+                            reason: format!("{CODE_AMOUNT_REQUIRED}: enter the amount you see for {method}"),
+                        });
                     }
                 };
                 let note = match blank_to_none(input.note.as_deref()) {
                     Some(n) => n,
                     None if replay => REPLAY_MISSING_NOTE.to_string(),
                     None => {
-                        return Err(AppError::BadRequest(format!(
-                            "{CODE_NOTE_REQUIRED}: add a note for the difference on {method}"
-                        )));
+                        return Err(AppError::Coded {
+                            status: 400,
+                            code: CODE_NOTE_REQUIRED,
+                            reason: format!("{CODE_NOTE_REQUIRED}: add a note for the difference on {method}"),
+                        });
                     }
                 };
                 Ok(PlannedLine { status: "disagreed", declared_amount: Some(amount), note: Some(note), ..base })
@@ -344,8 +348,45 @@ pub async fn write_close_reconciliation(
     }
     let totals = system_totals_by_method(conn, till_id, closing_cash_system as i64).await?;
     let planned = plan_lines(&totals, closing_cash_declared, closing_cash_system, cash_note, inputs, replay)?;
+    insert_planned(conn, till_id, actor, &planned).await
+}
 
-    for l in &planned {
+/// The reconciliation a FORCE-close writes: nobody counted anything, so every
+/// line — the cash row included — is `unreviewed` with no declared amount
+/// (contract §8: `unreviewed` exists for legacy closes and force-closes). The
+/// system totals are still snapshotted so a later review has the figures.
+/// Same precondition and idempotency as [`write_close_reconciliation`].
+pub async fn write_force_close_reconciliation(
+    conn: &mut sqlx::PgConnection,
+    till_id: Uuid,
+    actor: Uuid,
+    closing_cash_system: i32,
+) -> Result<(Vec<TillReconciliationLine>, &'static str), AppError> {
+    let existing = stored_lines(conn, till_id).await?;
+    if !existing.is_empty() {
+        let status = rollup_status(existing.iter().map(|l| l.status.as_str()));
+        return Ok((existing, status));
+    }
+    let totals = system_totals_by_method(conn, till_id, closing_cash_system as i64).await?;
+    let planned = force_close_lines(plan_lines(&totals, closing_cash_system, closing_cash_system, None, &[], true)?);
+    insert_planned(conn, till_id, actor, &planned).await
+}
+
+/// Force-close planning: no line was counted or checked by anyone.
+pub fn force_close_lines(planned: Vec<PlannedLine>) -> Vec<PlannedLine> {
+    planned
+        .into_iter()
+        .map(|l| PlannedLine { status: STATUS_UNREVIEWED, declared_amount: None, note: None, ..l })
+        .collect()
+}
+
+async fn insert_planned(
+    conn: &mut sqlx::PgConnection,
+    till_id: Uuid,
+    actor: Uuid,
+    planned: &[PlannedLine],
+) -> Result<(Vec<TillReconciliationLine>, &'static str), AppError> {
+    for l in planned {
         sqlx::query(
             "INSERT INTO till_reconciliations
                (till_id, method, payment_method_id, is_cash, system_total, current_system_total,

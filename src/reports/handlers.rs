@@ -468,10 +468,34 @@ pub async fn shift_deductions(
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
     require_shift_branch_access(pool.get_ref(), &claims, *shift_id).await?;
 
-    // Inventory deduction logs no longer exist — every deduction is a ledger movement.
-    // Return empty array to maintain API compatibility.
-    let rows: Vec<DeductionLogRow> = Vec::new();
-    Ok(HttpResponse::Ok().json(rows))
+    Ok(HttpResponse::Ok().json(till_deduction_rows(pool.get_ref(), *shift_id).await?))
+}
+
+/// The stock a till's sales moved, read from the inventory ledger.
+///
+/// The old `inventory_deduction_logs` table is gone; every deduction is now an
+/// `inventory_movements` row. Sales, void restocks and refund restocks post with
+/// `source_type = 'order'` and the order's id, so a till's rows are the
+/// movements of its orders. `quantity_deducted` is positive for stock that left
+/// (a sale) and negative for stock put back (`source` = `void_restock`).
+/// `order_item_id` is always null: the ledger records the order, not the line.
+///
+/// Waste and staff meals are recorded against the BRANCH (`source_type` `waste`,
+/// no order, no till), so no till's deductions include them.
+pub(crate) async fn till_deduction_rows(pool: &PgPool, till_id: Uuid) -> Result<Vec<DeductionLogRow>, AppError> {
+    Ok(sqlx::query_as::<_, DeductionLogRow>(
+        "SELECT m.id, m.source_id AS order_id, NULL::uuid AS order_item_id, \
+                m.org_ingredient_id AS inventory_item_id, i.name AS item_name, i.unit::text AS unit, \
+                (-m.quantity)::float8 AS quantity_deducted, m.type::text AS source, m.created_at \
+           FROM inventory_movements m \
+           JOIN org_ingredients i ON i.id = m.org_ingredient_id \
+          WHERE m.source_type = 'order' \
+            AND m.source_id IN (SELECT o.id FROM orders o WHERE o.till_id = $1) \
+          ORDER BY m.created_at, m.id",
+    )
+    .bind(till_id)
+    .fetch_all(pool)
+    .await?)
 }
 
 // ── GET /reports/branches/:id/sales ──────────────────────────

@@ -342,7 +342,7 @@ fn branch_allowed(c: &Claims, org_id: Uuid, branch_id: Uuid) -> bool {
     }
 }
 
-#[utoipa::path(get, path = "/sync/asset-bundles/{org_id}/{file_name}", tag = "assets",
+#[utoipa::path(get, path = "/sync/asset-bundles/{org_id}/{file_name}", tag = "assets", operation_id = "get_asset_bundle",
     params(("org_id" = Uuid, Path), ("file_name" = String, Path, description = "assets-<branch_id>-<seq>.tar")),
     responses((status = 200, description = "Tar (Range/If-Range supported)"), (status = 206, description = "Partial"), AppErrorResponse),
     security(("bearer_jwt" = [])))]

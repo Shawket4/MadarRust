@@ -333,9 +333,12 @@ pub async fn replace_list(
     body: &AllowList,
 ) -> Result<AllowList, AppError> {
     if body.restricted && body.payment_method_ids.is_empty() {
-        return Err(AppError::BadRequest(format!(
-            "{CODE_EMPTY_ALLOW_LIST}: a restricted list needs at least one payment method"
-        )));
+        // Structured `code` alongside the unchanged message text.
+        return Err(AppError::Coded {
+            status: 400,
+            code: CODE_EMPTY_ALLOW_LIST,
+            reason: format!("{CODE_EMPTY_ALLOW_LIST}: a restricted list needs at least one payment method"),
+        });
     }
     let exists: bool = sqlx::query_scalar(owner.owner_sql())
         .bind(owner_id)

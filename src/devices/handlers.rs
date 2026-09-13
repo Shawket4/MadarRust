@@ -12,6 +12,16 @@ use crate::{
     permissions::checker::check_permission,
 };
 
+/// OpenAPI-only vocabulary for `devices.kind` (CHECK `kind IN ('pos','kds','waiter')`).
+/// The struct fields stay `String`, so the wire strings are unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceKind {
+    Pos,
+    Kds,
+    Waiter,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct Device {
     pub id: Uuid,
@@ -19,6 +29,7 @@ pub struct Device {
     pub branch_id: Option<Uuid>,
     pub code: String,
     pub label: Option<String>,
+    #[schema(value_type = DeviceKind)]
     pub kind: String,
     pub platform: Option<String>,
     pub app_version: Option<String>,
@@ -42,6 +53,7 @@ pub struct RegisterDeviceRequest {
     #[serde(default)]
     pub label: Option<String>,
     /// `pos` | `kds` | `waiter`
+    #[schema(value_type = DeviceKind)]
     pub kind: String,
     #[serde(default)]
     pub platform: Option<String>,

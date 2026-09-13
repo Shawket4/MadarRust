@@ -31,6 +31,28 @@ const MAX_TILLS_PER_PAGE: i64 = 200;
 
 // ── Models ────────────────────────────────────────────────────
 
+/// OpenAPI-only vocabulary for `Till.status` (the `till_status` DB enum). The
+/// struct fields stay `String`, so the wire strings are exactly the DB values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TillStatus {
+    Open,
+    Closed,
+    ForceClosed,
+}
+
+/// OpenAPI-only vocabulary for `Till.verification` (`tills_verification` CHECK):
+/// how the one-open-till-per-person rule was checked when the till opened.
+/// `legacy` marks tills opened by pre-rework clients / before the rework.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TillVerification {
+    Server,
+    Lan,
+    Unverified,
+    Legacy,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct Till {
     pub id: Uuid,
@@ -42,6 +64,7 @@ pub struct Till {
     pub teller_id: Uuid,
     pub teller_name: String,
     /// `open` | `closed` | `force_closed`
+    #[schema(value_type = TillStatus)]
     pub status: String,
     pub opening_cash: i32,
     pub opening_cash_original: Option<i32>,
@@ -64,6 +87,7 @@ pub struct Till {
     pub device_code: Option<String>,
     pub device_label: Option<String>,
     /// `server` | `lan` | `unverified` | `legacy`
+    #[schema(value_type = TillVerification)]
     pub verification: String,
     pub opened_while_another_open: bool,
     pub other_till_id: Option<Uuid>,
@@ -98,11 +122,13 @@ pub struct TillBrief {
     pub branch_id: Uuid,
     pub teller_id: Uuid,
     pub teller_name: String,
+    #[schema(value_type = TillStatus)]
     pub status: String,
     pub opened_at: DateTime<Utc>,
     pub device_id: Option<Uuid>,
     pub device_code: Option<String>,
     pub device_label: Option<String>,
+    #[schema(value_type = TillVerification)]
     pub verification: String,
     pub opened_while_another_open: bool,
 }
@@ -344,6 +370,7 @@ pub struct OpenTillRequest {
     pub device_id: Option<Uuid>,
     /// Ignored on the live route (live writes `server`).
     #[serde(default)]
+    #[schema(value_type = Option<TillVerification>)]
     pub verification: Option<String>,
 }
 
@@ -1422,10 +1449,8 @@ pub async fn force_close_till(
     .bind(notice.old_bills_count as i32)
     .execute(&mut *tx)
     .await?;
-    let (_, rollup) = reconcile::write_close_reconciliation(
-        &mut tx, *till_id, claims.user_id(), closing_cash_system, closing_cash_system, None, &[], true,
-    )
-    .await?;
+    let (_, rollup) =
+        reconcile::write_force_close_reconciliation(&mut tx, *till_id, claims.user_id(), closing_cash_system).await?;
     let other_open = branch_has_open_till(&mut *tx, till.branch_id).await?;
     if !other_open {
         crate::kitchen::retire_unbumped_at_till_close(&mut tx, till.branch_id, Some(claims.user_id())).await?;

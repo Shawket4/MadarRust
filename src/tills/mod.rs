@@ -10,3 +10,5 @@ mod reconcile_tests;
 mod tests;
 #[cfg(test)]
 mod legacy_tests;
+#[cfg(test)]
+mod followup_tests;
