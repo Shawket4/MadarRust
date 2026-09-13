@@ -861,7 +861,7 @@ pub async fn put_reward_items(
     if !ids.is_empty() {
         let valid: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM menu_items \
-              WHERE id = ANY($1) AND org_id = $2 AND deleted_at IS NULL",
+              WHERE id = ANY($1) AND org_id = $2 AND deleted_at IS NULL AND is_active",
         )
         .bind(&ids)
         .bind(org_id)

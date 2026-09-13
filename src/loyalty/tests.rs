@@ -2862,7 +2862,7 @@ async fn a_clawback_of_spent_points_clamps_at_zero_unless_the_shop_says_otherwis
         test::TestRequest::post()
             .uri("/loyalty/adjust")
             .insert_header(("Authorization", format!("Bearer {admin_jwt}")))
-            .set_json(json!({ "branch_id": branch, "customer_id": member, "points": 3 }))
+            .set_json(json!({ "branch_id": branch, "customer_id": member, "points": 3, "note": "welcome" }))
             .to_request(),
     )
     .await;
@@ -2895,7 +2895,7 @@ async fn the_ledger_reports_where_each_movement_came_from(pool: PgPool) {
         test::TestRequest::post()
             .uri("/loyalty/adjust")
             .insert_header(("Authorization", format!("Bearer {admin_jwt}")))
-            .set_json(json!({ "branch_id": branch, "customer_id": member, "points": 20 }))
+            .set_json(json!({ "branch_id": branch, "customer_id": member, "points": 20, "note": "welcome" }))
             .to_request(),
     )
     .await;
@@ -3625,4 +3625,149 @@ async fn a_void_after_a_refund_cannot_give_a_reward_back_twice(pool: PgPool) {
         .await;
     assert!(voided.is_err());
     assert_eq!(visits_of(&pool, shop.member).await, 12);
+}
+
+// ── What the dashboard reads ─────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn the_birthday_preview_is_routed_and_forgetting_a_member_is_in_the_spec(pool: PgPool) {
+    use utoipa::OpenApi;
+    let shop = reward_shop(&pool, 0).await;
+    let admin = seed_user(&pool, shop.org, "org_admin").await;
+    let app = reward_app!(pool);
+    let settings =
+        serde_json::to_value(super::settings::LoyaltySettings::defaults(shop.org, None)).unwrap();
+    let req = test::TestRequest::post()
+        .uri("/loyalty/birthday-preview")
+        .insert_header((
+            "Authorization",
+            format!(
+                "Bearer {}",
+                token(admin, shop.org, UserRole::OrgAdmin, None)
+            ),
+        ))
+        .set_json(settings)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let spec = serde_json::to_value(crate::openapi::ApiDoc::openapi()).unwrap();
+    assert!(spec["paths"]["/loyalty/members/{id}"]["delete"].is_object());
+    assert!(spec["paths"]["/loyalty/analytics"]["get"].is_object());
+}
+
+#[sqlx::test]
+async fn a_hand_adjustment_needs_a_reason(pool: PgPool) {
+    let shop = reward_shop(&pool, 0).await;
+    let admin = seed_user(&pool, shop.org, "org_admin").await;
+    let app = reward_app!(pool);
+    for note in [json!(null), json!("   ")] {
+        let req = test::TestRequest::post()
+            .uri("/loyalty/adjust")
+            .insert_header((
+                "Authorization",
+                format!(
+                    "Bearer {}",
+                    token(admin, shop.org, UserRole::OrgAdmin, None)
+                ),
+            ))
+            .set_json(json!({
+                "branch_id": shop.branch, "customer_id": shop.member, "points": 5, "note": note
+            }))
+            .to_request();
+        assert_eq!(
+            test::call_service(&app, req).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(visits_of(&pool, shop.member).await, 0);
+}
+
+#[sqlx::test]
+async fn an_inactive_menu_item_cannot_be_made_a_reward(pool: PgPool) {
+    let shop = reward_shop(&pool, 0).await;
+    let admin = seed_user(&pool, shop.org, "org_admin").await;
+    sqlx::query("UPDATE menu_items SET is_active = false WHERE id = $1")
+        .bind(shop.cake)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = reward_app!(pool);
+    let req = test::TestRequest::put()
+        .uri("/loyalty/reward-items")
+        .insert_header((
+            "Authorization",
+            format!(
+                "Bearer {}",
+                token(admin, shop.org, UserRole::OrgAdmin, None)
+            ),
+        ))
+        .set_json(json!({ "items": [{ "menu_item_id": shop.cake }] }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+/// An order's detail names its member and says, per line, that a reward paid
+/// for it, how many units and how much; the ledger says who applied it; the
+/// report adds it up without loading a member.
+#[sqlx::test]
+async fn a_reward_sale_reads_back_in_the_order_the_ledger_and_the_report(pool: PgPool) {
+    let shop = reward_shop(&pool, 12).await;
+    let admin = seed_user(&pool, shop.org, "org_admin").await;
+    let app = reward_app!(pool);
+    let sale = reward_sale(&app, &shop).await;
+    let admin_jwt = token(admin, shop.org, UserRole::OrgAdmin, None);
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/orders/{}", sale["id"].as_str().unwrap()))
+        .insert_header(("Authorization", format!("Bearer {admin_jwt}")))
+        .to_request();
+    let detail: Value = test::call_and_read_body_json(&app, req).await;
+    assert_eq!(detail["loyalty_customer_id"], json!(shop.member));
+    assert_eq!(detail["loyalty_member_name"], "Ali");
+    let latte = detail["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["is_reward"] == true)
+        .expect("the reward line");
+    assert_eq!(latte["reward_units"], 2);
+    assert_eq!(latte["reward_covered"], 10_000);
+
+    let ledger = super::model::ledger(&pool, shop.member, 10).await.unwrap();
+    let redeem = ledger.iter().find(|e| e.kind == "redeem").unwrap();
+    assert_eq!(redeem.created_by, Some(shop.teller));
+    assert!(redeem.created_by_name.is_some());
+
+    let req = test::TestRequest::get()
+        .uri("/loyalty/analytics")
+        .insert_header(("Authorization", format!("Bearer {admin_jwt}")))
+        .to_request();
+    let report: Value = test::call_and_read_body_json(&app, req).await;
+    assert_eq!(report["redemptions"], 1);
+    assert_eq!(report["redeemed_units"], 2);
+    assert_eq!(report["redeemed_points"], 10);
+    assert_eq!(report["redeemed_value_minor"], 10_000);
+    assert_eq!(report["top_rewards"][0]["name"], "Latte");
+    assert_eq!(report["liability"]["outstanding_visits"], 2);
+    assert_eq!(report["liability"]["value_per_unit_minor"], 1000.0);
+    assert_eq!(report["liability"]["valued_minor"], 2_000);
+
+    // A teller reads a card, not the books.
+    let req = test::TestRequest::get()
+        .uri("/loyalty/analytics")
+        .insert_header((
+            "Authorization",
+            format!(
+                "Bearer {}",
+                token(shop.teller, shop.org, UserRole::Teller, Some(shop.branch))
+            ),
+        ))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::FORBIDDEN
+    );
 }

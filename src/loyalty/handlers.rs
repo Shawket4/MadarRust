@@ -471,6 +471,17 @@ pub async fn adjust(
             "Only an admin may adjust a member's points by hand".into(),
         ));
     }
+    // A number typed by a person with no reason beside it is the one ledger row
+    // nobody can later explain. Refused before anything moves.
+    let note = body
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            AppError::BadRequest("Say why the points are being adjusted (note)".into())
+        })?;
     require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
     let org_id = resolve_branch_org(pool.get_ref(), body.branch_id).await?;
 
@@ -490,7 +501,7 @@ pub async fn adjust(
         mode,
         body.points,
         model::Source::Manual,
-        body.note.clone(),
+        Some(note),
         claims.user_id_safe().ok(),
     )
     .await?;
@@ -710,5 +721,218 @@ pub async fn get_member(
     Ok(HttpResponse::Ok().json(MemberDetail {
         member: member.view(mode, target),
         ledger,
+    }))
+}
+
+// ── Analytics ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct AnalyticsQuery {
+    /// Omit for the whole organisation; supply a branch to narrow the
+    /// redemption figures to it (the liability is org-wide either way — a
+    /// balance can be spent at any branch).
+    pub branch_id: Option<Uuid>,
+    /// Inclusive start of the range. Defaults to 30 days before `to`.
+    pub from: Option<chrono::DateTime<chrono::Utc>>,
+    /// Exclusive end of the range. Defaults to now.
+    pub to: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// One reward, by how often it was claimed in the range.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct TopReward {
+    pub menu_item_id: Uuid,
+    pub name: String,
+    /// Redemption rows (one per covered order line).
+    pub redemptions: i64,
+    /// Units handed over.
+    pub units: i64,
+    /// Balance spent on it, net of anything given back by a void or refund.
+    pub points: i64,
+    /// Minor units of goods given away (what the covered lines were charged).
+    pub value_minor: i64,
+}
+
+/// What the programme owes its members.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PointsLiability {
+    /// Live members with a positive balance.
+    pub members_with_balance: i64,
+    pub outstanding_points: i64,
+    pub outstanding_visits: i64,
+    /// Minor units one unit of the live currency has bought, on average, over
+    /// every redemption this org has recorded (value given ÷ balance spent).
+    /// `None` until the first redemption with a recorded value.
+    pub value_per_unit_minor: Option<f64>,
+    /// The outstanding balance in the live currency × `value_per_unit_minor`,
+    /// rounded. An estimate — a balance is worth what it will be spent on.
+    pub valued_minor: Option<i64>,
+    /// `"points"` or `"visits"` — the currency the valuation is in.
+    pub currency: String,
+}
+
+/// The redemption report, computed in the database so a dashboard never loads
+/// every member to draw it.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LoyaltyAnalytics {
+    pub from: chrono::DateTime<chrono::Utc>,
+    pub to: chrono::DateTime<chrono::Utc>,
+    /// Redemption rows in the range (one per covered order line).
+    pub redemptions: i64,
+    /// Units handed over as rewards.
+    pub redeemed_units: i64,
+    /// Balance spent, net of reversals written in the range.
+    pub redeemed_points: i64,
+    /// Minor units of goods given away as rewards, on sales not voided.
+    pub redeemed_value_minor: i64,
+    /// Balance earned, net of clawbacks written in the range.
+    pub earned_points: i64,
+    /// Replayed sales whose rewards the points could not pay for.
+    pub refused_redemptions: i64,
+    pub top_rewards: Vec<TopReward>,
+    pub liability: PointsLiability,
+}
+
+#[utoipa::path(get, path = "/loyalty/analytics", tag = "loyalty",
+    operation_id = "get_loyalty_analytics", params(AnalyticsQuery),
+    responses((status = 200, body = LoyaltyAnalytics), AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn analytics(
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
+    query: web::Query<AnalyticsQuery>,
+) -> Result<HttpResponse, AppError> {
+    let (org_id, claims) =
+        super::settings::scope_org(pool.get_ref(), &req, query.branch_id).await?;
+    check_permission(pool.get_ref(), &claims, "loyalty", "read").await?;
+    // Same line as the member list: a till reads a card, not the books.
+    if !matches!(
+        claims.role,
+        UserRole::OrgAdmin | UserRole::SuperAdmin | UserRole::BranchManager
+    ) {
+        return Err(AppError::Forbidden(
+            "The loyalty report is for managers".into(),
+        ));
+    }
+    if let Some(b) = query.branch_id {
+        require_branch_access(pool.get_ref(), &claims, b).await?;
+    }
+    let to = query.to.unwrap_or_else(chrono::Utc::now);
+    let from = query.from.unwrap_or(to - chrono::Duration::days(30));
+    if from >= to {
+        return Err(AppError::BadRequest("`from` must be before `to`".into()));
+    }
+    let pool = pool.get_ref();
+
+    let (redemptions, redeemed_units, redeemed_points, earned_points): (i64, i64, i64, i64) =
+        sqlx::query_as(
+            "SELECT \
+                COUNT(*) FILTER (WHERE t.kind = 'redeem'), \
+                COALESCE(SUM(CASE WHEN t.kind = 'redeem' \
+                    THEN COALESCE(NULLIF(oi.reward_units, 0), 1) END), 0)::bigint, \
+                COALESCE(-SUM(t.points) FILTER (WHERE t.kind IN ('redeem','reverse_redeem')), 0)::bigint, \
+                COALESCE(SUM(t.points) FILTER (WHERE t.kind IN ('earn','reverse_earn')), 0)::bigint \
+               FROM loyalty_transactions t \
+               LEFT JOIN order_items oi ON oi.id = t.order_item_id \
+              WHERE t.org_id = $1 AND ($2::uuid IS NULL OR t.branch_id = $2) \
+                AND t.created_at >= $3 AND t.created_at < $4",
+        )
+        .bind(org_id)
+        .bind(query.branch_id)
+        .bind(from)
+        .bind(to)
+        .fetch_one(pool)
+        .await?;
+
+    let (redeemed_value_minor, refused_redemptions): (i64, i64) = sqlx::query_as(
+        "SELECT COALESCE(SUM(oi.reward_covered), 0)::bigint, \
+                COUNT(DISTINCT o.id) FILTER (WHERE o.loyalty_redemption_refused IS NOT NULL) \
+           FROM orders o \
+           JOIN branches b ON b.id = o.branch_id \
+           LEFT JOIN order_items oi ON oi.order_id = o.id AND oi.is_reward \
+          WHERE b.org_id = $1 AND ($2::uuid IS NULL OR o.branch_id = $2) \
+            AND o.status <> 'voided' AND o.created_at >= $3 AND o.created_at < $4",
+    )
+    .bind(org_id)
+    .bind(query.branch_id)
+    .bind(from)
+    .bind(to)
+    .fetch_one(pool)
+    .await?;
+
+    let top_rewards: Vec<TopReward> = sqlx::query_as(
+        "SELECT m.id AS menu_item_id, m.name, \
+                COUNT(*) FILTER (WHERE t.kind = 'redeem') AS redemptions, \
+                COALESCE(SUM(CASE WHEN t.kind = 'redeem' \
+                    THEN COALESCE(NULLIF(oi.reward_units, 0), 1) END), 0)::bigint AS units, \
+                COALESCE(-SUM(t.points), 0)::bigint AS points, \
+                COALESCE(SUM(oi.reward_covered) FILTER (WHERE t.kind = 'redeem'), 0)::bigint \
+                    AS value_minor \
+           FROM loyalty_transactions t \
+           JOIN loyalty_transactions r ON r.id = COALESCE(t.reverses_id, t.id) \
+           JOIN menu_items m ON m.id = r.reward_menu_item_id \
+           LEFT JOIN order_items oi ON oi.id = t.order_item_id \
+          WHERE t.org_id = $1 AND ($2::uuid IS NULL OR t.branch_id = $2) \
+            AND t.kind IN ('redeem','reverse_redeem') \
+            AND t.created_at >= $3 AND t.created_at < $4 \
+          GROUP BY m.id, m.name \
+          ORDER BY redemptions DESC, units DESC, m.name LIMIT 10",
+    )
+    .bind(org_id)
+    .bind(query.branch_id)
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await?;
+
+    let settings = load_effective(pool, org_id, query.branch_id.unwrap_or(Uuid::nil())).await?;
+    let currency = settings.mode().as_str().to_string();
+    let (members_with_balance, outstanding_points, outstanding_visits): (i64, i64, i64) =
+        sqlx::query_as(
+            "SELECT COUNT(*) FILTER (WHERE (CASE WHEN $2 = 'visits' THEN visits_balance \
+                                             ELSE points_balance END) > 0), \
+                    COALESCE(SUM(GREATEST(points_balance, 0)), 0)::bigint, \
+                    COALESCE(SUM(GREATEST(visits_balance, 0)), 0)::bigint \
+               FROM loyalty_customers WHERE org_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(org_id)
+        .bind(&currency)
+        .fetch_one(pool)
+        .await?;
+    let (value, spent): (i64, i64) = sqlx::query_as(
+        "SELECT COALESCE(SUM(oi.reward_covered), 0)::bigint, COALESCE(-SUM(t.points), 0)::bigint \
+           FROM loyalty_transactions t JOIN order_items oi ON oi.id = t.order_item_id \
+          WHERE t.org_id = $1 AND t.kind = 'redeem' AND t.currency = $2 AND oi.reward_covered > 0",
+    )
+    .bind(org_id)
+    .bind(&currency)
+    .fetch_one(pool)
+    .await?;
+    let value_per_unit_minor = (spent > 0).then(|| value as f64 / spent as f64);
+    let outstanding = if currency == "visits" {
+        outstanding_visits
+    } else {
+        outstanding_points
+    };
+    let valued_minor = value_per_unit_minor.map(|v| (v * outstanding as f64).round() as i64);
+
+    Ok(HttpResponse::Ok().json(LoyaltyAnalytics {
+        from,
+        to,
+        redemptions,
+        redeemed_units,
+        redeemed_points,
+        redeemed_value_minor,
+        earned_points,
+        refused_redemptions,
+        top_rewards,
+        liability: PointsLiability {
+            members_with_balance,
+            outstanding_points,
+            outstanding_visits,
+            value_per_unit_minor,
+            valued_minor,
+            currency,
+        },
     }))
 }
