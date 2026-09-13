@@ -684,6 +684,11 @@ pub async fn create_bundle(
     .await?;
 
     tx.commit().await?;
+    // Image slot (Track B4, §11.5 W2).
+    if let Some(url) = mut_body.image_url.clone() {
+        crate::menu::handlers::image_url_side_effects(pool.get_ref(), crate::assets::ingest::AssetTable::Bundles,
+            bundle.org_id, bundle.id, Some(&Some(url)), None, &claims).await?;
+    }
 
     let full = fetch_bundle_full(pool.get_ref(), bundle.id)
         .await?
@@ -930,6 +935,13 @@ pub async fn update_bundle(
     }
 
     tx.commit().await?;
+    // Image slot (Track B4, §11.5 W2): a changed URL goes through the asset pipeline.
+    if let Some(url) = mut_body.image_url.as_ref()
+        && original.bundle.image_url.as_deref() != Some(url.as_str())
+    {
+        crate::menu::handlers::image_url_side_effects(pool.get_ref(), crate::assets::ingest::AssetTable::Bundles,
+            original.bundle.org_id, original.bundle.id, Some(&Some(url.clone())), original.bundle.image_url.as_deref(), &claims).await?;
+    }
 
     let full = fetch_bundle_full(pool.get_ref(), original.bundle.id)
         .await?

@@ -63,6 +63,8 @@ pub struct RecipeStepPreset {
     /// Path to the animation, relative to the API base.
     pub animation_url: String,
     pub animation_sha256: String,
+    /// Content hash of the zstd-compressed asset (`/assets/global/<hash>.lottie.zst`).
+    pub animation_hash: Option<String>,
     pub bytes: i32,
     pub sort_order: i16,
 }
@@ -75,6 +77,7 @@ struct PresetRow {
     note: Option<String>,
     note_ar: Option<String>,
     sha256: String,
+    animation_hash: Option<String>,
     bytes: i32,
     sort_order: i16,
 }
@@ -84,6 +87,7 @@ impl From<PresetRow> for RecipeStepPreset {
         Self {
             animation_url: animation_url(&r.slug, &r.sha256),
             animation_sha256: r.sha256,
+            animation_hash: r.animation_hash,
             slug: r.slug,
             name: r.name,
             name_ar: r.name_ar,
@@ -216,6 +220,31 @@ pub async fn reconcile(pool: &PgPool, dir: &Path) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await?;
     }
+    // Asset store (Track B4, §11.5 W8): each shipped animation is ingested once
+    // as a global zstd asset; source-hash dedup makes later boots a lookup.
+    for s in &scanned {
+        let path = dir.join(format!("{}.json", s.slug));
+        match crate::assets::ingest::ingest(
+            pool,
+            None,
+            crate::assets::ingest::AssetPurpose::StepAnimation,
+            crate::assets::ingest::IngestSource::LegacyFile(path),
+            crate::assets::ingest::SourceKind::Preset,
+            Some(&s.slug),
+            None,
+        )
+        .await
+        {
+            Ok(o) => {
+                sqlx::query("UPDATE recipe_step_presets SET animation_group_id = $1 WHERE slug = $2")
+                    .bind(o.group_id)
+                    .bind(&s.slug)
+                    .execute(pool)
+                    .await?;
+            }
+            Err(e) => tracing::warn!(slug = %s.slug, error = %e, "step animation asset ingest failed"),
+        }
+    }
     // A preset whose file stopped shipping is retired, never deleted: the items
     // that use it keep showing its name, and the recipe stays readable.
     let retired = sqlx::query(
@@ -242,7 +271,8 @@ where
     E: PgExecutor<'e>,
 {
     let rows: Vec<PresetRow> = sqlx::query_as(
-        "SELECT slug, name, name_ar, note, note_ar, sha256, bytes, sort_order \
+        "SELECT slug, name, name_ar, note, note_ar, sha256, bytes, sort_order, \
+                (SELECT a.hash FROM assets a WHERE a.group_id = recipe_step_presets.animation_group_id AND a.variant = 'animation' LIMIT 1) AS animation_hash \
          FROM recipe_step_presets WHERE (is_active OR $1) ORDER BY sort_order, slug",
     )
     .bind(include_retired)
@@ -271,6 +301,10 @@ pub struct RecipeStep {
     /// custom step, and on a retired preset — clients show the name alone.
     pub animation_url: Option<String>,
     pub animation_sha256: Option<String>,
+    /// Content hash of the global asset; `None` until ingested or when retired.
+    pub animation_hash: Option<String>,
+    /// Always true for preset animations (global library).
+    pub animation_is_global: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -285,6 +319,7 @@ struct StepRow {
     note: Option<String>,
     note_ar: Option<String>,
     sha256: Option<String>,
+    animation_hash: Option<String>,
     is_active: Option<bool>,
 }
 
@@ -319,6 +354,8 @@ impl From<StepRow> for RecipeStep {
             name_ar,
             note: r.note,
             note_ar: r.note_ar,
+            animation_hash: if live { r.animation_hash } else { None },
+            animation_is_global: true,
             animation_url: url,
             animation_sha256: sha,
         }
@@ -335,7 +372,8 @@ where
     let rows: Vec<StepRow> = sqlx::query_as(
         "SELECT s.position, s.kind, s.preset_slug, s.title, s.title_ar, \
                 p.name AS preset_name, p.name_ar AS preset_name_ar, p.note, p.note_ar, \
-                p.sha256, p.is_active \
+                p.sha256, p.is_active, \
+                (SELECT a.hash FROM assets a WHERE a.group_id = p.animation_group_id AND a.variant = 'animation' LIMIT 1) AS animation_hash \
          FROM menu_item_recipe_steps s \
          LEFT JOIN recipe_step_presets p ON p.slug = s.preset_slug \
          WHERE s.menu_item_id = $1 ORDER BY s.position",
@@ -364,7 +402,8 @@ where
     let rows: Vec<OrgStepRow> = sqlx::query_as(
         "SELECT s.menu_item_id, s.position, s.kind, s.preset_slug, s.title, s.title_ar, \
                 p.name AS preset_name, p.name_ar AS preset_name_ar, p.note, p.note_ar, \
-                p.sha256, p.is_active \
+                p.sha256, p.is_active, \
+                (SELECT a.hash FROM assets a WHERE a.group_id = p.animation_group_id AND a.variant = 'animation' LIMIT 1) AS animation_hash \
          FROM menu_item_recipe_steps s \
          LEFT JOIN recipe_step_presets p ON p.slug = s.preset_slug \
          WHERE s.org_id = $1 \

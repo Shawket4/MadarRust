@@ -467,7 +467,9 @@ pub(crate) async fn load_public_menu(
 
     let categories: Vec<DeliveryMenuCategory> =
         sqlx::query_as::<_, (Uuid, String, serde_json::Value, Option<String>)>(
-            "SELECT id, name, name_translations, image_url FROM categories \
+            "SELECT id, name, name_translations, \
+                    COALESCE('asset:' || (SELECT a.hash FROM assets a WHERE a.group_id = categories.image_group_id AND a.variant = 'full' LIMIT 1), image_url) \
+             FROM categories \
          WHERE org_id = $1 AND is_active = true AND deleted_at IS NULL ORDER BY name",
         )
         .bind(org_id)
@@ -479,7 +481,7 @@ pub(crate) async fn load_public_menu(
                 id,
                 name,
                 name_translations,
-                image_url,
+                image_url: public_image_url(org_id, image_url),
             },
         )
         .collect();
@@ -487,7 +489,8 @@ pub(crate) async fn load_public_menu(
     #[allow(clippy::type_complexity)]
     let item_rows: Vec<(Uuid, Option<Uuid>, String, serde_json::Value, Option<String>, Option<String>, i32)> =
         sqlx::query_as(
-            r#"SELECT mi.id, mi.category_id, mi.name, mi.name_translations, mi.description, mi.image_url,
+            r#"SELECT mi.id, mi.category_id, mi.name, mi.name_translations, mi.description,
+                      COALESCE('asset:' || (SELECT a.hash FROM assets a WHERE a.group_id = mi.image_group_id AND a.variant = 'full' LIMIT 1), mi.image_url) AS image_url,
                       COALESCE(bcmo.price_override, bmo.price_override, mi.base_price) AS price
                FROM menu_items mi
                LEFT JOIN branch_menu_overrides bmo
@@ -570,7 +573,7 @@ pub(crate) async fn load_public_menu(
                     name,
                     name_translations,
                     description,
-                    image_url,
+                    image_url: public_image_url(org_id, image_url),
                     price,
                 }
             },
@@ -1979,4 +1982,18 @@ pub async fn track_delivery_order(
     .await?;
     let tracking = row.ok_or_else(|| AppError::NotFound("Order not found".into()))?;
     Ok(HttpResponse::Ok().json(tracking))
+}
+
+/// Track B4 (§11.5 R5): an ingested image is served as a 7-day signed URL of
+/// its `full` variant; otherwise the legacy URL is passed through unchanged.
+fn public_image_url(org_id: Uuid, v: Option<String>) -> Option<String> {
+    match v {
+        Some(s) if s.starts_with("asset:") => Some(crate::assets::ingest::signed_url(
+            Some(org_id),
+            &s["asset:".len()..],
+            "webp",
+            crate::assets::ingest::PUBLIC_TTL,
+        )),
+        other => other,
+    }
 }

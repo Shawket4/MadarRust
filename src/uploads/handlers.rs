@@ -1,227 +1,180 @@
 use crate::{
+    assets::ingest::{AssetField, AssetPurpose, AssetTable, AssetTarget, IngestSource, MAX_RAW_BYTES, stage},
     auth::jwt::Claims,
     errors::{AppError, AppErrorResponse},
     models::UserRole,
     permissions::checker::check_permission,
-    uploads::image::{MAX_PHOTO_EDGE, MAX_RAW_BYTES, process_upload},
 };
 use actix_multipart::Multipart;
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-const ALLOWED_MIME: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-    "image/bmp",
-    "image/x-bmp",
-    "image/x-ms-bmp",
-];
-
+/// Upload accepted: the picture is converted by the background asset worker.
+/// `image_url` is the row's current legacy URL (unchanged until the job is
+/// done); poll `GET /assets/jobs/{asset_job_id}`.
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct UploadResponse {
-    #[serde(serialize_with = "serialize_url")]
-    pub image_url: String,
+    #[serde(serialize_with = "serialize_opt_url")]
+    pub image_url: Option<String>,
+    pub asset_job_id: Uuid,
+    /// `processing`
+    pub status: String,
 }
 
 #[derive(ToSchema)]
 #[allow(dead_code)]
 pub struct UploadImageMultipart {
-    /// Image file. PNG, JPEG, or WebP. Required.
+    /// Image file (JPEG, PNG, WebP, GIF still, BMP). Type is sniffed from bytes.
     #[schema(format = Binary, content_media_type = "image/*")]
     pub image: String,
+}
+
+/// Read the `image` multipart field (capped). Client MIME/filename are ignored.
+pub async fn read_image_field(payload: &mut Multipart) -> Result<(Vec<u8>, Option<String>), AppError> {
+    while let Some(item) = payload.next().await {
+        let mut field = item.map_err(|_| AppError::BadRequest("Invalid multipart data".into()))?;
+        let name = field.content_disposition().and_then(|cd| cd.get_name()).unwrap_or("").to_string();
+        let label = field.content_disposition().and_then(|cd| cd.get_filename()).map(str::to_string);
+        if name != "image" {
+            while let Some(c) = field.next().await {
+                c.map_err(|_| AppError::BadRequest("Failed reading upload".into()))?;
+            }
+            continue;
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = field.next().await {
+            let chunk = chunk.map_err(|_| AppError::BadRequest("Failed reading upload".into()))?;
+            bytes.extend_from_slice(&chunk);
+            if bytes.len() > MAX_RAW_BYTES {
+                return Err(AppError::BadRequest("File too large (max 20 MB raw)".into()));
+            }
+        }
+        if bytes.is_empty() {
+            return Err(AppError::BadRequest("No image field found in upload".into()));
+        }
+        return Ok((bytes, label));
+    }
+    Err(AppError::BadRequest("No image field found in upload".into()))
+}
+
+async fn upload_for(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    table: AssetTable,
+    id: Uuid,
+    mut payload: Multipart,
+) -> Result<HttpResponse, AppError> {
+    if crate::demo::config::demo_mode() {
+        return Err(AppError::BadRequest("Image uploads are disabled in the demo.".into()));
+    }
+    let claims = extract_claims(&req)?;
+    let (resource, sql, purpose, what) = match table {
+        AssetTable::MenuItems => ("menu_items", "SELECT org_id, image_url FROM menu_items WHERE id = $1 AND deleted_at IS NULL", AssetPurpose::MenuItemPhoto, "Menu item"),
+        AssetTable::Categories => ("categories", "SELECT org_id, image_url FROM categories WHERE id = $1 AND deleted_at IS NULL", AssetPurpose::CategoryPhoto, "Category"),
+        AssetTable::Bundles => ("menu_items", "SELECT org_id, image_url FROM bundles WHERE id = $1", AssetPurpose::BundlePhoto, "Bundle"),
+        _ => return Err(AppError::BadRequest("unsupported upload target".into())),
+    };
+    check_permission(pool.get_ref(), &claims, resource, "update").await?;
+    let row: Option<(Uuid, Option<String>)> = sqlx::query_as(sql).bind(id).fetch_optional(pool.get_ref()).await?;
+    let (org_id, image_url) = row.ok_or_else(|| AppError::NotFound(format!("{what} not found")))?;
+    if claims.role != UserRole::SuperAdmin && claims.org_id() != Some(org_id) {
+        return Err(AppError::Forbidden(format!("{what} belongs to a different org")));
+    }
+    let (bytes, label) = read_image_field(&mut payload).await?;
+    let job = stage(
+        pool.get_ref(),
+        Some(org_id),
+        purpose,
+        IngestSource::Bytes(bytes.into()),
+        label.as_deref(),
+        AssetTarget::new(table, id, AssetField::Image),
+        claims.user_id_safe().ok(),
+    )
+    .await?;
+    Ok(HttpResponse::Ok().json(UploadResponse { image_url, asset_job_id: job, status: "processing".into() }))
 }
 
 #[utoipa::path(
     post,
     path = "/uploads/menu-items/{menu_item_id}",
     tag = "uploads",
-    params(
-        ("menu_item_id" = Uuid, Path, description = "Menu item ID")
-    ),
-    request_body(
-        content = UploadImageMultipart,
-        content_type = "multipart/form-data",
-        description = "Multipart form with a single `image` file field."
-    ),
-    responses(
-        (status = 200, description = "Image uploaded", body = UploadResponse),
-        AppErrorResponse,
-    ),
+    params(("menu_item_id" = Uuid, Path, description = "Menu item ID")),
+    request_body(content = UploadImageMultipart, content_type = "multipart/form-data",
+        description = "Multipart form with a single `image` file field."),
+    responses((status = 200, description = "Image accepted for processing", body = UploadResponse), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
-pub async fn upload_menu_item_image(
-    req: HttpRequest,
-    pool: crate::db::Db,
-    menu_item_id: web::Path<Uuid>,
-    mut payload: Multipart,
-) -> Result<HttpResponse, AppError> {
-    // Disabled in the public demo: uploaded files live on disk and the demo-org
-    // sweeper only reclaims DB rows, so allowing them would leak storage.
-    if crate::demo::config::demo_mode() {
-        return Err(AppError::BadRequest(
-            "Image uploads are disabled in the demo.".into(),
-        ));
-    }
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
-
-    let row: Option<(Uuid, Option<String>)> = sqlx::query_as(
-        "SELECT org_id, image_url FROM menu_items WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(*menu_item_id)
-    .fetch_optional(pool.get_ref())
-    .await?;
-
-    let (org_id, old_image_url) =
-        row.ok_or_else(|| AppError::NotFound("Menu item not found".into()))?;
-
-    if claims.role != UserRole::SuperAdmin && claims.org_id() != Some(org_id) {
-        return Err(AppError::Forbidden(
-            "Menu item belongs to a different org".into(),
-        ));
-    }
-
-    let uploads_dir = std::env::var("UPLOADS_DIR").map_err(|_| AppError::Internal)?;
-    let base_url = std::env::var("UPLOADS_BASE_URL").map_err(|_| AppError::Internal)?;
-
-    let mut file_bytes: Option<Vec<u8>> = None;
-
-    while let Some(item) = payload.next().await {
-        let mut field = item.map_err(|_| AppError::BadRequest("Invalid multipart data".into()))?;
-        let content_type = field
-            .content_type()
-            .map(|m| m.to_string())
-            .unwrap_or_default();
-        let field_name = field
-            .content_disposition()
-            .and_then(|cd| cd.get_name())
-            .unwrap_or("")
-            .to_string();
-
-        if field_name != "image" {
-            continue;
-        }
-        if !ALLOWED_MIME.contains(&content_type.as_str()) {
-            return Err(AppError::BadRequest(format!(
-                "Unsupported image type: {}",
-                content_type
-            )));
-        }
-
-        let mut bytes = Vec::new();
-        while let Some(chunk) = field.next().await {
-            let chunk = chunk.map_err(|_| AppError::BadRequest("Failed reading upload".into()))?;
-            bytes.extend_from_slice(&chunk);
-            if bytes.len() > MAX_RAW_BYTES {
-                return Err(AppError::BadRequest(
-                    "File too large (max 20 MB raw)".into(),
-                ));
-            }
-        }
-        file_bytes = Some(bytes);
-        break;
-    }
-
-    let raw_bytes =
-        file_bytes.ok_or_else(|| AppError::BadRequest("No image field found in upload".into()))?;
-
-    // A menu photograph is a photograph, so this almost always comes back JPEG
-    // — but a plated-dish cut-out on transparency is a real thing shops upload,
-    // and flattening it would print a white rectangle behind the plate on the
-    // public menu. The pixels decide, not the route.
-    let processed = process_upload(&raw_bytes, MAX_PHOTO_EDGE)?;
-    let stored_bytes = processed.bytes;
-
-    let filename = format!("{}.{}", Uuid::new_v4(), processed.extension);
-    let dir_path = Path::new(&uploads_dir)
-        .join(org_id.to_string())
-        .join("menu-items");
-    tokio::fs::create_dir_all(&dir_path).await.map_err(|e| {
-        tracing::error!("Failed to create upload dir: {}", e);
-        AppError::Internal
-    })?;
-    let file_path: PathBuf = dir_path.join(&filename);
-
-    // 1. Write new file to disk first
-    tokio::fs::write(&file_path, &stored_bytes)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to write image: {}", e);
-            AppError::Internal
-        })?;
-
-    let base = base_url.trim_end_matches('/');
-    let image_url = format!("{}/{}/menu-items/{}", base, org_id, filename);
-
-    // 2. Update DB — if this fails, clean up the newly written file
-    if let Err(e) = sqlx::query("UPDATE menu_items SET image_url = $1 WHERE id = $2")
-        .bind(&image_url)
-        .bind(*menu_item_id)
-        .execute(pool.get_ref())
-        .await
-    {
-        let _ = tokio::fs::remove_file(&file_path).await;
-        tracing::error!("DB update failed, cleaned up new file: {}", e);
-        return Err(AppError::from(e));
-    }
-
-    // 3. Delete old image ONLY after successful DB update
-    if let Some(old_url) = old_image_url {
-        delete_old_image(&old_url, &base_url, &uploads_dir, Some(org_id)).await;
-    }
-
-    tracing::info!(
-        "Uploaded image for menu_item {} → {} ({} KB)",
-        menu_item_id,
-        image_url,
-        stored_bytes.len() / 1024
-    );
-
-    Ok(HttpResponse::Ok().json(UploadResponse { image_url }))
+pub async fn upload_menu_item_image(req: HttpRequest, pool: crate::db::Db, id: web::Path<Uuid>, payload: Multipart) -> Result<HttpResponse, AppError> {
+    upload_for(req, pool, AssetTable::MenuItems, *id, payload).await
 }
 
-/// Delete a stored image. `org_scope = Some(org)` constrains the deletion to
-/// that org's subtree (`{uploads_root}/{org}/…`) so one tenant can't delete
-/// another's file via a crafted image_url; `None` (org-logos, super-admin only)
-/// keeps the looser uploads-root check. Either way path traversal OUT of the
-/// uploads dir is blocked.
-pub async fn delete_old_image(
-    old_url: &str,
-    _base_url: &str,
-    uploads_dir: &str,
-    org_scope: Option<Uuid>,
-) {
-    let rel = extract_relative_path(old_url);
-    let uploads_root = match std::fs::canonicalize(uploads_dir) {
-        Ok(p) => p,
-        Err(_) => return,
+#[utoipa::path(
+    post,
+    path = "/uploads/categories/{category_id}",
+    tag = "uploads",
+    params(("category_id" = Uuid, Path, description = "Category ID")),
+    request_body(content = UploadImageMultipart, content_type = "multipart/form-data"),
+    responses((status = 200, description = "Image accepted for processing", body = UploadResponse), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn upload_category_image(req: HttpRequest, pool: crate::db::Db, id: web::Path<Uuid>, payload: Multipart) -> Result<HttpResponse, AppError> {
+    upload_for(req, pool, AssetTable::Categories, *id, payload).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/uploads/bundles/{bundle_id}",
+    tag = "uploads",
+    params(("bundle_id" = Uuid, Path, description = "Bundle ID")),
+    request_body(content = UploadImageMultipart, content_type = "multipart/form-data"),
+    responses((status = 200, description = "Image accepted for processing", body = UploadResponse), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn upload_bundle_image(req: HttpRequest, pool: crate::db::Db, id: web::Path<Uuid>, payload: Multipart) -> Result<HttpResponse, AppError> {
+    upload_for(req, pool, AssetTable::Bundles, *id, payload).await
+}
+
+/// A URL saved into an image field by a JSON handler: our own legacy upload
+/// path → staged from the uploads dir (org-scoped); an external https URL →
+/// fetched by the worker (SSRF-guarded). Anything else is ignored.
+pub async fn stage_image_url(
+    pool: &sqlx::PgPool,
+    org_id: Uuid,
+    table: AssetTable,
+    id: Uuid,
+    url: &str,
+    actor: Option<Uuid>,
+) -> Result<Option<Uuid>, AppError> {
+    let target = AssetTarget::new(table, id, AssetField::Image);
+    let purpose = match table {
+        AssetTable::MenuItems => AssetPurpose::MenuItemPhoto,
+        AssetTable::Categories => AssetPurpose::CategoryPhoto,
+        AssetTable::Bundles => AssetPurpose::BundlePhoto,
+        _ => return Ok(None),
     };
-    let candidate = uploads_root.join(rel);
-    // Resolve symlinks and ".." before comparing — prevents path traversal
-    let canonical = match candidate.canonicalize() {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    let allowed_root = match org_scope {
-        Some(org) => uploads_root.join(org.to_string()),
-        None => uploads_root.clone(),
-    };
-    if !canonical.starts_with(&allowed_root) {
-        tracing::warn!(
-            "Blocked out-of-scope image delete: {:?} not under {:?}",
-            canonical,
-            allowed_root
-        );
-        return;
+    let store = crate::assets::AssetStore::from_env();
+    if let Some(rel) = crate::assets::legacy_rel_from_url(url) {
+        // Only this org's own files (or pre-org legacy dirs) may be re-staged.
+        let first = rel.split('/').next().unwrap_or("");
+        if Uuid::parse_str(first).is_ok_and(|o| o != org_id) {
+            return Ok(None);
+        }
+        // Already an asset-minted URL: nothing to do.
+        if rel.ends_with(".webp") && sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM asset_legacy_paths WHERE legacy_path = $1)").bind(&rel).fetch_one(pool).await? {
+            return Ok(None);
+        }
+        let Some(path) = store.legacy_file(&rel) else { return Ok(None) };
+        if tokio::fs::metadata(&path).await.is_err() {
+            return Ok(None);
+        }
+        return stage(pool, Some(org_id), purpose, IngestSource::LegacyFile(path), None, target, actor).await.map(Some);
     }
-    if let Err(e) = tokio::fs::remove_file(&canonical).await {
-        tracing::warn!("Could not delete old image {:?}: {}", canonical, e);
+    match url::Url::parse(url) {
+        Ok(u) if u.scheme() == "https" => stage(pool, Some(org_id), purpose, IngestSource::Url(u), None, target, actor).await.map(Some),
+        _ => Ok(None),
     }
 }
 
@@ -245,6 +198,10 @@ pub fn extract_relative_path(url: &str) -> &str {
 }
 
 pub fn normalize_upload_url(url: &str) -> String {
+    // Signed asset URLs are already absolute and must not be rewritten.
+    if url.contains("/assets/") && url.contains("sig=") {
+        return url.to_string();
+    }
     let base_url = std::env::var("UPLOADS_BASE_URL")
         .unwrap_or_else(|_| "https://madar-pos.cloud/api/uploads".to_string());
     let base = base_url.trim_end_matches('/');

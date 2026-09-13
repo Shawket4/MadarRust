@@ -497,14 +497,11 @@ async fn test_upload_org_logo(pool: PgPool) {
     let resp = test::call_service(&app, req).await;
     assert!(resp.status().is_success(), "got {}", resp.status());
 
-    let org: Org = test::read_body_json(resp).await;
-    let logo_url = org.logo_url.expect("a logo url");
-    // Transparency survives, so the file is a PNG and the card may still
-    // repaint the mark.
-    assert!(
-        logo_url.ends_with(".png"),
-        "a transparent logo must stay a PNG, got {logo_url}"
-    );
+    // Accepted for background conversion (Track B4): the org body plus the job.
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["status"], "processing");
+    assert!(body["asset_job_id"].is_string());
+    assert_eq!(body["id"], serde_json::json!(org_id));
 
     // And the same route now refuses a file that is not an image at all,
     // rather than writing it to disk and serving it as a logo.

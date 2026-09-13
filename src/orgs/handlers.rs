@@ -14,10 +14,7 @@ use crate::{
     branches::handlers::validate_timezone,
     errors::{AppError, AppErrorResponse},
     permissions::checker::check_permission,
-    uploads::{
-        handlers::delete_old_image,
-        image::{MAX_LOGO_EDGE, MAX_PHOTO_EDGE, MAX_RAW_BYTES, process_upload},
-    },
+    assets::ingest::{AssetField, AssetPurpose, AssetTable, AssetTarget, IngestSource, MAX_RAW_BYTES, stage},
 };
 
 // ── Models ────────────────────────────────────────────────────
@@ -240,11 +237,9 @@ pub async fn create_org(
     check_permission(pool.get_ref(), &claims, "orgs", "create").await?;
     require_super_admin(&claims)?;
 
-    let uploads_dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
-    let base_url = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
-
     let mut fields = CreateOrgFields::default();
-    let mut logo_url: Option<String> = None;
+    let logo_url: Option<String> = None;
+    let mut logo_bytes: Option<Vec<u8>> = None;
 
     while let Some(mut field) = mp
         .try_next()
@@ -257,21 +252,10 @@ pub async fn create_org(
             "logo" => {
                 let bytes = read_capped(&mut field).await?;
                 if !bytes.is_empty() {
-                    // Capped, stripped and re-encoded like every other upload —
-                    // and the extension comes from the processed bytes, not from
-                    // the client's Content-Type, because the old mapping wrote a
-                    // `.jpg` name onto whatever it had just been handed.
-                    let processed = process_upload(&bytes, MAX_LOGO_EDGE)?;
-                    let filename = format!("{}.{}", Uuid::new_v4(), processed.extension);
-                    let file_path = format!("{}/logos/{}", uploads_dir, filename);
-                    std::fs::create_dir_all(format!("{}/logos", uploads_dir))
-                        .map_err(|_| AppError::Internal)?;
-                    std::fs::write(&file_path, &processed.bytes).map_err(|_| AppError::Internal)?;
-                    logo_url = Some(format!(
-                        "{}/logos/{}",
-                        base_url.trim_end_matches('/'),
-                        filename
-                    ));
+                    // Sniffed now (cheap), converted by the asset worker after
+                    // the org row exists (§11.5 W5).
+                    crate::assets::ingest::sniff(&bytes)?;
+                    logo_bytes = Some(bytes);
                 }
             }
             "name" => fields.name = text_field(&mut field).await?,
@@ -410,6 +394,19 @@ pub async fn create_org(
 
     tx.commit().await?;
 
+    if let Some(bytes) = logo_bytes {
+        let job = stage(
+            pool.get_ref(),
+            Some(org.id),
+            AssetPurpose::OrgLogo,
+            IngestSource::Bytes(bytes.into()),
+            None,
+            AssetTarget::new(AssetTable::Organizations, org.id, AssetField::Logo),
+            claims.user_id_safe().ok(),
+        )
+        .await?;
+        return Ok(HttpResponse::Created().json(with_job(&org, job)?));
+    }
     Ok(HttpResponse::Created().json(org))
 }
 
@@ -701,9 +698,13 @@ pub async fn update_org(
     if body.logo_url == Some(None)
         && let Some(old_url) = existing.logo_url
     {
-        let uploads_dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
-        let base_url = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
-        delete_old_image(&old_url, &base_url, &uploads_dir, None).await;
+        // No file delete: assets are content-addressed and shared; the group
+        // reference is cleared and GC is a separate concern.
+        let _ = old_url;
+        sqlx::query("UPDATE organizations SET logo_group_id = NULL WHERE id = $1")
+            .bind(*org_id)
+            .execute(pool.get_ref())
+            .await?;
     }
 
     // If this update toggled the active flag, drop the cached org status so the
@@ -764,93 +765,21 @@ pub async fn upload_org_logo(
     }
 
     let existing = fetch_org(pool.get_ref(), *org_id).await?;
-    let uploads_dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
-    let base_url = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
-
-    let mut new_logo_url: Option<String> = None;
-    let mut decoded: Option<image::DynamicImage> = None;
-
-    while let Some(mut field) = mp
-        .try_next()
-        .await
-        .map_err(|e| AppError::BadRequest(format!("Multipart error: {e}")))?
-    {
-        if field.name().unwrap_or("") != "logo" {
-            drain_field(&mut field).await?;
-            continue;
-        }
-        let bytes = read_capped(&mut field).await?;
-        if !bytes.is_empty() {
-            // A logo is the one upload that must NOT become a JPEG just because
-            // JPEG is smaller: `is_mark` reads the alpha channel to decide
-            // whether a card may repaint the mark, and a flattened logo is 0%
-            // clear, so every shop's pass and printed card would show its mark
-            // inside a black or white box. `process_upload` keeps a transparent
-            // logo as PNG for exactly that reason.
-            let processed = process_upload(&bytes, MAX_LOGO_EDGE)?;
-            let filename = format!("{}.{}", Uuid::new_v4(), processed.extension);
-            let dir = format!("{}/logos", uploads_dir);
-            std::fs::create_dir_all(&dir).map_err(|_| AppError::Internal)?;
-            std::fs::write(format!("{}/{}", dir, filename), &processed.bytes)
-                .map_err(|_| AppError::Internal)?;
-            new_logo_url = Some(format!(
-                "{}/logos/{}",
-                base_url.trim_end_matches('/'),
-                filename,
-            ));
-            decoded = Some(processed.image);
-        }
-    }
-
-    let new_logo_url = new_logo_url
+    let bytes = read_file_field(&mut mp, "logo").await?
         .ok_or_else(|| AppError::BadRequest("No logo file received in field 'logo'".into()))?;
-
-    // Read the brand palette straight out of the pixels we were just handed: no
-    // fetch, so no stale cache and no server-side request to an address someone
-    // else supplied. A logo we cannot decode never reaches here at all now —
-    // `process_upload` turns that into a 400 — and one with no colour in it (a
-    // plain black mark is common) leaves the columns NULL and the card falls
-    // back to Madar's palette: a finished card, not a broken one.
-    //
-    // These are the SCALED pixels that were just written to disk, not the
-    // upload. The card renderers re-read the stored file later, so deriving the
-    // flag from anything else would let `brand_logo_is_mark` disagree with the
-    // image it describes.
-    let palette = decoded
-        .as_ref()
-        .and_then(crate::orgs::branding::palette_from_image);
-    // Whether the card may repaint this logo for contrast. Decided here, where
-    // the pixels already are, rather than on every card view.
-    let logo_is_mark = decoded
-        .as_ref()
-        .map(crate::orgs::branding::is_mark)
-        .unwrap_or(false);
-
-    let org = sqlx::query_as::<_, Org>(
-        r#"
-        UPDATE organizations
-        SET logo_url = $2, updated_at = NOW(),
-            brand_background = $3, brand_foreground = $4, brand_accent = $5,
-            brand_logo_source = $2, brand_logo_is_mark = $6
-        WHERE id = $1 AND deleted_at IS NULL
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
-        "#,
+    // The palette and `is_mark` are derived by the worker from the stored
+    // lossless original, so they can never disagree with the stored pixels.
+    let job = stage(
+        pool.get_ref(),
+        Some(*org_id),
+        AssetPurpose::OrgLogo,
+        IngestSource::Bytes(bytes.into()),
+        None,
+        AssetTarget::new(AssetTable::Organizations, *org_id, AssetField::Logo),
+        claims.user_id_safe().ok(),
     )
-    .bind(*org_id)
-    .bind(&new_logo_url)
-    .bind(palette.as_ref().map(|p| p.background.clone()))
-    .bind(palette.as_ref().map(|p| p.foreground.clone()))
-    .bind(palette.as_ref().map(|p| p.accent.clone()))
-    .bind(logo_is_mark)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .ok_or_else(|| AppError::NotFound("Org not found".into()))?;
-
-    if let Some(old_url) = existing.logo_url {
-        delete_old_image(&old_url, &base_url, &uploads_dir, None).await;
-    }
-
-    Ok(HttpResponse::Ok().json(org))
+    .await?;
+    Ok(HttpResponse::Ok().json(with_job(&existing, job)?))
 }
 
 // ── PUT /orgs/:id/card-image ─────────────────────────────────
@@ -902,64 +831,19 @@ pub async fn upload_org_card_image(
     }
 
     let existing = fetch_org(pool.get_ref(), *org_id).await?;
-    let uploads_dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
-    let base_url = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
-
-    let mut new_url: Option<String> = None;
-    while let Some(mut field) = mp
-        .try_next()
-        .await
-        .map_err(|e| AppError::BadRequest(format!("Multipart error: {e}")))?
-    {
-        if field.name().unwrap_or("") != "image" {
-            drain_field(&mut field).await?;
-            continue;
-        }
-        let bytes = read_capped(&mut field).await?;
-        if bytes.is_empty() {
-            continue;
-        }
-        // Decoded before it is stored. A file the wallets cannot read would be
-        // a card that silently loses its band, and the upload is where someone
-        // is still watching. It is also capped and re-encoded here: this is a
-        // photograph off a phone, so it arrives at 4000 px with the GPS
-        // coordinates of the shop in its EXIF, and it is served to every
-        // customer who opens the card.
-        let processed = process_upload(&bytes, MAX_PHOTO_EDGE)?;
-
-        let filename = format!("{}.{}", Uuid::new_v4(), processed.extension);
-        let dir = format!("{uploads_dir}/card");
-        std::fs::create_dir_all(&dir).map_err(|_| AppError::Internal)?;
-        std::fs::write(format!("{dir}/{filename}"), &processed.bytes)
-            .map_err(|_| AppError::Internal)?;
-        new_url = Some(format!(
-            "{}/card/{}",
-            base_url.trim_end_matches('/'),
-            filename
-        ));
-    }
-
-    let new_url =
-        new_url.ok_or_else(|| AppError::BadRequest("No file received in field 'image'".into()))?;
-
-    let org = sqlx::query_as::<_, Org>(
-        r#"
-        UPDATE organizations SET brand_card_image = $2, updated_at = NOW()
-        WHERE id = $1 AND deleted_at IS NULL
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
-        "#,
+    let bytes = read_file_field(&mut mp, "image").await?
+        .ok_or_else(|| AppError::BadRequest("No file received in field 'image'".into()))?;
+    let job = stage(
+        pool.get_ref(),
+        Some(*org_id),
+        AssetPurpose::LoyaltyCardImage,
+        IngestSource::Bytes(bytes.into()),
+        None,
+        AssetTarget::new(AssetTable::Organizations, *org_id, AssetField::BrandCardImage),
+        claims.user_id_safe().ok(),
     )
-    .bind(*org_id)
-    .bind(&new_url)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .ok_or_else(|| AppError::NotFound("Org not found".into()))?;
-
-    if let Some(old) = existing.brand_card_image {
-        delete_old_image(&old, &base_url, &uploads_dir, None).await;
-    }
-
-    Ok(HttpResponse::Ok().json(org))
+    .await?;
+    Ok(HttpResponse::Ok().json(with_job(&existing, job)?))
 }
 
 // ── DELETE /orgs/:id  (super_admin only) ─────────────────────
@@ -1025,6 +909,36 @@ async fn fetch_org(pool: &PgPool, id: Uuid) -> Result<Org, AppError> {
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| AppError::NotFound("Org not found".into()))
+}
+
+/// First non-empty file in `name`; other fields drained.
+async fn read_file_field(mp: &mut Multipart, name: &str) -> Result<Option<Vec<u8>>, AppError> {
+    let mut out = None;
+    while let Some(mut field) = mp
+        .try_next()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Multipart error: {e}")))?
+    {
+        if field.name().unwrap_or("") != name || out.is_some() {
+            drain_field(&mut field).await?;
+            continue;
+        }
+        let bytes = read_capped(&mut field).await?;
+        if !bytes.is_empty() {
+            out = Some(bytes);
+        }
+    }
+    Ok(out)
+}
+
+/// Existing response body + `asset_job_id` + `status: "processing"` (§11.3).
+fn with_job(org: &Org, job: Uuid) -> Result<serde_json::Value, AppError> {
+    let mut v = serde_json::to_value(org).map_err(|_| AppError::Internal)?;
+    if let Some(o) = v.as_object_mut() {
+        o.insert("asset_job_id".into(), serde_json::json!(job));
+        o.insert("status".into(), serde_json::json!("processing"));
+    }
+    Ok(v)
 }
 
 async fn drain_field(field: &mut actix_multipart::Field) -> Result<(), AppError> {
