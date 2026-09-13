@@ -139,7 +139,7 @@ pub(crate) async fn seed(pool: &PgPool, label: &str) -> Seeded {
         let subtotal = unit * qty;
         let total = subtotal - discount;
         sqlx::query(
-            "INSERT INTO orders (id, branch_id, shift_id, teller_id, order_number, payment_method, \
+            "INSERT INTO orders (id, branch_id, till_id, teller_id, order_number, payment_method, \
              order_ref, status, subtotal, discount_amount, total_amount, order_type) \
              VALUES ($1,$2,$3,$4,$5,'cash',$6,'completed',$7,$8,$9,'dine_in')",
         )
@@ -658,7 +658,7 @@ async fn a_partial_refund_is_netted_from_revenue_and_reported_apart(pool: PgPool
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO order_refunds (order_id, shift_id, amount, method, is_cash, reason, issued_by)
+        "INSERT INTO order_refunds (order_id, till_id, amount, method, is_cash, reason, issued_by)
          VALUES ($1, $2, 1000, 'cash', true, 'quality_issue', $3)",
     )
     .bind(latte_order)
@@ -724,7 +724,7 @@ async fn a_partial_refund_is_netted_from_revenue_and_reported_apart(pool: PgPool
     // Refund the rest: the status flips, the sale leaves `sold` and takes its
     // refunds with it, and the refunds dataset counts it as fully refunded.
     sqlx::query(
-        "INSERT INTO order_refunds (order_id, shift_id, amount, method, is_cash, reason, issued_by)
+        "INSERT INTO order_refunds (order_id, till_id, amount, method, is_cash, reason, issued_by)
          VALUES ($1, $2, 9000, 'card', false, 'quality_issue', $3)",
     )
     .bind(latte_order)
