@@ -328,7 +328,7 @@ async fn sweeper_emits_time_based_deletes_and_raises_watermark(pool: PgPool) {
     // Time passes: the slot ended days ago, with no write to fire a trigger.
     let mut conn = pool.acquire().await.unwrap();
     sqlx::query("SET session_replication_role = replica").execute(&mut *conn).await.unwrap();
-    sqlx::query("UPDATE bookings SET starts_at = now() - interval '3 days', ends_at = now() - interval '3 days' WHERE id = $1")
+    sqlx::query("UPDATE bookings SET starts_at = now() - interval '3 days 1 hour', ends_at = now() - interval '3 days' WHERE id = $1")
         .bind(booking)
         .execute(&mut *conn)
         .await
