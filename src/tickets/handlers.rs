@@ -577,7 +577,8 @@ pub async fn list_open_tickets(
     let ids: Vec<Uuid> = sqlx::query_scalar(
         "SELECT id FROM open_tickets \
          WHERE branch_id = $1 AND ($2::text IS NULL OR status::text = $2) \
-         ORDER BY opened_at DESC LIMIT 500",
+         ORDER BY opened_at DESC \
+         LIMIT CASE WHEN $2::text = 'open' THEN NULL ELSE 500 END",
     )
     .bind(query.branch_id)
     .bind(status)
