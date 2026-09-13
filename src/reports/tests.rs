@@ -210,7 +210,7 @@ async fn test_shift_summary(pool: PgPool) {
     let token = generate_org_admin_token(user_id, org_id);
     let shift_id = seed_shift(&pool, branch_id, user_id).await;
 
-    grant_permission(&pool, "org_admin", "shifts", "read").await;
+    grant_permission(&pool, "org_admin", "tills", "read").await;
     grant_permission(&pool, "org_admin", "orders", "read").await;
 
     // Seed an order
@@ -1268,7 +1268,7 @@ async fn test_shift_summary_split_payment_not_double_counted(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
-    grant_permission(&pool, "org_admin", "shifts", "read").await;
+    grant_permission(&pool, "org_admin", "tills", "read").await;
     grant_permission(&pool, "org_admin", "orders", "read").await;
     let shift_id = seed_shift(&pool, branch_id, user_id).await;
     let token = generate_org_admin_token(user_id, org_id);
@@ -1531,7 +1531,7 @@ async fn sales_and_shift_reports_reconcile(pool: PgPool) {
     let shift_id = seed_shift(&pool, branch_id, user_id).await;
 
     grant_permission(&pool, "org_admin", "orders", "read").await;
-    grant_permission(&pool, "org_admin", "shifts", "read").await;
+    grant_permission(&pool, "org_admin", "tills", "read").await;
 
     seed_paid_order(
         &pool,
@@ -1747,7 +1747,7 @@ async fn seed_refund(
     method: &str,
 ) {
     sqlx::query(
-        "INSERT INTO order_refunds (order_id, shift_id, amount, method, is_cash, reason, issued_by)
+        "INSERT INTO order_refunds (order_id, till_id, amount, method, is_cash, reason, issued_by)
          VALUES ($1, $2, $3, $4, $4 = 'cash', 'customer_request', $5)",
     )
     .bind(order_id)
@@ -1768,7 +1768,7 @@ async fn a_partial_refund_comes_off_revenue_but_not_off_money_in(pool: PgPool) {
     let user_id = seed_user(&pool, org_id, "org_admin").await;
     let token = generate_org_admin_token(user_id, org_id);
     grant_permission(&pool, "org_admin", "orders", "read").await;
-    grant_permission(&pool, "org_admin", "shifts", "read").await;
+    grant_permission(&pool, "org_admin", "tills", "read").await;
 
     // Two shifts on the branch: the sale is made in A, one of the refunds is
     // issued from B's drawer.

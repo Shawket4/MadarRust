@@ -1939,7 +1939,7 @@ pub(crate) async fn create_order_inner(
     let order = match sqlx::query_as::<_, Order>(
         r#"
         INSERT INTO orders
-            (branch_id, shift_id, teller_id, order_number,
+            (branch_id, till_id, teller_id, order_number,
              payment_method, subtotal, discount_type, discount_value,
              discount_amount, tax_amount, total_amount,
              amount_tendered, change_given, tip_amount, tip_payment_method,
@@ -1952,7 +1952,7 @@ pub(crate) async fn create_order_inner(
                 $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'completed', $19, $20, $21, $22,
                 $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)
         RETURNING
-            id, branch_id, shift_id, teller_id,
+            id, branch_id, till_id, till_id AS shift_id, teller_id,
             (SELECT name FROM users WHERE id = $3) AS teller_name,
             waiter_id, (SELECT name FROM users WHERE id = $25) AS waiter_name,
             order_number, order_ref, status::text, payment_method::text,
@@ -2948,7 +2948,7 @@ pub(crate) async fn void_order_inner(
                void_note   = $5
            WHERE id = $1 AND status <> 'voided'
            RETURNING
-               id, branch_id, shift_id, teller_id,
+               id, branch_id, till_id, till_id AS shift_id, teller_id,
                (SELECT name FROM users WHERE id = teller_id) AS teller_name,
                waiter_id, (SELECT name FROM users WHERE id = waiter_id) AS waiter_name,
                order_number, order_ref, status::text, payment_method::text,

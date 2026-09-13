@@ -218,7 +218,7 @@ async fn seed_order(pool: &PgPool, branch_id: Uuid, org_id: Uuid) -> Uuid {
     .unwrap();
     if let Some((shift, teller)) = existing {
         return sqlx::query_scalar(
-            "INSERT INTO orders (branch_id, teller_id, shift_id, idempotency_key, subtotal, \
+            "INSERT INTO orders (branch_id, teller_id, till_id, idempotency_key, subtotal, \
                  discount_amount, tax_amount, total_amount, status, order_number, payment_method, \
                  order_ref) \
              VALUES ($1, $2, $3, gen_random_uuid(), 0, 0, 0, 0, 'completed', \
@@ -243,7 +243,7 @@ async fn seed_order(pool: &PgPool, branch_id: Uuid, org_id: Uuid) -> Uuid {
     .await
     .unwrap();
     sqlx::query_scalar(
-        "INSERT INTO orders (branch_id, teller_id, shift_id, idempotency_key, subtotal, \
+        "INSERT INTO orders (branch_id, teller_id, till_id, idempotency_key, subtotal, \
              discount_amount, tax_amount, total_amount, status, order_number, payment_method, \
              order_ref) \
          VALUES ($1, $2, $3, gen_random_uuid(), 0, 0, 0, 0, 'completed', 1, 'cash', \

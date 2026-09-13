@@ -337,7 +337,7 @@ pub async fn seed_full(
         let order_ref = format!("DMO-{}", order_id.simple());
         sqlx::query(
             "INSERT INTO orders \
-             (id, branch_id, shift_id, teller_id, order_number, status, payment_method, \
+             (id, branch_id, till_id, teller_id, order_number, status, payment_method, \
               subtotal, tax_amount, total_amount, created_at, order_ref) \
              VALUES ($1, $2, $3, $4, $5, 'completed'::order_status, 'Cash', $6, $7, $8, $9, $10)",
         )

@@ -337,7 +337,7 @@ pub async fn shift_summary(
     shift_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "shifts", "read").await?;
+    check_permission(pool.get_ref(), &claims, "tills", "read").await?;
     require_shift_branch_access(pool.get_ref(), &claims, *shift_id).await?;
 
     let summary = sqlx::query_as::<_, ShiftSummary>(

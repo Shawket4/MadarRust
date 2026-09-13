@@ -623,7 +623,7 @@ pub async fn apply_snapshot(
     let order_id: Uuid = sqlx::query_scalar(
         r#"
         INSERT INTO orders
-            (branch_id, shift_id, teller_id, order_number,
+            (branch_id, till_id, teller_id, order_number,
              payment_method, subtotal,
              discount_type, discount_value, discount_amount, discount_id,
              tax_amount, total_amount, tip_amount, status,

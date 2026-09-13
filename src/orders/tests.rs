@@ -3425,7 +3425,7 @@ async fn renaming_a_payment_method_carries_history(pool: PgPool) {
     grant_permission(&pool, "org_admin", "payment_methods", "update").await;
 
     sqlx::query(
-        "INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal,
+        "INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, subtotal,
              discount_amount, tax_amount, total_amount, status, order_number, payment_method,
              tip_amount, tip_payment_method, tip_is_cash, order_ref)
          VALUES (gen_random_uuid(), $1, $2, $3, gen_random_uuid(), 1000, 0, 0, 1000,
@@ -3756,7 +3756,7 @@ async fn a_sale_that_has_refunded_money_cannot_be_voided(pool: PgPool) {
     )
     .await;
     sqlx::query(
-        "INSERT INTO order_refunds (order_id, shift_id, amount, method, is_cash, reason, issued_by) \
+        "INSERT INTO order_refunds (order_id, till_id, amount, method, is_cash, reason, issued_by) \
          VALUES ($1, $2, 100, 'cash', true, 'goodwill', $3)",
     )
     .bind(order_id)

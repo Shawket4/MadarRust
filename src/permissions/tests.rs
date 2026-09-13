@@ -777,7 +777,7 @@ async fn kitchen_role_can_bump_but_not_touch_the_pos(pool: PgPool) {
         ("payments", "create"),
         ("open_tickets", "create"),
         ("open_tickets", "update"),
-        ("shifts", "create"),
+        ("tills", "create"),
         ("kitchen_stations", "create"),
     ] {
         assert!(
@@ -905,8 +905,8 @@ async fn a_branch_manager_holds_the_till_grants(pool: PgPool) {
     };
 
     for (res, act) in [
-        ("shifts", "create"),
-        ("shifts", "update"), // close, cash movements, force-close
+        ("tills", "create"),
+        ("tills", "update"), // close, cash movements, force-close
         ("orders", "create"),
         ("orders", "delete"), // void
         ("payments", "create"),

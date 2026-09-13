@@ -391,7 +391,7 @@ async fn a_queued_refund_lands_once_under_its_author(pool: PgPool) {
     let manager = seed_user(&pool, org, "branch_manager").await;
     let shift = open_shift_row(&pool, branch, teller).await;
     let order: Uuid = sqlx::query_scalar(
-        "INSERT INTO orders (branch_id, teller_id, shift_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref) \
+        "INSERT INTO orders (branch_id, teller_id, till_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref) \
          VALUES ($1, $2, $3, gen_random_uuid(), 300, 0, 300, 'completed', 1, 'cash', gen_random_uuid()::text) RETURNING id",
     )
     .bind(branch)

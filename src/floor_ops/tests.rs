@@ -1542,7 +1542,7 @@ async fn seed_order_for_ticket(
     );
     let _ = org;
     sqlx::query(
-        "INSERT INTO orders (branch_id, shift_id, teller_id, order_number, order_ref, \
+        "INSERT INTO orders (branch_id, till_id, teller_id, order_number, order_ref, \
              status, payment_method, subtotal, total_amount, open_ticket_id, \
              voided_at, voided_by) \
          VALUES ($1,$2,$3,$7,'O-' || $7::text, \

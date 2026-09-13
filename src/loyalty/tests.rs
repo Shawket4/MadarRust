@@ -2607,7 +2607,7 @@ async fn seed_settled_order(
     number: i32,
 ) -> Uuid {
     sqlx::query_scalar(
-        "INSERT INTO orders (branch_id, shift_id, teller_id, idempotency_key, subtotal, \
+        "INSERT INTO orders (branch_id, till_id, teller_id, idempotency_key, subtotal, \
              discount_amount, tax_amount, total_amount, status, order_number, \
              payment_method, order_ref) \
          VALUES ($1,$2,$3, gen_random_uuid(), $4, 0, 0, $4, 'completed', $5, 'cash', \

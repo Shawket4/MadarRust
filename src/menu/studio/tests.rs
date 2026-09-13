@@ -459,7 +459,7 @@ async fn test_put_sizes_roundtrip_and_soft_deactivate(pool: PgPool) {
     .await
     .unwrap();
     let cust_order: Uuid = sqlx::query_scalar(
-        "INSERT INTO orders (branch_id, shift_id, teller_id, order_number, status, \
+        "INSERT INTO orders (branch_id, till_id, teller_id, order_number, status, \
                              payment_method, subtotal, total_amount, order_ref) \
          VALUES ($1, $2, $3, 1, 'completed', 'cash', 4000, 4000, gen_random_uuid()::text) \
          RETURNING id",

@@ -2211,7 +2211,7 @@ pub const DATASETS: &[Dataset] = &[
         title: "Shifts",
         help: "One row per till shift. Use for cash control: drawer variance, short \
                shifts, force-closes, and shift length by teller or branch.",
-        from: "shifts s",
+        from: "tills s",
         branch_col: "s.branch_id",
         time_col: "s.opened_at",
         time_is_date: false,

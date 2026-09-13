@@ -1853,7 +1853,7 @@ mod it {
         // take their DB column defaults (the path POST /orders exercises).
         let oid = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO orders (id, branch_id, shift_id, teller_id, order_number, \
+            "INSERT INTO orders (id, branch_id, till_id, teller_id, order_number, \
              payment_method, subtotal, total_amount, status, order_ref) \
              VALUES ($1,$2,$3,$4,1,'cash',500,500,'completed','DT-000000-0001')",
         )
