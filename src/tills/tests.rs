@@ -2105,3 +2105,122 @@ async fn test_shift_report_reconciles_refunds_against_the_drawer(pool: PgPool) {
         "the sheet adds up from its own lines"
     );
 }
+
+/// Tills are per person: several tellers can each have a till open at the same
+/// branch at the same time (no per-drawer or per-branch limit).
+#[sqlx::test]
+async fn many_tills_open_at_once_in_one_branch(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(crate::tills::routes::configure),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    for a in ["create", "read", "update"] {
+        grant_permission(&pool, "teller", "tills", a).await;
+    }
+    let mut opened = Vec::new();
+    for _ in 0..3 {
+        let teller = seed_user(&pool, org_id, "teller").await;
+        sqlx::query("UPDATE users SET name = $2 WHERE id = $1")
+            .bind(teller)
+            .bind(format!("Teller {teller}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        assign_user_to_branch(&pool, teller, branch_id).await;
+        let token = generate_teller_token(teller, org_id);
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri(&format!("/tills/branches/{branch_id}/open"))
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .insert_header(("X-Madar-Device", Uuid::new_v4().to_string()))
+                .set_json(serde_json::json!({ "opening_cash": 0 }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), 201);
+        let till: serde_json::Value = test::read_body_json(resp).await;
+        opened.push((till["id"].as_str().unwrap().to_string(), token));
+    }
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/tills/branches/{branch_id}/open"))
+            .insert_header(("Authorization", format!("Bearer {}", opened[0].1)))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let open: Vec<serde_json::Value> = test::read_body_json(resp).await;
+    assert_eq!(open.len(), 3);
+    for (id, _) in &opened {
+        assert!(open.iter().any(|t| t["id"] == id.as_str()));
+        assert!(open.iter().all(|t| t["status"] == "open"));
+    }
+}
+
+/// At most one open till per person (live): re-opening on the same device
+/// resumes the same till, another device at the branch is refused with
+/// `TILL_OPEN_ELSEWHERE`, another branch with `TILL_OPEN_AT_OTHER_BRANCH`.
+#[sqlx::test]
+async fn at_most_one_open_till_per_person(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(crate::tills::routes::configure),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    let branch_a = seed_branch(&pool, org_id).await;
+    let branch_b = seed_branch(&pool, org_id).await;
+    let teller = seed_user(&pool, org_id, "teller").await;
+    assign_user_to_branch(&pool, teller, branch_a).await;
+    assign_user_to_branch(&pool, teller, branch_b).await;
+    for a in ["create", "read", "update"] {
+        grant_permission(&pool, "teller", "tills", a).await;
+    }
+    let token = generate_teller_token(teller, org_id);
+    let device = Uuid::new_v4();
+    let open = |branch: Uuid, device: Uuid| {
+        test::TestRequest::post()
+            .uri(&format!("/tills/branches/{branch}/open"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("X-Madar-Device", device.to_string()))
+            .set_json(serde_json::json!({ "opening_cash": 0 }))
+            .to_request()
+    };
+
+    let resp = test::call_service(&app, open(branch_a, device)).await;
+    assert_eq!(resp.status(), 201);
+    let first: serde_json::Value = test::read_body_json(resp).await;
+
+    let resp = test::call_service(&app, open(branch_a, device)).await;
+    assert_eq!(resp.status(), 200, "same device resumes");
+    let again: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(again["id"], first["id"]);
+
+    let resp = test::call_service(&app, open(branch_a, Uuid::new_v4())).await;
+    assert_eq!(resp.status(), 409);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["code"], "TILL_OPEN_ELSEWHERE");
+    assert_eq!(body["till"]["id"], first["id"]);
+
+    let resp = test::call_service(&app, open(branch_b, device)).await;
+    assert_eq!(resp.status(), 409);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["code"], "TILL_OPEN_AT_OTHER_BRANCH");
+    assert_eq!(body["till"]["id"], first["id"]);
+
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM tills WHERE teller_id=$1 AND status='open'")
+        .bind(teller)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+}
