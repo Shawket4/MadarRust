@@ -9,7 +9,7 @@ use uuid::Uuid;
 use super::handlers::{self as h, CashMovementRequest, CloseTillRequest, ForceCloseRequest, ListTillsQuery};
 use super::legacy::{
     CloseShiftResponse, LegacyTill, OpenShiftRequest, PaginatedShifts, Shift, ShiftPreFill,
-    ShiftReportResponse, synthesized_till_id,
+    ShiftReportResponse, LegacyJoins, legacy_shift, synthesized_till_id,
 };
 use crate::{
     auth::middleware::JwtMiddleware,
@@ -76,7 +76,10 @@ pub async fn get_current_shift(
     Ok(HttpResponse::Ok().json(ShiftPreFill {
         has_open_shift: open.is_some(),
         suggested_opening_cash: if open.is_some() { 0 } else { pre.suggested_opening_cash },
-        open_shift: open.map(Shift::from),
+        open_shift: match open {
+            Some(t) => Some(legacy_shift(pool.get_ref(), t, LegacyJoins::Till).await?),
+            None => None,
+        },
     }))
 }
 
@@ -104,8 +107,8 @@ pub async fn open_shift(
     )
     .await;
     match res {
-        Ok((till, true)) => Ok(HttpResponse::Created().json(Shift::from(till))),
-        Ok((till, false)) => Ok(HttpResponse::Ok().json(Shift::from(till))),
+        Ok((till, true)) => Ok(HttpResponse::Created().json(legacy_shift(pool.get_ref(), till, LegacyJoins::Till).await?)),
+        Ok((till, false)) => Ok(HttpResponse::Ok().json(legacy_shift(pool.get_ref(), till, LegacyJoins::Till).await?)),
         Err(AppError::RefusedWith { code, .. }) => Err(AppError::Conflict(if code == "TILL_OPEN_AT_OTHER_BRANCH" {
             "You already have an open shift at another branch. Close it before opening a new one.".into()
         } else {
@@ -136,8 +139,12 @@ pub async fn list_shifts(
     check_permission(pool.get_ref(), &claims, "tills", "read").await?;
     let query = ListTillsQuery { page: q.page, per_page: q.per_page, ..Default::default() };
     let p = h::list_tills_core(&req, pool.get_ref(), &claims, *branch_id, &query).await?;
+    let mut data = Vec::with_capacity(p.data.len());
+    for t in p.data {
+        data.push(legacy_shift(pool.get_ref(), t, LegacyJoins::TillAndBranch).await?);
+    }
     Ok(HttpResponse::Ok().json(PaginatedShifts {
-        data: p.data.into_iter().map(Shift::from).collect(),
+        data,
         total: p.total,
         page: p.page,
         per_page: p.per_page,
@@ -163,7 +170,7 @@ pub async fn force_close_shift(
         return Ok(resp);
     }
     let till = h::fetch_till_or_404(pool.get_ref(), till_id).await?;
-    Ok(HttpResponse::Ok().json(Shift::from(till)))
+    Ok(HttpResponse::Ok().json(legacy_shift(pool.get_ref(), till, LegacyJoins::None).await?))
 }
 
 #[utoipa::path(get, path = "/shifts/{shift_id}", tag = "shifts",
@@ -175,7 +182,7 @@ pub async fn get_shift(req: HttpRequest, pool: crate::db::Db, id: web::Path<Uuid
     check_permission(pool.get_ref(), &claims, "tills", "read").await?;
     let till = h::fetch_till_or_404(pool.get_ref(), *id).await?;
     h::require_branch_access(pool.get_ref(), &claims, till.branch_id).await?;
-    Ok(HttpResponse::Ok().json(Shift::from(till)))
+    Ok(HttpResponse::Ok().json(legacy_shift(pool.get_ref(), till, LegacyJoins::Till).await?))
 }
 
 #[utoipa::path(get, path = "/shifts/{shift_id}/report", tag = "shifts",
@@ -188,7 +195,7 @@ pub async fn get_shift_report(req: HttpRequest, pool: crate::db::Db, id: web::Pa
     let till = h::fetch_till_or_404(pool.get_ref(), *id).await?;
     h::require_branch_access(pool.get_ref(), &claims, till.branch_id).await?;
     let figures = h::report_figures(pool.get_ref(), &till).await?;
-    Ok(HttpResponse::Ok().json(ShiftReportResponse { shift: till.into(), figures }))
+    Ok(HttpResponse::Ok().json(ShiftReportResponse { shift: legacy_shift(pool.get_ref(), till, LegacyJoins::Till).await?, figures }))
 }
 
 #[utoipa::path(post, path = "/shifts/{shift_id}/cash-movements", tag = "shifts",
@@ -234,10 +241,11 @@ pub async fn close_shift(
     check_permission(pool.get_ref(), &claims, "tills", "update").await?;
     let till = h::fetch_till_or_404(pool.get_ref(), *id).await?;
     h::require_branch_access(pool.get_ref(), &claims, till.branch_id).await?;
+    let already_closed = till.status != "open";
     let mut body = body.into_inner();
     body.reconciliation = None;
     let out = h::close_till_inner(pool.get_ref(), hub.as_ref().map(|h| h.get_ref()), *id, body, ActingContext::live(&claims)?).await?;
-    Ok(HttpResponse::Ok().json(CloseShiftResponse { shift: out.till.into() }))
+    Ok(HttpResponse::Ok().json(CloseShiftResponse { shift: legacy_shift(pool.get_ref(), out.till, if already_closed { LegacyJoins::Till } else { LegacyJoins::None }).await? }))
 }
 
 #[derive(Deserialize, IntoParams)]

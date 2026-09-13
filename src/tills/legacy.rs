@@ -9,8 +9,9 @@ use uuid::Uuid;
 
 use super::handlers::{Till, TillReportFigures};
 
-/// Legacy `Shift` = `Till` + `till_id`/`till_name` (always null: the drawer
-/// entity is gone).
+/// Legacy `Shift` = `Till` + `till_id`/`till_name`: the branch's legacy drawer
+/// entity (the one `GET /tills` synthesizes) and its name, exactly as the
+/// pre-rename backend reported them. Build it with [`legacy_shift`].
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct Shift {
     #[serde(flatten)]
@@ -23,12 +24,6 @@ impl std::ops::Deref for Shift {
     type Target = Till;
     fn deref(&self) -> &Till {
         &self.till
-    }
-}
-
-impl From<Till> for Shift {
-    fn from(till: Till) -> Self {
-        Self { till, till_id: None, till_name: None }
     }
 }
 
@@ -109,6 +104,51 @@ pub struct LegacyTill {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub standard_float: Option<i32>,
+}
+
+/// The id old clients know as the branch's drawer: the archived default entity
+/// when one exists, else [`synthesized_till_id`]. Same rule as `GET /tills`.
+pub async fn legacy_till_entity_id(pool: &sqlx::PgPool, branch_id: Uuid) -> Uuid {
+    sqlx::query_scalar::<_, Uuid>(
+        "SELECT e.id FROM archive.till_entities e WHERE e.branch_id = $1 AND e.is_default \
+           AND e.deleted_at IS NULL ORDER BY e.created_at LIMIT 1",
+    )
+    .bind(branch_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| synthesized_till_id(branch_id))
+}
+
+/// Which joins the pre-rename query behind a response made. The old backend
+/// built single-shift reads with the drawer join but no branch join
+/// (`branch_name: null`), the branch list with both, and the close /
+/// force-close `RETURNING` rows with neither (`till_id`/`till_name: null`).
+#[derive(Clone, Copy)]
+pub enum LegacyJoins {
+    /// `GET /shifts/{id}`, report, current, open.
+    Till,
+    /// `GET /shifts/branches/{b}`.
+    TillAndBranch,
+    /// close / force-close.
+    None,
+}
+
+/// The legacy `Shift` for a till, with exactly the joins the old response had.
+pub async fn legacy_shift(
+    pool: &sqlx::PgPool,
+    mut till: Till,
+    joins: LegacyJoins,
+) -> Result<Shift, crate::errors::AppError> {
+    if !matches!(joins, LegacyJoins::TillAndBranch) {
+        till.branch_name = None;
+    }
+    if matches!(joins, LegacyJoins::None) {
+        return Ok(Shift { till, till_id: None, till_name: None });
+    }
+    let till_id = legacy_till_entity_id(pool, till.branch_id).await;
+    Ok(Shift { till, till_id: Some(till_id), till_name: Some("Till 1".into()) })
 }
 
 /// `uuid v5(NAMESPACE_OID, "madar-legacy-till:"+branch_id)`.

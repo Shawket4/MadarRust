@@ -358,15 +358,19 @@ pub async fn replay(
     req: HttpRequest,
     pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
-    body: web::Json<ReplayOp>,
+    body: web::Json<serde_json::Value>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
+    // Old POS (v0.5.1 / v0.6.0) queue `open_shift` / `close_shift`; their acks
+    // keep the legacy `Shift` / `CloseShiftResponse` shapes.
+    let legacy_op = matches!(body.get("op").and_then(|v| v.as_str()), Some("open_shift" | "close_shift"));
     let token_org = claims
         .org_id()
         .ok_or_else(|| AppError::Unauthorized("Token has no organization".into()))?;
 
     let header_device = crate::devices::DeviceHeader::from_request_headers(&req);
-    let op = body.into_inner();
+    let op: ReplayOp = serde_json::from_value(body.into_inner())
+        .map_err(|e| AppError::BadRequest(format!("Json deserialize error: {e}")))?;
     let teller_id = op.teller_id();
 
     // ATTRIBUTION. The embedded actor must be a real, active till user of the
@@ -429,12 +433,21 @@ pub async fn replay(
                 crate::tills::handlers::OpenMeta { device_id: device_id.or(header_device), device_code, verification },
             )
             .await?;
-            Ok(if created { HttpResponse::Created() } else { HttpResponse::Ok() }.json(till))
+            let mut out = if created { HttpResponse::Created() } else { HttpResponse::Ok() };
+            if legacy_op {
+                let shift = crate::tills::legacy::legacy_shift(pool.get_ref(), till, crate::tills::legacy::LegacyJoins::Till).await?;
+                return Ok(out.json(shift));
+            }
+            Ok(out.json(till))
         }
         ReplayOp::CloseTill {
             till_id, device_id, mut request, ..
         } => {
             request.device_id = request.device_id.or(device_id).or(header_device);
+            // An already-closed till is returned as stored; the old backend read
+            // it back WITH the drawer join, a fresh close without it.
+            let already_closed = legacy_op
+                && crate::tills::handlers::fetch_till_or_404(pool.get_ref(), till_id).await?.status != "open";
             let resp = crate::tills::handlers::close_till_inner(
                 pool.get_ref(),
                 Some(hub.get_ref()),
@@ -443,6 +456,14 @@ pub async fn replay(
                 actor,
             )
             .await?;
+            if legacy_op {
+                let shift = crate::tills::legacy::legacy_shift(
+                    pool.get_ref(),
+                    resp.till,
+                    if already_closed { crate::tills::legacy::LegacyJoins::Till } else { crate::tills::legacy::LegacyJoins::None },
+                ).await?;
+                return Ok(HttpResponse::Ok().json(crate::tills::legacy::CloseShiftResponse { shift }));
+            }
             Ok(HttpResponse::Ok().json(resp))
         }
         ReplayOp::CreateOrder { device_id, device_code, mut request, .. } => {
