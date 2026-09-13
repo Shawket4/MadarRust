@@ -17,10 +17,10 @@
     "discount_type": null,
     "discount_value": null,
     "guest_count": 2,
-    "id": "19a0ba9a-88fb-4334-8fbe-f501289e9c04",
+    "id": "4fb4c1f2-c01c-47db-a673-8cde28d40eb2",
     "items": [
       {
-        "id": "3cf7dd3c-f2c5-4a83-84fd-6074f268b82c",
+        "id": "62639b89-2cee-4d73-be7b-f0f76b5916cd",
         "line": {
           "input": {
             "addons": [],
@@ -51,7 +51,7 @@
     "opened_at": "2026-01-01T00:00:00Z",
     "opened_by": "10000000-0000-4000-8000-00000000aa01",
     "opened_by_name": "Waiter Whisky",
-    "order_id": "969c9537-6c01-4748-bd61-377e952f0502",
+    "order_id": "4cb885b4-5f30-4ad7-a759-379143d8b6e1",
     "ready": false,
     "ready_at": null,
     "settled_at": "2026-01-01T00:00:00Z",
@@ -67,7 +67,7 @@
   "request": {
     "body": null,
     "method": "GET",
-    "path": "/open-tickets/19a0ba9a-88fb-4334-8fbe-f501289e9c04"
+    "path": "/open-tickets/4fb4c1f2-c01c-47db-a673-8cde28d40eb2"
   },
   "status": 200
 }

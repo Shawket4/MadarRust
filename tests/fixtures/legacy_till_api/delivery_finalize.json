@@ -45,9 +45,9 @@
       "distance_source": "haversine",
       "extra_prep_minutes": 0,
       "floor": "2",
-      "id": "82da2061-37d8-4757-abe9-2ed5e83f2533",
+      "id": "fc4b8918-33ff-4239-b233-8f98c6933a4b",
       "landmark": null,
-      "order_id": "51efbbe7-9dfd-4098-8f63-8884579452f0",
+      "order_id": "0a05363c-9471-438e-8566-048ae9bb0815",
       "org_id": "10000000-0000-4000-8000-000000000001",
       "otp_verified": true,
       "out_for_delivery_at": null,
@@ -70,7 +70,7 @@
       "unit_number": "B4",
       "updated_at": "2026-01-01T00:00:00Z"
     },
-    "order_id": "51efbbe7-9dfd-4098-8f63-8884579452f0",
+    "order_id": "0a05363c-9471-438e-8566-048ae9bb0815",
     "order_ref": "GLDB-YYMMDD-0001",
     "warnings": []
   },
@@ -80,7 +80,7 @@
       "shift_id": "20000000-0000-4000-8000-0000000000b1"
     },
     "method": "POST",
-    "path": "/delivery-orders/82da2061-37d8-4757-abe9-2ed5e83f2533/finalize"
+    "path": "/delivery-orders/fc4b8918-33ff-4239-b233-8f98c6933a4b/finalize"
   },
   "status": 200
 }

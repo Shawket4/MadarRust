@@ -1,8 +1,8 @@
 {
   "body": {
-    "amount_tendered": 5000,
+    "amount_tendered": null,
     "branch_id": "10000000-0000-4000-8000-0000000000a1",
-    "change_given": 0,
+    "change_given": null,
     "created_at": "2026-01-01T00:00:00Z",
     "customer_name": null,
     "delivery_channel": null,
@@ -15,7 +15,7 @@
     "discount_rate": 0.0,
     "discount_type": null,
     "discount_value": 0,
-    "id": "81197ca2-d387-4d47-87f0-17e98bda8024",
+    "id": "68c279fe-0166-4da4-8f39-d8e6776beea4",
     "items": [
       {
         "addons": [],
@@ -24,7 +24,7 @@
         "bundle_unit_price": null,
         "cost_missing": true,
         "deductions_snapshot": [],
-        "id": "6bae9827-5e67-4ff2-88dc-07738efd8cff",
+        "id": "9dc87c34-96e8-4129-beec-438a16a3a9c5",
         "is_reward": false,
         "item_name": "Latte",
         "line_cost": null,
@@ -33,7 +33,7 @@
         "name_translations": {},
         "notes": null,
         "optionals": [],
-        "order_id": "81197ca2-d387-4d47-87f0-17e98bda8024",
+        "order_id": "68c279fe-0166-4da4-8f39-d8e6776beea4",
         "quantity": 1,
         "reward_covered": 0,
         "reward_units": 0,
@@ -45,21 +45,21 @@
     "loyalty_customer_id": null,
     "loyalty_member_name": null,
     "notes": null,
-    "order_number": 4,
-    "order_ref": "GLDA-YYMMDD-200000-004",
+    "order_number": 2,
+    "order_ref": "GLDA-YYMMDD-200000-002",
     "order_type": "takeaway",
     "payment_legs": [
       {
         "amount": 5000,
-        "method": "cash"
+        "method": "card"
       }
     ],
-    "payment_method": "cash",
+    "payment_method": "card",
     "price_expected_total": 5000,
     "price_flagged": false,
     "service_charge_amount": 0,
     "shift_id": "20000000-0000-4000-8000-0000000000a1",
-    "status": "completed",
+    "status": "voided",
     "subtotal": 5000,
     "tax_amount": 0,
     "teller_id": "10000000-0000-4000-8000-00000000ee0a",
@@ -68,10 +68,10 @@
     "tip_amount": 0,
     "tip_payment_method": null,
     "total_amount": 5000,
-    "void_note": null,
-    "void_reason": null,
-    "voided_at": null,
-    "voided_by": null,
+    "void_note": "golden void",
+    "void_reason": "customer_request",
+    "voided_at": "2026-01-01T00:00:00Z",
+    "voided_by": "10000000-0000-4000-8000-00000000ee0a",
     "waiter_id": null,
     "waiter_name": null,
     "warnings": []
@@ -79,7 +79,7 @@
   "request": {
     "body": null,
     "method": "GET",
-    "path": "/orders/81197ca2-d387-4d47-87f0-17e98bda8024"
+    "path": "/orders/68c279fe-0166-4da4-8f39-d8e6776beea4"
   },
   "status": 200
 }

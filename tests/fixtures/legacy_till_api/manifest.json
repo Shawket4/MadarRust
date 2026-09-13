@@ -258,6 +258,27 @@
       ]
     },
     {
+      "file": "replay_void_order.json",
+      "status": 200,
+      "model": null,
+      "clients": []
+    },
+    {
+      "file": "replay_void_order_again.json",
+      "status": 200,
+      "model": null,
+      "clients": []
+    },
+    {
+      "file": "orders_get_voided.json",
+      "status": 200,
+      "model": "OrderFull",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0"
+      ]
+    },
+    {
       "file": "shifts_report_after_mutations.json",
       "status": 200,
       "model": "ShiftReportResponse",

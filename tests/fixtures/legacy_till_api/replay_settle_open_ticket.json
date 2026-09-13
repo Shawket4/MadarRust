@@ -15,7 +15,7 @@
     "discount_rate": 0.0,
     "discount_type": null,
     "discount_value": 0,
-    "id": "e024e11e-e281-47e7-83b3-6994ab72cfc2",
+    "id": "20b0e5ff-216e-4018-a735-46321aa71d24",
     "loyalty_customer_id": null,
     "loyalty_member_name": null,
     "notes": null,
@@ -57,7 +57,7 @@
         "shift_id": "20000000-0000-4000-8000-0000000000b1"
       },
       "teller_id": "10000000-0000-4000-8000-00000000ee0b",
-      "ticket_id": "0c95db0a-7272-46d7-b1a9-c6192f9e7adb"
+      "ticket_id": "63173ca4-f476-4b8b-b43a-c1540b9f5a5d"
     },
     "method": "POST",
     "path": "/sync/replay"
