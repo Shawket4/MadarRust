@@ -43,6 +43,13 @@ pub struct ScanResult {
     pub any_item: bool,
     /// What one line costs when `any_item` is on, in the branch's currency.
     pub any_item_cost: i32,
+    /// The shop's ceiling on reward ITEMS per order, if it set one. The till
+    /// enforces it before Charge so the server's refusal is never the first
+    /// the teller hears of it.
+    pub max_rewards_per_order: Option<i32>,
+    /// Whether a programme runs at this branch at all. A till that attached a
+    /// member before the programme was switched off learns it on the refresh.
+    pub enabled: bool,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -52,6 +59,10 @@ pub struct LookupRequest {
     pub token: Option<String>,
     /// Manual fallback for a customer whose phone is dead.
     pub phone: Option<String>,
+    /// A member the till already identified, re-read before a charge so the
+    /// balance and catalogue it prices against are the server's current ones.
+    #[serde(default)]
+    pub customer_id: Option<Uuid>,
 }
 
 /// Identify the member in front of the till.
@@ -97,6 +108,8 @@ pub async fn lookup(
         recent,
         any_item: settings.reward_any_item,
         any_item_cost: settings.default_reward_cost,
+        max_rewards_per_order: settings.max_rewards_per_order,
+        enabled: settings.enabled,
     }))
 }
 
@@ -424,6 +437,12 @@ async fn resolve_member(
     org_id: Uuid,
     body: &LookupRequest,
 ) -> Result<MemberRow, AppError> {
+    if let Some(id) = body.customer_id {
+        return match model::find_by_id(pool, id).await? {
+            Some(m) if m.org_id == org_id => Ok(m),
+            _ => Err(AppError::NotFound("No member for that card".into())),
+        };
+    }
     let found = match (&body.token, &body.phone) {
         (Some(token), _) if !token.trim().is_empty() => {
             model::find_by_token(pool, token.trim()).await?

@@ -3771,3 +3771,38 @@ async fn a_reward_sale_reads_back_in_the_order_the_ledger_and_the_report(pool: P
         StatusCode::FORBIDDEN
     );
 }
+
+/// The till re-reads a member it already attached, by id, before it charges:
+/// the balance and the shop's per-order cap come back with the catalogue, and
+/// another tenant's member is nobody.
+#[sqlx::test]
+async fn a_till_refreshes_an_attached_member_by_id_with_the_cap(pool: PgPool) {
+    let shop = reward_shop(&pool, 7).await;
+    sqlx::query("UPDATE loyalty_settings SET max_rewards_per_order = 1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = reward_app!(pool);
+    let jwt = token(shop.teller, shop.org, UserRole::Teller, Some(shop.branch));
+    let req = test::TestRequest::post()
+        .uri("/loyalty/lookup")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .set_json(json!({ "branch_id": shop.branch, "customer_id": shop.member }))
+        .to_request();
+    let body: Value = test::call_and_read_body_json(&app, req).await;
+    assert_eq!(body["member"]["balance"], 7);
+    assert_eq!(body["max_rewards_per_order"], 1);
+    assert_eq!(body["enabled"], true);
+
+    let other_org = seed_org(&pool).await;
+    let stranger = seed_member(&pool, other_org, "201000000099", "Mstrangerxxxxxxxxxx1").await;
+    let req = test::TestRequest::post()
+        .uri("/loyalty/lookup")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .set_json(json!({ "branch_id": shop.branch, "customer_id": stranger }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::NOT_FOUND
+    );
+}
