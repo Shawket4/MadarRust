@@ -35,9 +35,10 @@ pub struct ClientSeen {
     pub device_id: Option<Uuid>,
     /// The registered device's code, when the device is registered.
     pub device_code: Option<String>,
-    /// `X-Madar-Client`, else the User-Agent.
+    /// `X-Madar-Client`; else `dashboard` for a browser; else the User-Agent.
     pub client: Option<String>,
-    /// Parsed from `client`; `null` when it carries no `<app>/<semver>`.
+    /// From an `X-Madar-Client` of the form `<app>/<semver>` only; `null` for
+    /// the dashboard and for any client identified by its User-Agent.
     pub app_version: Option<String>,
     pub first_seen_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,

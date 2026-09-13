@@ -704,11 +704,13 @@ async fn legacy_upload_path_redirects_after_prune(pool: PgPool) {
         .bind(&rel).bind(org).bind(o.variant("full").unwrap().id).execute(&pool).await.unwrap();
     let app = asset_app(&pool, &store).await;
     let uri = format!("/uploads/{rel}");
-    let resp = test::call_service(&app, test::TestRequest::get().uri(&uri).to_request()).await;
+    let (resp, hits) = crate::client_seen::collect_hits(test::call_service(&app, test::TestRequest::get().uri(&uri).to_request())).await;
     assert_eq!(resp.status(), StatusCode::OK, "original still served");
+    assert_eq!(hits.iter().map(|h| (h.kind, h.org_id)).collect::<Vec<_>>(), vec![(crate::client_seen::KIND_UPLOADS_LEGACY_PATH, Some(org))]);
     std::fs::remove_file(&file).unwrap();
-    let resp = test::call_service(&app, test::TestRequest::get().uri(&uri).to_request()).await;
+    let (resp, hits) = crate::client_seen::collect_hits(test::call_service(&app, test::TestRequest::get().uri(&uri).to_request())).await;
     assert_eq!(resp.status(), StatusCode::FOUND);
+    assert_eq!(hits.iter().map(|h| (h.kind, h.org_id)).collect::<Vec<_>>(), vec![(crate::client_seen::KIND_UPLOADS_LEGACY_REDIRECT, Some(org))]);
     let loc = resp.headers().get("location").unwrap().to_str().unwrap().to_string();
     let follow = test::call_service(&app, test::TestRequest::get().uri(&rel_url(&loc)).to_request()).await;
     assert_eq!(follow.status(), StatusCode::OK);

@@ -50394,7 +50394,7 @@
               "string",
               "null"
             ],
-            "description": "Parsed from `client`; `null` when it carries no `<app>/<semver>`."
+            "description": "From an `X-Madar-Client` of the form `<app>/<semver>` only; `null` for\nthe dashboard and for any client identified by its User-Agent."
           },
           "branch_id": {
             "type": [
@@ -50414,7 +50414,7 @@
               "string",
               "null"
             ],
-            "description": "`X-Madar-Client`, else the User-Agent."
+            "description": "`X-Madar-Client`; else `dashboard` for a browser; else the User-Agent."
           },
           "device_code": {
             "type": [

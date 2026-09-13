@@ -464,6 +464,9 @@ pub async fn legacy_upload(req: HttpRequest, tail: web::Path<String>) -> Result<
     if let Ok(m) = tokio::fs::metadata(&file).await
         && m.is_file()
     {
+        // Unauthenticated: the org is the path's first segment (`<org>/<dir>/…`).
+        let org = rel.trim_start_matches('/').split('/').next().and_then(|seg| Uuid::parse_str(seg).ok());
+        crate::client_seen::legacy_hit_for_org(crate::client_seen::KIND_UPLOADS_LEGACY_PATH, "original", org);
         let ct = mime_for_legacy(&rel);
         let etag = format!("\"{:x}-{:x}\"", m.len(), m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0));
         return serve_ranged(&req, &file, ct, &etag, "public, max-age=86400").await;
@@ -477,6 +480,7 @@ pub async fn legacy_upload(req: HttpRequest, tail: web::Path<String>) -> Result<
     .fetch_optional(&pool)
     .await?
     .ok_or_else(not_found)?;
+    crate::client_seen::legacy_hit_for_org(crate::client_seen::KIND_UPLOADS_LEGACY_REDIRECT, "signed_full", Some(row.get("org_id")));
     let url = super::ingest::signed_url(
         row.get("org_id"),
         &row.get::<String, _>("hash"),

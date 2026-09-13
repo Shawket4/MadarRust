@@ -5,12 +5,15 @@
 //! * [`legacy_hit`] — called at every legacy code path (the `/shifts` adapters,
 //!   the `GET /tills` entity, `shift_id` alias fields, the `shifts:*` permission
 //!   mirror, `open_shift`/`close_shift` replays, old error wording, analytics
-//!   aliases). It emits one structured `tracing` event, target `madar.legacy`,
+//!   aliases, `/catalog/sync`, legacy `/uploads`, §8a mirror lists read by a
+//!   POS/KDS). It emits one structured `tracing` event, target `madar.legacy`,
 //!   message `legacy_hit`, field `kind` — so journald and Sentry breadcrumbs show
 //!   it — and notes the hit on the current request.
 //! * [`record`] — app-level middleware. After the handler ran (so `JwtMiddleware`
 //!   has resolved the org), it upserts one `client_seen` row per device (org,
-//!   branch, device, client, app version, first/last seen, last legacy path) in
+//!   branch (the token's, else the device row's, else `X-Madar-Branch`),
+//!   device, client, app version from `X-Madar-Client` only, first/last seen,
+//!   last legacy path) in
 //!   a background task, at most once a minute per device (and once a minute per
 //!   device + legacy kind), so the request path pays one map lookup.
 //!
@@ -76,6 +79,18 @@ pub const KIND_REPLAY_SHIFT_ID_FIELD: &str = "replay_shift_id_field";
 pub const KIND_ERROR_WORDING: &str = "legacy_error_wording";
 /// Analytics dataset `shifts` / preset `shift_cash_summary` (§6.1, 6.2).
 pub const KIND_ANALYTICS_ALIAS: &str = "analytics_shifts_alias";
+/// `GET /catalog/sync` (§8.1; no dashboard caller).
+pub const KIND_CATALOG_SYNC: &str = "catalog_sync";
+/// `GET /uploads/{path}` served the original file (§8.24).
+pub const KIND_UPLOADS_LEGACY_PATH: &str = "uploads_legacy_path";
+/// `GET /uploads/{path}` answered a 302 to the signed `full` variant (§8.24).
+pub const KIND_UPLOADS_LEGACY_REDIRECT: &str = "uploads_legacy_redirect";
+/// A per-endpoint offline mirror list read by a `pos/` or `kds/` client (§8a).
+pub const KIND_MIRROR_LIST_POS: &str = "mirror_list_pos";
+
+/// Optional header naming the branch a client works at (read for telemetry
+/// only, and only when it is a branch of the token's org).
+pub const BRANCH_HEADER: &str = "X-Madar-Branch";
 
 /// One legacy path taken during a request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +154,53 @@ pub fn route_kind(path: &str) -> Option<&'static str> {
     }
 }
 
+/// A §8a offline-mirror list read (the POS-shaped variant of the route), by
+/// method + path + query alone. Whether the caller is a POS is decided by
+/// [`is_native_client`].
+pub fn mirror_list_route(method: &actix_web::http::Method, path: &str, query: &str) -> bool {
+    if method != actix_web::http::Method::GET {
+        return false;
+    }
+    let has = |key: &str| query.split('&').any(|pair| pair.split('=').next() == Some(key));
+    let segs: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+    match segs.as_slice() {
+        ["", "menu-items"] => query.split('&').any(|p| p == "full=true"),
+        ["", "floor", "transfers"] => has("since"),
+        ["", "orders"] => has("till_id"),
+        ["", "addon-items"]
+        | ["", "categories"]
+        | ["", "bundles"]
+        | ["", "payment-methods"]
+        | ["", "discounts"]
+        | ["", "branches", _]
+        | ["", "floor", "sections"]
+        | ["", "floor", "tables"]
+        | ["", "bookings"]
+        | ["", "open-tickets"]
+        | ["", "open-tickets", _]
+        | ["", "kitchen", "orders"]
+        | ["", "kitchen", "stations"]
+        | ["", "kitchen", "routing-mode"]
+        | ["", "delivery-orders"]
+        | ["", "delivery-orders", _]
+        | ["", "orgs", _, "offline-auth-bundle"]
+        | ["", "tills", "branches", _]
+        | ["", "tills", "branches", _, "open"]
+        | ["", "tills", _, "cash-movements"]
+        | ["", "tills", _, "refunds"]
+        | ["", "refunds", "order", _] => true,
+        _ => false,
+    }
+}
+
+/// `X-Madar-Client` names a POS or KDS build (`pos/…`, `kds/…`).
+pub fn is_native_client(headers: &actix_web::http::header::HeaderMap) -> bool {
+    matches!(
+        ClientHeader::parse(headers.get(CLIENT_HEADER).and_then(|v| v.to_str().ok())).app.as_deref(),
+        Some("pos" | "kds")
+    )
+}
+
 /// `GET /orders?shift_id=…` and `GET /orders/export?shift_id=…`.
 pub fn query_uses_shift_id(method: &actix_web::http::Method, path: &str, query: &str) -> bool {
     method == actix_web::http::Method::GET
@@ -163,33 +225,52 @@ pub fn body_names_shift_id(body: &[u8]) -> bool {
     body.windows(KEY.len()).any(|w| w == KEY)
 }
 
-/// The client string: `X-Madar-Client`, else `User-Agent`. Trimmed, ≤ 200 chars.
-pub fn client_string(headers: &actix_web::http::header::HeaderMap) -> Option<String> {
-    [CLIENT_HEADER, "User-Agent"].iter().find_map(|h| {
-        headers
-            .get(*h)
-            .and_then(|v| v.to_str().ok())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.chars().take(200).collect())
-    })
+fn header_str<'a>(headers: &'a actix_web::http::header::HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|v| v.to_str().ok()).map(str::trim).filter(|s| !s.is_empty())
 }
 
-/// `<app>/<semver>…` → `"<major>.<minor>.<patch>"`.
-pub fn app_version(client: Option<&str>) -> Option<String> {
-    let parsed = ClientHeader::parse(client);
+/// A web browser's User-Agent (the dashboard, in a browser or the Tauri webview).
+pub fn is_browser(headers: &actix_web::http::header::HeaderMap) -> bool {
+    header_str(headers, "User-Agent").is_some_and(|ua| ua.contains("Mozilla"))
+}
+
+/// The client string: `X-Madar-Client`; else `dashboard` for a browser; else
+/// the `User-Agent`. Trimmed, ≤ 200 chars.
+pub fn client_string(headers: &actix_web::http::header::HeaderMap) -> Option<String> {
+    if let Some(c) = header_str(headers, CLIENT_HEADER) {
+        return Some(c.chars().take(200).collect());
+    }
+    if is_browser(headers) {
+        return Some(DASHBOARD_CLIENT.to_string());
+    }
+    header_str(headers, "User-Agent").map(|s| s.chars().take(200).collect())
+}
+
+/// What a browser without `X-Madar-Client` is recorded as.
+pub const DASHBOARD_CLIENT: &str = "dashboard";
+
+/// The app version, read ONLY from an `X-Madar-Client` of the form
+/// `<app>/<semver>` (`pos/0.7.2 (ios)` → `0.7.2`). A User-Agent never yields
+/// one (`madar-core/0.1.0` is the crate, `Dart/3.4` the runtime, a browser's
+/// `Mozilla/5.0` nothing), and the dashboard has no version.
+pub fn app_version(headers: &actix_web::http::header::HeaderMap) -> Option<String> {
+    let parsed = ClientHeader::parse(header_str(headers, CLIENT_HEADER));
+    if matches!(parsed.app.as_deref(), None | Some(DASHBOARD_CLIENT)) {
+        return None;
+    }
     parsed.version.map(|(a, b, c)| format!("{a}.{b}.{c}"))
+}
+
+/// `X-Madar-Branch`, when it is a UUID (checked against the org at upsert).
+pub fn branch_header(headers: &actix_web::http::header::HeaderMap) -> Option<Uuid> {
+    header_str(headers, BRANCH_HEADER).and_then(|v| Uuid::parse_str(v).ok())
 }
 
 /// A POS that predates `X-Madar-Client` (or reports < 0.7). Browsers (the
 /// dashboard, which never gated on `shifts:*`) are not counted.
 pub fn is_legacy_pos_request(headers: &actix_web::http::header::HeaderMap) -> bool {
     let client = ClientHeader::parse(headers.get(CLIENT_HEADER).and_then(|v| v.to_str().ok()));
-    let browser = headers
-        .get("User-Agent")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|ua| ua.contains("Mozilla"));
-    client.is_legacy_pos() && !(client.app.is_none() && browser)
+    client.is_legacy_pos() && !(client.app.is_none() && is_browser(headers))
 }
 
 pub fn seen_key(device_id: Option<Uuid>, branch_id: Option<Uuid>, client: Option<&str>) -> String {
@@ -231,7 +312,11 @@ pub fn throttle_allows(key: &str, now: Instant) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sighting {
     pub org_id: Uuid,
+    /// The token's branch claim. When absent the upsert resolves the branch
+    /// from the device row (`devices.branch_id`), then from `branch_hint`.
     pub branch_id: Option<Uuid>,
+    /// `X-Madar-Branch`; used only when it is a branch of `org_id`.
+    pub branch_hint: Option<Uuid>,
     pub device_id: Option<Uuid>,
     pub client: Option<String>,
     pub app_version: Option<String>,
@@ -242,13 +327,16 @@ pub struct Sighting {
 
 /// Upsert one sighting. `last_legacy_*` move only when a legacy kind is present.
 pub async fn upsert(pool: &PgPool, s: &Sighting) -> Result<(), sqlx::Error> {
-    let key = seen_key(s.device_id, s.branch_id, s.client.as_deref());
+    let key = seen_key(s.device_id, s.branch_id.or(s.branch_hint), s.client.as_deref());
     let last_kind = s.legacy_kinds.last().copied();
     let kinds: Vec<String> = s.legacy_kinds.iter().map(|k| k.to_string()).collect();
     sqlx::query(
         "INSERT INTO client_seen (org_id, seen_key, branch_id, device_id, client, app_version, \
                                   last_legacy_kind, last_legacy_path, last_legacy_at, legacy_kinds) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, CASE WHEN $7::text IS NULL THEN NULL ELSE $8 END, \
+         VALUES ($1, $2, \
+                 COALESCE($3, (SELECT d.branch_id FROM devices d WHERE d.id = $4 AND d.org_id = $1), \
+                          (SELECT b.id FROM branches b WHERE b.id = $10 AND b.org_id = $1)), \
+                 $4, $5, $6, $7, CASE WHEN $7::text IS NULL THEN NULL ELSE $8 END, \
                  CASE WHEN $7::text IS NULL THEN NULL ELSE now() END, $9) \
          ON CONFLICT (org_id, seen_key) DO UPDATE SET \
            branch_id        = COALESCE(EXCLUDED.branch_id, client_seen.branch_id), \
@@ -270,6 +358,7 @@ pub async fn upsert(pool: &PgPool, s: &Sighting) -> Result<(), sqlx::Error> {
     .bind(last_kind)
     .bind(&s.path)
     .bind(&kinds)
+    .bind(s.branch_hint)
     .execute(pool)
     .await
     .map(|_| ())
@@ -298,6 +387,9 @@ pub async fn record(
         }
         if query_uses_shift_id(&method, &path, req.query_string()) {
             v.push(KIND_SHIFT_ID_QUERY);
+        }
+        if is_native_client(req.headers()) && mirror_list_route(&method, &path, req.query_string()) {
+            v.push(KIND_MIRROR_LIST_POS);
         }
         v
     };
@@ -337,8 +429,9 @@ pub async fn record(
     if let (Some(pool), Some(org_id)) = (pool, org) {
         let device_id = DeviceHeader::from_request_headers(res.request());
         let branch_id = claims.as_ref().and_then(|c| c.branch_id());
+        let branch_hint = branch_header(&headers);
         let client = client_string(&headers);
-        let key = format!("{org_id}|{}", seen_key(device_id, branch_id, client.as_deref()));
+        let key = format!("{org_id}|{}", seen_key(device_id, branch_id.or(branch_hint), client.as_deref()));
         let now = Instant::now();
         let mut kinds: Vec<&'static str> = Vec::new();
         for h in &hits {
@@ -350,8 +443,9 @@ pub async fn record(
             let sighting = Sighting {
                 org_id,
                 branch_id,
+                branch_hint,
                 device_id,
-                app_version: app_version(client.as_deref()),
+                app_version: app_version(&headers),
                 client,
                 legacy_kinds: kinds,
                 path,

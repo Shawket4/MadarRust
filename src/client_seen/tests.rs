@@ -72,16 +72,66 @@ fn detects_shift_id_in_queries_and_bodies() {
 fn client_string_version_and_legacy_pos() {
     let h = headers(&[("x-madar-client", "pos/0.7.2 (ios)"), ("user-agent", "madar-core/0.1.0")]);
     assert_eq!(client_string(&h).as_deref(), Some("pos/0.7.2 (ios)"));
-    assert_eq!(app_version(client_string(&h).as_deref()).as_deref(), Some("0.7.2"));
+    assert_eq!(app_version(&h).as_deref(), Some("0.7.2"));
     assert!(!is_legacy_pos_request(&h));
+    assert_eq!(app_version(&headers(&[("x-madar-client", "kds/1.2.3")])).as_deref(), Some("1.2.3"));
 
     let old = headers(&[("user-agent", "madar-core/0.6.1")]);
     assert_eq!(client_string(&old).as_deref(), Some("madar-core/0.6.1"));
+    assert_eq!(app_version(&old), None, "a User-Agent is never an app version (that is the crate's)");
+    assert_eq!(app_version(&headers(&[("user-agent", "Dart/3.4 (dart:io)")])), None);
     assert!(is_legacy_pos_request(&old), "no X-Madar-Client = a pre-0.7 POS");
     assert!(is_legacy_pos_request(&headers(&[("x-madar-client", "pos/0.6.9")])));
-    assert!(!is_legacy_pos_request(&headers(&[("user-agent", "Mozilla/5.0 (Macintosh)")])), "the dashboard");
-    assert!(!is_legacy_pos_request(&headers(&[("x-madar-client", "dashboard/2026.9")])));
+    let browser = headers(&[("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/17.0 Safari/605.1.15")]);
+    assert!(!is_legacy_pos_request(&browser), "the dashboard");
+    assert_eq!(client_string(&browser).as_deref(), Some(DASHBOARD_CLIENT));
+    assert_eq!(app_version(&browser), None, "a browser's Mozilla/5.0 is not a version");
+    let dash = headers(&[("x-madar-client", "dashboard/2026.9"), ("user-agent", "Mozilla/5.0")]);
+    assert!(!is_legacy_pos_request(&dash));
+    assert_eq!(app_version(&dash), None, "the dashboard has no app version");
+    assert_eq!(app_version(&headers(&[("x-madar-client", "pos")])), None);
+    assert!(is_native_client(&h) && !is_native_client(&old) && !is_native_client(&dash));
+    let b = Uuid::new_v4();
+    assert_eq!(branch_header(&headers(&[("x-madar-branch", &b.to_string())])), Some(b));
+    assert_eq!(branch_header(&headers(&[("x-madar-branch", "nope")])), None);
     assert_eq!(client_string(&HeaderMap::new()), None);
+}
+
+#[core::prelude::v1::test]
+fn classifies_mirror_list_reads() {
+    let g = Method::GET;
+    for (path, q) in [
+        ("/menu-items", "branch_id=x&full=true"),
+        ("/categories", ""),
+        ("/bundles", "status=active&per_page=500"),
+        ("/payment-methods", ""),
+        ("/branches/abc", ""),
+        ("/floor/transfers", "since=2026-09-01T00:00:00Z"),
+        ("/open-tickets", "status=open"),
+        ("/kitchen/orders", ""),
+        ("/delivery-orders", "limit=200"),
+        ("/orgs/o/offline-auth-bundle", ""),
+        ("/tills/branches/b", ""),
+        ("/tills/branches/b/open", ""),
+        ("/tills/t/cash-movements", ""),
+        ("/refunds/order/o", ""),
+        ("/orders", "till_id=t&page=1"),
+    ] {
+        assert!(mirror_list_route(&g, path, q), "{path}?{q}");
+    }
+    for (path, q) in [
+        ("/menu-items", "branch_id=x"),
+        ("/floor/transfers", ""),
+        ("/orders", "branch_id=x"),
+        ("/tills/branches/b/current", ""),
+        ("/branches", ""),
+        ("/orders/o", ""),
+        ("/auth/me", ""),
+        ("/sync/pull", ""),
+    ] {
+        assert!(!mirror_list_route(&g, path, q), "{path}?{q}");
+    }
+    assert!(!mirror_list_route(&Method::POST, "/categories", ""));
 }
 
 #[core::prelude::v1::test]
@@ -174,6 +224,7 @@ async fn upsert_keeps_first_seen_and_accumulates_legacy_kinds(pool: PgPool) {
     let base = Sighting {
         org_id: org,
         branch_id: Some(uid(BRANCH_A)),
+        branch_hint: None,
         device_id: Some(device),
         client: Some("madar-core/0.6.0".into()),
         app_version: Some("0.6.0".into()),
@@ -210,6 +261,7 @@ async fn client_seen_is_tenant_isolated(pool: PgPool) {
     upsert(&pool, &Sighting {
         org_id: org,
         branch_id: None,
+        branch_hint: None,
         device_id: None,
         client: Some("madar-core/0.5.1".into()),
         app_version: Some("0.5.1".into()),
@@ -240,6 +292,7 @@ macro_rules! telemetry_app {
                 .configure(crate::sync::routes::configure)
                 .configure(crate::orders::routes::configure)
                 .configure(crate::refunds::routes::configure)
+                .configure(crate::menu::routes::configure)
                 .configure(|c| crate::reports::routes::configure(c, web::Data::new($pool.clone()))),
         )
         .await
@@ -273,7 +326,7 @@ async fn middleware_records_devices_and_legacy_paths(pool: PgPool) {
     let got = wait_for(&pool, org, &key, |r| r.5.is_some()).await;
     assert_eq!(got.2, Some(old_device));
     assert_eq!(got.3.as_deref(), Some("madar-core/0.6.0"));
-    assert_eq!(got.4.as_deref(), Some("0.6.0"));
+    assert_eq!(got.4, None, "the old tablet's User-Agent is its core crate, not an app version");
     assert_eq!(got.5.as_deref(), Some(KIND_SHIFTS_ROUTE));
     assert_eq!(got.6.as_deref(), Some(&*format!("/shifts/branches/{BRANCH_A}/open")));
 
@@ -369,7 +422,7 @@ async fn middleware_records_devices_and_legacy_paths(pool: PgPool) {
     let rows: Vec<Value> = test::read_body_json(r).await;
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0]["device_id"], json!(old_device));
-    assert_eq!(rows[0]["branch_name"], Value::Null, "teller tokens carry no branch claim");
+    assert_eq!(rows[0]["branch_name"], "Golden A", "no branch claim on a teller token: resolved from the device row the open registered");
     assert!(rows[0]["legacy_kinds"].as_array().unwrap().len() >= 5);
     let r = test::call_service(
         &app,
@@ -409,7 +462,7 @@ async fn middleware_records_legacy_report_and_refund_routes_without_a_device(poo
     // Anonymous client: keyed by branch + client string.
     let got = wait_for(&pool, org, "c:-:Dart/3.4 (dart:io)", |r| r.7.len() == 2).await;
     assert_eq!(got.7, vec![KIND_REFUNDS_SHIFT_ROUTE.to_string(), KIND_REPORTS_SHIFTS_ROUTE.to_string()]);
-    assert_eq!(got.4, Some("3.4.0".into()));
+    assert_eq!(got.4, None, "Dart/3.4 is the runtime, not an app version");
 }
 
 #[sqlx::test]
@@ -435,4 +488,111 @@ async fn handler_sites_report_their_kind() {
     assert_eq!(hits.iter().map(|h| h.kind).collect::<Vec<_>>(), vec![KIND_TILLS_ENTITY_GONE]);
     assert_eq!(wording.iter().map(|h| (h.kind, h.site)).collect::<Vec<_>>(), vec![(KIND_ERROR_WORDING, Some("legacy_error_till_to_shift"))]);
     assert!(untouched.is_empty());
+}
+
+#[sqlx::test]
+async fn branch_resolves_from_the_device_row_then_the_header(pool: PgPool) {
+    seeded(&pool).await;
+    let org = uid(ORG);
+    let app = telemetry_app!(pool);
+    // Admin tokens carry no branch claim.
+    let admin = bearer(ADMIN, org, UserRole::OrgAdmin);
+    let registered = Uuid::new_v4();
+    sqlx::query("INSERT INTO devices (id, org_id, branch_id, code) VALUES ($1, $2, $3, 'AB1')")
+        .bind(registered)
+        .bind(org)
+        .bind(uid("10000000-0000-4000-8000-0000000000b1"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let call = |device: Option<Uuid>, branch: Option<String>, client: &'static str| {
+        let mut r = test::TestRequest::get().uri("/auth/permissions").insert_header(admin.clone()).insert_header(("X-Madar-Client", client));
+        if let Some(d) = device {
+            r = r.insert_header(("X-Madar-Device", d.to_string()));
+        }
+        if let Some(b) = branch {
+            r = r.insert_header((BRANCH_HEADER, b));
+        }
+        r.to_request()
+    };
+    // The device row wins over the header.
+    let r = test::call_service(&app, call(Some(registered), Some(BRANCH_A.into()), "pos/0.7.4 (android)")).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let got = wait_for(&pool, org, &format!("d:{registered}"), |_| true).await;
+    assert_eq!(got.1, Some(uid("10000000-0000-4000-8000-0000000000b1")));
+    assert_eq!(got.4.as_deref(), Some("0.7.4"));
+
+    // An unregistered device: the header names the branch.
+    let unknown = Uuid::new_v4();
+    test::call_service(&app, call(Some(unknown), Some(BRANCH_A.into()), "pos/0.7.4 (ios)")).await;
+    assert_eq!(wait_for(&pool, org, &format!("d:{unknown}"), |_| true).await.1, Some(uid(BRANCH_A)));
+
+    // A branch of another org is ignored.
+    let other_org = Uuid::new_v4();
+    let foreign = Uuid::new_v4();
+    sqlx::query("INSERT INTO organizations (id, name, slug, tax_rate) VALUES ($1, 'Other', 'other-telemetry', 0)").bind(other_org).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO branches (id, org_id, name, code, latitude, longitude) VALUES ($1, $2, 'X', 'OTHX', 0, 0)")
+        .bind(foreign)
+        .bind(other_org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let stray = Uuid::new_v4();
+    test::call_service(&app, call(Some(stray), Some(foreign.to_string()), "kds/0.7.4")).await;
+    let got = wait_for(&pool, org, &format!("d:{stray}"), |_| true).await;
+    assert_eq!(got.1, None);
+}
+
+#[sqlx::test]
+async fn browsers_are_the_dashboard_without_a_version(pool: PgPool) {
+    seeded(&pool).await;
+    let org = uid(ORG);
+    let app = telemetry_app!(pool);
+    let r = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/auth/permissions")
+            .insert_header(bearer(ADMIN, org, UserRole::OrgAdmin))
+            .insert_header(("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/128.0.0.0 Safari/537.36"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let got = wait_for(&pool, org, "c:-:dashboard", |_| true).await;
+    assert_eq!((got.3.as_deref(), got.4.as_deref()), (Some(DASHBOARD_CLIENT), None));
+    assert!(got.7.is_empty(), "the dashboard never takes the permissions mirror path");
+}
+
+#[sqlx::test]
+async fn mirror_lists_and_catalog_sync_are_recorded_for_native_clients(pool: PgPool) {
+    seeded(&pool).await;
+    let org = uid(ORG);
+    let app = telemetry_app!(pool);
+    let admin = bearer(ADMIN, org, UserRole::OrgAdmin);
+    let device = Uuid::new_v4();
+    // A dashboard read of the same list is not a mirror hit.
+    let r = test::call_service(
+        &app,
+        test::TestRequest::get().uri(&format!("/categories?org_id={ORG}")).insert_header(admin.clone()).insert_header(("User-Agent", "Mozilla/5.0")).to_request(),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    for uri in [format!("/categories?org_id={ORG}"), format!("/catalog/sync?branch_id={BRANCH_A}")] {
+        let r = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&uri)
+                .insert_header(admin.clone())
+                .insert_header(("X-Madar-Device", device.to_string()))
+                .insert_header(("X-Madar-Client", "pos/0.7.4 (android)"))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK, "{uri}");
+    }
+    let got = wait_for(&pool, org, &format!("d:{device}"), |r| r.7.len() == 2).await;
+    assert_eq!(got.7, vec![KIND_CATALOG_SYNC.to_string(), KIND_MIRROR_LIST_POS.to_string()]);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let dash = row(&pool, org, "c:-:dashboard").await.expect("dashboard seen");
+    assert!(dash.7.is_empty(), "{:?}", dash.7);
 }

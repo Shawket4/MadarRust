@@ -210,6 +210,8 @@ pub async fn catalog_sync(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
+    // LEGACY_REMOVAL.md §8.1: no dashboard caller; POS < B only.
+    crate::client_seen::legacy_hit(crate::client_seen::KIND_CATALOG_SYNC);
 
     let q = query.into_inner();
 
