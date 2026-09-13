@@ -24,31 +24,89 @@ use crate::realtime::hub::BranchEventHub;
 use crate::reservations::resolve_branch_org;
 use crate::sync::ActingContext;
 
-/// A service day runs 05:00 → 05:00 local, so a 00:30 booking belongs to the
-/// evening before it.
-const DAY_CUTOFF_HOUR: u32 = 5;
+/// Bookings group by plain calendar date in the branch zone: the day runs
+/// local midnight → next local midnight, so a 00:30 booking belongs to the
+/// date it happens on. (Staff attendance keeps its own night-shift date.)
+fn local_midnight(tz: chrono_tz::Tz, date: NaiveDate) -> DateTime<Utc> {
+    // A DST gap can swallow midnight; step forward until the wall clock exists.
+    let mut t = date.and_time(NaiveTime::MIN);
+    for _ in 0..4 {
+        if let Some(d) = tz.from_local_datetime(&t).earliest() {
+            return d.with_timezone(&Utc);
+        }
+        t += Duration::minutes(30);
+    }
+    Utc.from_utc_datetime(&date.and_time(NaiveTime::MIN))
+}
 
 pub(crate) fn service_day_bounds(
     tz: chrono_tz::Tz,
     date: NaiveDate,
 ) -> (DateTime<Utc>, DateTime<Utc>) {
-    let cutoff = NaiveTime::from_hms_opt(DAY_CUTOFF_HOUR, 0, 0).unwrap_or_default();
-    let start = tz
-        .from_local_datetime(&date.and_time(cutoff))
-        .earliest()
-        .map(|d| d.with_timezone(&Utc))
-        .unwrap_or_else(|| Utc.from_utc_datetime(&date.and_time(cutoff)));
-    (start, start + Duration::days(1))
+    (
+        local_midnight(tz, date),
+        local_midnight(tz, date + Duration::days(1)),
+    )
 }
 
-/// Today's service date in the branch zone.
+/// Today's calendar date in the branch zone.
 pub(crate) fn service_today(tz: chrono_tz::Tz, now: DateTime<Utc>) -> NaiveDate {
-    let local = now.with_timezone(&tz);
-    let d = local.date_naive();
-    if local.time() < NaiveTime::from_hms_opt(DAY_CUTOFF_HOUR, 0, 0).unwrap_or_default() {
-        d - Duration::days(1)
-    } else {
-        d
+    now.with_timezone(&tz).date_naive()
+}
+
+#[cfg(test)]
+mod day_tests {
+    use super::*;
+
+    #[test]
+    fn half_past_midnight_belongs_to_its_calendar_date() {
+        let tz: chrono_tz::Tz = "Africa/Cairo".parse().unwrap();
+        let b = tz
+            .with_ymd_and_hms(2026, 9, 11, 0, 30, 0)
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            service_today(tz, b),
+            NaiveDate::from_ymd_opt(2026, 9, 11).unwrap()
+        );
+        let (s, e) = service_day_bounds(tz, NaiveDate::from_ymd_opt(2026, 9, 11).unwrap());
+        assert!(s <= b && b < e);
+        let (_, prev_end) = service_day_bounds(tz, NaiveDate::from_ymd_opt(2026, 9, 10).unwrap());
+        assert_eq!(prev_end, s, "days tile with no gap");
+    }
+
+    #[test]
+    fn list_rolls_over_at_midnight() {
+        let tz: chrono_tz::Tz = "Africa/Cairo".parse().unwrap();
+        let before = tz
+            .with_ymd_and_hms(2026, 9, 10, 23, 59, 0)
+            .unwrap()
+            .with_timezone(&Utc);
+        let after = tz
+            .with_ymd_and_hms(2026, 9, 11, 0, 0, 0)
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            service_today(tz, before),
+            NaiveDate::from_ymd_opt(2026, 9, 10).unwrap()
+        );
+        assert_eq!(
+            service_today(tz, after),
+            NaiveDate::from_ymd_opt(2026, 9, 11).unwrap()
+        );
+    }
+
+    #[test]
+    fn dst_days_are_23_and_25_hours() {
+        let tz: chrono_tz::Tz = "Europe/London".parse().unwrap();
+        let (s, e) = service_day_bounds(tz, NaiveDate::from_ymd_opt(2026, 3, 29).unwrap());
+        assert_eq!(e - s, Duration::hours(23));
+        let (s, e) = service_day_bounds(tz, NaiveDate::from_ymd_opt(2026, 10, 25).unwrap());
+        assert_eq!(e - s, Duration::hours(25));
+        // Midnight itself skipped (Asia/Beirut springs forward at 00:00).
+        let tz: chrono_tz::Tz = "Asia/Beirut".parse().unwrap();
+        let (s, e) = service_day_bounds(tz, NaiveDate::from_ymd_opt(2026, 3, 29).unwrap());
+        assert_eq!(e - s, Duration::hours(23));
     }
 }
 
@@ -140,7 +198,7 @@ fn clean_locale(l: Option<&str>) -> String {
 #[into_params(parameter_in = Query)]
 pub struct ListBookingsQuery {
     pub branch_id: Uuid,
-    /// Service date (`YYYY-MM-DD`, branch-local, 05:00→05:00). Defaults to today.
+    /// Calendar date (`YYYY-MM-DD`, branch-local, midnight→midnight). Defaults to today.
     #[param(value_type = Option<String>)]
     pub date: Option<NaiveDate>,
     /// Explicit window (overrides `date`).

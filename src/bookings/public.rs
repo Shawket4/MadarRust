@@ -274,7 +274,7 @@ fn check_slot(
     let local_date = service_today(tz, starts_at);
     let mut ok = slot_starts(s, tz, local_date).contains(&starts_at);
     if !ok {
-        // A slot after midnight belongs to the previous service day's window.
+        // A slot after midnight is offered from the previous day's opening window.
         ok = slot_starts(s, tz, local_date - Duration::days(1)).contains(&starts_at)
             || slot_starts(s, tz, local_date + Duration::days(1)).contains(&starts_at);
     }
