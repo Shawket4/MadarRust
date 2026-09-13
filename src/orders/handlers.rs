@@ -1365,10 +1365,54 @@ pub async fn create_order(
             .and_then(|v| v.to_str().ok())
             .and_then(|s| Uuid::parse_str(s).ok());
     }
+    let header_device = crate::devices::DeviceHeader::from_request_headers(&req);
+    if body.device_id.is_none() {
+        body.device_id = header_device;
+    }
+    // A till bound to another device refuses live sales from this one.
+    crate::tills::handlers::guard_till_device(pool.get_ref(), body.till_id, header_device).await?;
+    let actor = ActingContext::live(&claims)?;
+    // Live only: the method must be in the effective set for branch ∩ person ∩
+    // device (replay never rejects on availability — the sale happened).
+    // Only an owner with an allow-list restricts; an unrestricted shop keeps
+    // accepting what it always did.
+    let restricted: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM branch_payment_methods WHERE branch_id = $1) \
+             OR EXISTS (SELECT 1 FROM user_payment_methods WHERE user_id = $2) \
+             OR EXISTS (SELECT 1 FROM device_payment_methods WHERE device_id = $3)",
+    )
+    .bind(body.branch_id)
+    .bind(actor.teller_id)
+    .bind(body.device_id)
+    .fetch_one(pool.get_ref())
+    .await?;
+    let allowed = if restricted {
+        crate::payment_methods::availability::effective_method_names(
+            pool.get_ref(),
+            actor.org_id,
+            body.branch_id,
+            Some(actor.teller_id),
+            body.device_id,
+        )
+        .await?
+    } else {
+        Vec::new()
+    };
+    let mut used: Vec<&str> = if restricted { vec![body.payment_method.as_str()] } else { Vec::new() };
+    if let (true, Some(splits)) = (restricted, &body.payment_splits) {
+        used.extend(splits.iter().map(|p| p.method.as_str()));
+    }
+    if let Some(bad) = used.into_iter().find(|m| !allowed.iter().any(|a| a.eq_ignore_ascii_case(m))) {
+        return Err(AppError::Coded {
+            status: 422,
+            code: "PAYMENT_METHOD_UNAVAILABLE",
+            reason: format!("Payment method `{bad}` is not available at this till"),
+        });
+    }
     create_order_inner(
         pool.clone(),
         body,
-        ActingContext::live(&claims)?,
+        actor,
         hub.as_ref().map(|d| d.get_ref()),
         None, // a direct POS sale has no waiter — only ticket settles do
     )
@@ -1889,12 +1933,27 @@ pub(crate) async fn create_order_inner(
     // order_number)`, so a client value can't be authoritative (two devices would
     // both mint #1 into a shared shift and collide). A POS device PREDICTS the same
     // per-shift number offline (single numberer per shift) for its receipt.
-    let order_number: i32 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(order_number), 0) + 1 FROM orders WHERE till_id = $1",
-    )
-    .bind(body.till_id)
-    .fetch_one(&mut *tx)
-    .await?;
+    // R4: a device that numbers its own sales (per business day) sends
+    // device_id + device_code + order_number — stored verbatim. Anything else
+    // (old clients, dashboard, delivery) keeps the legacy per-till counter over
+    // the till's un-deviced orders (`uq_orders_till_legacy_number`).
+    let device_numbered = match (&body.device_id, &body.device_code, body.order_number) {
+        (Some(_), Some(code), Some(n)) if !code.trim().is_empty() => Some(n),
+        _ => None,
+    };
+    let order_number: i32 = match device_numbered {
+        Some(n) => n,
+        None => sqlx::query_scalar(
+            "SELECT COALESCE(MAX(order_number) FILTER (WHERE device_id IS NULL), 0) + 1 FROM orders WHERE till_id = $1",
+        )
+        .bind(body.till_id)
+        .fetch_one(&mut *tx)
+        .await?,
+    };
+    let (order_device_id, order_device_code) = match device_numbered {
+        Some(_) => (body.device_id, body.device_code.clone()),
+        None => (None, None),
+    };
 
     // The order_ref IS client-authoritative: a POS device mints it once with its
     // MANAGED DEVICE CODE + a per-device-day sequence (independent of order_number),
@@ -1903,7 +1962,22 @@ pub(crate) async fn create_order_inner(
     // → the server mints the deterministic <BRANCH>-<YYMMDD>-<SHIFT6>-<NNN> fallback.
     // The global UNIQUE(order_ref) index backstops either path.
     let order_ref = match &body.order_ref {
-        Some(r) => r.clone(),
+        // R5: the same ref minted by a DIFFERENT device (two devices sharing a
+        // code offline) is kept, suffixed with that device; the same device and
+        // ref is an idempotent duplicate (handled at the unique violation below).
+        Some(r) => {
+            let clash: Option<Option<Uuid>> =
+                sqlx::query_scalar("SELECT device_id FROM orders WHERE order_ref = $1")
+                    .bind(r)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            match (clash, body.device_id) {
+                (Some(other), Some(mine)) if other != Some(mine) => {
+                    format!("{r}~{}", mine.simple().to_string()[..4].to_uppercase())
+                }
+                _ => r.clone(),
+            }
+        }
         None => {
             let (branch_code, biz_date): (String, chrono::NaiveDate) = sqlx::query_as(
                 "SELECT b.code, ($1::timestamptz AT TIME ZONE COALESCE(b.timezone, o.timezone)::text)::date
@@ -1947,10 +2021,11 @@ pub(crate) async fn create_order_inner(
              idempotency_key, created_at, tip_is_cash, order_ref,
              price_flagged, price_expected_total, waiter_id, loyalty_customer_id,
              service_charge_amount, tax_rate_applied, service_charge_rate_applied,
-             tax_inclusive, service_charge_taxable_applied, order_type, open_ticket_id)
+             tax_inclusive, service_charge_taxable_applied, order_type, open_ticket_id,
+             device_id, device_code, verification)
         VALUES ($1, $2, $3, $4, $5, $6, $7::discount_type, $8,
                 $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'completed', $19, $20, $21, $22,
-                $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)
+                $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36)
         RETURNING
             id, branch_id, till_id, till_id AS shift_id, teller_id,
             (SELECT name FROM users WHERE id = $3) AS teller_name,
@@ -2014,6 +2089,13 @@ pub(crate) async fn create_order_inner(
     .bind(policy.service_charge_taxable)
     .bind(order_type)
     .bind(ticket.as_ref().map(|t| t.open_ticket_id))
+    .bind(order_device_id)
+    .bind(order_device_code.as_deref())
+    .bind(if actor.replay {
+        body.verification.clone().or_else(|| body.device_id.map(|_| "unverified".to_string()))
+    } else {
+        Some("server".to_string())
+    })
     .fetch_one(&mut *tx)
     .await
     {
@@ -2067,7 +2149,7 @@ pub(crate) async fn create_order_inner(
     if let Some(t) = ticket {
         let linked = sqlx::query(
             "UPDATE open_tickets SET status = 'settled', settled_at = $5, order_id = $2, \
-                 settled_by = $3, settled_till_id = $4, updated_at = now() \
+                 settled_by = $3, settled_till_id = $4, settled_device_id = $6, updated_at = now() \
              WHERE id = $1 AND status = 'open'",
         )
         .bind(t.open_ticket_id)
@@ -2075,6 +2157,7 @@ pub(crate) async fn create_order_inner(
         .bind(actor.teller_id)
         .bind(body.till_id)
         .bind(created_at)
+        .bind(body.device_id)
         .execute(&mut *tx)
         .await?;
         if linked.rows_affected() == 0 {
@@ -2174,6 +2257,7 @@ pub(crate) async fn create_order_inner(
         .bind(body.till_id)
         .execute(&mut *tx)
         .await?;
+        crate::tills::reconcile::recompute_after_late_replay(&mut tx, body.till_id, system_cash as i32).await?;
     }
 
     let mut order_items_full: Vec<OrderItemFull> = Vec::new();
