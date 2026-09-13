@@ -15275,6 +15275,132 @@
         ]
       }
     },
+    "/loyalty/analytics": {
+      "get": {
+        "tags": [
+          "loyalty"
+        ],
+        "operationId": "get_loyalty_analytics",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "query",
+            "description": "Omit for the whole organisation; supply a branch to narrow the\nredemption figures to it (the liability is org-wide either way — a\nbalance can be spent at any branch).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Inclusive start of the range. Defaults to 30 days before `to`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Exclusive end of the range. Defaults to now.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoyaltyAnalytics"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/loyalty/award": {
       "post": {
         "tags": [
@@ -15754,6 +15880,96 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "loyalty"
+        ],
+        "summary": "Forget a member. **Admin only.**",
+        "description": "A void corrects a sale; this corrects a membership — someone asked the shop\nto stop holding their details, or an admin is clearing a test signup. The\nperson is scrubbed and the books are kept: see [`model::forget`] for exactly\nwhat goes and what stays, and why the ledger is not the member's data.\n\n204 twice in a row: forgetting someone already forgotten is not a failure,\nand telling the caller \"no such member\" would confirm that a phone number\nused to be one.",
+        "operationId": "delete_loyalty_member",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Member ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Forgotten"
           },
           "400": {
             "description": "Bad request — validation failed or malformed input",
@@ -52894,6 +53110,20 @@
             "type": "string",
             "format": "date-time"
           },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Who wrote the row: the teller who applied a reward or rang the sale, the\nadmin who adjusted by hand. `None` for the system (birthday, win-back,\na trigger with no actor)."
+          },
+          "created_by_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "currency": {
             "type": "string",
             "description": "`\"points\"` or `\"visits\"` — which balance this row moved."
@@ -53095,6 +53325,14 @@
             "type": "string",
             "format": "uuid"
           },
+          "customer_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "A member the till already identified, re-read before a charge so the\nbalance and catalogue it prices against are the server's current ones."
+          },
           "phone": {
             "type": [
               "string",
@@ -53176,6 +53414,71 @@
           },
           "unit": {
             "type": "string"
+          }
+        }
+      },
+      "LoyaltyAnalytics": {
+        "type": "object",
+        "description": "The redemption report, computed in the database so a dashboard never loads\nevery member to draw it.",
+        "required": [
+          "from",
+          "to",
+          "redemptions",
+          "redeemed_units",
+          "redeemed_points",
+          "redeemed_value_minor",
+          "earned_points",
+          "refused_redemptions",
+          "top_rewards",
+          "liability"
+        ],
+        "properties": {
+          "earned_points": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Balance earned, net of clawbacks written in the range."
+          },
+          "from": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "liability": {
+            "$ref": "#/components/schemas/PointsLiability"
+          },
+          "redeemed_points": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Balance spent, net of reversals written in the range."
+          },
+          "redeemed_units": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Units handed over as rewards."
+          },
+          "redeemed_value_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Minor units of goods given away as rewards, on sales not voided."
+          },
+          "redemptions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Redemption rows in the range (one per covered order line)."
+          },
+          "refused_redemptions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Replayed sales whose rewards the points could not pay for."
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "top_rewards": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TopReward"
+            }
           }
         }
       },
@@ -55051,6 +55354,21 @@
             "type": "string",
             "format": "uuid"
           },
+          "loyalty_customer_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The loyalty member this sale redeemed for (or was scanned for)."
+          },
+          "loyalty_member_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "That member's name, for the order detail. `None` once forgotten."
+          },
           "notes": {
             "type": [
               "string",
@@ -55664,6 +55982,11 @@
           "quantity": {
             "type": "integer",
             "format": "int32"
+          },
+          "reward_covered": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Minor units the reward took off this line (0 for a paid line)."
           },
           "reward_units": {
             "type": "integer",
@@ -57465,6 +57788,51 @@
               "boolean",
               "null"
             ]
+          }
+        }
+      },
+      "PointsLiability": {
+        "type": "object",
+        "description": "What the programme owes its members.",
+        "required": [
+          "members_with_balance",
+          "outstanding_points",
+          "outstanding_visits",
+          "currency"
+        ],
+        "properties": {
+          "currency": {
+            "type": "string",
+            "description": "`\"points\"` or `\"visits\"` — the currency the valuation is in."
+          },
+          "members_with_balance": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Live members with a positive balance."
+          },
+          "outstanding_points": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "outstanding_visits": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "value_per_unit_minor": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Minor units one unit of the live currency has bought, on average, over\nevery redemption this org has recorded (value given ÷ balance spent).\n`None` until the first redemption with a recorded value."
+          },
+          "valued_minor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The outstanding balance in the live currency × `value_per_unit_minor`,\nrounded. An estimate — a balance is worth what it will be spent on."
           }
         }
       },
@@ -60306,7 +60674,8 @@
           "rewards",
           "recent",
           "any_item",
-          "any_item_cost"
+          "any_item_cost",
+          "enabled"
         ],
         "properties": {
           "any_item": {
@@ -60317,6 +60686,18 @@
             "type": "integer",
             "format": "int32",
             "description": "What one line costs when `any_item` is on, in the branch's currency."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether a programme runs at this branch at all. A till that attached a\nmember before the programme was switched off learns it on the refresh."
+          },
+          "max_rewards_per_order": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The shop's ceiling on reward ITEMS per order, if it set one. The till\nenforces it before Charge so the server's refusal is never the first\nthe teller hears of it."
           },
           "member": {
             "$ref": "#/components/schemas/MemberView"
@@ -63161,6 +63542,47 @@
           }
         },
         "additionalProperties": false
+      },
+      "TopReward": {
+        "type": "object",
+        "description": "One reward, by how often it was claimed in the range.",
+        "required": [
+          "menu_item_id",
+          "name",
+          "redemptions",
+          "units",
+          "points",
+          "value_minor"
+        ],
+        "properties": {
+          "menu_item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "points": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Balance spent on it, net of anything given back by a void or refund."
+          },
+          "redemptions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Redemption rows (one per covered order line)."
+          },
+          "units": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Units handed over."
+          },
+          "value_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Minor units of goods given away (what the covered lines were charged)."
+          }
+        }
       },
       "TransferView": {
         "type": "object",
