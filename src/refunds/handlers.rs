@@ -323,7 +323,7 @@ pub(crate) async fn create_refund_inner(
         .await?;
         if !still_open {
             return Err(AppError::BadRequest(
-                "Refunds can only be issued in an open till".into(),
+                "Refunds can only be issued in an open shift".into(),
             ));
         }
     }
@@ -472,7 +472,7 @@ async fn resolve_refund_till(
         }
         if !actor.replay && shift_status != "open" {
             return Err(AppError::BadRequest(
-                "Refunds can only be issued in an open till".into(),
+                "Refunds can only be issued in an open shift".into(),
             ));
         }
         return Ok(shift_id);
@@ -495,7 +495,7 @@ async fn resolve_refund_till(
     .await?
     .ok_or_else(|| {
         AppError::BadRequest(
-            "You have no open till at this branch — open one before issuing a refund".into(),
+            "You have no open shift at this branch — open one before issuing a refund".into(),
         )
     })
 }
