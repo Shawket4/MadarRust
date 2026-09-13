@@ -573,6 +573,7 @@ pub async fn finalize_delivery_order(
     .fetch_one(pool.get_ref())
     .await?;
     if !shift_ok {
+        crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ERROR_WORDING, "finalize_shift_not_open");
         return Err(AppError::BadRequest(
             "Shift is not open, does not belong to this branch, or is not yours.".into(),
         ));
@@ -602,6 +603,7 @@ pub async fn finalize_delivery_order(
             .fetch_one(&mut *tx)
             .await?;
     if !still_open {
+        crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ERROR_WORDING, "finalize_shift_closed");
         return Err(AppError::Conflict(
             "Shift was closed before finalize".into(),
         ));

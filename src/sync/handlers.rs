@@ -335,6 +335,13 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
         .ok_or_else(|| AppError::Unauthorized("Missing authentication".into()))
 }
 
+/// An old envelope names the till `shift_id`: at the top (`close_shift`,
+/// `cash_movement`) or inside the request (`create_order`, `settle_open_ticket`,
+/// `refund_order`).
+pub fn replay_names_shift_id(body: &serde_json::Value) -> bool {
+    body.get("shift_id").is_some() || body.get("request").and_then(|r| r.get("shift_id")).is_some()
+}
+
 /// POST /sync/replay — flush ONE queued op, attributed to its embedded teller.
 ///
 /// Authorization, in two parts that answer two different questions:
@@ -364,6 +371,12 @@ pub async fn replay(
     // Old POS (v0.5.1 / v0.6.0) queue `open_shift` / `close_shift`; their acks
     // keep the legacy `Shift` / `CloseShiftResponse` shapes.
     let legacy_op = matches!(body.get("op").and_then(|v| v.as_str()), Some("open_shift" | "close_shift"));
+    if legacy_op {
+        crate::client_seen::legacy_hit(crate::client_seen::KIND_REPLAY_LEGACY_OP);
+    }
+    if replay_names_shift_id(&body) {
+        crate::client_seen::legacy_hit(crate::client_seen::KIND_REPLAY_SHIFT_ID_FIELD);
+    }
     let token_org = claims
         .org_id()
         .ok_or_else(|| AppError::Unauthorized("Token has no organization".into()))?;

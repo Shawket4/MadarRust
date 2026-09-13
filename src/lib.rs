@@ -14,6 +14,7 @@ pub mod bookings;
 pub mod branches;
 pub mod bundles;
 pub mod cache;
+pub mod client_seen;
 pub mod clock;
 pub mod costing;
 pub mod db;

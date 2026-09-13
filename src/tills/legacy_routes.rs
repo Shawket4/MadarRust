@@ -110,8 +110,10 @@ pub async fn open_shift(
         Ok((till, true)) => Ok(HttpResponse::Created().json(legacy_shift(pool.get_ref(), till, LegacyJoins::Till).await?)),
         Ok((till, false)) => Ok(HttpResponse::Ok().json(legacy_shift(pool.get_ref(), till, LegacyJoins::Till).await?)),
         Err(AppError::RefusedWith { code, .. }) => Err(AppError::Conflict(if code == "TILL_OPEN_AT_OTHER_BRANCH" {
+            crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ERROR_WORDING, "open_shift_other_branch");
             "You already have an open shift at another branch. Close it before opening a new one.".into()
         } else {
+            crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ERROR_WORDING, "open_shift_this_branch");
             "You already have an open shift at this branch.".into()
         })),
         Err(e) => Err(e),
@@ -198,7 +200,7 @@ pub async fn get_shift_report(req: HttpRequest, pool: crate::db::Db, id: web::Pa
     Ok(HttpResponse::Ok().json(ShiftReportResponse { shift: legacy_shift(pool.get_ref(), till, LegacyJoins::Till).await?, figures }))
 }
 
-#[utoipa::path(post, path = "/shifts/{shift_id}/cash-movements", tag = "shifts",
+#[utoipa::path(post, path = "/shifts/{shift_id}/cash-movements", tag = "shifts", operation_id = "legacy_add_shift_cash_movement",
     params(("shift_id" = Uuid, Path, description = "Till ID")), request_body = CashMovementRequest,
     responses((status = 201, description = "DEPRECATED — use /tills/{till_id}/cash-movements", body = h::CashMovement), AppErrorResponse),
     security(("bearer_jwt" = [])))]
@@ -221,7 +223,10 @@ pub async fn add_cash_movement(
 /// Old clients read prose, not codes: keep 400 bodies they used to get.
 pub(crate) fn legacy_error(e: AppError) -> AppError {
     match e {
-        AppError::Coded { status: 400, reason, .. } => AppError::BadRequest(reason.replace("till", "shift")),
+        AppError::Coded { status: 400, reason, .. } => {
+            crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ERROR_WORDING, "legacy_error_till_to_shift");
+            AppError::BadRequest(reason.replace("till", "shift"))
+        }
         other => other,
     }
 }
@@ -267,6 +272,7 @@ pub async fn legacy_list_till_entities(
     if !client.is_legacy_pos() {
         return Err(AppError::NotFound("Not found".into()));
     }
+    crate::client_seen::legacy_hit(crate::client_seen::KIND_TILLS_ENTITY);
     let claims = h::extract_claims(&req)?;
     let branch_id = match q.branch_id {
         Some(b) => b,
@@ -303,6 +309,7 @@ pub async fn legacy_list_till_entities(
 }
 
 pub async fn till_entity_gone() -> Result<HttpResponse, AppError> {
+    crate::client_seen::legacy_hit(crate::client_seen::KIND_TILLS_ENTITY_GONE);
     Err(AppError::Coded {
         status: 410,
         code: "TILL_ENTITY_REMOVED",

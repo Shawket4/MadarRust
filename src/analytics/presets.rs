@@ -79,7 +79,12 @@ impl Preset {
 }
 
 pub fn preset(id: &str) -> Option<&'static Preset> {
-    let id = if id == "shift_cash_summary" { "till_cash_summary" } else { id }; // pre-rework id
+    let id = if id == "shift_cash_summary" {
+        crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ANALYTICS_ALIAS, "preset_shift_cash_summary");
+        "till_cash_summary"
+    } else {
+        id
+    }; // pre-rework id
     PRESETS.iter().find(|p| p.id == id)
 }
 
