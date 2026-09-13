@@ -40,7 +40,8 @@ const ORDER_SELECT: &str =
      o.voided_at, o.void_reason::text, o.void_note, o.voided_by,
      o.loyalty_customer_id, lc.name AS loyalty_member_name,
      o.price_flagged, o.price_expected_total, o.created_at,
-     effective_timezone(o.branch_id) AS timezone
+     effective_timezone(o.branch_id) AS timezone,
+     o.device_id, o.device_code, CASE WHEN o.device_code IS NOT NULL THEN o.device_code || '-' || o.order_number ELSE o.order_number::text END AS display_number, o.verification
      FROM orders o JOIN users u ON u.id = o.teller_id
      LEFT JOIN users w ON w.id = o.waiter_id
      LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id
@@ -237,6 +238,26 @@ pub struct Order {
     #[serde(default)]
     #[sqlx(default)]
     pub timezone: Option<String>,
+    /// The device that numbered this sale (contract R4). `null` for server-numbered
+    /// orders (old clients, dashboard, delivery).
+    #[serde(default)]
+    #[sqlx(default)]
+    pub device_id: Option<Uuid>,
+    /// That device's code (`36B`), stored with the order. `null` when server-numbered.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub device_code: Option<String>,
+    /// What receipts and lists show: `<device_code>-<order_number>` (`36B-12`)
+    /// for a device-numbered sale, else `order_number` as text.
+    #[serde(default)]
+    #[sqlx(default)]
+    #[schema(example = "36B-12")]
+    pub display_number: String,
+    /// `server` | `lan` | `unverified` — the till's verification as the ringing
+    /// device knew it; `null` when not recorded.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub verification: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -497,12 +518,14 @@ pub struct CreateOrderRequest {
     // response — even months later — dedups against `orders.idempotency_key`.
     #[serde(default)]
     pub idempotency_key: Option<Uuid>,
-    /// IGNORED by the server (accepted for backward compatibility only). The
-    /// authoritative per-shift number is ALWAYS `MAX(order_number)+1` computed under
-    /// the shift advisory lock — never the client value, which is used only on the
-    /// device's local receipt. The byte-identical-at-reprint guarantee rides on
-    /// `order_ref`, not this field. Two tills on one shift get distinct numbers
-    /// (UNIQUE(shift_id, order_number) + the lock).
+    /// The device's own order number (contract R4): its per-business-day
+    /// sequence, the same counter as the `NNNN` of its `order_ref`. Stored
+    /// VERBATIM when the request also names `device_id` and a non-blank
+    /// `device_code` — the order then reads `display_number` `<device_code>-<n>`.
+    /// Without all three (old clients, dashboard, delivery) it is ignored and the
+    /// server numbers the sale per till: `MAX(order_number)+1` over the till's
+    /// server-numbered orders, under the till advisory lock
+    /// (`uq_orders_till_legacy_number`).
     #[serde(default)]
     pub order_number: Option<i32>,
     /// Client-minted order reference (`<BRANCH>-<YYMMDD>-<DEVICE>-<NNNN>`). Stored
@@ -1929,18 +1952,26 @@ pub(crate) async fn create_order_inner(
         ));
     }
 
-    // order_number stays SERVER-COMPUTED and per-shift — it's `UNIQUE(shift_id,
-    // order_number)`, so a client value can't be authoritative (two devices would
-    // both mint #1 into a shared shift and collide). A POS device PREDICTS the same
-    // per-shift number offline (single numberer per shift) for its receipt.
     // R4: a device that numbers its own sales (per business day) sends
     // device_id + device_code + order_number — stored verbatim. Anything else
     // (old clients, dashboard, delivery) keeps the legacy per-till counter over
     // the till's un-deviced orders (`uq_orders_till_legacy_number`).
-    let device_numbered = match (&body.device_id, &body.device_code, body.order_number) {
+    let mut device_numbered = match (&body.device_id, &body.device_code, body.order_number) {
         (Some(_), Some(code), Some(n)) if !code.trim().is_empty() => Some(n),
         _ => None,
     };
+    // A device rings sales before it ever calls /devices/register (and a
+    // backlog replays days later): register it on first contact (§2.4), as the
+    // till open, close and refund paths do, instead of failing the sale on the
+    // devices FK. A device id another org owns is not visible here; the sale
+    // is then server-numbered rather than refused.
+    if let (Some(_), Some(device)) = (device_numbered, body.device_id)
+        && crate::devices::ensure_registered(&mut tx, actor.org_id, device, Some(shift_branch_id), body.device_code.as_deref())
+            .await?
+            .is_none()
+    {
+        device_numbered = None;
+    }
     let order_number: i32 = match device_numbered {
         Some(n) => n,
         None => sqlx::query_scalar(
@@ -2043,7 +2074,8 @@ pub(crate) async fn create_order_inner(
             (SELECT customer_lng FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_lng,
             voided_at, void_reason::text, void_note, voided_by,
             price_flagged, price_expected_total, created_at,
-            effective_timezone(branch_id) AS timezone
+            effective_timezone(branch_id) AS timezone,
+            device_id, device_code, CASE WHEN device_code IS NOT NULL THEN device_code || '-' || order_number ELSE order_number::text END AS display_number, verification
         "#,
     )
     .bind(shift_branch_id) // authoritative: the order's branch IS its shift's branch
@@ -3048,7 +3080,8 @@ pub(crate) async fn void_order_inner(
                (SELECT customer_lng FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_lng,
                voided_at, void_reason::text, void_note, voided_by,
             price_flagged, price_expected_total, created_at,
-            effective_timezone(branch_id) AS timezone"#,
+            effective_timezone(branch_id) AS timezone,
+            device_id, device_code, CASE WHEN device_code IS NOT NULL THEN device_code || '-' || order_number ELSE order_number::text END AS display_number, verification"#,
     )
     .bind(order_id)
     .bind(reason)

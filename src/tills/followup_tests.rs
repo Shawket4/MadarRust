@@ -42,6 +42,7 @@ macro_rules! app {
                 .configure(crate::orders::routes::configure)
                 .configure(crate::branches::routes::configure)
                 .configure(crate::payment_methods::routes::configure)
+                .configure(crate::sync::routes::configure)
                 .configure(|c| crate::reports::routes::configure(c, web::Data::new($pool.clone()))),
         )
         .await
@@ -413,4 +414,91 @@ async fn branch_old_bill_hours_and_standard_float_read_and_write(pool: PgPool) {
     let r = test::call_service(&app, get(admin.clone())).await;
     let b: Value = test::read_body_json(r).await;
     assert_eq!(b["standard_float"], 40000);
+}
+
+// ── (h) order responses carry the device numbering ──────────────────────────
+
+#[sqlx::test]
+async fn order_responses_carry_device_numbering(pool: PgPool) {
+    seeded(&pool).await;
+    let app = app!(pool);
+    let till = till_with_sales(&app).await; // two server-numbered sales
+    let device = Uuid::new_v4();
+    let teller = bearer(TELLER_A, UserRole::Teller);
+    let r = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(teller.clone())
+            .set_json(json!({
+                "branch_id": BRANCH_A, "till_id": till, "payment_method": "cash", "idempotency_key": Uuid::new_v4(),
+                "device_id": device, "device_code": "36B", "order_number": 12, "verification": "lan",
+                "order_ref": "GLDA-260913-36B-0012",
+                "items": [{ "menu_item_id": ITEM, "quantity": 1, "unit_price": 5000, "addons": [], "optional_field_ids": [] }],
+                "subtotal": 5000, "tax_amount": 0, "total_amount": 5000, "amount_tendered": 5000, "change_given": 0
+            }))
+            .to_request(),
+    )
+    .await;
+    let status = r.status();
+    let created: Value = test::read_body_json(r).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let expect = |o: &Value, what: &str| {
+        assert_eq!(o["device_id"], json!(device), "{what}");
+        assert_eq!(o["device_code"], "36B", "{what}");
+        assert_eq!(o["display_number"], "36B-12", "{what}");
+        assert_eq!(o["verification"], "server", "{what}: a live sale is server-verified");
+        assert_eq!(o["order_number"], 12, "{what}");
+    };
+    expect(&created, "create");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let r = test::call_service(&app, test::TestRequest::get().uri(&format!("/orders/{id}")).insert_header(teller.clone()).to_request()).await;
+    expect(&test::read_body_json::<Value, _>(r).await, "get");
+
+    let r = test::call_service(
+        &app,
+        test::TestRequest::get().uri(&format!("/orders?branch_id={BRANCH_A}&till_id={till}")).insert_header(teller.clone()).to_request(),
+    )
+    .await;
+    let list: Value = test::read_body_json(r).await;
+    let rows = list["data"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    expect(rows.iter().find(|o| o["id"] == json!(id)).unwrap(), "list");
+    // Server-numbered sales: no device, the bare number, verification as stored.
+    let plain = rows.iter().find(|o| o["order_number"] == 1).unwrap();
+    assert!(plain["device_id"].is_null() && plain["device_code"].is_null());
+    assert_eq!(plain["display_number"], "1");
+    assert_eq!(plain["verification"], "server");
+}
+
+/// A replayed sale from a device that never registered lands (and registers
+/// the device) instead of failing on the devices FK and dead-lettering.
+#[sqlx::test]
+async fn replayed_sale_registers_an_unknown_device(pool: PgPool) {
+    seeded(&pool).await;
+    let app = app!(pool);
+    let till = till_with_sales(&app).await;
+    let device = Uuid::new_v4();
+    let r = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/sync/replay")
+            .insert_header(bearer(TELLER_A, UserRole::Teller))
+            .set_json(json!({ "op": "create_order", "teller_id": TELLER_A, "device_id": device, "device_code": "7QX",
+                "request": {
+                    "branch_id": BRANCH_A, "till_id": till, "payment_method": "cash", "idempotency_key": Uuid::new_v4(),
+                    "order_number": 3, "verification": "unverified", "order_ref": "GLDA-260913-7QX-0003",
+                    "items": [{ "menu_item_id": ITEM, "quantity": 1, "unit_price": 5000, "addons": [], "optional_field_ids": [] }],
+                    "subtotal": 5000, "tax_amount": 0, "total_amount": 5000, "amount_tendered": 5000, "change_given": 0 } }))
+            .to_request(),
+    )
+    .await;
+    let status = r.status();
+    let body: Value = test::read_body_json(r).await;
+    assert!(status.is_success(), "{status}: {body}");
+    assert_eq!(body["display_number"], "7QX-3");
+    assert_eq!(body["verification"], "unverified");
+    let code: String = sqlx::query_scalar("SELECT code FROM devices WHERE id = $1").bind(device).fetch_one(&pool).await.unwrap();
+    assert_eq!(code, "7QX");
 }
