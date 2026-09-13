@@ -446,6 +446,13 @@ pub struct LedgerEntry {
     pub reward_name: Option<String>,
     pub note: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Who wrote the row: the teller who applied a reward or rang the sale, the
+    /// admin who adjusted by hand. `None` for the system (birthday, win-back,
+    /// a trigger with no actor).
+    #[sqlx(default)]
+    pub created_by: Option<Uuid>,
+    #[sqlx(default)]
+    pub created_by_name: Option<String>,
 }
 
 pub async fn ledger(
@@ -456,9 +463,11 @@ pub async fn ledger(
     Ok(sqlx::query_as(
         "SELECT t.id, t.kind::text AS kind, t.source, t.reverses_id, t.currency, t.points, \
                 t.branch_id, b.name AS branch_name, \
-                t.order_id, t.basis_piastres, m.name AS reward_name, t.note, t.created_at \
+                t.order_id, t.basis_piastres, m.name AS reward_name, t.note, t.created_at, \
+                t.created_by, u.name AS created_by_name \
            FROM loyalty_transactions t \
            LEFT JOIN branches b ON b.id = t.branch_id \
+           LEFT JOIN users u ON u.id = t.created_by \
            LEFT JOIN menu_items m ON m.id = t.reward_menu_item_id \
           WHERE t.customer_id = $1 ORDER BY t.created_at DESC LIMIT $2",
     )

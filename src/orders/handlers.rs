@@ -38,11 +38,13 @@ const ORDER_SELECT: &str =
      o.customer_name, o.notes, o.order_type, o.delivery_fee, o.delivery_order_id,
      d.channel::text AS delivery_channel, d.customer_lat AS delivery_lat, d.customer_lng AS delivery_lng,
      o.voided_at, o.void_reason::text, o.void_note, o.voided_by,
+     o.loyalty_customer_id, lc.name AS loyalty_member_name,
      o.price_flagged, o.price_expected_total, o.created_at,
      effective_timezone(o.branch_id) AS timezone
      FROM orders o JOIN users u ON u.id = o.teller_id
      LEFT JOIN users w ON w.id = o.waiter_id
-     LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id ";
+     LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id
+     LEFT JOIN loyalty_customers lc ON lc.id = o.loyalty_customer_id ";
 
 // ── Shared summary aggregate columns ──────────────────────────
 /// Aggregate columns hydrating [OrderSummary] (by name, via `FromRow`). Used by
@@ -218,6 +220,14 @@ pub struct Order {
     /// anyone looking at a flagged sale asks next.
     #[serde(default)]
     pub price_expected_total: Option<i32>,
+    /// The loyalty member this sale redeemed for (or was scanned for).
+    #[serde(default)]
+    #[sqlx(default)]
+    pub loyalty_customer_id: Option<Uuid>,
+    /// That member's name, for the order detail. `None` once forgotten.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub loyalty_member_name: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// The branch's effective IANA timezone (see `crate::tz`) — the zone every
     /// timestamp on this payload is shown and printed in. Additive: older
@@ -260,6 +270,10 @@ pub struct OrderItem {
     #[sqlx(default)]
     #[serde(default)]
     pub reward_units: i32,
+    /// Minor units the reward took off this line (0 for a paid line).
+    #[sqlx(default)]
+    #[serde(default)]
+    pub reward_covered: i32,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -2198,12 +2212,12 @@ pub(crate) async fn create_order_inner(
                 (order_id, menu_item_id, item_name, name_translations, size_label,
                  unit_price, quantity, line_total, notes, deductions_snapshot,
                  bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing,
-                 price_flagged, is_reward, reward_units)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                 price_flagged, is_reward, reward_units, reward_covered)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
                RETURNING id, order_id, menu_item_id, item_name, name_translations, size_label,
                          unit_price, quantity, line_total, notes, deductions_snapshot,
                          bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing,
-                         is_reward, reward_units"#,
+                         is_reward, reward_units, reward_covered"#,
         )
         .bind(order.id)
         .bind(resolved.menu_item_id)
@@ -2223,6 +2237,7 @@ pub(crate) async fn create_order_inner(
         .bind(resolved.price_flagged)
         .bind(resolved.is_reward)
         .bind(resolved.reward_units)
+        .bind(resolved.reward_covered)
         .fetch_one(&mut *tx)
         .await?;
 
@@ -3350,7 +3365,7 @@ async fn fetch_order_items_full(
         "SELECT id, order_id, menu_item_id, item_name, name_translations, size_label, \
                 unit_price, quantity, line_total, notes, deductions_snapshot, \
                 bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing, \
-                is_reward, reward_units \
+                is_reward, reward_units, reward_covered \
          FROM order_items WHERE order_id = $1 ORDER BY id",
     )
     .bind(order_id)
@@ -3459,7 +3474,7 @@ async fn fetch_orders_items_full_batch(
         "SELECT id, order_id, menu_item_id, item_name, name_translations, size_label, \
                 unit_price, quantity, line_total, notes, deductions_snapshot, \
                 bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing, \
-                is_reward, reward_units \
+                is_reward, reward_units, reward_covered \
          FROM order_items WHERE order_id = ANY($1) ORDER BY id",
     )
     .bind(order_ids)
