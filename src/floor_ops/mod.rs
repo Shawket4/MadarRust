@@ -410,9 +410,10 @@ pub(crate) struct Taken {
 /// * another hand's hold or a booking  -> refused `TABLE_HELD`, when holding;
 /// * plates still on it (`dirty`)      -> refused `TABLE_DIRTY`, whoever asks.
 ///
-/// "Same hand" is the same user or the same till: a draft parked by the
-/// morning teller is re-held by the afternoon one on the same till after a
-/// shift handover, and that is one hold, not a fight over the table.
+/// "Same hand" is the same user, or ANY teller with an open till at the
+/// branch (holds are branch-wide): a draft parked by the morning teller is
+/// picked up by the afternoon one, and the hold moves to the afternoon
+/// teller's till -- one hold, not a fight over the table.
 pub(crate) async fn take_table(
     tx: &mut Transaction<'_, Postgres>,
     table_id: Uuid,
@@ -440,9 +441,15 @@ pub(crate) async fn take_table(
             ));
         }
         (Some(o), Holder::Party) => {
-            let same_hand = o.started_by == Some(by.user_id)
-                || (by.till_id.is_some() && o.started_till_id == by.till_id);
+            let same_hand = o.started_by == Some(by.user_id) || by.till_id.is_some();
             if o.held_by == "party" && same_hand {
+                if by.till_id.is_some() && o.started_till_id != by.till_id {
+                    sqlx::query("UPDATE table_occupancies SET started_till_id = $2 WHERE id = $1")
+                        .bind(o.id)
+                        .bind(by.till_id)
+                        .execute(&mut **tx)
+                        .await?;
+                }
                 return Ok(Taken { landed: false });
             }
             return Err(refused(

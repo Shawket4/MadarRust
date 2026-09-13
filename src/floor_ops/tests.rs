@@ -775,11 +775,8 @@ async fn a_hold_is_owned_by_the_till_that_placed_it(pool: PgPool) {
         .await
         .unwrap();
     open_shift_row(&pool, branch, afternoon).await;
-    assert_eq!(
-        till_of_open_shift(&pool, afternoon).await,
-        till,
-        "same till"
-    );
+    // Tills are per person now: the hold moves to the afternoon teller's till.
+    let till = till_of_open_shift(&pool, afternoon).await;
     let resp = post_json!(
         app,
         a,
