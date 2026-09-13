@@ -1182,6 +1182,103 @@
         ]
       }
     },
+    "/assets/jobs/{id}": {
+      "get": {
+        "tags": [
+          "assets"
+        ],
+        "operationId": "get_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Asset job id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetJobView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/auth/login": {
       "post": {
         "tags": [
@@ -1551,7 +1648,7 @@
           {
             "name": "date",
             "in": "query",
-            "description": "Service date (`YYYY-MM-DD`, branch-local, midnight→midnight). Defaults to today.",
+            "description": "Calendar date (`YYYY-MM-DD`, branch-local, midnight→midnight). Defaults to today.",
             "required": false,
             "schema": {
               "type": "string"
@@ -8759,6 +8856,307 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DeliveryZone"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/devices": {
+      "get": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "list_devices",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Devices of a branch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Device"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/devices/register": {
+      "post": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "register_device",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterDeviceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Registered (upsert by id)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Device"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/devices/{id}": {
+      "patch": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "update_device",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Device id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateDeviceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Device"
                 }
               }
             }
@@ -21524,7 +21922,7 @@
             }
           },
           {
-            "name": "shift_id",
+            "name": "till_id",
             "in": "query",
             "required": false,
             "schema": {
@@ -21836,7 +22234,7 @@
             }
           },
           {
-            "name": "shift_id",
+            "name": "till_id",
             "in": "query",
             "required": false,
             "schema": {
@@ -30406,103 +30804,6 @@
         ]
       }
     },
-    "/refunds/shift/{shift_id}": {
-      "get": {
-        "tags": [
-          "refunds"
-        ],
-        "operationId": "list_shift_refunds",
-        "parameters": [
-          {
-            "name": "shift_id",
-            "in": "path",
-            "description": "Shift ID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Refunds issued in one shift",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ShiftRefunds"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request — validation failed or malformed input",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized — missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden — insufficient permission or wrong org",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict — FK or domain invariant violation",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_jwt": []
-          }
-        ]
-      }
-    },
     "/refunds/{id}": {
       "get": {
         "tags": [
@@ -33306,6 +33607,203 @@
         ]
       }
     },
+    "/reports/tills/{till_id}/deductions": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "operationId": "till_deductions",
+        "parameters": [
+          {
+            "name": "till_id",
+            "in": "path",
+            "description": "Till ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Till deductions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DeductionLogRow"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/reports/tills/{till_id}/summary": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "operationId": "till_summary",
+        "parameters": [
+          {
+            "name": "till_id",
+            "in": "path",
+            "description": "Till ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Till summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShiftSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/shifts/branches/{branch_id}": {
       "get": {
         "tags": [
@@ -33316,7 +33814,7 @@
           {
             "name": "branch_id",
             "in": "path",
-            "description": "Branch ID (nil UUID = all branches in org)",
+            "description": "Branch ID (nil UUID = all branches)",
             "required": true,
             "schema": {
               "type": "string",
@@ -33326,7 +33824,6 @@
           {
             "name": "page",
             "in": "query",
-            "description": "1-based page number. Omit (along with `per_page`) to fetch every shift.",
             "required": false,
             "schema": {
               "type": "integer",
@@ -33336,7 +33833,6 @@
           {
             "name": "per_page",
             "in": "query",
-            "description": "Page size (clamped to [1, 200]). Omit to fetch every shift in one page.",
             "required": false,
             "schema": {
               "type": "integer",
@@ -33346,7 +33842,7 @@
         ],
         "responses": {
           "200": {
-            "description": "List shifts (newest first)",
+            "description": "DEPRECATED — use /tills/branches/{branch_id}",
             "content": {
               "application/json": {
                 "schema": {
@@ -33443,7 +33939,7 @@
           {
             "name": "till_id",
             "in": "query",
-            "description": "The device's till (drawer). Narrows the open-shift lookup for managers and\nscopes the suggested opening cash to that drawer's carryover. Optional —\nomit to fall back to the branch's default till for the suggestion.",
+            "description": "Ignored (the drawer entity is gone).",
             "required": false,
             "schema": {
               "type": "string",
@@ -33453,7 +33949,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Current shift info",
+            "description": "DEPRECATED — use /tills/branches/{branch_id}/current",
             "content": {
               "application/json": {
                 "schema": {
@@ -33560,7 +34056,7 @@
         },
         "responses": {
           "201": {
-            "description": "Shift opened",
+            "description": "DEPRECATED — use /tills/branches/{branch_id}/open",
             "content": {
               "application/json": {
                 "schema": {
@@ -33647,7 +34143,7 @@
           {
             "name": "shift_id",
             "in": "path",
-            "description": "Shift ID",
+            "description": "Till ID",
             "required": true,
             "schema": {
               "type": "string",
@@ -33657,7 +34153,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Get shift",
+            "description": "DEPRECATED — use /tills/{till_id}",
             "content": {
               "application/json": {
                 "schema": {
@@ -33732,195 +34228,9 @@
             "bearer_jwt": []
           }
         ]
-      },
-      "delete": {
-        "tags": [
-          "shifts"
-        ],
-        "operationId": "delete_shift",
-        "parameters": [
-          {
-            "name": "shift_id",
-            "in": "path",
-            "description": "Shift ID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Shift deleted"
-          },
-          "400": {
-            "description": "Bad request — validation failed or malformed input",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized — missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden — insufficient permission or wrong org",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict — FK or domain invariant violation",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_jwt": []
-          }
-        ]
       }
     },
     "/shifts/{shift_id}/cash-movements": {
-      "get": {
-        "tags": [
-          "shifts"
-        ],
-        "operationId": "list_cash_movements",
-        "parameters": [
-          {
-            "name": "shift_id",
-            "in": "path",
-            "description": "Shift ID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "List cash movements",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/CashMovement"
-                  }
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request — validation failed or malformed input",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized — missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden — insufficient permission or wrong org",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict — FK or domain invariant violation",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_jwt": []
-          }
-        ]
-      },
       "post": {
         "tags": [
           "shifts"
@@ -33930,7 +34240,7 @@
           {
             "name": "shift_id",
             "in": "path",
-            "description": "Shift ID",
+            "description": "Till ID",
             "required": true,
             "schema": {
               "type": "string",
@@ -33950,7 +34260,7 @@
         },
         "responses": {
           "201": {
-            "description": "Add cash movement",
+            "description": "DEPRECATED — use /tills/{till_id}/cash-movements",
             "content": {
               "application/json": {
                 "schema": {
@@ -34037,7 +34347,7 @@
           {
             "name": "shift_id",
             "in": "path",
-            "description": "Shift ID",
+            "description": "Till ID",
             "required": true,
             "schema": {
               "type": "string",
@@ -34049,7 +34359,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CloseShiftRequest"
+                "$ref": "#/components/schemas/CloseTillRequest"
               }
             }
           },
@@ -34057,7 +34367,7 @@
         },
         "responses": {
           "200": {
-            "description": "Close shift",
+            "description": "DEPRECATED — use /tills/{till_id}/close",
             "content": {
               "application/json": {
                 "schema": {
@@ -34144,7 +34454,7 @@
           {
             "name": "shift_id",
             "in": "path",
-            "description": "Shift ID",
+            "description": "Till ID",
             "required": true,
             "schema": {
               "type": "string",
@@ -34164,7 +34474,7 @@
         },
         "responses": {
           "200": {
-            "description": "Force close shift",
+            "description": "DEPRECATED — use /tills/{till_id}/force-close",
             "content": {
               "application/json": {
                 "schema": {
@@ -34251,7 +34561,7 @@
           {
             "name": "shift_id",
             "in": "path",
-            "description": "Shift ID",
+            "description": "Till ID",
             "required": true,
             "schema": {
               "type": "string",
@@ -34261,7 +34571,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Get shift report",
+            "description": "DEPRECATED — use /tills/{till_id}/report",
             "content": {
               "application/json": {
                 "schema": {
@@ -41789,7 +42099,403 @@
         ]
       }
     },
+    "/sync/asset-bundles/{org_id}/{file_name}": {
+      "get": {
+        "tags": [
+          "assets"
+        ],
+        "operationId": "get_bundle",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "file_name",
+            "in": "path",
+            "description": "assets-<branch_id>-<seq>.tar",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tar (Range/If-Range supported)"
+          },
+          "206": {
+            "description": "Partial"
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/sync/assets": {
+      "post": {
+        "tags": [
+          "assets"
+        ],
+        "operationId": "top_up",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TopUpRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "application/x-tar: index.json then <hash>.<ext> entries"
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/sync/pull": {
+      "post": {
+        "tags": [
+          "sync"
+        ],
+        "operationId": "pull",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Cursor from the previous response's `next`. Absent = full snapshot.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PullRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Changefeed page, resync marker or full snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PullResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/tills": {
+      "get": {
+        "tags": [
+          "tills"
+        ],
+        "summary": "`GET /tills` — the removed entity list, synthesized (one \"Till 1\" per branch).",
+        "operationId": "legacy_list_till_entities",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "DEPRECATED (POS < 0.7 only): one synthesized drawer per branch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LegacyTill"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/tills/branches/{branch_id}": {
       "get": {
         "tags": [
           "tills"
@@ -41798,7 +42504,283 @@
         "parameters": [
           {
             "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID (nil UUID = all branches in org)",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "status",
             "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "teller_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "device_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "flagged",
+            "in": "query",
+            "description": "Only tills opened while another was open, or with a disagreed reconciliation.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tills, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedTills"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/tills/branches/{branch_id}/current": {
+      "get": {
+        "tags": [
+          "tills"
+        ],
+        "operationId": "get_current_till",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "teller_id",
+            "in": "query",
+            "description": "Non-teller roles may ask about another person.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The person's till state at this branch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TillPreFill"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/tills/branches/{branch_id}/open": {
+      "get": {
+        "tags": [
+          "tills"
+        ],
+        "operationId": "list_open_tills",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
             "required": true,
             "schema": {
               "type": "string",
@@ -41808,7 +42790,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Tills for the branch",
+            "description": "Every open till at the branch, newest first",
             "content": {
               "application/json": {
                 "schema": {
@@ -41891,20 +42873,42 @@
         "tags": [
           "tills"
         ],
-        "operationId": "create_till",
+        "operationId": "open_till",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CreateTillRequest"
+                "$ref": "#/components/schemas/OpenTillRequest"
               }
             }
           },
           "required": true
         },
         "responses": {
+          "200": {
+            "description": "Already open on this device (resumed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Till"
+                }
+              }
+            }
+          },
           "201": {
-            "description": "Till created",
+            "description": "Till opened",
             "content": {
               "application/json": {
                 "schema": {
@@ -41981,7 +42985,199 @@
         ]
       }
     },
-    "/tills/{id}": {
+    "/tills/branches/{branch_id}/open-bills-notice": {
+      "get": {
+        "tags": [
+          "tills"
+        ],
+        "operationId": "get_open_bills_notice",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bills left open at the branch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenBillsNotice"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/tills/{till_id}": {
+      "get": {
+        "tags": [
+          "tills"
+        ],
+        "operationId": "get_till",
+        "parameters": [
+          {
+            "name": "till_id",
+            "in": "path",
+            "description": "Till ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Till",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Till"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
       "delete": {
         "tags": [
           "tills"
@@ -41989,7 +43185,7 @@
         "operationId": "delete_till",
         "parameters": [
           {
-            "name": "id",
+            "name": "till_id",
             "in": "path",
             "description": "Till ID",
             "required": true,
@@ -42069,15 +43265,115 @@
             "bearer_jwt": []
           }
         ]
-      },
-      "patch": {
+      }
+    },
+    "/tills/{till_id}/cash-movements": {
+      "get": {
         "tags": [
           "tills"
         ],
-        "operationId": "update_till",
+        "operationId": "list_cash_movements",
         "parameters": [
           {
-            "name": "id",
+            "name": "till_id",
+            "in": "path",
+            "description": "Till ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cash movements",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CashMovement"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "tills"
+        ],
+        "operationId": "add_cash_movement",
+        "parameters": [
+          {
+            "name": "till_id",
             "in": "path",
             "description": "Till ID",
             "required": true,
@@ -42091,7 +43387,114 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/UpdateTillRequest"
+                "$ref": "#/components/schemas/CashMovementRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Cash movement added",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CashMovement"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/tills/{till_id}/close": {
+      "post": {
+        "tags": [
+          "tills"
+        ],
+        "operationId": "close_till",
+        "parameters": [
+          {
+            "name": "till_id",
+            "in": "path",
+            "description": "Till ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CloseTillRequest"
               }
             }
           },
@@ -42099,11 +43502,409 @@
         },
         "responses": {
           "200": {
-            "description": "Till updated",
+            "description": "Till closed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloseTillResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/tills/{till_id}/close-preview": {
+      "get": {
+        "tags": [
+          "tills"
+        ],
+        "operationId": "close_preview",
+        "parameters": [
+          {
+            "name": "till_id",
+            "in": "path",
+            "description": "Till ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What the close screen shows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloseTillPreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/tills/{till_id}/force-close": {
+      "post": {
+        "tags": [
+          "tills"
+        ],
+        "operationId": "force_close_till",
+        "parameters": [
+          {
+            "name": "till_id",
+            "in": "path",
+            "description": "Till ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ForceCloseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Till force-closed",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Till"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/tills/{till_id}/refunds": {
+      "get": {
+        "tags": [
+          "refunds"
+        ],
+        "operationId": "list_till_refunds",
+        "parameters": [
+          {
+            "name": "till_id",
+            "in": "path",
+            "description": "Till ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Refunds issued from one till (also served at the deprecated /refunds/shift/{till_id})",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TillRefunds"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/tills/{till_id}/report": {
+      "get": {
+        "tags": [
+          "tills"
+        ],
+        "operationId": "get_till_report",
+        "parameters": [
+          {
+            "name": "till_id",
+            "in": "path",
+            "description": "Till ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Till (Z) report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TillReportResponse"
                 }
               }
             }
@@ -42265,6 +44066,220 @@
         ]
       }
     },
+    "/uploads/bundles/{bundle_id}": {
+      "post": {
+        "tags": [
+          "uploads"
+        ],
+        "operationId": "upload_bundle_image",
+        "parameters": [
+          {
+            "name": "bundle_id",
+            "in": "path",
+            "description": "Bundle ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadImageMultipart"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Image accepted for processing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/uploads/categories/{category_id}": {
+      "post": {
+        "tags": [
+          "uploads"
+        ],
+        "operationId": "upload_category_image",
+        "parameters": [
+          {
+            "name": "category_id",
+            "in": "path",
+            "description": "Category ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadImageMultipart"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Image accepted for processing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/uploads/menu-items/{menu_item_id}": {
       "post": {
         "tags": [
@@ -42296,7 +44311,7 @@
         },
         "responses": {
           "200": {
-            "description": "Image uploaded",
+            "description": "Image accepted for processing",
             "content": {
               "application/json": {
                 "schema": {
@@ -44295,6 +46310,175 @@
           "total_tax": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "AssetBundleRef": {
+        "type": "object",
+        "required": [
+          "url",
+          "seq",
+          "bytes",
+          "sha256"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "AssetGroupRef": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ProcessingGroupRef"
+          },
+          {
+            "$ref": "#/components/schemas/ReadyGroupRef"
+          }
+        ],
+        "description": "`image` / `logo` / `brand_card_image` on entity responses."
+      },
+      "AssetJobResult": {
+        "type": "object",
+        "required": [
+          "pos",
+          "variants"
+        ],
+        "properties": {
+          "full": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AssetRef"
+              }
+            ]
+          },
+          "pos": {
+            "$ref": "#/components/schemas/AssetRef"
+          },
+          "variants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AssetRef"
+            }
+          }
+        }
+      },
+      "AssetJobView": {
+        "type": "object",
+        "required": [
+          "id",
+          "status"
+        ],
+        "properties": {
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "result": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AssetJobResult"
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "description": "queued | running | done | failed"
+          }
+        }
+      },
+      "AssetRef": {
+        "type": "object",
+        "required": [
+          "id",
+          "group_id",
+          "hash",
+          "kind",
+          "variant",
+          "ext",
+          "content_type",
+          "bytes",
+          "has_alpha",
+          "url"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "content_type": {
+            "type": "string"
+          },
+          "ext": {
+            "type": "string"
+          },
+          "group_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "has_alpha": {
+            "type": "boolean"
+          },
+          "hash": {
+            "type": "string"
+          },
+          "height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "org_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "url": {
+            "type": "string",
+            "description": "Signed, org-scoped (§11.4), 24 h bucketed."
+          },
+          "variant": {
+            "type": "string"
+          },
+          "width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
           }
         }
       },
@@ -46702,6 +48886,7 @@
         "type": "object",
         "required": [
           "id",
+          "till_id",
           "shift_id",
           "amount",
           "kind",
@@ -46720,28 +48905,32 @@
               "string",
               "null"
             ],
-            "format": "uuid",
-            "description": "Client-minted idempotency / reconciliation key, echoed back so an\noffline client can map its queued movement to the server row. NULL for\nlive online movements."
+            "format": "uuid"
           },
           "corrects_id": {
             "type": [
               "string",
               "null"
             ],
-            "format": "uuid",
-            "description": "For a `correction`: the movement it reverses. NULL for every other kind,\nand for a correction of something never recorded as a row."
+            "format": "uuid"
           },
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           },
           "id": {
             "type": "string",
             "format": "uuid"
           },
           "kind": {
-            "type": "string",
-            "description": "One of `pay_in` / `pay_out` / `safe_drop` / `correction` — see\n[`CashMovementKind`]."
+            "type": "string"
           },
           "moved_by": {
             "type": "string",
@@ -46755,13 +48944,18 @@
           },
           "shift_id": {
             "type": "string",
+            "format": "uuid",
+            "description": "DEPRECATED: same value as `till_id` (kept for POS v0.5.1/v0.6.0)."
+          },
+          "till_id": {
+            "type": "string",
             "format": "uuid"
           }
         }
       },
       "CashMovementKind": {
         "type": "string",
-        "description": "What a cash movement IS, which fixes its sign. The DB holds this as a text\ncolumn under `shift_cash_movements_kind_is_known` (same convention as\n`order_type`), so the wire value is the snake_case label and the model\ncarries it as a plain `String`; this enum exists so the handler can validate\na request before the CHECK turns a teller's mistake into a 500.",
+        "description": "What a cash movement IS, which fixes its sign.",
         "enum": [
           "pay_in",
           "pay_out",
@@ -46785,24 +48979,28 @@
               "string",
               "null"
             ],
-            "format": "uuid",
-            "description": "Client-minted idempotency / reconciliation key. The POS sends a stable\nUUID per movement so a replayed offline movement dedupes instead of\ndouble-applying. Omit for live online movements."
+            "format": "uuid"
           },
           "corrects_id": {
             "type": [
               "string",
               "null"
             ],
-            "format": "uuid",
-            "description": "For a `correction` only: the movement on this shift it reverses. The\namount must be the exact opposite of that row's, and a row may be\ncorrected once. Omit for a correction of something never recorded."
+            "format": "uuid"
           },
           "created_at": {
             "type": [
               "string",
               "null"
             ],
-            "format": "date-time",
-            "description": "When the movement actually happened. Omit for live (online) movements —\nthe server stamps `now()`. The POS sends this for movements made OFFLINE\nso they keep their real time after syncing. Future values are rejected."
+            "format": "date-time"
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           },
           "kind": {
             "oneOf": [
@@ -46810,8 +49008,7 @@
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/CashMovementKind",
-                "description": "What the movement is. Optional for the clients already in the field,\nwhich send only a signed amount: an omitted kind resolves by sign\n(negative → `pay_out`, positive → `pay_in`), exactly what the In/Out\nchips have always meant. A supplied kind must agree with the sign."
+                "$ref": "#/components/schemas/CashMovementKind"
               }
             ]
           },
@@ -46846,8 +49043,7 @@
             "type": [
               "string",
               "null"
-            ],
-            "description": "The kind of the movement `corrects_id` points at, so a printed report\ncan say \"correction of pay-out\" and the totals can net the pair inside\nthe bucket the mistake was made in."
+            ]
           },
           "created_at": {
             "type": "string",
@@ -46924,6 +49120,17 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "image": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AssetGroupRef",
+                "description": "Asset refs (Track B4, §11.10); null when no asset or not attached by this endpoint."
+              }
+            ]
           },
           "image_url": {
             "type": [
@@ -47376,7 +49583,83 @@
           }
         }
       },
-      "CloseShiftRequest": {
+      "CloseShiftResponse": {
+        "type": "object",
+        "required": [
+          "shift"
+        ],
+        "properties": {
+          "shift": {
+            "$ref": "#/components/schemas/Shift"
+          }
+        }
+      },
+      "CloseTillMethod": {
+        "type": "object",
+        "required": [
+          "method",
+          "is_cash",
+          "system_total",
+          "order_count"
+        ],
+        "properties": {
+          "is_cash": {
+            "type": "boolean"
+          },
+          "method": {
+            "type": "string"
+          },
+          "order_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "payment_method_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "system_total": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "CloseTillPreview": {
+        "type": "object",
+        "required": [
+          "till",
+          "expected_cash",
+          "methods"
+        ],
+        "properties": {
+          "expected_cash": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_till_warning": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LastTillWarning"
+              }
+            ]
+          },
+          "methods": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CloseTillMethod"
+            }
+          },
+          "till": {
+            "$ref": "#/components/schemas/Till"
+          }
+        }
+      },
+      "CloseTillRequest": {
         "type": "object",
         "required": [
           "closing_cash_declared"
@@ -47398,17 +49681,51 @@
           "closing_cash_declared": {
             "type": "integer",
             "format": "int32"
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "reconciliation": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ReconciliationInput"
+            },
+            "description": "Absent (old clients) → every used method is stored `unreviewed`."
           }
         }
       },
-      "CloseShiftResponse": {
+      "CloseTillResponse": {
         "type": "object",
         "required": [
-          "shift"
+          "till",
+          "reconciliation"
         ],
         "properties": {
-          "shift": {
-            "$ref": "#/components/schemas/Shift"
+          "last_till_warning": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LastTillWarning"
+              }
+            ]
+          },
+          "reconciliation": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TillReconciliationLine"
+            }
+          },
+          "till": {
+            "$ref": "#/components/schemas/Till"
           }
         }
       },
@@ -48866,7 +51183,7 @@
         "type": "object",
         "required": [
           "branch_id",
-          "shift_id",
+          "till_id",
           "payment_method",
           "items"
         ],
@@ -48901,6 +51218,21 @@
               "string",
               "null"
             ]
+          },
+          "device_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The device's code; with `device_id` + `order_number` the number is stored verbatim."
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The device ringing the order (else `X-Madar-Device`)."
           },
           "discount_amount": {
             "type": [
@@ -48990,10 +51322,6 @@
               "$ref": "#/components/schemas/PaymentSplitInput"
             }
           },
-          "shift_id": {
-            "type": "string",
-            "format": "uuid"
-          },
           "subtotal": {
             "type": [
               "integer",
@@ -49007,6 +51335,10 @@
               "null"
             ],
             "format": "int32"
+          },
+          "till_id": {
+            "type": "string",
+            "format": "uuid"
           },
           "tip_amount": {
             "type": [
@@ -49027,6 +51359,13 @@
               "null"
             ],
             "format": "int32"
+          },
+          "verification": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`server` | `lan` | `unverified` — the till's verification as the device knew it."
           }
         }
       },
@@ -49244,6 +51583,14 @@
             "format": "uuid",
             "description": "Client-minted idempotency key. A retried request or a replayed offline\nqueue carrying the same key gets the original refund back instead of\nhanding the money out again."
           },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The device issuing the refund (else the `X-Madar-Device` header)."
+          },
           "issued_at": {
             "type": [
               "string",
@@ -49277,7 +51624,7 @@
           "reason": {
             "$ref": "#/components/schemas/RefundReason"
           },
-          "shift_id": {
+          "till_id": {
             "type": [
               "string",
               "null"
@@ -49573,42 +51920,6 @@
           "label": {
             "type": "string",
             "example": "Table 5"
-          }
-        }
-      },
-      "CreateTillRequest": {
-        "type": "object",
-        "required": [
-          "branch_id",
-          "name"
-        ],
-        "properties": {
-          "branch_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "is_active": {
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
-          "is_default": {
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
-          "name": {
-            "type": "string"
-          },
-          "standard_float": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "description": "Standard float in minor units; must not be negative. Omit or `null`\nfor \"not decided\"."
           }
         }
       },
@@ -51095,6 +53406,78 @@
           }
         }
       },
+      "Device": {
+        "type": "object",
+        "required": [
+          "id",
+          "org_id",
+          "code",
+          "kind",
+          "first_seen_at",
+          "last_seen_at",
+          "code_conflict"
+        ],
+        "properties": {
+          "app_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "branch_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "code": {
+            "type": "string"
+          },
+          "code_conflict": {
+            "type": "boolean",
+            "description": "Another live device at the same branch uses the same code."
+          },
+          "first_seen_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "platform": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "retired_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
       "Dir": {
         "type": "string",
         "description": "Sort direction. `Asc` is what unlocks \"worst\", \"slowest\", \"least\" questions.",
@@ -51351,6 +53734,13 @@
             "type": "string",
             "description": "Human-readable error message.",
             "example": "Something went wrong"
+          },
+          "till": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The till a `TILL_OPEN_AT_OTHER_BRANCH` / `TILL_OPEN_ELSEWHERE` refusal\nis about (`TillBrief`). Omitted everywhere else."
           }
         }
       },
@@ -51457,7 +53847,7 @@
       "FinalizeInput": {
         "type": "object",
         "required": [
-          "shift_id",
+          "till_id",
           "payment_method"
         ],
         "properties": {
@@ -51465,7 +53855,7 @@
             "type": "string",
             "description": "The actual method the customer paid (overrides the hint). Must be an org method."
           },
-          "shift_id": {
+          "till_id": {
             "type": "string",
             "format": "uuid"
           }
@@ -51666,6 +54056,13 @@
       "ForceCloseRequest": {
         "type": "object",
         "properties": {
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
           "reason": {
             "type": [
               "string",
@@ -52928,6 +55325,32 @@
           }
         }
       },
+      "LastTillWarning": {
+        "type": "object",
+        "required": [
+          "is_last_open_till",
+          "open_bills_count",
+          "open_bills_amount",
+          "seated_tables_count"
+        ],
+        "properties": {
+          "is_last_open_till": {
+            "type": "boolean"
+          },
+          "open_bills_amount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "open_bills_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "seated_tables_count": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "LateDeductionKind": {
         "type": "string",
         "description": "What a tier costs the employee.",
@@ -53225,6 +55648,69 @@
           }
         }
       },
+      "LedgerWindow": {
+        "type": "object",
+        "required": [
+          "from"
+        ],
+        "properties": {
+          "from": {
+            "type": "string"
+          }
+        }
+      },
+      "LegacyTill": {
+        "type": "object",
+        "description": "The removed drawer entity, synthesized one per branch for old settings screens.",
+        "required": [
+          "id",
+          "org_id",
+          "branch_id",
+          "name",
+          "is_default",
+          "is_active",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "is_active": {
+            "type": "boolean"
+          },
+          "is_default": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "standard_float": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "LoginRequest": {
         "type": "object",
         "description": "Login is dual-mode:\n\n- **Email + password** (admins, managers, super-admins): supply\n  `email` and `password`. `org_id` is optional — if provided, the\n  user must belong to that org; if omitted, lookup is by email only.\n- **PIN + name** (tellers): supply `name`, `pin`, and **`branch_id`**\n  (required). The teller must be assigned to that branch. `org_id` is\n  derived server-side from the branch — never trusted from the client.",
@@ -53291,6 +55777,17 @@
           "currency_code": {
             "type": "string",
             "example": "EGP"
+          },
+          "open_till": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TillBrief",
+                "description": "The person's open till at the branch they signed into (any device), so\nthe device can resume it or show where it is open."
+              }
+            ]
           },
           "require_table_for_orders": {
             "type": "boolean",
@@ -54258,6 +56755,17 @@
             "type": "string",
             "format": "uuid"
           },
+          "image": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AssetGroupRef",
+                "description": "Asset refs (Track B4, §11.10); null when no asset or not attached by this endpoint."
+              }
+            ]
+          },
           "image_url": {
             "type": [
               "string",
@@ -54882,8 +57390,56 @@
           }
         }
       },
+      "OpenBillsNotice": {
+        "type": "object",
+        "required": [
+          "open_bills_count",
+          "open_bills_amount",
+          "old_bills_count",
+          "old_bill_hours",
+          "seated_tables_count"
+        ],
+        "properties": {
+          "old_bill_hours": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "old_bills_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "oldest_opened_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "open_bills_amount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "open_bills_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "seated_tables_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "`closed_at` of the most recent closed till at the branch."
+          }
+        }
+      },
       "OpenShiftRequest": {
         "type": "object",
+        "description": "Request of the legacy open (`till_id` is the removed entity and ignored).",
         "required": [
           "opening_cash"
         ],
@@ -54916,16 +57472,14 @@
             "type": [
               "boolean",
               "null"
-            ],
-            "description": "Ignored by the server — the carryover edit is DERIVED from the previous\nshift's declared closing. Kept only for API/back-compat with clients."
+            ]
           },
           "till_id": {
             "type": [
               "string",
               "null"
             ],
-            "format": "uuid",
-            "description": "The till (drawer) this shift opens on. Optional for back-compat: when\nomitted the server falls back to the branch's default till. Newer\ndevice-bound clients send their configured till explicitly."
+            "format": "uuid"
           }
         }
       },
@@ -55140,6 +57694,59 @@
           }
         }
       },
+      "OpenTillRequest": {
+        "type": "object",
+        "required": [
+          "opening_cash"
+        ],
+        "properties": {
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Else the `X-Madar-Device` header."
+          },
+          "edit_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "opened_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "opening_cash": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "opening_cash_edited": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "verification": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Ignored on the live route (live writes `server`)."
+          }
+        }
+      },
       "OptionRecipeLineInput": {
         "type": "object",
         "description": "One recipe line as submitted to the option-recipe replace endpoint. `quantity`\nmay be 0 (a swap marker). Server normalizes to the ingredient base unit.",
@@ -55243,6 +57850,7 @@
         "required": [
           "id",
           "branch_id",
+          "till_id",
           "shift_id",
           "teller_id",
           "teller_name",
@@ -55420,7 +58028,8 @@
           },
           "shift_id": {
             "type": "string",
-            "format": "uuid"
+            "format": "uuid",
+            "description": "DEPRECATED: same value as `till_id` (required by POS v0.5.1/v0.6.0)."
           },
           "status": {
             "type": "string"
@@ -55439,6 +58048,10 @@
           },
           "teller_name": {
             "type": "string"
+          },
+          "till_id": {
+            "type": "string",
+            "format": "uuid"
           },
           "timezone": {
             "type": [
@@ -56236,6 +58849,31 @@
           }
         }
       },
+      "OrderNumberRange": {
+        "type": "object",
+        "properties": {
+          "device_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "first": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "last": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        }
+      },
       "OrderPayment": {
         "type": "object",
         "required": [
@@ -57003,7 +59641,6 @@
       },
       "PaginatedShifts": {
         "type": "object",
-        "description": "Paginated envelope for the shifts list. When the request omits `page`/`per_page`,\n`data` holds every matching shift in one page (back-compat for the dashboard);\nwhen they are present, `data` is one bounded page ordered newest-first.",
         "required": [
           "data",
           "total",
@@ -57016,6 +59653,40 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Shift"
+            }
+          },
+          "page": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "per_page": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total_pages": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "PaginatedTills": {
+        "type": "object",
+        "required": [
+          "data",
+          "total",
+          "page",
+          "per_page",
+          "total_pages"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Till"
             }
           },
           "page": {
@@ -58150,6 +60821,31 @@
           "epson"
         ]
       },
+      "ProcessingGroupRef": {
+        "type": "object",
+        "required": [
+          "status",
+          "job_id"
+        ],
+        "properties": {
+          "group_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Always null while processing."
+          },
+          "job_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "description": "`processing`"
+          }
+        }
+      },
       "PublicBookingBranch": {
         "type": "object",
         "required": [
@@ -58738,6 +61434,155 @@
           "number": {
             "type": "integer",
             "format": "int32"
+          }
+        }
+      },
+      "PullChange": {
+        "type": "object",
+        "required": [
+          "seq",
+          "type",
+          "id",
+          "op",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "op": {
+            "type": "string",
+            "description": "`upsert` | `delete`."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
+      "PullRequest": {
+        "type": "object",
+        "required": [
+          "branch_id"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Page size for incremental pulls, 1..5000 (default 2000)."
+          },
+          "types": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Full-fetch ONLY these types (checksum self-heal). Invalid with `since`."
+          }
+        }
+      },
+      "PullResponse": {
+        "type": "object",
+        "description": "Any `/sync/pull` response (incremental, resync or full).",
+        "required": [
+          "full",
+          "has_more",
+          "server_time"
+        ],
+        "properties": {
+          "asset_bundle": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AssetBundleRef",
+                "description": "Full responses only: the latest built base bundle, or null."
+              }
+            ]
+          },
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PullChange"
+            }
+          },
+          "checksums": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/TypeChecksum"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "data": {
+            "type": "object"
+          },
+          "full": {
+            "type": "boolean"
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "ledger_window": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LedgerWindow"
+              }
+            ]
+          },
+          "next": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "resync_required": {
+            "type": "boolean"
+          },
+          "server_time": {
+            "type": "string"
+          },
+          "since": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -59429,6 +62274,46 @@
           }
         }
       },
+      "ReadyGroupRef": {
+        "type": "object",
+        "required": [
+          "group_id",
+          "has_alpha",
+          "variants"
+        ],
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "has_alpha": {
+            "type": "boolean"
+          },
+          "height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "variants": {
+            "$ref": "#/components/schemas/VariantSet"
+          },
+          "width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        }
+      },
       "ReceiveLineInput": {
         "type": "object",
         "required": [
@@ -59572,9 +62457,21 @@
           "position",
           "kind",
           "name",
-          "name_ar"
+          "name_ar",
+          "animation_is_global"
         ],
         "properties": {
+          "animation_hash": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Content hash of the global asset; `None` until ingested or when retired."
+          },
+          "animation_is_global": {
+            "type": "boolean",
+            "description": "Always true for preset animations (global library)."
+          },
           "animation_sha256": {
             "type": [
               "string",
@@ -59669,6 +62566,13 @@
           "sort_order"
         ],
         "properties": {
+          "animation_hash": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Content hash of the zstd-compressed asset (`/assets/global/<hash>.lottie.zst`)."
+          },
           "animation_sha256": {
             "type": "string"
           },
@@ -59707,12 +62611,43 @@
           }
         }
       },
+      "ReconciliationInput": {
+        "type": "object",
+        "description": "What the teller said about one method at close.",
+        "required": [
+          "method",
+          "status"
+        ],
+        "properties": {
+          "declared_amount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "method": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "description": "`checked` | `disagreed`"
+          }
+        }
+      },
       "Refund": {
         "type": "object",
         "required": [
           "id",
           "branch_id",
           "order_id",
+          "till_id",
           "shift_id",
           "amount",
           "method",
@@ -59782,7 +62717,12 @@
           "shift_id": {
             "type": "string",
             "format": "uuid",
-            "description": "The shift the refund was ISSUED in — the drawer the money left. Not\nnecessarily the shift the order was sold in."
+            "description": "DEPRECATED: same value as `till_id`."
+          },
+          "till_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The shift the refund was ISSUED in — the drawer the money left. Not\nnecessarily the till the order was sold in."
           }
         }
       },
@@ -59932,6 +62872,50 @@
             "type": "integer",
             "format": "int64",
             "description": "The cash slice of `refunded_amount` — what left a drawer."
+          }
+        }
+      },
+      "RegisterDeviceRequest": {
+        "type": "object",
+        "required": [
+          "id",
+          "code",
+          "kind",
+          "branch_id"
+        ],
+        "properties": {
+          "app_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "code": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`pos` | `kds` | `waiter`"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "platform": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -60948,7 +63932,7 @@
       "SettleOpenTicketRequest": {
         "type": "object",
         "required": [
-          "shift_id",
+          "till_id",
           "payment_method"
         ],
         "properties": {
@@ -61024,7 +64008,7 @@
             "format": "date-time",
             "description": "When the bill was paid, as the till says. An offline settle replayed\nlater keeps its real time — it becomes the order's `created_at` and the\nticket's `settled_at`, one instant on both rows. Absent means now; a\nfuture clock is refused."
           },
-          "shift_id": {
+          "till_id": {
             "type": "string",
             "format": "uuid"
           },
@@ -61052,150 +64036,30 @@
         }
       },
       "Shift": {
-        "type": "object",
-        "required": [
-          "id",
-          "branch_id",
-          "teller_id",
-          "teller_name",
-          "status",
-          "opening_cash",
-          "opening_cash_was_edited",
-          "opened_at"
-        ],
-        "properties": {
-          "branch_id": {
-            "type": "string",
-            "format": "uuid"
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Till"
           },
-          "branch_name": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Branch label — only populated by the shifts list (so the \"All branches\"\nview can show which branch each shift belongs to). Other shift endpoints\nleave it `null`."
-          },
-          "cash_discrepancy": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32"
-          },
-          "closed_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
-          },
-          "closed_by": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          },
-          "closing_cash_declared": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32"
-          },
-          "closing_cash_system": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32"
-          },
-          "force_close_reason": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "force_closed_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
-          },
-          "force_closed_by": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          },
-          "id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "notes": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "opened_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "opening_cash": {
-            "type": "integer",
-            "format": "int32"
-          },
-          "opening_cash_edit_reason": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "opening_cash_original": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32"
-          },
-          "opening_cash_was_edited": {
-            "type": "boolean"
-          },
-          "status": {
-            "type": "string"
-          },
-          "teller_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "teller_name": {
-            "type": "string"
-          },
-          "till_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid",
-            "description": "The till (drawer) this shift is on. Populated by the read/list/open\nendpoints; mutation responses that build the row via RETURNING may leave\n`till_name` null (same convention as `branch_name`)."
-          },
-          "till_name": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "timezone": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The branch's effective IANA timezone (see `crate::tz`) — the zone every\ntimestamp on this payload is shown and printed in. Additive: older\nclients ignore it; `null` only where a write path does not resolve it."
+          {
+            "type": "object",
+            "properties": {
+              "till_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
+              "till_name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
           }
-        }
+        ],
+        "description": "Legacy `Shift` = `Till` + `till_id`/`till_name`: the branch's legacy drawer\nentity (the one `GET /tills` synthesizes) and its name, exactly as the\npre-rename backend reported them. Build it with [`legacy_shift`]."
       },
       "ShiftPreFill": {
         "type": "object",
@@ -61223,177 +64087,30 @@
           }
         }
       },
-      "ShiftRefunds": {
+      "ShiftReportResponse": {
         "allOf": [
           {
-            "$ref": "#/components/schemas/RefundTotals"
+            "$ref": "#/components/schemas/TillReportFigures"
           },
           {
             "type": "object",
             "required": [
-              "shift_id",
-              "refunds"
+              "shift"
             ],
             "properties": {
-              "refunds": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/RefundFull"
-                }
-              },
-              "shift_id": {
-                "type": "string",
-                "format": "uuid"
+              "shift": {
+                "$ref": "#/components/schemas/Shift"
               }
             }
           }
         ]
       },
-      "ShiftReportResponse": {
-        "type": "object",
-        "required": [
-          "shift",
-          "payment_summary",
-          "total_payments",
-          "voided_amount",
-          "net_payments",
-          "total_tips",
-          "cash_tips",
-          "non_cash_tips",
-          "cash_movements",
-          "cash_movements_in",
-          "cash_movements_out",
-          "safe_drops",
-          "cash_adjustments",
-          "cash_movements_net",
-          "expected_cash",
-          "printed_at"
-        ],
-        "properties": {
-          "cash_adjustments": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Signed sum of corrections that reverse nothing on record (a miscounted\nfloat). Kept apart so a fix-up is never mistaken for a receipt or a cost."
-          },
-          "cash_in_refunded_sales": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Cash tenders and cash tips on this shift's sales that were later FULLY\nrefunded. `payment_summary` and `cash_tips` leave those sales out (they\nare revenue figures and match the sales report), but the notes did go\ninto the drawer, so `expected_cash` counts them. Reported so the sheet\nadds up: `expected_cash = opening_cash + cash bucket + cash_tips +\ncash_in_refunded_sales + cash_movements_net − refunds_issued_cash`."
-          },
-          "cash_movements": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/CashMovementSummaryRow"
-            }
-          },
-          "cash_movements_in": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Non-sale cash placed in the drawer (`pay_in`), net of any correction\nthat reversed one. Positive."
-          },
-          "cash_movements_net": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Signed net effect of EVERY movement on the drawer — the figure\n`compute_system_cash` adds to the float and the cash sales:\n`in − out − safe_drops + cash_adjustments`."
-          },
-          "cash_movements_out": {
-            "type": "integer",
-            "format": "int64",
-            "description": "What the shift SPENT (`pay_out`), net of corrections. Positive. A safe\ndrop is NOT in here — that money left the drawer but not the shop."
-          },
-          "cash_tips": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The cash slice of `total_tips` (snapshotted `tip_is_cash`). This IS in\nthe drawer, so it is counted by `expected_cash` even though it is not\npart of `net_payments`."
-          },
-          "expected_cash": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Authoritative system (expected) cash in the drawer. For a closed shift\nthis is the snapshot taken at close (`closing_cash_system`); for an open\nshift it is computed live via the same formula. Clients should display\nthis directly instead of re-deriving it from the payment breakdown."
-          },
-          "net_payments": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "non_cash_tips": {
-            "type": "integer",
-            "format": "int64",
-            "description": "`total_tips - cash_tips` — tips added onto a card/wallet tender."
-          },
-          "payment_summary": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/PaymentSummaryRow"
-            },
-            "description": "Money COLLECTED FOR GOODS, bucketed by the method actually tendered\n(`order_payments`, so a split order contributes to each leg it really\nused). Tips are NOT in here — see `total_tips`."
-          },
-          "printed_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "refunds_issued_amount": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "refunds_issued_cash": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "refunds_issued_count": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Refunds ISSUED FROM THIS DRAWER — keyed on `order_refunds.shift_id`,\nwhich need not be the shift that made the sale. Money OUT; the Z-report's\nreturns line. `refunds_issued_cash` is what `compute_system_cash`\nsubtracts."
-          },
-          "safe_drops": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Cash moved from the drawer to the safe (`safe_drop`), net of\ncorrections. Positive. Out of the drawer, still the shop's."
-          },
-          "shift": {
-            "$ref": "#/components/schemas/Shift"
-          },
-          "standard_float": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "The till's standard float, when the shop has set one: what should stay\nin the drawer at close. `None` means \"not decided\" — propose nothing."
-          },
-          "suggested_safe_drop": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "For an OPEN shift on a till with a standard float: how much of\n`expected_cash` to drop into the safe so the drawer closes at the\nfloat. Never negative — a drawer under its float has nothing to drop.\n`None` when the shift is closed or the till has no float."
-          },
-          "timezone": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The zone this report's times print in (the shift's branch) — see\n`crate::tz`. Additive; mirrors `shift.timezone`."
-          },
-          "total_payments": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "total_tips": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Tips, as a standalone figure — never folded into a method bucket, and\nnever part of `total_payments`/`net_payments`. Mirrors `total_tips` on\nthe sales reports so the two screens agree on what \"revenue\" means."
-          },
-          "voided_amount": {
-            "type": "integer",
-            "format": "int64"
-          }
-        }
-      },
       "ShiftSummary": {
         "type": "object",
         "required": [
+          "till_id",
           "shift_id",
+          "opened_while_another_open",
           "branch_id",
           "branch_name",
           "teller_id",
@@ -61449,6 +64166,12 @@
             ],
             "format": "int64"
           },
+          "device_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "gross_sales": {
             "type": "integer",
             "format": "int64",
@@ -61458,9 +64181,18 @@
             "type": "string",
             "format": "date-time"
           },
+          "opened_while_another_open": {
+            "type": "boolean"
+          },
           "opening_cash": {
             "type": "integer",
             "format": "int64"
+          },
+          "reconciliation_status": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "refunded_amount": {
             "type": "integer",
@@ -61485,7 +64217,8 @@
           },
           "shift_id": {
             "type": "string",
-            "format": "uuid"
+            "format": "uuid",
+            "description": "DEPRECATED: same value as `till_id` (required by POS v0.5.1/v0.6.0)."
           },
           "status": {
             "type": "string"
@@ -61496,6 +64229,10 @@
           },
           "teller_name": {
             "type": "string"
+          },
+          "till_id": {
+            "type": "string",
+            "format": "uuid"
           },
           "total_delivery_fees": {
             "type": "integer",
@@ -63428,53 +66165,579 @@
         "type": "object",
         "required": [
           "id",
-          "org_id",
           "branch_id",
-          "name",
-          "is_default",
-          "is_active",
-          "created_at",
-          "updated_at"
+          "teller_id",
+          "teller_name",
+          "status",
+          "opening_cash",
+          "opening_cash_was_edited",
+          "opened_at",
+          "verification",
+          "opened_while_another_open",
+          "disagreement_count"
         ],
         "properties": {
           "branch_id": {
             "type": "string",
             "format": "uuid"
           },
-          "created_at": {
-            "type": "string",
+          "branch_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Branch label (populated by reads; may be null on some write responses)."
+          },
+          "cash_discrepancy": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "closed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time"
+          },
+          "closed_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "closing_cash_declared": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "closing_cash_system": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "device_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "device_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "disagreement_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "flagged_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "force_close_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "force_closed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "force_closed_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           },
           "id": {
             "type": "string",
             "format": "uuid"
           },
-          "is_active": {
+          "notes": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "old_bills_at_close": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "open_bills_at_close": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "opened_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "opened_while_another_open": {
             "type": "boolean"
           },
-          "is_default": {
+          "opening_cash": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "opening_cash_edit_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "opening_cash_original": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "opening_cash_was_edited": {
             "type": "boolean"
           },
-          "name": {
-            "type": "string"
+          "other_till_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           },
-          "org_id": {
+          "reconciliation_status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`clean` | `disagreed` | `unreviewed` | null (open, or closed before reconciliation existed)"
+          },
+          "status": {
+            "type": "string",
+            "description": "`open` | `closed` | `force_closed`"
+          },
+          "teller_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "teller_name": {
+            "type": "string"
+          },
+          "timezone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verification": {
+            "type": "string",
+            "description": "`server` | `lan` | `unverified` | `legacy`"
+          }
+        }
+      },
+      "TillBrief": {
+        "type": "object",
+        "required": [
+          "id",
+          "branch_id",
+          "teller_id",
+          "teller_name",
+          "status",
+          "opened_at",
+          "verification",
+          "opened_while_another_open"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "device_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "device_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "opened_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "opened_while_another_open": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          },
+          "teller_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "teller_name": {
+            "type": "string"
+          },
+          "verification": {
+            "type": "string"
+          }
+        }
+      },
+      "TillPreFill": {
+        "type": "object",
+        "required": [
+          "has_open_till",
+          "open_elsewhere",
+          "suggested_opening_cash",
+          "open_bills_notice"
+        ],
+        "properties": {
+          "has_open_till": {
+            "type": "boolean"
+          },
+          "last_close_declared": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "open_bills_notice": {
+            "$ref": "#/components/schemas/OpenBillsNotice"
+          },
+          "open_elsewhere": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TillBrief"
+            }
+          },
+          "open_till": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Till"
+              }
+            ]
+          },
+          "suggested_opening_cash": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "TillReconciliationLine": {
+        "type": "object",
+        "description": "One stored reconciliation line (§2.1).",
+        "required": [
+          "method",
+          "is_cash",
+          "system_total",
+          "current_system_total",
+          "order_count",
+          "status",
+          "reconciled_at",
+          "changed_after_close"
+        ],
+        "properties": {
+          "changed_after_close": {
+            "type": "boolean",
+            "description": "`current_system_total <> system_total` — a late replay moved the total."
+          },
+          "current_system_total": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "declared_amount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "is_cash": {
+            "type": "boolean"
+          },
+          "method": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "order_count": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "payment_method_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "reconciled_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "reconciled_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "description": "`checked` | `disagreed` | `unreviewed`"
+          },
+          "system_total": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "TillRefunds": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RefundTotals"
+          },
+          {
+            "type": "object",
+            "required": [
+              "till_id",
+              "shift_id",
+              "refunds"
+            ],
+            "properties": {
+              "refunds": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RefundFull"
+                }
+              },
+              "shift_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "DEPRECATED: same value as `till_id` (POS v0.6.0 decodes `ShiftRefunds`)."
+              },
+              "till_id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          }
+        ]
+      },
+      "TillReportFigures": {
+        "type": "object",
+        "description": "The report figures shared by the new `TillReportResponse` and the legacy\n`ShiftReportResponse` (flattened into both).",
+        "required": [
+          "payment_summary",
+          "total_payments",
+          "voided_amount",
+          "net_payments",
+          "total_tips",
+          "cash_tips",
+          "non_cash_tips",
+          "cash_movements",
+          "cash_movements_in",
+          "cash_movements_out",
+          "safe_drops",
+          "cash_adjustments",
+          "cash_movements_net",
+          "expected_cash",
+          "printed_at"
+        ],
+        "properties": {
+          "cash_adjustments": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cash_in_refunded_sales": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cash_movements": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CashMovementSummaryRow"
+            }
+          },
+          "cash_movements_in": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cash_movements_net": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cash_movements_out": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cash_tips": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "expected_cash": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "net_payments": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "non_cash_tips": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "payment_summary": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PaymentSummaryRow"
+            }
+          },
+          "printed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "refunds_issued_amount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "refunds_issued_cash": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "refunds_issued_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "safe_drops": {
+            "type": "integer",
+            "format": "int64"
           },
           "standard_float": {
             "type": [
               "integer",
               "null"
             ],
-            "format": "int32",
-            "description": "The cash that should be in this drawer at the start of a shift, in\nminor units. The shift report proposes closing at it (\"leave the float,\ndrop the rest into the safe\"); `None` means the shop has not decided\nand nothing is proposed."
+            "format": "int64",
+            "description": "`branches.standard_float`."
           },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time"
+          "suggested_safe_drop": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "timezone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "total_payments": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total_tips": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "voided_amount": {
+            "type": "integer",
+            "format": "int64"
           }
         }
+      },
+      "TillReportResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/TillReportFigures"
+          },
+          {
+            "type": "object",
+            "required": [
+              "till",
+              "reconciliation",
+              "order_number_range"
+            ],
+            "properties": {
+              "old_bills_at_close": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32"
+              },
+              "open_bills_at_close": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32"
+              },
+              "order_number_range": {
+                "$ref": "#/components/schemas/OrderNumberRange"
+              },
+              "reconciliation": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/TillReconciliationLine"
+                }
+              },
+              "till": {
+                "$ref": "#/components/schemas/Till"
+              }
+            }
+          }
+        ]
       },
       "TimeseriesPoint": {
         "type": "object",
@@ -63576,6 +66839,25 @@
             "type": "integer",
             "format": "int64",
             "description": "Minor units of goods given away (what the covered lines were charged)."
+          }
+        }
+      },
+      "TopUpRequest": {
+        "type": "object",
+        "required": [
+          "branch_id",
+          "hashes"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "hashes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -63720,6 +67002,22 @@
           }
         },
         "additionalProperties": false
+      },
+      "TypeChecksum": {
+        "type": "object",
+        "required": [
+          "count",
+          "checksum"
+        ],
+        "properties": {
+          "checksum": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
       },
       "UpdateAddonItemRequest": {
         "type": "object",
@@ -64155,6 +67453,36 @@
           "name_translations": {
             "type": [
               "object",
+              "null"
+            ]
+          }
+        }
+      },
+      "UpdateDeviceRequest": {
+        "type": "object",
+        "properties": {
+          "branch_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "retired": {
+            "type": [
+              "boolean",
               "null"
             ]
           }
@@ -64686,37 +68014,6 @@
           }
         }
       },
-      "UpdateTillRequest": {
-        "type": "object",
-        "properties": {
-          "is_active": {
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
-          "is_default": {
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
-          "name": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "standard_float": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "description": "Standard float in minor units. Absent → unchanged; `null` → cleared\n(the shop no longer proposes a closing figure); a value → set. Same\n`Option<Option<T>>` shape as the branch printer fields."
-          }
-        }
-      },
       "UpdateTransferRequest": {
         "type": "object",
         "properties": {
@@ -64808,7 +68105,7 @@
           "image": {
             "type": "string",
             "format": "binary",
-            "description": "Image file. PNG, JPEG, or WebP. Required.",
+            "description": "Image file (JPEG, PNG, WebP, GIF still, BMP). Type is sniffed from bytes.",
             "contentMediaType": "image/*"
           }
         }
@@ -64829,12 +68126,25 @@
       },
       "UploadResponse": {
         "type": "object",
+        "description": "Upload accepted: the picture is converted by the background asset worker.\n`image_url` is the row's current legacy URL (unchanged until the job is\ndone); poll `GET /assets/jobs/{asset_job_id}`.",
         "required": [
-          "image_url"
+          "asset_job_id",
+          "status"
         ],
         "properties": {
+          "asset_job_id": {
+            "type": "string",
+            "format": "uuid"
+          },
           "image_url": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "description": "`processing`"
           }
         }
       },
@@ -65447,6 +68757,95 @@
           }
         }
       },
+      "VariantRef": {
+        "type": "object",
+        "required": [
+          "url",
+          "bytes",
+          "content_hash"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "content_hash": {
+            "type": "string"
+          },
+          "height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "url": {
+            "type": "string"
+          },
+          "width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "VariantSet": {
+        "type": "object",
+        "properties": {
+          "animation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VariantRef"
+              }
+            ]
+          },
+          "full": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VariantRef"
+              }
+            ]
+          },
+          "original": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VariantRef"
+              }
+            ]
+          },
+          "thumb": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VariantRef"
+              }
+            ]
+          },
+          "tile": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VariantRef"
+              }
+            ]
+          }
+        }
+      },
       "Viz": {
         "type": "string",
         "description": "How a result is best visualized. A hint: the client may always override, and\n[`Viz::Auto`] asks the backend to choose from the [`Grain`].",
@@ -66052,7 +69451,11 @@
     },
     {
       "name": "shifts",
-      "description": "Shift open/close, cash reconciliation, printable reports."
+      "description": "DEPRECATED legacy adapters over `tills` for POS v0.5.1/v0.6.0."
+    },
+    {
+      "name": "devices",
+      "description": "POS/KDS installations: code (order-number prefix), label, last seen."
     },
     {
       "name": "refunds",
@@ -66060,7 +69463,7 @@
     },
     {
       "name": "tills",
-      "description": "Physical cash drawers (registers) per branch — the unit of shift concurrency and cash continuity."
+      "description": "Tills: a person's sales session with its own drawer, opened on and bound to a device; open/close with per-method reconciliation, cash movements, Z report."
     },
     {
       "name": "realtime",
