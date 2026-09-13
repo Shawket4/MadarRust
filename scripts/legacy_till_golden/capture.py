@@ -27,7 +27,7 @@ FIXED_TS = "2026-01-01T00:00:00Z"
 DATED_REF_KEYS = sorted({"order_ref", "delivery_ref", "ticket_ref"})
 REF_DATE_RE = re.compile(r"-\d{6}-")
 TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
-BOTH = ["v0.5.1", "v0.6.0"]
+BOTH = ["v0.5.1", "v0.6.0", "v0.6.1"]
 
 
 def b64(b):

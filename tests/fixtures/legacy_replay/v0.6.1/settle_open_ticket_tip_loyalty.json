@@ -1,0 +1,18 @@
+{
+  "op": "settle_open_ticket",
+  "request": {
+    "loyalty_customer_id": "00000000-0000-4000-8000-000000000040",
+    "loyalty_redemptions": [
+      {
+        "ticket_line_id": "00000000-0000-4000-8000-000000000031",
+        "units": 1
+      }
+    ],
+    "payment_method": "Card",
+    "shift_id": "00000000-0000-4000-8000-000000000003",
+    "tip_amount": 2000,
+    "tip_payment_method": "Card"
+  },
+  "teller_id": "00000000-0000-4000-8000-000000000001",
+  "ticket_id": "00000000-0000-4000-8000-000000000030"
+}

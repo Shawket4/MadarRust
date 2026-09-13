@@ -1,5 +1,5 @@
 {
-  "_doc": "Scripted request sequence for the legacy till goldens. Run by capture.py against the OLD backend (097a653) on seed.sql, and replayed step by step by src/tills/legacy_tests.rs against the current backend. {{var}} = seed/fixed ids or values bound from an earlier response via `bind` (dot path). Steps with `save` write tests/fixtures/legacy_till_api/<save>.json.",
+  "_doc": "Scripted request sequence for the legacy till goldens. Run by capture.py against the OLD backend (097a653) on seed.sql, and replayed step by step by src/tills/legacy_tests.rs against the current backend. {{var}} = seed/fixed ids or values bound from an earlier response via `bind` (dot path). Steps with `save` write tests/fixtures/legacy_till_api/<save>.json. Steps named v061_* cover wire only POS v0.6.1 (tag v0.6.1 = 9eaec5f) sends: open bills filtered status=open, a shift's orders paged with include_items=true, a sale carrying the cart's order note.",
   "vars": {
     "org": "10000000-0000-4000-8000-000000000001",
     "branch_a": "10000000-0000-4000-8000-0000000000a1",
@@ -21,7 +21,8 @@
     "key_o2": "40000000-0000-4000-8000-000000000002",
     "key_replay": "40000000-0000-4000-8000-000000000003",
     "refund_ref": "50000000-0000-4000-8000-000000000001",
-    "settle_ref": "50000000-0000-4000-8000-000000000002"
+    "settle_ref": "50000000-0000-4000-8000-000000000002",
+    "key_note": "40000000-0000-4000-8000-000000000004"
   },
   "steps": [
     {"method": "POST", "path": "/shifts/branches/{{branch_a}}/open", "as": "teller_a", "expect": 201,
@@ -68,7 +69,7 @@
     {"save": "tills_list", "model": "Vec<Till>", "method": "GET", "path": "/tills?branch_id={{branch_a}}", "as": "teller_a"},
     {"save": "orders_list_by_shift", "model": "PaginatedOrders", "method": "GET", "path": "/orders?branch_id={{branch_a}}&shift_id={{s_a}}&page=1&per_page=3", "as": "teller_a"},
     {"save": "orders_get", "model": "OrderFull", "method": "GET", "path": "/orders/{{order_a}}", "as": "teller_a"},
-    {"save": "refunds_by_shift_empty", "model": "ShiftRefunds", "clients": ["v0.6.0"], "method": "GET", "path": "/refunds/shift/{{s_a}}", "as": "teller_a"},
+    {"save": "refunds_by_shift_empty", "model": "ShiftRefunds", "clients": ["v0.6.0", "v0.6.1"], "method": "GET", "path": "/refunds/shift/{{s_a}}", "as": "teller_a"},
     {"save": "reports_shift_summary", "model": "ShiftSummary", "method": "GET", "path": "/reports/shifts/{{s_a}}/summary", "as": "admin"},
     {"save": "reports_shift_deductions", "method": "GET", "path": "/reports/shifts/{{s_a}}/deductions", "as": "admin"},
     {"save": "open_tickets_list", "model": "Vec<OpenTicketView>", "method": "GET", "path": "/open-tickets?branch_id={{branch_b}}", "as": "teller_b"},
@@ -87,16 +88,16 @@
               "items": [{"menu_item_id": "{{item}}", "quantity": 1, "unit_price": 5000, "addons": [], "optional_field_ids": []}],
               "subtotal": 5000, "tax_amount": 0, "total_amount": 5000, "amount_tendered": 5000, "change_given": 0}}},
     {"save": "orders_get_created", "model": "OrderFull", "method": "GET", "path": "/orders/{{new_order}}", "as": "teller_a"},
-    {"save": "replay_refund_order", "model": "RefundIssued", "clients": ["v0.6.0"], "method": "POST", "path": "/sync/replay", "as": "teller_a",
+    {"save": "replay_refund_order", "model": "RefundIssued", "clients": ["v0.6.0", "v0.6.1"], "method": "POST", "path": "/sync/replay", "as": "teller_a",
      "body": {"op": "refund_order", "teller_id": "{{teller_a}}", "request": {
               "order_id": "{{new_order}}", "amount": 1000, "method": "cash", "reason": "quality_issue",
               "client_ref": "{{refund_ref}}", "shift_id": "{{s_a}}"}}},
-    {"save": "replay_refund_order_dedup", "model": "RefundIssued", "clients": ["v0.6.0"], "method": "POST", "path": "/sync/replay", "as": "teller_a",
+    {"save": "replay_refund_order_dedup", "model": "RefundIssued", "clients": ["v0.6.0", "v0.6.1"], "method": "POST", "path": "/sync/replay", "as": "teller_a",
      "body": {"op": "refund_order", "teller_id": "{{teller_a}}", "request": {
               "order_id": "{{new_order}}", "amount": 1000, "method": "cash", "reason": "quality_issue",
               "client_ref": "{{refund_ref}}", "shift_id": "{{s_a}}"}}},
-    {"save": "refunds_by_order", "model": "OrderRefunds", "clients": ["v0.6.0"], "method": "GET", "path": "/refunds/order/{{new_order}}", "as": "teller_a"},
-    {"save": "refunds_by_shift", "model": "ShiftRefunds", "clients": ["v0.6.0"], "method": "GET", "path": "/refunds/shift/{{s_a}}", "as": "teller_a"},
+    {"save": "refunds_by_order", "model": "OrderRefunds", "clients": ["v0.6.0", "v0.6.1"], "method": "GET", "path": "/refunds/order/{{new_order}}", "as": "teller_a"},
+    {"save": "refunds_by_shift", "model": "ShiftRefunds", "clients": ["v0.6.0", "v0.6.1"], "method": "GET", "path": "/refunds/shift/{{s_a}}", "as": "teller_a"},
     {"save": "orders_list_by_shift_after", "model": "PaginatedOrders", "method": "GET", "path": "/orders?branch_id={{branch_a}}&shift_id={{s_a}}&page=1&per_page=2", "as": "teller_a"},
     {"save": "replay_settle_open_ticket", "model": "Order", "method": "POST", "path": "/sync/replay", "as": "teller_b",
      "body": {"op": "settle_open_ticket", "teller_id": "{{teller_b}}", "ticket_id": "{{ticket_open}}",
@@ -125,7 +126,17 @@
     {"save": "replay_open_shift_dedup", "model": "Shift", "method": "POST", "path": "/sync/replay", "as": "teller_a",
      "body": {"op": "open_shift", "teller_id": "{{teller_a}}", "branch_id": "{{branch_a}}",
               "request": {"id": "{{s_new}}", "opening_cash": 10000}}},
-    {"save": "shifts_force_close", "model": "Shift", "clients": ["v0.6.0"], "method": "POST", "path": "/shifts/{{s_force}}/force-close", "as": "admin",
-     "body": {"reason": "golden capture"}}
+    {"save": "shifts_force_close", "model": "Shift", "clients": ["v0.6.0", "v0.6.1"], "method": "POST", "path": "/shifts/{{s_force}}/force-close", "as": "admin",
+     "body": {"reason": "golden capture"}},
+
+    {"save": "v061_open_tickets_list_status_open", "model": "Vec<OpenTicketView>", "clients": ["v0.6.1"], "method": "GET", "path": "/open-tickets?branch_id={{branch_b}}&status=open", "as": "teller_b"},
+    {"save": "v061_orders_list_by_shift_page2", "model": "PaginatedOrders", "clients": ["v0.6.1"], "method": "GET", "path": "/orders?branch_id={{branch_a}}&shift_id={{s_a}}&page=2&per_page=2&include_items=true", "as": "teller_a"},
+    {"save": "v061_replay_create_order_note", "model": "ReplayCreateOrderAck", "clients": ["v0.6.1"], "method": "POST", "path": "/sync/replay", "as": "teller_a", "bind": {"note_order": "id"},
+     "body": {"op": "create_order", "teller_id": "{{teller_a}}", "request": {
+              "branch_id": "{{branch_a}}", "shift_id": "{{s_new}}", "payment_method": "cash", "idempotency_key": "{{key_note}}",
+              "items": [{"menu_item_id": "{{item}}", "quantity": 1, "unit_price": 5000, "addons": [], "optional_field_ids": []}],
+              "subtotal": 5000, "tax_amount": 0, "total_amount": 5000, "amount_tendered": 5000, "change_given": 0,
+              "notes": "no sugar", "order_ref": "GLDA-260913-36B-0001"}}},
+    {"save": "v061_orders_get_note", "model": "OrderFull", "clients": ["v0.6.1"], "method": "GET", "path": "/orders/{{note_order}}", "as": "teller_a"}
   ]
 }

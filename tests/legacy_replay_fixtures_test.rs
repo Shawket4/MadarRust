@@ -1,6 +1,6 @@
 //! Old-client wire compatibility (tills rework guard, decision 12).
 //!
-//! POS v0.5.1 and v0.6.0 are in the field with queued outbox rows. Every
+//! POS v0.5.1, v0.6.0 and v0.6.1 are in the field with queued outbox rows. Every
 //! envelope under tests/fixtures/legacy_replay/<release>/ is what that release's
 //! core POSTs to /sync/replay (regenerate with madar's
 //! `tool/old_client_api_check.sh --regen-envelopes`). The replay aliases are
@@ -12,7 +12,7 @@ use std::path::Path;
 use madar_rust::delivery::staff::FinalizeInput;
 use madar_rust::sync::handlers::ReplayOp;
 
-const RELEASES: &[&str] = &["v0.5.1", "v0.6.0"];
+const RELEASES: &[&str] = &["v0.5.1", "v0.6.0", "v0.6.1"];
 
 #[test]
 fn legacy_replay_envelopes_deserialize_into_current_replay_op() {
@@ -52,6 +52,8 @@ fn legacy_replay_envelopes_deserialize_into_current_replay_op() {
                         ReplayOp::SettleOpenTicket { .. } => "settle_open_ticket",
                         ReplayOp::RefundOrder { .. } => "refund_order",
                         ReplayOp::VoidOrder { .. } => "void_order",
+                        ReplayOp::FireOpenTicket { .. } => "fire_open_ticket",
+                        ReplayOp::AddTicketRound { .. } => "add_ticket_round",
                         _ => "other",
                     };
                     if variant != op {

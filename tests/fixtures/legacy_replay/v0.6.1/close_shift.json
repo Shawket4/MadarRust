@@ -1,0 +1,10 @@
+{
+  "op": "close_shift",
+  "request": {
+    "cash_note": null,
+    "closed_at": "2026-09-13T15:30:00.654321Z",
+    "closing_cash_declared": 48250
+  },
+  "shift_id": "00000000-0000-4000-8000-000000000003",
+  "teller_id": "00000000-0000-4000-8000-000000000001"
+}

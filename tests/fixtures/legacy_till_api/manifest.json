@@ -39,7 +39,8 @@
       "model": "ShiftPreFill",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -48,7 +49,8 @@
       "model": "PaginatedShifts",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -63,7 +65,8 @@
       "model": "ShiftReportResponse",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -72,7 +75,8 @@
       "model": "ShiftReportResponse",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -81,7 +85,8 @@
       "model": "Vec<CashMovement>",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -90,7 +95,8 @@
       "model": "Vec<Till>",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -99,7 +105,8 @@
       "model": "PaginatedOrders",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -108,7 +115,8 @@
       "model": "OrderFull",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -116,7 +124,8 @@
       "status": 200,
       "model": "ShiftRefunds",
       "clients": [
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -125,7 +134,8 @@
       "model": "ShiftSummary",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -140,7 +150,8 @@
       "model": "Vec<OpenTicketView>",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -149,7 +160,8 @@
       "model": "OpenTicketView",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -158,7 +170,8 @@
       "model": "Vec<DeliveryOrder>",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -167,7 +180,8 @@
       "model": "CashMovement",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -176,7 +190,8 @@
       "model": "CashMovement",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -185,7 +200,8 @@
       "model": "ReplayCreateOrderAck",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -194,7 +210,8 @@
       "model": "OrderFull",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -202,7 +219,8 @@
       "status": 201,
       "model": "RefundIssued",
       "clients": [
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -210,7 +228,8 @@
       "status": 200,
       "model": "RefundIssued",
       "clients": [
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -218,7 +237,8 @@
       "status": 200,
       "model": "OrderRefunds",
       "clients": [
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -226,7 +246,8 @@
       "status": 200,
       "model": "ShiftRefunds",
       "clients": [
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -235,7 +256,8 @@
       "model": "PaginatedOrders",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -244,7 +266,8 @@
       "model": "Order",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -253,7 +276,8 @@
       "model": "OpenTicketView",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -262,7 +286,8 @@
       "model": "FinalizeResponse",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -283,7 +308,8 @@
       "model": "OrderFull",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -292,7 +318,8 @@
       "model": "ShiftReportResponse",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -301,7 +328,8 @@
       "model": "CloseShiftResponse",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -310,7 +338,8 @@
       "model": "CloseShiftResponse",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -319,7 +348,8 @@
       "model": "ShiftPreFill",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -328,7 +358,8 @@
       "model": "Shift",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -337,7 +368,8 @@
       "model": "Shift",
       "clients": [
         "v0.5.1",
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
       ]
     },
     {
@@ -345,7 +377,40 @@
       "status": 200,
       "model": "Shift",
       "clients": [
-        "v0.6.0"
+        "v0.6.0",
+        "v0.6.1"
+      ]
+    },
+    {
+      "file": "v061_open_tickets_list_status_open.json",
+      "status": 200,
+      "model": "Vec<OpenTicketView>",
+      "clients": [
+        "v0.6.1"
+      ]
+    },
+    {
+      "file": "v061_orders_list_by_shift_page2.json",
+      "status": 200,
+      "model": "PaginatedOrders",
+      "clients": [
+        "v0.6.1"
+      ]
+    },
+    {
+      "file": "v061_replay_create_order_note.json",
+      "status": 201,
+      "model": "ReplayCreateOrderAck",
+      "clients": [
+        "v0.6.1"
+      ]
+    },
+    {
+      "file": "v061_orders_get_note.json",
+      "status": 200,
+      "model": "OrderFull",
+      "clients": [
+        "v0.6.1"
       ]
     }
   ]

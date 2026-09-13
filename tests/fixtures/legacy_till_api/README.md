@@ -1,6 +1,6 @@
 # legacy_till_api — golden responses of the PRE-rename backend
 
-What POS v0.5.1 / v0.6.0 decode from every shifts/tills-related endpoint,
+What POS v0.5.1 / v0.6.0 / v0.6.1 decode from every shifts/tills-related endpoint,
 captured from MadarRust `097a653` (the last commit before the tills rename).
 Guards decision 12 (legacy `/shifts` adapters + replay aliases must keep old
 tablets working), byte-for-byte: `src/tills/legacy_tests.rs` replays the same
@@ -17,6 +17,15 @@ scenario against the current backend and compares every value.
    requests (shifts, orders, tickets, a delivery order) and then every saved
    request, including the `/sync/replay` ops and their dedup re-sends;
 5. stops the server and drops the database.
+
+## v0.6.1
+POS v0.6.1 (tag `v0.6.1` = `9eaec5f`) calls the same shifts/tills endpoints as v0.6.0
+(`git diff 97c4a29 v0.6.1 -- rust-core`), so every v0.6.0 golden also lists `v0.6.1`
+in `clients`. What it sends differently is captured by the `v061_*` steps (same
+`097a653` backend): open bills listed with `status=open`, a shift's orders paged with
+`page=N&include_items=true`, and a replayed sale carrying an order `notes`. Its
+response models add fields only; one type narrowed (`Order`/`OrderFull`/`DeliveryOrder`
+`discount_value` f64 → i64), which the golden decode under `v061` covers.
 
 ## File format
 Each file: `{ "request": {method, path, body}, "status": N, "body": <response> }`.

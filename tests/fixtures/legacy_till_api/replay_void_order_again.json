@@ -15,7 +15,7 @@
     "discount_rate": 0.0,
     "discount_type": null,
     "discount_value": 0,
-    "id": "ed3aca6f-dcea-4917-b361-0917c61af4ae",
+    "id": "cf7ab78a-2332-4db6-be85-f4d41ce78911",
     "loyalty_customer_id": null,
     "loyalty_member_name": null,
     "notes": null,
@@ -52,7 +52,7 @@
   "request": {
     "body": {
       "op": "void_order",
-      "order_id": "ed3aca6f-dcea-4917-b361-0917c61af4ae",
+      "order_id": "cf7ab78a-2332-4db6-be85-f4d41ce78911",
       "request": {
         "note": "golden void",
         "reason": "customer_request"
