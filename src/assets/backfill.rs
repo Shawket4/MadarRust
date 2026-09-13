@@ -298,7 +298,8 @@ async fn ingest_phase(pool: &PgPool, opts: &BackfillOptions) -> Result<(), AppEr
                 .bind(pk.2)
                 .bind(outcome.group_id)
                 .bind(source_len)
-                .bind(outcome.stored_bytes())
+                // Bytes this item added to the store: nothing when it reused a group.
+                .bind(if outcome.deduped { 0 } else { outcome.stored_bytes() })
                 .bind(outcome.deduped)
                 .bind(opts.run_id)
                 .execute(pool)
@@ -509,7 +510,6 @@ async fn report(pool: &PgPool, opts: &BackfillOptions) -> Result<Report, AppErro
         }
         if matches!(status.as_str(), "ingested" | "verified") {
             b.source += r.get::<i64, _>("sb");
-            b.stored += r.get::<i64, _>("stb");
         }
         if matches!(status.as_str(), "missing" | "broken" | "failed" | "skipped") {
             failed.push(FailedItem {
@@ -522,6 +522,18 @@ async fn report(pool: &PgPool, opts: &BackfillOptions) -> Result<Report, AppErro
             });
         }
     }
+    // Stored = every distinct file (org, hash) behind the ingested/verified
+    // items, counted once however many items, groups or variants share it.
+    b.stored = sqlx::query_scalar(
+        "SELECT COALESCE(sum(bytes), 0)::bigint FROM ( \
+            SELECT DISTINCT a.org_id, a.hash, a.ext, a.bytes FROM assets a \
+            WHERE a.group_id IN (SELECT group_id FROM asset_backfill_items \
+                                 WHERE status IN ('ingested','verified') AND group_id IS NOT NULL \
+                                   AND ($1::uuid IS NULL OR org_id = $1))) f",
+    )
+    .bind(opts.org)
+    .fetch_one(pool)
+    .await?;
     b.saved = b.source - b.stored;
     Ok(Report {
         run_id: opts.run_id,
@@ -543,6 +555,7 @@ async fn dry_run(pool: &PgPool, opts: &BackfillOptions) -> Result<Report, AppErr
     let mut b = ByteTotals::default();
     let mut failed = Vec::new();
     let mut seen_sources: BTreeMap<(Option<Uuid>, String), ()> = BTreeMap::new();
+    let mut seen_files: std::collections::BTreeSet<(Option<Uuid>, String)> = Default::default();
     for it in &items {
         let (status, err) = match probe(it, &opts.store).await {
             Probe::Missing(e) => ("missing", Some(e)),
@@ -559,7 +572,12 @@ async fn dry_run(pool: &PgPool, opts: &BackfillOptions) -> Result<Report, AppErr
                 match tokio::task::spawn_blocking(move || convert(&bytes, sniffed, purpose)).await {
                     Ok(Ok(vars)) => {
                         b.source += len;
-                        b.stored += vars.iter().map(|v| v.bytes.len() as i64).sum::<i64>();
+                        for v in &vars {
+                            let h = super::sha256_hex(&v.bytes);
+                            if seen_files.insert((it.org_id, format!("{h}.{}", v.ext))) {
+                                b.stored += v.bytes.len() as i64;
+                            }
+                        }
                         ("ingested", None)
                     }
                     Ok(Err(e)) => ("broken", Some(e.to_string())),
@@ -604,9 +622,24 @@ pub struct PruneReport {
     pub already_gone: i64,
 }
 
+/// The run ids that hold verified items in scope (what `--i-have-verified`
+/// takes), newest first. A re-run that changes nothing verifies nothing, so its
+/// own run id is not one of them.
+pub async fn verified_runs(pool: &PgPool, org: Option<Uuid>) -> Result<Vec<(Uuid, i64)>, AppError> {
+    Ok(sqlx::query_as(
+        "SELECT run_id, count(*) FROM asset_backfill_items \
+         WHERE status = 'verified' AND run_id IS NOT NULL AND ($1::uuid IS NULL OR org_id = $1) \
+         GROUP BY run_id ORDER BY max(updated_at) DESC",
+    )
+    .bind(org)
+    .fetch_all(pool)
+    .await?)
+}
+
 /// Delete original legacy files for items verified in `verified_run` that are
 /// mapped in `asset_legacy_paths`. Refuses when the run's org scope has any
-/// failed/broken item unless `allow_partial`.
+/// failed/broken item unless `allow_partial`. A legacy file that another,
+/// not-yet-verified item also points at is kept.
 pub async fn prune(
     pool: &PgPool,
     store: &AssetStore,
@@ -638,9 +671,11 @@ pub async fn prune(
         )));
     }
     let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT i.legacy_path FROM asset_backfill_items i JOIN asset_legacy_paths l ON l.legacy_path = i.legacy_path \
+        "SELECT DISTINCT i.legacy_path FROM asset_backfill_items i JOIN asset_legacy_paths l ON l.legacy_path = i.legacy_path \
          WHERE i.run_id = $1 AND i.status = 'verified' AND i.source_table <> 'recipe_step_presets' \
-           AND ($2::uuid IS NULL OR i.org_id = $2)",
+           AND ($2::uuid IS NULL OR i.org_id = $2) \
+           AND NOT EXISTS (SELECT 1 FROM asset_backfill_items o WHERE o.legacy_path = i.legacy_path \
+                             AND o.source_table <> 'recipe_step_presets' AND o.status <> 'verified')",
     )
     .bind(verified_run)
     .bind(org)

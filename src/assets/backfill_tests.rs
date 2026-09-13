@@ -154,3 +154,225 @@ async fn encoder_version_bump_creates_new_group_on_backfill(pool: PgPool) {
     let groups: i64 = sqlx::query_scalar("SELECT count(*) FROM asset_groups").fetch_one(&pool).await.unwrap();
     assert_eq!(groups, 2, "new encoder → new group; old rows remain valid");
 }
+
+// ── Shared content-addressed files and per-profile groups ───────────────────
+
+/// Re-encode the same pixels with other PNG settings: different file
+/// bytes (different source_hash), identical decoded pixels.
+fn same_pixels_other_bytes(png: &[u8]) -> Vec<u8> {
+    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+    let img = image::load_from_memory(png).unwrap().to_rgba8();
+    let mut out = Vec::new();
+    image::ImageEncoder::write_image(PngEncoder::new_with_quality(&mut out, CompressionType::Best, FilterType::Sub),
+        img.as_raw(), img.width(), img.height(), image::ExtendedColorType::Rgba8).unwrap();
+    out
+}
+
+fn put(store: &AssetStore, rel: &str, bytes: &[u8]) {
+    let p = store.uploads_dir.join(rel);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(p, bytes).unwrap();
+}
+
+async fn set_org_images(pool: &PgPool, org: Uuid, logo: Option<&str>, card: Option<&str>) {
+    sqlx::query("UPDATE organizations SET logo_url = $2, brand_card_image = $3 WHERE id = $1")
+        .bind(org).bind(logo).bind(card).execute(pool).await.unwrap();
+}
+
+/// Files under `<org>/` on disk vs the distinct (hash, ext) the rows reference.
+async fn files_vs_rows(pool: &PgPool, store: &AssetStore, org: Uuid) -> (Vec<String>, Vec<String>) {
+    let mut disk: Vec<String> = std::fs::read_dir(store.assets_dir.join(org.to_string()))
+        .map(|d| d.filter_map(|e| e.ok()).filter(|e| e.path().is_file()).map(|e| e.file_name().to_string_lossy().to_string()).collect())
+        .unwrap_or_default();
+    disk.sort();
+    let rows: Vec<String> = sqlx::query_scalar("SELECT DISTINCT hash || '.' || ext FROM assets WHERE org_id = $1 ORDER BY 1")
+        .bind(org).fetch_all(pool).await.unwrap();
+    (disk, rows)
+}
+
+async fn group_of(pool: &PgPool, sql: &str, id: Uuid) -> Uuid {
+    sqlx::query_scalar::<_, Option<Uuid>>(sql).bind(id).fetch_one(pool).await.unwrap().expect("group attached")
+}
+
+async fn variants_of(pool: &PgPool, g: Uuid) -> Vec<String> {
+    sqlx::query_scalar("SELECT variant FROM assets WHERE group_id = $1 ORDER BY variant").bind(g).fetch_all(pool).await.unwrap()
+}
+
+fn opts_org(store: &AssetStore, org: Uuid) -> BackfillOptions {
+    BackfillOptions { org: Some(org), dry_run: false, limit: None, run_id: Uuid::new_v4(), verify_only: false, store: store.clone(), step_animations_dir: None }
+}
+
+#[sqlx::test]
+async fn backfill_logo_with_same_pixels_as_menu_photo_but_other_bytes(pool: PgPool) {
+    let (_d, store) = tmp_store();
+    let org = seed_org(&pool).await;
+    let photo = photo_png(600, 400, 21);
+    let logo = same_pixels_other_bytes(&photo);
+    assert_ne!(photo, logo);
+    assert_eq!(image::load_from_memory(&photo).unwrap().to_rgba8(), image::load_from_memory(&logo).unwrap().to_rgba8());
+    put(&store, &format!("{org}/menu-items/p.png"), &photo);
+    put(&store, "logos/l.png", &logo);
+    put(&store, "card/c.png", &logo);
+    let base = "https://api.example/uploads";
+    let item = seed_item(&pool, org, Some(&format!("{base}/{org}/menu-items/p.png"))).await;
+    set_org_images(&pool, org, Some(&format!("{base}/logos/l.png")), Some(&format!("{base}/card/c.png"))).await;
+
+    let rep = run(&pool, &opts_org(&store, org)).await.unwrap();
+    assert_eq!((rep.totals.verified, rep.totals.failed, rep.totals.broken, rep.totals.skipped), (3, 0, 0, 0), "{:?}", rep.items_failed);
+
+    let pg = group_of(&pool, "SELECT image_group_id FROM menu_items WHERE id=$1", item).await;
+    let lg = group_of(&pool, "SELECT logo_group_id FROM organizations WHERE id=$1", org).await;
+    let cg = group_of(&pool, "SELECT brand_card_image_group_id FROM organizations WHERE id=$1", org).await;
+    assert_ne!(pg, lg, "logo never reuses the photo group");
+    assert_eq!(lg, cg, "logo and card share the keeps_original group");
+    assert!(variants_of(&pool, lg).await.contains(&"original".to_string()));
+    assert!(!variants_of(&pool, pg).await.contains(&"original".to_string()));
+    // The lossy `full` of both groups is one shared file.
+    let shared: i64 = sqlx::query_scalar("SELECT count(*) FROM (SELECT hash FROM assets WHERE org_id=$1 GROUP BY hash HAVING count(DISTINCT group_id) > 1) s")
+        .bind(org).fetch_one(&pool).await.unwrap();
+    assert!(shared >= 1, "the colliding variant is stored once and referenced twice");
+    let (disk, rows) = files_vs_rows(&pool, &store, org).await;
+    assert_eq!(disk, rows, "no orphan files, no missing files");
+    // Stored bytes count each shared file once.
+    let on_disk: i64 = disk.iter().map(|f| std::fs::metadata(store.assets_dir.join(org.to_string()).join(f)).unwrap().len() as i64).sum();
+    assert_eq!(rep.bytes.stored, on_disk);
+}
+
+#[sqlx::test]
+async fn backfill_same_file_as_menu_photo_and_logo_gets_two_profiles(pool: PgPool) {
+    let (_d, store) = tmp_store();
+    let org = seed_org(&pool).await;
+    let bytes = photo_png(500, 500, 22);
+    put(&store, &format!("{org}/menu-items/same.png"), &bytes);
+    put(&store, "logos/same.png", &bytes);
+    put(&store, "card/same.png", &bytes);
+    let base = "https://api.example/uploads";
+    let item = seed_item(&pool, org, Some(&format!("{base}/{org}/menu-items/same.png"))).await;
+    set_org_images(&pool, org, Some(&format!("{base}/logos/same.png")), Some(&format!("{base}/card/same.png"))).await;
+
+    let rep = run(&pool, &opts_org(&store, org)).await.unwrap();
+    assert_eq!((rep.totals.verified, rep.totals.failed), (3, 0), "{:?}", rep.items_failed);
+    let pg = group_of(&pool, "SELECT image_group_id FROM menu_items WHERE id=$1", item).await;
+    let lg = group_of(&pool, "SELECT logo_group_id FROM organizations WHERE id=$1", org).await;
+    let cg = group_of(&pool, "SELECT brand_card_image_group_id FROM organizations WHERE id=$1", org).await;
+    assert_ne!(pg, lg);
+    assert_eq!(lg, cg);
+    for g in [lg, cg] {
+        assert!(variants_of(&pool, g).await.contains(&"original".to_string()), "logo/card keep an original");
+    }
+    let profiles: Vec<(Uuid, String)> = sqlx::query_as("SELECT id, profile FROM asset_groups WHERE org_id=$1").bind(org).fetch_all(&pool).await.unwrap();
+    assert_eq!(profiles.len(), 2);
+    assert!(profiles.contains(&(pg, "photo".into())) && profiles.contains(&(lg, "keeps_original".into())));
+    let (disk, rows) = files_vs_rows(&pool, &store, org).await;
+    assert_eq!(disk, rows);
+}
+
+#[sqlx::test]
+async fn ingest_different_images_with_byte_identical_thumbnails(pool: PgPool) {
+    use super::ingest::{AssetPurpose, SourceKind, ingest_bytes};
+    let (_d, store) = tmp_store();
+    let org = seed_org(&pool).await;
+    let make = |dot: bool| {
+        let mut img = image::RgbaImage::from_pixel(4000, 2000, image::Rgba([200, 180, 160, 255]));
+        if dot {
+            for y in 1000..1002 { for x in 2000..2002 { img.put_pixel(x, y, image::Rgba([0, 0, 0, 255])); } }
+        }
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img).write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        buf.into_inner()
+    };
+    let a = ingest_bytes(&pool, &store, Some(org), AssetPurpose::MenuItemPhoto, make(false), SourceKind::Upload, None, None).await.unwrap();
+    let b = ingest_bytes(&pool, &store, Some(org), AssetPurpose::MenuItemPhoto, make(true), SourceKind::Upload, None, None).await.unwrap();
+    assert_ne!(a.group_id, b.group_id);
+    assert!(!b.deduped);
+    assert_eq!(a.variant("thumb").unwrap().hash, b.variant("thumb").unwrap().hash, "precondition: identical thumbnails");
+    assert_ne!(a.variant("full").unwrap().hash, b.variant("full").unwrap().hash, "precondition: different images");
+    assert_eq!((a.variants.len(), b.variants.len()), (3, 3));
+    let (disk, rows) = files_vs_rows(&pool, &store, org).await;
+    assert_eq!(disk, rows);
+    assert!(rows.len() < 6, "the shared thumbnail is one file");
+}
+
+#[sqlx::test]
+async fn failed_ingest_attempt_leaves_no_orphan_and_keeps_shared_files(pool: PgPool) {
+    use super::ingest::{AssetPurpose, FAIL_BEFORE_COMMIT, SourceKind, ingest_bytes};
+    let (_d, store) = tmp_store();
+    let org = seed_org(&pool).await;
+    let photo = photo_png(600, 400, 23);
+    ingest_bytes(&pool, &store, Some(org), AssetPurpose::MenuItemPhoto, photo.clone(), SourceKind::Upload, None, None).await.unwrap();
+    let (before, _) = files_vs_rows(&pool, &store, org).await;
+
+    FAIL_BEFORE_COMMIT.lock().unwrap().push(org);
+    let logo = same_pixels_other_bytes(&photo);
+    for _ in 0..3 {
+        let r = ingest_bytes(&pool, &store, Some(org), AssetPurpose::OrgLogo, logo.clone(), SourceKind::Backfill, None, None).await;
+        assert!(r.is_err());
+        let (disk, rows) = files_vs_rows(&pool, &store, org).await;
+        assert_eq!(disk, before, "the attempt's own files are gone, the shared ones stay");
+        assert_eq!(disk, rows);
+    }
+    FAIL_BEFORE_COMMIT.lock().unwrap().retain(|o| *o != org);
+    let ok = ingest_bytes(&pool, &store, Some(org), AssetPurpose::OrgLogo, logo, SourceKind::Backfill, None, None).await.unwrap();
+    assert!(ok.variant("original").is_some());
+    let (disk, rows) = files_vs_rows(&pool, &store, org).await;
+    assert_eq!(disk, rows);
+    assert!(disk.len() > before.len());
+}
+
+#[sqlx::test]
+async fn backfill_with_shared_files_rerun_is_noop(pool: PgPool) {
+    let (_d, store) = tmp_store();
+    let org = seed_org(&pool).await;
+    let photo = photo_png(600, 400, 24);
+    let other = same_pixels_other_bytes(&photo);
+    put(&store, &format!("{org}/menu-items/p.png"), &photo);
+    put(&store, &format!("{org}/menu-items/q.png"), &other); // same pixels → pixel dedup
+    put(&store, "logos/l.png", &photo); // same file as a photo → own profile
+    put(&store, "card/c.png", &other);
+    let base = "https://api.example/uploads";
+    seed_item(&pool, org, Some(&format!("{base}/{org}/menu-items/p.png"))).await;
+    seed_item(&pool, org, Some(&format!("{base}/{org}/menu-items/q.png"))).await;
+    set_org_images(&pool, org, Some(&format!("{base}/logos/l.png")), Some(&format!("{base}/card/c.png"))).await;
+
+    let rep = run(&pool, &opts_org(&store, org)).await.unwrap();
+    assert_eq!((rep.totals.verified, rep.totals.failed, rep.totals.deduped), (4, 0, 2), "{:?}", rep.items_failed);
+    let groups: i64 = sqlx::query_scalar("SELECT count(*) FROM asset_groups").fetch_one(&pool).await.unwrap();
+    assert_eq!(groups, 2);
+    let snapshot = |pool: PgPool| async move {
+        let rows: Vec<(String, String, Option<Uuid>, bool, Option<i64>)> = sqlx::query_as(
+            "SELECT source_id, status, group_id, deduped, stored_bytes FROM asset_backfill_items ORDER BY source_table, source_id, source_field")
+            .fetch_all(&pool).await.unwrap();
+        let assets: Vec<(Uuid, String, String)> = sqlx::query_as("SELECT group_id, variant, hash FROM assets ORDER BY 1, 2").fetch_all(&pool).await.unwrap();
+        (rows, assets)
+    };
+    let before = snapshot(pool.clone()).await;
+    let files_before = files_vs_rows(&pool, &store, org).await;
+    let second = opts_org(&store, org);
+    let rep2 = run(&pool, &second).await.unwrap();
+    assert_eq!(rep2.totals, rep.totals);
+    assert_eq!(rep2.bytes, rep.bytes);
+    assert_eq!(snapshot(pool.clone()).await, before);
+    assert_eq!(files_vs_rows(&pool, &store, org).await, files_before);
+    // The no-op run verified nothing; the first run is the one to prune with.
+    let runs = super::backfill::verified_runs(&pool, Some(org)).await.unwrap();
+    let first_id = sqlx::query_scalar::<_, Uuid>("SELECT DISTINCT run_id FROM asset_backfill_items WHERE status='verified'").fetch_one(&pool).await.unwrap();
+    assert_eq!(runs, vec![(first_id, 4)]);
+    assert_ne!(first_id, second.run_id);
+}
+
+#[sqlx::test]
+async fn prune_keeps_a_legacy_file_another_unverified_item_uses(pool: PgPool) {
+    let (_d, store) = tmp_store();
+    let org = seed_org(&pool).await;
+    let bytes = photo_png(300, 300, 25);
+    put(&store, &format!("{org}/menu-items/s.png"), &bytes);
+    let url = format!("https://api.example/uploads/{org}/menu-items/s.png");
+    seed_item(&pool, org, Some(&url)).await;
+    set_org_images(&pool, org, Some(&url), None).await;
+    let o = opts_org(&store, org);
+    run(&pool, &o).await.unwrap();
+    sqlx::query("UPDATE asset_backfill_items SET status='failed' WHERE source_table='organizations'").execute(&pool).await.unwrap();
+    let rep = prune(&pool, &store, Some(org), o.run_id, true).await.unwrap();
+    assert_eq!(rep.deleted, 0);
+    assert!(store.uploads_dir.join(format!("{org}/menu-items/s.png")).exists());
+}

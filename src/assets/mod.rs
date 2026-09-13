@@ -103,6 +103,43 @@ impl AssetStore {
     }
 }
 
+/// Serialize everyone who creates, references or deletes the file `key`
+/// within the caller's transaction (released at commit/rollback). Take several
+/// keys in sorted order.
+pub async fn lock_file_key(conn: &mut sqlx::PgConnection, key: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 7019))")
+        .bind(key)
+        .execute(conn)
+        .await
+        .map(|_| ())
+}
+
+/// A content-addressed file is shared by every `assets` row with the same
+/// (org, hash): delete it only when no committed row references it. The caller
+/// must hold [`lock_file_key`] for this key in `conn`'s transaction, so no
+/// concurrent ingest can be between "the file exists, skip the write" and
+/// committing its row. Returns whether the file was removed.
+pub async fn remove_file_if_unreferenced(
+    conn: &mut sqlx::PgConnection,
+    store: &AssetStore,
+    org_id: Option<Uuid>,
+    hash: &str,
+    ext: &str,
+) -> Result<bool, sqlx::Error> {
+    let referenced: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM assets WHERE org_id IS NOT DISTINCT FROM $1 AND hash = $2 AND ext = $3)",
+    )
+    .bind(org_id)
+    .bind(hash)
+    .bind(ext)
+    .fetch_one(conn)
+    .await?;
+    if referenced {
+        return Ok(false);
+    }
+    Ok(std::fs::remove_file(store.path_for_key(&AssetStore::key(org_id, hash, ext))).is_ok())
+}
+
 /// A relative path with no traversal, no absolute root, no backslashes and no
 /// hidden segments.
 pub fn safe_rel_path(rel: &str) -> bool {
