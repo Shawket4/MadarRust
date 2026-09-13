@@ -206,7 +206,7 @@ mod backfill_tests {
         .await
         .unwrap();
         let shift: Uuid = sqlx::query_scalar(
-            "INSERT INTO shifts (branch_id, teller_id) VALUES ($1, $2) RETURNING id",
+            "INSERT INTO tills (branch_id, teller_id) VALUES ($1, $2) RETURNING id",
         )
         .bind(branch)
         .bind(teller)

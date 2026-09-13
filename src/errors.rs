@@ -33,6 +33,24 @@ pub enum AppError {
     #[error("{reason}")]
     Refused { code: &'static str, reason: String },
 
+    /// A `Refused` 409 that also names the till in the way (`TILL_OPEN_*`), so
+    /// the device can say where the person's till is open.
+    #[error("{reason}")]
+    RefusedWith {
+        code: &'static str,
+        reason: String,
+        till: serde_json::Value,
+    },
+
+    /// A coded refusal at a status other than 409 (`RECONCILIATION_*` 400,
+    /// `PAYMENT_METHOD_UNAVAILABLE` 422, `TILL_ENTITY_REMOVED` 410).
+    #[error("{reason}")]
+    Coded {
+        status: u16,
+        code: &'static str,
+        reason: String,
+    },
+
     #[error("Database error: {0}")]
     Db(sqlx::Error),
 
@@ -61,6 +79,11 @@ pub struct ErrorBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = "ORG_SUSPENDED")]
     pub code: Option<String>,
+    /// The till a `TILL_OPEN_AT_OTHER_BRANCH` / `TILL_OPEN_ELSEWHERE` refusal
+    /// is about (`TillBrief`). Omitted everywhere else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
+    pub till: Option<serde_json::Value>,
 }
 
 /// Convert sqlx errors into `AppError`. `RowNotFound` — what `fetch_one` /
@@ -99,7 +122,9 @@ impl AppError {
             // The dashboard branches on this to say "wait a moment" rather
             // than showing a raw error for something that is not a fault.
             AppError::TooManyRequests(_) => Some("EXPORT_RATE_LIMITED".to_string()),
-            AppError::Refused { code, .. } => Some((*code).to_string()),
+            AppError::Refused { code, .. }
+            | AppError::RefusedWith { code, .. }
+            | AppError::Coded { code, .. } => Some((*code).to_string()),
             _ => None,
         }
     }
@@ -165,6 +190,10 @@ impl actix_web::ResponseError for AppError {
         let body = ErrorBody {
             error: self.to_string(),
             code: self.code(),
+            till: match self {
+                AppError::RefusedWith { till, .. } => Some(till.clone()),
+                _ => None,
+            },
         };
         match self {
             AppError::Unauthorized(_) => HttpResponse::Unauthorized().json(body),
@@ -174,6 +203,12 @@ impl actix_web::ResponseError for AppError {
             AppError::BadRequest(_) => HttpResponse::BadRequest().json(body),
             AppError::Conflict(_) => HttpResponse::Conflict().json(body),
             AppError::Refused { .. } => HttpResponse::Conflict().json(body),
+            AppError::RefusedWith { .. } => HttpResponse::Conflict().json(body),
+            AppError::Coded { status, .. } => HttpResponse::build(
+                actix_web::http::StatusCode::from_u16(*status)
+                    .unwrap_or(actix_web::http::StatusCode::BAD_REQUEST),
+            )
+            .json(body),
             AppError::Db(e) => HttpResponse::build(Self::db_status(e)).json(body),
             AppError::ServiceUnavailable(_) => HttpResponse::ServiceUnavailable().json(body),
             AppError::TooManyRequests(_) => HttpResponse::TooManyRequests().json(body),

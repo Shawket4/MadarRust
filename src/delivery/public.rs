@@ -141,7 +141,7 @@ const BRANCH_OPEN_SELECT: &str = r#"b.id, b.name, b.code,
     COALESCE(s.otp_required, true) AS otp_required,
     COALESCE(s.in_mall_require_location, true) AS in_mall_require_location,
     (now() AT TIME ZONE COALESCE(b.timezone, o.timezone)::text)::time AS local_time,
-    EXISTS(SELECT 1 FROM shifts sh WHERE sh.branch_id = b.id AND sh.status = 'open') AS has_open_shift"#;
+    EXISTS(SELECT 1 FROM tills sh WHERE sh.branch_id = b.id AND sh.status = 'open') AS has_open_shift"#;
 
 #[utoipa::path(
     get, path = "/public/branches", tag = "delivery-public", params(PublicBranchesQuery),

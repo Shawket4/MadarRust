@@ -27,7 +27,7 @@ const MAX_PER_PAGE: i64 = 1000;
 
 // ── Shared SELECT fragment ────────────────────────────────────
 const ORDER_SELECT: &str =
-    "SELECT o.id, o.branch_id, o.shift_id, o.teller_id, u.name AS teller_name,
+    "SELECT o.id, o.branch_id, o.till_id, o.till_id AS shift_id, o.teller_id, u.name AS teller_name,
      o.waiter_id, w.name AS waiter_name,
      o.order_number, o.order_ref, o.status::text, o.payment_method::text,
      COALESCE((SELECT json_agg(json_build_object('method', op.method, 'amount', op.amount) ORDER BY op.id)
@@ -125,6 +125,8 @@ pub struct PaymentLeg {
 pub struct Order {
     pub id: Uuid,
     pub branch_id: Uuid,
+    pub till_id: Uuid,
+    /// DEPRECATED: same value as `till_id` (required by POS v0.5.1/v0.6.0).
     pub shift_id: Uuid,
     pub teller_id: Uuid,
     pub teller_name: String,
@@ -451,7 +453,17 @@ pub struct OrderItemInput {
 #[derive(Deserialize, Serialize, Default, ToSchema)]
 pub struct CreateOrderRequest {
     pub branch_id: Uuid,
-    pub shift_id: Uuid,
+    #[serde(alias = "shift_id")]
+    pub till_id: Uuid,
+    /// The device ringing the order (else `X-Madar-Device`).
+    #[serde(default)]
+    pub device_id: Option<Uuid>,
+    /// The device's code; with `device_id` + `order_number` the number is stored verbatim.
+    #[serde(default)]
+    pub device_code: Option<String>,
+    /// `server` | `lan` | `unverified` — the till's verification as the device knew it.
+    #[serde(default)]
+    pub verification: Option<String>,
     pub payment_method: String,
     pub customer_name: Option<String>,
     pub notes: Option<String>,
@@ -547,7 +559,8 @@ pub struct VoidOrderRequest {
 #[into_params(parameter_in = Query)]
 pub struct ListOrdersQuery {
     pub branch_id: Option<Uuid>,
-    pub shift_id: Option<Uuid>,
+    #[serde(alias = "shift_id")]
+    pub till_id: Option<Uuid>,
     pub updated_after: Option<chrono::DateTime<chrono::Utc>>,
     pub page: Option<i64>,
     pub per_page: Option<i64>,
@@ -666,7 +679,8 @@ pub struct ExportResponse {
 #[into_params(parameter_in = Query)]
 pub struct ExportOrdersQuery {
     pub branch_id: Option<Uuid>,
-    pub shift_id: Option<Uuid>,
+    #[serde(alias = "shift_id")]
+    pub till_id: Option<Uuid>,
     pub teller_name: Option<String>,
     /// Filter by the WAITER who opened the ticket (ILIKE, partial match).
     pub waiter_name: Option<String>,
@@ -1448,11 +1462,11 @@ pub(crate) async fn create_order_inner(
         None
     };
     let shift_ok: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM shifts \
+        "SELECT EXISTS(SELECT 1 FROM tills \
          WHERE id = $1 AND branch_id = $2 AND (status = 'open' OR $4) \
            AND ($3::uuid IS NULL OR teller_id = $3))",
     )
-    .bind(body.shift_id)
+    .bind(body.till_id)
     .bind(body.branch_id)
     .bind(teller_match)
     .bind(actor.replay)
@@ -1828,7 +1842,7 @@ pub(crate) async fn create_order_inner(
     let mut tx = pool.get_ref().begin().await?;
 
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text))")
-        .bind(body.shift_id.to_string())
+        .bind(body.till_id.to_string())
         .execute(&mut *tx)
         .await?;
 
@@ -1842,8 +1856,8 @@ pub(crate) async fn create_order_inner(
     // own shift — so a sale can never be mis-registered onto the wrong shift or
     // branch.
     let shift_row: Option<(Uuid, Uuid, String)> =
-        sqlx::query_as("SELECT branch_id, teller_id, status::text FROM shifts WHERE id = $1")
-            .bind(body.shift_id)
+        sqlx::query_as("SELECT branch_id, teller_id, status::text FROM tills WHERE id = $1")
+            .bind(body.till_id)
             .fetch_optional(&mut *tx)
             .await?;
     let (shift_branch_id, shift_teller_id, shift_status) = shift_row.ok_or_else(|| {
@@ -1876,9 +1890,9 @@ pub(crate) async fn create_order_inner(
     // both mint #1 into a shared shift and collide). A POS device PREDICTS the same
     // per-shift number offline (single numberer per shift) for its receipt.
     let order_number: i32 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(order_number), 0) + 1 FROM orders WHERE shift_id = $1",
+        "SELECT COALESCE(MAX(order_number), 0) + 1 FROM orders WHERE till_id = $1",
     )
-    .bind(body.shift_id)
+    .bind(body.till_id)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -1899,7 +1913,7 @@ pub(crate) async fn create_order_inner(
             .bind(body.branch_id)
             .fetch_one(&mut *tx)
             .await?;
-            let shift6 = body.shift_id.simple().to_string()[..6].to_uppercase();
+            let shift6 = body.till_id.simple().to_string()[..6].to_uppercase();
             format!(
                 "{}-{}-{}-{:03}",
                 branch_code,
@@ -1958,7 +1972,7 @@ pub(crate) async fn create_order_inner(
         "#,
     )
     .bind(shift_branch_id) // authoritative: the order's branch IS its shift's branch
-    .bind(body.shift_id)
+    .bind(body.till_id)
     .bind(actor.teller_id)
     .bind(order_number)
     .bind(&body.payment_method)
@@ -2053,13 +2067,13 @@ pub(crate) async fn create_order_inner(
     if let Some(t) = ticket {
         let linked = sqlx::query(
             "UPDATE open_tickets SET status = 'settled', settled_at = $5, order_id = $2, \
-                 settled_by = $3, settled_shift_id = $4, updated_at = now() \
+                 settled_by = $3, settled_till_id = $4, updated_at = now() \
              WHERE id = $1 AND status = 'open'",
         )
         .bind(t.open_ticket_id)
         .bind(order.id)
         .bind(actor.teller_id)
-        .bind(body.shift_id)
+        .bind(body.till_id)
         .bind(created_at)
         .execute(&mut *tx)
         .await?;
@@ -2152,12 +2166,12 @@ pub(crate) async fn create_order_inner(
     // (cash-only sum) and, guarded by the WHERE, for shifts still open.
     if actor.replay && shift_status != "open" {
         let system_cash =
-            crate::shifts::handlers::compute_system_cash(&mut *tx, body.shift_id).await?;
+            crate::tills::handlers::compute_system_cash(&mut *tx, body.till_id).await?;
         sqlx::query(
-            "UPDATE shifts SET closing_cash_system = $1 WHERE id = $2 AND status <> 'open'",
+            "UPDATE tills SET closing_cash_system = $1 WHERE id = $2 AND status <> 'open'",
         )
         .bind(system_cash as i32)
-        .bind(body.shift_id)
+        .bind(body.till_id)
         .execute(&mut *tx)
         .await?;
     }
@@ -2553,7 +2567,7 @@ pub async fn list_orders(
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
 
     let page = query.page.unwrap_or(1).max(1);
-    let default_per_page = if query.shift_id.is_some() {
+    let default_per_page = if query.till_id.is_some() {
         DEFAULT_PER_PAGE_SHIFT
     } else {
         DEFAULT_PER_PAGE_BRANCH
@@ -2584,17 +2598,17 @@ pub async fn list_orders(
     // branch_id is absent or the all-zeros (nil) UUID — every branch in the
     // caller's org (the "All branches" view). org_id was validated above, so
     // the org roll-up stays inside the caller's own org.
-    let all_branches = query.shift_id.is_none() && query.branch_id.is_none_or(|b| b.is_nil());
+    let all_branches = query.till_id.is_none() && query.branch_id.is_none_or(|b| b.is_nil());
 
-    let (scope_condition, scope_id): (&str, Uuid) = if let Some(shift_id) = query.shift_id {
-        let bid: Option<Uuid> = sqlx::query_scalar("SELECT branch_id FROM shifts WHERE id = $1")
+    let (scope_condition, scope_id): (&str, Uuid) = if let Some(shift_id) = query.till_id {
+        let bid: Option<Uuid> = sqlx::query_scalar("SELECT branch_id FROM tills WHERE id = $1")
             .bind(shift_id)
             .fetch_optional(pool.get_ref())
             .await?
             .flatten();
         let bid = bid.ok_or_else(|| AppError::NotFound("Shift not found".into()))?;
         require_branch_access(pool.get_ref(), &claims, bid).await?;
-        ("o.shift_id = $1", shift_id)
+        ("o.till_id = $1", shift_id)
     } else if all_branches {
         (
             "o.branch_id IN (SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL)",
@@ -2867,9 +2881,9 @@ pub(crate) async fn void_order_inner(
     // figure.) Replay bypasses this — the void happened while the shift was open.
     if !actor.replay && actor.role == UserRole::Teller {
         let shift_open: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND status = 'open')",
+            "SELECT EXISTS(SELECT 1 FROM tills WHERE id = $1 AND status = 'open')",
         )
-        .bind(order.shift_id)
+        .bind(order.till_id)
         .fetch_one(pool.get_ref())
         .await?;
         if !shift_open {
@@ -3795,17 +3809,17 @@ pub async fn export_orders(
 
     // Same scope rule as list_orders: shift, single branch, or every branch in
     // the org when no shift is given and branch_id is absent or the nil UUID.
-    let all_branches = query.shift_id.is_none() && query.branch_id.is_none_or(|b| b.is_nil());
+    let all_branches = query.till_id.is_none() && query.branch_id.is_none_or(|b| b.is_nil());
 
-    let (scope_condition, scope_id): (&str, Uuid) = if let Some(shift_id) = query.shift_id {
-        let bid: Option<Uuid> = sqlx::query_scalar("SELECT branch_id FROM shifts WHERE id = $1")
+    let (scope_condition, scope_id): (&str, Uuid) = if let Some(shift_id) = query.till_id {
+        let bid: Option<Uuid> = sqlx::query_scalar("SELECT branch_id FROM tills WHERE id = $1")
             .bind(shift_id)
             .fetch_optional(pool.get_ref())
             .await?
             .flatten();
         let bid = bid.ok_or_else(|| AppError::NotFound("Shift not found".into()))?;
         require_branch_access(pool.get_ref(), &claims, bid).await?;
-        ("o.shift_id = $1", shift_id)
+        ("o.till_id = $1", shift_id)
     } else if all_branches {
         (
             "o.branch_id IN (SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL)",

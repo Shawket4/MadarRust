@@ -64,7 +64,7 @@ async fn seed_org(pool: &PgPool, label: &str) -> Seed {
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO shifts (id, branch_id, teller_id, till_id) VALUES ($1, $2, $3, $4)")
+    sqlx::query("INSERT INTO tills (id, branch_id, teller_id, till_id) VALUES ($1, $2, $3, $4)")
         .bind(shift)
         .bind(branch)
         .bind(teller)

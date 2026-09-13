@@ -288,7 +288,7 @@ async fn seed_order_with_addon(pool: &PgPool, org: Uuid, item: Uuid, option_id: 
     let branch = seed_branch(pool, org).await;
     let teller = seed_user(pool, org).await;
     let shift: Uuid = sqlx::query_scalar(
-        "INSERT INTO shifts (branch_id, teller_id) VALUES ($1, $2) RETURNING id",
+        "INSERT INTO tills (branch_id, teller_id) VALUES ($1, $2) RETURNING id",
     )
     .bind(branch)
     .bind(teller)

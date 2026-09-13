@@ -102,7 +102,7 @@ async fn grant_permission(pool: &PgPool, role: &str, resource: &str, action: &st
 
 async fn seed_shift(pool: &PgPool, branch_id: Uuid, user_id: Uuid) -> Uuid {
     let shift_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO shifts (id, branch_id, teller_id, status, opening_cash) VALUES ($1, $2, $3, 'open', 10000)")
+    sqlx::query("INSERT INTO tills (id, branch_id, teller_id, status, opening_cash) VALUES ($1, $2, $3, 'open', 10000)")
         .bind(shift_id)
         .bind(branch_id)
         .bind(user_id)
@@ -1850,7 +1850,7 @@ async fn test_order_rejected_on_closed_shift(pool: PgPool) {
     let cat_id = seed_category(&pool, org_id).await;
     let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
 
-    sqlx::query("UPDATE shifts SET status='closed', closed_at=now() WHERE id=$1")
+    sqlx::query("UPDATE tills SET status='closed', closed_at=now() WHERE id=$1")
         .bind(shift_id)
         .execute(&pool)
         .await
@@ -2945,7 +2945,7 @@ async fn test_order_on_closed_shift_files_nothing(pool: PgPool) {
     let cat_id = seed_category(&pool, org_id).await;
     let item = seed_menu_item(&pool, org_id, cat_id).await;
 
-    sqlx::query("UPDATE shifts SET status='closed', closed_at=now() WHERE id=$1")
+    sqlx::query("UPDATE tills SET status='closed', closed_at=now() WHERE id=$1")
         .bind(shift_id)
         .execute(&pool)
         .await
@@ -3439,7 +3439,7 @@ async fn renaming_a_payment_method_carries_history(pool: PgPool) {
     .unwrap();
     sqlx::query(
         "INSERT INTO order_payments (order_id, method, amount, is_cash)
-         SELECT id, 'card', 1000, false FROM orders WHERE shift_id = $1",
+         SELECT id, 'card', 1000, false FROM orders WHERE till_id = $1",
     )
     .bind(shift_id)
     .execute(&pool)

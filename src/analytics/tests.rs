@@ -107,7 +107,7 @@ pub(crate) async fn seed(pool: &PgPool, label: &str) -> Seeded {
         .await
         .unwrap();
     sqlx::query(
-        "INSERT INTO shifts (id, branch_id, teller_id, till_id, status, opening_cash, \
+        "INSERT INTO tills (id, branch_id, teller_id, till_id, status, opening_cash, \
          closing_cash_declared, closing_cash_system, closed_at) \
          VALUES ($1,$2,$3,$4,'closed',10000,25000,25500, now())",
     )
@@ -659,7 +659,7 @@ async fn a_partial_refund_is_netted_from_revenue_and_reported_apart(pool: PgPool
     let s = seed(&pool, "a").await;
     // The seed's Latte order: 10000, paid in cash, sold in the seeded shift.
     let (latte_order, shift, teller): (Uuid, Uuid, Uuid) = sqlx::query_as(
-        "SELECT o.id, o.shift_id, o.teller_id FROM orders o WHERE o.branch_id = $1 AND o.total_amount = 10000",
+        "SELECT o.id, o.till_id, o.teller_id FROM orders o WHERE o.branch_id = $1 AND o.total_amount = 10000",
     )
     .bind(s.branch)
     .fetch_one(&pool)

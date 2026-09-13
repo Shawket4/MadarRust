@@ -563,7 +563,7 @@ pub async fn finalize_delivery_order(
         None
     };
     let shift_ok: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND branch_id = $2 AND status = 'open' \
+        "SELECT EXISTS(SELECT 1 FROM tills WHERE id = $1 AND branch_id = $2 AND status = 'open' \
          AND ($3::uuid IS NULL OR teller_id = $3))",
     )
     .bind(body.shift_id)
@@ -596,7 +596,7 @@ pub async fn finalize_delivery_order(
         .execute(&mut *tx)
         .await?;
     let still_open: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND status = 'open')")
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tills WHERE id = $1 AND status = 'open')")
             .bind(body.shift_id)
             .fetch_one(&mut *tx)
             .await?;

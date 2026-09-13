@@ -369,7 +369,7 @@ pub async fn shift_summary(
                 SELECT op.method, SUM(op.amount)::bigint AS rev
                 FROM order_payments op
                 JOIN orders o2 ON o2.id = op.order_id
-                WHERE o2.shift_id = s.id AND o2.status NOT IN ('voided', 'refunded')
+                WHERE o2.till_id = s.id AND o2.status NOT IN ('voided', 'refunded')
                 GROUP BY op.method
               ) sub
             ), '{}'::json) AS revenue_by_method,
@@ -386,13 +386,13 @@ pub async fn shift_summary(
             -- The drawer's side: refunds issued from THIS shift, by
             -- order_refunds.shift_id. Not filtered on the order's status — a
             -- fully refunded sale's refund left this drawer all the same.
-            COALESCE((SELECT COUNT(*)                            FROM order_refunds r WHERE r.shift_id = s.id), 0)::bigint AS refunds_issued_count,
-            COALESCE((SELECT SUM(r.amount)                       FROM order_refunds r WHERE r.shift_id = s.id), 0)::bigint AS refunds_issued_amount,
-            COALESCE((SELECT SUM(r.amount) FILTER (WHERE r.is_cash) FROM order_refunds r WHERE r.shift_id = s.id), 0)::bigint AS refunds_issued_cash
-        FROM shifts s
+            COALESCE((SELECT COUNT(*)                            FROM order_refunds r WHERE r.till_id = s.id), 0)::bigint AS refunds_issued_count,
+            COALESCE((SELECT SUM(r.amount)                       FROM order_refunds r WHERE r.till_id = s.id), 0)::bigint AS refunds_issued_amount,
+            COALESCE((SELECT SUM(r.amount) FILTER (WHERE r.is_cash) FROM order_refunds r WHERE r.till_id = s.id), 0)::bigint AS refunds_issued_cash
+        FROM tills s
         JOIN branches b ON b.id = s.branch_id
         JOIN users    u ON u.id = s.teller_id
-        LEFT JOIN orders o          ON o.shift_id  = s.id
+        LEFT JOIN orders o          ON o.till_id  = s.id
         LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
         WHERE s.id = $1
         GROUP BY s.id, b.name, u.name
@@ -1047,7 +1047,7 @@ pub async fn branch_teller_stats(
                 )::bigint
             END AS avg_order_value,
             COUNT(o.id) FILTER (WHERE o.status = 'voided')::bigint AS voided,
-            COUNT(DISTINCT o.shift_id)::bigint AS shifts
+            COUNT(DISTINCT o.till_id)::bigint AS shifts
         FROM orders o
         JOIN users u ON u.id = o.teller_id
         LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
@@ -2054,7 +2054,7 @@ async fn require_shift_branch_access(
     claims: &Claims,
     shift_id: Uuid,
 ) -> Result<Uuid, AppError> {
-    let branch_id: Option<Uuid> = sqlx::query_scalar("SELECT branch_id FROM shifts WHERE id = $1")
+    let branch_id: Option<Uuid> = sqlx::query_scalar("SELECT branch_id FROM tills WHERE id = $1")
         .bind(shift_id)
         .fetch_optional(pool)
         .await?

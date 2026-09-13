@@ -13,7 +13,7 @@ use crate::floor_ops::handlers::{
     CreateFloorTransferRequest, FulfillTransferRequest, SwapTablesRequest,
 };
 use crate::orders::handlers::{CreateOrderRequest, VoidOrderRequest};
-use crate::shifts::handlers::{CashMovementRequest, CloseShiftRequest, OpenShiftRequest};
+use crate::tills::handlers::{CashMovementRequest, CloseTillRequest as CloseShiftRequest, OpenTillRequest as OpenShiftRequest};
 use crate::tickets::handlers::{
     AddRoundRequest, CreateOpenTicketRequest, SettleOpenTicketRequest, VoidOpenTicketRequest,
 };
@@ -399,24 +399,29 @@ pub async fn replay(
         ReplayOp::OpenShift {
             branch_id, request, ..
         } => {
-            crate::shifts::handlers::open_shift_inner(
-                pool.clone(),
+            let (till, created) = crate::tills::handlers::open_till_inner(
+                pool.get_ref(),
+                Some(hub.get_ref()),
                 branch_id,
-                web::Json(request),
+                request,
                 actor,
+                crate::tills::handlers::OpenMeta { device_id: None, device_code: None, verification: None },
             )
-            .await
+            .await?;
+            Ok(if created { HttpResponse::Created() } else { HttpResponse::Ok() }.json(till))
         }
         ReplayOp::CloseShift {
             shift_id, request, ..
         } => {
-            crate::shifts::handlers::close_shift_inner(
-                pool.clone(),
+            let resp = crate::tills::handlers::close_till_inner(
+                pool.get_ref(),
+                Some(hub.get_ref()),
                 shift_id,
-                web::Json(request),
+                request,
                 actor,
             )
-            .await
+            .await?;
+            Ok(HttpResponse::Ok().json(resp))
         }
         ReplayOp::CreateOrder { request, .. } => {
             // Replay never fires to the KDS (the order is historical) → hub = None.
@@ -457,10 +462,11 @@ pub async fn replay(
         ReplayOp::CashMovement {
             shift_id, request, ..
         } => {
-            crate::shifts::handlers::add_cash_movement_inner(
-                pool.clone(),
+            crate::tills::handlers::add_cash_movement_inner(
+                pool.get_ref(),
+                Some(hub.get_ref()),
                 shift_id,
-                web::Json(request),
+                request,
                 actor,
             )
             .await
@@ -711,7 +717,7 @@ async fn op_branch_must_be_in_org(pool: &PgPool, op: &ReplayOp, org: Uuid) -> Re
         }
         ReplayOp::CloseShift { shift_id, .. } | ReplayOp::CashMovement { shift_id, .. } => {
             sqlx::query_scalar(
-                "SELECT b.org_id FROM shifts s JOIN branches b ON b.id = s.branch_id WHERE s.id = $1",
+                "SELECT b.org_id FROM tills s JOIN branches b ON b.id = s.branch_id WHERE s.id = $1",
             )
             .bind(shift_id)
             .fetch_optional(pool)

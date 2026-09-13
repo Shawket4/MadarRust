@@ -396,7 +396,7 @@ pub(crate) async fn emit_kitchen_ticket(
 ///
 /// `Settled` and `Voided` are the two closes a bill can cause; a bump is the
 /// KDS's own (`kds::set_bump_inner`) and a retirement is the shift's
-/// ([`retire_unbumped_at_shift_close`]). The FIRST close wins — a ticket the
+/// ([`retire_unbumped_at_till_close`]). The FIRST close wins — a ticket the
 /// kitchen already bumped keeps `bumped` when its bill settles an hour later,
 /// because that is what happened. A void is the exception in one respect: it
 /// is also a change to the COOKING, so `status` becomes `voided` and every
@@ -459,7 +459,7 @@ pub(crate) async fn close_kitchen_tickets(
 ///
 /// `closed_by` is stamped only on the `settled` closes; a retirement names no
 /// actor, per the column's contract. Returns how many tickets closed.
-pub(crate) async fn retire_unbumped_at_shift_close(
+pub(crate) async fn retire_unbumped_at_till_close(
     tx: &mut Transaction<'_, Postgres>,
     branch_id: Uuid,
     closed_by: Option<Uuid>,
@@ -468,7 +468,7 @@ pub(crate) async fn retire_unbumped_at_shift_close(
         return Ok(0);
     }
     let another_open: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM shifts WHERE branch_id = $1 AND status = 'open')",
+        "SELECT EXISTS(SELECT 1 FROM tills WHERE branch_id = $1 AND status = 'open')",
     )
     .bind(branch_id)
     .fetch_one(&mut **tx)

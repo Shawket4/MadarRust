@@ -124,7 +124,7 @@ async fn seed_cash_method(pool: &PgPool, org: Uuid) {
     .unwrap();
 }
 async fn open_shift_row(pool: &PgPool, branch: Uuid, teller: Uuid) -> Uuid {
-    sqlx::query_scalar("INSERT INTO shifts (branch_id, teller_id, status, opening_cash) VALUES ($1,$2,'open',0) RETURNING id")
+    sqlx::query_scalar("INSERT INTO tills (branch_id, teller_id, status, opening_cash) VALUES ($1,$2,'open',0) RETURNING id")
         .bind(branch).bind(teller).fetch_one(pool).await.unwrap()
 }
 async fn grant(pool: &PgPool, role: &str, resource: &str, action: &str) {

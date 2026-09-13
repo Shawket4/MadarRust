@@ -580,7 +580,7 @@ pub async fn apply_snapshot(
     deductions: &[SnapshotDeduction],
 ) -> Result<(MaterializedOrder, Vec<String>), AppError> {
     let order_number: i32 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(order_number), 0) + 1 FROM orders WHERE shift_id = $1",
+        "SELECT COALESCE(MAX(order_number), 0) + 1 FROM orders WHERE till_id = $1",
     )
     .bind(ctx.shift_id)
     .fetch_one(&mut **tx)

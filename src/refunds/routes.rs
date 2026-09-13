@@ -19,7 +19,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             )
             .route(
                 "/shift/{shift_id}",
-                web::get().to(handlers::list_shift_refunds),
+                web::get().to(handlers::list_till_refunds),
             )
             .route("/{id}", web::get().to(handlers::get_refund)),
     );

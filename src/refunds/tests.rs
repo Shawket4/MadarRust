@@ -114,8 +114,8 @@ async fn seed_shift(pool: &PgPool, branch_id: Uuid, teller_id: Uuid, status: &st
     .unwrap();
     let shift_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO shifts (id, branch_id, teller_id, till_id, status, opening_cash, closed_at) \
-         VALUES ($1, $2, $3, $4, $5::shift_status, 10000, $6)",
+        "INSERT INTO tills (id, branch_id, teller_id, till_id, status, opening_cash, closed_at) \
+         VALUES ($1, $2, $3, $4, $5::till_status, 10000, $6)",
     )
     .bind(shift_id)
     .bind(branch_id)
@@ -378,7 +378,7 @@ async fn a_refund_outside_an_open_shift_is_refused(pool: PgPool) {
     let t = seed_till(&pool).await;
 
     // The teller's shift closes; the sale stays on the books.
-    sqlx::query("UPDATE shifts SET status = 'closed', closed_at = now() WHERE id = $1")
+    sqlx::query("UPDATE tills SET status = 'closed', closed_at = now() WHERE id = $1")
         .bind(t.shift_id)
         .execute(&pool)
         .await
@@ -686,7 +686,7 @@ async fn another_orgs_order_is_not_found(pool: PgPool) {
 /// twice and both moves are real.
 #[sqlx::test]
 async fn a_cash_refund_leaves_the_drawer_and_a_refunded_sale_still_entered_it(pool: PgPool) {
-    use crate::shifts::handlers::compute_system_cash;
+    use crate::tills::handlers::compute_system_cash;
     let app = app!(pool);
     let t = seed_till(&pool).await;
 
@@ -730,7 +730,7 @@ async fn a_cash_refund_leaves_the_drawer_and_a_refunded_sale_still_entered_it(po
 /// alone.
 #[sqlx::test]
 async fn a_refund_from_another_shift_lightens_that_drawer_not_the_sales(pool: PgPool) {
-    use crate::shifts::handlers::compute_system_cash;
+    use crate::tills::handlers::compute_system_cash;
     let app = app!(pool);
     let t = seed_till(&pool).await;
     let other_teller = seed_user(&pool, t.org_id, "teller").await;

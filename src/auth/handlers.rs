@@ -318,7 +318,7 @@ pub async fn login(
     //
     // (1) This teller's own open shift must be at the branch they're signing into.
     let open_shift_branch: Option<Uuid> =
-        sqlx::query_scalar("SELECT branch_id FROM shifts WHERE teller_id = $1 AND status = 'open'")
+        sqlx::query_scalar("SELECT branch_id FROM tills WHERE teller_id = $1 AND status = 'open'")
             .bind(user.id)
             .fetch_optional(pool.get_ref())
             .await?;

@@ -72,7 +72,7 @@ INSERT INTO tills (id, org_id, branch_id, name, is_default, standard_float, dele
   ('00000000-0000-4000-8000-0000000000e2', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000b2', 'Till 1', true, NULL, NULL),
   ('00000000-0000-4000-8000-0000000000e3', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000b1', 'Old',    false, 100, now());
 
-INSERT INTO tills (id, branch_id, teller_id, till_id, status, opening_cash, closing_cash_declared, closing_cash_system, opened_at, closed_at) VALUES
+INSERT INTO shifts (id, branch_id, teller_id, till_id, status, opening_cash, closing_cash_declared, closing_cash_system, opened_at, closed_at) VALUES
   ('00000000-0000-4000-8000-00000000c001', '00000000-0000-4000-8000-0000000000b1', '00000000-0000-4000-8000-0000000000a1', '00000000-0000-4000-8000-0000000000e1', 'closed', 1000, 3000, 3200, '2026-09-01 09:00+00', '2026-09-01 12:00+00'),
   ('00000000-0000-4000-8000-00000000c002', '00000000-0000-4000-8000-0000000000b1', '00000000-0000-4000-8000-0000000000a1', '00000000-0000-4000-8000-0000000000e1', 'open',   500,  NULL, NULL, '2026-09-01 13:00+00', NULL),
   ('00000000-0000-4000-8000-00000000c003', '00000000-0000-4000-8000-0000000000b2', '00000000-0000-4000-8000-0000000000a2', '00000000-0000-4000-8000-0000000000e2', 'open',   0,    NULL, NULL, '2026-09-01 08:00+00', NULL);
@@ -86,13 +86,13 @@ INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES
   ('00000000-0000-4000-8000-00000000d002', 'Card', 1500, false),
   ('00000000-0000-4000-8000-00000000d002', 'Cash', 1000, true),
   ('00000000-0000-4000-8000-00000000d003', 'Cash', 700, true);
-INSERT INTO till_cash_movements (shift_id, amount, note, moved_by, kind) VALUES
+INSERT INTO shift_cash_movements (shift_id, amount, note, moved_by, kind) VALUES
   ('00000000-0000-4000-8000-00000000c001', 500, 'float top-up', '00000000-0000-4000-8000-0000000000a1', 'pay_in'),
   ('00000000-0000-4000-8000-00000000c002', -300, 'to safe', '00000000-0000-4000-8000-0000000000a1', 'safe_drop');
 INSERT INTO order_refunds (org_id, branch_id, order_id, shift_id, amount, method, is_cash, reason, issued_by) VALUES
   ('00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000b1', '00000000-0000-4000-8000-00000000d002', '00000000-0000-4000-8000-00000000c002', 200, 'Card', false, 'goodwill', '00000000-0000-4000-8000-0000000000a1');
 
-INSERT INTO open_tickets (id, org_id, branch_id, opened_by, status, settled_at, settled_by, settled_till_id) VALUES
+INSERT INTO open_tickets (id, org_id, branch_id, opened_by, status, settled_at, settled_by, settled_shift_id) VALUES
   ('00000000-0000-4000-8000-00000000ab01', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000b1', '00000000-0000-4000-8000-0000000000a1', 'settled', '2026-09-01 11:30+00', '00000000-0000-4000-8000-0000000000a1', '00000000-0000-4000-8000-00000000c001');
 INSERT INTO open_tickets (id, org_id, branch_id, opened_by) VALUES
   ('00000000-0000-4000-8000-00000000ab02', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000b1', '00000000-0000-4000-8000-0000000000a1');
@@ -173,15 +173,15 @@ fn u(s: &str) -> Uuid {
 
 const PER_TILL_OLD: &str = r#"
 SELECT s.id::text || '|' ||
-  (SELECT count(*) FROM orders o WHERE o.till_id = s.id) || ',' ||
-  (SELECT coalesce(sum(total_amount),0) FROM orders o WHERE o.till_id = s.id) || ',' ||
-  (SELECT count(*) FROM order_payments p JOIN orders o ON o.id = p.order_id WHERE o.till_id = s.id) || ',' ||
-  (SELECT coalesce(sum(p.amount),0) FROM order_payments p JOIN orders o ON o.id = p.order_id WHERE o.till_id = s.id) || ',' ||
-  (SELECT coalesce(sum(amount),0) FROM till_cash_movements m WHERE m.shift_id = s.id) || ',' ||
-  (SELECT coalesce(sum(amount),0) FROM order_refunds r WHERE r.till_id = s.id) || ',' ||
-  (SELECT count(*) FROM open_tickets t WHERE t.settled_till_id = s.id) || ',' ||
+  (SELECT count(*) FROM orders o WHERE o.shift_id = s.id) || ',' ||
+  (SELECT coalesce(sum(total_amount),0) FROM orders o WHERE o.shift_id = s.id) || ',' ||
+  (SELECT count(*) FROM order_payments p JOIN orders o ON o.id = p.order_id WHERE o.shift_id = s.id) || ',' ||
+  (SELECT coalesce(sum(p.amount),0) FROM order_payments p JOIN orders o ON o.id = p.order_id WHERE o.shift_id = s.id) || ',' ||
+  (SELECT coalesce(sum(amount),0) FROM shift_cash_movements m WHERE m.shift_id = s.id) || ',' ||
+  (SELECT coalesce(sum(amount),0) FROM order_refunds r WHERE r.shift_id = s.id) || ',' ||
+  (SELECT count(*) FROM open_tickets t WHERE t.settled_shift_id = s.id) || ',' ||
   s.status || ',' || coalesce(s.closing_cash_system::text,'-')
-FROM tills s ORDER BY s.id"#;
+FROM shifts s ORDER BY s.id"#;
 
 const PER_TILL_NEW: &str = r#"
 SELECT s.id::text || '|' ||
@@ -623,7 +623,7 @@ async fn down_script_round_trip(pool: PgPool) {
         "SELECT id::text || name || is_default FROM tills ORDER BY id",
     )
     .await;
-    let bindings_before = lines(&pool, "SELECT id::text || till_id FROM tills ORDER BY id").await;
+    let bindings_before = lines(&pool, "SELECT id::text || till_id FROM shifts ORDER BY id").await;
     let occ_before = lines(&pool, "SELECT id::text || coalesce(started_till_id::text,'-') || coalesce(ended_till_id::text,'-') FROM table_occupancies ORDER BY id").await;
     migrate_rest(&pool).await;
 
@@ -650,7 +650,7 @@ async fn down_script_round_trip(pool: PgPool) {
         entities_before
     );
     assert_eq!(
-        lines(&pool, "SELECT id::text || till_id FROM tills ORDER BY id").await,
+        lines(&pool, "SELECT id::text || till_id FROM shifts ORDER BY id").await,
         bindings_before
     );
     assert_eq!(lines(&pool, "SELECT id::text || coalesce(started_till_id::text,'-') || coalesce(ended_till_id::text,'-') FROM table_occupancies ORDER BY id").await, occ_before);

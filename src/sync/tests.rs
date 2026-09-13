@@ -71,7 +71,7 @@ async fn seed_menu_item(pool: &PgPool, org: Uuid, price: i32) -> Uuid {
 }
 async fn open_shift_row(pool: &PgPool, branch: Uuid, teller: Uuid) -> Uuid {
     sqlx::query_scalar(
-        "INSERT INTO shifts (branch_id, teller_id, status, opening_cash) \
+        "INSERT INTO tills (branch_id, teller_id, status, opening_cash) \
          VALUES ($1, $2, 'open', 0) RETURNING id",
     )
     .bind(branch)

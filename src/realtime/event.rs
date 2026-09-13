@@ -31,17 +31,20 @@ pub enum Topic {
     /// (guests book online, hosts on the dashboard) — the POS sees held tables
     /// and gets its "party arriving" ping through this.
     Bookings,
+    /// Till lifecycle + payment-method availability: `till.*`, `payment_methods.*`.
+    Tills,
 }
 
 impl Topic {
     /// Every topic, for the "subscribe to all I'm allowed to read" default.
-    pub const ALL: [Topic; 6] = [
+    pub const ALL: [Topic; 7] = [
         Topic::Delivery,
         Topic::Tickets,
         Topic::Kitchen,
         Topic::Orders,
         Topic::Floor,
         Topic::Bookings,
+        Topic::Tills,
     ];
 
     pub fn parse(s: &str) -> Option<Topic> {
@@ -52,6 +55,7 @@ impl Topic {
             "orders" => Some(Topic::Orders),
             "floor" => Some(Topic::Floor),
             "bookings" => Some(Topic::Bookings),
+            "tills" => Some(Topic::Tills),
             _ => None,
         }
     }
@@ -64,6 +68,7 @@ impl Topic {
             Topic::Orders => "orders",
             Topic::Floor => "floor",
             Topic::Bookings => "bookings",
+            Topic::Tills => "tills",
         }
     }
 
@@ -76,6 +81,7 @@ impl Topic {
             Topic::Orders => ("orders", "read"),
             Topic::Floor => ("floor_plan", "read"),
             Topic::Bookings => ("bookings", "read"),
+            Topic::Tills => ("tills", "read"),
         }
     }
 }

@@ -305,8 +305,8 @@ pub async fn seed_full(
     // ── An open shift (teller = the demo admin) ─────────────────────────────
     let shift_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO shifts (id, branch_id, teller_id, status, opening_cash, opened_at) \
-         VALUES ($1, $2, $3, 'open'::shift_status, 50000, now())",
+        "INSERT INTO tills (id, branch_id, teller_id, status, opening_cash, opened_at) \
+         VALUES ($1, $2, $3, 'open'::till_status, 50000, now())",
     )
     .bind(shift_id)
     .bind(branch_id)

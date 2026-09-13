@@ -451,7 +451,7 @@ async fn test_put_sizes_roundtrip_and_soft_deactivate(pool: PgPool) {
     let branch = seed_branch(&pool, org).await;
     let teller = seed_user(&pool, org).await;
     let shift: Uuid = sqlx::query_scalar(
-        "INSERT INTO shifts (branch_id, teller_id) VALUES ($1, $2) RETURNING id",
+        "INSERT INTO tills (branch_id, teller_id) VALUES ($1, $2) RETURNING id",
     )
     .bind(branch)
     .bind(teller)

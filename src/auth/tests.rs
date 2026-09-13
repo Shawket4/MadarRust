@@ -950,7 +950,7 @@ async fn test_pin_login_same_branch_allowed_different_branch_blocked(pool: PgPoo
     assign_teller_to_branch(&pool, user_id, branch_a).await;
     assign_teller_to_branch(&pool, user_id, branch_b).await;
     let shift_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO shifts (id, branch_id, teller_id, opening_cash) VALUES ($1,$2,$3,0)")
+    sqlx::query("INSERT INTO tills (id, branch_id, teller_id, opening_cash) VALUES ($1,$2,$3,0)")
         .bind(shift_id)
         .bind(branch_a)
         .bind(user_id)
@@ -981,7 +981,7 @@ async fn test_pin_login_same_branch_allowed_different_branch_blocked(pool: PgPoo
     );
 
     // Once the shift is closed, any branch is available again.
-    sqlx::query("UPDATE shifts SET status='closed', closed_at=now() WHERE id=$1")
+    sqlx::query("UPDATE tills SET status='closed', closed_at=now() WHERE id=$1")
         .bind(shift_id)
         .execute(&pool)
         .await
@@ -1054,7 +1054,7 @@ async fn test_pin_login_allowed_when_branch_has_other_tellers_open_shift(pool: P
     sqlx::query("INSERT INTO users (id, org_id, name, role, pin_hash) VALUES ($1,$2,'Alice','teller'::user_role,$3)")
         .bind(alice).bind(org_id).bind(bcrypt::hash("1111", bcrypt::DEFAULT_COST).unwrap()).execute(&pool).await.unwrap();
     assign_teller_to_branch(&pool, alice, branch).await;
-    sqlx::query("INSERT INTO shifts (branch_id, teller_id, opening_cash) VALUES ($1,$2,0)")
+    sqlx::query("INSERT INTO tills (branch_id, teller_id, opening_cash) VALUES ($1,$2,0)")
         .bind(branch)
         .bind(alice)
         .execute(&pool)

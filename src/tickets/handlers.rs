@@ -19,7 +19,7 @@ use crate::orders::handlers::{
 use crate::permissions::checker::check_permission;
 use crate::realtime::event::{BranchEvent, Topic};
 use crate::realtime::hub::BranchEventHub;
-use crate::shifts::handlers::branch_has_open_shift;
+use crate::tills::handlers::branch_has_open_till;
 use crate::sync::ActingContext;
 
 // ── Requests ──────────────────────────────────────────────────
@@ -283,7 +283,7 @@ pub(crate) async fn create_open_ticket_inner(
     }
     // The branch must be operating (any till open) to fire to the kitchen. Replay
     // is recorded history (the gate was answered LAN-first at fire time) → skip.
-    if !actor.replay && !branch_has_open_shift(pool.get_ref(), body.branch_id).await? {
+    if !actor.replay && !crate::tills::handlers::branch_has_open_till(pool.get_ref(), body.branch_id).await? {
         return Err(AppError::Conflict(
             "No open shift at this branch — open a till first".into(),
         ));
@@ -1241,7 +1241,10 @@ pub(crate) async fn settle_open_ticket_inner(
         branch_id,
         loyalty_customer_id: body.loyalty_customer_id,
         loyalty_redemptions: redemptions,
-        shift_id: body.shift_id,
+        till_id: body.shift_id,
+        device_id: None,
+        device_code: None,
+        verification: None,
         payment_method: body.payment_method.clone(),
         customer_name,
         notes,

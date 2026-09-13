@@ -592,7 +592,7 @@ async fn live_at_branch(pool: &PgPool, branch_id: Uuid) -> Result<Vec<String>, A
     // tickets, and a parked cart is now a ticket like any other.
     let row: (i64, i64, i64, i64) = sqlx::query_as(
         "SELECT \
-           (SELECT count(*) FROM shifts WHERE branch_id = $1 AND closed_at IS NULL), \
+           (SELECT count(*) FROM tills WHERE branch_id = $1 AND closed_at IS NULL), \
            (SELECT count(*) FROM open_tickets WHERE branch_id = $1 \
              AND status NOT IN ('settled','voided')), \
            (SELECT count(*) FROM branch_tables WHERE branch_id = $1 \

@@ -103,7 +103,7 @@ async fn grant_permission(pool: &PgPool, role: &str, resource: &str, action: &st
 
 async fn seed_shift(pool: &PgPool, branch_id: Uuid, user_id: Uuid) -> Uuid {
     let shift_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO shifts (id, branch_id, teller_id, status, opening_cash) VALUES ($1, $2, $3, 'open', 10000)")
+    sqlx::query("INSERT INTO tills (id, branch_id, teller_id, status, opening_cash) VALUES ($1, $2, $3, 'open', 10000)")
         .bind(shift_id)
         .bind(branch_id)
         .bind(user_id)
@@ -1777,7 +1777,7 @@ async fn a_partial_refund_comes_off_revenue_but_not_off_money_in(pool: PgPool) {
     // B is an earlier, closed one on the same branch.
     let shift_b = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO shifts (id, branch_id, teller_id, status, opening_cash, closed_at)
+        "INSERT INTO tills (id, branch_id, teller_id, status, opening_cash, closed_at)
          VALUES ($1, $2, $3, 'closed', 10000, now())",
     )
     .bind(shift_b)

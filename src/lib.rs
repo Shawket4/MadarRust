@@ -19,6 +19,7 @@ pub mod costing;
 pub mod db;
 pub mod decimals;
 pub mod delivery;
+pub mod devices;
 pub mod demo;
 pub mod discounts;
 pub mod errors;
@@ -46,7 +47,6 @@ pub mod recipes;
 pub mod refunds;
 pub mod reports;
 pub mod reservations;
-pub mod shifts;
 pub mod staff;
 pub mod stocktakes;
 pub mod sync;
@@ -64,3 +64,6 @@ pub mod e2e_tests;
 
 #[cfg(test)]
 pub mod rls_tests;
+
+#[cfg(test)]
+mod tills_migration_tests;

@@ -478,7 +478,7 @@ mod it {
     }
     async fn seed_shift(pool: &PgPool, branch: Uuid, user: Uuid) -> Uuid {
         let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO shifts (id, branch_id, teller_id, status, opening_cash) VALUES ($1,$2,$3,'open',10000)")
+        sqlx::query("INSERT INTO tills (id, branch_id, teller_id, status, opening_cash) VALUES ($1,$2,$3,'open',10000)")
             .bind(id)
             .bind(branch)
             .bind(user)
