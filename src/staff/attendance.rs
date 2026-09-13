@@ -173,6 +173,10 @@ pub struct MyAttendanceToday {
     /// That branch's name, so the app's geofence chip can say WHERE it is about
     /// to clock in rather than merely that it can.
     pub branch_name: Option<String>,
+    /// The IANA timezone this payload's instants are shown in (see `crate::tz`).
+    /// Additive; older clients ignore it.
+    #[serde(default)]
+    pub timezone: Option<String>,
 }
 
 // ── Requests ──────────────────────────────────────────────────
@@ -1075,6 +1079,7 @@ pub async fn my_today(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRespo
         blocked_reason,
         branch_id,
         branch_name,
+        timezone: Some(tz),
     }))
 }
 
@@ -1295,6 +1300,10 @@ pub struct TeamPresence {
     /// Minutes rostered for today across the team.
     pub planned_minutes: i64,
     pub rows: Vec<PresenceRow>,
+    /// The IANA timezone this payload's instants are shown in (see `crate::tz`).
+    /// Additive; older clients ignore it.
+    #[serde(default)]
+    pub timezone: Option<String>,
 }
 
 #[derive(Deserialize, IntoParams, Debug)]
@@ -1425,6 +1434,7 @@ pub async fn team_presence(
         worked_minutes: rows.iter().map(|r| r.worked_minutes as i64).sum(),
         planned_minutes: rows.iter().map(|r| r.scheduled_minutes).sum(),
         rows,
+        timezone: Some(tz.clone()),
     };
     Ok(HttpResponse::Ok().json(body))
 }
