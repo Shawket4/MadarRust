@@ -54801,6 +54801,13 @@
               "null"
             ]
           },
+          "timezone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The branch's effective IANA timezone (see `crate::tz`) — the zone this\nticket's times are shown in. Additive."
+          },
           "void_note": {
             "type": [
               "string",
@@ -55107,6 +55114,13 @@
           },
           "teller_name": {
             "type": "string"
+          },
+          "timezone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The branch's effective IANA timezone (see `crate::tz`) — the zone every\ntimestamp on this payload is shown and printed in. Additive: older\nclients ignore it; `null` only where a write path does not resolve it."
           },
           "tip_amount": {
             "type": [
@@ -55442,6 +55456,13 @@
                   "$ref": "#/components/schemas/OrderItemFull"
                 }
               },
+              "loyalty_redemption_refused": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Set only on the response to a REPLAYED sale whose rewards the points\ncould not pay for: the covered lines stayed covered, no points moved,\nthe order is flagged. The till shows this sentence to the teller."
+              },
               "warnings": {
                 "type": "array",
                 "items": {
@@ -55594,6 +55615,10 @@
             "type": "string",
             "format": "uuid"
           },
+          "is_reward": {
+            "type": "boolean",
+            "description": "A loyalty reward paid for some or all of this line. The receipt and the\nkitchen say \"Reward\" beside it."
+          },
           "item_name": {
             "type": "string"
           },
@@ -55632,6 +55657,11 @@
           "quantity": {
             "type": "integer",
             "format": "int32"
+          },
+          "reward_units": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many of `quantity` the reward covered."
           },
           "size_label": {
             "type": [
@@ -60774,6 +60804,13 @@
               "string",
               "null"
             ]
+          },
+          "timezone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The branch's effective IANA timezone (see `crate::tz`) — the zone every\ntimestamp on this payload is shown and printed in. Additive: older\nclients ignore it; `null` only where a write path does not resolve it."
           }
         }
       },
@@ -60947,6 +60984,13 @@
             ],
             "format": "int64",
             "description": "For an OPEN shift on a till with a standard float: how much of\n`expected_cash` to drop into the safe so the drawer closes at the\nfloat. Never negative — a drawer under its float has nothing to drop.\n`None` when the shift is closed or the till has no float."
+          },
+          "timezone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The zone this report's times print in (the shift's branch) — see\n`crate::tz`. Additive; mirrors `shift.timezone`."
           },
           "total_payments": {
             "type": "integer",
