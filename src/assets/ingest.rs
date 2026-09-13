@@ -939,8 +939,11 @@ pub async fn ingest_bytes(
         .map_err(|_| AppError::Internal)??;
     drop(permit);
 
-    // 4. content_hash per file. Byte-identical variants of ONE group (an image
-    //    smaller than the bound) share one row: keep the largest variant name.
+    // 4. content_hash per file. Byte-identical display variants of ONE group
+    //    (an image smaller than the bound) share one row: keep the largest
+    //    variant name. A kept `original` always gets its own row, even when it
+    //    is the same file as `full` (a small lossless logo): readers ask for
+    //    `original` by name, and rows may share a file.
     let mut hashed: Vec<(String, EncodedVariant)> = variants
         .into_iter()
         .map(|v| (sha256_hex(&v.bytes), v))
@@ -948,7 +951,7 @@ pub async fn ingest_bytes(
     let rank = |v: &str| match v { "full" => 0, "original" => 1, "tile" => 2, "thumb" => 3, _ => 4 };
     hashed.sort_by_key(|(_, v)| rank(v.variant));
     let mut seen = std::collections::HashSet::new();
-    hashed.retain(|(h, _)| seen.insert(h.clone()));
+    hashed.retain(|(h, v)| v.variant == "original" || seen.insert(h.clone()));
 
     // 5. Content dedup, before any file is written: a group of the same profile
     //    in this org whose variants are byte-identical to ours (e.g. the same

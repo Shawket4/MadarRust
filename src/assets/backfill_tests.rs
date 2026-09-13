@@ -376,3 +376,20 @@ async fn prune_keeps_a_legacy_file_another_unverified_item_uses(pool: PgPool) {
     assert_eq!(rep.deleted, 0);
     assert!(store.uploads_dir.join(format!("{org}/menu-items/s.png")).exists());
 }
+
+#[sqlx::test]
+async fn small_transparent_logo_keeps_an_original_row_sharing_the_full_file(pool: PgPool) {
+    use super::ingest::{AssetPurpose, SourceKind, ingest_bytes};
+    let (_d, store) = tmp_store();
+    let org = seed_org(&pool).await;
+    let mut img = image::RgbaImage::from_pixel(200, 100, image::Rgba([0, 0, 0, 0]));
+    for x in 50..150 { for y in 25..75 { img.put_pixel(x, y, image::Rgba([10, 120, 60, 255])); } }
+    let mut buf = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(img).write_to(&mut buf, image::ImageFormat::Png).unwrap();
+    let o = ingest_bytes(&pool, &store, Some(org), AssetPurpose::OrgLogo, buf.into_inner(), SourceKind::Backfill, None, None).await.unwrap();
+    let (full, orig) = (o.variant("full").unwrap(), o.variant("original").expect("original row"));
+    assert_eq!(full.hash, orig.hash, "precondition: lossless full == original");
+    assert_ne!(full.id, orig.id);
+    let (disk, rows) = files_vs_rows(&pool, &store, org).await;
+    assert_eq!(disk, rows);
+}

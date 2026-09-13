@@ -19,8 +19,20 @@ CREATE INDEX idx_assets_org_hash ON assets (org_id, hash);
 ALTER TABLE asset_groups ADD COLUMN profile text NOT NULL DEFAULT 'photo'
     CONSTRAINT asset_groups_profile_check CHECK (profile IN ('photo','keeps_original'));
 -- Groups made before this migration: a stored original means keeps_original.
+-- So does a lossless `full` (only logo/card conversions encode `full`
+-- losslessly); there the original was byte-identical to `full` and 090400's
+-- (org, hash) rule folded it into the `full` row.
 UPDATE asset_groups g SET profile = 'keeps_original'
- WHERE EXISTS (SELECT 1 FROM assets a WHERE a.group_id = g.id AND a.variant = 'original');
+ WHERE EXISTS (SELECT 1 FROM assets a WHERE a.group_id = g.id
+                 AND (a.variant = 'original' OR (a.variant = 'full' AND a.encoder_settings->>'lossless' = 'true')));
+-- Give those folded originals their own row, sharing the `full` file.
+INSERT INTO assets (org_id, hash, group_id, encoder, encoder_settings, kind, variant, ext, content_type,
+                    bytes, width, height, has_alpha, source_hash, source_kind, label, created_by, created_at)
+SELECT a.org_id, a.hash, a.group_id, a.encoder, a.encoder_settings, a.kind, 'original', a.ext, a.content_type,
+       a.bytes, a.width, a.height, a.has_alpha, a.source_hash, a.source_kind, a.label, a.created_by, a.created_at
+  FROM assets a JOIN asset_groups g ON g.id = a.group_id
+ WHERE g.profile = 'keeps_original' AND a.variant = 'full'
+   AND NOT EXISTS (SELECT 1 FROM assets o WHERE o.group_id = a.group_id AND o.variant = 'original');
 
 DROP INDEX uq_asset_groups_org_source;
 DROP INDEX uq_asset_groups_global_source;
