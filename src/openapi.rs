@@ -735,6 +735,12 @@ struct SecurityAddon;
 
 impl Modify for SecurityAddon {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        // Payment-method availability (TILLS_CONTRACT §2.3) keeps its own doc
+        // next to the handlers; fold it into the aggregate spec.
+        openapi.merge(
+            <crate::payment_methods::availability::AvailabilityApiDoc as utoipa::OpenApi>::openapi(),
+        );
+
         let components = openapi
             .components
             .as_mut()
