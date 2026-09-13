@@ -100,6 +100,11 @@ impl AssetPurpose {
     pub fn keeps_original(self) -> bool {
         matches!(self, Self::OrgLogo | Self::LoyaltyCardImage)
     }
+    /// `asset_groups.profile`: which conversion recipe made the group. Dedup
+    /// (by source or by pixels) never crosses profiles.
+    pub fn profile(self) -> &'static str {
+        if self.keeps_original() { "keeps_original" } else { "photo" }
+    }
 }
 
 pub enum IngestSource {
@@ -914,8 +919,13 @@ pub async fn ingest_bytes(
     let encoder = encoder_string(kind);
 
     // 2. Per-org dedup on the source. Scoped to this org only (or to the global
-    //    preset namespace): other orgs are never consulted.
-    if let Some(found) = find_group_by_source(pool, org_id, &source_hash, &encoder).await? {
+    //    preset namespace): other orgs are never consulted. Never across
+    //    profiles: a logo must not reuse the photo group made from the same file
+    //    (it has no `original`).
+    let profile = purpose.profile();
+    if let Some(found) =
+        find_group_by_source(pool, org_id, &source_hash, &encoder, profile).await?
+    {
         return Ok(found);
     }
 
@@ -929,120 +939,88 @@ pub async fn ingest_bytes(
         .map_err(|_| AppError::Internal)??;
     drop(permit);
 
-    // 4. Store files (content-addressed; an existing file IS these bytes).
-    let mut hashed = Vec::with_capacity(variants.len());
-    for v in variants {
-        let hash = sha256_hex(&v.bytes);
-        let key = AssetStore::key(org_id, &hash, v.ext);
-        let path = store.path_for_key(&key);
-        let bytes = v.bytes.clone();
-        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            match std::fs::metadata(&path) {
-                Ok(m) if m.len() == bytes.len() as u64 => Ok(()),
-                _ => write_atomic(&path, &bytes),
-            }
-        })
-        .await
-        .map_err(|_| AppError::Internal)?
-        .map_err(|e| {
-            tracing::error!(error = %e, "asset write failed");
-            AppError::Internal
-        })?;
-        hashed.push((hash, v));
-    }
-    // Byte-identical variants (image smaller than the bound) share one row:
-    // keep the largest variant name (`uq_assets_org_hash`).
+    // 4. content_hash per file. Byte-identical display variants of ONE group
+    //    (an image smaller than the bound) share one row: keep the largest
+    //    variant name. A kept `original` always gets its own row, even when it
+    //    is the same file as `full` (a small lossless logo): readers ask for
+    //    `original` by name, and rows may share a file.
+    let mut hashed: Vec<(String, EncodedVariant)> = variants
+        .into_iter()
+        .map(|v| (sha256_hex(&v.bytes), v))
+        .collect();
     let rank = |v: &str| match v { "full" => 0, "original" => 1, "tile" => 2, "thumb" => 3, _ => 4 };
     hashed.sort_by_key(|(_, v)| rank(v.variant));
     let mut seen = std::collections::HashSet::new();
-    hashed.retain(|(h, _)| seen.insert(h.clone()));
+    hashed.retain(|(h, v)| v.variant == "original" || seen.insert(h.clone()));
 
-    // 5a. Content dedup: identical converted pixels (e.g. the same photo with
-    //     different metadata) already stored in this org → reuse that group.
-    if let Some((_, v)) = hashed.iter().find(|(_, v)| v.variant == "full" || v.variant == "animation") {
-        let hash = &hashed.iter().find(|(_, x)| x.variant == v.variant).unwrap().0;
-        let existing: Option<Uuid> = sqlx::query_scalar(
-            "SELECT a.group_id FROM assets a WHERE a.org_id IS NOT DISTINCT FROM $1 AND a.hash = $2 AND a.encoder = $3 \
-               AND EXISTS (SELECT 1 FROM assets o WHERE o.group_id = a.group_id AND o.variant = 'original') = $4 LIMIT 1",
+    // 5. Content dedup, before any file is written: a group of the same profile
+    //    in this org whose variants are byte-identical to ours (e.g. the same
+    //    photo with different metadata) → reuse that group.
+    if let Some((hash, v)) = hashed
+        .iter()
+        .find(|(_, v)| v.variant == "full" || v.variant == "animation")
+    {
+        let candidates: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT DISTINCT a.group_id FROM assets a JOIN asset_groups g ON g.id = a.group_id \
+             WHERE a.org_id IS NOT DISTINCT FROM $1 AND a.hash = $2 AND a.variant = $3 AND a.encoder = $4 \
+               AND g.profile = $5",
         )
         .bind(org_id)
         .bind(hash)
+        .bind(v.variant)
         .bind(&encoder)
-        .bind(hashed.iter().any(|(_, x)| x.variant == "original"))
-        .fetch_optional(pool)
+        .bind(profile)
+        .fetch_all(pool)
         .await?;
-        if let Some(group_id) = existing {
+        let mut ours: Vec<(&str, &str)> =
+            hashed.iter().map(|(h, v)| (v.variant, h.as_str())).collect();
+        ours.sort();
+        for group_id in candidates {
             let variants = group_variants(pool, org_id, group_id).await?;
-            return Ok(IngestOutcome { group_id, org_id, variants, deduped: true });
+            let mut theirs: Vec<(&str, &str)> = variants
+                .iter()
+                .map(|v| (v.variant.as_str(), v.hash.as_str()))
+                .collect();
+            theirs.sort();
+            if theirs == ours {
+                return Ok(IngestOutcome { group_id, org_id, variants, deduped: true });
+            }
         }
     }
 
-    // 5. Rows.
+    // 6. Rows and files together (content-addressed; an existing file IS these
+    //    bytes, and may already be shared by other groups' rows).
     let group_id = Uuid::new_v4();
     let label = sanitize_label(label);
-    let mut tx = pool.begin().await?;
-    let r0 = sqlx::query(
-        "INSERT INTO asset_groups (id, org_id, kind, source_hash, encoder, label) VALUES ($1,$2,$3,$4,$5,$6)",
-    )
-    .bind(group_id)
-    .bind(org_id)
-    .bind(kind)
-    .bind(&source_hash)
-    .bind(&encoder)
-    .bind(&label)
-    .execute(&mut *tx)
-    .await;
-    if let Err(e) = r0 {
-        let unique = matches!(&e, sqlx::Error::Database(d) if d.is_unique_violation());
-        drop(tx);
+    let new_group = NewGroup {
+        group_id,
+        org_id,
+        kind,
+        source_hash: &source_hash,
+        encoder: &encoder,
+        profile,
+        label: label.as_deref(),
+        source_kind,
+        actor,
+    };
+    if let Err(e) = store_group(pool, store, &new_group, &hashed).await {
+        let unique = matches!(&e, StoreError::Db(sqlx::Error::Database(d)) if d.is_unique_violation());
+        // A concurrent ingest (backfill vs worker) of the same source won the
+        // race: its group is the answer.
         if unique
-            && let Some(found) = find_group_by_source(pool, org_id, &source_hash, &encoder).await?
+            && let Some(found) =
+                find_group_by_source(pool, org_id, &source_hash, &encoder, profile).await?
         {
             return Ok(found);
         }
-        return Err(e.into());
-    }
-    for (hash, v) in &hashed {
-        let r = sqlx::query(
-            "INSERT INTO assets (org_id, hash, group_id, encoder, encoder_settings, kind, variant, ext, \
-                                 content_type, bytes, width, height, has_alpha, source_hash, source_kind, label, created_by) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)",
-        )
-        .bind(org_id)
-        .bind(hash)
-        .bind(group_id)
-        .bind(&encoder)
-        .bind(&v.settings)
-        .bind(kind)
-        .bind(v.variant)
-        .bind(v.ext)
-        .bind(v.content_type)
-        .bind(v.bytes.len() as i64)
-        .bind(v.width)
-        .bind(v.height)
-        .bind(v.has_alpha)
-        .bind(&source_hash)
-        .bind(source_kind.as_str())
-        .bind(&label)
-        .bind(actor)
-        .execute(&mut *tx)
-        .await;
-        if let Err(e) = r {
-            let unique = matches!(&e, sqlx::Error::Database(d) if d.is_unique_violation());
-            drop(tx);
-            if unique {
-                // A concurrent ingest (backfill vs worker) of the same source
-                // won the race: its group is the answer.
-                if let Some(found) =
-                    find_group_by_source(pool, org_id, &source_hash, &encoder).await?
-                {
-                    return Ok(found);
-                }
+        return Err(match e {
+            StoreError::Db(e) => e.into(),
+            StoreError::Io(e) => {
+                tracing::error!(error = %e, "asset write failed");
+                AppError::Internal
             }
-            return Err(e.into());
-        }
+        });
     }
-    tx.commit().await?;
     let variants = group_variants(pool, org_id, group_id).await?;
     Ok(IngestOutcome {
         group_id,
@@ -1052,33 +1030,168 @@ pub async fn ingest_bytes(
     })
 }
 
+struct NewGroup<'a> {
+    group_id: Uuid,
+    org_id: Option<Uuid>,
+    kind: &'a str,
+    source_hash: &'a str,
+    encoder: &'a str,
+    profile: &'a str,
+    label: Option<&'a str>,
+    source_kind: SourceKind,
+    actor: Option<Uuid>,
+}
+
+enum StoreError {
+    Db(sqlx::Error),
+    Io(std::io::Error),
+}
+
+impl From<sqlx::Error> for StoreError {
+    fn from(e: sqlx::Error) -> Self {
+        Self::Db(e)
+    }
+}
+
+/// Insert the group + its rows and write any missing files, in one transaction
+/// that holds the per-file locks. On any failure nothing is committed and every
+/// file this attempt created is removed again unless a committed row (another
+/// group's) references it by then: a failed attempt leaves no orphan.
+async fn store_group(
+    pool: &PgPool,
+    store: &AssetStore,
+    g: &NewGroup<'_>,
+    hashed: &[(String, EncodedVariant)],
+) -> Result<(), StoreError> {
+    let mut files: Vec<(String, &str, &EncodedVariant)> = hashed
+        .iter()
+        .map(|(h, v)| (AssetStore::key(g.org_id, h, v.ext), h.as_str(), v))
+        .collect();
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files.dedup_by(|a, b| a.0 == b.0);
+
+    let mut created: Vec<(String, &'static str)> = Vec::new();
+    let res = store_group_tx(pool, store, g, hashed, &files, &mut created).await;
+    if res.is_err() && !created.is_empty() {
+        // The failed transaction is gone (its locks with it). Re-take the locks
+        // so nobody is between "file exists, skip the write" and committing a
+        // row that references it, then delete what is still unreferenced.
+        let cleanup = async {
+            let mut tx = pool.begin().await?;
+            created.sort();
+            for (hash, ext) in &created {
+                super::lock_file_key(&mut tx, &AssetStore::key(g.org_id, hash, ext)).await?;
+            }
+            for (hash, ext) in &created {
+                super::remove_file_if_unreferenced(&mut tx, store, g.org_id, hash, ext).await?;
+            }
+            tx.commit().await
+        };
+        if let Err(e) = cleanup.await {
+            tracing::error!(error = %e, "asset orphan cleanup failed");
+        }
+    }
+    res
+}
+
+async fn store_group_tx(
+    pool: &PgPool,
+    store: &AssetStore,
+    g: &NewGroup<'_>,
+    hashed: &[(String, EncodedVariant)],
+    files: &[(String, &str, &EncodedVariant)],
+    created: &mut Vec<(String, &'static str)>,
+) -> Result<(), StoreError> {
+    let mut tx = pool.begin().await?;
+    for (key, _, _) in files {
+        super::lock_file_key(&mut tx, key).await?;
+    }
+    sqlx::query(
+        "INSERT INTO asset_groups (id, org_id, kind, source_hash, encoder, profile, label) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+    )
+    .bind(g.group_id)
+    .bind(g.org_id)
+    .bind(g.kind)
+    .bind(g.source_hash)
+    .bind(g.encoder)
+    .bind(g.profile)
+    .bind(g.label)
+    .execute(&mut *tx)
+    .await?;
+    for (hash, v) in hashed {
+        sqlx::query(
+            "INSERT INTO assets (org_id, hash, group_id, encoder, encoder_settings, kind, variant, ext, \
+                                 content_type, bytes, width, height, has_alpha, source_hash, source_kind, label, created_by) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)",
+        )
+        .bind(g.org_id)
+        .bind(hash)
+        .bind(g.group_id)
+        .bind(g.encoder)
+        .bind(&v.settings)
+        .bind(g.kind)
+        .bind(v.variant)
+        .bind(v.ext)
+        .bind(v.content_type)
+        .bind(v.bytes.len() as i64)
+        .bind(v.width)
+        .bind(v.height)
+        .bind(v.has_alpha)
+        .bind(g.source_hash)
+        .bind(g.source_kind.as_str())
+        .bind(g.label)
+        .bind(g.actor)
+        .execute(&mut *tx)
+        .await?;
+    }
+    for (key, hash, v) in files {
+        let path = store.path_for_key(key);
+        let bytes = v.bytes.clone();
+        let wrote = tokio::task::spawn_blocking(move || -> std::io::Result<bool> {
+            match std::fs::metadata(&path) {
+                Ok(m) if m.len() == bytes.len() as u64 => Ok(false),
+                _ => write_atomic(&path, &bytes).map(|_| true),
+            }
+        })
+        .await
+        .map_err(|e| StoreError::Io(std::io::Error::other(e)))?;
+        match wrote {
+            Ok(true) => created.push((hash.to_string(), v.ext)),
+            Ok(false) => {}
+            Err(e) => return Err(StoreError::Io(e)),
+        }
+    }
+    #[cfg(test)]
+    if g.org_id.is_some_and(|o| FAIL_BEFORE_COMMIT.lock().unwrap().contains(&o)) {
+        return Err(StoreError::Io(std::io::Error::other("injected failure before commit")));
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Test hook: `store_group` for these orgs fails after writing its files.
+#[cfg(test)]
+pub(crate) static FAIL_BEFORE_COMMIT: std::sync::Mutex<Vec<Uuid>> = std::sync::Mutex::new(Vec::new());
+
 async fn find_group_by_source(
     pool: &PgPool,
     org_id: Option<Uuid>,
     source_hash: &str,
     encoder: &str,
+    profile: &str,
 ) -> Result<Option<IngestOutcome>, AppError> {
-    let gid: Option<Uuid> = match org_id {
-        Some(o) => sqlx::query_scalar(
-            "SELECT g.id FROM asset_groups g WHERE g.org_id = $1 AND g.source_hash = $2 AND g.encoder = $3 \
-               AND EXISTS (SELECT 1 FROM assets a WHERE a.group_id = g.id) \
-             ORDER BY g.created_at LIMIT 1",
-        )
-        .bind(o)
-        .bind(source_hash)
-        .bind(encoder)
-        .fetch_optional(pool)
-        .await?,
-        None => sqlx::query_scalar(
-            "SELECT g.id FROM asset_groups g WHERE g.org_id IS NULL AND g.source_hash = $1 AND g.encoder = $2 \
-               AND EXISTS (SELECT 1 FROM assets a WHERE a.group_id = g.id) \
-             ORDER BY g.created_at LIMIT 1",
-        )
-        .bind(source_hash)
-        .bind(encoder)
-        .fetch_optional(pool)
-        .await?,
-    };
+    let gid: Option<Uuid> = sqlx::query_scalar(
+        "SELECT g.id FROM asset_groups g WHERE g.org_id IS NOT DISTINCT FROM $1 AND g.source_hash = $2 \
+           AND g.encoder = $3 AND g.profile = $4 \
+           AND EXISTS (SELECT 1 FROM assets a WHERE a.group_id = g.id) \
+         ORDER BY g.created_at LIMIT 1",
+    )
+    .bind(org_id)
+    .bind(source_hash)
+    .bind(encoder)
+    .bind(profile)
+    .fetch_optional(pool)
+    .await?;
     let Some(group_id) = gid else { return Ok(None) };
     let variants = group_variants(pool, org_id, group_id).await?;
     Ok(Some(IngestOutcome {

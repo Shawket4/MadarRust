@@ -1,4 +1,5 @@
 -- ROLLBACK of the tills rework (NOT a sqlx migration). Reverses, in order:
+--   20260914090600_asset_files_are_shared_groups_have_a_profile.sql (the asset tables are dropped whole)
 --   20260914090400_assets.sql
 --   20260914090500_asset_internal_tables_rls.sql
 --   20260914090300_sync_changefeed.sql
@@ -52,7 +53,7 @@ SELECT (SELECT count(*) FROM tills) AS tills, (SELECT count(*) FROM orders) AS o
        (SELECT coalesce(sum(amount),0) FROM till_cash_movements) AS sum_cash_moves,
        (SELECT coalesce(sum(amount),0) FROM order_refunds) AS sum_refunds;
 
--- ═══ 090400 assets ═══════════════════════════════════════════════════════════
+-- ═══ 090400 assets (+ 090600) ═══════════════════════════════════════════════════════════
 DROP TRIGGER IF EXISTS asset_ref_changed ON menu_items;
 DROP TRIGGER IF EXISTS asset_ref_changed ON categories;
 DROP TRIGGER IF EXISTS asset_ref_changed ON bundles;
@@ -408,4 +409,4 @@ BEGIN
 END $$;
 
 DELETE FROM _sqlx_migrations WHERE version IN
-    (20260914090000, 20260914090100, 20260914090200, 20260914090300, 20260914090400, 20260914090500);
+    (20260914090000, 20260914090100, 20260914090200, 20260914090300, 20260914090400, 20260914090500, 20260914090600);

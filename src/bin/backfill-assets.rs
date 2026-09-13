@@ -117,6 +117,22 @@ async fn main() {
             if let Some(p) = report_path {
                 std::fs::write(&p, &json).expect("write report");
             }
+            if !report.dry_run {
+                eprintln!("run_id: {}", report.run_id);
+                match backfill::verified_runs(&pool, org).await {
+                    Ok(runs) if runs.is_empty() => {
+                        eprintln!("no verified items yet: nothing can be pruned");
+                    }
+                    Ok(runs) => {
+                        for (run, n) in runs {
+                            eprintln!(
+                                "verified in run {run}: {n} item(s) -> prune with --prune-originals --i-have-verified {run}"
+                            );
+                        }
+                    }
+                    Err(e) => eprintln!("could not list verified runs: {e}"),
+                }
+            }
         }
         Err(e) => {
             eprintln!("backfill failed: {e}");

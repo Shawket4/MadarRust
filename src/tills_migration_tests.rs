@@ -16,13 +16,14 @@ static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 /// Last migration before the rework.
 const PRE_VERSION: i64 = 20260913101500;
-const REWORK_VERSIONS: [i64; 6] = [
+const REWORK_VERSIONS: [i64; 7] = [
     20260914090000,
     20260914090100,
     20260914090200,
     20260914090300,
     20260914090400,
     20260914090500,
+    20260914090600,
 ];
 
 const DOWN_SQL: &str = include_str!("../scripts/tills_rework/down.sql");
@@ -714,7 +715,7 @@ async fn down_script_round_trip(pool: PgPool) {
         bindings_before
     );
     assert_eq!(lines(&pool, "SELECT id::text || coalesce(started_till_id::text,'-') || coalesce(ended_till_id::text,'-') FROM table_occupancies ORDER BY id").await, occ_before);
-    assert_eq!(i64_of(&pool, "SELECT count(*) FROM _sqlx_migrations WHERE version >= 20260914090000 AND version <= 20260914090500").await, 0);
+    assert_eq!(i64_of(&pool, "SELECT count(*) FROM _sqlx_migrations WHERE version >= 20260914090000 AND version <= 20260914090600").await, 0);
     // The old one-open-per-teller rule is back.
     assert!(
         sqlx::query("INSERT INTO tills (branch_id, teller_id, status) VALUES ($1, $2, 'open')")
@@ -994,17 +995,26 @@ async fn assets_unique_per_org_not_global(pool: PgPool) {
     let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     let hash = "a".repeat(64);
-    insert_group_and_asset(&pool, Some(ORG), &hash)
+    let g = insert_group_and_asset(&pool, Some(ORG), &hash)
         .await
         .unwrap();
     insert_group_and_asset(&pool, Some(ORG2), &hash)
         .await
         .expect("same bytes in another org is a separate row");
+    // 090600: a file is shared by (org, hash); a row is unique per (group, variant).
+    insert_group_and_asset(&pool, Some(ORG), &hash)
+        .await
+        .expect("another group in the same org may reference the same file");
     assert!(
-        insert_group_and_asset(&pool, Some(ORG), &hash)
+        sqlx::query("INSERT INTO assets (org_id, hash, group_id, encoder, kind, variant, ext, content_type, bytes, source_hash, source_kind)
+                     VALUES ($1, $2, $3, 'test/1', 'image', 'tile', 'webp', 'image/webp', 10, $2, 'upload')")
+            .bind(u(ORG))
+            .bind("b".repeat(64))
+            .bind(g)
+            .execute(&pool)
             .await
             .is_err(),
-        "dedup within an org"
+        "one row per variant within a group"
     );
 }
 
