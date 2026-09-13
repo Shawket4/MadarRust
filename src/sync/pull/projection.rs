@@ -345,12 +345,23 @@ keyed(crate::kitchen::kitchen_ticket_views(&mut *conn, ids).await?, &["org_id"])
             .bind(ids)
             .fetch_all(&mut *conn)
             .await?;
-            keyed(
+            let mut out = keyed(
                 rows,
                 // The opening-cash edit and the discrepancy stay: the till's Z report is
                 // computed on the device from these rows (offline plan B).
                 &["branch_name", "closed_by", "force_closed_by", "force_close_reason", "notes", "flagged_at"],
-            )
+            );
+            // The per-method close reconciliation, for the Z report the device prints.
+            let mut lines = crate::tills::reconcile::stored_lines_by_till(&mut *conn, ids).await?;
+            for (id, v) in out.iter_mut() {
+                if let Value::Object(m) = v {
+                    m.insert(
+                        "reconciliation".into(),
+                        serde_json::to_value(lines.remove(id).unwrap_or_default()).unwrap_or_else(|_| json!([])),
+                    );
+                }
+            }
+            out
         }
         "cash_movement" => {
             by_sql(

@@ -256,6 +256,24 @@ async fn an_order_carries_its_lines_and_drawer_fields_but_no_cost(pool: PgPool) 
     for k in ["opening_cash", "opening_cash_was_edited", "closing_cash_system", "status"] {
         assert!(t.get(k).is_some(), "till carries `{k}`");
     }
+    assert_eq!(t["reconciliation"], serde_json::json!([]), "an open till has no close lines yet");
+
+    // Closed with a per-method reconciliation: the lines ride the till row.
+    sqlx::query("UPDATE tills SET status = 'closed', closed_at = now(), closing_cash_declared = 0, closing_cash_system = 0, reconciliation_status = 'clean' WHERE id = $1")
+        .bind(till)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO till_reconciliations (till_id, method, is_cash, system_total, current_system_total, status, declared_amount)
+                 VALUES ($1, 'Cash', true, 0, 0, 'checked', 0)")
+        .bind(till)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let inc2 = pull_core(&pool, s.org, &req(s.branch), inc.next).await.unwrap();
+    let tr = change(&inc2, "till", till).expect("the close re-emits the till").data.clone().unwrap();
+    assert_eq!(tr["reconciliation"][0]["method"], "Cash");
+    assert_eq!(tr["reconciliation"][0]["status"], "checked");
 }
 
 #[sqlx::test]

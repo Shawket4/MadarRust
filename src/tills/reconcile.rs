@@ -310,6 +310,25 @@ const LINE_COLUMNS: &str = "method, payment_method_id, is_cash, system_total, cu
     status, declared_amount, note, reconciled_by, reconciled_at,
     (current_system_total <> system_total) AS changed_after_close";
 
+/// The stored lines of several tills on one connection, keyed by till (sync pull).
+pub(crate) async fn stored_lines_by_till(
+    conn: &mut sqlx::PgConnection,
+    till_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, Vec<TillReconciliationLine>>, AppError> {
+    let rows: Vec<(Uuid, sqlx::types::Json<TillReconciliationLine>)> = sqlx::query_as(&format!(
+        "SELECT till_id, row_to_json(x) FROM (SELECT till_id, {LINE_COLUMNS} FROM till_reconciliations \
+          WHERE till_id = ANY($1) ORDER BY till_id, is_cash DESC, method) x"
+    ))
+    .bind(till_ids)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut out: std::collections::HashMap<Uuid, Vec<TillReconciliationLine>> = std::collections::HashMap::new();
+    for (till, line) in rows {
+        out.entry(till).or_default().push(line.0);
+    }
+    Ok(out)
+}
+
 async fn stored_lines(conn: &mut sqlx::PgConnection, till_id: Uuid) -> Result<Vec<TillReconciliationLine>, AppError> {
     Ok(sqlx::query_as::<_, TillReconciliationLine>(&format!(
         "SELECT {LINE_COLUMNS} FROM till_reconciliations WHERE till_id = $1 ORDER BY is_cash DESC, method"
