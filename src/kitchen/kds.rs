@@ -7,9 +7,7 @@ use sqlx::PgPool;
 use utoipa::IntoParams;
 use uuid::Uuid;
 
-use super::{
-    KitchenTicketView, extract_claims, kitchen_ticket_view, publish_kitchen, require_branch_access,
-};
+use super::{KitchenTicketView, extract_claims, publish_kitchen, require_branch_access};
 use crate::errors::{AppError, AppErrorResponse};
 use crate::permissions::checker::check_permission;
 use crate::realtime::event::{BranchEvent, Topic};
@@ -60,12 +58,8 @@ pub async fn feed(
     .fetch_all(pool.get_ref())
     .await?;
 
-    let mut out: Vec<KitchenTicketView> = Vec::with_capacity(ids.len());
-    for id in ids {
-        if let Some(v) = kitchen_ticket_view(pool.get_ref(), id).await? {
-            out.push(v);
-        }
-    }
+    let mut conn = pool.get_ref().acquire().await?;
+    let out: Vec<KitchenTicketView> = super::kitchen_ticket_views(&mut conn, &ids).await?;
     Ok(HttpResponse::Ok().json(out))
 }
 

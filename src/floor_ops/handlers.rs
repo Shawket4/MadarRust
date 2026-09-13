@@ -184,8 +184,9 @@ pub(crate) async fn swap_tables_inner(
             ));
         }
     }
-    check_permission_for(
-        pool.get_ref(),
+    // On the held transaction: never a second pooled connection mid-write.
+    crate::permissions::checker::check_permission_for_on(
+        &mut tx,
         actor.teller_id,
         &actor.role,
         "open_tickets",
@@ -899,8 +900,9 @@ pub(crate) async fn fulfill_transfer_inner(
             "The party's order is no longer live",
         ));
     }
-    check_permission_for(
-        pool.get_ref(),
+    // On the held transaction: never a second pooled connection mid-write.
+    crate::permissions::checker::check_permission_for_on(
+        &mut tx,
         actor.teller_id,
         &actor.role,
         "open_tickets",

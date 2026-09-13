@@ -63,6 +63,8 @@ services:
       # (scripts/loadtest.sh --pgbouncer). Default = straight to Postgres.
       DATABASE_URL: postgres://madar:madar@${LT_DB_HOST:-loadtest-db}:${LT_DB_PORT:-5432}/madar_loadtest
       JWT_SECRET: ${LOADTEST_JWT_SECRET:-loadtest-secret-not-for-prod}
+      # Required by the release binary (>= 32 bytes); a throwaway value here.
+      ASSET_URL_SECRET: ${LOADTEST_ASSET_URL_SECRET:-loadtest-asset-url-secret-not-for-prod-0000}
       BIND_ADDR: 0.0.0.0:8081
       RUST_LOG: warn
       UPLOADS_DIR: /app/uploads

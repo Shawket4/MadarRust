@@ -402,3 +402,232 @@ async fn sync_changed_realtime_published_debounced(pool: PgPool) {
     }
     assert!((1..=2).contains(&events), "five changes in a burst → one immediate + at most one trailing event, got {events}");
 }
+
+/// One live entity of every one of the 22 types at `s.branch`, plus rows whose
+/// feed entry still says `upsert` but which no longer project: the time-based
+/// live rules (kitchen ticket closed > 12 h ago, delivery finished > 48 h ago,
+/// booking ended > 1 day ago) age out with no write to fire a trigger, and the
+/// sweeper has not run yet. Returns the ids of those stale rows.
+async fn seed_every_type(pool: &PgPool, s: &Shop) -> Vec<Uuid> {
+    let sql = format!(
+        r#"
+DO $$
+DECLARE
+    org uuid := '{org}';
+    br uuid := '{branch}';
+    adm uuid := '{admin}';
+    cat uuid; item uuid; item2 uuid; bun uuid; icat uuid; pm uuid; dev uuid; sec uuid; tbl uuid; tbl2 uuid;
+    ot uuid; ot2 uuid; til uuid; ord uuid; ord2 uuid;
+BEGIN
+    INSERT INTO categories (org_id, name) VALUES (org, 'Hot') RETURNING id INTO cat;
+    INSERT INTO menu_items (org_id, name, category_id) VALUES (org, 'Latte', cat) RETURNING id INTO item;
+    INSERT INTO menu_items (org_id, name, category_id) VALUES (org, 'Mocha', cat) RETURNING id INTO item2;
+    INSERT INTO menu_item_sizes (menu_item_id, label, price) VALUES (item, 'M', 1000), (item2, 'M', 1200);
+    INSERT INTO bundles (org_id, name, price, status) VALUES (org, 'Duo', 2000, 'active') RETURNING id INTO bun;
+    INSERT INTO bundle_components (bundle_id, item_id) VALUES (bun, item), (bun, item2);
+    INSERT INTO ingredient_categories (org_id, slug, name) VALUES (org, 'dairy', 'Dairy') RETURNING id INTO icat;
+    INSERT INTO org_ingredients (org_id, name, unit, category_id) VALUES (org, 'Milk', 'ml', icat);
+    INSERT INTO org_payment_methods (org_id, name, color, icon, is_cash) VALUES (org, 'Cash', '#000', 'cash', true) RETURNING id INTO pm;
+    INSERT INTO branch_payment_methods (branch_id, payment_method_id, org_id) VALUES (br, pm, org);
+    INSERT INTO user_payment_methods (user_id, payment_method_id, org_id) VALUES (adm, pm, org);
+    INSERT INTO discounts (org_id, name, type, value) VALUES (org, 'Staff', 'percentage', 0.1);
+    INSERT INTO devices (id, org_id, branch_id, code) VALUES (gen_random_uuid(), org, br, 'A') RETURNING id INTO dev;
+    INSERT INTO device_payment_methods (device_id, payment_method_id, org_id) VALUES (dev, pm, org);
+    INSERT INTO floor_sections (org_id, branch_id, name) VALUES (org, br, 'Main') RETURNING id INTO sec;
+    INSERT INTO branch_tables (org_id, branch_id, label, section_id) VALUES (org, br, 'T1', sec) RETURNING id INTO tbl;
+    INSERT INTO branch_tables (org_id, branch_id, label, section_id) VALUES (org, br, 'T2', sec) RETURNING id INTO tbl2;
+    INSERT INTO open_tickets (org_id, branch_id, opened_by, table_id) VALUES (org, br, adm, tbl) RETURNING id INTO ot;
+    INSERT INTO open_tickets (org_id, branch_id, opened_by) VALUES (org, br, adm) RETURNING id INTO ot2;
+    INSERT INTO table_occupancies (org_id, branch_id, table_id, held_by, open_ticket_id, started_by)
+         VALUES (org, br, tbl, 'ticket', ot, adm);
+    INSERT INTO table_transfer_requests (id, org_id, branch_id, occupant_kind, occupant_id, target_section_id)
+         VALUES (gen_random_uuid(), org, br, 'open_ticket', ot2, sec);
+    INSERT INTO bookings (org_id, branch_id, status, party_size, starts_at, ends_at, guest_name, guest_phone)
+         VALUES (org, br, 'confirmed', 2, now() + interval '1 hour', now() + interval '2 hours', 'G', '0100');
+    INSERT INTO tills (branch_id, teller_id, status, opening_cash) VALUES (br, adm, 'open', 0) RETURNING id INTO til;
+    INSERT INTO till_cash_movements (till_id, amount, note, moved_by, kind) VALUES (til, 500, 'float', adm, 'pay_in');
+    INSERT INTO orders (branch_id, till_id, teller_id, order_number, payment_method, order_ref, subtotal, total_amount)
+         VALUES (br, til, adm, 1, 'Cash', 'PULL-1', 1000, 1000) RETURNING id INTO ord;
+    INSERT INTO orders (branch_id, till_id, teller_id, order_number, payment_method, order_ref, subtotal, total_amount)
+         VALUES (br, til, adm, 2, 'Cash', 'PULL-2', 1000, 1000) RETURNING id INTO ord2;
+    INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES (ord, 'Cash', 1000, true);
+    INSERT INTO order_refunds (org_id, branch_id, order_id, till_id, amount, method, is_cash, reason, issued_by)
+         VALUES (org, br, ord, til, 100, 'Cash', true, 'goodwill', adm);
+    INSERT INTO kitchen_tickets (org_id, branch_id, order_id) VALUES (org, br, ord);
+    INSERT INTO kitchen_ticket_items (kitchen_ticket_id, line)
+         SELECT id, '{{"name":"Latte"}}'::jsonb FROM kitchen_tickets WHERE order_id = ord;
+    INSERT INTO delivery_orders (org_id, branch_id, channel, customer_name, customer_phone, cart, tax_amount, tax_rate_applied, tax_inclusive)
+         VALUES (org, br, 'pickup', 'C', '0101', '[]', 0, 0, false);
+    -- Rows that will age out of their live sets.
+    INSERT INTO kitchen_tickets (org_id, branch_id, order_id) VALUES (org, br, ord2);
+    INSERT INTO delivery_orders (org_id, branch_id, channel, customer_name, customer_phone, cart, tax_amount, tax_rate_applied, tax_inclusive, status)
+         VALUES (org, br, 'pickup', 'Old', '0102', '[]', 0, 0, false, 'cancelled');
+    INSERT INTO bookings (org_id, branch_id, status, party_size, starts_at, ends_at, guest_name, guest_phone)
+         VALUES (org, br, 'confirmed', 2, now() + interval '3 hours', now() + interval '4 hours', 'Gone', '0103');
+END $$;
+"#,
+        org = s.org,
+        branch = s.branch,
+        admin = s.admin
+    );
+    sqlx::raw_sql(&sql).execute(pool).await.unwrap();
+
+    // Time passes with no write (triggers off): the feed still says `upsert`.
+    let mut conn = pool.acquire().await.unwrap();
+    sqlx::raw_sql(&format!(
+        "SET session_replication_role = replica;
+         UPDATE kitchen_tickets SET status = 'ready', closed_at = now() - interval '13 hours', close_reason = 'bumped'
+          WHERE branch_id = '{b}' AND order_id = (SELECT id FROM orders WHERE order_ref = 'PULL-2');
+         UPDATE delivery_orders SET updated_at = now() - interval '49 hours' WHERE branch_id = '{b}' AND customer_name = 'Old';
+         UPDATE bookings SET starts_at = now() - interval '3 days 1 hour', ends_at = now() - interval '3 days'
+          WHERE branch_id = '{b}' AND guest_name = 'Gone';
+         SET session_replication_role = origin;",
+        b = s.branch
+    ))
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+    let stale: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT kt.id FROM kitchen_tickets kt JOIN orders o ON o.id = kt.order_id WHERE o.order_ref = 'PULL-2' \
+         UNION ALL SELECT id FROM delivery_orders WHERE customer_name = 'Old' AND branch_id = $1 \
+         UNION ALL SELECT id FROM bookings WHERE guest_name = 'Gone' AND branch_id = $1",
+    )
+    .bind(s.branch)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    assert_eq!(stale.len(), 3);
+    for id in &stale {
+        let op: String = sqlx::query_scalar("SELECT op FROM sync_changes WHERE branch_id = $1 AND entity_id = $2")
+            .bind(s.branch)
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(op, "upsert", "precondition: the feed row is stale");
+    }
+    stale
+}
+
+/// A device's local store: type → id → seq, exactly what the POS core keeps.
+type Store = std::collections::BTreeMap<String, std::collections::BTreeMap<String, i64>>;
+
+fn store_from_full(resp: &super::PullResponse) -> Store {
+    let mut store = Store::new();
+    for ty in ALL_TYPES {
+        let rows = store.entry(ty.to_string()).or_default();
+        for r in resp.data.get(*ty).into_iter().flatten() {
+            rows.insert(r["id"].as_str().unwrap().to_string(), r["seq"].as_i64().unwrap());
+        }
+    }
+    store
+}
+
+fn apply_changes(store: &mut Store, resp: &super::PullResponse) {
+    for c in &resp.changes {
+        let rows = store.entry(c.ty.clone()).or_default();
+        if c.op == "upsert" {
+            rows.insert(c.id.to_string(), c.seq);
+        } else {
+            rows.remove(&c.id.to_string());
+        }
+    }
+}
+
+/// Every type the response checksums must match the store; ledger types carry
+/// none. Returns the mismatching types (empty = the POS would not self-heal).
+fn mismatches(store: &Store, resp: &super::PullResponse) -> Vec<String> {
+    let mut bad = Vec::new();
+    for ty in ALL_TYPES {
+        if super::is_ledger(ty) {
+            if resp.checksums.contains_key(*ty) {
+                bad.push(format!("{ty}: ledger type checksummed"));
+            }
+            continue;
+        }
+        let Some(c) = resp.checksums.get(*ty) else {
+            bad.push(format!("{ty}: no checksum"));
+            continue;
+        };
+        let pairs: Vec<(String, i64)> = store[*ty].iter().map(|(id, seq)| (id.clone(), *seq)).collect();
+        if c.count != pairs.len() as i64 || c.checksum != checksum_of(&pairs) {
+            bad.push(format!("{ty}: server count {} vs store {}", c.count, pairs.len()));
+        }
+    }
+    bad
+}
+
+#[sqlx::test]
+async fn pull_checksums_equal_projected_sets_for_every_type(pool: PgPool) {
+    let s = shop(&pool).await;
+    let stale = seed_every_type(&pool, &s).await;
+
+    let full = pull_core(&pool, s.org, &req(s.branch), None).await.unwrap();
+    for ty in ALL_TYPES {
+        assert!(!full.data.get(*ty).is_none_or(|v| v.is_empty()), "fixture seeds a live `{ty}`");
+    }
+    let mut store = store_from_full(&full);
+    for id in &stale {
+        assert!(store.values().all(|rows| !rows.contains_key(&id.to_string())), "stale {id} does not project");
+    }
+    assert_eq!(mismatches(&store, &full), Vec::<String>::new(), "full snapshot checksums = its own data");
+
+    // A clean incremental pull right after the full one: nothing changed, and
+    // no type reports a mismatch (so no type is re-fetched).
+    let inc = pull_core(&pool, s.org, &req(s.branch), full.next).await.unwrap();
+    assert!(!inc.has_more && inc.changes.is_empty(), "{:?}", inc.changes);
+    apply_changes(&mut store, &inc);
+    assert_eq!(mismatches(&store, &inc), Vec::<String>::new());
+
+    // Changes after that, including one that leaves a live set, still match.
+    category(&pool, s.org, "Cold").await;
+    sqlx::query("UPDATE discounts SET is_active = false WHERE org_id = $1").bind(s.org).execute(&pool).await.unwrap();
+    let inc2 = pull_core(&pool, s.org, &req(s.branch), inc.next).await.unwrap();
+    assert!(inc2.changes.iter().any(|c| c.ty == "discount" && c.op == "delete"));
+    apply_changes(&mut store, &inc2);
+    assert_eq!(mismatches(&store, &inc2), Vec::<String>::new());
+
+    // An incremental that SEES a stale row (its feed row moved) sends a delete.
+    sqlx::query("SELECT sync_emit($1, 'booking', $2, 'upsert')").bind(s.branch).bind(stale[2]).execute(&pool).await.unwrap();
+    let inc3 = pull_core(&pool, s.org, &req(s.branch), inc2.next).await.unwrap();
+    let ch = inc3.changes.iter().find(|c| c.id == stale[2]).expect("the re-emitted booking");
+    assert_eq!(ch.op, "delete", "a booking that no longer projects is a delete");
+    apply_changes(&mut store, &inc3);
+    assert_eq!(mismatches(&store, &inc3), Vec::<String>::new());
+}
+
+/// The CRITICAL deadlock: a pull used to hold a transaction and then take a
+/// second pooled connection for the projection, so pool_size concurrent pulls
+/// each held one and waited forever for another. Now a pull holds at most one
+/// connection at a time: many more pulls than connections all complete.
+#[sqlx::test]
+async fn pull_concurrent_pulls_on_small_pool_all_complete(pool: PgPool) {
+    let s = shop(&pool).await;
+    seed_every_type(&pool, &s).await;
+    let since = pull_core(&pool, s.org, &req(s.branch), None).await.unwrap().next;
+    category(&pool, s.org, "After").await;
+
+    let small = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let mut tasks = Vec::new();
+    for i in 0..16 {
+        let small = small.clone();
+        let (org, branch) = (s.org, s.branch);
+        tasks.push(tokio::spawn(async move {
+            let since = if i % 2 == 0 { None } else { since };
+            pull_core(&small, org, &req(branch), since).await
+        }));
+    }
+    let all = tokio::time::timeout(std::time::Duration::from_secs(60), futures::future::join_all(tasks))
+        .await
+        .expect("16 pulls on a pool of 2 finish (no deadlock)");
+    for r in all {
+        let resp = r.unwrap().expect("pull ok");
+        assert!(resp.full || resp.changes.iter().any(|c| c.ty == "category"));
+    }
+}

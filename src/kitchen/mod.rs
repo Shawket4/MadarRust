@@ -507,15 +507,25 @@ pub(crate) async fn retire_unbumped_at_till_close(
 
 /// Build the view for one kitchen ticket (used for the KDS feed and the
 /// `kitchen.fired` / `kitchen.*` event payloads).
-pub(crate) async fn kitchen_ticket_view<'e, E>(
-    executor: E,
+pub(crate) async fn kitchen_ticket_view(
+    pool: &sqlx::PgPool,
     ticket_id: Uuid,
-) -> Result<Option<KitchenTicketView>, AppError>
-where
-    E: PgExecutor<'e> + Copy,
-{
+) -> Result<Option<KitchenTicketView>, AppError> {
+    let mut conn = pool.acquire().await?;
+    Ok(kitchen_ticket_views(&mut conn, &[ticket_id]).await?.pop())
+}
+
+/// Many kitchen ticket views in two queries, in the order of `ids` (missing
+/// ids are skipped). Runs on the caller's connection.
+pub(crate) async fn kitchen_ticket_views(
+    conn: &mut PgConnection,
+    ids: &[Uuid],
+) -> Result<Vec<KitchenTicketView>, AppError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
     #[allow(clippy::type_complexity)]
-    let row: Option<(
+    let rows: Vec<(
         Uuid,
         Uuid,
         String,
@@ -530,66 +540,90 @@ where
     )> = sqlx::query_as(
         "SELECT id, branch_id, source_type, source_id, table_label, kitchen_ref, \
                     round_number, status::text, created_at, closed_at, close_reason::text \
-             FROM kitchen_tickets WHERE id = $1",
+             FROM kitchen_tickets WHERE id = ANY($1)",
     )
-    .bind(ticket_id)
-    .fetch_optional(executor)
+    .bind(ids)
+    .fetch_all(&mut *conn)
     .await?;
-    let Some((
-        id,
-        branch_id,
-        source_type,
-        source_id,
-        table_label,
-        kitchen_ref,
-        round_number,
-        status,
-        created_at,
-        closed_at,
-        close_reason,
-    )) = row
-    else {
-        return Ok(None);
-    };
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
 
-    let items = sqlx::query_as::<_, KitchenTicketItemView>(
-        "SELECT kti.id, kti.station_id, ks.name AS station_name, kti.line, kti.qty, \
+    #[derive(sqlx::FromRow)]
+    struct ItemRow {
+        kitchen_ticket_id: Uuid,
+        #[sqlx(flatten)]
+        item: KitchenTicketItemView,
+    }
+    let found: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
+    let item_rows = sqlx::query_as::<_, ItemRow>(
+        "SELECT kti.kitchen_ticket_id, kti.id, kti.station_id, ks.name AS station_name, kti.line, kti.qty, \
                 (kti.bumped_at IS NOT NULL) AS bumped \
          FROM kitchen_ticket_items kti \
          LEFT JOIN kitchen_stations ks ON ks.id = kti.station_id \
-         WHERE kti.kitchen_ticket_id = $1 AND kti.voided_at IS NULL \
-         ORDER BY kti.created_at",
+         WHERE kti.kitchen_ticket_id = ANY($1) AND kti.voided_at IS NULL \
+         ORDER BY kti.kitchen_ticket_id, kti.created_at",
     )
-    .bind(id)
-    .fetch_all(executor)
+    .bind(&found)
+    .fetch_all(&mut *conn)
     .await?;
+    let mut items_of: std::collections::HashMap<Uuid, Vec<KitchenTicketItemView>> =
+        std::collections::HashMap::new();
+    for r in item_rows {
+        items_of
+            .entry(r.kitchen_ticket_id)
+            .or_default()
+            .push(r.item);
+    }
 
-    Ok(Some(KitchenTicketView {
-        id,
-        branch_id,
-        source_type,
-        source_id,
-        table_label,
-        kitchen_ref,
-        round_number,
-        status,
-        created_at,
-        closed_at,
-        close_reason,
-        items,
-    }))
+    let mut by_id: std::collections::HashMap<Uuid, KitchenTicketView> = rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                branch_id,
+                source_type,
+                source_id,
+                table_label,
+                kitchen_ref,
+                round_number,
+                status,
+                created_at,
+                closed_at,
+                close_reason,
+            )| {
+                let items = items_of.remove(&id).unwrap_or_default();
+                (
+                    id,
+                    KitchenTicketView {
+                        id,
+                        branch_id,
+                        source_type,
+                        source_id,
+                        table_label,
+                        kitchen_ref,
+                        round_number,
+                        status,
+                        created_at,
+                        closed_at,
+                        close_reason,
+                        items,
+                    },
+                )
+            },
+        )
+        .collect();
+    Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
 }
 
 /// Publish a kitchen event for a ticket (best-effort: skips if the view is gone).
-pub(crate) async fn publish_kitchen<'e, E>(
-    executor: E,
+pub(crate) async fn publish_kitchen(
+    executor: &sqlx::PgPool,
     hub: &BranchEventHub,
     branch_id: Uuid,
     event_type: &str,
     ticket_id: Uuid,
-) where
-    E: PgExecutor<'e> + Copy,
-{
+) {
     if let Ok(Some(view)) = kitchen_ticket_view(executor, ticket_id).await {
         hub.publish(
             branch_id,

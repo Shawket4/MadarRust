@@ -11,6 +11,7 @@ pub mod ai;
 pub mod analytics;
 pub mod auth;
 pub mod bookings;
+pub mod boot_config;
 pub mod branches;
 pub mod bundles;
 pub mod cache;
@@ -61,6 +62,8 @@ pub mod units;
 pub mod uploads;
 pub mod users;
 
+#[cfg(test)]
+mod pool_discipline_tests;
 #[cfg(test)]
 pub mod e2e_tests;
 

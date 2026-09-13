@@ -87,8 +87,19 @@ pub(crate) async fn transfer_view<'e, E>(
 where
     E: PgExecutor<'e>,
 {
+    Ok(transfer_views(executor, &[id]).await?.pop())
+}
+
+/// Many transfer views in one query (sync pull projection), in no particular order.
+pub(crate) async fn transfer_views<'e, E>(
+    executor: E,
+    ids: &[Uuid],
+) -> Result<Vec<TransferView>, AppError>
+where
+    E: PgExecutor<'e>,
+{
     #[allow(clippy::type_complexity)]
-    let row: Option<(
+    let rows: Vec<(
         Uuid,
         Uuid,
         String,
@@ -109,46 +120,49 @@ where
                 (SELECT ot.ticket_ref FROM open_tickets ot WHERE ot.id = t.occupant_id), \
                 t.from_table_id, t.target_section_id, t.target_table_id, t.note, t.status, \
                 t.requested_by, t.fulfilled_table_id, t.created_at, t.resolved_at, t.updated_at \
-         FROM table_transfer_requests t WHERE t.id = $1",
+         FROM table_transfer_requests t WHERE t.id = ANY($1)",
     )
-    .bind(id)
-    .fetch_optional(executor)
+    .bind(ids)
+    .fetch_all(executor)
     .await?;
-    Ok(row.map(
-        |(
-            id,
-            branch_id,
-            occupant_kind,
-            occupant_id,
-            occupant_label,
-            from_table_id,
-            target_section_id,
-            target_table_id,
-            note,
-            status,
-            requested_by,
-            fulfilled_table_id,
-            created_at,
-            resolved_at,
-            updated_at,
-        )| TransferView {
-            id,
-            branch_id,
-            occupant_kind,
-            occupant_id,
-            occupant_label,
-            from_table_id,
-            target_section_id,
-            target_table_id,
-            note,
-            status,
-            requested_by,
-            fulfilled_table_id,
-            created_at,
-            resolved_at,
-            updated_at,
-        },
-    ))
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                branch_id,
+                occupant_kind,
+                occupant_id,
+                occupant_label,
+                from_table_id,
+                target_section_id,
+                target_table_id,
+                note,
+                status,
+                requested_by,
+                fulfilled_table_id,
+                created_at,
+                resolved_at,
+                updated_at,
+            )| TransferView {
+                id,
+                branch_id,
+                occupant_kind,
+                occupant_id,
+                occupant_label,
+                from_table_id,
+                target_section_id,
+                target_table_id,
+                note,
+                status,
+                requested_by,
+                fulfilled_table_id,
+                created_at,
+                resolved_at,
+                updated_at,
+            },
+        )
+        .collect())
 }
 
 // ── Table occupancy: the ledger ──────────────────────────────────────────────

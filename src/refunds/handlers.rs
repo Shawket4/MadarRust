@@ -599,6 +599,7 @@ pub async fn get_refund(
         .await?
         .pop()
         .ok_or_else(|| AppError::NotFound("Refund not found".into()))?;
+    drop(conn); // back to the pool before the access check takes one
     require_branch_access(pool.get_ref(), &claims, refund.refund.branch_id).await?;
     Ok(HttpResponse::Ok().json(refund))
 }

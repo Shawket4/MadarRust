@@ -214,8 +214,12 @@ async fn incremental(pool: &PgPool, org_id: Uuid, branch: Uuid, since: i64, limi
         .collect();
     let next = if has_more { rows.last().map(|r| r.0).unwrap_or(since) } else { horizon };
 
-    let mut conn = pool.acquire().await?;
-    let mut wanted: HashMap<String, Vec<Uuid>> = HashMap::new();
+    // Projections and checksums read one snapshot on ONE connection: a pull
+    // never holds a second pooled connection (a pool of 5 would otherwise
+    // deadlock under 6 concurrent pulls).
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *tx).await?;
+    let mut wanted: BTreeMap<String, Vec<Uuid>> = BTreeMap::new();
     for (_, ty, id, op) in &rows {
         if op == "upsert" {
             wanted.entry(ty.clone()).or_default().push(*id);
@@ -223,7 +227,7 @@ async fn incremental(pool: &PgPool, org_id: Uuid, branch: Uuid, since: i64, limi
     }
     let mut projected: HashMap<(String, Uuid), Value> = HashMap::new();
     for (ty, ids) in &wanted {
-        for (id, v) in projection::project(pool, &mut conn, org_id, branch, ty, ids).await? {
+        for (id, v) in projection::project(&mut tx, org_id, branch, ty, ids).await? {
             projected.insert((ty.clone(), id), v);
         }
     }
@@ -238,8 +242,9 @@ async fn incremental(pool: &PgPool, org_id: Uuid, branch: Uuid, since: i64, limi
     let checksums = if has_more {
         BTreeMap::new()
     } else {
-        state_checksums(&mut conn, branch, ALL_TYPES, horizon).await?
+        state_checksums(&mut tx, branch, ALL_TYPES, horizon).await?
     };
+    tx.commit().await?;
     Ok(PullResponse {
         full: false,
         since: Some(since),
@@ -281,7 +286,7 @@ async fn full(pool: &PgPool, org_id: Uuid, branch: Uuid, types: &[String]) -> Re
             .await?
         };
         let ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
-        let mut projected = projection::project(pool, &mut tx, org_id, branch, ty, &ids).await?;
+        let mut projected = projection::project(&mut tx, org_id, branch, ty, &ids).await?;
         let out: Vec<Value> = rows
             .into_iter()
             .filter_map(|(id, seq)| {
@@ -341,29 +346,41 @@ SELECT c.entity_id, c.seq FROM sync_changes c
                                               WHERE r.id = c.entity_id AND t.status = 'open')))
  ORDER BY c.seq";
 
-/// R-checksum over the feed's upsert rows (state types only).
+/// R-checksum per state type over exactly that type's projected set: the feed's
+/// `upsert` rows whose entity passes [`projection::projects_sql`] — the same
+/// gate `project` applies, so what a device holds after applying the feed (or a
+/// full snapshot) is what is counted here.
 async fn state_checksums(
     conn: &mut PgConnection,
     branch: Uuid,
     types: &[&str],
     horizon: i64,
 ) -> Result<BTreeMap<String, TypeChecksum>, AppError> {
-    let state: Vec<String> = types.iter().filter(|t| !is_ledger(t)).map(|t| t.to_string()).collect();
-    let rows: Vec<(String, Uuid, i64)> = sqlx::query_as(
-        "SELECT type, entity_id, seq FROM sync_changes \
-          WHERE branch_id = $1 AND op = 'upsert' AND seq <= $2 AND type = ANY($3)",
-    )
-    .bind(branch)
-    .bind(horizon)
-    .bind(&state)
-    .fetch_all(&mut *conn)
-    .await?;
-    let mut by_type: BTreeMap<String, Vec<(String, i64)>> = state.iter().map(|t| (t.clone(), Vec::new())).collect();
-    for (ty, id, seq) in rows {
-        by_type.entry(ty).or_default().push((id.to_string(), seq));
+    let state: Vec<&str> = types.iter().copied().filter(|t| !is_ledger(t)).collect();
+    let mut by_type: BTreeMap<String, TypeChecksum> = BTreeMap::new();
+    if state.is_empty() {
+        return Ok(by_type);
     }
-    Ok(by_type
-        .into_iter()
-        .map(|(ty, rows)| (ty, TypeChecksum { count: rows.len() as i64, checksum: checksum::checksum_of(&rows) }))
-        .collect())
+    let cases: String = state
+        .iter()
+        .map(|t| {
+            let pred = projection::projects_sql(t).expect("state type has a projection gate");
+            format!(" WHEN '{t}' THEN {}", pred.replace("$ID", "c.entity_id"))
+        })
+        .collect();
+    let sql = format!(
+        "SELECT c.type, c.entity_id, c.seq FROM sync_changes c \
+          WHERE c.branch_id = $1 AND c.op = 'upsert' AND c.seq <= $2 AND c.type = ANY($3) \
+            AND CASE c.type{cases} ELSE false END"
+    );
+    let rows: Vec<(String, Uuid, i64)> =
+        sqlx::query_as(&sql).bind(branch).bind(horizon).bind(&state).fetch_all(&mut *conn).await?;
+    let mut rows_of: BTreeMap<String, Vec<(String, i64)>> = state.iter().map(|t| (t.to_string(), Vec::new())).collect();
+    for (ty, id, seq) in rows {
+        rows_of.entry(ty).or_default().push((id.to_string(), seq));
+    }
+    for (ty, rows) in rows_of {
+        by_type.insert(ty, TypeChecksum { count: rows.len() as i64, checksum: checksum::checksum_of(&rows) });
+    }
+    Ok(by_type)
 }
