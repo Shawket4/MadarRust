@@ -71,7 +71,7 @@ ROUTING = [
  ("how did people pay today","الناس دفعت إزاي النهاردة","payment_mix","today"),
  ("how much of our money is cash","كام من فلوسنا كاش","cash_vs_card","last_30_days"),
  ("who has drawer differences","مين عنده فروقات في الدرج","drawer_variance","last_30_days"),
- ("shift cash summary","ملخص كاش الورديات","shift_cash_summary","last_30_days"),
+ ("shift cash summary","ملخص كاش الورديات","till_cash_summary","last_30_days"),
  ("how much did we give away in discounts","كام خصومات اداينا","discount_usage","last_30_days"),
  ("why are orders being voided","ليه الأوردرات بتتلغي","voids_by_reason","last_30_days"),
  ("which cashier voids the most","أنهي كاشير بيلغي أكتر","voids_by_cashier","last_30_days"),
@@ -106,7 +106,7 @@ ALSO_OK = {
 # Breakdowns a hand-composed query answers exactly as well as the preset.
 CUSTOM_OK = {"sales_by_day","sales_by_weekday","sales_by_branch","sales_by_hour",
              "top_categories","tips_by_day","tips_by_waiter","attendance_by_day",
-             "waste_trend","refunds_by_day","shift_cash_summary",
+             "waste_trend","refunds_by_day","till_cash_summary",
              "cash_vs_card_tips","consumption_by_ingredient"}
 
 for i,(en,ar,p,per) in enumerate(ROUTING, 1):
@@ -153,8 +153,8 @@ CUSTOM = [
  ("ar","نسبة توريد كل مورد","purchasing",["supplier"],["fill_rate"],"last_90_days"),
  ("en","shrinkage by reason","stocktakes",["variance_reason"],["shrink_cost"],"last_90_days"),
  ("ar","الفاقد حسب السبب","stocktakes",["variance_reason"],["shrink_cost"],"last_90_days"),
- ("en","cash variance per teller","shifts",["teller"],["abs_discrepancy"],"last_30_days"),
- ("ar","فرق الكاش لكل كاشير","shifts",["teller"],["abs_discrepancy"],"last_30_days"),
+ ("en","cash variance per teller","tills",["teller"],["abs_discrepancy"],"last_30_days"),
+ ("ar","فرق الكاش لكل كاشير","tills",["teller"],["abs_discrepancy"],"last_30_days"),
  ("en","average tip per waiter this month","orders",["waiter"],["avg_tip"],"this_month"),
  ("ar","متوسط البقشيش لكل ويتر الشهر ده","orders",["waiter"],["avg_tip"],"this_month"),
  ("en","tip rate per branch","orders",["branch"],["tip_rate"],"last_30_days"),

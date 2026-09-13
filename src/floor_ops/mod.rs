@@ -214,7 +214,7 @@ impl Hand {
         E: PgExecutor<'e>,
     {
         let till_id: Option<Uuid> = sqlx::query_scalar(
-            "SELECT till_id FROM tills \
+            "SELECT id FROM tills \
               WHERE teller_id = $1 AND branch_id = $2 AND status = 'open' \
               ORDER BY opened_at DESC LIMIT 1",
         )

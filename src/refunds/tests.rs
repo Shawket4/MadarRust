@@ -381,7 +381,7 @@ async fn a_refund_outside_an_open_shift_is_refused(pool: PgPool) {
     assert_eq!(resp.status(), 400);
     let err: Value = test::read_body_json(resp).await;
     assert!(
-        err["error"].as_str().unwrap().contains("open shift"),
+        err["error"].as_str().unwrap().contains("open till"),
         "{err}"
     );
 
@@ -390,7 +390,7 @@ async fn a_refund_outside_an_open_shift_is_refused(pool: PgPool) {
     assert_eq!(resp.status(), 400);
     let err: Value = test::read_body_json(resp).await;
     assert!(
-        err["error"].as_str().unwrap().contains("no open shift"),
+        err["error"].as_str().unwrap().contains("no open till"),
         "{err}"
     );
 

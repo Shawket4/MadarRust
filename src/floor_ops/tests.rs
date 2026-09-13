@@ -165,7 +165,7 @@ async fn rows_on(pool: &PgPool, table: Uuid) -> i64 {
         .unwrap()
 }
 async fn till_of_open_shift(pool: &PgPool, teller: Uuid) -> Uuid {
-    sqlx::query_scalar("SELECT till_id FROM tills WHERE teller_id = $1 AND status = 'open'")
+    sqlx::query_scalar("SELECT id FROM tills WHERE teller_id = $1 AND status = 'open'")
         .bind(teller)
         .fetch_one(pool)
         .await
@@ -767,26 +767,23 @@ async fn a_hold_is_owned_by_the_till_that_placed_it(pool: PgPool) {
     assert_eq!(refusal_code(resp).await.as_deref(), Some("TABLE_HELD"));
     assert_eq!(rows_on(&pool, t1).await, 1, "and nothing was written");
 
-    // Shift handover on the same drawer: the afternoon teller inherits the
-    // parked draft, and re-holding its table is a yes, not a new row.
+    // Tills are a person's session now (no shared drawer entity): the
+    // afternoon teller opens their OWN till, and does not inherit the hold.
     sqlx::query("UPDATE tills SET status = 'closed', closed_at = now() WHERE id = $1")
         .bind(shift)
         .execute(&pool)
         .await
         .unwrap();
     open_shift_row(&pool, branch, afternoon).await;
-    assert_eq!(
-        till_of_open_shift(&pool, afternoon).await,
-        till,
-        "same till"
-    );
+    let afternoon_till = till_of_open_shift(&pool, afternoon).await;
+    assert_ne!(afternoon_till, till, "a till is per person");
     let resp = post_json!(
         app,
         a,
         &format!("/floor/tables/{t1}/hold"),
         serde_json::json!({ "branch_id": branch })
     );
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status(), 409);
     assert_eq!(rows_on(&pool, t1).await, 1);
 
     // Whoever checks the draft out releases it, and the ledger says who did.
@@ -798,7 +795,7 @@ async fn a_hold_is_owned_by_the_till_that_placed_it(pool: PgPool) {
     );
     assert_eq!(resp.status(), 200);
     let row = latest_row(&pool, t1).await;
-    assert_eq!((row.4, row.5), (Some(afternoon), Some(till)));
+    assert_eq!((row.4, row.5), (Some(afternoon), Some(afternoon_till)));
     assert_eq!((row.6.as_deref(), row.7), (Some("released"), true));
     assert_eq!(table_status(&pool, t1).await, "dirty");
 }

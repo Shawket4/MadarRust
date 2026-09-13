@@ -209,7 +209,7 @@ async fn a_loop_that_never_answers_ends_honestly(pool: PgPool) {
     let provider = MockProvider::scripted(vec![
         MockProvider::call(tools::DESCRIBE_DATASET, json!({ "dataset": "orders" })),
         MockProvider::call(tools::DESCRIBE_DATASET, json!({ "dataset": "payments" })),
-        MockProvider::call(tools::DESCRIBE_DATASET, json!({ "dataset": "shifts" })),
+        MockProvider::call(tools::DESCRIBE_DATASET, json!({ "dataset": "tills" })),
         MockProvider::call(tools::DESCRIBE_DATASET, json!({ "dataset": "orders" })),
         MockProvider::call(tools::DESCRIBE_DATASET, json!({ "dataset": "orders" })),
     ]);

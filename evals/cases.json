@@ -640,7 +640,7 @@
       "confidence": "high",
       "expect": {
         "tool": "run_preset",
-        "preset": "shift_cash_summary",
+        "preset": "till_cash_summary",
         "period": "last_30_days",
         "accept_custom_query": true
       }
@@ -654,7 +654,7 @@
       "confidence": "high",
       "expect": {
         "tool": "run_preset",
-        "preset": "shift_cash_summary",
+        "preset": "till_cash_summary",
         "period": "last_30_days",
         "accept_custom_query": true
       }
@@ -1844,7 +1844,7 @@
       "confidence": "high",
       "expect": {
         "tool": "query_metrics",
-        "dataset": "shifts",
+        "dataset": "tills",
         "dimensions": [
           "teller"
         ],
@@ -1863,7 +1863,7 @@
       "confidence": "high",
       "expect": {
         "tool": "query_metrics",
-        "dataset": "shifts",
+        "dataset": "tills",
         "dimensions": [
           "teller"
         ],
