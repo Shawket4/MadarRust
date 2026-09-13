@@ -995,7 +995,7 @@ pub async fn move_ticket_table(
     // A party waiting to order is sitting there too: moving a bill onto them
     // would end their hold and lose them. That is a swap, not a move.
     if let Some(live) = crate::floor_ops::live_occupancy(&mut tx, body.table_id).await?
-        && live.held_by != "ticket"
+        && live.held_by == "party"
     {
         return Err(crate::floor_ops::refused(
             crate::floor_ops::refusal::TABLE_HELD,

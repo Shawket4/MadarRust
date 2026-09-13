@@ -707,7 +707,9 @@ pub(crate) enum Movable {
 }
 
 /// The occupant a move/swap would carry off `table_id`. A booking's claim is
-/// not a party at the table and cannot be moved: refused `TABLE_HELD`.
+/// not a party at the table, so there is nothing to carry: it stays, and a
+/// bill landing on it seats the booking (`take_table`), as tills before this
+/// change relied on.
 pub(crate) async fn movable_on(
     tx: &mut Transaction<'_, Postgres>,
     table_id: Uuid,
@@ -716,10 +718,7 @@ pub(crate) async fn movable_on(
         None => Ok(None),
         Some(o) if o.held_by == "ticket" => Ok(o.open_ticket_id.map(Movable::Ticket)),
         Some(o) if o.held_by == "party" => Ok(Some(Movable::Party(o))),
-        Some(_) => Err(refused(
-            refusal::TABLE_HELD,
-            "This table is held for a booking",
-        )),
+        Some(_) => Ok(None),
     }
 }
 
