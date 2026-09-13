@@ -54416,6 +54416,13 @@
               "$ref": "#/components/schemas/ResolvedShift"
             },
             "description": "Shifts rostered for today. Empty = a rest day."
+          },
+          "timezone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The IANA timezone this payload's instants are shown in (see `crate::tz`).\nAdditive; older clients ignore it."
           }
         }
       },
@@ -62931,6 +62938,13 @@
             "items": {
               "$ref": "#/components/schemas/PresenceRow"
             }
+          },
+          "timezone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The IANA timezone this payload's instants are shown in (see `crate::tz`).\nAdditive; older clients ignore it."
           },
           "worked_minutes": {
             "type": "integer",
