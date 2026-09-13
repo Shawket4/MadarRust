@@ -49,6 +49,7 @@ pub mod reports;
 pub mod reservations;
 pub mod staff;
 pub mod stocktakes;
+pub mod assets;
 pub mod sync;
 pub mod tax;
 pub mod tickets;

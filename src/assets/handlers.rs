@@ -396,6 +396,7 @@ pub async fn top_up(
         return Ok(HttpResponse::BadRequest().json(ErrorBody {
             error: format!("At most {MAX_TOPUP_HASHES} hashes per request"),
             code: Some("TOO_MANY_HASHES".into()),
+            till: None,
         }));
     }
     let pool = base_pool(&req)?;

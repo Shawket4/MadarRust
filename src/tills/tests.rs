@@ -4,8 +4,9 @@ use uuid::Uuid;
 
 use crate::auth::jwt::JwtSecret;
 use crate::models::UserRole;
-use crate::shifts::handlers::*;
-use crate::shifts::routes;
+use crate::tills::handlers::{CashMovement, CashMovementRequest, CloseTillRequest as CloseShiftRequest, ForceCloseRequest};
+use crate::tills::legacy::*;
+use crate::tills::legacy_routes as routes;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
@@ -132,6 +133,8 @@ async fn test_open_shift_cash_continuity(pool: PgPool) {
                 .uri(&format!("/shifts/{}/close", shift_id))
                 .insert_header(("Authorization", format!("Bearer {}", token)))
                 .set_json(&CloseShiftRequest {
+                    device_id: None,
+                    reconciliation: None,
                     closing_cash_declared: declared,
                     cash_note: None,
                     closed_at: None,
@@ -289,6 +292,7 @@ async fn test_cash_movements(pool: PgPool) {
     // No kind sent — the clients in the field still speak only in signed
     // amounts, and a negative one has always meant a pay-out.
     let move_req = CashMovementRequest {
+        device_id: None,
         amount: -500,
         kind: None,
         corrects_id: None,
@@ -366,6 +370,7 @@ async fn test_close_and_force_close_shift(pool: PgPool) {
         .uri(&format!("/shifts/{}/force-close", shift_id))
         .insert_header(("Authorization", format!("Bearer {}", teller_token)))
         .set_json(&ForceCloseRequest {
+            device_id: None,
             reason: Some("Forgot".into()),
         })
         .to_request();
@@ -377,6 +382,7 @@ async fn test_close_and_force_close_shift(pool: PgPool) {
         .uri(&format!("/shifts/{}/force-close", shift_id))
         .insert_header(("Authorization", format!("Bearer {}", admin_token)))
         .set_json(&ForceCloseRequest {
+            device_id: None,
             reason: Some("Forgot".into()),
         })
         .to_request();
@@ -425,6 +431,7 @@ async fn test_cash_movement_client_ref_idempotent(pool: PgPool) {
     // Same client_ref sent twice (a replayed offline movement).
     let cref = Uuid::new_v4();
     let body = CashMovementRequest {
+        device_id: None,
         amount: -500,
         kind: None,
         corrects_id: None,
@@ -521,6 +528,7 @@ async fn test_force_close_idempotent(pool: PgPool) {
             .uri(&format!("/shifts/{}/force-close", shift_id))
             .insert_header(("Authorization", format!("Bearer {}", token)))
             .set_json(&ForceCloseRequest {
+                device_id: None,
                 reason: Some("Forgot".into()),
             })
             .to_request(),
@@ -537,6 +545,7 @@ async fn test_force_close_idempotent(pool: PgPool) {
             .uri(&format!("/shifts/{}/force-close", shift_id))
             .insert_header(("Authorization", format!("Bearer {}", token)))
             .set_json(&ForceCloseRequest {
+                device_id: None,
                 reason: Some("Forgot".into()),
             })
             .to_request(),
@@ -592,6 +601,8 @@ async fn test_normal_close_and_report(pool: PgPool) {
         .uri(&format!("/shifts/{}/close", shift_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
         .set_json(&CloseShiftRequest {
+            device_id: None,
+            reconciliation: None,
             closing_cash_declared: 1000,
             cash_note: None,
             closed_at: None,
@@ -682,6 +693,7 @@ async fn test_delete_shift_forbidden(pool: PgPool) {
         .uri(&format!("/shifts/{}/force-close", shift_id))
         .insert_header(("Authorization", format!("Bearer {}", admin_token)))
         .set_json(&ForceCloseRequest {
+            device_id: None,
             reason: Some("cleanup".into()),
         })
         .to_request();
@@ -943,6 +955,8 @@ async fn test_close_cash_uses_is_cash_snapshot(pool: PgPool) {
             .uri(&format!("/shifts/{}/close", shift_id))
             .insert_header(("Authorization", format!("Bearer {}", token)))
             .set_json(&CloseShiftRequest {
+                device_id: None,
+                reconciliation: None,
                 closing_cash_declared: 1500,
                 cash_note: None,
                 closed_at: None,
@@ -1015,6 +1029,8 @@ async fn test_teller_cannot_close_another_tellers_shift(pool: PgPool) {
             .uri(&format!("/shifts/{}/close", shift_id))
             .insert_header(("Authorization", format!("Bearer {}", token_b)))
             .set_json(&CloseShiftRequest {
+                device_id: None,
+                reconciliation: None,
                 closing_cash_declared: 0,
                 cash_note: None,
                 closed_at: None,
@@ -1044,6 +1060,8 @@ async fn test_teller_cannot_close_another_tellers_shift(pool: PgPool) {
             .uri(&format!("/shifts/{}/close", shift_id))
             .insert_header(("Authorization", format!("Bearer {}", token_a)))
             .set_json(&CloseShiftRequest {
+                device_id: None,
+                reconciliation: None,
                 closing_cash_declared: 0,
                 cash_note: None,
                 closed_at: None,
@@ -1102,6 +1120,7 @@ async fn test_delete_shift_with_orders_blocked(pool: PgPool) {
             .uri(&format!("/shifts/{}/force-close", shift_id))
             .insert_header(("Authorization", format!("Bearer {}", token)))
             .set_json(&ForceCloseRequest {
+                device_id: None,
                 reason: Some("x".into()),
             })
             .to_request(),
@@ -1187,6 +1206,7 @@ async fn test_force_close_snapshots_system_cash(pool: PgPool) {
             .uri(&format!("/shifts/{}/force-close", shift_id))
             .insert_header(("Authorization", format!("Bearer {}", token)))
             .set_json(&ForceCloseRequest {
+                device_id: None,
                 reason: Some("absent teller".into()),
             })
             .to_request(),
@@ -1279,6 +1299,8 @@ async fn test_shift_timestamp_guards(pool: PgPool) {
             .uri(&format!("/shifts/{}/close", sid))
             .insert_header(("Authorization", format!("Bearer {}", token)))
             .set_json(&CloseShiftRequest {
+                device_id: None,
+                reconciliation: None,
                 closing_cash_declared: 1000,
                 cash_note: None,
                 closed_at: Some(chrono::Utc::now() + chrono::Duration::minutes(30)),
@@ -1380,6 +1402,7 @@ async fn test_cash_movement_timestamp_contract(pool: PgPool) {
             .uri(&format!("/shifts/{}/cash-movements", sid))
             .insert_header(("Authorization", format!("Bearer {}", token)))
             .set_json(&CashMovementRequest {
+                device_id: None,
                 amount: -500,
                 kind: None,
                 corrects_id: None,
@@ -1557,6 +1580,8 @@ async fn test_cash_continuity_is_per_till(pool: PgPool) {
                 .uri(&format!("/shifts/{}/close", shift_id))
                 .insert_header(("Authorization", format!("Bearer {}", token)))
                 .set_json(&CloseShiftRequest {
+                    device_id: None,
+                    reconciliation: None,
                     closing_cash_declared: declared,
                     cash_note: None,
                     closed_at: None,
@@ -1885,6 +1910,8 @@ async fn test_standard_float_proposes_the_safe_drop(pool: PgPool) {
             .uri(&format!("/shifts/{}/close", shift_id))
             .insert_header(("Authorization", format!("Bearer {}", token)))
             .set_json(&CloseShiftRequest {
+                device_id: None,
+                reconciliation: None,
                 closing_cash_declared: 5000,
                 cash_note: None,
                 closed_at: None,
@@ -1994,6 +2021,8 @@ async fn test_branch_manager_works_the_till(pool: PgPool) {
             .uri(&format!("/shifts/{}/close", managers_shift.id))
             .insert_header(("Authorization", format!("Bearer {}", manager_token)))
             .set_json(&CloseShiftRequest {
+                device_id: None,
+                reconciliation: None,
                 closing_cash_declared: 0,
                 cash_note: None,
                 closed_at: None,
@@ -2012,6 +2041,7 @@ async fn test_branch_manager_works_the_till(pool: PgPool) {
             .uri(&format!("/shifts/{}/force-close", tellers_shift.id))
             .insert_header(("Authorization", format!("Bearer {}", manager_token)))
             .set_json(&ForceCloseRequest {
+                device_id: None,
                 reason: Some("went home".into()),
             })
             .to_request(),
@@ -2085,6 +2115,8 @@ async fn test_close_shift_closes_unbumped_kitchen_tickets_in_till_mode(pool: PgP
             .uri(&format!("/shifts/{}/close", shift_id))
             .insert_header(("Authorization", format!("Bearer {}", token)))
             .set_json(&CloseShiftRequest {
+                device_id: None,
+                reconciliation: None,
                 closing_cash_declared: 100,
                 cash_note: None,
                 closed_at: None,

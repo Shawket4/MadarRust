@@ -195,6 +195,11 @@ paths(
         crate::menu::modifiers::get_item_cost,
         // ── uploads ───────────────────────────────────────────────────
         crate::uploads::handlers::upload_menu_item_image,
+        crate::uploads::handlers::upload_category_image,
+        crate::uploads::handlers::upload_bundle_image,
+        crate::assets::handlers::get_job,
+        crate::assets::handlers::get_bundle,
+        crate::assets::handlers::top_up,
         // ── inventory ─────────────────────────────────────────────────
         crate::inventory::handlers::list_ingredient_categories,
         crate::inventory::handlers::create_ingredient_category,
@@ -551,6 +556,8 @@ paths(
         crate::qr_card::handlers::list_marketing_links,
     ),
     components(schemas(
+        crate::assets::handlers::AssetJobView,
+        crate::assets::handlers::TopUpRequest,
         // Most schemas are pulled in transitively via path responses, but
         // listing the shared error body explicitly makes it discoverable.
         crate::errors::ErrorBody,

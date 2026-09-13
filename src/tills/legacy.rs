@@ -19,6 +19,13 @@ pub struct Shift {
     pub till_name: Option<String>,
 }
 
+impl std::ops::Deref for Shift {
+    type Target = Till;
+    fn deref(&self) -> &Till {
+        &self.till
+    }
+}
+
 impl From<Till> for Shift {
     fn from(till: Till) -> Self {
         Self { till, till_id: None, till_name: None }
@@ -46,6 +53,13 @@ pub struct ShiftReportResponse {
     pub shift: Shift,
     #[serde(flatten)]
     pub figures: TillReportFigures,
+}
+
+impl std::ops::Deref for ShiftReportResponse {
+    type Target = TillReportFigures;
+    fn deref(&self) -> &TillReportFigures {
+        &self.figures
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]

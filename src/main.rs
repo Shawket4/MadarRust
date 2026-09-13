@@ -133,6 +133,8 @@ async fn run() -> std::io::Result<()> {
     // scheduler; every step is idempotent. No-op when ATTENDANCE_SWEEP_ENABLED
     // is falsy.
     staff::jobs::spawn(pool.get_ref().clone());
+    madar_rust::assets::worker::spawn(pool.get_ref().clone());
+    madar_rust::assets::bundle::spawn(pool.get_ref().clone());
     loyalty::birthdays::spawn(pool.get_ref().clone());
     loyalty::winback::spawn(pool.get_ref().clone());
     loyalty::wallet::refresh::spawn(pool.get_ref().clone());
@@ -281,6 +283,7 @@ async fn run() -> std::io::Result<()> {
             .configure(kitchen::routes::configure)
             .configure(tickets::routes::configure)
             .configure(stocktakes::routes::configure)
+            .configure(madar_rust::assets::routes::configure)
             .configure(sync::routes::configure)
             .configure(purchasing::routes::configure)
             .configure(orders::routes::configure)
