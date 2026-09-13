@@ -192,3 +192,15 @@ where
     .await?;
     Ok(rows.into_iter().map(BookingView::from).collect())
 }
+
+/// The same views for a set of booking ids (sync pull projection).
+pub async fn views_by_ids<'e, E>(exec: E, ids: &[Uuid]) -> Result<Vec<BookingView>, AppError>
+where
+    E: PgExecutor<'e>,
+{
+    let rows: Vec<Row> = sqlx::query_as(&format!("{VIEW_SELECT} WHERE b.id = ANY($1)"))
+        .bind(ids)
+        .fetch_all(exec)
+        .await?;
+    Ok(rows.into_iter().map(BookingView::from).collect())
+}

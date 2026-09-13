@@ -32,6 +32,7 @@
 //! grant came to work online and be ignored offline.
 
 pub mod handlers;
+pub mod pull;
 pub mod routes;
 
 #[cfg(test)]

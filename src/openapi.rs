@@ -180,6 +180,7 @@ paths(
         crate::menu::studio::duplicate_item,
         // ── POS catalog sync (Wave 2, new unified tables) ───────────
         crate::menu::catalog_sync::catalog_sync,
+        crate::sync::pull::pull,
         // ── menu studio: modifiers + pricing (Wave 2, new tables) ───
         crate::menu::modifiers::list_groups,
         crate::menu::modifiers::create_group,

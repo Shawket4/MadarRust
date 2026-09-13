@@ -9,6 +9,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/sync")
             .wrap(JwtMiddleware)
-            .route("/replay", web::post().to(super::handlers::replay)),
+            .route("/replay", web::post().to(super::handlers::replay))
+            .route("/pull", web::post().to(super::pull::pull)),
     );
 }

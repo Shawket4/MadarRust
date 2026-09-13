@@ -1,0 +1,337 @@
+//! Lean per-type projections for `/sync/pull` (§10.2 R-data, TILLS_PAYLOAD_AUDIT).
+//!
+//! `project` returns the CURRENT POS-facing JSON of each requested entity that
+//! still exists; an id missing from the result is sent as a `delete`. Every
+//! object carries `id`. Nothing here serializes cost, audit or dashboard-only
+//! fields (no `deductions_snapshot`, recipe cost, `org_id`, `created_by`, …), and
+//! images travel as the `tile` variant hash, never a URL.
+use std::collections::HashMap;
+
+use serde_json::{Value, json};
+use sqlx::{PgConnection, PgPool};
+use uuid::Uuid;
+
+use crate::errors::AppError;
+
+/// `tile` hash of an asset group column (`<alias>.<col>`).
+fn tile_hash(group_col: &str) -> String {
+    format!("(SELECT a.hash FROM assets a WHERE a.group_id = {group_col} AND a.variant = 'tile' ORDER BY a.created_at DESC LIMIT 1)")
+}
+
+/// Run `SELECT id, <json>` and key the objects by id.
+async fn by_sql(conn: &mut PgConnection, sql: &str, ids: &[Uuid]) -> Result<HashMap<Uuid, Value>, AppError> {
+    let rows: Vec<(Uuid, Value)> = sqlx::query_as(sql).bind(ids).fetch_all(&mut *conn).await?;
+    Ok(rows.into_iter().collect())
+}
+
+fn strip(v: &mut Value, keys: &[&str]) {
+    if let Value::Object(m) = v {
+        for k in keys {
+            m.remove(*k);
+        }
+    }
+}
+
+/// Remove `key` at every depth.
+fn strip_deep(v: &mut Value, key: &str) {
+    match v {
+        Value::Object(m) => {
+            m.remove(key);
+            m.values_mut().for_each(|x| strip_deep(x, key));
+        }
+        Value::Array(a) => a.iter_mut().for_each(|x| strip_deep(x, key)),
+        _ => {}
+    }
+}
+
+fn keyed<T: serde::Serialize>(items: impl IntoIterator<Item = T>, strip_keys: &[&str]) -> HashMap<Uuid, Value> {
+    items
+        .into_iter()
+        .filter_map(|it| {
+            let mut v = serde_json::to_value(it).ok()?;
+            strip(&mut v, strip_keys);
+            let id = v.get("id")?.as_str().and_then(|s| Uuid::parse_str(s).ok())?;
+            Some((id, v))
+        })
+        .collect()
+}
+
+pub async fn project(
+    pool: &PgPool,
+    conn: &mut PgConnection,
+    org_id: Uuid,
+    branch_id: Uuid,
+    ty: &str,
+    ids: &[Uuid],
+) -> Result<HashMap<Uuid, Value>, AppError> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    Ok(match ty {
+        "category" => {
+            let sql = format!(
+                "SELECT c.id, jsonb_build_object('id', c.id, 'name', c.name, 'name_translations', c.name_translations, \
+                        'is_active', c.is_active, 'image_hash', {}) \
+                   FROM categories c WHERE c.id = ANY($1) AND c.deleted_at IS NULL AND c.is_active",
+                tile_hash("c.image_group_id")
+            );
+            by_sql(conn, &sql, ids).await?
+        }
+        "menu_item" => {
+            let items = crate::menu::catalog_sync::sync_items_by_ids(pool, org_id, branch_id, ids).await?;
+            let mut out = keyed(items, &[]);
+            // Option recipes are the preview's business, not the till's (35% of the
+            // old catalog body).
+            for v in out.values_mut() {
+                if let Some(groups) = v.get_mut("modifier_groups").and_then(Value::as_array_mut) {
+                    for g in groups {
+                        if let Some(opts) = g.get_mut("options").and_then(Value::as_array_mut) {
+                            opts.iter_mut().for_each(|o| strip(o, &["recipe"]));
+                        }
+                    }
+                }
+            }
+            let hashes: Vec<(Uuid, Option<String>)> = sqlx::query_as(&format!(
+                "SELECT m.id, {} FROM menu_items m WHERE m.id = ANY($1)",
+                tile_hash("m.image_group_id")
+            ))
+            .bind(ids)
+            .fetch_all(&mut *conn)
+            .await?;
+            for (id, h) in hashes {
+                if let Some(Value::Object(m)) = out.get_mut(&id) {
+                    m.insert("image_hash".into(), json!(h));
+                }
+            }
+            out
+        }
+        "bundle" => {
+            let mut out = HashMap::new();
+            for id in ids {
+                if let Some(b) = crate::bundles::handlers::fetch_bundle_full(pool, *id).await? {
+                    let mut v = serde_json::to_value(b).unwrap_or(Value::Null);
+                    strip(&mut v, &["org_id", "created_at", "updated_at", "created_by", "image_url"]);
+                    out.insert(*id, v);
+                }
+            }
+            let hashes: Vec<(Uuid, Option<String>)> = sqlx::query_as(&format!(
+                "SELECT b.id, {} FROM bundles b WHERE b.id = ANY($1)",
+                tile_hash("b.image_group_id")
+            ))
+            .bind(ids)
+            .fetch_all(&mut *conn)
+            .await?;
+            for (id, h) in hashes {
+                if let Some(Value::Object(m)) = out.get_mut(&id) {
+                    m.insert("image_hash".into(), json!(h));
+                }
+            }
+            out
+        }
+        "ingredient" => {
+            by_sql(
+                conn,
+                "SELECT i.id, jsonb_build_object('id', i.id, 'name', i.name, 'unit', i.unit::text, 'is_active', i.is_active) \
+                   FROM org_ingredients i WHERE i.id = ANY($1) AND i.deleted_at IS NULL",
+                ids,
+            )
+            .await?
+        }
+        "payment_method" => {
+            by_sql(
+                conn,
+                "SELECT p.id, jsonb_build_object('id', p.id, 'name', p.name, 'label_translations', p.label_translations, \
+                        'color', p.color, 'icon', p.icon, 'is_cash', p.is_cash, 'is_active', p.is_active) \
+                   FROM org_payment_methods p WHERE p.id = ANY($1)",
+                ids,
+            )
+            .await?
+        }
+        "payment_availability" => {
+            let rows: Vec<(Uuid, String, Vec<Uuid>)> = sqlx::query_as(
+                "SELECT owner, scope, array_agg(pm ORDER BY pm) FROM ( \
+                    SELECT branch_id AS owner, 'branch' AS scope, payment_method_id AS pm FROM branch_payment_methods WHERE branch_id = ANY($1) \
+                    UNION ALL SELECT user_id, 'user', payment_method_id FROM user_payment_methods WHERE user_id = ANY($1) \
+                    UNION ALL SELECT device_id, 'device', payment_method_id FROM device_payment_methods WHERE device_id = ANY($1) \
+                 ) x GROUP BY owner, scope",
+            )
+            .bind(ids)
+            .fetch_all(&mut *conn)
+            .await?;
+            rows.into_iter()
+                .map(|(id, scope, pms)| (id, json!({ "id": id, "scope": scope, "payment_method_ids": pms })))
+                .collect()
+        }
+        "discount" => {
+            by_sql(
+                conn,
+                "SELECT d.id, jsonb_build_object('id', d.id, 'name', d.name, 'name_translations', d.name_translations, \
+                        'type', d.type::text, 'value', d.value, 'is_active', d.is_active) \
+                   FROM discounts d WHERE d.id = ANY($1)",
+                ids,
+            )
+            .await?
+        }
+        "branch_settings" => {
+            let sql = format!(
+                "SELECT b.id, jsonb_build_object('id', b.id, 'name', b.name, 'code', b.code, \
+                        'timezone', effective_timezone(b.id), 'tax_rate', b.tax_rate, 'tax_inclusive', b.tax_inclusive, \
+                        'service_charge_rate', b.service_charge_rate, 'service_charge_taxable', b.service_charge_taxable, \
+                        'require_table_for_orders', b.require_table_for_orders, 'kitchen_routing_mode', b.kitchen_routing_mode, \
+                        'old_bill_hours', b.old_bill_hours, 'standard_float', b.standard_float, 'logo_hash', {}) \
+                   FROM branches b JOIN organizations o ON o.id = b.org_id \
+                  WHERE b.id = ANY($1) AND b.deleted_at IS NULL",
+                tile_hash("o.logo_group_id")
+            );
+            by_sql(conn, &sql, ids).await?
+        }
+        "device" => {
+            by_sql(
+                conn,
+                "SELECT d.id, jsonb_build_object('id', d.id, 'code', d.code, 'label', d.label, 'kind', d.kind) \
+                   FROM devices d WHERE d.id = ANY($1) AND d.retired_at IS NULL",
+                ids,
+            )
+            .await?
+        }
+        "teller" => {
+            by_sql(
+                conn,
+                "SELECT u.id, jsonb_build_object('id', u.id, 'user_id', u.id, 'name', u.name, 'role', u.role::text, \
+                        'is_active', u.is_active, 'offline_pin_hash', u.offline_pin_hash) \
+                   FROM users u WHERE u.id = ANY($1) AND u.deleted_at IS NULL",
+                ids,
+            )
+            .await?
+        }
+        "floor_section" => {
+            by_sql(
+                conn,
+                "SELECT s.id, jsonb_build_object('id', s.id, 'branch_id', s.branch_id, 'name', s.name, 'ordering', s.ordering, \
+                        'canvas_w', s.canvas_w, 'canvas_h', s.canvas_h) \
+                   FROM floor_sections s WHERE s.id = ANY($1)",
+                ids,
+            )
+            .await?
+        }
+        "floor_table" => keyed(
+            crate::reservations::floor::tables_by_ids(pool, ids).await?,
+            &["org_id", "created_at", "updated_at"],
+        ),
+        "table_occupancy" => {
+            by_sql(
+                conn,
+                "SELECT o.id, jsonb_build_object('id', o.id, 'table_id', o.table_id, 'held_by', o.held_by, \
+                        'open_ticket_id', o.open_ticket_id, 'booking_id', o.booking_id, 'party_size', o.party_size, \
+                        'started_at', o.started_at, 'started_by', o.started_by, 'started_till_id', o.started_till_id, \
+                        'seated_at', o.seated_at, 'ended_at', o.ended_at, 'end_reason', o.end_reason, \
+                        'needs_bussing', o.needs_bussing, 'cleared_at', o.cleared_at) \
+                   FROM table_occupancies o WHERE o.id = ANY($1)",
+                ids,
+            )
+            .await?
+        }
+        "table_transfer" => {
+            let mut out = HashMap::new();
+            for id in ids {
+                if let Some(t) = crate::floor_ops::transfer_view(pool, *id).await? {
+                    out.extend(keyed([t], &["org_id"]));
+                }
+            }
+            out
+        }
+        "open_ticket" => {
+            let mut out = keyed(crate::tickets::open_ticket_views(pool, ids).await?, &["org_id"]);
+            // The line's `input` echo is a third of the old body and never read.
+            out.values_mut().for_each(|v| strip_deep(v, "input"));
+            out
+        }
+        "kitchen_ticket" => {
+            let mut out = HashMap::new();
+            for id in ids {
+                if let Some(t) = crate::kitchen::kitchen_ticket_view(pool, *id).await? {
+                    out.extend(keyed([t], &["org_id"]));
+                }
+            }
+            out
+        }
+        "delivery" => {
+            let mut out = HashMap::new();
+            for id in ids {
+                if let Some(d) = crate::delivery::staff::fetch_delivery_order(pool, *id).await? {
+                    let mut v = serde_json::to_value(d).unwrap_or(Value::Null);
+                    strip(&mut v, &["org_id", "updated_at"]);
+                    strip_deep(&mut v, "name_translations");
+                    out.insert(*id, v);
+                }
+            }
+            out
+        }
+        "booking" => keyed(crate::bookings::model::views_by_ids(pool, ids).await?, &["manage_token"]),
+        "till" => {
+            let rows: Vec<crate::tills::handlers::Till> = sqlx::query_as(&format!(
+                "SELECT {} {} WHERE s.id = ANY($1)",
+                crate::tills::handlers::TILL_COLUMNS,
+                crate::tills::handlers::TILL_FROM
+            ))
+            .bind(ids)
+            .fetch_all(&mut *conn)
+            .await?;
+            keyed(
+                rows,
+                &[
+                    "branch_name", "opening_cash_original", "opening_cash_was_edited", "opening_cash_edit_reason",
+                    "cash_discrepancy", "closed_by", "force_closed_by", "force_close_reason", "notes", "timezone",
+                    "flagged_at",
+                ],
+            )
+        }
+        "cash_movement" => {
+            by_sql(
+                conn,
+                "SELECT m.id, jsonb_build_object('id', m.id, 'till_id', m.till_id, 'amount', m.amount, 'kind', m.kind, \
+                        'corrects_id', m.corrects_id, 'note', m.note, 'moved_by', m.moved_by, \
+                        'moved_by_name', (SELECT name FROM users WHERE id = m.moved_by), 'created_at', m.created_at, \
+                        'client_ref', m.client_ref, 'device_id', m.device_id) \
+                   FROM till_cash_movements m WHERE m.id = ANY($1)",
+                ids,
+            )
+            .await?
+        }
+        "order" => {
+            by_sql(
+                conn,
+                "SELECT o.id, jsonb_build_object('id', o.id, 'branch_id', o.branch_id, 'till_id', o.till_id, \
+                        'teller_id', o.teller_id, 'teller_name', u.name, 'waiter_id', o.waiter_id, \
+                        'order_number', o.order_number, 'device_code', o.device_code, \
+                        'display_number', CASE WHEN o.device_code IS NOT NULL THEN o.device_code || '-' || o.order_number \
+                                               ELSE o.order_number::text END, \
+                        'order_ref', o.order_ref, 'status', o.status::text, 'order_type', o.order_type, \
+                        'subtotal', o.subtotal, 'discount_amount', o.discount_amount, 'tax_amount', o.tax_amount, \
+                        'service_charge_amount', o.service_charge_amount, 'delivery_fee', o.delivery_fee, \
+                        'total_amount', o.total_amount, 'tip_amount', o.tip_amount, 'tip_payment_method', o.tip_payment_method, \
+                        'payment_method', o.payment_method::text, \
+                        'payment_legs', COALESCE((SELECT jsonb_agg(jsonb_build_object('method', p.method, 'amount', p.amount, \
+                                                   'is_cash', p.is_cash) ORDER BY p.id) FROM order_payments p WHERE p.order_id = o.id), '[]'::jsonb), \
+                        'open_ticket_id', o.open_ticket_id, 'table_id', o.table_id, 'customer_name', o.customer_name, \
+                        'created_at', o.created_at, 'voided_at', o.voided_at, 'idempotency_key', o.idempotency_key, \
+                        'device_id', o.device_id) \
+                   FROM orders o JOIN users u ON u.id = o.teller_id WHERE o.id = ANY($1)",
+                ids,
+            )
+            .await?
+        }
+        "refund" => {
+            by_sql(
+                conn,
+                "SELECT r.id, jsonb_build_object('id', r.id, 'order_id', r.order_id, 'till_id', r.till_id, 'amount', r.amount, \
+                        'method', r.method, 'is_cash', r.is_cash, 'reason', r.reason, 'note', r.note, \
+                        'issued_by', r.issued_by, 'issued_at', r.issued_at, 'client_ref', r.client_ref) \
+                   FROM order_refunds r WHERE r.id = ANY($1)",
+                ids,
+            )
+            .await?
+        }
+        other => return Err(AppError::BadRequest(format!("Unknown sync type `{other}`"))),
+    })
+}

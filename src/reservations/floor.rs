@@ -712,3 +712,14 @@ pub(crate) async fn fetch_table_branch(pool: &PgPool, table_id: Uuid) -> Result<
         .await?
         .ok_or_else(|| AppError::NotFound("Table not found".into()))
 }
+
+/// Floor tables by id, with their next bookings (sync pull projection).
+pub(crate) async fn tables_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<FloorTable>, AppError> {
+    let mut tables: Vec<FloorTable> =
+        sqlx::query_as(&format!("SELECT {TABLE_COLS} FROM branch_tables WHERE id = ANY($1)"))
+            .bind(ids)
+            .fetch_all(pool)
+            .await?;
+    attach_next_bookings(pool, &mut tables).await?;
+    Ok(tables)
+}

@@ -652,3 +652,35 @@ async fn load_referenced_ingredients(
 
 #[cfg(test)]
 mod tests;
+
+/// `SyncItem`s for a set of ids, resolved for `branch_id` (default channel).
+/// Inactive or deleted items are omitted (sync pull projection).
+pub(crate) async fn sync_items_by_ids(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Uuid,
+    ids: &[Uuid],
+) -> Result<Vec<SyncItem>, AppError> {
+    let item_rows: Vec<(Uuid, String, serde_json::Value, Option<Uuid>)> = sqlx::query_as(
+        "SELECT id, name, name_translations, category_id FROM menu_items \
+         WHERE org_id = $1 AND id = ANY($2) AND is_active = true AND deleted_at IS NULL",
+    )
+    .bind(org_id)
+    .bind(ids)
+    .fetch_all(pool)
+    .await?;
+    let item_ids: Vec<Uuid> = item_rows.iter().map(|r| r.0).collect();
+    let sizes_by_item = load_sizes(pool, &item_ids, branch_id, None).await?;
+    let (groups_by_item, _) = load_modifier_groups(pool, &item_ids, branch_id, None).await?;
+    Ok(item_rows
+        .into_iter()
+        .map(|(id, name, name_translations, category_id)| SyncItem {
+            id,
+            name,
+            name_translations,
+            category_id,
+            sizes: sizes_by_item.get(&id).cloned().unwrap_or_default(),
+            modifier_groups: groups_by_item.get(&id).cloned().unwrap_or_default(),
+        })
+        .collect())
+}
