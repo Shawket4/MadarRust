@@ -244,6 +244,15 @@ pub struct OrderItem {
     pub unit_cost: Option<i64>,
     /// True when any cost component could not be resolved.
     pub cost_missing: bool,
+    /// A loyalty reward paid for some or all of this line. The receipt and the
+    /// kitchen say "Reward" beside it.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub is_reward: bool,
+    /// How many of `quantity` the reward covered.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub reward_units: i32,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -301,6 +310,11 @@ pub struct OrderFull {
     /// originated from a delivery order. `null`/absent for dine-in orders.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<OrderDeliveryInfo>,
+    /// Set only on the response to a REPLAYED sale whose rewards the points
+    /// could not pay for: the covered lines stayed covered, no points moved,
+    /// the order is flagged. The till shows this sentence to the teller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loyalty_redemption_refused: Option<String>,
 }
 
 /// Customer-facing delivery context attached to a finalized delivery order's
@@ -701,6 +715,8 @@ pub(crate) struct ResolvedItem {
     /// line total so the persisted order agrees with the subtotal the
     /// customer was charged — the receipt and the books read the same.
     pub(crate) reward_covered: i32,
+    /// Units of this line the reward covered (`order_items.reward_units`).
+    pub(crate) reward_units: i32,
     pub(crate) quantity: i32,
     pub(crate) notes: Option<String>,
     pub(crate) addons: Vec<ResolvedAddon>,
@@ -1254,6 +1270,7 @@ pub(crate) async fn resolve_order_line(
         price_flagged: false,
         is_reward: false,
         reward_covered: 0,
+        reward_units: 0,
         quantity: item_input.quantity,
         notes: item_input.notes.clone(),
         addons: resolved_addons,
@@ -1383,6 +1400,7 @@ pub(crate) async fn create_order_inner(
     {
         let items = fetch_order_items_full(pool.get_ref(), existing.id).await?;
         return Ok(HttpResponse::Ok().json(OrderFull {
+            loyalty_redemption_refused: redemption_refused_of(pool.get_ref(), existing.id).await?,
             order: existing,
             items,
             warnings: Vec::new(),
@@ -1518,6 +1536,8 @@ pub(crate) async fn create_order_inner(
         body.loyalty_customer_id,
         &body.loyalty_redemptions,
         &body.items,
+        // A replay is a sale that already happened; see `RedemptionPlan::refused`.
+        actor.replay,
     )
     .await?;
 
@@ -1562,10 +1582,12 @@ pub(crate) async fn create_order_inner(
         // A reward pays for whole units of this line, modifiers included — the
         // customer chose oat milk and the reward is the drink they chose. The
         // charge is reduced, never taken below zero.
-        let covered = redemption_plan
-            .units_for(line_index)
-            .map(|units| (resolved.charged_per_unit() * units).min(charged_line_subtotal))
-            .unwrap_or(0);
+        let reward_units = redemption_plan.units_for(line_index).unwrap_or(0);
+        let covered = crate::loyalty::redeem::covered_minor(
+            resolved.charged_per_unit() as i64,
+            charged_line_subtotal as i64,
+            reward_units as i64,
+        ) as i32;
         let charged_line_subtotal = charged_line_subtotal - covered;
         let is_reward_line = covered > 0;
 
@@ -1585,6 +1607,7 @@ pub(crate) async fn create_order_inner(
             && (resolved.branch_disabled || charged_line_subtotal != expected_line_subtotal);
         resolved.is_reward = is_reward_line;
         resolved.reward_covered = covered;
+        resolved.reward_units = if is_reward_line { reward_units } else { 0 };
 
         subtotal += charged_line_subtotal;
         expected_subtotal += expected_line_subtotal;
@@ -1962,12 +1985,12 @@ pub(crate) async fn create_order_inner(
             if let Some(key) = body.idempotency_key
                 && let Some(existing) = fetch_order_by_idempotency_key(pool.get_ref(), key, actor.org_id).await? {
                     let items = fetch_order_items_full(pool.get_ref(), existing.id).await?;
-                    return Ok(HttpResponse::Ok().json(OrderFull { order: existing, items, warnings: Vec::new(), delivery: None }));
+                    return Ok(HttpResponse::Ok().json(OrderFull { loyalty_redemption_refused: redemption_refused_of(pool.get_ref(), existing.id).await?, order: existing, items, warnings: Vec::new(), delivery: None }));
                 }
             if let Some(order_ref) = &body.order_ref
                 && let Some(existing) = fetch_order_by_order_ref(pool.get_ref(), order_ref, actor.org_id).await? {
                     let items = fetch_order_items_full(pool.get_ref(), existing.id).await?;
-                    return Ok(HttpResponse::Ok().json(OrderFull { order: existing, items, warnings: Vec::new(), delivery: None }));
+                    return Ok(HttpResponse::Ok().json(OrderFull { loyalty_redemption_refused: redemption_refused_of(pool.get_ref(), existing.id).await?, order: existing, items, warnings: Vec::new(), delivery: None }));
                 }
             return Err(AppError::Conflict("Duplicate order".into()));
         }
@@ -2151,11 +2174,12 @@ pub(crate) async fn create_order_inner(
                 (order_id, menu_item_id, item_name, name_translations, size_label,
                  unit_price, quantity, line_total, notes, deductions_snapshot,
                  bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing,
-                 price_flagged, is_reward)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                 price_flagged, is_reward, reward_units)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
                RETURNING id, order_id, menu_item_id, item_name, name_translations, size_label,
                          unit_price, quantity, line_total, notes, deductions_snapshot,
-                         bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing"#,
+                         bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing,
+                         is_reward, reward_units"#,
         )
         .bind(order.id)
         .bind(resolved.menu_item_id)
@@ -2174,6 +2198,7 @@ pub(crate) async fn create_order_inner(
         .bind(costs.cost_missing)
         .bind(resolved.price_flagged)
         .bind(resolved.is_reward)
+        .bind(resolved.reward_units)
         .fetch_one(&mut *tx)
         .await?;
 
@@ -2413,21 +2438,40 @@ pub(crate) async fn create_order_inner(
 
     // Record what the rewards spent, inside the order's own transaction: a free
     // coffee and the ledger row that paid for it commit together or not at all.
-    crate::loyalty::redeem::record(
+    let item_ids: Vec<Uuid> = order_items_full.iter().map(|i| i.item.id).collect();
+    let redemption_refused = crate::loyalty::redeem::record(
         &mut tx,
         &redemption_plan,
         actor.org_id,
         body.branch_id,
         order.id,
+        &item_ids,
         Some(actor.teller_id),
+        actor.replay,
     )
     .await?;
+    let mut order = order;
+    if let Some(why) = &redemption_refused {
+        // Recorded, flagged, and said out loud — never a lost sale.
+        sqlx::query(
+            "UPDATE orders SET loyalty_redemption_refused = $2, price_flagged = true \
+             WHERE id = $1",
+        )
+        .bind(order.id)
+        .bind(why)
+        .execute(&mut *tx)
+        .await?;
+        order.price_flagged = true;
+        tracing::warn!(order_id = %order.id, reason = %why, "replayed reward recorded without points");
+        warnings.push(format!("Reward not paid for with points: {why}"));
+    }
 
     tx.commit().await?;
     // The balance on the customer's phone must not outlive the sale that spent
     // it. After the commit, never inside — the same rule realtime follows.
     if let Some(member) = &redemption_plan.member
         && !redemption_plan.is_empty()
+        && redemption_refused.is_none()
     {
         crate::loyalty::wallet::push_update(pool.get_ref(), member.id);
     }
@@ -2447,6 +2491,7 @@ pub(crate) async fn create_order_inner(
         items: order_items_full,
         warnings,
         delivery: None,
+        loyalty_redemption_refused: redemption_refused,
     }))
 }
 
@@ -2659,6 +2704,7 @@ pub async fn list_orders(
                     items,
                     warnings: Vec::new(),
                     delivery: None,
+                    loyalty_redemption_refused: None,
                 }
             })
             .collect();
@@ -2706,12 +2752,25 @@ pub async fn get_order(
         Some(did) => fetch_order_delivery_info(pool.get_ref(), did).await?,
         None => None,
     };
+    let loyalty_redemption_refused = redemption_refused_of(pool.get_ref(), order.id).await?;
     Ok(HttpResponse::Ok().json(OrderFull {
         order,
         items,
         warnings: Vec::new(),
         delivery,
+        loyalty_redemption_refused,
     }))
+}
+
+/// Why a replayed sale's rewards were recorded without points, if they were.
+async fn redemption_refused_of(pool: &PgPool, order_id: Uuid) -> Result<Option<String>, AppError> {
+    Ok(sqlx::query_scalar::<_, Option<String>>(
+        "SELECT loyalty_redemption_refused FROM orders WHERE id = $1",
+    )
+    .bind(order_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten())
 }
 
 // ── POST /orders/:id/void ─────────────────────────────────────
@@ -3265,7 +3324,8 @@ async fn fetch_order_items_full(
     let items = sqlx::query_as::<_, OrderItem>(
         "SELECT id, order_id, menu_item_id, item_name, name_translations, size_label, \
                 unit_price, quantity, line_total, notes, deductions_snapshot, \
-                bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing \
+                bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing, \
+                is_reward, reward_units \
          FROM order_items WHERE order_id = $1 ORDER BY id",
     )
     .bind(order_id)
@@ -3373,7 +3433,8 @@ async fn fetch_orders_items_full_batch(
     let items = sqlx::query_as::<_, OrderItem>(
         "SELECT id, order_id, menu_item_id, item_name, name_translations, size_label, \
                 unit_price, quantity, line_total, notes, deductions_snapshot, \
-                bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing \
+                bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing, \
+                is_reward, reward_units \
          FROM order_items WHERE order_id = ANY($1) ORDER BY id",
     )
     .bind(order_ids)

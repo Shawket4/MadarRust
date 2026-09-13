@@ -44,6 +44,15 @@ pub struct PlannedRedemption {
 pub struct RedemptionPlan {
     pub member: Option<MemberRow>,
     pub lines: Vec<PlannedRedemption>,
+    /// Why the rewards could not be paid for with points, on a REPLAYED sale.
+    ///
+    /// A live sale that cannot honour its rewards is refused before anything
+    /// is handed over. A replayed one already happened: the till collected the
+    /// reduced amount and the customer left with the item. Refusing it would
+    /// lose the whole sale over one coffee, so the lines stay covered (the
+    /// money in the drawer is the truth), no points move, and the order is
+    /// flagged with this sentence for a manager to settle with the customer.
+    pub refused: Option<String>,
 }
 
 impl RedemptionPlan {
@@ -58,6 +67,22 @@ impl RedemptionPlan {
     pub fn is_empty(&self) -> bool {
         self.lines.is_empty()
     }
+
+    /// What the plan spends, in the member's currency.
+    pub fn spent(&self) -> i32 {
+        self.lines
+            .iter()
+            .fold(0i32, |a, l| a.saturating_add(l.cost))
+    }
+}
+
+/// Minor units a reward takes off one line: whole units at the price the line
+/// was charged per unit, modifiers included, never more than the line itself.
+///
+/// The one rule both sides share — `madar-core` prices the Charge screen with
+/// the same arithmetic, pinned by `loyalty_reward_vectors.json`.
+pub fn covered_minor(charged_per_unit: i64, line_subtotal: i64, units: i64) -> i64 {
+    (charged_per_unit.max(0) * units.max(0)).min(line_subtotal.max(0))
 }
 
 /// Price and validate the rewards a sale wants to spend.
@@ -66,6 +91,11 @@ impl RedemptionPlan {
 /// single price is computed: an unknown member, another tenant's member, a line
 /// that is not a reward at this branch, more units than the line holds, or a
 /// balance that does not cover it.
+///
+/// `lenient` is the REPLAY of a sale that already happened (see
+/// [`RedemptionPlan::refused`]): nothing is refused, lines that cannot be
+/// covered at all (no such line, a bundle) are dropped, units are clamped to
+/// the line, and the reason the points could not pay is kept.
 pub async fn plan(
     pool: &PgPool,
     org_id: Uuid,
@@ -73,10 +103,73 @@ pub async fn plan(
     customer_id: Option<Uuid>,
     redemptions: &[LoyaltyRedemptionInput],
     items: &[OrderItemInput],
+    lenient: bool,
 ) -> Result<RedemptionPlan, AppError> {
     if redemptions.is_empty() {
         return Ok(RedemptionPlan::default());
     }
+    let refused = match plan_strict(pool, org_id, branch_id, customer_id, redemptions, items).await
+    {
+        Ok(p) => return Ok(p),
+        Err(AppError::BadRequest(m) | AppError::Conflict(m) | AppError::NotFound(m)) if lenient => {
+            m
+        }
+        Err(e) => return Err(e),
+    };
+    let member = match customer_id {
+        Some(id) => model::find_by_id(pool, id)
+            .await?
+            .filter(|m| m.org_id == org_id),
+        None => None,
+    };
+    Ok(RedemptionPlan {
+        member,
+        lines: structural_lines(redemptions, items),
+        refused: Some(refused),
+    })
+}
+
+/// The lines a replayed sale covered, with no points attached: what the till
+/// took off the bill, as far as it can be priced at all.
+fn structural_lines(
+    redemptions: &[LoyaltyRedemptionInput],
+    items: &[OrderItemInput],
+) -> Vec<PlannedRedemption> {
+    let mut lines: Vec<PlannedRedemption> = Vec::new();
+    for r in redemptions {
+        let Some(index) = r.item_index else { continue };
+        let Some(item) = items.get(index) else {
+            continue;
+        };
+        let Some(menu_item_id) = item.menu_item_id else {
+            continue;
+        };
+        if lines.iter().any(|l| l.item_index == index) {
+            continue;
+        }
+        let units = r.units.unwrap_or(1).clamp(0, item.quantity.max(0));
+        if units < 1 {
+            continue;
+        }
+        lines.push(PlannedRedemption {
+            item_index: index,
+            menu_item_id,
+            units,
+            currency: String::new(),
+            cost: 0,
+        });
+    }
+    lines
+}
+
+async fn plan_strict(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Uuid,
+    customer_id: Option<Uuid>,
+    redemptions: &[LoyaltyRedemptionInput],
+    items: &[OrderItemInput],
+) -> Result<RedemptionPlan, AppError> {
     let customer_id = customer_id
         .ok_or_else(|| AppError::BadRequest("A reward needs the member it belongs to".into()))?;
 
@@ -149,6 +242,13 @@ pub async fn plan(
             }
         };
 
+        // A reward priced at nothing is a free item bounded by nothing but the
+        // cap. Refused rather than honoured, whatever the catalogue row says.
+        if unit_cost <= 0 {
+            return Err(AppError::Conflict(
+                "That reward has no price set — ask a manager to fix the catalogue".into(),
+            ));
+        }
         let cost = unit_cost.saturating_mul(units);
         spent = spent.saturating_add(cost);
         lines.push(PlannedRedemption {
@@ -197,6 +297,7 @@ pub async fn plan(
     Ok(RedemptionPlan {
         member: Some(member),
         lines,
+        refused: None,
     })
 }
 
@@ -204,23 +305,80 @@ pub async fn plan(
 ///
 /// Idempotent per covered line (`loyalty_transactions_redeem_line_key`), so a
 /// retried checkout lands the same free coffee exactly once.
+///
+/// ## Two tills, one balance
+/// `plan` reads the balance outside any lock, so two tills can each be told the
+/// last reward is affordable. The member's row is locked HERE, inside the order
+/// transaction, and the balance re-read under it: the second till waits for the
+/// first to commit and then sees what is left. A live sale that lost the race
+/// is refused (nothing has been handed over yet); a replayed one keeps its
+/// cover, moves no points and says why — the same rule as
+/// [`RedemptionPlan::refused`]. `created_by` is the audit trail: the teller
+/// who applied the reward.
+///
+/// `item_ids[i]` is the `order_items.id` of line `i`, so a refund can find the
+/// redemption that paid for the line it returns.
+///
+/// Returns the refusal to stamp on the order, if there is one.
+#[allow(clippy::too_many_arguments)]
 pub async fn record(
     tx: &mut Transaction<'_, Postgres>,
     plan: &RedemptionPlan,
     org_id: Uuid,
     branch_id: Uuid,
     order_id: Uuid,
+    item_ids: &[Uuid],
     created_by: Option<Uuid>,
-) -> Result<(), AppError> {
+    lenient: bool,
+) -> Result<Option<String>, AppError> {
+    if plan.is_empty() {
+        return Ok(None);
+    }
+    if let Some(refused) = &plan.refused {
+        return Ok(Some(refused.clone()));
+    }
     let Some(member) = &plan.member else {
-        return Ok(());
+        return Ok(None);
     };
+    let currency = plan
+        .lines
+        .first()
+        .map(|l| l.currency.clone())
+        .unwrap_or_default();
+    let balance: Option<i32> = sqlx::query_scalar(
+        "SELECT CASE WHEN $2 = 'visits' THEN visits_balance ELSE points_balance END \
+           FROM loyalty_customers WHERE id = $1 FOR UPDATE",
+    )
+    .bind(member.id)
+    .bind(&currency)
+    .fetch_optional(&mut **tx)
+    .await?;
+    // A retry of an order whose rows already landed must not be judged against
+    // the balance those rows already spent.
+    let already: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM loyalty_transactions WHERE order_id = $1 AND kind = 'redeem'",
+    )
+    .bind(order_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let spent = plan.spent();
+    if already == 0 && balance.unwrap_or(0) < spent {
+        let why = format!(
+            "{} has {}; those rewards cost {spent}",
+            member.name,
+            balance.unwrap_or(0)
+        );
+        if lenient {
+            return Ok(Some(why));
+        }
+        return Err(AppError::Conflict(why));
+    }
     for line in &plan.lines {
         sqlx::query(
             "INSERT INTO loyalty_transactions \
                 (org_id, customer_id, branch_id, kind, currency, points, order_id, \
-                 order_line_index, reward_menu_item_id, created_by, source) \
-             VALUES ($1,$2,$3,'redeem',$4,$5,$6,$7,$8,$9,'redemption') \
+                 order_line_index, reward_menu_item_id, created_by, source, order_item_id) \
+             VALUES ($1,$2,$3,'redeem',$4,$5,$6,$7,$8,$9,'redemption',$10) \
              ON CONFLICT DO NOTHING",
         )
         .bind(org_id)
@@ -232,8 +390,22 @@ pub async fn record(
         .bind(line.item_index as i32)
         .bind(line.menu_item_id)
         .bind(created_by)
+        .bind(item_ids.get(line.item_index).copied())
         .execute(&mut **tx)
         .await?;
     }
-    Ok(())
+    Ok(None)
+}
+
+#[cfg(test)]
+mod unit {
+    use super::covered_minor;
+
+    #[test]
+    fn a_reward_covers_whole_units_with_their_modifiers_and_never_more_than_the_line() {
+        assert_eq!(covered_minor(6_500, 13_000, 1), 6_500);
+        assert_eq!(covered_minor(6_500, 13_000, 3), 13_000);
+        assert_eq!(covered_minor(6_500, 13_000, 0), 0);
+        assert_eq!(covered_minor(-5, 100, 1), 0);
+    }
 }

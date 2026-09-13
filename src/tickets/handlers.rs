@@ -1179,18 +1179,36 @@ pub(crate) async fn settle_open_ticket_inner(
     // Translate each reward's LINE into the position that line ended up at.
     // A settle must name lines by id: the till cannot see the order the rounds
     // flatten into, and a guessed index takes the wrong item off the bill.
-    let mut redemptions = body.loyalty_redemptions.clone();
-    for r in &mut redemptions {
-        let Some(line_id) = r.ticket_line_id else {
-            return Err(AppError::BadRequest(
-                "A reward on a ticket must name the line it covers".into(),
-            ));
-        };
-        r.item_index = Some(*line_positions.get(&line_id).ok_or_else(|| {
+    //
+    // A REPLAYED settle is money already taken, so a reward naming a line that
+    // has since gone (voided by another device before this queue flushed) is
+    // dropped rather than refusing the whole bill: the line is not on the
+    // order, so there is nothing left to cover.
+    let mut redemptions = Vec::with_capacity(body.loyalty_redemptions.len());
+    for r in &body.loyalty_redemptions {
+        let position = r
+            .ticket_line_id
+            .and_then(|id| line_positions.get(&id).copied());
+        match position {
+            Some(index) => {
+                let mut r = r.clone();
+                r.item_index = Some(index);
+                redemptions.push(r);
+            }
+            None if actor.replay => continue,
+            None if r.ticket_line_id.is_none() => {
+                return Err(AppError::BadRequest(
+                    "A reward on a ticket must name the line it covers".into(),
+                ));
+            }
             // A voided line, or one from another ticket. Either way the reward
             // has nothing to cover, and guessing would give something away.
-            AppError::BadRequest("That line is not on this ticket".into())
-        })?);
+            None => {
+                return Err(AppError::BadRequest(
+                    "That line is not on this ticket".into(),
+                ));
+            }
+        }
     }
 
     // The discount, explicitly. The cashier says nothing → the waiter's ticket

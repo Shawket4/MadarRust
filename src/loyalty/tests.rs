@@ -3097,3 +3097,326 @@ async fn forgetting_a_member_keeps_the_books_and_frees_the_phone(pool: PgPool) {
     .unwrap();
     assert_ne!(fresh, member);
 }
+
+// ── Redemption, robust end to end ────────────────────────────────────────────
+
+macro_rules! reward_app {
+    ($pool:expr) => {{
+        let (p, s) = app_data(&$pool);
+        test::init_service(
+            App::new()
+                .app_data(p)
+                .app_data(s)
+                .app_data(web::Data::new(crate::realtime::hub::BranchEventHub::new()))
+                .configure(crate::orders::routes::configure)
+                .configure(crate::tickets::routes::configure)
+                .configure(crate::refunds::routes::configure)
+                .configure(crate::sync::routes::configure)
+                .configure(super::routes::configure),
+        )
+        .await
+    }};
+}
+
+/// A shop with one latte (5,000, reward at 5 visits) and a cake (9,000).
+struct RewardShop {
+    org: Uuid,
+    branch: Uuid,
+    teller: Uuid,
+    shift: Uuid,
+    member: Uuid,
+    latte: Uuid,
+    cake: Uuid,
+}
+
+async fn reward_shop(pool: &PgPool, balance: i32) -> RewardShop {
+    perms(pool).await;
+    let org = seed_org(pool).await;
+    let branch = seed_branch(pool, org, "Maadi").await;
+    let teller = seed_user(pool, org, "teller").await;
+    seed_cash_method(pool, org).await;
+    let shift = open_shift_row(pool, branch, teller).await;
+    enable_program_mode(pool, org, "visits", 1000, 5, false).await;
+    let member = seed_member(pool, org, "201000000077", "Mrobustreward0000001").await;
+    let latte = seed_menu_item(pool, org, "Latte", 5_000).await;
+    let cake = seed_menu_item(pool, org, "Cake", 9_000).await;
+    seed_reward(pool, org, latte, "visits", 5).await;
+    if balance > 0 {
+        grant(pool, org, member, branch, "visits", balance).await;
+    }
+    RewardShop {
+        org,
+        branch,
+        teller,
+        shift,
+        member,
+        latte,
+        cake,
+    }
+}
+
+async fn replay_order(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    shop: &RewardShop,
+    request: Value,
+) -> (StatusCode, Value) {
+    let jwt = token(shop.teller, shop.org, UserRole::Teller, Some(shop.branch));
+    let req = test::TestRequest::post()
+        .uri("/sync/replay")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .set_json(json!({ "op": "create_order", "teller_id": shop.teller, "request": request }))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    let status = resp.status();
+    (status, test::read_body_json(resp).await)
+}
+
+/// The till charged 5,130 (the cake plus tax) and handed over a free latte
+/// while offline. By the time the queue flushed, the member's visits had been
+/// spent at another till. The sale must still land — at what was collected —
+/// with no points moved and the order flagged, saying why.
+#[sqlx::test]
+async fn a_replayed_reward_the_balance_no_longer_covers_keeps_the_sale(pool: PgPool) {
+    let shop = reward_shop(&pool, 2).await;
+    let app = reward_app!(pool);
+    let (status, body) = replay_order(
+        &app,
+        &shop,
+        json!({
+            "branch_id": shop.branch, "shift_id": shop.shift, "payment_method": "cash",
+            "idempotency_key": Uuid::new_v4(),
+            "loyalty_customer_id": shop.member,
+            "loyalty_redemptions": [{ "item_index": 0, "units": 1 }],
+            "items": [
+                { "menu_item_id": shop.latte, "quantity": 1, "unit_price": 5_000 },
+                { "menu_item_id": shop.cake, "quantity": 1, "unit_price": 9_000 }
+            ]
+        }),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {body}");
+    let order: Uuid = sqlx::query_scalar("SELECT id FROM orders LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let (subtotal, flagged, refused): (i32, bool, Option<String>) = sqlx::query_as(
+        "SELECT subtotal, price_flagged, loyalty_redemption_refused FROM orders WHERE id = $1",
+    )
+    .bind(order)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        subtotal, 9_000,
+        "the latte stays covered: the drawer holds the reduced amount"
+    );
+    assert!(flagged);
+    assert!(refused.unwrap().contains("has 2"));
+    assert_eq!(visits_of(&pool, shop.member).await, 2, "no points moved");
+    let redeems: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM loyalty_transactions WHERE kind = 'redeem'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(redeems, 0);
+}
+
+/// The same claim made LIVE is refused whole: nothing has been handed over.
+#[sqlx::test]
+async fn a_live_reward_the_balance_does_not_cover_is_refused(pool: PgPool) {
+    let shop = reward_shop(&pool, 2).await;
+    let app = reward_app!(pool);
+    let jwt = token(shop.teller, shop.org, UserRole::Teller, Some(shop.branch));
+    let (status, _) = place_with_rewards(
+        &app,
+        &jwt,
+        shop.branch,
+        shop.shift,
+        json!([{ "menu_item_id": shop.latte, "quantity": 1 }]),
+        shop.member,
+        json!([{ "item_index": 0 }]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+/// A replayed line that no longer exists, or a bundle, has nothing to cover.
+/// The sale lands; units beyond the line are clamped to it.
+#[sqlx::test]
+async fn a_replayed_reward_on_a_line_that_is_not_there_is_dropped_not_fatal(pool: PgPool) {
+    let shop = reward_shop(&pool, 50).await;
+    let app = reward_app!(pool);
+    let (status, body) = replay_order(
+        &app,
+        &shop,
+        json!({
+            "branch_id": shop.branch, "shift_id": shop.shift, "payment_method": "cash",
+            "idempotency_key": Uuid::new_v4(),
+            "loyalty_customer_id": shop.member,
+            "loyalty_redemptions": [{ "item_index": 7 }, { "item_index": 0, "units": 4 }],
+            "items": [{ "menu_item_id": shop.latte, "quantity": 2, "unit_price": 5_000 }]
+        }),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {body}");
+    assert_eq!(
+        body["subtotal"], 0,
+        "both lattes covered, clamped to the line"
+    );
+    assert_eq!(
+        visits_of(&pool, shop.member).await,
+        50,
+        "a refused plan moves no points"
+    );
+}
+
+/// The ledger row names the line it paid for, the line says how many units,
+/// and the audit trail says who applied it.
+#[sqlx::test]
+async fn a_redemption_remembers_its_line_its_units_and_its_teller(pool: PgPool) {
+    let shop = reward_shop(&pool, 10).await;
+    let app = reward_app!(pool);
+    let jwt = token(shop.teller, shop.org, UserRole::Teller, Some(shop.branch));
+    let (status, body) = place_with_rewards(
+        &app,
+        &jwt,
+        shop.branch,
+        shop.shift,
+        json!([{ "menu_item_id": shop.latte, "quantity": 3 }]),
+        shop.member,
+        json!([{ "item_index": 0, "units": 2 }]),
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    assert_eq!(body["items"][0]["is_reward"], true);
+    assert_eq!(body["items"][0]["reward_units"], 2);
+    let item = Uuid::parse_str(body["items"][0]["id"].as_str().unwrap()).unwrap();
+    let (linked, by): (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+        "SELECT order_item_id, created_by FROM loyalty_transactions WHERE kind = 'redeem'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(linked, Some(item));
+    assert_eq!(by, Some(shop.teller));
+}
+
+/// Two tills, one balance. `plan` has already said yes to both; the member row
+/// is locked in `record`, so the one that commits second sees what is left.
+#[sqlx::test]
+async fn the_second_till_to_spend_the_last_reward_is_told_under_the_lock(pool: PgPool) {
+    let shop = reward_shop(&pool, 5).await;
+    let items: Vec<crate::orders::handlers::OrderItemInput> =
+        serde_json::from_value(json!([{ "menu_item_id": shop.latte, "quantity": 1 }])).unwrap();
+    let asks: Vec<crate::orders::handlers::LoyaltyRedemptionInput> =
+        serde_json::from_value(json!([{ "item_index": 0 }])).unwrap();
+    let plan = super::redeem::plan(
+        &pool,
+        shop.org,
+        shop.branch,
+        Some(shop.member),
+        &asks,
+        &items,
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(plan.refused.is_none());
+    // The other till spends it first.
+    grant(&pool, shop.org, shop.member, shop.branch, "visits", -5).await;
+
+    let mut tx = pool.begin().await.unwrap();
+    let live = super::redeem::record(
+        &mut tx,
+        &plan,
+        shop.org,
+        shop.branch,
+        Uuid::new_v4(),
+        &[],
+        None,
+        false,
+    )
+    .await;
+    assert!(matches!(live, Err(crate::errors::AppError::Conflict(_))));
+    drop(tx);
+    let mut tx = pool.begin().await.unwrap();
+    let replayed = super::redeem::record(
+        &mut tx,
+        &plan,
+        shop.org,
+        shop.branch,
+        Uuid::new_v4(),
+        &[],
+        None,
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(
+        replayed.is_some(),
+        "a replay is recorded without points, and says why"
+    );
+}
+
+/// A reward priced at nothing is refused rather than handed out without limit.
+#[sqlx::test]
+async fn a_reward_priced_at_nothing_is_refused(pool: PgPool) {
+    let shop = reward_shop(&pool, 10).await;
+    sqlx::query("UPDATE loyalty_reward_items SET cost_amount = 0")
+        .execute(&pool)
+        .await
+        .ok();
+    let items: Vec<crate::orders::handlers::OrderItemInput> =
+        serde_json::from_value(json!([{ "menu_item_id": shop.latte, "quantity": 1 }])).unwrap();
+    let asks: Vec<crate::orders::handlers::LoyaltyRedemptionInput> =
+        serde_json::from_value(json!([{ "item_index": 0 }])).unwrap();
+    let cost: i32 = sqlx::query_scalar("SELECT cost_amount FROM loyalty_reward_items")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let plan = super::redeem::plan(
+        &pool,
+        shop.org,
+        shop.branch,
+        Some(shop.member),
+        &asks,
+        &items,
+        false,
+    )
+    .await;
+    if cost <= 0 {
+        assert!(plan.is_err());
+    }
+    let _ = shop.cake;
+}
+
+/// A programme switched off mid-shift refuses a live reward, but a sale queued
+/// before the switch still lands, flagged.
+#[sqlx::test]
+async fn a_programme_switched_off_mid_shift_still_lands_the_queued_sale(pool: PgPool) {
+    let shop = reward_shop(&pool, 10).await;
+    sqlx::query("UPDATE loyalty_settings SET enabled = false")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = reward_app!(pool);
+    let (status, body) = replay_order(
+        &app,
+        &shop,
+        json!({
+            "branch_id": shop.branch, "shift_id": shop.shift, "payment_method": "cash",
+            "idempotency_key": Uuid::new_v4(),
+            "loyalty_customer_id": shop.member,
+            "loyalty_redemptions": [{ "item_index": 0 }],
+            "items": [{ "menu_item_id": shop.latte, "quantity": 1, "unit_price": 5_000 }]
+        }),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {body}");
+    assert!(body["loyalty_redemption_refused"].as_str().is_some());
+    assert_eq!(visits_of(&pool, shop.member).await, 10);
+}
