@@ -501,7 +501,8 @@ pub async fn cancel_delivery_order(
 
 #[derive(Deserialize, ToSchema)]
 pub struct FinalizeInput {
-    pub shift_id: Uuid,
+    #[serde(alias = "shift_id")]
+    pub till_id: Uuid,
     /// The actual method the customer paid (overrides the hint). Must be an org method.
     pub payment_method: String,
 }
@@ -566,7 +567,7 @@ pub async fn finalize_delivery_order(
         "SELECT EXISTS(SELECT 1 FROM tills WHERE id = $1 AND branch_id = $2 AND status = 'open' \
          AND ($3::uuid IS NULL OR teller_id = $3))",
     )
-    .bind(body.shift_id)
+    .bind(body.till_id)
     .bind(order.branch_id)
     .bind(teller_match)
     .fetch_one(pool.get_ref())
@@ -592,12 +593,12 @@ pub async fn finalize_delivery_order(
 
     // Same per-shift advisory lock the POS create path uses (cash TOCTOU).
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text))")
-        .bind(body.shift_id.to_string())
+        .bind(body.till_id.to_string())
         .execute(&mut *tx)
         .await?;
     let still_open: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tills WHERE id = $1 AND status = 'open')")
-            .bind(body.shift_id)
+            .bind(body.till_id)
             .fetch_one(&mut *tx)
             .await?;
     if !still_open {
@@ -629,7 +630,7 @@ pub async fn finalize_delivery_order(
     // ruling, and both tables CHECK it.
     let ctx = FinalizeCtx {
         branch_id: order.branch_id,
-        shift_id: body.shift_id,
+        till_id: body.till_id,
         teller_id: claims.user_id(),
         payment_method: &body.payment_method,
         is_cash,

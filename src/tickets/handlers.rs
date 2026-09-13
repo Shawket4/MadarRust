@@ -80,7 +80,8 @@ pub const DISCOUNT_NONE: &str = "none";
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct SettleOpenTicketRequest {
-    pub shift_id: Uuid,
+    #[serde(alias = "shift_id")]
+    pub till_id: Uuid,
     pub payment_method: String,
     /// Settle-time discount. ABSENT (all three fields) means the waiter's
     /// ticket discount is inherited, as it always was — but the till can now
@@ -1241,7 +1242,7 @@ pub(crate) async fn settle_open_ticket_inner(
         branch_id,
         loyalty_customer_id: body.loyalty_customer_id,
         loyalty_redemptions: redemptions,
-        till_id: body.shift_id,
+        till_id: body.till_id,
         device_id: None,
         device_code: None,
         verification: None,

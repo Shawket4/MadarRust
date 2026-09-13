@@ -481,6 +481,8 @@ paths(
         crate::orders::handlers::export_orders,
         // ── reports ───────────────────────────────────────────────────
         crate::reports::handlers::shift_summary,
+        crate::reports::handlers::till_summary,
+        crate::reports::handlers::till_deductions,
         crate::reports::handlers::shift_deductions,
         crate::reports::handlers::branch_sales,
         crate::reports::handlers::branch_stock,

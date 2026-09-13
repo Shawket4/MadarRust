@@ -46,7 +46,12 @@ pub struct TimeseriesQuery {
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct ShiftSummary {
+    pub till_id: Uuid,
+    /// DEPRECATED: same value as `till_id` (required by POS v0.5.1/v0.6.0).
     pub shift_id: Uuid,
+    pub device_code: Option<String>,
+    pub opened_while_another_open: bool,
+    pub reconciliation_status: Option<String>,
     pub branch_id: Uuid,
     pub branch_name: String,
     pub teller_id: Uuid,
@@ -343,7 +348,11 @@ pub async fn shift_summary(
     let summary = sqlx::query_as::<_, ShiftSummary>(
         r#"
         SELECT
+            s.id                                        AS till_id,
             s.id                                        AS shift_id,
+            s.device_code,
+            s.opened_while_another_open,
+            s.reconciliation_status,
             s.branch_id,
             b.name                                      AS branch_name,
             s.teller_id,
@@ -404,6 +413,40 @@ pub async fn shift_summary(
     .ok_or_else(|| AppError::NotFound("Shift not found".into()))?;
 
     Ok(HttpResponse::Ok().json(summary))
+}
+
+// ── GET /reports/tills/:id/summary (T15) ─────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/reports/tills/{till_id}/summary",
+    tag = "reports",
+    params(("till_id" = Uuid, Path, description = "Till ID")),
+    responses((status = 200, description = "Till summary", body = ShiftSummary), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn till_summary(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    till_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    shift_summary(req, pool, till_id).await
+}
+
+#[utoipa::path(
+    get,
+    path = "/reports/tills/{till_id}/deductions",
+    tag = "reports",
+    params(("till_id" = Uuid, Path, description = "Till ID")),
+    responses((status = 200, description = "Till deductions", body = Vec<DeductionLogRow>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn till_deductions(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    till_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    shift_deductions(req, pool, till_id).await
 }
 
 // ── GET /reports/shifts/:id/deductions ───────────────────────
