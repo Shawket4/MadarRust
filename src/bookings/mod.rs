@@ -58,20 +58,12 @@ use crate::realtime::hub::BranchEventHub;
 pub use model::{BookingView, booking_view};
 pub use settings::{BookingSettings, load_settings};
 
-/// The branch's effective IANA timezone (branch override, else the org's).
+/// The branch's effective IANA timezone — see [`crate::tz`].
 pub(crate) async fn branch_tz<'e, E>(exec: E, branch_id: Uuid) -> Result<Tz, AppError>
 where
     E: PgExecutor<'e>,
 {
-    let name: Option<String> = sqlx::query_scalar(
-        "SELECT COALESCE(b.timezone, o.timezone)::text FROM branches b \
-         JOIN organizations o ON o.id = b.org_id WHERE b.id = $1 AND b.deleted_at IS NULL",
-    )
-    .bind(branch_id)
-    .fetch_optional(exec)
-    .await?;
-    let name = name.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
-    Ok(name.parse().unwrap_or(chrono_tz::Africa::Cairo))
+    crate::tz::effective_tz(exec, branch_id).await
 }
 
 /// Publish a booking event on the `bookings` topic (post-commit). The payload is

@@ -121,8 +121,7 @@ pub fn build(
 /// message goes out — the gateway helper reports failures on its own).
 pub async fn notify(pool: &PgPool, view: &BookingView, kind: Kind) {
     let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT b.name, COALESCE(b.timezone, o.timezone)::text FROM branches b \
-         JOIN organizations o ON o.id = b.org_id WHERE b.id = $1",
+        "SELECT b.name, effective_timezone(b.id) FROM branches b WHERE b.id = $1",
     )
     .bind(view.branch_id)
     .fetch_optional(pool)
@@ -130,7 +129,7 @@ pub async fn notify(pool: &PgPool, view: &BookingView, kind: Kind) {
     .ok()
     .flatten();
     let Some((branch, tz_name)) = row else { return };
-    let tz: Tz = tz_name.parse().unwrap_or(chrono_tz::Africa::Cairo);
+    let tz: Tz = crate::tz::parse(&tz_name);
     let when = format_when(view.starts_at, tz, &view.locale);
     let url = match kind {
         Kind::Cancelled => None,

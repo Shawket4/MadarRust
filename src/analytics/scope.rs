@@ -75,7 +75,7 @@ pub async fn org_clock(db: &Db) -> Result<OrgClock, AppError> {
                 "org_clock",
                 &"no organization row visible on a tenant-scoped pool",
             );
-            "Africa/Cairo".to_string()
+            crate::tz::DEFAULT_TZ.to_string()
         }
     };
     let tz = super::spec::parse_tz(&timezone);

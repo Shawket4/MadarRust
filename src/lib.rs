@@ -54,6 +54,7 @@ pub mod tax;
 pub mod tickets;
 pub mod tills;
 pub mod translation;
+pub mod tz;
 pub mod units;
 pub mod uploads;
 pub mod users;

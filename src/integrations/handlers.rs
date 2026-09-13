@@ -33,7 +33,7 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 /// Fallback when neither the branch nor its org has a timezone configured —
 /// the same default the reports layer uses, so a partner's day boundaries and
 /// the dashboard's always agree.
-const DEFAULT_TZ: &str = "Africa/Cairo";
+const DEFAULT_TZ: &str = crate::tz::DEFAULT_TZ;
 
 /// Orders whose money touched a payment method the merchant has hidden from
 /// partners are excluded ENTIRELY — from `orders[]` and from every aggregate —

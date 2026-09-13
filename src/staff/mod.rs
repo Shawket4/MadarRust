@@ -46,7 +46,7 @@ use crate::{auth::jwt::Claims, errors::AppError};
 
 /// Fallback timezone when neither the branch nor the org sets one. Same default
 /// the rest of the system uses.
-pub(crate) const DEFAULT_TZ: &str = "Africa/Cairo";
+pub(crate) const DEFAULT_TZ: &str = crate::tz::DEFAULT_TZ;
 
 /// The org every staff query is scoped to: the caller's own, or — for a super
 /// admin, who has no org of their own — the one pinned with `X-Org-Id`.
@@ -90,17 +90,7 @@ pub(crate) async fn require_user_in_org(
 /// this value — never from the device clock. `::text` on the enum-typed columns
 /// is required: `AT TIME ZONE` does not accept the timezone enum directly.
 pub(crate) async fn branch_timezone(pool: &PgPool, branch_id: Uuid) -> Result<String, AppError> {
-    sqlx::query_scalar(
-        "SELECT COALESCE(b.timezone::text, o.timezone::text, $2)
-           FROM branches b
-           JOIN organizations o ON o.id = b.org_id
-          WHERE b.id = $1 AND b.deleted_at IS NULL",
-    )
-    .bind(branch_id)
-    .bind(DEFAULT_TZ)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Branch not found".into()))
+    crate::tz::effective_tz_name(pool, branch_id).await
 }
 
 /// Resolve a branch's org (and confirm it is live). Mirrors

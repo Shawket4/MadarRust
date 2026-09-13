@@ -783,21 +783,9 @@ pub async fn branch_sales_timeseries(
     let (branch_ids, org) =
         resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
-    // Resolve the bucketing timezone as branch → org → Africa/Cairo. For a
-    // specific branch this is its effective tz; for "all branches" (nil UUID)
-    // the branch subquery is NULL and we bucket every branch in one consistent
-    // org-level zone.
-    let tz: String = sqlx::query_scalar(
-        "SELECT COALESCE(
-            (SELECT timezone::text FROM branches WHERE id = $1 AND deleted_at IS NULL),
-            (SELECT timezone::text FROM organizations WHERE id = $2),
-            'Africa/Cairo'
-         )",
-    )
-    .bind(*branch_id)
-    .bind(org)
-    .fetch_one(pool.get_ref())
-    .await?;
+    // The bucketing zone: the branch's effective zone, or for "all branches"
+    // (nil UUID) the org's, so every branch buckets in one consistent zone.
+    let tz: String = crate::tz::scope_tz_name(pool.get_ref(), *branch_id, org).await?;
 
     let trunc = match query.granularity.as_deref().unwrap_or("daily") {
         "hourly" => "hour",

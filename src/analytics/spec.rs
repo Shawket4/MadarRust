@@ -349,7 +349,7 @@ where
 /// Parse an IANA timezone name, falling back to Cairo — the deployment's home
 /// timezone and the DB column default.
 pub fn parse_tz(name: &str) -> Tz {
-    name.parse().unwrap_or(chrono_tz::Africa::Cairo)
+    crate::tz::parse(name)
 }
 
 #[cfg(test)]
