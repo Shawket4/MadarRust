@@ -14,7 +14,10 @@ use crate::errors::AppError;
 use crate::tax::engine::TaxPolicy;
 
 /// The policy in force at a branch, resolved branch-first then org.
-pub async fn for_branch(pool: &PgPool, branch_id: Uuid) -> Result<TaxPolicy, AppError> {
+pub async fn for_branch<'e, E>(pool: E, branch_id: Uuid) -> Result<TaxPolicy, AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let row: Option<(
         Decimal,
         bool,

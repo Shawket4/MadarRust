@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use serde_json::{Value, json};
-use sqlx::{PgConnection, PgPool};
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 use crate::errors::AppError;
@@ -56,8 +56,64 @@ fn keyed<T: serde::Serialize>(items: impl IntoIterator<Item = T>, strip_keys: &[
         .collect()
 }
 
+/// The SQL predicate (over an entity id expression `$ID`) that says whether an
+/// entity of `ty` is in its type's projected set right now.
+///
+/// It is the ONE definition of "projects": [`project`] keeps only the ids that
+/// pass it (every loader below then returns every id it is given), and the
+/// per-type checksums count exactly the feed rows whose entity passes it. So a
+/// type's checksum set is its projected set by construction, even where a feed
+/// `upsert` row has gone stale (a time-based live rule that has aged out before
+/// the sweeper emitted its delete).
+pub fn projects_sql(ty: &str) -> Option<&'static str> {
+    Some(match ty {
+        "category" => "EXISTS (SELECT 1 FROM categories x WHERE x.id = $ID AND sync_live_category(x))",
+        "menu_item" => "EXISTS (SELECT 1 FROM menu_items x WHERE x.id = $ID AND sync_live_menu_item(x))",
+        "bundle" => "EXISTS (SELECT 1 FROM bundles x WHERE x.id = $ID AND sync_live_bundle(x))",
+        "ingredient" => "EXISTS (SELECT 1 FROM org_ingredients x WHERE x.id = $ID AND sync_live_ingredient(x))",
+        "payment_method" => "EXISTS (SELECT 1 FROM org_payment_methods x WHERE x.id = $ID)",
+        "payment_availability" => {
+            "(EXISTS (SELECT 1 FROM branch_payment_methods x WHERE x.branch_id = $ID) \
+              OR EXISTS (SELECT 1 FROM user_payment_methods x WHERE x.user_id = $ID) \
+              OR EXISTS (SELECT 1 FROM device_payment_methods x WHERE x.device_id = $ID))"
+        }
+        "discount" => "EXISTS (SELECT 1 FROM discounts x WHERE x.id = $ID AND sync_live_discount(x))",
+        "branch_settings" => "EXISTS (SELECT 1 FROM branches x WHERE x.id = $ID AND sync_live_branch_settings(x))",
+        "device" => "EXISTS (SELECT 1 FROM devices x WHERE x.id = $ID AND sync_live_device(x))",
+        "teller" => "EXISTS (SELECT 1 FROM users x WHERE x.id = $ID AND sync_live_teller(x))",
+        "floor_section" => "EXISTS (SELECT 1 FROM floor_sections x WHERE x.id = $ID)",
+        "floor_table" => "EXISTS (SELECT 1 FROM branch_tables x WHERE x.id = $ID AND sync_live_floor_table(x))",
+        "table_occupancy" => {
+            "EXISTS (SELECT 1 FROM table_occupancies x WHERE x.id = $ID AND sync_live_table_occupancy(x))"
+        }
+        "table_transfer" => {
+            "EXISTS (SELECT 1 FROM table_transfer_requests x WHERE x.id = $ID AND sync_live_table_transfer(x))"
+        }
+        "open_ticket" => "EXISTS (SELECT 1 FROM open_tickets x WHERE x.id = $ID AND sync_live_open_ticket(x))",
+        "kitchen_ticket" => {
+            "EXISTS (SELECT 1 FROM kitchen_tickets x WHERE x.id = $ID AND sync_live_kitchen_ticket(x))"
+        }
+        "delivery" => "EXISTS (SELECT 1 FROM delivery_orders x WHERE x.id = $ID AND sync_live_delivery(x))",
+        "booking" => "EXISTS (SELECT 1 FROM bookings x WHERE x.id = $ID AND sync_live_booking(x))",
+        "till" => "EXISTS (SELECT 1 FROM tills x WHERE x.id = $ID)",
+        "cash_movement" => "EXISTS (SELECT 1 FROM till_cash_movements x WHERE x.id = $ID)",
+        "order" => "EXISTS (SELECT 1 FROM orders x WHERE x.id = $ID)",
+        "refund" => "EXISTS (SELECT 1 FROM order_refunds x WHERE x.id = $ID)",
+        _ => return None,
+    })
+}
+
+/// The ids of `ids` that are in `ty`'s projected set (see [`projects_sql`]).
+async fn projectable(conn: &mut PgConnection, ty: &str, ids: &[Uuid]) -> Result<Vec<Uuid>, AppError> {
+    let pred = projects_sql(ty).ok_or_else(|| AppError::BadRequest(format!("Unknown sync type `{ty}`")))?;
+    let sql = format!("SELECT i FROM unnest($1::uuid[]) AS u(i) WHERE {}", pred.replace("$ID", "u.i"));
+    Ok(sqlx::query_scalar(&sql).bind(ids).fetch_all(&mut *conn).await?)
+}
+
+/// The CURRENT projection of every id of `ids` that is in `ty`'s projected set,
+/// all on `conn` (one connection per pull, never a second one from the pool) and
+/// in a fixed number of queries per type.
 pub async fn project(
-    pool: &PgPool,
     conn: &mut PgConnection,
     org_id: Uuid,
     branch_id: Uuid,
@@ -67,6 +123,11 @@ pub async fn project(
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
+    let ids = projectable(conn, ty, ids).await?;
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let ids = ids.as_slice();
     Ok(match ty {
         "category" => {
             let sql = format!(
@@ -78,7 +139,7 @@ pub async fn project(
             by_sql(conn, &sql, ids).await?
         }
         "menu_item" => {
-            let items = crate::menu::catalog_sync::sync_items_by_ids(pool, org_id, branch_id, ids).await?;
+            let items = crate::menu::catalog_sync::sync_items_by_ids(&mut *conn, org_id, branch_id, ids).await?;
             let mut out = keyed(items, &[]);
             // Option recipes are the preview's business, not the till's (35% of the
             // old catalog body).
@@ -106,14 +167,10 @@ pub async fn project(
             out
         }
         "bundle" => {
-            let mut out = HashMap::new();
-            for id in ids {
-                if let Some(b) = crate::bundles::handlers::fetch_bundle_full(pool, *id).await? {
-                    let mut v = serde_json::to_value(b).unwrap_or(Value::Null);
-                    strip(&mut v, &["org_id", "created_at", "updated_at", "created_by", "image_url"]);
-                    out.insert(*id, v);
-                }
-            }
+            let mut out = keyed(
+                crate::bundles::handlers::fetch_bundles_full(&mut *conn, ids).await?,
+                &["org_id", "created_at", "updated_at", "created_by", "image_url"],
+            );
             let hashes: Vec<(Uuid, Option<String>)> = sqlx::query_as(&format!(
                 "SELECT b.id, {} FROM bundles b WHERE b.id = ANY($1)",
                 tile_hash("b.image_group_id")
@@ -215,7 +272,7 @@ pub async fn project(
             .await?
         }
         "floor_table" => keyed(
-            crate::reservations::floor::tables_by_ids(pool, ids).await?,
+            crate::reservations::floor::tables_by_ids(&mut *conn, ids).await?,
             &["org_id", "created_at", "updated_at"],
         ),
         "table_occupancy" => {
@@ -232,42 +289,26 @@ pub async fn project(
             .await?
         }
         "table_transfer" => {
-            let mut out = HashMap::new();
-            for id in ids {
-                if let Some(t) = crate::floor_ops::transfer_view(pool, *id).await? {
-                    out.extend(keyed([t], &["org_id"]));
-                }
-            }
-            out
+keyed(crate::floor_ops::transfer_views(&mut *conn, ids).await?, &["org_id"])
         }
         "open_ticket" => {
-            let mut out = keyed(crate::tickets::open_ticket_views(pool, ids).await?, &["org_id"]);
+            let mut out = keyed(crate::tickets::open_ticket_views_on(&mut *conn, ids).await?, &["org_id"]);
             // The line's `input` echo is a third of the old body and never read.
             out.values_mut().for_each(|v| strip_deep(v, "input"));
             out
         }
         "kitchen_ticket" => {
-            let mut out = HashMap::new();
-            for id in ids {
-                if let Some(t) = crate::kitchen::kitchen_ticket_view(pool, *id).await? {
-                    out.extend(keyed([t], &["org_id"]));
-                }
-            }
-            out
+keyed(crate::kitchen::kitchen_ticket_views(&mut *conn, ids).await?, &["org_id"])
         }
         "delivery" => {
-            let mut out = HashMap::new();
-            for id in ids {
-                if let Some(d) = crate::delivery::staff::fetch_delivery_order(pool, *id).await? {
-                    let mut v = serde_json::to_value(d).unwrap_or(Value::Null);
-                    strip(&mut v, &["org_id", "updated_at"]);
-                    strip_deep(&mut v, "name_translations");
-                    out.insert(*id, v);
-                }
-            }
+            let mut out = keyed(
+                crate::delivery::staff::fetch_delivery_orders(&mut *conn, ids).await?,
+                &["org_id", "updated_at"],
+            );
+            out.values_mut().for_each(|v| strip_deep(v, "name_translations"));
             out
         }
-        "booking" => keyed(crate::bookings::model::views_by_ids(pool, ids).await?, &["manage_token"]),
+        "booking" => keyed(crate::bookings::model::views_by_ids(&mut *conn, ids).await?, &["manage_token"]),
         "till" => {
             let rows: Vec<crate::tills::handlers::Till> = sqlx::query_as(&format!(
                 "SELECT {} {} WHERE s.id = ANY($1)",
@@ -316,7 +357,7 @@ pub async fn project(
                         'open_ticket_id', o.open_ticket_id, 'table_id', o.table_id, 'customer_name', o.customer_name, \
                         'created_at', o.created_at, 'voided_at', o.voided_at, 'idempotency_key', o.idempotency_key, \
                         'device_id', o.device_id) \
-                   FROM orders o JOIN users u ON u.id = o.teller_id WHERE o.id = ANY($1)",
+                   FROM orders o LEFT JOIN users u ON u.id = o.teller_id WHERE o.id = ANY($1)",
                 ids,
             )
             .await?

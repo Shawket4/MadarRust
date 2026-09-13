@@ -133,6 +133,20 @@ pub async fn fetch_delivery_order(
         .await?)
 }
 
+/// Many delivery orders in one query (sync pull projection).
+pub async fn fetch_delivery_orders<'e, E>(
+    exec: E,
+    ids: &[Uuid],
+) -> Result<Vec<DeliveryOrder>, AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    Ok(sqlx::query_as(&format!("{DO_SELECT} WHERE id = ANY($1)"))
+        .bind(ids)
+        .fetch_all(exec)
+        .await?)
+}
+
 pub async fn fetch_delivery_order_by_idem(
     pool: &PgPool,
     key: Uuid,

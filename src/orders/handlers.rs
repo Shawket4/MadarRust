@@ -2213,7 +2213,7 @@ pub(crate) async fn create_order_inner(
                     "Split payment amounts must be greater than 0".into(),
                 ));
             }
-            validate_payment_method(pool.get_ref(), org_id, &split.method).await?;
+            validate_payment_method(&mut *tx, org_id, &split.method).await?;
             sqlx::query(
                 "INSERT INTO order_payments (order_id, method, amount, reference, is_cash) \
                  VALUES ($1, $2, $3, $4, $5)",
@@ -3757,11 +3757,14 @@ async fn require_branch_access(
     Ok(())
 }
 
-async fn validate_payment_method(
-    pool: &PgPool,
+async fn validate_payment_method<'e, E>(
+    pool: E,
     org_id: Uuid,
     method: &str,
-) -> Result<(), AppError> {
+) -> Result<(), AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM org_payment_methods WHERE org_id = $1 AND name = $2 AND is_active = true)"
     )

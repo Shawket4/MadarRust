@@ -344,7 +344,8 @@ pub(crate) async fn create_booking_inner(
             ids.clone()
         }
         None => {
-            let ground = Ground::load(pool, body.branch_id, body.starts_at, ends_at, None).await?;
+            let ground =
+                Ground::load(&mut tx, body.branch_id, body.starts_at, ends_at, None).await?;
             match ground.pick(
                 &settings,
                 now,
@@ -540,7 +541,7 @@ pub(crate) async fn update_booking_inner(
             current.iter().map(|(t, _)| *t).collect()
         }
         None => {
-            let ground = Ground::load(pool, branch_id, starts_at, ends_at, Some(id)).await?;
+            let ground = Ground::load(&mut tx, branch_id, starts_at, ends_at, Some(id)).await?;
             let cur_ids: Vec<Uuid> = current.iter().map(|(t, _)| *t).collect();
             let cur_seats: i32 = current.iter().map(|(_, s)| *s as i32).sum();
             let cur_free = !cur_ids.is_empty()
@@ -1277,7 +1278,14 @@ pub(crate) async fn day_availability(
         return Ok(Vec::new());
     };
     let last_end = *starts.last().unwrap_or(first) + duration;
-    let ground = Ground::load(pool, branch_id, *first, last_end, exclude).await?;
+    let ground = Ground::load(
+        &mut *pool.acquire().await?,
+        branch_id,
+        *first,
+        last_end,
+        exclude,
+    )
+    .await?;
     let lead = Duration::minutes(settings.lead_time_minutes as i64);
     let mut out = Vec::with_capacity(starts.len());
     for s in starts {

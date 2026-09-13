@@ -256,24 +256,33 @@ pub async fn org_sku_costs(
 /// Same recipe-cost rollup as [`org_sku_costs`] but scoped to a specific set of
 /// menu items, so list endpoints can embed per-page costs without a second
 /// org-wide round trip. Empty `item_ids` ⇒ no rows (no query issued).
-pub async fn sku_costs_for_items(
-    pool: &PgPool,
+///
+/// Takes any executor (a pool, or a transaction/connection already held by the
+/// caller) — it is one statement.
+pub async fn sku_costs_for_items<'e, E>(
+    exec: E,
     org_id: Uuid,
     item_ids: &[Uuid],
     branch_id: Option<Uuid>,
-) -> Result<Vec<SkuCost>, AppError> {
+) -> Result<Vec<SkuCost>, AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     if item_ids.is_empty() {
         return Ok(Vec::new());
     }
-    sku_costs_impl(pool, org_id, Some(item_ids), branch_id).await
+    sku_costs_impl(exec, org_id, Some(item_ids), branch_id).await
 }
 
-async fn sku_costs_impl(
-    pool: &PgPool,
+async fn sku_costs_impl<'e, E>(
+    exec: E,
     org_id: Uuid,
     item_ids: Option<&[Uuid]>,
     branch_id: Option<Uuid>,
-) -> Result<Vec<SkuCost>, AppError> {
+) -> Result<Vec<SkuCost>, AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     #[derive(sqlx::FromRow)]
     struct Row {
         menu_item_id: Uuid,
@@ -337,7 +346,7 @@ async fn sku_costs_impl(
     .bind(org_id)
     .bind(item_ids)
     .bind(branch_id)
-    .fetch_all(pool)
+    .fetch_all(exec)
     .await?;
 
     Ok(rows

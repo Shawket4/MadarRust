@@ -29,6 +29,23 @@ pub async fn check_permission_for(
     resource: &str,
     action: &str,
 ) -> Result<(), AppError> {
+    if *role == UserRole::SuperAdmin {
+        return Ok(());
+    }
+    let mut conn = pool.acquire().await?;
+    check_permission_for_on(&mut conn, user_id, role, resource, action).await
+}
+
+/// [`check_permission_for`] on a connection the caller already holds — e.g. a
+/// handler's open transaction, so the check never takes a second pooled
+/// connection while that transaction is held.
+pub async fn check_permission_for_on(
+    conn: &mut sqlx::PgConnection,
+    user_id: uuid::Uuid,
+    role: &UserRole,
+    resource: &str,
+    action: &str,
+) -> Result<(), AppError> {
     // super_admin bypasses everything
     if *role == UserRole::SuperAdmin {
         return Ok(());
@@ -42,13 +59,14 @@ pub async fn check_permission_for(
     let account_ok: Option<bool> =
         sqlx::query_scalar("SELECT (is_active AND deleted_at IS NULL) FROM users WHERE id = $1")
             .bind(user_id)
-            .fetch_optional(pool)
+            .fetch_optional(&mut *conn)
             .await?;
     if account_ok == Some(false) {
         return Err(AppError::Forbidden("Account is disabled".into()));
     }
 
     // 1. Check per-user override (cached; invalidated on `permissions` writes)
+    let c = &mut *conn;
     let user_override: Option<bool> =
         crate::cache::user_override(user_id, resource, action, || async move {
             let v: Option<bool> = sqlx::query_scalar(
@@ -62,7 +80,7 @@ pub async fn check_permission_for(
             .bind(user_id)
             .bind(resource)
             .bind(action)
-            .fetch_optional(pool)
+            .fetch_optional(c)
             .await?;
             Ok(v)
         })
@@ -89,6 +107,7 @@ pub async fn check_permission_for(
         UserRole::SuperAdmin => unreachable!(),
     };
 
+    let c = &mut *conn;
     let role_default: Option<bool> =
         crate::cache::role_default(role_str, resource, action, || async move {
             let v: Option<bool> = sqlx::query_scalar(
@@ -102,7 +121,7 @@ pub async fn check_permission_for(
             .bind(role_str)
             .bind(resource)
             .bind(action)
-            .fetch_optional(pool)
+            .fetch_optional(c)
             .await?;
             Ok(v)
         })

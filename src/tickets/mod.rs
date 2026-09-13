@@ -144,35 +144,18 @@ pub struct TicketBill {
 /// A discount id that no longer resolves (deleted, deactivated) prices as no
 /// discount here — the settle will refuse it with a message, and a preview
 /// that guessed a figure would only make that refusal a surprise.
-async fn price_bill_under(
-    pool: &PgPool,
+fn price_bill_under(
     policy: &crate::tax::TaxPolicy,
-    org_id: Uuid,
     subtotal: i32,
-    discount_id: Option<Uuid>,
-    discount_type: Option<&str>,
-    discount_value: Option<Decimal>,
-) -> Result<TicketBill, AppError> {
-    let (dtype, dvalue): (Option<String>, Decimal) = match discount_id {
-        Some(id) => sqlx::query_as::<_, (String, Decimal)>(
-            "SELECT type::text, value FROM discounts WHERE id = $1 AND org_id = $2 AND is_active = true",
-        )
-        .bind(id)
-        .bind(org_id)
-        .fetch_optional(pool)
-        .await?
-        .map(|(t, v)| (Some(t), v))
-        .unwrap_or((None, Decimal::ZERO)),
-        None => (
-            discount_type.map(str::to_string),
-            discount_value.unwrap_or(Decimal::ZERO),
-        ),
-    };
+    // The resolved discount: `(type, value)` of the live `discount_id` row when
+    // the ticket names one, else the typed discount.
+    dtype: Option<&str>,
+    dvalue: Decimal,
+) -> TicketBill {
     let discount_amount =
-        crate::discounts::handlers::calc_discount(dtype.as_deref(), dvalue, subtotal)
-            .clamp(0, subtotal);
+        crate::discounts::handlers::calc_discount(dtype, dvalue, subtotal).clamp(0, subtotal);
     let b = crate::tax::compute(subtotal as i64, discount_amount as i64, policy);
-    Ok(TicketBill {
+    TicketBill {
         subtotal,
         discount_amount,
         service_charge_amount: b.service_charge as i32,
@@ -181,12 +164,20 @@ async fn price_bill_under(
         total: b.total as i32,
         tax_rate: policy.tax_rate,
         service_charge_rate: policy.service_charge_rate,
-    })
+    }
 }
 
 /// A settled ticket's bill is what its order booked — read, never repriced.
-async fn booked_bill(pool: &PgPool, order_id: Uuid) -> Result<Option<TicketBill>, AppError> {
-    let row: Option<(
+async fn booked_bills(
+    conn: &mut sqlx::PgConnection,
+    order_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, TicketBill>, AppError> {
+    if order_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(
+        Uuid,
         i32,
         i32,
         i32,
@@ -196,36 +187,43 @@ async fn booked_bill(pool: &PgPool, order_id: Uuid) -> Result<Option<TicketBill>
         Option<Decimal>,
         Option<Decimal>,
     )> = sqlx::query_as(
-        "SELECT subtotal, discount_amount, service_charge_amount, tax_amount, tax_inclusive, \
+        "SELECT id, subtotal, discount_amount, service_charge_amount, tax_amount, tax_inclusive, \
                     total_amount, tax_rate_applied, service_charge_rate_applied \
-             FROM orders WHERE id = $1",
+             FROM orders WHERE id = ANY($1)",
     )
-    .bind(order_id)
-    .fetch_optional(pool)
+    .bind(order_ids)
+    .fetch_all(&mut *conn)
     .await?;
-    Ok(row.map(
-        |(
-            subtotal,
-            discount_amount,
-            service_charge_amount,
-            tax_amount,
-            tax_inclusive,
-            total,
-            tr,
-            sr,
-        )| {
-            TicketBill {
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                id,
                 subtotal,
                 discount_amount,
                 service_charge_amount,
                 tax_amount,
                 tax_inclusive,
                 total,
-                tax_rate: tr.unwrap_or(Decimal::ZERO),
-                service_charge_rate: sr.unwrap_or(Decimal::ZERO),
-            }
-        },
-    ))
+                tr,
+                sr,
+            )| {
+                (
+                    id,
+                    TicketBill {
+                        subtotal,
+                        discount_amount,
+                        service_charge_amount,
+                        tax_amount,
+                        tax_inclusive,
+                        total,
+                        tax_rate: tr.unwrap_or(Decimal::ZERO),
+                        service_charge_rate: sr.unwrap_or(Decimal::ZERO),
+                    },
+                )
+            },
+        )
+        .collect())
 }
 
 /// One row of `open_tickets` as the view reads it. Named rather than a tuple
@@ -259,21 +257,30 @@ struct TicketRow {
     timezone: Option<String>,
 }
 
-/// Takes the pool rather than an executor because the bill is priced through
-/// `tax::policy::for_branch`, which reads the pool; every caller had one.
 pub(crate) async fn open_ticket_view(
-    executor: &PgPool,
+    pool: &PgPool,
     ticket_id: Uuid,
 ) -> Result<Option<OpenTicketView>, AppError> {
-    Ok(open_ticket_views(executor, &[ticket_id]).await?.pop())
+    Ok(open_ticket_views(pool, &[ticket_id]).await?.pop())
 }
 
-/// Many views in a fixed number of queries -- one for the tickets, one for all
-/// their lines, and one tax policy per branch -- in the order of `ids`
-/// (missing ids are skipped). The list endpoint used to build each view on its
-/// own, several queries a ticket.
+/// [`open_ticket_views_on`] on a pooled connection.
 pub(crate) async fn open_ticket_views(
-    executor: &PgPool,
+    pool: &PgPool,
+    ids: &[Uuid],
+) -> Result<Vec<OpenTicketView>, AppError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut conn = pool.acquire().await?;
+    open_ticket_views_on(&mut conn, ids).await
+}
+
+/// Many views in a fixed number of queries -- tickets, lines, booked bills,
+/// named discounts, and one tax policy per branch -- in the order of `ids`
+/// (missing ids are skipped), all on the caller's connection.
+pub(crate) async fn open_ticket_views_on(
+    conn: &mut sqlx::PgConnection,
     ids: &[Uuid],
 ) -> Result<Vec<OpenTicketView>, AppError> {
     if ids.is_empty() {
@@ -297,7 +304,7 @@ pub(crate) async fn open_ticket_views(
          FROM open_tickets ot LEFT JOIN users u ON u.id = ot.opened_by WHERE ot.id = ANY($1)",
     )
     .bind(ids)
-    .fetch_all(executor)
+    .fetch_all(&mut *conn)
     .await?;
 
     #[allow(clippy::type_complexity)]
@@ -317,7 +324,7 @@ pub(crate) async fn open_ticket_views(
          WHERE oti.open_ticket_id = ANY($1) ORDER BY r.round_number, oti.created_at",
     )
     .bind(ids)
-    .fetch_all(executor)
+    .fetch_all(&mut *conn)
     .await?;
     let mut items_of: std::collections::HashMap<Uuid, Vec<OpenTicketItemView>> =
         std::collections::HashMap::new();
@@ -338,6 +345,27 @@ pub(crate) async fn open_ticket_views(
             });
     }
 
+    let order_ids: Vec<Uuid> = rows.iter().filter_map(|r| r.order_id).collect();
+    let booked = booked_bills(&mut *conn, &order_ids).await?;
+    // `discount_id` wins over a typed discount, exactly as `create_order_inner`
+    // resolves it. An id that no longer resolves (deleted, deactivated) prices
+    // as no discount — the settle refuses it with a message.
+    let discount_ids: Vec<Uuid> = rows.iter().filter_map(|r| r.discount_id).collect();
+    let named: std::collections::HashMap<(Uuid, Uuid), (String, Decimal)> = if discount_ids
+        .is_empty()
+    {
+        std::collections::HashMap::new()
+    } else {
+        sqlx::query_as::<_, (Uuid, Uuid, String, Decimal)>(
+            "SELECT id, org_id, type::text, value FROM discounts WHERE id = ANY($1) AND is_active = true",
+        )
+        .bind(&discount_ids)
+        .fetch_all(&mut *conn)
+        .await?
+        .into_iter()
+        .map(|(id, org, t, v)| ((id, org), (t, v)))
+        .collect()
+    };
     let mut policies: std::collections::HashMap<Uuid, crate::tax::TaxPolicy> =
         std::collections::HashMap::new();
     let mut by_id: std::collections::HashMap<Uuid, OpenTicketView> =
@@ -346,28 +374,30 @@ pub(crate) async fn open_ticket_views(
         // Settled: what was booked. Otherwise: what would be, under today's
         // policy — for a voided ticket that is history's curiosity, but a bill
         // that prices to nothing would read as a defect.
-        let bill = match r.order_id {
-            Some(order_id) => booked_bill(executor, order_id).await?,
-            None => None,
-        };
-        let bill = match bill {
+        let bill = match r.order_id.and_then(|o| booked.get(&o).cloned()) {
             Some(b) => b,
             None => {
                 #[allow(clippy::map_entry)] // the insert awaits
                 if !policies.contains_key(&r.branch_id) {
-                    let p = crate::tax::policy::for_branch(executor, r.branch_id).await?;
+                    let p = crate::tax::policy::for_branch(&mut *conn, r.branch_id).await?;
                     policies.insert(r.branch_id, p);
                 }
+                let (dtype, dvalue): (Option<String>, Decimal) = match r.discount_id {
+                    Some(id) => named
+                        .get(&(id, r.org_id))
+                        .map(|(t, v)| (Some(t.clone()), *v))
+                        .unwrap_or((None, Decimal::ZERO)),
+                    None => (
+                        r.discount_type.clone(),
+                        r.discount_value.unwrap_or(Decimal::ZERO),
+                    ),
+                };
                 price_bill_under(
-                    executor,
                     &policies[&r.branch_id],
-                    r.org_id,
                     r.subtotal,
-                    r.discount_id,
-                    r.discount_type.as_deref(),
-                    r.discount_value,
+                    dtype.as_deref(),
+                    dvalue,
                 )
-                .await?
             }
         };
         let items = items_of.remove(&r.id).unwrap_or_default();
@@ -464,7 +494,7 @@ fn to_kitchen_line(l: &StoredTicketLine) -> KitchenLine {
 /// the settle replays THIS bill rather than repricing against a later catalog.
 /// Runs server-side (online or at replay), so an offline-fired ticket gets its
 /// names when it syncs.
-async fn resolve_ticket_lines(
+pub(crate) async fn resolve_ticket_lines(
     pool: &sqlx::PgPool,
     org_id: Uuid,
     branch_id: Uuid,
@@ -500,7 +530,7 @@ async fn resolve_ticket_lines(
     Ok(out)
 }
 
-/// Fire a round of client-priced items onto an open ticket inside `tx`: store the
+/// Fire a round of resolved, client-priced lines onto an open ticket inside `tx`: store the
 /// bill lines (with the client input for replay), bump the running subtotal, and
 /// emit a kitchen ticket (returns its id for the post-commit publish).
 ///
@@ -511,22 +541,18 @@ async fn resolve_ticket_lines(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn fire_round(
     tx: &mut Transaction<'_, Postgres>,
-    pool: &sqlx::PgPool,
     org_id: Uuid,
     branch_id: Uuid,
     open_ticket_id: Uuid,
     fired_by: Uuid,
     round_idem: Option<Uuid>,
-    items: &[OrderItemInput],
+    // The round's lines, resolved by [`resolve_ticket_lines`] BEFORE the caller
+    // opened `tx` — resolving reads the catalogue through the pool, and doing
+    // that while holding `tx` would take a second connection per request.
+    lines: Vec<StoredTicketLine>,
     table_label: Option<&str>,
     ticket_ref: Option<&str>,
-    // A round fired NOW is priced by the catalogue; one being replayed off a
-    // till's outbox keeps what the customer was told at the table. Same rule as
-    // a counter sale — see `ClientPrices`.
-    prices: crate::orders::handlers::ClientPrices,
 ) -> Result<Option<Uuid>, AppError> {
-    let lines = resolve_ticket_lines(pool, org_id, branch_id, items, prices).await?;
-
     let (round_id, round_number): (Uuid, i32) = sqlx::query_as(
         "INSERT INTO open_ticket_rounds (open_ticket_id, round_number, fired_by, idempotency_key) \
          VALUES ($1, NULL, $2, $3) RETURNING id, round_number",
