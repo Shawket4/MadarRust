@@ -1,4 +1,6 @@
 -- ROLLBACK of the tills rework (NOT a sqlx migration). Reverses, in order:
+--   20260915090000_sync_feed_gaps.sql (extends the changefeed below; its triggers and
+--     functions are removed with the changefeed's, through the same registry)
 --   20260914090600_asset_files_are_shared_groups_have_a_profile.sql (the asset tables are dropped whole)
 --   20260914090400_assets.sql
 --   20260914090500_asset_internal_tables_rls.sql
@@ -410,4 +412,4 @@ END $$;
 
 DELETE FROM _sqlx_migrations WHERE version IN
     (20260914090000, 20260914090100, 20260914090200, 20260914090300, 20260914090400, 20260914090500, 20260914090600,
-     20260914091000);
+     20260914091000, 20260915090000);

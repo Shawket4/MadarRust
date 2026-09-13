@@ -36,11 +36,15 @@ pub enum Topic {
     /// `sync.changed { branch_id }`: the branch's changefeed moved; devices
     /// `POST /sync/pull`. Gated only by branch access.
     Sync,
+    /// `payment_methods.availability_changed`: which methods a branch / person /
+    /// device may take moved. Its own topic (it used to ride `orders`, so a
+    /// device that may charge but not read orders never heard it).
+    PaymentMethods,
 }
 
 impl Topic {
     /// Every topic, for the "subscribe to all I'm allowed to read" default.
-    pub const ALL: [Topic; 8] = [
+    pub const ALL: [Topic; 9] = [
         Topic::Delivery,
         Topic::Tickets,
         Topic::Kitchen,
@@ -49,6 +53,7 @@ impl Topic {
         Topic::Bookings,
         Topic::Tills,
         Topic::Sync,
+        Topic::PaymentMethods,
     ];
 
     pub fn parse(s: &str) -> Option<Topic> {
@@ -61,6 +66,7 @@ impl Topic {
             "bookings" => Some(Topic::Bookings),
             "tills" => Some(Topic::Tills),
             "sync" => Some(Topic::Sync),
+            "payment_methods" => Some(Topic::PaymentMethods),
             _ => None,
         }
     }
@@ -75,6 +81,7 @@ impl Topic {
             Topic::Bookings => "bookings",
             Topic::Tills => "tills",
             Topic::Sync => "sync",
+            Topic::PaymentMethods => "payment_methods",
         }
     }
 
@@ -89,6 +96,7 @@ impl Topic {
             Topic::Floor => ("floor_plan", "read"),
             Topic::Bookings => ("bookings", "read"),
             Topic::Tills => ("tills", "read"),
+            Topic::PaymentMethods => ("payment_methods", "read"),
             Topic::Sync => return None,
         })
     }

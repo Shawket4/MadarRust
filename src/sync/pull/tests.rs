@@ -431,6 +431,7 @@ BEGIN
     INSERT INTO branch_payment_methods (branch_id, payment_method_id, org_id) VALUES (br, pm, org);
     INSERT INTO user_payment_methods (user_id, payment_method_id, org_id) VALUES (adm, pm, org);
     INSERT INTO discounts (org_id, name, type, value) VALUES (org, 'Staff', 'percentage', 0.1);
+    INSERT INTO addon_items (org_id, name, type, default_price) VALUES (org, 'Oat milk', 'milk', 1500);
     INSERT INTO devices (id, org_id, branch_id, code) VALUES (gen_random_uuid(), org, br, 'A') RETURNING id INTO dev;
     INSERT INTO device_payment_methods (device_id, payment_method_id, org_id) VALUES (dev, pm, org);
     INSERT INTO floor_sections (org_id, branch_id, name) VALUES (org, br, 'Main') RETURNING id INTO sec;

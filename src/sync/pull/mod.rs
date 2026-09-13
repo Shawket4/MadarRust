@@ -16,6 +16,8 @@ pub mod projection;
 pub mod sweeper;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod gaps_tests;
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -34,7 +36,7 @@ pub const ALL_TYPES: &[&str] = &[
     "category", "menu_item", "bundle", "ingredient", "payment_method", "payment_availability",
     "discount", "branch_settings", "device", "teller", "floor_section", "floor_table",
     "table_occupancy", "table_transfer", "open_ticket", "kitchen_ticket", "delivery", "booking",
-    "till", "cash_movement", "order", "refund",
+    "till", "cash_movement", "order", "refund", "addon_item",
 ];
 /// Ledger types: never checksummed; windowed in full snapshots.
 pub const LEDGER_TYPES: &[&str] = &["till", "cash_movement", "order", "refund"];

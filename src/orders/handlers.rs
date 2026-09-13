@@ -3594,6 +3594,17 @@ async fn fetch_orders_items_full_batch(
     pool: &PgPool,
     order_ids: &[Uuid],
 ) -> Result<std::collections::HashMap<Uuid, Vec<OrderItemFull>>, AppError> {
+    let mut conn = pool.acquire().await?;
+    fetch_orders_items_full_batch_on(&mut conn, order_ids).await
+}
+
+/// Every line of `order_ids` with its modifiers and bundle components, on ONE
+/// connection (the changefeed pull hydrates orders inside its snapshot
+/// transaction and must never take a second pooled connection).
+pub(crate) async fn fetch_orders_items_full_batch_on(
+    conn: &mut sqlx::PgConnection,
+    order_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, Vec<OrderItemFull>>, AppError> {
     use std::collections::HashMap;
 
     let mut by_order: HashMap<Uuid, Vec<OrderItemFull>> = HashMap::new();
@@ -3609,7 +3620,7 @@ async fn fetch_orders_items_full_batch(
          FROM order_items WHERE order_id = ANY($1) ORDER BY id",
     )
     .bind(order_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
 
     let item_ids: Vec<Uuid> = items.iter().map(|i| i.id).collect();
@@ -3621,7 +3632,7 @@ async fn fetch_orders_items_full_batch(
          FROM order_item_addons WHERE order_item_id = ANY($1) ORDER BY id",
     )
     .bind(&item_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?
     {
         addons_by_item.entry(a.order_item_id).or_default().push(a);
@@ -3634,7 +3645,7 @@ async fn fetch_orders_items_full_batch(
          FROM order_item_optionals WHERE order_item_id = ANY($1) ORDER BY id",
     )
     .bind(&item_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?
     {
         optionals_by_item
@@ -3657,7 +3668,7 @@ async fn fetch_orders_items_full_batch(
                  FROM order_line_bundle_components WHERE order_line_id = ANY($1)",
         )
         .bind(&bundle_line_ids)
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await?;
 
         let comp_item_ids: Vec<Uuid> = comp_rows.iter().map(|r| r.1).collect();
@@ -3666,7 +3677,7 @@ async fn fetch_orders_items_full_batch(
             let name_rows: Vec<(Uuid, String)> =
                 sqlx::query_as("SELECT id, name FROM menu_items WHERE id = ANY($1)")
                     .bind(&comp_item_ids)
-                    .fetch_all(pool)
+                    .fetch_all(&mut *conn)
                     .await?;
             item_names.extend(name_rows);
         }
@@ -3679,7 +3690,7 @@ async fn fetch_orders_items_full_batch(
              WHERE order_line_id = ANY($1) ORDER BY id",
         )
         .bind(&bundle_line_ids)
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await?
         {
             comp_addons
@@ -3696,7 +3707,7 @@ async fn fetch_orders_items_full_batch(
              WHERE order_line_id = ANY($1) ORDER BY id",
         )
         .bind(&bundle_line_ids)
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await?
         {
             comp_optionals

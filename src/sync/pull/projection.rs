@@ -101,6 +101,7 @@ pub fn projects_sql(ty: &str) -> Option<&'static str> {
         "cash_movement" => "EXISTS (SELECT 1 FROM till_cash_movements x WHERE x.id = $ID)",
         "order" => "EXISTS (SELECT 1 FROM orders x WHERE x.id = $ID)",
         "refund" => "EXISTS (SELECT 1 FROM order_refunds x WHERE x.id = $ID)",
+        "addon_item" => "EXISTS (SELECT 1 FROM addon_items x WHERE x.id = $ID AND sync_live_addon_item(x))",
         _ => return None,
     })
 }
@@ -166,8 +167,17 @@ pub async fn project(
                     m.insert("image_hash".into(), json!(h));
                 }
             }
+            // Per-channel prices: only where a delivery channel resolves a size or an
+            // option differently from the in-store price above (TILLS_VERIFICATION gap).
+            let mut channel_prices = crate::menu::catalog_sync::sync_channel_prices_by_ids(&mut *conn, org_id, branch_id, ids).await?;
+            for (id, v) in out.iter_mut() {
+                if let Value::Object(m) = v {
+                    m.insert("channel_prices".into(), channel_prices.remove(id).unwrap_or_else(|| json!({})));
+                }
+            }
             out
         }
+        "addon_item" => crate::menu::handlers::addon_items_by_ids(&mut *conn, org_id, branch_id, ids).await?,
         "bundle" => {
             let mut out = keyed(
                 crate::bundles::handlers::fetch_bundles_full(&mut *conn, ids).await?,
@@ -200,7 +210,8 @@ pub async fn project(
             by_sql(
                 conn,
                 "SELECT p.id, json_build_object('id', p.id, 'name', p.name, 'label_translations', p.label_translations, \
-                        'color', p.color, 'icon', p.icon, 'is_cash', p.is_cash, 'is_active', p.is_active) \
+                        'color', p.color, 'icon', p.icon, 'is_cash', p.is_cash, 'is_active', p.is_active, \
+                        'created_at', p.created_at) \
                    FROM org_payment_methods p WHERE p.id = ANY($1)",
                 ids,
             )
@@ -237,7 +248,8 @@ pub async fn project(
                         'timezone', effective_timezone(b.id), 'tax_rate', b.tax_rate, 'tax_inclusive', b.tax_inclusive, \
                         'service_charge_rate', b.service_charge_rate, 'service_charge_taxable', b.service_charge_taxable, \
                         'require_table_for_orders', b.require_table_for_orders, 'kitchen_routing_mode', b.kitchen_routing_mode, \
-                        'old_bill_hours', b.old_bill_hours, 'standard_float', b.standard_float, 'logo_hash', {}) \
+                        'old_bill_hours', b.old_bill_hours, 'standard_float', b.standard_float, 'logo_hash', {}, \
+                        'delivery_prep_minutes', COALESCE((SELECT d.prep_time_minutes FROM branch_delivery_settings d WHERE d.branch_id = b.id), 20)) \
                    FROM branches b JOIN organizations o ON o.id = b.org_id \
                   WHERE b.id = ANY($1) AND b.deleted_at IS NULL",
                 tile_hash("o.logo_group_id")
@@ -254,10 +266,23 @@ pub async fn project(
             .await?
         }
         "teller" => {
+            // `permissions`: the person's EFFECTIVE granted `resource:action` pairs
+            // (user override → role default), granted only, the same resolution as
+            // `GET /auth/permissions` — so a grant or a revocation reaches a till
+            // through the feed instead of at the next online sign-in.
             by_sql(
                 conn,
                 "SELECT u.id, json_build_object('id', u.id, 'user_id', u.id, 'name', u.name, 'role', u.role::text, \
-                        'is_active', u.is_active, 'offline_pin_hash', u.offline_pin_hash) \
+                        'is_active', u.is_active, 'offline_pin_hash', u.offline_pin_hash, \
+                        'permissions', COALESCE((SELECT json_agg(g.p ORDER BY g.p) FROM ( \
+                            SELECT rp.resource::text || ':' || rp.action::text AS p \
+                              FROM role_permissions rp \
+                             WHERE rp.role = u.role \
+                               AND COALESCE((SELECT pm.granted FROM permissions pm WHERE pm.user_id = u.id \
+                                              AND pm.resource = rp.resource AND pm.action = rp.action), rp.granted) \
+                            UNION \
+                            SELECT pm.resource::text || ':' || pm.action::text \
+                              FROM permissions pm WHERE pm.user_id = u.id AND pm.granted) g), '[]'::json)) \
                    FROM users u WHERE u.id = ANY($1) AND u.deleted_at IS NULL",
                 ids,
             )
@@ -322,11 +347,9 @@ keyed(crate::kitchen::kitchen_ticket_views(&mut *conn, ids).await?, &["org_id"])
             .await?;
             keyed(
                 rows,
-                &[
-                    "branch_name", "opening_cash_original", "opening_cash_was_edited", "opening_cash_edit_reason",
-                    "cash_discrepancy", "closed_by", "force_closed_by", "force_close_reason", "notes", "timezone",
-                    "flagged_at",
-                ],
+                // The opening-cash edit and the discrepancy stay: the till's Z report is
+                // computed on the device from these rows (offline plan B).
+                &["branch_name", "closed_by", "force_closed_by", "force_close_reason", "notes", "flagged_at"],
             )
         }
         "cash_movement" => {
@@ -342,38 +365,86 @@ keyed(crate::kitchen::kitchen_ticket_views(&mut *conn, ids).await?, &["org_id"])
             .await?
         }
         "order" => {
-            by_sql(
+            // Everything a till reads off a sale — the history row, the drawer
+            // computation (payment legs with `is_cash`, `tip_is_cash`), and the
+            // receipt reprint (`items` with their modifiers) — in the `OrderFull`
+            // shape. Never cost/COGS: no deductions snapshot, no line or unit cost.
+            let mut out = by_sql(
                 conn,
                 "SELECT o.id, json_build_object('id', o.id, 'branch_id', o.branch_id, 'till_id', o.till_id, \
-                        'teller_id', o.teller_id, 'teller_name', u.name, 'waiter_id', o.waiter_id, \
-                        'order_number', o.order_number, 'device_code', o.device_code, \
+                        'shift_id', o.till_id, \
+                        'teller_id', o.teller_id, 'teller_name', u.name, 'waiter_id', o.waiter_id, 'waiter_name', w.name, \
+                        'order_number', o.order_number, 'device_code', o.device_code, 'device_id', o.device_id, \
                         'display_number', CASE WHEN o.device_code IS NOT NULL THEN o.device_code || '-' || o.order_number \
                                                ELSE o.order_number::text END, \
-                        'order_ref', o.order_ref, 'status', o.status::text, 'order_type', o.order_type, \
-                        'subtotal', o.subtotal, 'discount_amount', o.discount_amount, 'tax_amount', o.tax_amount, \
+                        'verification', o.verification, \
+                        'order_ref', o.order_ref, 'idempotency_key', o.idempotency_key, 'status', o.status::text, \
+                        'order_type', o.order_type, 'open_ticket_id', o.open_ticket_id, 'table_id', o.table_id, \
+                        'subtotal', o.subtotal, 'discount_type', o.discount_type::text, \
+                        'discount_value', (CASE WHEN o.discount_value > 0 AND o.discount_value <= 1 \
+                                                THEN round(o.discount_value * 100) ELSE round(o.discount_value) END)::bigint, \
+                        'discount_rate', o.discount_value, 'discount_id', o.discount_id, \
+                        'discount_amount', o.discount_amount, 'tax_amount', o.tax_amount, \
                         'service_charge_amount', o.service_charge_amount, 'delivery_fee', o.delivery_fee, \
-                        'total_amount', o.total_amount, 'tip_amount', o.tip_amount, 'tip_payment_method', o.tip_payment_method, \
+                        'total_amount', o.total_amount, 'amount_tendered', o.amount_tendered, 'change_given', o.change_given, \
+                        'tip_amount', o.tip_amount, 'tip_payment_method', o.tip_payment_method, 'tip_is_cash', o.tip_is_cash, \
                         'payment_method', o.payment_method::text, \
                         'payment_legs', COALESCE((SELECT json_agg(json_build_object('method', p.method, 'amount', p.amount, \
                                                    'is_cash', p.is_cash) ORDER BY p.id) FROM order_payments p WHERE p.order_id = o.id), '[]'::json), \
-                        'open_ticket_id', o.open_ticket_id, 'table_id', o.table_id, 'customer_name', o.customer_name, \
-                        'created_at', o.created_at, 'voided_at', o.voided_at, 'idempotency_key', o.idempotency_key, \
-                        'device_id', o.device_id) \
-                   FROM orders o LEFT JOIN users u ON u.id = o.teller_id WHERE o.id = ANY($1)",
+                        'customer_name', o.customer_name, 'notes', o.notes, \
+                        'delivery_order_id', o.delivery_order_id, \
+                        'voided_at', o.voided_at, 'void_reason', o.void_reason::text, 'void_note', o.void_note, 'voided_by', o.voided_by, \
+                        'price_flagged', o.price_flagged, \
+                        'loyalty_customer_id', o.loyalty_customer_id, 'loyalty_member_name', lc.name, \
+                        'timezone', effective_timezone(o.branch_id), \
+                        'created_at', o.created_at) \
+                   FROM orders o LEFT JOIN users u ON u.id = o.teller_id LEFT JOIN users w ON w.id = o.waiter_id \
+                   LEFT JOIN loyalty_customers lc ON lc.id = o.loyalty_customer_id \
+                  WHERE o.id = ANY($1)",
                 ids,
             )
-            .await?
+            .await?;
+            let mut items = crate::orders::handlers::fetch_orders_items_full_batch_on(&mut *conn, ids).await?;
+            for (id, v) in out.iter_mut() {
+                let mut lines = serde_json::to_value(items.remove(id).unwrap_or_default()).unwrap_or_else(|_| json!([]));
+                for key in ["deductions_snapshot", "line_cost", "unit_cost", "cost_missing", "cost", "quantity_deducted",
+                            "org_ingredient_id", "ingredient_name", "ingredient_unit"] {
+                    strip_deep(&mut lines, key);
+                }
+                if let Value::Object(m) = v {
+                    m.insert("items".into(), lines);
+                }
+            }
+            out
         }
         "refund" => {
-            by_sql(
+            let mut out = by_sql(
                 conn,
-                "SELECT r.id, json_build_object('id', r.id, 'order_id', r.order_id, 'till_id', r.till_id, 'amount', r.amount, \
+                "SELECT r.id, json_build_object('id', r.id, 'branch_id', r.branch_id, 'order_id', r.order_id, \
+                        'till_id', r.till_id, 'shift_id', r.till_id, 'amount', r.amount, \
                         'method', r.method, 'is_cash', r.is_cash, 'reason', r.reason, 'note', r.note, \
-                        'issued_by', r.issued_by, 'issued_at', r.issued_at, 'client_ref', r.client_ref) \
+                        'issued_by', r.issued_by, 'issued_by_name', (SELECT name FROM users WHERE id = r.issued_by), \
+                        'issued_at', r.issued_at, 'client_ref', r.client_ref, 'created_at', r.created_at) \
                    FROM order_refunds r WHERE r.id = ANY($1)",
                 ids,
             )
-            .await?
+            .await?;
+            let lines: Vec<(Uuid, Value)> = sqlx::query_as(
+                "SELECT l.refund_id, json_agg(json_build_object('id', l.id, 'order_item_id', l.order_item_id, \
+                        'item_name', i.item_name, 'quantity', l.quantity, 'amount', l.amount, 'restock', l.restock) ORDER BY l.id) \
+                   FROM order_refund_lines l JOIN order_items i ON i.id = l.order_item_id \
+                  WHERE l.refund_id = ANY($1) GROUP BY l.refund_id",
+            )
+            .bind(ids)
+            .fetch_all(&mut *conn)
+            .await?;
+            let mut by_refund: HashMap<Uuid, Value> = lines.into_iter().collect();
+            for (id, v) in out.iter_mut() {
+                if let Value::Object(m) = v {
+                    m.insert("lines".into(), by_refund.remove(id).unwrap_or_else(|| json!([])));
+                }
+            }
+            out
         }
         other => return Err(AppError::BadRequest(format!("Unknown sync type `{other}`"))),
     })

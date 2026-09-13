@@ -3002,6 +3002,70 @@ async fn fetch_item_recipes(pool: &PgPool, item_id: Uuid) -> Result<Vec<MenuItem
     .await?)
 }
 
+/// The branch-effective `/addon-items` shape for a set of addon ids, keyed by id,
+/// on one connection (sync pull projection). Unlike the list route a
+/// branch-disabled addon is KEPT with `is_available: false`, so turning one back
+/// on is an ordinary upsert on the device.
+pub(crate) async fn addon_items_by_ids(
+    conn: &mut sqlx::PgConnection,
+    org_id: Uuid,
+    branch_id: Uuid,
+    ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, serde_json::Value>, AppError> {
+    let mut rows = sqlx::query_as::<_, AddonItem>(
+        "SELECT a.id, a.org_id, a.name, a.name_translations, a.type as addon_type,
+                COALESCE(bao.price_override, a.default_price) AS default_price,
+                a.is_active, a.created_at, a.updated_at,
+                (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id LIMIT 1) as primary_ingredient_id
+         FROM addon_items a
+         LEFT JOIN branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $2
+         WHERE a.org_id = $1 AND a.id = ANY($3)",
+    )
+    .bind(org_id)
+    .bind(branch_id)
+    .bind(ids)
+    .fetch_all(&mut *conn)
+    .await?;
+    let available: std::collections::HashMap<Uuid, bool> = sqlx::query_as::<_, (Uuid, bool)>(
+        "SELECT addon_item_id, is_available FROM branch_addon_overrides WHERE branch_id = $1 AND addon_item_id = ANY($2)",
+    )
+    .bind(branch_id)
+    .bind(ids)
+    .fetch_all(&mut *conn)
+    .await?
+    .into_iter()
+    .collect();
+    let mut ingredients: std::collections::HashMap<Uuid, Vec<AddonItemIngredient>> = std::collections::HashMap::new();
+    type IngRow = (Uuid, Option<Uuid>, sqlx::types::BigDecimal, String, String);
+    for (addon, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) in sqlx::query_as::<_, IngRow>(
+        "SELECT addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit \
+           FROM addon_item_ingredients WHERE addon_item_id = ANY($1) ORDER BY addon_item_id, ingredient_name",
+    )
+    .bind(ids)
+    .fetch_all(&mut *conn)
+    .await?
+    {
+        ingredients.entry(addon).or_default().push(AddonItemIngredient {
+            org_ingredient_id,
+            quantity_used,
+            ingredient_name,
+            ingredient_unit,
+        });
+    }
+    let mut out = std::collections::HashMap::new();
+    for mut a in rows.drain(..) {
+        a.ingredients = ingredients.remove(&a.id).unwrap_or_default();
+        let id = a.id;
+        let mut v = serde_json::to_value(&a).unwrap_or(serde_json::Value::Null);
+        if let serde_json::Value::Object(m) = &mut v {
+            m.remove("org_id");
+            m.insert("is_available".into(), serde_json::Value::Bool(available.get(&id).copied().unwrap_or(true)));
+        }
+        out.insert(id, v);
+    }
+    Ok(out)
+}
+
 async fn fetch_addon_ingredients(
     pool: &PgPool,
     addon_item_id: Uuid,

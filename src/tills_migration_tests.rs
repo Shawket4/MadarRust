@@ -16,7 +16,9 @@ static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 /// Last migration before the rework.
 const PRE_VERSION: i64 = 20260913101500;
-const REWORK_VERSIONS: [i64; 8] = [
+// 20260915090000 extends the changefeed (feed gaps for offline plan B); the
+// rework's down script removes it with the feed it depends on.
+const REWORK_VERSIONS: [i64; 9] = [
     20260914090000,
     20260914090100,
     20260914090200,
@@ -25,6 +27,7 @@ const REWORK_VERSIONS: [i64; 8] = [
     20260914090500,
     20260914090600,
     20260914091000,
+    20260915090000,
 ];
 
 const DOWN_SQL: &str = include_str!("../scripts/tills_rework/down.sql");
@@ -1022,20 +1025,27 @@ async fn child_row_change_reemits_parent_menu_item(pool: PgPool) {
 async fn every_projection_source_table_has_emitter(pool: PgPool) {
     let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
-    let header: Vec<String> = include_str!("../migrations/20260914090300_sync_changefeed.sql")
-        .lines()
-        .skip_while(|l| !l.starts_with("-- SOURCE TABLES"))
-        .skip(2)
-        .take_while(|l| l.contains("->"))
-        .map(|l| {
-            l.trim_start_matches("--")
-                .trim()
-                .split_whitespace()
-                .next()
-                .unwrap()
-                .to_string()
-        })
-        .collect();
+    // The changefeed's header plus every later migration that adds source tables.
+    let header: Vec<String> = [
+        include_str!("../migrations/20260914090300_sync_changefeed.sql"),
+        include_str!("../migrations/20260915090000_sync_feed_gaps.sql"),
+    ]
+    .iter()
+    .flat_map(|sql| {
+        sql.lines()
+            .skip_while(|l| !l.starts_with("-- SOURCE TABLES"))
+            .skip(2)
+            .take_while(|l| l.contains("->"))
+            .map(|l| {
+                l.trim_start_matches("--")
+                    .split_whitespace()
+                    .next()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+    })
+    .collect();
     assert!(header.len() > 40, "header parsed: {header:?}");
     let mut registry = lines(
         &pool,

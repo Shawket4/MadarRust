@@ -12,3 +12,5 @@ mod tests;
 mod legacy_tests;
 #[cfg(test)]
 mod followup_tests;
+#[cfg(test)]
+mod report_vectors_tests;

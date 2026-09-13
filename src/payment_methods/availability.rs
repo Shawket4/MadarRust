@@ -319,9 +319,9 @@ async fn put_list(
     Ok(HttpResponse::Ok().json(stored))
 }
 
-/// Topic for `payment_methods.availability_changed`. Contract §2.3 says `tills`;
-/// `Topic::Tills` is added by B2 — switch this constant when it lands.
-pub const AVAILABILITY_TOPIC: Topic = Topic::Orders;
+/// Topic for `payment_methods.availability_changed`: its own, so a device that may
+/// take payments but not read orders still hears it (TILLS_VERIFICATION gap).
+pub const AVAILABILITY_TOPIC: Topic = Topic::PaymentMethods;
 
 /// Validate and replace one owner's allow-list in a transaction. Idempotent:
 /// the same body twice leaves the same rows.
