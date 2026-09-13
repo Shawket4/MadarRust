@@ -1782,7 +1782,7 @@ async fn test_idempotency_key_replays_same_order(pool: PgPool) {
         ids[0], ids[1],
         "same idempotency key must return the same order"
     );
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE shift_id=$1")
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE till_id=$1")
         .bind(shift_id)
         .fetch_one(&pool)
         .await
@@ -2825,7 +2825,7 @@ async fn seed_branch2(pool: &PgPool, org_id: Uuid) -> Uuid {
     id
 }
 async fn orders_on_shift(pool: &PgPool, shift_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE shift_id=$1")
+    sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE till_id=$1")
         .bind(shift_id)
         .fetch_one(pool)
         .await
@@ -2851,7 +2851,7 @@ async fn test_order_records_shift_branch_authoritatively(pool: PgPool) {
     assert_eq!(of.order.branch_id, branch_id);
 
     let (db_branch, db_shift): (Uuid, Uuid) =
-        sqlx::query_as("SELECT branch_id, shift_id FROM orders WHERE id=$1")
+        sqlx::query_as("SELECT branch_id, till_id FROM orders WHERE id=$1")
             .bind(of.order.id)
             .fetch_one(&pool)
             .await
@@ -2998,12 +2998,12 @@ async fn test_two_open_shifts_route_orders_correctly(pool: PgPool) {
     assert_eq!((a.order.shift_id, a.order.branch_id), (shift_1, branch_1));
     assert_eq!((b.order.shift_id, b.order.branch_id), (shift_2, branch_2));
 
-    let in_1: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM orders WHERE shift_id=$1")
+    let in_1: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM orders WHERE till_id=$1")
         .bind(shift_1)
         .fetch_all(&pool)
         .await
         .unwrap();
-    let in_2: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM orders WHERE shift_id=$1")
+    let in_2: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM orders WHERE till_id=$1")
         .bind(shift_2)
         .fetch_all(&pool)
         .await

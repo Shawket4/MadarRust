@@ -32,7 +32,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/{shift_id}/cash-movements", web::post().to(add_cash_movement))
             .route("/{shift_id}/cash-movements", web::get().to(h::list_cash_movements))
             .route("/{shift_id}/close", web::post().to(close_shift))
-            .route("/{shift_id}/force-close", web::post().to(h::force_close_till))
+            .route("/{shift_id}/force-close", web::post().to(force_close_shift))
             .route("/{shift_id}", web::get().to(get_shift))
             .route("/{shift_id}", web::delete().to(h::delete_till)),
     );
@@ -143,6 +143,27 @@ pub async fn list_shifts(
         per_page: p.per_page,
         total_pages: p.total_pages,
     }))
+}
+
+#[utoipa::path(post, path = "/shifts/{shift_id}/force-close", tag = "shifts",
+    params(("shift_id" = Uuid, Path, description = "Till ID")), request_body = ForceCloseRequest,
+    responses((status = 200, description = "DEPRECATED — use /tills/{till_id}/force-close", body = Shift), AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn force_close_shift(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    hub: Option<web::Data<BranchEventHub>>,
+    id: web::Path<Uuid>,
+    body: web::Json<ForceCloseRequest>,
+    device: crate::devices::DeviceHeader,
+) -> Result<HttpResponse, AppError> {
+    let till_id = *id;
+    let resp = h::force_close_till(req, pool.clone(), hub, id, body, device).await?;
+    if !resp.status().is_success() {
+        return Ok(resp);
+    }
+    let till = h::fetch_till_or_404(pool.get_ref(), till_id).await?;
+    Ok(HttpResponse::Ok().json(Shift::from(till)))
 }
 
 #[utoipa::path(get, path = "/shifts/{shift_id}", tag = "shifts",

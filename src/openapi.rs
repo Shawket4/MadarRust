@@ -268,6 +268,7 @@ paths(
         crate::tills::legacy_routes::get_current_shift,
         crate::tills::legacy_routes::open_shift,
         crate::tills::legacy_routes::list_shifts,
+        crate::tills::legacy_routes::force_close_shift,
         crate::tills::legacy_routes::get_shift,
         crate::tills::legacy_routes::get_shift_report,
         crate::tills::legacy_routes::add_cash_movement,
