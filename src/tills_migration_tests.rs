@@ -136,6 +136,15 @@ fn subset(pred: impl Fn(i64) -> bool) -> Migrator {
 }
 
 async fn migrate_pre(pool: &PgPool) {
+    // The test cluster's template1 may be pre-migrated; start from an empty
+    // schema so the fixture lands on the OLD (pre-rework) schema.
+    sqlx::raw_sql(
+        "DROP SCHEMA IF EXISTS archive CASCADE; DROP SCHEMA public CASCADE; CREATE SCHEMA public; \
+         GRANT ALL ON SCHEMA public TO PUBLIC;",
+    )
+    .execute(pool)
+    .await
+    .expect("empty schema");
     subset(|v| v <= PRE_VERSION)
         .run(pool)
         .await
