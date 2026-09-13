@@ -356,17 +356,6 @@ pub async fn create_branch(
     .fetch_one(pool.get_ref())
     .await?;
 
-    // Every branch gets a default "Till 1" drawer out of the box, so the dashboard
-    // and devices have a till to bind to and shifts can open without extra setup.
-    sqlx::query(
-        "INSERT INTO tills (org_id, branch_id, name, is_default, is_active) \
-         VALUES ($1, $2, 'Till 1', true, true) ON CONFLICT DO NOTHING",
-    )
-    .bind(branch.org_id)
-    .bind(branch.id)
-    .execute(pool.get_ref())
-    .await?;
-
     Ok(HttpResponse::Created().json(branch))
 }
 

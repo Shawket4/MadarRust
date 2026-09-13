@@ -103,24 +103,14 @@ async fn seed_shift(pool: &PgPool, branch_id: Uuid, teller_id: Uuid, status: &st
     // One drawer per shift: `idx_shifts_one_open_per_till` allows a single
     // open shift on a till, and the branch's default till would otherwise be
     // shared by every teller these tests seat at it.
-    let till_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO tills (org_id, branch_id, name) \
-         SELECT org_id, id, $2 FROM branches WHERE id = $1 RETURNING id",
-    )
-    .bind(branch_id)
-    .bind(format!("Till {}", &Uuid::new_v4().to_string()[..8]))
-    .fetch_one(pool)
-    .await
-    .unwrap();
     let shift_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO tills (id, branch_id, teller_id, till_id, status, opening_cash, closed_at) \
-         VALUES ($1, $2, $3, $4, $5::till_status, 10000, $6)",
+        "INSERT INTO tills (id, branch_id, teller_id, status, opening_cash, closed_at) \
+         VALUES ($1, $2, $3, $4::till_status, 10000, $5)",
     )
     .bind(shift_id)
     .bind(branch_id)
     .bind(teller_id)
-    .bind(till_id)
     .bind(status)
     .bind((status != "open").then(chrono::Utc::now))
     .execute(pool)

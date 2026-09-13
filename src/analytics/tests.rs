@@ -52,7 +52,7 @@ pub(crate) struct Seeded {
 /// exposes joins for, so a broken join surfaces here rather than in production.
 pub(crate) async fn seed(pool: &PgPool, label: &str) -> Seeded {
     let (admin, other_admin) = (Uuid::new_v4(), Uuid::new_v4());
-    let (org, teller, branch, till, shift) = (
+    let (org, teller, branch, _till, shift) = (
         Uuid::new_v4(),
         Uuid::new_v4(),
         Uuid::new_v4(),
@@ -99,22 +99,14 @@ pub(crate) async fn seed(pool: &PgPool, label: &str) -> Seeded {
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO tills (id, org_id, branch_id, name) VALUES ($1,$2,$3,'Till 1')")
-        .bind(till)
-        .bind(org)
-        .bind(branch)
-        .execute(pool)
-        .await
-        .unwrap();
     sqlx::query(
-        "INSERT INTO tills (id, branch_id, teller_id, till_id, status, opening_cash, \
+        "INSERT INTO tills (id, branch_id, teller_id, status, opening_cash, \
          closing_cash_declared, closing_cash_system, closed_at) \
-         VALUES ($1,$2,$3,$4,'closed',10000,25000,25500, now())",
+         VALUES ($1,$2,$3,'closed',10000,25000,25500, now())",
     )
     .bind(shift)
     .bind(branch)
     .bind(teller)
-    .bind(till)
     .execute(pool)
     .await
     .unwrap();

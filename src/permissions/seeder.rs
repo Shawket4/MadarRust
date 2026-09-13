@@ -70,10 +70,10 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         ("org_admin", "payment_methods", "read", true),
         ("org_admin", "payment_methods", "update", true),
         ("org_admin", "payment_methods", "delete", true),
-        ("org_admin", "shifts", "create", true),
-        ("org_admin", "shifts", "read", true),
-        ("org_admin", "shifts", "update", true),
-        ("org_admin", "shifts", "delete", true),
+        ("org_admin", "tills", "create", true),
+        ("org_admin", "tills", "read", true),
+        ("org_admin", "tills", "update", true),
+        ("org_admin", "tills", "delete", true),
         ("org_admin", "stocktakes", "create", true),
         ("org_admin", "stocktakes", "read", true),
         ("org_admin", "stocktakes", "update", true),
@@ -145,9 +145,9 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         ("branch_manager", "payments", "read", true),
         ("branch_manager", "payments", "update", true),
         ("branch_manager", "payment_methods", "read", true),
-        ("branch_manager", "shifts", "create", true),
-        ("branch_manager", "shifts", "read", true),
-        ("branch_manager", "shifts", "update", true),
+        ("branch_manager", "tills", "create", true),
+        ("branch_manager", "tills", "read", true),
+        ("branch_manager", "tills", "update", true),
         ("branch_manager", "stocktakes", "create", true),
         ("branch_manager", "stocktakes", "read", true),
         ("branch_manager", "stocktakes", "update", true),
@@ -204,9 +204,9 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         // from and gets nothing here.
         ("teller", "refunds", "create", true),
         ("teller", "refunds", "read", true),
-        ("teller", "shifts", "create", true),
-        ("teller", "shifts", "read", true),
-        ("teller", "shifts", "update", true), // covers cash movements
+        ("teller", "tills", "create", true),
+        ("teller", "tills", "read", true),
+        ("teller", "tills", "update", true), // covers cash movements
         ("teller", "discounts", "read", true),
         // Delivery queue: tellers work it (confirm/status/finalize/cancel) and
         // flip the POS open/close override. They cannot manage delivery_settings

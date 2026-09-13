@@ -71,7 +71,7 @@ async fn seed(pool: &PgPool, label: &str, tz: Option<&str>) -> Seed {
     let org = Uuid::new_v4();
     let teller = Uuid::new_v4();
     let branch = Uuid::new_v4();
-    let till = Uuid::new_v4();
+    let _till = Uuid::new_v4();
     let shift = Uuid::new_v4();
 
     sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, $2, $3)")
@@ -102,18 +102,10 @@ async fn seed(pool: &PgPool, label: &str, tz: Option<&str>) -> Seed {
     .execute(pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO tills (id, org_id, branch_id, name) VALUES ($1, $2, $3, 'Till')")
-        .bind(till)
-        .bind(org)
-        .bind(branch)
-        .execute(pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO tills (id, branch_id, teller_id, till_id) VALUES ($1, $2, $3, $4)")
+    sqlx::query("INSERT INTO tills (id, branch_id, teller_id) VALUES ($1, $2, $3)")
         .bind(shift)
         .bind(branch)
         .bind(teller)
-        .bind(till)
         .execute(pool)
         .await
         .unwrap();
