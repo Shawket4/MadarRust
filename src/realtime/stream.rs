@@ -51,6 +51,12 @@ pub(crate) async fn permitted_topics(
             out.push(t);
         }
     }
+    // `sync` carries no data of its own: on the default subscription it rides
+    // along only with a readable topic, so a caller who can read nothing still
+    // gets the terminal 403.
+    if requested.is_none() && out.iter().all(|t| *t == Topic::Sync) {
+        out.clear();
+    }
     out
 }
 
