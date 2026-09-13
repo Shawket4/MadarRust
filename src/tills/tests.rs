@@ -101,9 +101,9 @@ async fn test_open_shift_cash_continuity(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
-    grant_permission(&pool, "org_admin", "shifts", "read").await;
-    grant_permission(&pool, "org_admin", "shifts", "create").await;
-    grant_permission(&pool, "org_admin", "shifts", "update").await;
+    grant_permission(&pool, "org_admin", "tills", "read").await;
+    grant_permission(&pool, "org_admin", "tills", "create").await;
+    grant_permission(&pool, "org_admin", "tills", "update").await;
     let token = generate_org_admin_token(user_id, org_id);
 
     let open = |opening: i32, reason: Option<String>| {
@@ -196,8 +196,8 @@ async fn test_open_shift_and_get_current(pool: PgPool) {
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
 
-    grant_permission(&pool, "org_admin", "shifts", "read").await;
-    grant_permission(&pool, "org_admin", "shifts", "create").await;
+    grant_permission(&pool, "org_admin", "tills", "read").await;
+    grant_permission(&pool, "org_admin", "tills", "create").await;
 
     let token = generate_org_admin_token(user_id, org_id);
 
@@ -265,9 +265,9 @@ async fn test_cash_movements(pool: PgPool) {
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
 
-    grant_permission(&pool, "org_admin", "shifts", "read").await;
-    grant_permission(&pool, "org_admin", "shifts", "create").await;
-    grant_permission(&pool, "org_admin", "shifts", "update").await;
+    grant_permission(&pool, "org_admin", "tills", "read").await;
+    grant_permission(&pool, "org_admin", "tills", "create").await;
+    grant_permission(&pool, "org_admin", "tills", "update").await;
 
     let token = generate_org_admin_token(user_id, org_id);
 
@@ -340,11 +340,11 @@ async fn test_close_and_force_close_shift(pool: PgPool) {
     let user_teller = seed_user(&pool, org_id, "teller").await;
     assign_user_to_branch(&pool, user_teller, branch_id).await;
 
-    grant_permission(&pool, "org_admin", "shifts", "read").await;
-    grant_permission(&pool, "org_admin", "shifts", "create").await;
-    grant_permission(&pool, "org_admin", "shifts", "update").await;
-    grant_permission(&pool, "teller", "shifts", "read").await;
-    grant_permission(&pool, "teller", "shifts", "update").await;
+    grant_permission(&pool, "org_admin", "tills", "read").await;
+    grant_permission(&pool, "org_admin", "tills", "create").await;
+    grant_permission(&pool, "org_admin", "tills", "update").await;
+    grant_permission(&pool, "teller", "tills", "read").await;
+    grant_permission(&pool, "teller", "tills", "update").await;
 
     let admin_token = generate_org_admin_token(user_admin, org_id);
     let teller_token = generate_teller_token(user_teller, org_id);
@@ -405,9 +405,9 @@ async fn test_cash_movement_client_ref_idempotent(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
-    grant_permission(&pool, "org_admin", "shifts", "read").await;
-    grant_permission(&pool, "org_admin", "shifts", "create").await;
-    grant_permission(&pool, "org_admin", "shifts", "update").await;
+    grant_permission(&pool, "org_admin", "tills", "read").await;
+    grant_permission(&pool, "org_admin", "tills", "create").await;
+    grant_permission(&pool, "org_admin", "tills", "update").await;
     let token = generate_org_admin_token(user_id, org_id);
 
     let shift_id = Uuid::new_v4();
@@ -500,8 +500,8 @@ async fn test_force_close_idempotent(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_admin = seed_user(&pool, org_id, "org_admin").await;
-    grant_permission(&pool, "org_admin", "shifts", "create").await;
-    grant_permission(&pool, "org_admin", "shifts", "update").await;
+    grant_permission(&pool, "org_admin", "tills", "create").await;
+    grant_permission(&pool, "org_admin", "tills", "update").await;
     let token = generate_org_admin_token(user_admin, org_id);
 
     let shift_id = Uuid::new_v4();
@@ -574,9 +574,9 @@ async fn test_normal_close_and_report(pool: PgPool) {
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
 
-    grant_permission(&pool, "org_admin", "shifts", "read").await;
-    grant_permission(&pool, "org_admin", "shifts", "create").await;
-    grant_permission(&pool, "org_admin", "shifts", "update").await;
+    grant_permission(&pool, "org_admin", "tills", "read").await;
+    grant_permission(&pool, "org_admin", "tills", "create").await;
+    grant_permission(&pool, "org_admin", "tills", "update").await;
 
     let token = generate_org_admin_token(user_id, org_id);
 
@@ -644,8 +644,8 @@ async fn test_delete_shift_forbidden(pool: PgPool) {
     assign_user_to_branch(&pool, user_teller, branch_id).await;
     let user_admin = seed_user(&pool, org_id, "org_admin").await;
 
-    grant_permission(&pool, "org_admin", "shifts", "create").await;
-    grant_permission(&pool, "org_admin", "shifts", "update").await;
+    grant_permission(&pool, "org_admin", "tills", "create").await;
+    grant_permission(&pool, "org_admin", "tills", "update").await;
 
     let admin_token = generate_org_admin_token(user_admin, org_id);
     let teller_token = generate_teller_token(user_teller, org_id);
@@ -725,7 +725,7 @@ async fn test_teller_cannot_open_shift_at_two_branches(pool: PgPool) {
     assign_user_to_branch(&pool, teller, branch_a).await;
     assign_user_to_branch(&pool, teller, branch_b).await;
     for a in ["create", "read", "update"] {
-        grant_permission(&pool, "teller", "shifts", a).await;
+        grant_permission(&pool, "teller", "tills", a).await;
     }
     let token = generate_teller_token(teller, org_id);
 
@@ -744,7 +744,7 @@ async fn test_teller_cannot_open_shift_at_two_branches(pool: PgPool) {
     assert_eq!(resp.status(), 409);
     // DB enforces it too: exactly one open shift for this teller.
     let n: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM shifts WHERE teller_id=$1 AND status='open'")
+        sqlx::query_scalar("SELECT count(*) FROM tills WHERE teller_id=$1 AND status='open'")
             .bind(teller)
             .fetch_one(&pool)
             .await
@@ -766,13 +766,13 @@ async fn test_list_shifts_all_branches(pool: PgPool) {
     let branch_a = seed_branch(&pool, org_id).await;
     let branch_b = seed_branch(&pool, org_id).await;
     let admin = seed_user(&pool, org_id, "org_admin").await;
-    grant_permission(&pool, "org_admin", "shifts", "read").await;
+    grant_permission(&pool, "org_admin", "tills", "read").await;
     let token = generate_org_admin_token(admin, org_id);
 
     // One closed shift in each branch (closed → no one-open-per-teller clash).
     for branch in [branch_a, branch_b] {
         sqlx::query(
-            "INSERT INTO shifts (id, branch_id, teller_id, status, opening_cash, closing_cash_declared, closed_at)
+            "INSERT INTO tills (id, branch_id, teller_id, status, opening_cash, closing_cash_declared, closed_at)
              VALUES ($1,$2,$3,'closed',10000,10000,NOW())")
             .bind(Uuid::new_v4()).bind(branch).bind(admin).execute(&pool).await.unwrap();
     }
@@ -780,7 +780,7 @@ async fn test_list_shifts_all_branches(pool: PgPool) {
     let other_org = seed_org(&pool).await;
     let other_branch = seed_branch(&pool, other_org).await;
     let other_admin = seed_user(&pool, other_org, "org_admin").await;
-    sqlx::query("INSERT INTO shifts (id, branch_id, teller_id, status, opening_cash) VALUES ($1,$2,$3,'open',5000)")
+    sqlx::query("INSERT INTO tills (id, branch_id, teller_id, status, opening_cash) VALUES ($1,$2,$3,'open',5000)")
         .bind(Uuid::new_v4()).bind(other_branch).bind(other_admin).execute(&pool).await.unwrap();
 
     let auth = ("Authorization", format!("Bearer {token}"));
@@ -857,7 +857,7 @@ async fn test_teller_token_org_scoped_across_branches(pool: PgPool) {
     let teller = seed_user(&pool, org_id, "teller").await;
     assign_user_to_branch(&pool, teller, branch_a).await;
     assign_user_to_branch(&pool, teller, branch_b).await;
-    grant_permission(&pool, "teller", "shifts", "read").await;
+    grant_permission(&pool, "teller", "tills", "read").await;
     // Token minted for branch A (as login does for this device).
     let token = crate::auth::jwt::create_token(
         &get_secret(),
@@ -909,8 +909,8 @@ async fn test_close_cash_uses_is_cash_snapshot(pool: PgPool) {
         .bind(org_id).execute(&pool).await.unwrap();
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
-    grant_permission(&pool, "org_admin", "shifts", "create").await;
-    grant_permission(&pool, "org_admin", "shifts", "update").await;
+    grant_permission(&pool, "org_admin", "tills", "create").await;
+    grant_permission(&pool, "org_admin", "tills", "update").await;
     let token = generate_org_admin_token(user_id, org_id);
 
     // Open a shift with 1000 opening cash.
@@ -935,7 +935,7 @@ async fn test_close_cash_uses_is_cash_snapshot(pool: PgPool) {
 
     // A completed CASH order of 500, with order_payments.is_cash snapshotted true.
     let order_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref) VALUES ($1,$2,$3,$4, gen_random_uuid(), 500,0,500,'completed',1,'cash', gen_random_uuid()::text)")
+    sqlx::query("INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref) VALUES ($1,$2,$3,$4, gen_random_uuid(), 500,0,500,'completed',1,'cash', gen_random_uuid()::text)")
         .bind(order_id).bind(branch_id).bind(user_id).bind(shift_id).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ($1,'cash',500,true)")
         .bind(order_id).execute(&pool).await.unwrap();
@@ -997,7 +997,7 @@ async fn test_teller_cannot_close_another_tellers_shift(pool: PgPool) {
     assign_user_to_branch(&pool, teller_a, branch_id).await;
     assign_user_to_branch(&pool, teller_b, branch_id).await;
     for a in ["create", "read", "update"] {
-        grant_permission(&pool, "teller", "shifts", a).await;
+        grant_permission(&pool, "teller", "tills", a).await;
     }
     let token_a = generate_teller_token(teller_a, org_id);
     let token_b = generate_teller_token(teller_b, org_id);
@@ -1046,7 +1046,7 @@ async fn test_teller_cannot_close_another_tellers_shift(pool: PgPool) {
 
     // The shift is still open afterwards.
     let still_open: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM shifts WHERE id=$1 AND status='open')")
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tills WHERE id=$1 AND status='open')")
             .bind(shift_id)
             .fetch_one(&pool)
             .await
@@ -1086,8 +1086,8 @@ async fn test_delete_shift_with_orders_blocked(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let admin = seed_user(&pool, org_id, "org_admin").await;
-    grant_permission(&pool, "org_admin", "shifts", "create").await;
-    grant_permission(&pool, "org_admin", "shifts", "update").await;
+    grant_permission(&pool, "org_admin", "tills", "create").await;
+    grant_permission(&pool, "org_admin", "tills", "update").await;
     let token = generate_org_admin_token(admin, org_id);
 
     let shift_id = Uuid::new_v4();
@@ -1110,7 +1110,7 @@ async fn test_delete_shift_with_orders_blocked(pool: PgPool) {
     assert!(open.status().is_success());
 
     // A recorded (non-voided) order on the shift.
-    sqlx::query("INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref) VALUES (gen_random_uuid(),$1,$2,$3, gen_random_uuid(), 500,0,500,'completed',1,'cash', gen_random_uuid()::text)")
+    sqlx::query("INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref) VALUES (gen_random_uuid(),$1,$2,$3, gen_random_uuid(), 500,0,500,'completed',1,'cash', gen_random_uuid()::text)")
         .bind(branch_id).bind(admin).bind(shift_id).execute(&pool).await.unwrap();
 
     // Force-close so the only barrier left is the recorded-order guard.
@@ -1144,7 +1144,7 @@ async fn test_delete_shift_with_orders_blocked(pool: PgPool) {
     );
 
     // The shift and its order are still there.
-    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM shifts WHERE id=$1")
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM tills WHERE id=$1")
         .bind(shift_id)
         .fetch_one(&pool)
         .await
@@ -1168,8 +1168,8 @@ async fn test_force_close_snapshots_system_cash(pool: PgPool) {
         .bind(org_id).execute(&pool).await.unwrap();
     let branch_id = seed_branch(&pool, org_id).await;
     let admin = seed_user(&pool, org_id, "org_admin").await;
-    grant_permission(&pool, "org_admin", "shifts", "create").await;
-    grant_permission(&pool, "org_admin", "shifts", "update").await;
+    grant_permission(&pool, "org_admin", "tills", "create").await;
+    grant_permission(&pool, "org_admin", "tills", "update").await;
     let token = generate_org_admin_token(admin, org_id);
 
     // Open with 1000 float.
@@ -1194,7 +1194,7 @@ async fn test_force_close_snapshots_system_cash(pool: PgPool) {
 
     // A 500 cash sale lands in the drawer.
     let order_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref) VALUES ($1,$2,$3,$4, gen_random_uuid(), 500,0,500,'completed',1,'cash', gen_random_uuid()::text)")
+    sqlx::query("INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref) VALUES ($1,$2,$3,$4, gen_random_uuid(), 500,0,500,'completed',1,'cash', gen_random_uuid()::text)")
         .bind(order_id).bind(branch_id).bind(admin).bind(shift_id).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ($1,'cash',500,true)")
         .bind(order_id).execute(&pool).await.unwrap();
@@ -1240,9 +1240,9 @@ async fn test_shift_timestamp_guards(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
-    grant_permission(&pool, "org_admin", "shifts", "create").await;
-    grant_permission(&pool, "org_admin", "shifts", "update").await;
-    grant_permission(&pool, "org_admin", "shifts", "read").await;
+    grant_permission(&pool, "org_admin", "tills", "create").await;
+    grant_permission(&pool, "org_admin", "tills", "update").await;
+    grant_permission(&pool, "org_admin", "tills", "read").await;
     let token = generate_org_admin_token(user_id, org_id);
 
     let open = |id: Uuid, opened_at: Option<chrono::DateTime<chrono::Utc>>| {
@@ -1281,7 +1281,7 @@ async fn test_shift_timestamp_guards(pool: PgPool) {
         resp.status()
     );
     let stored: chrono::DateTime<chrono::Utc> =
-        sqlx::query_scalar("SELECT opened_at FROM shifts WHERE id=$1")
+        sqlx::query_scalar("SELECT opened_at FROM tills WHERE id=$1")
             .bind(sid)
             .fetch_one(&pool)
             .await
@@ -1324,7 +1324,7 @@ async fn test_shift_opened_at_defaults_to_now(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
-    grant_permission(&pool, "org_admin", "shifts", "create").await;
+    grant_permission(&pool, "org_admin", "tills", "create").await;
     let token = generate_org_admin_token(user_id, org_id);
 
     let sid = Uuid::new_v4();
@@ -1350,7 +1350,7 @@ async fn test_shift_opened_at_defaults_to_now(pool: PgPool) {
         resp.status()
     );
     let stored: chrono::DateTime<chrono::Utc> =
-        sqlx::query_scalar("SELECT opened_at FROM shifts WHERE id=$1")
+        sqlx::query_scalar("SELECT opened_at FROM tills WHERE id=$1")
             .bind(sid)
             .fetch_one(&pool)
             .await
@@ -1375,8 +1375,8 @@ async fn test_cash_movement_timestamp_contract(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
-    grant_permission(&pool, "org_admin", "shifts", "create").await;
-    grant_permission(&pool, "org_admin", "shifts", "update").await;
+    grant_permission(&pool, "org_admin", "tills", "create").await;
+    grant_permission(&pool, "org_admin", "tills", "update").await;
     let token = generate_org_admin_token(user_id, org_id);
 
     let sid = Uuid::new_v4();
@@ -1455,176 +1455,16 @@ async fn seed_till(
     name: &str,
     is_default: bool,
 ) -> Uuid {
-    let id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO tills (id, org_id, branch_id, name, is_default, is_active) \
-         VALUES ($1, $2, $3, $4, $5, true)",
-    )
-    .bind(id)
-    .bind(org_id)
-    .bind(branch_id)
-    .bind(name)
-    .bind(is_default)
-    .execute(pool)
-    .await
-    .unwrap();
-    id
+    // The drawer entity is gone (TILLS_DECISIONS): legacy till_id is accepted and ignored.
+    let _ = (pool, org_id, branch_id, name, is_default);
+    Uuid::new_v4()
 }
 
 /// Several tills may be open at one branch at once (one per drawer), but a single
 /// till holds only one open shift — the per-till index, not the branch, is the guard.
-#[sqlx::test]
-async fn test_multiple_tills_open_concurrently_at_one_branch(pool: PgPool) {
-    let app = test::init_service(
-        App::new()
-            .app_data(web::Data::new(pool.clone()))
-            .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure),
-    )
-    .await;
-    let org_id = seed_org(&pool).await;
-    let branch_id = seed_branch(&pool, org_id).await;
-    grant_permission(&pool, "org_admin", "shifts", "create").await;
-    grant_permission(&pool, "org_admin", "shifts", "read").await;
-    let till_a = seed_till(&pool, org_id, branch_id, "A", true).await;
-    let till_b = seed_till(&pool, org_id, branch_id, "B", false).await;
-
-    let open = |user: Uuid, till: Uuid| {
-        let app = &app;
-        async move {
-            let token = generate_org_admin_token(user, org_id);
-            let req = test::TestRequest::post()
-                .uri(&format!("/shifts/branches/{}/open", branch_id))
-                .insert_header(("Authorization", format!("Bearer {}", token)))
-                .set_json(&OpenShiftRequest {
-                    till_id: Some(till),
-                    id: None,
-                    opening_cash: 0,
-                    opening_cash_edited: None,
-                    edit_reason: None,
-                    opened_at: None,
-                })
-                .to_request();
-            test::call_service(app, req).await
-        }
-    };
-
-    // Two different tellers open two different tills at the same branch concurrently.
-    let u1 = seed_user(&pool, org_id, "org_admin").await;
-    let u2 = seed_user(&pool, org_id, "org_admin").await;
-    let u3 = seed_user(&pool, org_id, "org_admin").await;
-
-    let s1 = open(u1, till_a).await;
-    assert_eq!(s1.status(), 201, "first till opens");
-    let s1: Shift = test::read_body_json(s1).await;
-    assert_eq!(s1.till_id, Some(till_a));
-    assert_eq!(s1.till_name.as_deref(), Some("A"));
-
-    assert_eq!(
-        open(u2, till_b).await.status(),
-        201,
-        "a second, different till opens concurrently at the same branch"
-    );
-
-    // A third teller cannot open the SAME till that's already open.
-    assert_eq!(
-        open(u3, till_a).await.status().as_u16(),
-        409,
-        "one open shift per till — re-opening an occupied drawer is rejected"
-    );
-}
 
 /// Cash continuity is per-TILL (the drawer), not per teller: a handover keeps the
 /// float. A fresh, never-used till has no carryover.
-#[sqlx::test]
-async fn test_cash_continuity_is_per_till(pool: PgPool) {
-    let app = test::init_service(
-        App::new()
-            .app_data(web::Data::new(pool.clone()))
-            .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure),
-    )
-    .await;
-    let org_id = seed_org(&pool).await;
-    let branch_id = seed_branch(&pool, org_id).await;
-    grant_permission(&pool, "org_admin", "shifts", "create").await;
-    grant_permission(&pool, "org_admin", "shifts", "read").await;
-    grant_permission(&pool, "org_admin", "shifts", "update").await;
-    let till_a = seed_till(&pool, org_id, branch_id, "A", true).await;
-    let till_b = seed_till(&pool, org_id, branch_id, "B", false).await;
-
-    let open = |user: Uuid, till: Uuid, opening: i32, reason: Option<String>| {
-        let app = &app;
-        async move {
-            let token = generate_org_admin_token(user, org_id);
-            let req = test::TestRequest::post()
-                .uri(&format!("/shifts/branches/{}/open", branch_id))
-                .insert_header(("Authorization", format!("Bearer {}", token)))
-                .set_json(&OpenShiftRequest {
-                    till_id: Some(till),
-                    id: None,
-                    opening_cash: opening,
-                    opening_cash_edited: None,
-                    edit_reason: reason,
-                    opened_at: None,
-                })
-                .to_request();
-            test::call_service(app, req).await
-        }
-    };
-    let close = |user: Uuid, shift_id: Uuid, declared: i32| {
-        let app = &app;
-        async move {
-            let token = generate_org_admin_token(user, org_id);
-            let req = test::TestRequest::post()
-                .uri(&format!("/shifts/{}/close", shift_id))
-                .insert_header(("Authorization", format!("Bearer {}", token)))
-                .set_json(&CloseShiftRequest {
-                    device_id: None,
-                    reconciliation: None,
-                    closing_cash_declared: declared,
-                    cash_note: None,
-                    closed_at: None,
-                })
-                .to_request();
-            test::call_service(app, req).await
-        }
-    };
-
-    // Teller A opens Till A at 1000, closes declaring 1500.
-    let teller_a = seed_user(&pool, org_id, "org_admin").await;
-    let r = open(teller_a, till_a, 1000, None).await;
-    assert_eq!(r.status(), 201);
-    let s1: Shift = test::read_body_json(r).await;
-    assert_eq!(close(teller_a, s1.id, 1500).await.status(), 200);
-
-    // Teller B (handover, different person) opens the SAME drawer: the 1500 float
-    // carries over, so a silent deviation is rejected …
-    let teller_b = seed_user(&pool, org_id, "org_admin").await;
-    assert_eq!(
-        open(teller_b, till_a, 1000, None).await.status(),
-        400,
-        "carryover is per-till: Till A's 1500 close must gate Teller B's open"
-    );
-    // … and matching the carryover opens cleanly with the right baseline.
-    let r = open(teller_b, till_a, 1500, None).await;
-    assert_eq!(r.status(), 201);
-    let s2: Shift = test::read_body_json(r).await;
-    assert!(!s2.opening_cash_was_edited);
-    assert_eq!(s2.opening_cash_original, Some(1500));
-
-    // A different drawer (Till B) has its own (empty) history — no carryover.
-    let teller_c = seed_user(&pool, org_id, "org_admin").await;
-    let r = open(teller_c, till_b, 9999, None).await;
-    assert_eq!(
-        r.status(),
-        201,
-        "a fresh till has no carryover, any float is the starting amount"
-    );
-    let s3: Shift = test::read_body_json(r).await;
-    assert!(!s3.opening_cash_was_edited);
-    assert_eq!(s3.opening_cash_original, None);
-}
 
 // ── Cash movement kinds ───────────────────────────────────────
 
@@ -1643,9 +1483,9 @@ async fn open_admin_shift(
     opening_cash: i32,
 ) -> (String, Uuid, Uuid) {
     let user_id = seed_user(pool, org_id, "org_admin").await;
-    grant_permission(pool, "org_admin", "shifts", "read").await;
-    grant_permission(pool, "org_admin", "shifts", "create").await;
-    grant_permission(pool, "org_admin", "shifts", "update").await;
+    grant_permission(pool, "org_admin", "tills", "read").await;
+    grant_permission(pool, "org_admin", "tills", "create").await;
+    grant_permission(pool, "org_admin", "tills", "update").await;
     let token = generate_org_admin_token(user_id, org_id);
     let shift_id = Uuid::new_v4();
     let resp = test::call_service(
@@ -1858,8 +1698,8 @@ async fn test_standard_float_proposes_the_safe_drop(pool: PgPool) {
         .bind(org_id).execute(&pool).await.unwrap();
     let branch_id = seed_branch(&pool, org_id).await;
     let till = seed_till(&pool, org_id, branch_id, "Front", true).await;
-    sqlx::query("UPDATE tills SET standard_float = 5000 WHERE id = $1")
-        .bind(till)
+    sqlx::query("UPDATE branches SET standard_float = 5000 WHERE id = $1")
+        .bind(branch_id)
         .execute(&pool)
         .await
         .unwrap();
@@ -1895,7 +1735,7 @@ async fn test_standard_float_proposes_the_safe_drop(pool: PgPool) {
 
     // A 6000 cash sale → 7000 in the drawer → drop 2000 to close at 5000.
     let order_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref) VALUES ($1,$2,$3,$4, gen_random_uuid(), 6000,0,6000,'completed',1,'cash', gen_random_uuid()::text)")
+    sqlx::query("INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref) VALUES ($1,$2,$3,$4, gen_random_uuid(), 6000,0,6000,'completed',1,'cash', gen_random_uuid()::text)")
         .bind(order_id).bind(branch_id).bind(user_id).bind(shift_id).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ($1,'cash',6000,true)")
         .bind(order_id).execute(&pool).await.unwrap();
@@ -1945,8 +1785,8 @@ async fn test_branch_manager_works_the_till(pool: PgPool) {
     let till_b = seed_till(&pool, org_id, branch_id, "B", false).await;
     // What `permissions::seeder` promises a branch manager.
     for action in ["create", "read", "update"] {
-        grant_permission(&pool, "branch_manager", "shifts", action).await;
-        grant_permission(&pool, "teller", "shifts", action).await;
+        grant_permission(&pool, "branch_manager", "tills", action).await;
+        grant_permission(&pool, "teller", "tills", action).await;
     }
     let manager = seed_user(&pool, org_id, "branch_manager").await;
     assign_user_to_branch(&pool, manager, branch_id).await;
@@ -2090,7 +1930,7 @@ async fn test_close_shift_closes_unbumped_kitchen_tickets_in_till_mode(pool: PgP
             let id = Uuid::new_v4();
             let status = if voided { "voided" } else { "completed" };
             sqlx::query(
-                "INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref, voided_at, voided_by) \
+                "INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref, voided_at, voided_by) \
                  VALUES ($1,$2,$3,$4, gen_random_uuid(), 100,0,100,$5::order_status,$6,'cash', gen_random_uuid()::text, \
                          CASE WHEN $7 THEN now() END, CASE WHEN $7 THEN $3 END)",
             )
@@ -2200,7 +2040,7 @@ async fn test_shift_report_reconciles_refunds_against_the_drawer(pool: PgPool) {
         let pool = pool.clone();
         async move {
             let order_id = Uuid::new_v4();
-            sqlx::query("INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref) VALUES ($1,$2,$3,$4, gen_random_uuid(), $5,0,$5,'completed',$6,'cash', gen_random_uuid()::text)")
+            sqlx::query("INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref) VALUES ($1,$2,$3,$4, gen_random_uuid(), $5,0,$5,'completed',$6,'cash', gen_random_uuid()::text)")
                 .bind(order_id).bind(branch_id).bind(user_id).bind(shift_id).bind(total).bind(number).execute(&pool).await.unwrap();
             sqlx::query("INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ($1,'cash',$2,true)")
                 .bind(order_id).bind(total).execute(&pool).await.unwrap();
@@ -2211,7 +2051,7 @@ async fn test_shift_report_reconciles_refunds_against_the_drawer(pool: PgPool) {
         let pool = pool.clone();
         async move {
             sqlx::query(
-                "INSERT INTO order_refunds (order_id, shift_id, amount, method, is_cash, reason, issued_by) \
+                "INSERT INTO order_refunds (order_id, till_id, amount, method, is_cash, reason, issued_by) \
                  VALUES ($1, $2, $3, 'cash', true, 'quality_issue', $4)",
             )
             .bind(order_id).bind(shift_id).bind(amount).bind(user_id).execute(&pool).await.unwrap();

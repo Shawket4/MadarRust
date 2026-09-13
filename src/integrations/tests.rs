@@ -141,7 +141,7 @@ async fn seed_order(
 ) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO orders (id, branch_id, shift_id, teller_id, order_number, payment_method,
+        "INSERT INTO orders (id, branch_id, till_id, teller_id, order_number, payment_method,
                              status, created_at, subtotal, discount_amount, tax_amount,
                              total_amount, delivery_fee, tip_amount, order_ref)
          VALUES ($1, $2, $3, $4, $5, 'cash', $6::order_status, $7, $8, $9, $10, $11, $12, $13, $14)",

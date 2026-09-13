@@ -174,7 +174,7 @@ async fn seed_branch_inventory(pool: &PgPool, branch_id: Uuid, ing_id: Uuid, sto
 async fn seed_order(pool: &PgPool, branch_id: Uuid, teller_id: Uuid, shift_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, customer_name, subtotal, discount_amount, tax_amount, total_amount, status, order_number, payment_method, order_ref)
+        "INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, customer_name, subtotal, discount_amount, tax_amount, total_amount, status, order_number, payment_method, order_ref)
          VALUES ($1, $2, $3, $4, gen_random_uuid(), 'Customer', 500, 0, 70, 570, 'completed', 1, 'cash', gen_random_uuid()::text)"
     )
     .bind(id)
@@ -503,7 +503,7 @@ async fn test_branch_waiter_stats(pool: PgPool) {
     // Direct teller sale (no waiter); inline because seed_order hardcodes
     // order_number 1 and shifts are unique per open teller.
     sqlx::query(
-        "INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, customer_name, subtotal, discount_amount, tax_amount, total_amount, status, order_number, payment_method, order_ref)
+        "INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, customer_name, subtotal, discount_amount, tax_amount, total_amount, status, order_number, payment_method, order_ref)
          VALUES (gen_random_uuid(), $1, $2, $3, gen_random_uuid(), 'Customer', 500, 0, 70, 570, 'completed', 2, 'cash', gen_random_uuid()::text)"
     )
     .bind(branch_id)
@@ -1276,7 +1276,7 @@ async fn test_shift_summary_split_payment_not_double_counted(pool: PgPool) {
     // One order, total 570, paid by cash 300 + card 270 → TWO order_payments rows.
     let order_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, discount_amount, tax_amount, total_amount, status, order_number, payment_method, order_ref)
+        "INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, subtotal, discount_amount, tax_amount, total_amount, status, order_number, payment_method, order_ref)
          VALUES ($1,$2,$3,$4, gen_random_uuid(), 500, 0, 70, 570, 'completed', 1, 'cash', gen_random_uuid()::text)"
     ).bind(order_id).bind(branch_id).bind(user_id).bind(shift_id).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO order_payments (order_id, method, amount) VALUES ($1,'cash',300),($1,'card',270)")
@@ -1319,7 +1319,7 @@ async fn test_org_branch_comparison_split_payment_revenue(pool: PgPool) {
 
     let order_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, discount_amount, tax_amount, total_amount, status, order_number, payment_method, order_ref)
+        "INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, subtotal, discount_amount, tax_amount, total_amount, status, order_number, payment_method, order_ref)
          VALUES ($1,$2,$3,$4, gen_random_uuid(), 500, 0, 70, 570, 'completed', 1, 'cash', gen_random_uuid()::text)"
     ).bind(order_id).bind(branch_id).bind(user_id).bind(shift_id).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO order_payments (order_id, method, amount) VALUES ($1,'cash',300),($1,'card',270)")
@@ -1472,7 +1472,7 @@ async fn seed_paid_order(
     };
 
     sqlx::query(
-        "INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal,
+        "INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, subtotal,
              discount_amount, tax_amount, total_amount, status, order_number, payment_method,
              tip_amount, tip_payment_method, tip_is_cash, order_ref)
          VALUES ($1, $2, $3, $4, gen_random_uuid(), $5, 0, 0, $5, $6::order_status, $7, $8,
