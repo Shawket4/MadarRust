@@ -57,6 +57,10 @@ fn main() -> std::io::Result<()> {
 }
 
 async fn run() -> std::io::Result<()> {
+    // Every required setting is checked before the database is touched, so a
+    // bad deploy exits with a list of what is wrong instead of migrating and
+    // then panicking in a background task.
+    madar_rust::boot_config::validate_or_exit();
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let jwt_secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
     let uploads_dir = env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());

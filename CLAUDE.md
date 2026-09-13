@@ -48,6 +48,13 @@ The Flutter side additionally needs `melos run bridge` when the FRB surface chan
   line were ordered today (current recipe/addon rollups × quantities — mirrors the menu-engineering
   `cost_basis=current` view). Always `--dry-run` first.
 
+## Deploy: required environment
+The server checks its required settings BEFORE connecting or running migrations (`src/boot_config.rs`) and exits with every problem listed, so a bad `.env` never migrates prod and then crash-loops:
+- `DATABASE_URL`, `JWT_SECRET` — always.
+- `ASSET_URL_SECRET` — **release builds** (>= 32 bytes, `openssl rand -hex 32`; a fresh value per environment). It keys the signed org-scoped asset URLs; debug builds fall back to a dev key.
+- `SSL_CERT_FILE` / `SSL_KEY_FILE` — optional, but once both are set they must be readable.
+See `.env.example` (prod), `deploy/demo/.env.example` (demo) and `docker-compose.loadtest.yml` (load rig).
+
 ## Robustness & Pre-push Testing
 Deterministic test tooling guards the codebase (especially the money/cost engine). Run it locally **before pushing** with the tiered gate:
 

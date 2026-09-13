@@ -175,7 +175,9 @@ pub fn url_secret() -> Vec<u8> {
 }
 
 /// Called from the boot-time `spawn`s: a production binary without a real
-/// secret would mint URLs anyone who has read this file can forge.
+/// secret would mint URLs anyone who has read this file can forge. `main`
+/// already refused to start without it ([`crate::boot_config`]), before
+/// migrating; this is the backstop for other entry points.
 pub fn require_secret() {
     let ok = std::env::var("ASSET_URL_SECRET")
         .map(|s| s.len() >= 32)

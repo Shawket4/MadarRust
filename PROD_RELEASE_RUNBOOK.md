@@ -60,6 +60,10 @@ done
 #   → fix any "Unconvertible (cross‑family)" rows in the dashboard now. (Rehearsal: 0 across all orgs;
 #     First Crack had 1 auto‑convertible row only.)
 
+# 1c'. The prod .env must carry ASSET_URL_SECRET (>= 32 bytes, openssl rand -hex 32) besides
+#      DATABASE_URL and JWT_SECRET: the release binary exits BEFORE migrating when one is missing.
+grep -E '^(DATABASE_URL|JWT_SECRET|ASSET_URL_SECRET)=.+' /opt/madar-rust/.env | cut -d= -f1   # expect all three names
+
 # 1d. Have the new artifacts READY so the window is short:
 #   - Backend binary built for x86_64-unknown-linux-gnu (CI on merge to main builds it).
 #   - POS new build staged for the tills.
