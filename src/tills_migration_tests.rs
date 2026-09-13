@@ -730,11 +730,12 @@ async fn down_script_round_trip(pool: PgPool) {
     migrate_rest(&pool).await;
     assert_eq!(lines(&pool, PER_TILL_NEW).await, before);
     let applied: Vec<i64> = sqlx::query_scalar(
-        "SELECT version FROM _sqlx_migrations WHERE version >= 20260914090000 ORDER BY version",
+        "SELECT version FROM _sqlx_migrations WHERE version >= 20260914090000 AND version <= 20260914090600 ORDER BY version",
     )
     .fetch_all(&pool)
     .await
     .unwrap();
+    // Later migrations (client_seen, grants) are not part of the rework and stay applied across its down script.
     assert_eq!(applied, REWORK_VERSIONS.to_vec());
 }
 

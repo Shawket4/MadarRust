@@ -3969,6 +3969,112 @@
             "bearer_jwt": []
           }
         ]
+      },
+      "patch": {
+        "tags": [
+          "branches"
+        ],
+        "summary": "`PATCH /branches/{id}` — the same partial update as `PUT` (the contract\nnames both; every field is already optional).",
+        "operationId": "patch_branch",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateBranchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Branch updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Branch"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
       }
     },
     "/branches/{id}/booking-qr": {
@@ -8954,6 +9060,125 @@
                   "type": "array",
                   "items": {
                     "$ref": "#/components/schemas/Device"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/devices/client-versions": {
+      "get": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "list_client_versions",
+        "parameters": [
+          {
+            "name": "legacy_only",
+            "in": "query",
+            "description": "Only clients that took a legacy path within the window (default `true`).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "description": "Look-back window in days, 1..=365 (default 14 — the G-old gate).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "branch_id",
+            "in": "query",
+            "description": "Narrow to one branch.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Devices and app versions seen in the window, newest legacy hit first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ClientSeen"
                   }
                 }
               }
@@ -34769,7 +34994,7 @@
         "tags": [
           "shifts"
         ],
-        "operationId": "add_cash_movement",
+        "operationId": "legacy_add_shift_cash_movement",
         "parameters": [
           {
             "name": "shift_id",
@@ -42638,7 +42863,7 @@
         "tags": [
           "assets"
         ],
-        "operationId": "get_bundle",
+        "operationId": "get_asset_bundle",
         "parameters": [
           {
             "name": "org_id",
@@ -47892,6 +48117,7 @@
           "name",
           "timezone",
           "is_active",
+          "old_bill_hours",
           "created_at",
           "updated_at"
         ],
@@ -47949,6 +48175,14 @@
           "name": {
             "type": "string",
             "example": "Zamalek"
+          },
+          "old_bill_hours": {
+            "type": "integer",
+            "format": "int32",
+            "description": "A bill left open longer than this many hours is flagged as OLD (till\nopen notice, close warning, Z report). 1..168, default 3.",
+            "example": 3,
+            "maximum": 168,
+            "minimum": 1
           },
           "org_id": {
             "type": "string",
@@ -48013,6 +48247,16 @@
               "boolean",
               "null"
             ]
+          },
+          "standard_float": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The drawer's standard opening float in minor units; drives the till\nreport's `standard_float` / `suggested_safe_drop`. `null` = none set.",
+            "example": 50000,
+            "minimum": 0
           },
           "tax_inclusive": {
             "type": [
@@ -50136,6 +50380,93 @@
           }
         }
       },
+      "ClientSeen": {
+        "type": "object",
+        "description": "One device (or device-less client) as last seen.",
+        "required": [
+          "first_seen_at",
+          "last_seen_at",
+          "legacy_kinds"
+        ],
+        "properties": {
+          "app_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Parsed from `client`; `null` when it carries no `<app>/<semver>`."
+          },
+          "branch_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "branch_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "client": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`X-Madar-Client`, else the User-Agent."
+          },
+          "device_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The registered device's code, when the device is registered."
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "first_seen_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_legacy_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "last_legacy_kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The latest legacy path kind (`legacy_shifts_route`, `replay_shift_id_field`, …)."
+          },
+          "last_legacy_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "legacy_kinds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every legacy kind this client has hit."
+          }
+        }
+      },
       "CloseShiftResponse": {
         "type": "object",
         "required": [
@@ -51854,7 +52185,7 @@
               "null"
             ],
             "format": "int32",
-            "description": "IGNORED by the server (accepted for backward compatibility only). The\nauthoritative per-shift number is ALWAYS `MAX(order_number)+1` computed under\nthe shift advisory lock — never the client value, which is used only on the\ndevice's local receipt. The byte-identical-at-reprint guarantee rides on\n`order_ref`, not this field. Two tills on one shift get distinct numbers\n(UNIQUE(shift_id, order_number) + the lock)."
+            "description": "The device's own order number (contract R4): its per-business-day\nsequence, the same counter as the `NNNN` of its `order_ref`. Stored\nVERBATIM when the request also names `device_id` and a non-blank\n`device_code` — the order then reads `display_number` `<device_code>-<n>`.\nWithout all three (old clients, dashboard, delivery) it is ignored and the\nserver numbers the sale per till: `MAX(order_number)+1` over the till's\nserver-numbered orders, under the till advisory lock\n(`uq_orders_till_legacy_number`)."
           },
           "order_ref": {
             "type": [
@@ -54000,7 +54331,7 @@
             "format": "uuid"
           },
           "kind": {
-            "type": "string"
+            "$ref": "#/components/schemas/DeviceKind"
           },
           "label": {
             "type": [
@@ -54050,6 +54381,15 @@
             }
           }
         }
+      },
+      "DeviceKind": {
+        "type": "string",
+        "description": "OpenAPI-only vocabulary for `devices.kind` (CHECK `kind IN ('pos','kds','waiter')`).\nThe struct fields stay `String`, so the wire strings are unchanged.",
+        "enum": [
+          "pos",
+          "kds",
+          "waiter"
+        ]
       },
       "Dir": {
         "type": "string",
@@ -58345,11 +58685,15 @@
             ]
           },
           "verification": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Ignored on the live route (live writes `server`)."
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TillVerification",
+                "description": "Ignored on the live route (live writes `server`)."
+              }
+            ]
           }
         }
       },
@@ -58537,6 +58881,21 @@
             "format": "uuid",
             "description": "Links a finalized delivery order back to its `delivery_orders` row\n(customer, address, channel, zone). `null` for dine-in orders."
           },
+          "device_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "That device's code (`36B`), stored with the order. `null` when server-numbered."
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The device that numbered this sale (contract R4). `null` for server-numbered\norders (old clients, dashboard, delivery)."
+          },
           "discount_amount": {
             "type": "integer",
             "format": "int32"
@@ -58563,6 +58922,11 @@
             "type": "integer",
             "format": "int64",
             "description": "LEGACY SPELLING — an integer, 0-100 for a percentage. See\n`discounts::wire`: every shipped till was generated against `integer`,\nand a double here fails to deserialise the whole ORDER, not just this\nfield. Read [`Order::discount_rate`] for the stored number."
+          },
+          "display_number": {
+            "type": "string",
+            "description": "What receipts and lists show: `<device_code>-<order_number>` (`36B-12`)\nfor a device-numbered sale, else `order_number` as text.",
+            "example": "36B-12"
           },
           "id": {
             "type": "string",
@@ -58682,6 +59046,13 @@
           "total_amount": {
             "type": "integer",
             "format": "int32"
+          },
+          "verification": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`server` | `lan` | `unverified` — the till's verification as the ringing\ndevice knew it; `null` when not recorded."
           },
           "void_note": {
             "type": [
@@ -63538,7 +63909,7 @@
             "format": "uuid"
           },
           "kind": {
-            "type": "string",
+            "$ref": "#/components/schemas/DeviceKind",
             "description": "`pos` | `kds` | `waiter`"
           },
           "label": {
@@ -66975,7 +67346,7 @@
             "description": "`clean` | `disagreed` | `unreviewed` | null (open, or closed before reconciliation existed)"
           },
           "status": {
-            "type": "string",
+            "$ref": "#/components/schemas/TillStatus",
             "description": "`open` | `closed` | `force_closed`"
           },
           "teller_id": {
@@ -66992,7 +67363,7 @@
             ]
           },
           "verification": {
-            "type": "string",
+            "$ref": "#/components/schemas/TillVerification",
             "description": "`server` | `lan` | `unverified` | `legacy`"
           }
         }
@@ -67045,7 +67416,7 @@
             "type": "boolean"
           },
           "status": {
-            "type": "string"
+            "$ref": "#/components/schemas/TillStatus"
           },
           "teller_id": {
             "type": "string",
@@ -67055,7 +67426,7 @@
             "type": "string"
           },
           "verification": {
-            "type": "string"
+            "$ref": "#/components/schemas/TillVerification"
           }
         }
       },
@@ -67373,6 +67744,25 @@
               }
             }
           }
+        ]
+      },
+      "TillStatus": {
+        "type": "string",
+        "description": "OpenAPI-only vocabulary for `Till.status` (the `till_status` DB enum). The\nstruct fields stay `String`, so the wire strings are exactly the DB values.",
+        "enum": [
+          "open",
+          "closed",
+          "force_closed"
+        ]
+      },
+      "TillVerification": {
+        "type": "string",
+        "description": "OpenAPI-only vocabulary for `Till.verification` (`tills_verification` CHECK):\nhow the one-open-till-per-person rule was checked when the till opened.\n`legacy` marks tills opened by pre-rework clients / before the rework.",
+        "enum": [
+          "server",
+          "lan",
+          "unverified",
+          "legacy"
         ]
       },
       "TimeseriesPoint": {
@@ -67840,6 +68230,16 @@
               "null"
             ]
           },
+          "old_bill_hours": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Hours after which an open bill counts as old (1..168).",
+            "maximum": 168,
+            "minimum": 1
+          },
           "phone": {
             "type": [
               "string",
@@ -67887,6 +68287,15 @@
               "boolean",
               "null"
             ]
+          },
+          "standard_float": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Standard opening float in minor units (>= 0); explicit `null` clears it.",
+            "minimum": 0
           },
           "tax_inclusive": {
             "type": [
