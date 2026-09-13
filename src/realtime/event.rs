@@ -33,11 +33,14 @@ pub enum Topic {
     Bookings,
     /// Till lifecycle + payment-method availability: `till.*`, `payment_methods.*`.
     Tills,
+    /// `sync.changed { branch_id }`: the branch's changefeed moved; devices
+    /// `POST /sync/pull`. Gated only by branch access.
+    Sync,
 }
 
 impl Topic {
     /// Every topic, for the "subscribe to all I'm allowed to read" default.
-    pub const ALL: [Topic; 7] = [
+    pub const ALL: [Topic; 8] = [
         Topic::Delivery,
         Topic::Tickets,
         Topic::Kitchen,
@@ -45,6 +48,7 @@ impl Topic {
         Topic::Floor,
         Topic::Bookings,
         Topic::Tills,
+        Topic::Sync,
     ];
 
     pub fn parse(s: &str) -> Option<Topic> {
@@ -56,6 +60,7 @@ impl Topic {
             "floor" => Some(Topic::Floor),
             "bookings" => Some(Topic::Bookings),
             "tills" => Some(Topic::Tills),
+            "sync" => Some(Topic::Sync),
             _ => None,
         }
     }
@@ -69,12 +74,14 @@ impl Topic {
             Topic::Floor => "floor",
             Topic::Bookings => "bookings",
             Topic::Tills => "tills",
+            Topic::Sync => "sync",
         }
     }
 
-    /// The `(resource, action)` the caller must hold to receive this topic.
-    pub fn permission(self) -> (&'static str, &'static str) {
-        match self {
+    /// The `(resource, action)` the caller must hold to receive this topic;
+    /// `None` = branch access alone (the stream already enforces it).
+    pub fn permission(self) -> Option<(&'static str, &'static str)> {
+        Some(match self {
             Topic::Delivery => ("delivery_orders", "read"),
             Topic::Tickets => ("open_tickets", "read"),
             Topic::Kitchen => ("kitchen_orders", "read"),
@@ -82,7 +89,8 @@ impl Topic {
             Topic::Floor => ("floor_plan", "read"),
             Topic::Bookings => ("bookings", "read"),
             Topic::Tills => ("tills", "read"),
-        }
+            Topic::Sync => return None,
+        })
     }
 }
 

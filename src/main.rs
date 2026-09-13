@@ -135,6 +135,8 @@ async fn run() -> std::io::Result<()> {
     staff::jobs::spawn(pool.get_ref().clone());
     madar_rust::assets::worker::spawn(pool.get_ref().clone());
     madar_rust::assets::bundle::spawn(pool.get_ref().clone());
+    madar_rust::sync::pull::sweeper::spawn(pool.get_ref().clone());
+    madar_rust::sync::pull::listener::spawn(pool.get_ref().clone(), realtime_bus.get_ref().clone());
     loyalty::birthdays::spawn(pool.get_ref().clone());
     loyalty::winback::spawn(pool.get_ref().clone());
     loyalty::wallet::refresh::spawn(pool.get_ref().clone());

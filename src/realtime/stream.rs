@@ -43,8 +43,11 @@ pub(crate) async fn permitted_topics(
     };
     let mut out = Vec::new();
     for t in candidates {
-        let (res, act) = t.permission();
-        if check_permission(pool, claims, res, act).await.is_ok() {
+        let allowed = match t.permission() {
+            None => true,
+            Some((res, act)) => check_permission(pool, claims, res, act).await.is_ok(),
+        };
+        if allowed {
             out.push(t);
         }
     }

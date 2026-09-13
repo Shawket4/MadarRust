@@ -303,3 +303,102 @@ async fn legacy_catalog_sync_unchanged(pool: PgPool) {
         assert!(body.get(k).is_some(), "{k}");
     }
 }
+
+#[sqlx::test]
+async fn sweeper_emits_time_based_deletes_and_raises_watermark(pool: PgPool) {
+    let s = shop(&pool).await;
+    let booking: Uuid = sqlx::query_scalar(
+        "INSERT INTO bookings (org_id, branch_id, status, party_size, starts_at, ends_at, guest_name, guest_phone) \
+         VALUES ($1, $2, 'confirmed', 2, now() + interval '1 hour', now() + interval '2 hours', 'G', '0100') RETURNING id",
+    )
+    .bind(s.org)
+    .bind(s.branch)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let op = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, String>("SELECT op FROM sync_changes WHERE branch_id = $1 AND type = 'booking' AND entity_id = $2")
+            .bind(s.branch)
+            .bind(booking)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(op(pool.clone()).await, "upsert");
+    // Time passes: the slot ended days ago, with no write to fire a trigger.
+    let mut conn = pool.acquire().await.unwrap();
+    sqlx::query("SET session_replication_role = replica").execute(&mut *conn).await.unwrap();
+    sqlx::query("UPDATE bookings SET starts_at = now() - interval '3 days', ends_at = now() - interval '3 days' WHERE id = $1")
+        .bind(booking)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("SET session_replication_role = origin").execute(&mut *conn).await.unwrap();
+    drop(conn);
+
+    // An old tombstone to purge.
+    let ghost = Uuid::new_v4();
+    sqlx::query("SELECT sync_emit($1, 'category', $2, 'delete')")
+        .bind(s.branch)
+        .bind(ghost)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let ghost_seq: i64 = sqlx::query_scalar(
+        "UPDATE sync_changes SET changed_at = now() - interval '31 days' WHERE branch_id = $1 AND entity_id = $2 RETURNING seq",
+    )
+    .bind(s.branch)
+    .bind(ghost)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let report = super::sweeper::sweep_once(&pool).await.unwrap();
+    assert!(report.deletes_emitted >= 1, "{report:?}");
+    assert!(report.tombstones_purged >= 1, "{report:?}");
+    assert_eq!(op(pool.clone()).await, "delete");
+    let wm: i64 = sqlx::query_scalar("SELECT purged_through_seq FROM sync_feed_watermarks WHERE branch_id = $1")
+        .bind(s.branch)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(wm >= ghost_seq);
+    let resp = pull_core(&pool, s.org, &req(s.branch), Some(ghost_seq - 1)).await.unwrap();
+    assert!(resp.resync_required, "a cursor before the purge must resync");
+}
+
+#[::core::prelude::v1::test]
+fn sync_changed_debounced_per_branch() {
+    use super::listener::{DEBOUNCE, Debouncer};
+    use std::time::Instant;
+    let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+    let t0 = Instant::now();
+    let mut d = Debouncer::default();
+    assert!(d.on_notify(a, t0), "first change publishes immediately");
+    assert!(d.on_notify(b, t0), "other branches are independent");
+    assert!(!d.on_notify(a, t0 + DEBOUNCE / 4));
+    assert!(!d.on_notify(a, t0 + DEBOUNCE / 2), "a burst folds into one trailing event");
+    assert!(d.due(t0 + DEBOUNCE / 2).is_empty());
+    assert_eq!(d.due(t0 + DEBOUNCE), vec![a]);
+    assert!(d.due(t0 + DEBOUNCE * 2).is_empty(), "exactly one trailing publish");
+}
+
+#[sqlx::test]
+async fn sync_changed_realtime_published_debounced(pool: PgPool) {
+    let s = shop(&pool).await;
+    let hub = crate::realtime::hub::BranchEventHub::new();
+    let mut rx = hub.subscribe(s.branch);
+    super::listener::spawn(pool.clone(), hub.clone());
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    for i in 0..5 {
+        category(&pool, s.org, &format!("Burst {i}")).await;
+    }
+    let mut events = 0;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(2500);
+    while let Ok(Ok(ev)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        assert_eq!(ev.event_type, "sync.changed");
+        assert_eq!(ev.data["branch_id"], json!(s.branch));
+        events += 1;
+    }
+    assert!((1..=2).contains(&events), "five changes in a burst → one immediate + at most one trailing event, got {events}");
+}
