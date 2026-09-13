@@ -13,7 +13,7 @@ use crate::floor_ops::handlers::{
     CreateFloorTransferRequest, FulfillTransferRequest, SwapTablesRequest,
 };
 use crate::orders::handlers::{CreateOrderRequest, VoidOrderRequest};
-use crate::tills::handlers::{CashMovementRequest, CloseTillRequest as CloseShiftRequest, OpenTillRequest as OpenShiftRequest};
+use crate::tills::handlers::{CashMovementRequest, CloseTillRequest, OpenTillRequest};
 use crate::tickets::handlers::{
     AddRoundRequest, CreateOpenTicketRequest, SettleOpenTicketRequest, VoidOpenTicketRequest,
 };
@@ -36,18 +36,35 @@ pub struct ReleaseReplay {
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ReplayOp {
-    OpenShift {
+    /// Permanent alias `open_shift` (POS v0.5.1 / v0.6.0).
+    #[serde(alias = "open_shift")]
+    OpenTill {
         teller_id: Uuid,
         branch_id: Uuid,
-        request: OpenShiftRequest,
+        #[serde(default)]
+        device_id: Option<Uuid>,
+        #[serde(default)]
+        device_code: Option<String>,
+        #[serde(default)]
+        verification: Option<String>,
+        request: OpenTillRequest,
     },
-    CloseShift {
+    /// Permanent alias `close_shift`.
+    #[serde(alias = "close_shift")]
+    CloseTill {
         teller_id: Uuid,
-        shift_id: Uuid,
-        request: CloseShiftRequest,
+        #[serde(alias = "shift_id")]
+        till_id: Uuid,
+        #[serde(default)]
+        device_id: Option<Uuid>,
+        request: CloseTillRequest,
     },
     CreateOrder {
         teller_id: Uuid,
+        #[serde(default)]
+        device_id: Option<Uuid>,
+        #[serde(default)]
+        device_code: Option<String>,
         request: CreateOrderRequest,
     },
     VoidOrder {
@@ -77,7 +94,10 @@ pub enum ReplayOp {
     },
     CashMovement {
         teller_id: Uuid,
-        shift_id: Uuid,
+        #[serde(alias = "shift_id")]
+        till_id: Uuid,
+        #[serde(default)]
+        device_id: Option<Uuid>,
         request: CashMovementRequest,
     },
     // Open-ticket ops. Typically a waiter fires and adds rounds, the cashier
@@ -195,8 +215,8 @@ pub enum ReplayOp {
 impl ReplayOp {
     fn teller_id(&self) -> Uuid {
         match self {
-            ReplayOp::OpenShift { teller_id, .. }
-            | ReplayOp::CloseShift { teller_id, .. }
+            ReplayOp::OpenTill { teller_id, .. }
+            | ReplayOp::CloseTill { teller_id, .. }
             | ReplayOp::CreateOrder { teller_id, .. }
             | ReplayOp::VoidOrder { teller_id, .. }
             | ReplayOp::RefundOrder { teller_id, .. }
@@ -250,9 +270,9 @@ impl ReplayOp {
     /// re-created the drift this function exists to prevent.
     fn required_permissions(&self) -> &'static [(&'static str, &'static str)] {
         match self {
-            ReplayOp::OpenShift { .. } => &[("shifts", "create")],
-            ReplayOp::CloseShift { .. } => &[("shifts", "update")],
-            ReplayOp::CashMovement { .. } => &[("shifts", "update")],
+            ReplayOp::OpenTill { .. } => &[("tills", "create")],
+            ReplayOp::CloseTill { .. } => &[("tills", "update")],
+            ReplayOp::CashMovement { .. } => &[("tills", "update")],
             ReplayOp::CreateOrder { .. } => &[("orders", "create")],
             // A void is its own rung. Ringing up is `create`; voiding is
             // `delete` — nothing hard-deletes an order, so the rung was free,
@@ -345,6 +365,7 @@ pub async fn replay(
         .org_id()
         .ok_or_else(|| AppError::Unauthorized("Token has no organization".into()))?;
 
+    let header_device = crate::devices::DeviceHeader::from_request_headers(&req);
     let op = body.into_inner();
     let teller_id = op.teller_id();
 
@@ -396,8 +417,8 @@ pub async fn replay(
 
     let actor = ActingContext::replay_with_role(teller_id, token_org, actor_role);
     match op {
-        ReplayOp::OpenShift {
-            branch_id, request, ..
+        ReplayOp::OpenTill {
+            branch_id, device_id, device_code, verification, request, ..
         } => {
             let (till, created) = crate::tills::handlers::open_till_inner(
                 pool.get_ref(),
@@ -405,25 +426,30 @@ pub async fn replay(
                 branch_id,
                 request,
                 actor,
-                crate::tills::handlers::OpenMeta { device_id: None, device_code: None, verification: None },
+                crate::tills::handlers::OpenMeta { device_id: device_id.or(header_device), device_code, verification },
             )
             .await?;
             Ok(if created { HttpResponse::Created() } else { HttpResponse::Ok() }.json(till))
         }
-        ReplayOp::CloseShift {
-            shift_id, request, ..
+        ReplayOp::CloseTill {
+            till_id, device_id, mut request, ..
         } => {
+            request.device_id = request.device_id.or(device_id).or(header_device);
             let resp = crate::tills::handlers::close_till_inner(
                 pool.get_ref(),
                 Some(hub.get_ref()),
-                shift_id,
+                till_id,
                 request,
                 actor,
             )
             .await?;
             Ok(HttpResponse::Ok().json(resp))
         }
-        ReplayOp::CreateOrder { request, .. } => {
+        ReplayOp::CreateOrder { device_id, device_code, mut request, .. } => {
+            request.device_id = request.device_id.or(device_id).or(header_device);
+            if request.device_code.is_none() {
+                request.device_code = device_code;
+            }
             // Replay never fires to the KDS (the order is historical) → hub = None.
             // A replayed direct sale has no waiter (only ticket settles do) → None.
             crate::orders::handlers::create_order_inner(
@@ -460,12 +486,13 @@ pub async fn replay(
             .await
         }
         ReplayOp::CashMovement {
-            shift_id, request, ..
+            till_id, device_id, mut request, ..
         } => {
+            request.device_id = request.device_id.or(device_id).or(header_device);
             crate::tills::handlers::add_cash_movement_inner(
                 pool.get_ref(),
                 Some(hub.get_ref()),
-                shift_id,
+                till_id,
                 request,
                 actor,
             )
@@ -703,7 +730,7 @@ pub async fn replay(
 /// 404/409 idempotently) — we only reject a target that exists in a DIFFERENT org.
 async fn op_branch_must_be_in_org(pool: &PgPool, op: &ReplayOp, org: Uuid) -> Result<(), AppError> {
     let branch_org: Option<Uuid> = match op {
-        ReplayOp::OpenShift { branch_id, .. } => {
+        ReplayOp::OpenTill { branch_id, .. } => {
             sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1")
                 .bind(branch_id)
                 .fetch_optional(pool)
@@ -715,11 +742,11 @@ async fn op_branch_must_be_in_org(pool: &PgPool, op: &ReplayOp, org: Uuid) -> Re
                 .fetch_optional(pool)
                 .await?
         }
-        ReplayOp::CloseShift { shift_id, .. } | ReplayOp::CashMovement { shift_id, .. } => {
+        ReplayOp::CloseTill { till_id, .. } | ReplayOp::CashMovement { till_id, .. } => {
             sqlx::query_scalar(
                 "SELECT b.org_id FROM tills s JOIN branches b ON b.id = s.branch_id WHERE s.id = $1",
             )
-            .bind(shift_id)
+            .bind(till_id)
             .fetch_optional(pool)
             .await?
         }
