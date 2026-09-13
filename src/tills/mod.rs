@@ -5,8 +5,6 @@ pub mod reconcile;
 pub mod routes;
 
 #[cfg(test)]
-mod legacy_tests;
-#[cfg(test)]
 mod reconcile_tests;
 #[cfg(test)]
 mod tests;

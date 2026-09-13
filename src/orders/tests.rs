@@ -230,7 +230,7 @@ async fn test_create_order_success(pool: PgPool) {
 
     let req_body = CreateOrderRequest {
         branch_id,
-        shift_id,
+        till_id: shift_id,
         payment_method: "cash".to_string(),
         customer_name: Some("John Doe".to_string()),
         notes: None,
@@ -312,7 +312,7 @@ async fn test_order_ref_generated_and_decoded(pool: PgPool) {
 
     let make_body = || CreateOrderRequest {
         branch_id,
-        shift_id,
+        till_id: shift_id,
         payment_method: "cash".to_string(),
         customer_name: None,
         notes: None,
@@ -469,7 +469,7 @@ async fn test_create_order_with_addons_and_discount(pool: PgPool) {
 
     let req_body = CreateOrderRequest {
         branch_id,
-        shift_id,
+        till_id: shift_id,
         payment_method: "card".to_string(),
         customer_name: None,
         notes: None,
@@ -565,7 +565,7 @@ async fn test_milk_swap_converts_units_across_base_units(pool: PgPool) {
 
     let req_body = CreateOrderRequest {
         branch_id,
-        shift_id,
+        till_id: shift_id,
         payment_method: "cash".to_string(),
         customer_name: None,
         notes: None,
@@ -681,7 +681,7 @@ async fn test_standalone_resolver_swap_additive_and_optional(pool: PgPool) {
 
     let req_body = CreateOrderRequest {
         branch_id,
-        shift_id,
+        till_id: shift_id,
         payment_method: "cash".to_string(),
         customer_name: None,
         notes: None,
@@ -783,7 +783,7 @@ async fn test_list_orders(pool: PgPool) {
     for _ in 0..2 {
         let req_body = CreateOrderRequest {
             branch_id,
-            shift_id,
+            till_id: shift_id,
             payment_method: "cash".to_string(),
             customer_name: None,
             notes: None,
@@ -896,7 +896,7 @@ async fn test_list_orders_all_branches(pool: PgPool) {
     for (branch_id, shift_id) in [(branch_a, shift_a), (branch_b, shift_b)] {
         let body = CreateOrderRequest {
             branch_id,
-            shift_id,
+            till_id: shift_id,
             payment_method: "cash".to_string(),
             customer_name: None,
             notes: None,
@@ -1019,7 +1019,7 @@ async fn test_void_order(pool: PgPool) {
 
     let req_body = CreateOrderRequest {
         branch_id,
-        shift_id,
+        till_id: shift_id,
         payment_method: "cash".to_string(),
         customer_name: None,
         notes: None,
@@ -1114,7 +1114,7 @@ async fn test_void_no_restock_logs_waste(pool: PgPool) {
 
     let req_body = CreateOrderRequest {
         branch_id,
-        shift_id,
+        till_id: shift_id,
         payment_method: "cash".to_string(),
         customer_name: None,
         notes: None,
@@ -1275,7 +1275,7 @@ async fn test_order_cost_snapshot_with_recipe_and_addon(pool: PgPool) {
 
     let req_body = CreateOrderRequest {
         branch_id,
-        shift_id,
+        till_id: shift_id,
         payment_method: "cash".to_string(),
         customer_name: None,
         notes: None,
@@ -1356,7 +1356,7 @@ async fn test_order_cost_missing_without_recipe(pool: PgPool) {
 
     let req_body = CreateOrderRequest {
         branch_id,
-        shift_id,
+        till_id: shift_id,
         payment_method: "cash".to_string(),
         customer_name: None,
         notes: None,
@@ -1415,7 +1415,7 @@ macro_rules! order_app {
 fn simple_order(branch_id: Uuid, shift_id: Uuid, menu_item_id: Uuid) -> CreateOrderRequest {
     CreateOrderRequest {
         branch_id,
-        shift_id,
+        till_id: shift_id,
         payment_method: "cash".to_string(),
         customer_name: None,
         notes: None,
@@ -2144,7 +2144,7 @@ async fn test_create_order_records_charged_prices_and_flags(pool: PgPool) {
     let of = post(
         CreateOrderRequest {
             branch_id,
-            shift_id,
+            till_id: shift_id,
             payment_method: "cash".to_string(),
             items: vec![OrderItemInput {
                 menu_item_id: Some(item),
@@ -2187,7 +2187,7 @@ async fn test_create_order_records_charged_prices_and_flags(pool: PgPool) {
     let of2 = post(
         CreateOrderRequest {
             branch_id,
-            shift_id,
+            till_id: shift_id,
             payment_method: "cash".to_string(),
             items: vec![OrderItemInput {
                 menu_item_id: Some(item),

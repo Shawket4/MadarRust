@@ -1520,7 +1520,7 @@ async fn sales_and_shift_reports_reconcile(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
             .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
-            .configure(crate::shifts::routes::configure),
+            .configure(crate::tills::legacy_routes::configure),
     )
     .await;
 
@@ -1610,7 +1610,7 @@ async fn sales_and_shift_reports_reconcile(pool: PgPool) {
             .to_request();
         test::read_body_json(test::call_service(&app, req).await).await
     };
-    let shift: crate::shifts::handlers::ShiftReportResponse = {
+    let shift: crate::tills::legacy::ShiftReportResponse = {
         let req = test::TestRequest::get()
             .uri(&format!("/shifts/{shift_id}/report"))
             .insert_header(("Authorization", format!("Bearer {token}")))
@@ -1682,7 +1682,7 @@ fn status_predicates_are_unified() {
             include_str!("../reports/handlers.rs"),
         ),
         ("orders/handlers.rs", include_str!("../orders/handlers.rs")),
-        ("shifts/handlers.rs", include_str!("../shifts/handlers.rs")),
+        ("tills/handlers.rs", include_str!("../tills/handlers.rs")),
         (
             "insights/handlers.rs",
             include_str!("../insights/handlers.rs"),

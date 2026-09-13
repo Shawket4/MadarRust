@@ -15,7 +15,7 @@ use crate::{
     orders::handlers::Order,
     orgs::handlers::Org,
     permissions::handlers::PermissionMatrix,
-    shifts::handlers::{Shift, ShiftReportResponse},
+    tills::legacy::{Shift, ShiftReportResponse},
     users::handlers::CreateUserResponse,
 };
 
@@ -129,7 +129,7 @@ async fn test_e2e_merchant_setup_and_operation_happy_path(pool: PgPool) {
             .configure(crate::menu::routes::configure)
             .configure(crate::inventory::routes::configure)
             .configure(crate::recipes::routes::configure)
-            .configure(crate::shifts::routes::configure)
+            .configure(crate::tills::legacy_routes::configure)
             .configure(crate::orders::routes::configure),
     )
     .await;
@@ -422,7 +422,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
             .configure(crate::menu::routes::configure)
             .configure(crate::inventory::routes::configure)
             .configure(crate::recipes::routes::configure)
-            .configure(crate::shifts::routes::configure)
+            .configure(crate::tills::legacy_routes::configure)
             .configure(crate::orders::routes::configure)
             .configure(crate::discounts::routes::configure)
             .configure(|cfg| crate::reports::routes::configure(cfg, web::Data::new(pool.clone()))),
@@ -1029,7 +1029,7 @@ async fn test_e2e_purchasing_stocktake_reporting_lifecycle(pool: PgPool) {
             .configure(crate::recipes::routes::configure)
             .configure(crate::purchasing::routes::configure)
             .configure(crate::stocktakes::routes::configure)
-            .configure(crate::shifts::routes::configure)
+            .configure(crate::tills::legacy_routes::configure)
             .configure(crate::orders::routes::configure)
             .configure(|cfg| crate::reports::routes::configure(cfg, web::Data::new(pool.clone()))),
     )

@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::auth::jwt::JwtSecret;
 use crate::models::UserRole;
-use crate::refunds::handlers::{RefundIssued, shift_cash_refunds};
+use crate::refunds::handlers::{RefundIssued, till_cash_refunds};
 use crate::refunds::routes;
 
 fn get_secret() -> JwtSecret {
@@ -458,7 +458,7 @@ async fn cash_refunds_are_a_drawer_figure_keyed_on_the_issuing_shift(pool: PgPoo
     );
 
     // Only the cash leg leaves the drawer.
-    assert_eq!(shift_cash_refunds(&pool, t.shift_id).await.unwrap(), 50);
+    assert_eq!(till_cash_refunds(&pool, t.shift_id).await.unwrap(), 50);
 
     // Flipping the method's flag afterwards does not move the closed figure —
     // is_cash was snapshotted at issue.
@@ -469,7 +469,7 @@ async fn cash_refunds_are_a_drawer_figure_keyed_on_the_issuing_shift(pool: PgPoo
     .execute(&pool)
     .await
     .unwrap();
-    assert_eq!(shift_cash_refunds(&pool, t.shift_id).await.unwrap(), 50);
+    assert_eq!(till_cash_refunds(&pool, t.shift_id).await.unwrap(), 50);
 
     // The shift view carries both figures and the rows.
     let resp = test::call_service(
@@ -721,7 +721,7 @@ async fn a_cash_refund_leaves_the_drawer_and_a_refunded_sale_still_entered_it(po
         "a fully refunded sale's cash tender stays in the drawer maths; only \
          the cash actually handed back comes off"
     );
-    assert_eq!(shift_cash_refunds(&pool, t.shift_id).await.unwrap(), 170);
+    assert_eq!(till_cash_refunds(&pool, t.shift_id).await.unwrap(), 170);
 }
 
 /// The refund comes off the drawer it was ISSUED from, which need not be the
