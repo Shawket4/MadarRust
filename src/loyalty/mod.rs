@@ -24,6 +24,7 @@ pub mod handlers;
 pub mod model;
 pub mod public;
 pub mod redeem;
+pub mod reward_vectors;
 pub mod routes;
 pub mod settings;
 pub mod wallet;
