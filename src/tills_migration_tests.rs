@@ -137,20 +137,46 @@ fn subset(pred: impl Fn(i64) -> bool) -> Migrator {
 }
 
 /// A brand-new database cloned from `template0`: the test cluster's `template1`
-/// may be pre-migrated, and these tests must seed the OLD schema. Named
-/// `_sqlx_test_*` so the leftover-cleanup sweep removes it.
-async fn fresh(pool: &PgPool) -> PgPool {
+/// may be pre-migrated, and these tests must seed the OLD schema. The returned
+/// guard drops the database when the test ends (pass or panic).
+async fn fresh(pool: &PgPool) -> (PgPool, FreshDb) {
     let name = format!("_sqlx_test_t0_{}", Uuid::new_v4().simple());
     sqlx::raw_sql(&format!("CREATE DATABASE \"{name}\" TEMPLATE template0"))
         .execute(pool)
         .await
         .expect("create fresh database");
-    let opts = pool.connect_options().as_ref().clone().database(&name);
-    sqlx::pool::PoolOptions::new()
+    let base = pool.connect_options().as_ref().clone();
+    let fresh = sqlx::pool::PoolOptions::new()
         .max_connections(4)
-        .connect_with(opts)
+        .connect_with(base.clone().database(&name))
         .await
-        .expect("connect fresh database")
+        .expect("connect fresh database");
+    (fresh, FreshDb { name, base })
+}
+
+struct FreshDb {
+    name: String,
+    base: sqlx::postgres::PgConnectOptions,
+}
+
+impl Drop for FreshDb {
+    fn drop(&mut self) {
+        let name = std::mem::take(&mut self.name);
+        let opts = self.base.clone().database("postgres");
+        // Drop runs outside any async context guarantee: use a private runtime.
+        let _ = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(async move {
+                use sqlx::Connection;
+                if let Ok(mut conn) = sqlx::PgConnection::connect_with(&opts).await {
+                    let _ = sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))
+                        .execute(&mut conn)
+                        .await;
+                }
+            });
+        })
+        .join();
+    }
 }
 
 async fn migrate_pre(pool: &PgPool) {
@@ -241,7 +267,7 @@ async fn feed_op(pool: &PgPool, branch: &str, ty: &str, id: &str) -> Option<(Str
 
 #[sqlx::test(migrations = false)]
 async fn migration_preserves_counts_and_sums_per_till(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     migrate_pre(&pool).await;
     sqlx::raw_sql(FIXTURE).execute(&pool).await.unwrap();
     let before = lines(&pool, PER_TILL_OLD).await;
@@ -265,7 +291,7 @@ async fn migration_preserves_counts_and_sums_per_till(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn migration_archives_till_entities_and_bindings(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     assert_eq!(
         i64_of(&pool, "SELECT count(*) FROM archive.till_entities").await,
@@ -304,7 +330,7 @@ async fn migration_archives_till_entities_and_bindings(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn migration_remaps_occupancy_till_refs_to_covering_session(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     let row =
         sqlx::query("SELECT started_till_id, ended_till_id FROM table_occupancies WHERE id = $1")
@@ -320,7 +346,7 @@ async fn migration_remaps_occupancy_till_refs_to_covering_session(pool: PgPool) 
 
 #[sqlx::test(migrations = false)]
 async fn migration_remap_null_when_no_covering_session(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     assert_eq!(
         uuid_opt(
@@ -354,7 +380,7 @@ async fn migration_remap_null_when_no_covering_session(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn migration_backfills_order_payments_till_id(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     assert_eq!(
         i64_of(&pool, "SELECT count(*) FROM order_payments").await,
@@ -373,7 +399,7 @@ async fn migration_backfills_order_payments_till_id(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn order_payments_fill_till_trigger_sets_missing_till(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     let till: Uuid = sqlx::query_scalar("INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ($1, 'Cash', 5, true) RETURNING till_id")
         .bind(u(O3))
@@ -385,7 +411,7 @@ async fn order_payments_fill_till_trigger_sets_missing_till(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn refund_trigger_references_tills_and_rejects_cross_branch(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     let body: String = sqlx::query_scalar(
         "SELECT prosrc FROM pg_proc WHERE proname = 'order_refunds_before_insert'",
@@ -415,7 +441,7 @@ async fn refund_trigger_references_tills_and_rejects_cross_branch(pool: PgPool) 
 
 #[sqlx::test(migrations = false)]
 async fn no_function_body_mentions_shifts(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     let n = i64_of(&pool, r"SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
         WHERE n.nspname = 'public' AND regexp_replace(p.prosrc, 'work_shift', '', 'g') ~ '(\mshifts\M|shift_id)'").await;
@@ -424,7 +450,7 @@ async fn no_function_body_mentions_shifts(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn schema_has_no_stray_shift_identifiers(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     let stray = lines(&pool, r"
         SELECT k || ':' || name FROM (
@@ -446,7 +472,7 @@ async fn schema_has_no_stray_shift_identifiers(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn two_open_tills_same_teller_allowed(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     sqlx::query("INSERT INTO tills (branch_id, teller_id, status, verification) VALUES ($1, $2, 'open', 'unverified')")
         .bind(u(B1))
@@ -475,7 +501,7 @@ async fn two_open_tills_same_teller_allowed(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn permission_rows_follow_enum_rename(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     migrate_pre(&pool).await;
     sqlx::raw_sql(FIXTURE).execute(&pool).await.unwrap();
     let before_user = i64_of(
@@ -550,7 +576,7 @@ async fn insert_order(
 
 #[sqlx::test(migrations = false)]
 async fn legacy_numbered_orders_unique_per_till(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     let err = insert_order(&pool, S2, 1, None)
         .await
@@ -563,7 +589,7 @@ async fn legacy_numbered_orders_unique_per_till(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn device_numbered_orders_not_unique_per_till(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     let (d1, d2) = (Uuid::new_v4(), Uuid::new_v4());
     insert_device(&pool, d1, ORG, B1, "36B").await;
@@ -579,7 +605,7 @@ async fn device_numbered_orders_not_unique_per_till(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn reconciliation_checks_enforced(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     let ins = |method: &'static str,
                is_cash: bool,
@@ -627,7 +653,7 @@ async fn reconciliation_checks_enforced(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn availability_same_org_trigger(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     sqlx::query("INSERT INTO branch_payment_methods (branch_id, payment_method_id, org_id) VALUES ($1, $2, $3)")
         .bind(u(B1)).bind(u(PM_CASH)).bind(u(ORG))
@@ -648,7 +674,7 @@ async fn availability_same_org_trigger(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn down_script_round_trip(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     migrate_pre(&pool).await;
     sqlx::raw_sql(FIXTURE).execute(&pool).await.unwrap();
     let before = lines(&pool, PER_TILL_OLD).await;
@@ -715,7 +741,7 @@ async fn down_script_round_trip(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn changefeed_backfill_matches_live_sets(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     let diff = i64_of(&pool, "SELECT count(*) FROM (
         (SELECT branch_id, type, entity_id FROM sync_changes WHERE op = 'upsert' EXCEPT SELECT * FROM sync_live_rows())
@@ -745,7 +771,7 @@ async fn changefeed_backfill_matches_live_sets(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn sync_emit_compacts_and_advances_seq(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     let (_, s0) = feed_op(&pool, B1, "till", S2).await.unwrap();
     let rows_before = i64_of(&pool, "SELECT count(*) FROM sync_changes").await;
@@ -779,7 +805,7 @@ async fn sync_emit_compacts_and_advances_seq(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn safe_horizon_waits_out_uncommitted_emitters(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     let mut writer = pool.begin().await.unwrap();
     sqlx::query("UPDATE tills SET notes = 'in flight' WHERE id = $1")
@@ -810,7 +836,7 @@ async fn safe_horizon_waits_out_uncommitted_emitters(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn ticket_settle_emits_delete(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     assert_eq!(
         feed_op(&pool, B1, "open_ticket", TK_OPEN).await.unwrap().0,
@@ -827,7 +853,7 @@ async fn ticket_settle_emits_delete(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn occupancy_needs_bussing_stays_live_until_cleared(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     assert_eq!(
         feed_op(&pool, B1, "table_occupancy", OC3).await.unwrap().0,
@@ -853,7 +879,7 @@ async fn occupancy_needs_bussing_stays_live_until_cleared(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn org_type_fans_out_to_all_branches(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     let s0 = max_seq(&pool).await;
     sqlx::query("UPDATE org_payment_methods SET color = '#fff' WHERE id = $1")
@@ -871,7 +897,7 @@ async fn org_type_fans_out_to_all_branches(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn child_row_change_reemits_parent_menu_item(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     let (_, s0) = feed_op(&pool, B1, "menu_item", MI).await.unwrap();
     sqlx::query("UPDATE menu_item_sizes SET price = 1200 WHERE id = $1")
@@ -905,7 +931,7 @@ async fn child_row_change_reemits_parent_menu_item(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn every_projection_source_table_has_emitter(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     let header: Vec<String> = include_str!("../migrations/20260914090300_sync_changefeed.sql")
         .lines()
@@ -965,7 +991,7 @@ async fn insert_group_and_asset(
 
 #[sqlx::test(migrations = false)]
 async fn assets_unique_per_org_not_global(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     let hash = "a".repeat(64);
     insert_group_and_asset(&pool, Some(ORG), &hash)
@@ -984,7 +1010,7 @@ async fn assets_unique_per_org_not_global(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn asset_reference_columns_fk_set_null(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     let g = insert_group_and_asset(&pool, Some(ORG), &"b".repeat(64))
         .await
@@ -1020,7 +1046,7 @@ async fn asset_reference_columns_fk_set_null(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn asset_ref_change_marks_bundle_dirty_and_emits_row(pool: PgPool) {
-    let pool = fresh(&pool).await;
+    let (pool, _fresh) = fresh(&pool).await;
     setup(&pool).await;
     let g = insert_group_and_asset(&pool, Some(ORG), &"c".repeat(64))
         .await
