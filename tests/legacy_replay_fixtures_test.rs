@@ -45,8 +45,8 @@ fn legacy_replay_envelopes_deserialize_into_current_replay_op() {
                 Ok(parsed) => {
                     // The tag must land on the variant the old client meant.
                     let variant = match parsed {
-                        ReplayOp::OpenShift { .. } => "open_shift",
-                        ReplayOp::CloseShift { .. } => "close_shift",
+                        ReplayOp::OpenTill { .. } => "open_shift",
+                        ReplayOp::CloseTill { .. } => "close_shift",
                         ReplayOp::CashMovement { .. } => "cash_movement",
                         ReplayOp::CreateOrder { .. } => "create_order",
                         ReplayOp::SettleOpenTicket { .. } => "settle_open_ticket",
