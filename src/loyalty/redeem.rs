@@ -409,3 +409,137 @@ mod unit {
         assert_eq!(covered_minor(-5, 100, 1), 0);
     }
 }
+
+/// Give back the points a refunded reward spent.
+///
+/// ## The rule
+/// A reward is goods handed over against points, so when the goods come back
+/// the points do — in proportion to the reward UNITS returned, never to the
+/// money, because a reward unit carried no money:
+///
+/// * A refund line on a line a reward covered returns reward units only once
+///   its paid units are exhausted (`paid = quantity − reward_units`): three
+///   lattes with one free, one returned for cash, is a paid latte. A unit
+///   refunded for **nothing** (`amount = 0`) is a free unit coming back.
+/// * A refund with no lines that brings the order to fully refunded returns
+///   every redemption on it — the whole sale was undone.
+/// * Refunding a paid line of a basket that also had a reward restores nothing.
+///
+/// Cumulative and monotonic: each call tops the reversal up to the target for
+/// everything refunded so far, so retries and a sequence of partial refunds
+/// land exactly once. Written through `loyalty_reverse(source = 'refund')`,
+/// which also refuses to reverse more than was spent. The EARN clawback stays
+/// the `order_refunds` trigger's; this only ever writes `reverse_redeem`.
+///
+/// Returns the members whose balance moved, for the wallet push after commit.
+pub async fn restore_on_refund(
+    tx: &mut Transaction<'_, Postgres>,
+    order_id: Uuid,
+    lines: &[crate::refunds::handlers::RefundLineInput],
+    by: Uuid,
+    note: Option<&str>,
+) -> Result<Vec<Uuid>, AppError> {
+    // (redeem row, member, |points|, already reversed, item's reward units,
+    //  item quantity, item id)
+    type Row = (Uuid, Uuid, i32, i64, Option<i32>, Option<i32>, Option<Uuid>);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT t.id, t.customer_id, abs(t.points), \
+                COALESCE((SELECT SUM(abs(r.points)) FROM loyalty_transactions r \
+                           WHERE r.reverses_id = t.id), 0)::bigint, \
+                oi.reward_units, oi.quantity, t.order_item_id \
+           FROM loyalty_transactions t \
+           LEFT JOIN order_items oi ON oi.id = t.order_item_id \
+          WHERE t.order_id = $1 AND t.kind = 'redeem' AND t.reverses_id IS NULL \
+          ORDER BY t.created_at, t.id",
+    )
+    .bind(order_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let fully_refunded: bool = sqlx::query_scalar(
+        "SELECT COALESCE((SELECT SUM(amount) FROM order_refunds WHERE order_id = $1), 0) \
+                >= o.total_amount \
+           FROM orders o WHERE o.id = $1",
+    )
+    .bind(order_id)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    let mut moved = Vec::new();
+    for (txn, member, spent, reversed, reward_units, quantity, item) in rows {
+        let target: i64 = if lines.is_empty() {
+            if fully_refunded { spent as i64 } else { 0 }
+        } else {
+            let (Some(item), Some(units), Some(qty)) = (item, reward_units, quantity) else {
+                continue;
+            };
+            if !lines.iter().any(|l| l.order_item_id == item) {
+                continue;
+            };
+            if units <= 0 {
+                continue;
+            }
+            let (free, paid): (i64, i64) = sqlx::query_as(
+                "SELECT COALESCE(SUM(quantity) FILTER (WHERE amount = 0), 0)::bigint, \
+                        COALESCE(SUM(quantity) FILTER (WHERE amount > 0), 0)::bigint \
+                   FROM order_refund_lines WHERE order_item_id = $1",
+            )
+            .bind(item)
+            .fetch_one(&mut **tx)
+            .await?;
+            let reward_returned =
+                reward_units_returned(free, paid, i64::from(qty), i64::from(units));
+            i64::from(spent) * reward_returned / i64::from(units)
+        };
+        if target > reversed {
+            sqlx::query("SELECT loyalty_reverse($1, $2, 'refund', $3, $4)")
+                .bind(txn)
+                .bind((target - reversed) as i32)
+                .bind(by)
+                .bind(note)
+                .execute(&mut **tx)
+                .await?;
+            moved.push(member);
+        }
+    }
+    moved.dedup();
+    Ok(moved)
+}
+
+/// How many of a line's reward units have come back: every unit refunded for
+/// nothing is a free one, and units refunded for money are free only once the
+/// paid units (`quantity − reward_units`) are all back. See [`restore_on_refund`].
+pub fn reward_units_returned(free: i64, paid: i64, quantity: i64, reward_units: i64) -> i64 {
+    let reward_units = reward_units.clamp(0, quantity.max(0));
+    let paid_units = quantity - reward_units;
+    (free.max(0) + (paid - paid_units).max(0)).clamp(0, reward_units)
+}
+
+#[cfg(test)]
+mod refund_rule {
+    use super::reward_units_returned;
+
+    #[test]
+    fn paid_units_come_back_before_free_ones() {
+        // Three lattes, one free: the first two returned for cash are paid.
+        assert_eq!(reward_units_returned(0, 1, 3, 1), 0);
+        assert_eq!(reward_units_returned(0, 2, 3, 1), 0);
+        assert_eq!(reward_units_returned(0, 3, 3, 1), 1);
+    }
+
+    #[test]
+    fn a_line_refunded_for_nothing_is_the_free_unit() {
+        assert_eq!(reward_units_returned(1, 0, 3, 1), 1);
+        assert_eq!(reward_units_returned(1, 1, 3, 2), 1);
+        assert_eq!(reward_units_returned(3, 0, 3, 2), 2);
+    }
+
+    #[test]
+    fn a_fully_free_line_returns_its_units() {
+        assert_eq!(reward_units_returned(0, 2, 2, 2), 2);
+        assert_eq!(reward_units_returned(0, 9, 2, 2), 2);
+    }
+}

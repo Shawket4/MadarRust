@@ -397,10 +397,25 @@ pub(crate) async fn create_refund_inner(
         .await?;
     }
 
+    // A refunded REWARD gives its points back, in proportion to the reward
+    // units returned (`loyalty::redeem::restore_on_refund` states the rule).
+    // The earn clawback stays the trigger's; this writes only reverse_redeem.
+    let restored = crate::loyalty::redeem::restore_on_refund(
+        &mut tx,
+        order.id,
+        &body.lines,
+        actor.teller_id,
+        note,
+    )
+    .await?;
+
     // Read back inside the transaction: the status the AFTER INSERT trigger
     // may just have flipped is what the till should print.
     let issued = load_issued(&mut tx, refund_id).await?;
     tx.commit().await?;
+    for member in restored {
+        crate::loyalty::wallet::push_update(pool.get_ref(), member);
+    }
     Ok(HttpResponse::Created().json(issued))
 }
 

@@ -3452,3 +3452,177 @@ async fn a_programme_switched_off_mid_shift_still_lands_the_queued_sale(pool: Pg
     assert!(body["loyalty_redemption_refused"].as_str().is_some());
     assert_eq!(visits_of(&pool, shop.member).await, 10);
 }
+
+async fn refund(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    shop: &RewardShop,
+    body: Value,
+) -> (StatusCode, Value) {
+    let jwt = token(shop.teller, shop.org, UserRole::Teller, Some(shop.branch));
+    let req = test::TestRequest::post()
+        .uri("/refunds")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .set_json(body)
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    let status = resp.status();
+    (status, test::read_body_json(resp).await)
+}
+
+/// Three lattes (two of them rewards, 5 visits each) and a cake.
+async fn reward_sale(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    shop: &RewardShop,
+) -> Value {
+    let jwt = token(shop.teller, shop.org, UserRole::Teller, Some(shop.branch));
+    let (status, body) = place_with_rewards(
+        app,
+        &jwt,
+        shop.branch,
+        shop.shift,
+        json!([
+            { "menu_item_id": shop.latte, "quantity": 3 },
+            { "menu_item_id": shop.cake, "quantity": 1 }
+        ]),
+        shop.member,
+        json!([{ "item_index": 0, "units": 2 }]),
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    body
+}
+
+/// Returning a paid latte gives money back and no points; returning a free one
+/// (refunded for nothing) gives its 5 visits back; returning the cake — a paid
+/// line of a basket that also had a reward — restores nothing.
+#[sqlx::test]
+async fn a_refunded_reward_unit_gives_its_points_back_and_a_paid_one_does_not(pool: PgPool) {
+    let shop = reward_shop(&pool, 12).await;
+    let app = reward_app!(pool);
+    let sale = reward_sale(&app, &shop).await;
+    assert_eq!(visits_of(&pool, shop.member).await, 2);
+    let order = sale["id"].clone();
+    let latte = sale["items"][0]["id"].clone();
+    let cake = sale["items"][1]["id"].clone();
+
+    let (s, b) = refund(
+        &app,
+        &shop,
+        json!({
+            "order_id": order, "amount": 5_700, "method": "cash", "reason": "customer_request",
+            "lines": [{ "order_item_id": latte, "quantity": 1, "amount": 5_700 }]
+        }),
+    )
+    .await;
+    assert!(s.is_success(), "{s} {b}");
+    assert_eq!(
+        visits_of(&pool, shop.member).await,
+        2,
+        "the paid latte came back"
+    );
+
+    let (s, b) = refund(
+        &app,
+        &shop,
+        json!({
+            "order_id": order, "amount": 5_000, "method": "cash", "reason": "quality_issue",
+            "lines": [{ "order_item_id": cake, "quantity": 1, "amount": 5_000 }]
+        }),
+    )
+    .await;
+    assert!(s.is_success(), "{s} {b}");
+    assert_eq!(
+        visits_of(&pool, shop.member).await,
+        2,
+        "a paid line restores nothing"
+    );
+
+    let (s, b) = refund(
+        &app,
+        &shop,
+        json!({
+            "order_id": order, "amount": 100, "method": "cash", "reason": "goodwill",
+            "lines": [{ "order_item_id": latte, "quantity": 1, "amount": 0 }]
+        }),
+    )
+    .await;
+    assert!(s.is_success(), "{s} {b}");
+    assert_eq!(
+        visits_of(&pool, shop.member).await,
+        7,
+        "one free latte back: 5 visits"
+    );
+
+    let kinds: Vec<(String, String)> = sqlx::query_as(
+        "SELECT kind::text, source FROM loyalty_transactions WHERE kind = 'reverse_redeem'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(kinds, vec![("reverse_redeem".into(), "refund".into())]);
+}
+
+/// Refunding the whole sale with no lines named gives every redemption back,
+/// once — a second call has nothing left to reverse.
+#[sqlx::test]
+async fn a_whole_sale_refunded_gives_back_every_reward_once(pool: PgPool) {
+    let shop = reward_shop(&pool, 12).await;
+    let app = reward_app!(pool);
+    let sale = reward_sale(&app, &shop).await;
+    let total = sale["total_amount"].as_i64().unwrap();
+    let (s, b) = refund(&app, &shop, json!({
+        "order_id": sale["id"], "amount": total - 1, "method": "cash", "reason": "customer_request"
+    }))
+    .await;
+    assert!(s.is_success(), "{s} {b}");
+    assert_eq!(
+        visits_of(&pool, shop.member).await,
+        2,
+        "partly refunded is not undone"
+    );
+    let (s, b) = refund(
+        &app,
+        &shop,
+        json!({
+            "order_id": sale["id"], "amount": 1, "method": "cash", "reason": "customer_request"
+        }),
+    )
+    .await;
+    assert!(s.is_success(), "{s} {b}");
+    assert_eq!(visits_of(&pool, shop.member).await, 12);
+}
+
+/// A void after a refund is refused (the trigger's rule), so a reward can never
+/// be given back twice — once by the refund, once by the void.
+#[sqlx::test]
+async fn a_void_after_a_refund_cannot_give_a_reward_back_twice(pool: PgPool) {
+    let shop = reward_shop(&pool, 12).await;
+    let app = reward_app!(pool);
+    let sale = reward_sale(&app, &shop).await;
+    let (s, _) = refund(
+        &app,
+        &shop,
+        json!({
+            "order_id": sale["id"], "amount": 100, "method": "cash", "reason": "goodwill",
+            "lines": [{ "order_item_id": sale["items"][0]["id"], "quantity": 2, "amount": 0 }]
+        }),
+    )
+    .await;
+    assert!(s.is_success());
+    assert_eq!(visits_of(&pool, shop.member).await, 12);
+    let order = Uuid::parse_str(sale["id"].as_str().unwrap()).unwrap();
+    let voided = sqlx::query("UPDATE orders SET status = 'voided' WHERE id = $1")
+        .bind(order)
+        .execute(&pool)
+        .await;
+    assert!(voided.is_err());
+    assert_eq!(visits_of(&pool, shop.member).await, 12);
+}
