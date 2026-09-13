@@ -47,9 +47,6 @@ pub struct ScanResult {
     /// enforces it before Charge so the server's refusal is never the first
     /// the teller hears of it.
     pub max_rewards_per_order: Option<i32>,
-    /// Whether a programme runs at this branch at all. A till that attached a
-    /// member before the programme was switched off learns it on the refresh.
-    pub enabled: bool,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -109,7 +106,6 @@ pub async fn lookup(
         any_item: settings.reward_any_item,
         any_item_cost: settings.default_reward_cost,
         max_rewards_per_order: settings.max_rewards_per_order,
-        enabled: settings.enabled,
     }))
 }
 

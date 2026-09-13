@@ -512,7 +512,6 @@ async fn a_shop_can_hand_out_one_code_for_the_whole_organisation(pool: PgPool) {
     .await;
     assert!(body["branch_id"].is_null(), "{body}");
     assert!(body["branch_name"].is_null());
-    assert_eq!(body["enabled"], true);
     assert_eq!(body["next_reward_cost"], 100);
 
     // Signing up through it makes a member of the SHOP.
@@ -3792,7 +3791,6 @@ async fn a_till_refreshes_an_attached_member_by_id_with_the_cap(pool: PgPool) {
     let body: Value = test::call_and_read_body_json(&app, req).await;
     assert_eq!(body["member"]["balance"], 7);
     assert_eq!(body["max_rewards_per_order"], 1);
-    assert_eq!(body["enabled"], true);
 
     let other_org = seed_org(&pool).await;
     let stranger = seed_member(&pool, other_org, "201000000099", "Mstrangerxxxxxxxxxx1").await;

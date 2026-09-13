@@ -60674,8 +60674,7 @@
           "rewards",
           "recent",
           "any_item",
-          "any_item_cost",
-          "enabled"
+          "any_item_cost"
         ],
         "properties": {
           "any_item": {
@@ -60686,10 +60685,6 @@
             "type": "integer",
             "format": "int32",
             "description": "What one line costs when `any_item` is on, in the branch's currency."
-          },
-          "enabled": {
-            "type": "boolean",
-            "description": "Whether a programme runs at this branch at all. A till that attached a\nmember before the programme was switched off learns it on the refresh."
           },
           "max_rewards_per_order": {
             "type": [
