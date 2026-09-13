@@ -1675,10 +1675,26 @@ pub(crate) async fn create_order_inner(
     // cannot reproduce a decision a person made at the counter. What changes is
     // that the tax is then computed over THAT stated discount rather than
     // accepted alongside it.
-    let discount_amount = body
-        .discount_amount
-        .unwrap_or_else(|| calc_discount(subtotal))
-        .clamp(0, subtotal);
+    //
+    // REWARDS FIRST, THEN DISCOUNTS. On a bill that claims a reward the discount
+    // is resolved against the REDUCED subtotal whenever it is a rule (a
+    // percentage or a fixed amount) the server can apply itself. A till that
+    // computed 10% of the basket before the free coffee came off — every build
+    // up to 0.6.0 — would otherwise have its larger figure clamped and kept,
+    // discounting the free coffee a second time. Only an amount no rule
+    // expresses is still the till's word, clamped to what is left.
+    let rule_discount = claimed
+        && matches!(
+            resolved_discount_type.as_deref(),
+            Some("percentage") | Some("fixed")
+        );
+    let discount_amount = if rule_discount {
+        calc_discount(subtotal)
+    } else {
+        body.discount_amount
+            .unwrap_or_else(|| calc_discount(subtotal))
+    }
+    .clamp(0, subtotal);
     let breakdown = crate::tax::compute(subtotal as i64, discount_amount as i64, &policy);
     let service_charge_amount = breakdown.service_charge as i32;
     let tax_amount = breakdown.tax as i32;

@@ -3274,6 +3274,38 @@ async fn a_replayed_reward_on_a_line_that_is_not_there_is_dropped_not_fatal(pool
     );
 }
 
+/// Rewards first, then discounts. An old till computed 10% of the WHOLE basket
+/// (1,400) and sent it; the server takes 10% of what is left after the free
+/// latte (900), so the free latte is not discounted a second time.
+#[sqlx::test]
+async fn a_discount_is_taken_after_the_reward_not_before(pool: PgPool) {
+    let shop = reward_shop(&pool, 5).await;
+    let app = reward_app!(pool);
+    let jwt = token(shop.teller, shop.org, UserRole::Teller, Some(shop.branch));
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .set_json(json!({
+            "branch_id": shop.branch, "shift_id": shop.shift, "payment_method": "cash",
+            "idempotency_key": Uuid::new_v4(),
+            "loyalty_customer_id": shop.member,
+            "loyalty_redemptions": [{ "item_index": 0 }],
+            "discount_type": "percentage", "discount_value": 0.10,
+            "discount_amount": 1_400,
+            "items": [
+                { "menu_item_id": shop.latte, "quantity": 1 },
+                { "menu_item_id": shop.cake, "quantity": 1 }
+            ]
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status();
+    let body: Value = test::read_body_json(resp).await;
+    assert!(status.is_success(), "{status} {body}");
+    assert_eq!(body["subtotal"], 9_000);
+    assert_eq!(body["discount_amount"], 900);
+}
+
 /// The ledger row names the line it paid for, the line says how many units,
 /// and the audit trail says who applied it.
 #[sqlx::test]
