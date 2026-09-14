@@ -48738,6 +48738,15 @@
           "revenue_by_method": {
             "description": "Money collected FOR GOODS, bucketed by the method actually tendered\n(`order_payments`) — money IN. Tips are not in here — see `total_tips`\n— and refunds are not netted out: they are money OUT with a tender of\ntheir own, on `GET /shifts/{id}/refunds` and the refunds dataset."
           },
+          "service_charge_waived_amount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "service_charge_waived_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Table bills in range whose service charge was waived, and what those\ncharges came to. Additive."
+          },
           "subtotal": {
             "type": "integer",
             "format": "int64"
@@ -48781,7 +48790,7 @@
           "total_service_charge": {
             "type": "integer",
             "format": "int64",
-            "description": "Service charge on the dine-in bills in range — inside `total_revenue`\nas the shop's income, not a pass-through."
+            "description": "Service charge on the dine-in bills in range, less what refunds took\nback — inside `total_revenue` as the shop's income, not a pass-through."
           },
           "total_tax": {
             "type": "integer",
@@ -59012,6 +59021,51 @@
             "format": "int32",
             "description": "The service charge on this bill; `0` where the branch charges none.\nIts own field, and its own receipt line: a charge the customer did not\nchoose is stated separately from the tax rather than folded into it."
           },
+          "service_charge_rate_applied": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The service charge rate the bill was priced under (a fraction); `0` on a\ntakeaway, a delivery, or a bill whose charge was waived. Additive."
+          },
+          "service_charge_taxable_applied": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the service charge sat inside the tax base. Additive."
+          },
+          "service_charge_waived_amount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "What the removed service charge came to, in minor units; `0` when\nnothing was waived. Not part of the total. Additive."
+          },
+          "service_charge_waived_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the service charge was removed. Additive."
+          },
+          "service_charge_waived_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Who removed the service charge from this table's bill (a holder of\n`orders:waive_service`), or `null`. Additive."
+          },
+          "service_charge_waived_by_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "shift_id": {
             "type": "string",
             "format": "uuid",
@@ -59027,6 +59081,21 @@
           "tax_amount": {
             "type": "integer",
             "format": "int32"
+          },
+          "tax_inclusive": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether this bill's prices included tax, as it was priced. A receipt\nsays \"Prices include VAT\" when true. `null` on a read that does not\nresolve it. Additive."
+          },
+          "tax_rate_applied": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The tax rate the bill was priced under (a fraction). `null` for orders\nfrom before rates were recorded. Additive."
           },
           "teller_id": {
             "type": "string",
@@ -63774,10 +63843,20 @@
             "type": "string",
             "description": "One of the [`RefundReason`] spellings."
           },
+          "service_charge_amount": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How much of `amount` was service charge, the same way. Additive."
+          },
           "shift_id": {
             "type": "string",
             "format": "uuid",
             "description": "DEPRECATED: same value as `till_id`."
+          },
+          "tax_amount": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How much of `amount` was tax, taken back pro rata of the order's own\ntax (filled by the database, cumulatively across the order's refunds,\nso a full refund takes back exactly the order's tax). Additive."
           },
           "till_id": {
             "type": "string",
@@ -65092,6 +65171,10 @@
             ],
             "format": "int32",
             "description": "What the till says the bill came to — the figure its drawer collected.\nChecked against the server's own total exactly as a counter checkout is\n(`create_order_inner`'s drift check); a disagreement is refused, not\nrecorded. Absent on older builds, which then get no check. The figure\nto send is `OpenTicketView::bill.total`, which is priced by the same\nengine under the same policy — a till that shows that number cannot\ndisagree with the books."
+          },
+          "waive_service_charge": {
+            "type": "boolean",
+            "description": "Remove the service charge from this bill. Only someone whose effective\npermissions include `orders:waive_service` may send `true`; anyone else\nis refused, live or replayed. The order records who and when. Absent\n(every build before 0.7.2) means the charge stands."
           }
         }
       },
@@ -65275,6 +65358,15 @@
           "revenue_by_method": {
             "description": "Goods only, by method actually tendered — money IN. Tips are in\n`total_tips`; refunds are not netted from these buckets (they are money\nOUT, with their own tender — see `refunds_issued_*`)."
           },
+          "service_charge_waived_amount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "service_charge_waived_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Table bills whose service charge was removed by someone holding\n`orders:waive_service`, and what those charges came to. Additive."
+          },
           "shift_id": {
             "type": "string",
             "format": "uuid",
@@ -65315,7 +65407,7 @@
           "total_service_charge": {
             "type": "integer",
             "format": "int64",
-            "description": "Service charge added to this shift's dine-in bills. Inside\n`total_revenue` as the shop's income; see `analytics::schema` for why."
+            "description": "Service charge added to this shift's dine-in bills, less what refunds\ntook back. Inside `total_revenue` as the shop's income; see\n`analytics::schema` for why."
           },
           "total_tax": {
             "type": "integer",
@@ -67225,6 +67317,10 @@
             "type": "number",
             "format": "double"
           },
+          "service_charge_taxable": {
+            "type": "boolean",
+            "description": "Whether the service charge sits inside the tax base. Frozen on the bill\nwith the rates, so a till re-pricing the bill (a discount, a reward, a\nvoided line) prices it the way the settle will. Additive: a bill from\nan older server decodes as `true`, `TaxPolicy::default()`'s value."
+          },
           "subtotal": {
             "type": "integer",
             "format": "int32",
@@ -67753,9 +67849,27 @@
             "type": "integer",
             "format": "int64"
           },
+          "refunds_issued_service_charge": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "refunds_issued_tax": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The tax and service charge inside the refunds issued FROM this till's\ndrawer (`refunds_issued_amount`'s split)."
+          },
           "safe_drops": {
             "type": "integer",
             "format": "int64"
+          },
+          "service_charge_waived_amount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "service_charge_waived_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Table bills whose service charge was removed (`orders:waive_service`),\nand what those charges came to. Not part of any total."
           },
           "standard_float": {
             "type": [
@@ -67781,6 +67895,16 @@
           "total_payments": {
             "type": "integer",
             "format": "int64"
+          },
+          "total_service_charge": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Service charge on this till's sales, less what their refunds took back."
+          },
+          "total_tax": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Tax on this till's sales, less the tax their refunds took back (a\npartial refund takes back its pro-rata share; a voided or fully\nrefunded sale is out altogether). Additive."
           },
           "total_tips": {
             "type": "integer",

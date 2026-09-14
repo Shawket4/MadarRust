@@ -736,3 +736,41 @@ async fn a_refund_from_another_shift_lightens_that_drawer_not_the_sales(pool: Pg
     assert_eq!(compute_system_cash(&pool, t.shift_id).await.unwrap(), 10200);
     assert_eq!(compute_system_cash(&pool, other_shift).await.unwrap(), 9800);
 }
+
+/// The database fills a refund's tax and service split (`refund_share` in the
+/// insert trigger); the till computes the same split offline with
+/// `tax::refund_split`. They must agree to the piastre, including on the
+/// half-piastre boundaries.
+#[sqlx::test]
+async fn the_refund_trigger_splits_tax_exactly_like_the_engine(pool: PgPool) {
+    let cases: Vec<(i64, i64, i64, i64, i64)> = (0..400)
+        .map(|i: i64| {
+            let total = 1 + (i * 7919) % 20000;
+            let tax = (total * ((i % 5) + 10)) / 114;
+            let sc = (total * (i % 3)) / 23;
+            let before = (i * 31) % (total + 1);
+            let amount = 1 + (i * 131) % total;
+            (total, tax, sc, before, amount)
+        })
+        .chain([(12540, 1540, 1000, 2508, 1001), (2, 1, 1, 0, 1), (10, 5, 0, 1, 1)])
+        .collect();
+    for (total, tax, sc, before, amount) in cases {
+        let (t, s): (i32, i32) = sqlx::query_as(
+            "SELECT refund_share($1, $4 + $5, $3) - refund_share($1, $4, $3), \
+                    refund_share($2, $4 + $5, $3) - refund_share($2, $4, $3)",
+        )
+        .bind(tax as i32)
+        .bind(sc as i32)
+        .bind(total as i32)
+        .bind(before)
+        .bind(amount)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (t as i64, s as i64),
+            crate::tax::refund_split(total, tax, sc, before, amount),
+            "total {total} tax {tax} sc {sc} before {before} amount {amount}"
+        );
+    }
+}
