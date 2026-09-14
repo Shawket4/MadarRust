@@ -205,7 +205,13 @@ jobs:
             up -d --no-deps --pull never madar-backend
 
           # Verify
-          sleep 4
+          # Migrations run on boot BEFORE the server listens, so a release
+          # with migrations is not up after a fixed few seconds (1.4.0 took ~9s
+          # and this check failed a healthy deploy). Poll for up to 3 minutes.
+          for i in $(seq 1 90); do
+            curl -sf http://127.0.0.1:8081/health >/dev/null && break
+            sleep 2
+          done
           curl -sf http://127.0.0.1:8081/health && echo "✅ healthy" || {
             docker compose -f /opt/madar-rust/docker-compose.yml logs madar-backend --tail 50
             exit 1
@@ -264,7 +270,13 @@ jobs:
             docker compose -f /opt/madar-demo/docker-compose.demo.yml \
             up -d --no-deps --pull never madar-demo-backend
 
-          sleep 4
+          # Migrations run on boot BEFORE the server listens, so a release
+          # with migrations is not up after a fixed few seconds (1.4.0 took ~9s
+          # and this check failed a healthy deploy). Poll for up to 3 minutes.
+          for i in $(seq 1 90); do
+            curl -sf http://127.0.0.1:8083/health >/dev/null && break
+            sleep 2
+          done
           curl -sf http://127.0.0.1:8083/health && echo "✅ demo healthy" || {
             docker compose -f /opt/madar-demo/docker-compose.demo.yml logs madar-demo-backend --tail 50
             exit 1
