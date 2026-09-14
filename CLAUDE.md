@@ -138,6 +138,22 @@ same code path (see `src/sync/handlers.rs` and the `*_inner` fns in `tickets`,
 `held_orders`). If you add a POS-facing mutation, split it the same way or offline
 tills silently lose the write.
 
+### The POS changefeed (`/sync/pull`, offline plan B)
+Every table a POS shows reaches devices through `sync_changes` (`src/sync/pull`).
+- **A new POS-visible table needs a sync trigger**: an `AFTER INSERT OR UPDATE
+  OR DELETE` trigger named `sync_emit` running `sync_emit_<table>()`, a row in
+  `sync_source_tables()`, and a line in the migration's `SOURCE TABLES` header.
+  `tills_migration_tests::every_projection_source_table_has_emitter` fails
+  otherwise. A projection change for a type is enough when the table already
+  re-emits that type.
+- **A report formula change regenerates the shared vectors.** Changing
+  `compute_system_cash`, `report_figures` or the close-method figures means
+  `MADAR_WRITE_TILL_VECTORS=1 cargo nextest run -E 'test(till_report_vectors)'`
+  and copying `tests/fixtures/till_report_vectors.json` into madar's
+  `rust-core/crates/madar-core/tests/fixtures/`; the POS computes the same
+  figures offline and its test asserts that file.
+- Additive fields only on payloads the POS mirrors (old tablets decode them).
+
 ### Realtime
 `src/realtime` publishes per-branch events consumers subscribe to, e.g.
 `floor.layout_changed` (re-pull the authored layout) and `table.status_changed`.
