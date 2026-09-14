@@ -696,7 +696,12 @@ pub async fn update_category(
     .await?;
 
     let mut row = row;
-    attach_category_refs(pool.get_ref(), existing.org_id, std::slice::from_mut(&mut row)).await?;
+    attach_category_refs(
+        pool.get_ref(),
+        existing.org_id,
+        std::slice::from_mut(&mut row),
+    )
+    .await?;
     Ok(HttpResponse::Ok().json(row))
 }
 
@@ -1237,7 +1242,12 @@ pub async fn update_menu_item(
     .await?;
 
     let mut item = item;
-    attach_item_refs(pool.get_ref(), existing.org_id, std::slice::from_mut(&mut item)).await?;
+    attach_item_refs(
+        pool.get_ref(),
+        existing.org_id,
+        std::slice::from_mut(&mut item),
+    )
+    .await?;
     Ok(HttpResponse::Ok().json(item))
 }
 

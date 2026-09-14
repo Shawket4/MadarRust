@@ -2131,9 +2131,13 @@ async fn attach_photo(
     .await
     .unwrap();
     let mut conn = pool.acquire().await.unwrap();
-    attach(&mut conn, &AssetTarget::new(table, id, AssetField::Image), &o)
-        .await
-        .unwrap();
+    attach(
+        &mut conn,
+        &AssetTarget::new(table, id, AssetField::Image),
+        &o,
+    )
+    .await
+    .unwrap();
     o.group_id
 }
 
@@ -2175,9 +2179,36 @@ async fn image_refs_on_all_menu_reads(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let gi = attach_photo(&pool, &store, org, AssetTable::MenuItems, AssetPurpose::MenuItemPhoto, item, 1).await;
-    let gc = attach_photo(&pool, &store, org, AssetTable::Categories, AssetPurpose::CategoryPhoto, cat, 2).await;
-    let gb = attach_photo(&pool, &store, org, AssetTable::Bundles, AssetPurpose::BundlePhoto, bundle, 3).await;
+    let gi = attach_photo(
+        &pool,
+        &store,
+        org,
+        AssetTable::MenuItems,
+        AssetPurpose::MenuItemPhoto,
+        item,
+        1,
+    )
+    .await;
+    let gc = attach_photo(
+        &pool,
+        &store,
+        org,
+        AssetTable::Categories,
+        AssetPurpose::CategoryPhoto,
+        cat,
+        2,
+    )
+    .await;
+    let gb = attach_photo(
+        &pool,
+        &store,
+        org,
+        AssetTable::Bundles,
+        AssetPurpose::BundlePhoto,
+        bundle,
+        3,
+    )
+    .await;
     // A third-party absolute URL is served verbatim (no uploads prefix).
     let foodics = "https://foodics-console-production.s3.eu-west-1.amazonaws.com/images/x.jpg";
     sqlx::query("UPDATE menu_items SET image_url = $1 WHERE id = $2")
@@ -2197,7 +2228,11 @@ async fn image_refs_on_all_menu_reads(pool: PgPool) {
     let json = |r| async { test::read_body_json::<serde_json::Value, _>(r).await };
 
     // Paginated catalog (the shape the owner reported without `image`).
-    let resp = test::call_service(&app, get(format!("/costing/catalog?org_id={org}&page=1&per_page=10"))).await;
+    let resp = test::call_service(
+        &app,
+        get(format!("/costing/catalog?org_id={org}&page=1&per_page=10")),
+    )
+    .await;
     assert!(resp.status().is_success());
     let v = json(resp).await;
     assert_image(&v["data"][0], gi, "costing/catalog");
@@ -2207,7 +2242,9 @@ async fn image_refs_on_all_menu_reads(pool: PgPool) {
     // Plain list, full list, get, studio.
     let v = json(test::call_service(&app, get(format!("/menu-items?org_id={org}"))).await).await;
     assert_image(&v[0], gi, "menu-items");
-    let v = json(test::call_service(&app, get(format!("/menu-items?org_id={org}&full=true"))).await).await;
+    let v =
+        json(test::call_service(&app, get(format!("/menu-items?org_id={org}&full=true"))).await)
+            .await;
     assert_image(&v[0], gi, "menu-items full");
     let v = json(test::call_service(&app, get(format!("/menu-items/{item}"))).await).await;
     assert_image(&v, gi, "menu-items/{id}");
@@ -2260,14 +2297,21 @@ async fn addon_items_optional_pagination(pool: PgPool) {
     let org = seed_org(&pool).await;
     let user = seed_user(&pool, org, "org_admin").await;
     grant_permission(&pool, "org_admin", "menu_items", "read").await;
-    for (n, t) in [("Oat", "milk_type"), ("Almond", "milk_type"), ("Vanilla", "syrup"), ("Oatmeal Crumble", "topping")] {
-        sqlx::query("INSERT INTO addon_items (org_id, name, type, default_price) VALUES ($1, $2, $3, 100)")
-            .bind(org)
-            .bind(n)
-            .bind(t)
-            .execute(&pool)
-            .await
-            .unwrap();
+    for (n, t) in [
+        ("Oat", "milk_type"),
+        ("Almond", "milk_type"),
+        ("Vanilla", "syrup"),
+        ("Oatmeal Crumble", "topping"),
+    ] {
+        sqlx::query(
+            "INSERT INTO addon_items (org_id, name, type, default_price) VALUES ($1, $2, $3, 100)",
+        )
+        .bind(org)
+        .bind(n)
+        .bind(t)
+        .execute(&pool)
+        .await
+        .unwrap();
     }
     let tok = generate_org_admin_token(user, org);
     let get = |uri: String| {
@@ -2278,12 +2322,16 @@ async fn addon_items_optional_pagination(pool: PgPool) {
     };
 
     // Legacy: no page params → plain array of everything.
-    let v: serde_json::Value = test::call_and_read_body_json(&app, get(format!("/addon-items?org_id={org}"))).await;
+    let v: serde_json::Value =
+        test::call_and_read_body_json(&app, get(format!("/addon-items?org_id={org}"))).await;
     assert_eq!(v.as_array().unwrap().len(), 4);
 
     // Paginated shape.
-    let v: serde_json::Value =
-        test::call_and_read_body_json(&app, get(format!("/addon-items?org_id={org}&page=2&per_page=3"))).await;
+    let v: serde_json::Value = test::call_and_read_body_json(
+        &app,
+        get(format!("/addon-items?org_id={org}&page=2&per_page=3")),
+    )
+    .await;
     assert_eq!(v["total"], 4);
     assert_eq!(v["page"], 2);
     assert_eq!(v["per_page"], 3);
@@ -2292,12 +2340,17 @@ async fn addon_items_optional_pagination(pool: PgPool) {
     assert!(v["data"][0]["ingredients"].is_array());
 
     // Search + type filter, paginated and not.
-    let v: serde_json::Value =
-        test::call_and_read_body_json(&app, get(format!("/addon-items?org_id={org}&search=oat&per_page=10"))).await;
+    let v: serde_json::Value = test::call_and_read_body_json(
+        &app,
+        get(format!("/addon-items?org_id={org}&search=oat&per_page=10")),
+    )
+    .await;
     assert_eq!(v["total"], 2);
     let v: serde_json::Value = test::call_and_read_body_json(
         &app,
-        get(format!("/addon-items?org_id={org}&search=oat&addon_type=milk_type")),
+        get(format!(
+            "/addon-items?org_id={org}&search=oat&addon_type=milk_type"
+        )),
     )
     .await;
     assert_eq!(v.as_array().unwrap().len(), 1);
