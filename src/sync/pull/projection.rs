@@ -408,20 +408,37 @@ keyed(crate::kitchen::kitchen_ticket_views(&mut *conn, ids).await?, &["org_id"])
                         'price_flagged', o.price_flagged, \
                         'loyalty_customer_id', o.loyalty_customer_id, 'loyalty_member_name', lc.name, \
                         'timezone', effective_timezone(o.branch_id), \
-                        'tax_inclusive', o.tax_inclusive, 'tax_rate_applied', o.tax_rate_applied, \
-                        'service_charge_rate_applied', o.service_charge_rate_applied, \
-                        'service_charge_taxable_applied', o.service_charge_taxable_applied, \
-                        'service_charge_waived_by', o.service_charge_waived_by, 'service_charge_waived_by_name', sw.name, \
-                        'service_charge_waived_at', o.service_charge_waived_at, \
-                        'service_charge_waived_amount', o.service_charge_waived_amount, \
                         'created_at', o.created_at) \
                    FROM orders o LEFT JOIN users u ON u.id = o.teller_id LEFT JOIN users w ON w.id = o.waiter_id \
                    LEFT JOIN loyalty_customers lc ON lc.id = o.loyalty_customer_id \
-                   LEFT JOIN users sw ON sw.id = o.service_charge_waived_by \
                   WHERE o.id = ANY($1)",
                 ids,
             )
             .await?;
+            // The policy the bill was priced under and its service-charge
+            // waiver. A second object because `json_build_object` takes at most
+            // 100 arguments and the one above is at its limit.
+            let pricing: Vec<(Uuid, Value)> = sqlx::query_as(
+                "SELECT o.id, json_build_object('tax_inclusive', o.tax_inclusive, \
+                        'tax_rate_applied', o.tax_rate_applied, \
+                        'service_charge_rate_applied', o.service_charge_rate_applied, \
+                        'service_charge_taxable_applied', o.service_charge_taxable_applied, \
+                        'service_charge_waived_by', o.service_charge_waived_by, \
+                        'service_charge_waived_by_name', sw.name, \
+                        'service_charge_waived_at', o.service_charge_waived_at, \
+                        'service_charge_waived_amount', o.service_charge_waived_amount) \
+                   FROM orders o LEFT JOIN users sw ON sw.id = o.service_charge_waived_by \
+                  WHERE o.id = ANY($1)",
+            )
+            .bind(ids)
+            .fetch_all(&mut *conn)
+            .await?;
+            let mut pricing: HashMap<Uuid, Value> = pricing.into_iter().collect();
+            for (id, v) in out.iter_mut() {
+                if let (Value::Object(m), Some(Value::Object(extra))) = (v, pricing.remove(id)) {
+                    m.extend(extra);
+                }
+            }
             let mut items = crate::orders::handlers::fetch_orders_items_full_batch_on(&mut *conn, ids).await?;
             for (id, v) in out.iter_mut() {
                 let mut lines = serde_json::to_value(items.remove(id).unwrap_or_default()).unwrap_or_else(|_| json!([]));

@@ -2653,3 +2653,151 @@ async fn the_guest_principal_is_not_one_of_the_staff(pool: PgPool) {
     .unwrap();
     assert_eq!(listed, 1, "the teller, and nobody invented");
 }
+
+// ── Pricing fixes: frozen policy, the waiver, the channel rule ───────────────
+
+async fn waiver_fixture(
+    pool: &PgPool,
+) -> (Uuid, Uuid, Uuid, Uuid, Uuid, Uuid) {
+    let org = seed_org(pool).await;
+    sqlx::query("UPDATE organizations SET service_charge_rate = 0.10, service_charge_taxable = true WHERE id = $1")
+        .bind(org).execute(pool).await.unwrap();
+    let branch = seed_branch(pool, org).await;
+    let item = seed_menu_item(pool, org, 1000).await;
+    seed_cash_method(pool, org).await;
+    let table = seed_table(pool, org, branch, "W1").await;
+    let teller = seed_user(pool, org, "teller").await;
+    let shift = open_shift_row(pool, branch, teller).await;
+    for (res, act) in [("open_tickets", "create"), ("open_tickets", "read"), ("open_tickets", "update"),
+                       ("orders", "create"), ("payments", "create")] {
+        grant(pool, "teller", res, act).await;
+        grant(pool, "branch_manager", res, act).await;
+    }
+    (org, branch, item, table, teller, shift)
+}
+
+async fn fire_bill(pool: &PgPool, org: Uuid, branch: Uuid, table: Uuid, item: Uuid, by: Uuid, role: UserRole) -> Uuid {
+    let app = app!(pool);
+    let t = token(by, org, role);
+    let fire = test::call_service(&app, test::TestRequest::post().uri("/open-tickets")
+        .insert_header(("Authorization", format!("Bearer {t}")))
+        .set_json(&serde_json::json!({ "branch_id": branch, "table_id": table,
+            "items": [{ "menu_item_id": item, "quantity": 2 }] }))
+        .to_request()).await;
+    assert_eq!(fire.status(), 201);
+    let v: OpenTicketView = test::read_body_json(fire).await;
+    v.id
+}
+
+/// A bill keeps the policy it was opened under: a branch that changes its tax
+/// or service settings mid-service does not re-price the bills on its tables.
+#[sqlx::test]
+async fn a_bill_keeps_the_policy_it_was_opened_under(pool: PgPool) {
+    let (org, branch, item, table, teller, shift) = waiver_fixture(&pool).await;
+    let ticket = fire_bill(&pool, org, branch, table, item, teller, UserRole::Teller).await;
+    // The owner flips everything after the party sat down.
+    sqlx::query("UPDATE organizations SET tax_rate = 0.05, tax_inclusive = true, service_charge_rate = 0.20, \
+                 service_charge_taxable = false WHERE id = $1")
+        .bind(org).execute(&pool).await.unwrap();
+    let app = app!(pool);
+    let t = token(teller, org, UserRole::Teller);
+    let get = test::call_service(&app, test::TestRequest::get().uri(&format!("/open-tickets/{ticket}"))
+        .insert_header(("Authorization", format!("Bearer {t}"))).to_request()).await;
+    let view: OpenTicketView = test::read_body_json(get).await;
+    // 2000; +10% = 200; 14% of 2200 = 308 — the policy at open.
+    assert_eq!((view.bill.service_charge_amount, view.bill.tax_amount, view.bill.total), (200, 308, 2508));
+    assert!(view.bill.service_charge_taxable && !view.bill.tax_inclusive);
+    let settle = test::call_service(&app, test::TestRequest::post().uri(&format!("/open-tickets/{ticket}/settle"))
+        .insert_header(("Authorization", format!("Bearer {t}")))
+        .set_json(&serde_json::json!({ "till_id": shift, "payment_method": "cash", "total_amount": 2508 }))
+        .to_request()).await;
+    assert_eq!(settle.status(), 200);
+    let order: Order = test::read_body_json(settle).await;
+    assert_eq!((order.service_charge_amount, order.tax_amount, order.total_amount), (200, 308, 2508));
+    assert_eq!(order.tax_inclusive, Some(false));
+    assert_eq!(order.service_charge_taxable_applied, Some(true));
+}
+
+/// Removing the service charge is a permission: refused without it (a teller by
+/// default), honoured with it (a manager by default), and a per-user grant or
+/// revocation beats the role default in both directions.
+#[sqlx::test]
+async fn waiving_the_service_charge_needs_the_permission(pool: PgPool) {
+    let (org, branch, item, table, teller, shift) = waiver_fixture(&pool).await;
+    let app = app!(pool);
+    let settle = |ticket: Uuid, who: Uuid, role: UserRole, total: i32| {
+        test::TestRequest::post().uri(&format!("/open-tickets/{ticket}/settle"))
+            .insert_header(("Authorization", format!("Bearer {}", token(who, org, role))))
+            .set_json(&serde_json::json!({ "till_id": shift, "payment_method": "cash",
+                "total_amount": total, "waive_service_charge": true }))
+            .to_request()
+    };
+    // Defaults on record: managers yes, tellers no.
+    let defaults: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT role::text, granted FROM role_permissions WHERE resource = 'orders' AND action = 'waive_service' ORDER BY role::text")
+        .fetch_all(&pool).await.unwrap();
+    assert!(defaults.contains(&("branch_manager".into(), true)) && defaults.contains(&("teller".into(), false)));
+
+    // A teller without the grant: refused, ticket still open.
+    let t1 = fire_bill(&pool, org, branch, table, item, teller, UserRole::Teller).await;
+    let r = test::call_service(&app, settle(t1, teller, UserRole::Teller, 2280)).await;
+    assert_eq!(r.status(), 403);
+    let why = String::from_utf8(test::read_body(r).await.to_vec()).unwrap();
+    assert!(why.contains("Waive service charge"), "{why}");
+
+    // The same teller granted it per user: honoured and recorded.
+    sqlx::query("INSERT INTO permissions (user_id, resource, action, granted) VALUES ($1, 'orders', 'waive_service', true)")
+        .bind(teller).execute(&pool).await.unwrap();
+    // 2000, no service, 14% = 280.
+    let r = test::call_service(&app, settle(t1, teller, UserRole::Teller, 2280)).await;
+    assert_eq!(r.status(), 200);
+    let order: Order = test::read_body_json(r).await;
+    assert_eq!((order.service_charge_amount, order.tax_amount, order.total_amount), (0, 280, 2280));
+    assert_eq!(order.service_charge_waived_by, Some(teller));
+    assert!(order.service_charge_waived_at.is_some());
+    assert_eq!(order.service_charge_waived_amount, Some(200));
+
+    // A manager whose grant was revoked per user: refused, even replayed.
+    let manager = seed_user(&pool, org, "branch_manager").await;
+    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
+        .bind(manager).bind(branch).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO permissions (user_id, resource, action, granted) VALUES ($1, 'orders', 'waive_service', false)")
+        .bind(manager).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE branch_tables SET status = 'free' WHERE id = $1").bind(table).execute(&pool).await.unwrap();
+    let t2 = fire_bill(&pool, org, branch, table, item, teller, UserRole::Teller).await;
+    let r = test::call_service(&app, settle(t2, manager, UserRole::BranchManager, 2280)).await;
+    assert_eq!(r.status(), 403);
+    let why = String::from_utf8(test::read_body(r).await.to_vec()).unwrap();
+    assert!(why.contains("Waive service charge"), "{why}");
+    let body: crate::tickets::handlers::SettleOpenTicketRequest = serde_json::from_value(serde_json::json!({
+        "till_id": shift, "payment_method": "cash", "waive_service_charge": true })).unwrap();
+    let replay = crate::tickets::handlers::settle_open_ticket_inner(
+        crate::db::Db::for_org(&pool, org).await, t2, web::Json(body),
+        crate::sync::ActingContext { teller_id: manager, org_id: org, role: UserRole::BranchManager, replay: true },
+        None).await;
+    assert!(matches!(replay, Err(crate::errors::AppError::Forbidden(_))), "a queued waiver is refused too");
+
+    // A manager on the role default: honoured. An old client that sends no
+    // waiver keeps its service charge.
+    let manager2 = seed_user(&pool, org, "branch_manager").await;
+    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
+        .bind(manager2).bind(branch).execute(&pool).await.unwrap();
+    let r = test::call_service(&app, settle(t2, manager2, UserRole::BranchManager, 2280)).await;
+    assert_eq!(r.status(), 200, "{:?}", test::read_body(r).await);
+}
+
+/// Old clients never send a waiver: the charge stands, nothing is recorded.
+#[sqlx::test]
+async fn a_settle_without_a_waiver_keeps_the_service_charge(pool: PgPool) {
+    let (org, branch, item, table, teller, shift) = waiver_fixture(&pool).await;
+    let ticket = fire_bill(&pool, org, branch, table, item, teller, UserRole::Teller).await;
+    let app = app!(pool);
+    let r = test::call_service(&app, test::TestRequest::post().uri(&format!("/open-tickets/{ticket}/settle"))
+        .insert_header(("Authorization", format!("Bearer {}", token(teller, org, UserRole::Teller))))
+        .set_json(&serde_json::json!({ "shift_id": shift, "payment_method": "cash", "total_amount": 2508 }))
+        .to_request()).await;
+    assert_eq!(r.status(), 200);
+    let order: Order = test::read_body_json(r).await;
+    assert_eq!((order.service_charge_amount, order.total_amount), (200, 2508));
+    assert_eq!((order.service_charge_waived_by, order.service_charge_waived_amount), (None, Some(0)));
+}
