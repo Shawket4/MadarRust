@@ -290,7 +290,31 @@ pub async fn project(
                         'service_charge_rate', b.service_charge_rate, 'service_charge_taxable', b.service_charge_taxable, \
                         'require_table_for_orders', b.require_table_for_orders, 'kitchen_routing_mode', b.kitchen_routing_mode, \
                         'old_bill_hours', b.old_bill_hours, 'standard_float', b.standard_float, 'logo_hash', {}, \
-                        'delivery_prep_minutes', COALESCE((SELECT d.prep_time_minutes FROM branch_delivery_settings d WHERE d.branch_id = b.id), 20)) \
+                        'delivery_prep_minutes', COALESCE((SELECT d.prep_time_minutes FROM branch_delivery_settings d WHERE d.branch_id = b.id), 20), \
+                        'kitchen_routing_effective', COALESCE(b.kitchen_routing_mode::text, \
+                            CASE WHEN EXISTS (SELECT 1 FROM kitchen_stations ks WHERE ks.branch_id = b.id AND ks.is_active AND ks.deleted_at IS NULL) \
+                                 THEN 'kds' ELSE 'till' END), \
+                        'kitchen_stations', COALESCE((SELECT json_agg(json_build_object('id', ks.id, 'org_id', ks.org_id, 'branch_id', ks.branch_id, \
+                                'name', ks.name, 'name_translations', ks.name_translations, 'sort_order', ks.sort_order, \
+                                'printer_brand', ks.printer_brand, 'printer_ip', ks.printer_ip, 'printer_port', ks.printer_port, \
+                                'is_default', ks.is_default, 'is_active', ks.is_active, 'created_at', ks.created_at, 'updated_at', ks.updated_at) \
+                                ORDER BY ks.sort_order, lower(ks.name), ks.id) \
+                              FROM kitchen_stations ks WHERE ks.branch_id = b.id AND ks.deleted_at IS NULL), '[]'::json), \
+                        'delivery', (SELECT json_build_object('branch_id', d.branch_id, 'in_mall_enabled', d.in_mall_enabled, \
+                                'outside_enabled', d.outside_enabled, 'in_mall_override', d.in_mall_override, 'outside_override', d.outside_override, \
+                                'in_mall_fee', d.in_mall_fee, 'prep_time_minutes', d.prep_time_minutes, \
+                                'umbrella_enabled', d.umbrella_enabled, 'pickup_enabled', d.pickup_enabled, \
+                                'umbrella_override', d.umbrella_override, 'pickup_override', d.pickup_override) \
+                              FROM branch_delivery_settings d WHERE d.branch_id = b.id), \
+                        'tax_policy', json_build_object('tax_rate', COALESCE(b.tax_rate, o.tax_rate), \
+                                'tax_inclusive', COALESCE(b.tax_inclusive, o.tax_inclusive), \
+                                'service_charge_rate', COALESCE(b.service_charge_rate, o.service_charge_rate), \
+                                'service_charge_taxable', COALESCE(b.service_charge_taxable, o.service_charge_taxable)), \
+                        'org_require_table_for_orders', o.require_table_for_orders, \
+                        'loyalty', (SELECT json_build_object('enabled', l.enabled, 'mode', l.mode, \
+                                'program_name', l.program_name, 'program_name_ar', l.program_name_ar) \
+                              FROM loyalty_settings l WHERE l.org_id = b.org_id AND (l.branch_id = b.id OR l.branch_id IS NULL) \
+                             ORDER BY l.branch_id NULLS LAST LIMIT 1)) \
                    FROM branches b JOIN organizations o ON o.id = b.org_id \
                   WHERE b.id = ANY($1) AND b.deleted_at IS NULL",
                 tile_hash("o.logo_group_id")

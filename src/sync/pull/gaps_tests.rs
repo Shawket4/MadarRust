@@ -400,6 +400,136 @@ async fn branch_settings_carry_the_delivery_prep_minutes(pool: PgPool) {
     );
 }
 
+/// The branch reads a POS used to poll (stations, routing mode, delivery
+/// settings, the loyalty programme) ride the settings row, and each source
+/// table re-emits it.
+#[sqlx::test]
+async fn branch_settings_carry_the_branch_reads_a_till_used_to_poll(pool: PgPool) {
+    let s = shop(&pool).await;
+    let full = pull_core(&pool, s.org, &req(s.branch), None).await.unwrap();
+    let row0 = row(&full, "branch_settings", s.branch).unwrap().clone();
+    assert_eq!(
+        row0["kitchen_routing_effective"], "till",
+        "auto with no station"
+    );
+    assert_eq!(row0["kitchen_stations"], serde_json::json!([]));
+    assert!(row0["delivery"].is_null(), "no delivery row: the defaults");
+    assert!(row0["loyalty"].is_null(), "no programme");
+    assert!(
+        row0["tax_policy"]["tax_rate"].is_number(),
+        "the effective tax policy"
+    );
+
+    // An org's tax rate change reaches every branch that inherits it.
+    sqlx::query("UPDATE branches SET tax_rate = NULL WHERE id = $1")
+        .bind(s.branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let base = pull_core(&pool, s.org, &req(s.branch), full.next)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE organizations SET tax_rate = 0.05 WHERE id = $1")
+        .bind(s.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let taxed = pull_core(&pool, s.org, &req(s.branch), base.next)
+        .await
+        .unwrap();
+    let data = change(&taxed, "branch_settings", s.branch)
+        .expect("an org tax change re-emits")
+        .data
+        .clone()
+        .unwrap();
+    assert_eq!(data["tax_policy"]["tax_rate"].as_f64(), Some(0.05));
+    sqlx::query("UPDATE organizations SET name = name || ' ' WHERE id = $1")
+        .bind(s.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let quiet = pull_core(&pool, s.org, &req(s.branch), taxed.next)
+        .await
+        .unwrap();
+    assert!(
+        change(&quiet, "branch_settings", s.branch).is_none(),
+        "an unrelated org edit does not"
+    );
+    let full = taxed;
+
+    let station: Uuid = sqlx::query_scalar(
+        "INSERT INTO kitchen_stations (org_id, branch_id, name) VALUES ($1, $2, 'Grill') RETURNING id",
+    )
+    .bind(s.org)
+    .bind(s.branch)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let inc = pull_core(&pool, s.org, &req(s.branch), full.next)
+        .await
+        .unwrap();
+    let data = change(&inc, "branch_settings", s.branch)
+        .expect("a station re-emits")
+        .data
+        .clone()
+        .unwrap();
+    assert_eq!(
+        data["kitchen_routing_effective"], "kds",
+        "auto with a station"
+    );
+    assert_eq!(data["kitchen_stations"][0]["id"], station.to_string());
+    assert_eq!(data["kitchen_stations"][0]["name"], "Grill");
+
+    sqlx::query("INSERT INTO branch_delivery_settings (branch_id, in_mall_enabled, in_mall_override) VALUES ($1, true, 'closed')")
+        .bind(s.branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let inc2 = pull_core(&pool, s.org, &req(s.branch), inc.next)
+        .await
+        .unwrap();
+    let data = change(&inc2, "branch_settings", s.branch)
+        .expect("delivery re-emits")
+        .data
+        .clone()
+        .unwrap();
+    assert_eq!(data["delivery"]["in_mall_enabled"], true);
+    assert_eq!(data["delivery"]["in_mall_override"], "closed");
+
+    // The org programme, then the branch's own override wins.
+    sqlx::query("INSERT INTO loyalty_settings (org_id, enabled, program_name) VALUES ($1, true, 'Org club')")
+        .bind(s.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let inc3 = pull_core(&pool, s.org, &req(s.branch), inc2.next)
+        .await
+        .unwrap();
+    let data = change(&inc3, "branch_settings", s.branch)
+        .expect("an org programme re-emits")
+        .data
+        .clone()
+        .unwrap();
+    assert_eq!(data["loyalty"]["program_name"], "Org club");
+    sqlx::query("INSERT INTO loyalty_settings (org_id, branch_id, enabled, mode, program_name) VALUES ($1, $2, false, 'visits', 'Branch club')")
+        .bind(s.org)
+        .bind(s.branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let inc4 = pull_core(&pool, s.org, &req(s.branch), inc3.next)
+        .await
+        .unwrap();
+    let data = change(&inc4, "branch_settings", s.branch)
+        .expect("a branch programme re-emits")
+        .data
+        .clone()
+        .unwrap();
+    assert_eq!(data["loyalty"]["program_name"], "Branch club");
+    assert_eq!(data["loyalty"]["enabled"], false);
+    assert_eq!(data["loyalty"]["mode"], "visits");
+}
+
 #[sqlx::test]
 async fn an_order_carries_its_lines_and_drawer_fields_but_no_cost(pool: PgPool) {
     let s = shop(&pool).await;

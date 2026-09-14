@@ -1103,6 +1103,7 @@ async fn every_projection_source_table_has_emitter(pool: PgPool) {
     let header: Vec<String> = [
         include_str!("../migrations/20260914090300_sync_changefeed.sql"),
         include_str!("../migrations/20260915090000_sync_feed_gaps.sql"),
+        include_str!("../migrations/20260917090000_sync_feed_branch_reads.sql"),
     ]
     .iter()
     .flat_map(|sql| {
