@@ -212,6 +212,109 @@ pub fn discount_amount(subtotal: Minor, discount: Discount) -> Minor {
     raw.clamp(0, subtotal.max(0))
 }
 
+/// Where a sale happens, which decides whether it carries a service charge.
+///
+/// The service charge is DINE-IN ONLY (owner ruling 2): a party that sat at a
+/// table pays it, anything carried out, delivered or ordered online does not.
+/// The rule used to live in two `if` statements on the server and nowhere on
+/// the till, so the till added the charge to a takeaway the server then
+/// refused. It lives here now, in the pinned engine, and `tax_vectors.json`
+/// carries a case per channel so the two copies cannot part company on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaleChannel {
+    /// A table's bill (an open ticket settled at the till).
+    DineIn,
+    /// Rung straight through the till: counter, takeaway, a parked cart.
+    Takeaway,
+    /// A delivery order finalized at the branch.
+    Delivery,
+    /// The online storefront.
+    Online,
+}
+
+impl SaleChannel {
+    /// The `orders.order_type` word for the channel (`online` has none of its
+    /// own on the order and books as `delivery`; the word here is the vector's).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SaleChannel::DineIn => "dine_in",
+            SaleChannel::Takeaway => "takeaway",
+            SaleChannel::Delivery => "delivery",
+            SaleChannel::Online => "online",
+        }
+    }
+
+    /// The channel for a wire word. Unknown words are `None`, never a guess.
+    pub fn from_wire(word: &str) -> Option<Self> {
+        match word {
+            "dine_in" => Some(SaleChannel::DineIn),
+            "takeaway" => Some(SaleChannel::Takeaway),
+            "delivery" => Some(SaleChannel::Delivery),
+            "online" => Some(SaleChannel::Online),
+            _ => None,
+        }
+    }
+
+    /// Whether a sale on this channel may carry a service charge at all.
+    pub fn carries_service_charge(self) -> bool {
+        matches!(self, SaleChannel::DineIn)
+    }
+}
+
+impl TaxPolicy {
+    /// The policy one sale is priced under: this policy, with the service
+    /// charge taken off when the channel carries none or when someone holding
+    /// `orders:waive_service` removed it from the bill.
+    ///
+    /// The zero is the RATE, before the engine runs, never a charge computed
+    /// and then dropped: in inclusive mode a taxable charge enters the gross,
+    /// so dropping it afterwards would leave the tax wrong.
+    pub fn for_sale(self, channel: SaleChannel, service_waived: bool) -> TaxPolicy {
+        if channel.carries_service_charge() && !service_waived {
+            self
+        } else {
+            TaxPolicy {
+                service_charge_rate: Decimal::ZERO,
+                ..self
+            }
+        }
+    }
+}
+
+/// The tax and service charge a refund takes back, as `(tax, service_charge)`.
+///
+/// A refund records an AMOUNT; the books also need to know how much of that
+/// amount was tax and service, or a partially refunded order keeps all its tax
+/// in the tax figure. The split is pro rata of the order's own figures, and it
+/// is computed CUMULATIVELY — what the refunds so far plus this one should have
+/// taken back, minus what the earlier ones did take — so the rounding of every
+/// refund on an order adds up exactly, and a refund of the whole order takes
+/// back exactly its tax and service charge, never a piastre either side.
+///
+/// `refunded_before` is the sum of the order's earlier refunds. Amounts are
+/// clamped to the order, so an over-refund cannot take back more tax than the
+/// order carried.
+pub fn refund_split(
+    order_total: Minor,
+    order_tax: Minor,
+    order_service_charge: Minor,
+    refunded_before: Minor,
+    amount: Minor,
+) -> (Minor, Minor) {
+    if order_total <= 0 {
+        return (0, 0);
+    }
+    let before = refunded_before.clamp(0, order_total);
+    let after = (refunded_before.max(0) + amount.max(0)).clamp(0, order_total);
+    let share = |figure: Minor, upto: Minor| -> Minor {
+        round_minor(minor(figure.max(0)) * minor(upto) / minor(order_total))
+    };
+    (
+        share(order_tax, after) - share(order_tax, before),
+        share(order_service_charge, after) - share(order_service_charge, before),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,5 +573,77 @@ mod tests {
         // The column is NUMERIC, so a fraction of a piastre can arrive.
         assert_eq!(discount_amount(5000, Discount::Fixed(dec!(250.5))), 251);
         assert_eq!(discount_amount(5000, Discount::Fixed(dec!(250.4))), 250);
+    }
+
+    #[test]
+    fn only_a_dine_in_sale_carries_the_service_charge() {
+        let p = TaxPolicy {
+            tax_rate: dec!(0.14),
+            tax_inclusive: false,
+            service_charge_rate: dec!(0.12),
+            service_charge_taxable: true,
+        };
+        assert_eq!(
+            compute(10000, 0, &p.for_sale(SaleChannel::DineIn, false)).service_charge,
+            1200
+        );
+        for ch in [
+            SaleChannel::Takeaway,
+            SaleChannel::Delivery,
+            SaleChannel::Online,
+        ] {
+            let b = compute(10000, 0, &p.for_sale(ch, false));
+            assert_eq!(
+                (b.service_charge, b.tax, b.total),
+                (0, 1400, 11400),
+                "{ch:?}"
+            );
+        }
+        let waived = compute(10000, 0, &p.for_sale(SaleChannel::DineIn, true));
+        assert_eq!((waived.service_charge, waived.total), (0, 11400));
+        for ch in [
+            SaleChannel::DineIn,
+            SaleChannel::Takeaway,
+            SaleChannel::Delivery,
+            SaleChannel::Online,
+        ] {
+            assert_eq!(SaleChannel::from_wire(ch.as_str()), Some(ch));
+        }
+        assert_eq!(SaleChannel::from_wire("counter"), None);
+    }
+
+    #[test]
+    fn refunds_take_back_tax_and_service_pro_rata_and_add_up_exactly() {
+        // Shared with madar-core `tax::tests` — the same table on both sides.
+        let cases: &[(Minor, Minor, Minor, Minor, Minor, (Minor, Minor))] = &[
+            (11400, 1400, 0, 0, 5700, (700, 0)),
+            (11400, 1400, 0, 5700, 5700, (700, 0)),
+            (12768, 1568, 1200, 0, 1000, (123, 94)),
+            (12768, 1568, 1200, 1000, 11768, (1445, 1106)),
+            (12768, 1568, 1200, 0, 12768, (1568, 1200)),
+            (12768, 1568, 1200, 12000, 5000, (94, 72)),
+            (333, 41, 0, 0, 1, (0, 0)),
+            (333, 41, 0, 1, 1, (0, 0)),
+            (333, 41, 0, 2, 331, (41, 0)),
+            (0, 0, 0, 0, 100, (0, 0)),
+        ];
+        for &(total, tax, sc, before, amount, want) in cases {
+            assert_eq!(
+                refund_split(total, tax, sc, before, amount),
+                want,
+                "{total} {tax} {sc} {before} {amount}"
+            );
+        }
+        // Any sequence of refunds that empties the order takes back all of it.
+        let (total, tax, sc) = (98765, 12129, 8888);
+        let mut before = 0;
+        let (mut t, mut s) = (0, 0);
+        for amount in [1, 333, 4999, 12345, 40000, 41087] {
+            let (dt, ds) = refund_split(total, tax, sc, before, amount);
+            t += dt;
+            s += ds;
+            before += amount;
+        }
+        assert_eq!((before, t, s), (total, tax, sc));
     }
 }

@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::tax::engine::{Discount, TaxPolicy, compute, discount_amount};
+use crate::tax::engine::{Discount, SaleChannel, TaxPolicy, compute, discount_amount};
 
 /// One priced bill: the inputs, and every figure they must produce.
 ///
@@ -41,6 +41,12 @@ pub struct Vector {
     pub tax_inclusive: bool,
     pub service_charge_rate: String,
     pub service_charge_taxable: bool,
+    /// Where the sale happened — `"dine_in"`, `"takeaway"`, `"delivery"` or
+    /// `"online"`. Only dine-in carries a service charge (owner ruling 2), and
+    /// that rule is part of the maths both engines must agree on.
+    pub channel: String,
+    /// Someone holding `orders:waive_service` removed the service charge.
+    pub service_waived: bool,
     // Expected:
     pub discount: i64,
     pub service_charge: i64,
@@ -61,6 +67,12 @@ pub fn discount_from_wire(kind: &str, value: &str) -> Discount {
         "fixed" => Discount::Fixed(value),
         other => panic!("unknown discount_kind {other:?} in tax_vectors.json"),
     }
+}
+
+/// The fixture's word for a channel. An unknown word is a fixture bug.
+pub fn channel_from_wire(word: &str) -> SaleChannel {
+    SaleChannel::from_wire(word)
+        .unwrap_or_else(|| panic!("unknown channel {word:?} in tax_vectors.json"))
 }
 
 pub fn fixture_path() -> PathBuf {
@@ -134,28 +146,91 @@ pub fn generate() -> Vec<Vector> {
                             service_charge_rate: c.parse::<Decimal>().unwrap(),
                             service_charge_taxable: taxable,
                         };
-                        let discount = discount_amount(subtotal, discount_from_wire(kind, value));
-                        let b = compute(subtotal, discount, &policy);
-                        out.push(Vector {
+                        out.push(priced(
                             subtotal,
-                            discount_kind: kind.to_string(),
-                            discount_value: value.to_string(),
-                            tax_rate: r.to_string(),
-                            tax_inclusive: inclusive,
-                            service_charge_rate: c.to_string(),
-                            service_charge_taxable: taxable,
-                            discount: b.discount,
-                            service_charge: b.service_charge,
-                            tax: b.tax,
-                            total: b.total,
-                            net: b.net,
-                        });
+                            kind,
+                            value,
+                            policy,
+                            SaleChannel::DineIn,
+                            false,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // The channel rule and the waiver. Every channel, waived and not, under the
+    // charges and both tax treatments, over bills with and without a discount —
+    // a takeaway priced with a service charge is the refused sale this pins.
+    let channel_bills: &[(i64, &str, &str)] = &[
+        (5000, "none", "0"),
+        (5700, "percentage", "0.10"),
+        (100, "percentage", "0.145"),
+        (12_345, "fixed", "500"),
+        (1, "none", "0"),
+    ];
+    let channels = [
+        SaleChannel::DineIn,
+        SaleChannel::Takeaway,
+        SaleChannel::Delivery,
+        SaleChannel::Online,
+    ];
+    for channel in channels {
+        for &waived in &[false, true] {
+            for r in ["0", "0.14"] {
+                for c in ["0.10", "0.125"] {
+                    for &taxable in &[true, false] {
+                        for &inclusive in &[true, false] {
+                            for &(subtotal, kind, value) in channel_bills {
+                                let policy = TaxPolicy {
+                                    tax_rate: r.parse::<Decimal>().unwrap(),
+                                    tax_inclusive: inclusive,
+                                    service_charge_rate: c.parse::<Decimal>().unwrap(),
+                                    service_charge_taxable: taxable,
+                                };
+                                out.push(priced(subtotal, kind, value, policy, channel, waived));
+                            }
+                        }
                     }
                 }
             }
         }
     }
     out
+}
+
+/// One vector: the branch's policy as configured, priced for `channel`.
+fn priced(
+    subtotal: i64,
+    kind: &str,
+    value: &str,
+    policy: TaxPolicy,
+    channel: SaleChannel,
+    service_waived: bool,
+) -> Vector {
+    let discount = discount_amount(subtotal, discount_from_wire(kind, value));
+    let b = compute(
+        subtotal,
+        discount,
+        &policy.for_sale(channel, service_waived),
+    );
+    Vector {
+        subtotal,
+        discount_kind: kind.to_string(),
+        discount_value: value.to_string(),
+        tax_rate: policy.tax_rate.to_string(),
+        tax_inclusive: policy.tax_inclusive,
+        service_charge_rate: policy.service_charge_rate.to_string(),
+        service_charge_taxable: policy.service_charge_taxable,
+        channel: channel.as_str().to_string(),
+        service_waived,
+        discount: b.discount,
+        service_charge: b.service_charge,
+        tax: b.tax,
+        total: b.total,
+        net: b.net,
+    }
 }
 
 #[cfg(test)]
