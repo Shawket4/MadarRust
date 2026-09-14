@@ -317,6 +317,16 @@ fn throttle_map() -> &'static Mutex<HashMap<String, Instant>> {
     MAP.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Tests only: forget the throttle marks under `prefix`. The map is process
+/// wide and every `#[sqlx::test]` seeds the same org id, so under one-process
+/// `cargo test` (CI) a dashboard sighting in one test throttled the next.
+#[cfg(test)]
+pub(crate) fn forget_throttle(prefix: &str) {
+    if let Ok(mut map) = throttle_map().lock() {
+        map.retain(|k, _| !k.starts_with(prefix));
+    }
+}
+
 /// True when `key` was not let through within [`THROTTLE`]; marks it now.
 pub fn throttle_allows(key: &str, now: Instant) -> bool {
     let Ok(mut map) = throttle_map().lock() else {

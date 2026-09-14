@@ -788,10 +788,16 @@ async fn branch_resolves_from_the_device_row_then_the_header(pool: PgPool) {
     assert_eq!(got.1, None);
 }
 
+/// The two tests that expect a fresh DASHBOARD sighting share one throttle
+/// key (same seeded org), so they run one at a time and start unthrottled.
+static DASHBOARD_SIGHTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[sqlx::test]
 async fn browsers_are_the_dashboard_without_a_version(pool: PgPool) {
     seeded(&pool).await;
     let org = uid(ORG);
+    let _one_at_a_time = DASHBOARD_SIGHTING.lock().await;
+    forget_throttle(&format!("{org}|"));
     let app = telemetry_app!(pool);
     let r = test::call_service(
         &app,
@@ -818,6 +824,8 @@ async fn browsers_are_the_dashboard_without_a_version(pool: PgPool) {
 async fn mirror_lists_and_catalog_sync_are_recorded_for_native_clients(pool: PgPool) {
     seeded(&pool).await;
     let org = uid(ORG);
+    let _one_at_a_time = DASHBOARD_SIGHTING.lock().await;
+    forget_throttle(&format!("{org}|"));
     let app = telemetry_app!(pool);
     let admin = bearer(ADMIN, org, UserRole::OrgAdmin);
     let device = Uuid::new_v4();
@@ -856,9 +864,9 @@ async fn mirror_lists_and_catalog_sync_are_recorded_for_native_clients(pool: PgP
             KIND_MIRROR_LIST_POS.to_string()
         ]
     );
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let dash = row(&pool, org, "c:-:dashboard")
-        .await
-        .expect("dashboard seen");
+    // The sighting is written in the background after the response; a fixed
+    // 200 ms nap lost that race under a loaded single-process `cargo test`
+    // (CI), so wait for the row like every other assertion here does.
+    let dash = wait_for(&pool, org, "c:-:dashboard", |_| true).await;
     assert!(dash.7.is_empty(), "{:?}", dash.7);
 }
