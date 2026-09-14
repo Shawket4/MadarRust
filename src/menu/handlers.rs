@@ -424,6 +424,13 @@ pub struct AddonItemQuery {
     /// addons disabled at this branch are excluded — the per-branch addon list the
     /// POS consumes. Omitted → the plain org list (legacy behaviour).
     pub branch_id: Option<Uuid>,
+    /// Case-insensitive filter on the addon name.
+    pub search: Option<String>,
+    /// Sending `page` or `per_page` switches the response to the paginated
+    /// shape (`PaginatedAddonItems`); without either it stays the plain array
+    /// the POS and old clients read.
+    pub page: Option<i64>,
+    pub per_page: Option<i64>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -1434,7 +1441,7 @@ pub async fn delete_size(
     path = "/addon-items",
     tag = "menu",
     params(AddonItemQuery),
-    responses((status = 200, description = "List addon items", body = Vec<AddonItem>), AppErrorResponse),
+    responses((status = 200, description = "List addon items. A plain array; with `page` or `per_page` the paginated `PaginatedAddonItems` shape.", body = Vec<AddonItem>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn list_addon_items(
@@ -1449,22 +1456,42 @@ pub async fn list_addon_items(
     // With a branch_id, default_price is branch-effective (override replaces it) and
     // branch-disabled addons are excluded. Without it ($3 NULL), the LEFT JOIN matches
     // nothing → the plain org list (legacy contract).
-    let mut rows = sqlx::query_as::<_, AddonItem>(
-        "SELECT a.id, a.org_id, a.name, a.name_translations, a.type as addon_type,
-                COALESCE(bao.price_override, a.default_price) AS default_price,
-                a.is_active, a.created_at, a.updated_at,
-                (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id LIMIT 1) as primary_ingredient_id
-         FROM addon_items a
+    const FILTER: &str = "FROM addon_items a
          LEFT JOIN branch_addon_overrides bao
                 ON bao.addon_item_id = a.id AND bao.branch_id = $3
          WHERE a.org_id = $1
            AND ($2::text IS NULL OR a.type = $2)
            AND ($3::uuid IS NULL OR COALESCE(bao.is_available, true) = true)
-         ORDER BY a.type ASC, a.created_at ASC",
-    )
+           AND ($4::text IS NULL OR a.name ILIKE '%' || $4 || '%')";
+    let search = query
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let paginated = query.page.is_some() || query.per_page.is_some();
+    let per_page = query.per_page.unwrap_or(50).clamp(1, 500);
+    let page = query.page.unwrap_or(1).max(1);
+    let (limit, offset) = if paginated {
+        (per_page, (page - 1) * per_page)
+    } else {
+        (i64::MAX, 0)
+    };
+
+    let mut rows = sqlx::query_as::<_, AddonItem>(&format!(
+        "SELECT a.id, a.org_id, a.name, a.name_translations, a.type as addon_type,
+                COALESCE(bao.price_override, a.default_price) AS default_price,
+                a.is_active, a.created_at, a.updated_at,
+                (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id LIMIT 1) as primary_ingredient_id
+         {FILTER}
+         ORDER BY a.type ASC, a.created_at ASC
+         LIMIT $5 OFFSET $6"
+    ))
     .bind(query.org_id)
     .bind(query.addon_type.as_deref())
     .bind(query.branch_id)
+    .bind(search)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(pool.get_ref())
     .await?;
 
@@ -1472,7 +1499,23 @@ pub async fn list_addon_items(
         addon.ingredients = fetch_addon_ingredients(pool.get_ref(), addon.id).await?;
     }
 
-    Ok(HttpResponse::Ok().json(rows))
+    if !paginated {
+        return Ok(HttpResponse::Ok().json(rows));
+    }
+    let total: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) {FILTER}"))
+        .bind(query.org_id)
+        .bind(query.addon_type.as_deref())
+        .bind(query.branch_id)
+        .bind(search)
+        .fetch_one(pool.get_ref())
+        .await?;
+    Ok(HttpResponse::Ok().json(PaginatedAddonItems {
+        data: rows,
+        total,
+        page,
+        per_page,
+        total_pages: (total + per_page - 1) / per_page,
+    }))
 }
 
 // ── Addon catalog (paginated; powers the Branch Overrides add-on grid) ────────

@@ -57,11 +57,39 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Case-insensitive filter on the addon name.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "Sending `page` or `per_page` switches the response to the paginated\nshape (`PaginatedAddonItems`); without either it stays the plain array\nthe POS and old clients read.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "List addon items",
+            "description": "List addon items. A plain array; with `page` or `per_page` the paginated `PaginatedAddonItems` shape.",
             "content": {
               "application/json": {
                 "schema": {
