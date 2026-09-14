@@ -284,15 +284,46 @@ pub fn extract_relative_path(url: &str) -> &str {
     }
 }
 
+/// Default public base for legacy upload paths when `UPLOADS_BASE_URL` is unset.
+/// The API is served at the root of `api.madar-pos.cloud` (no `/api` prefix),
+/// and nginx serves `/uploads/` straight from disk.
+pub const DEFAULT_UPLOADS_BASE_URL: &str = "https://api.madar-pos.cloud/uploads";
+
+/// True when an absolute URL points at one of OUR legacy upload paths
+/// (`…/uploads/<org-uuid>/…`, `…/uploads/logos/…`, `…/uploads/card/…`,
+/// `…/uploads/assets/…`), possibly on an old host, so it is safe to rebase onto
+/// the current uploads base.
+fn is_own_upload_url(url: &str) -> bool {
+    let Some(pos) = url.find("/uploads/") else {
+        return false;
+    };
+    let rest = &url[pos + "/uploads/".len()..];
+    let first = rest.split('/').next().unwrap_or("");
+    rest.contains('/')
+        && (Uuid::parse_str(first).is_ok() || matches!(first, "logos" | "card" | "assets"))
+}
+
 pub fn normalize_upload_url(url: &str) -> String {
-    // Signed asset URLs are already absolute and must not be rewritten.
-    if url.contains("/assets/") && url.contains("sig=") {
-        return url.to_string();
+    let url = url.trim();
+    if url.is_empty() {
+        return String::new();
+    }
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        // Signed asset URLs and third-party URLs (e.g. an imported Foodics S3
+        // image) are returned verbatim. Only our own legacy upload paths on a
+        // previous host get rebased onto the current base.
+        if (url.contains("/assets/") && url.contains("sig=")) || !is_own_upload_url(url) {
+            return url.to_string();
+        }
     }
     let base_url = std::env::var("UPLOADS_BASE_URL")
-        .unwrap_or_else(|_| "https://madar-pos.cloud/api/uploads".to_string());
-    let base = base_url.trim_end_matches('/');
-    let rel = extract_relative_path(url);
+        .ok()
+        .filter(|b| !b.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_UPLOADS_BASE_URL.to_string());
+    let base = base_url.trim().trim_end_matches('/');
+    let rel = extract_relative_path(url).trim_start_matches('/');
+    let rel = rel.strip_prefix("uploads/").unwrap_or(rel);
     format!("{}/{}", base, rel)
 }
 
@@ -322,4 +353,72 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
         .get::<Claims>()
         .cloned()
         .ok_or_else(|| AppError::Unauthorized("Missing claims".into()))
+}
+
+#[cfg(test)]
+mod url_normalize_tests {
+    use super::normalize_upload_url;
+
+    // The env var is process-global; these assertions only depend on it being
+    // unset-or-constant within this test, so read the effective base once.
+    fn base() -> String {
+        std::env::var("UPLOADS_BASE_URL")
+            .ok()
+            .filter(|b| !b.trim().is_empty())
+            .unwrap_or_else(|| super::DEFAULT_UPLOADS_BASE_URL.to_string())
+            .trim_end_matches('/')
+            .to_string()
+    }
+
+    #[test]
+    fn default_base_has_no_api_prefix() {
+        assert_eq!(
+            super::DEFAULT_UPLOADS_BASE_URL,
+            "https://api.madar-pos.cloud/uploads"
+        );
+    }
+
+    #[test]
+    fn absolute_foreign_urls_unchanged() {
+        let s3 = "https://foodics-console-production.s3.eu-west-1.amazonaws.com/images/x.jpg";
+        assert_eq!(normalize_upload_url(s3), s3);
+        let http = "http://example.com/a/b.png";
+        assert_eq!(normalize_upload_url(http), http);
+        let signed = "https://api.madar-pos.cloud/assets/abc/full.webp?exp=1&sig=zz";
+        assert_eq!(normalize_upload_url(signed), signed);
+    }
+
+    #[test]
+    fn own_old_host_urls_rebased() {
+        let org = "685f6bfa-0d44-4a9f-bb3e-50eec96d50c9";
+        let old = format!("https://rue-pos.ddns.net/api/uploads/{org}/menu-items/x.jpg");
+        assert_eq!(
+            normalize_upload_url(&old),
+            format!("{}/{org}/menu-items/x.jpg", base())
+        );
+    }
+
+    #[test]
+    fn relative_forms_prefixed_once() {
+        let b = base();
+        assert_eq!(normalize_upload_url("/uploads/x.jpg"), format!("{b}/x.jpg"));
+        assert_eq!(normalize_upload_url("uploads/x.jpg"), format!("{b}/x.jpg"));
+        assert_eq!(normalize_upload_url("x.jpg"), format!("{b}/x.jpg"));
+        assert_eq!(
+            normalize_upload_url("logos/a.png"),
+            format!("{b}/logos/a.png")
+        );
+        assert!(!normalize_upload_url("/uploads/x.jpg").contains("uploads/uploads"));
+        assert!(
+            !normalize_upload_url("/x.jpg")
+                .trim_start_matches("https://")
+                .contains("//")
+        );
+    }
+
+    #[test]
+    fn empty_stays_empty() {
+        assert_eq!(normalize_upload_url(""), "");
+        assert_eq!(normalize_upload_url("   "), "");
+    }
 }

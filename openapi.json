@@ -49226,6 +49226,17 @@
             "type": "string",
             "format": "uuid"
           },
+          "image": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AssetGroupRef",
+                "description": "Asset refs (WebP variants, signed); absent when the bundle has no asset\ngroup. Additive: `image_url` keeps its legacy value."
+              }
+            ]
+          },
           "image_url": {
             "type": [
               "string",
@@ -66534,6 +66545,17 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "image": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AssetGroupRef",
+                "description": "Asset refs (WebP variants, signed), same as `GET /menu-items/{id}`."
+              }
+            ]
           },
           "image_url": {
             "type": [

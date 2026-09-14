@@ -169,6 +169,9 @@ pub struct StudioAggregate {
     pub name_translations: serde_json::Value,
     pub description: Option<String>,
     pub image_url: Option<String>,
+    /// Asset refs (WebP variants, signed), same as `GET /menu-items/{id}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<crate::assets::refs::AssetGroupRef>,
     pub category_id: Option<Uuid>,
     pub is_active: bool,
     pub catalog_revision: i64,
@@ -611,6 +614,15 @@ async fn build_studio_aggregate(
 
     let catalog_revision = current_catalog_revision(pool, org_id).await?;
     let recipe_steps = crate::recipes::steps::fetch_item_steps(pool, item_id).await?;
+    let image = crate::assets::refs::slot_refs(
+        pool,
+        org_id,
+        crate::assets::ingest::AssetTable::MenuItems,
+        crate::assets::ingest::AssetField::Image,
+        &[item_id],
+    )
+    .await?
+    .remove(&item_id);
 
     Ok(StudioAggregate {
         id: basics.id,
@@ -619,6 +631,7 @@ async fn build_studio_aggregate(
         name_translations: basics.name_translations.clone(),
         description: basics.description.clone(),
         image_url: basics.image_url.clone(),
+        image,
         category_id: basics.category_id,
         is_active: basics.is_active,
         catalog_revision,
