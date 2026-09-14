@@ -24,7 +24,7 @@ use uuid::Uuid;
 const PURGE_STMTS: &[&str] = &[
     // Branch-scoped transactional data (orders cascade to order_items).
     "DELETE FROM orders WHERE branch_id IN (SELECT id FROM branches WHERE org_id = $1)",
-    "DELETE FROM shifts WHERE branch_id IN (SELECT id FROM branches WHERE org_id = $1)",
+    "DELETE FROM tills WHERE branch_id IN (SELECT id FROM branches WHERE org_id = $1)",
     // Unified menu model (menu unification): recipe_lines and
     // menu_price_overrides have NO FK to their polymorphic owners/targets, so
     // they are removed explicitly. recipe_lines MUST precede org_ingredients

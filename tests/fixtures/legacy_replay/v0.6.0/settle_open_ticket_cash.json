@@ -1,0 +1,10 @@
+{
+  "op": "settle_open_ticket",
+  "request": {
+    "amount_tendered": 30000,
+    "payment_method": "Cash",
+    "shift_id": "00000000-0000-4000-8000-000000000003"
+  },
+  "teller_id": "00000000-0000-4000-8000-000000000001",
+  "ticket_id": "00000000-0000-4000-8000-000000000030"
+}

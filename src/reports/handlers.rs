@@ -46,7 +46,12 @@ pub struct TimeseriesQuery {
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct ShiftSummary {
+    pub till_id: Uuid,
+    /// DEPRECATED: same value as `till_id` (required by POS v0.5.1/v0.6.0).
     pub shift_id: Uuid,
+    pub device_code: Option<String>,
+    pub opened_while_another_open: bool,
+    pub reconciliation_status: Option<String>,
     pub branch_id: Uuid,
     pub branch_name: String,
     pub teller_id: Uuid,
@@ -337,13 +342,17 @@ pub async fn shift_summary(
     shift_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "shifts", "read").await?;
+    check_permission(pool.get_ref(), &claims, "tills", "read").await?;
     require_shift_branch_access(pool.get_ref(), &claims, *shift_id).await?;
 
     let summary = sqlx::query_as::<_, ShiftSummary>(
         r#"
         SELECT
+            s.id                                        AS till_id,
             s.id                                        AS shift_id,
+            s.device_code,
+            s.opened_while_another_open,
+            s.reconciliation_status,
             s.branch_id,
             b.name                                      AS branch_name,
             s.teller_id,
@@ -369,7 +378,7 @@ pub async fn shift_summary(
                 SELECT op.method, SUM(op.amount)::bigint AS rev
                 FROM order_payments op
                 JOIN orders o2 ON o2.id = op.order_id
-                WHERE o2.shift_id = s.id AND o2.status NOT IN ('voided', 'refunded')
+                WHERE o2.till_id = s.id AND o2.status NOT IN ('voided', 'refunded')
                 GROUP BY op.method
               ) sub
             ), '{}'::json) AS revenue_by_method,
@@ -386,13 +395,13 @@ pub async fn shift_summary(
             -- The drawer's side: refunds issued from THIS shift, by
             -- order_refunds.shift_id. Not filtered on the order's status — a
             -- fully refunded sale's refund left this drawer all the same.
-            COALESCE((SELECT COUNT(*)                            FROM order_refunds r WHERE r.shift_id = s.id), 0)::bigint AS refunds_issued_count,
-            COALESCE((SELECT SUM(r.amount)                       FROM order_refunds r WHERE r.shift_id = s.id), 0)::bigint AS refunds_issued_amount,
-            COALESCE((SELECT SUM(r.amount) FILTER (WHERE r.is_cash) FROM order_refunds r WHERE r.shift_id = s.id), 0)::bigint AS refunds_issued_cash
-        FROM shifts s
+            COALESCE((SELECT COUNT(*)                            FROM order_refunds r WHERE r.till_id = s.id), 0)::bigint AS refunds_issued_count,
+            COALESCE((SELECT SUM(r.amount)                       FROM order_refunds r WHERE r.till_id = s.id), 0)::bigint AS refunds_issued_amount,
+            COALESCE((SELECT SUM(r.amount) FILTER (WHERE r.is_cash) FROM order_refunds r WHERE r.till_id = s.id), 0)::bigint AS refunds_issued_cash
+        FROM tills s
         JOIN branches b ON b.id = s.branch_id
         JOIN users    u ON u.id = s.teller_id
-        LEFT JOIN orders o          ON o.shift_id  = s.id
+        LEFT JOIN orders o          ON o.till_id  = s.id
         LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
         WHERE s.id = $1
         GROUP BY s.id, b.name, u.name
@@ -404,6 +413,40 @@ pub async fn shift_summary(
     .ok_or_else(|| AppError::NotFound("Shift not found".into()))?;
 
     Ok(HttpResponse::Ok().json(summary))
+}
+
+// ── GET /reports/tills/:id/summary (T15) ─────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/reports/tills/{till_id}/summary",
+    tag = "reports",
+    params(("till_id" = Uuid, Path, description = "Till ID")),
+    responses((status = 200, description = "Till summary", body = ShiftSummary), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn till_summary(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    till_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    shift_summary(req, pool, till_id).await
+}
+
+#[utoipa::path(
+    get,
+    path = "/reports/tills/{till_id}/deductions",
+    tag = "reports",
+    params(("till_id" = Uuid, Path, description = "Till ID")),
+    responses((status = 200, description = "Till deductions", body = Vec<DeductionLogRow>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn till_deductions(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    till_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    shift_deductions(req, pool, till_id).await
 }
 
 // ── GET /reports/shifts/:id/deductions ───────────────────────
@@ -425,10 +468,34 @@ pub async fn shift_deductions(
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
     require_shift_branch_access(pool.get_ref(), &claims, *shift_id).await?;
 
-    // Inventory deduction logs no longer exist — every deduction is a ledger movement.
-    // Return empty array to maintain API compatibility.
-    let rows: Vec<DeductionLogRow> = Vec::new();
-    Ok(HttpResponse::Ok().json(rows))
+    Ok(HttpResponse::Ok().json(till_deduction_rows(pool.get_ref(), *shift_id).await?))
+}
+
+/// The stock a till's sales moved, read from the inventory ledger.
+///
+/// The old `inventory_deduction_logs` table is gone; every deduction is now an
+/// `inventory_movements` row. Sales, void restocks and refund restocks post with
+/// `source_type = 'order'` and the order's id, so a till's rows are the
+/// movements of its orders. `quantity_deducted` is positive for stock that left
+/// (a sale) and negative for stock put back (`source` = `void_restock`).
+/// `order_item_id` is always null: the ledger records the order, not the line.
+///
+/// Waste and staff meals are recorded against the BRANCH (`source_type` `waste`,
+/// no order, no till), so no till's deductions include them.
+pub(crate) async fn till_deduction_rows(pool: &PgPool, till_id: Uuid) -> Result<Vec<DeductionLogRow>, AppError> {
+    Ok(sqlx::query_as::<_, DeductionLogRow>(
+        "SELECT m.id, m.source_id AS order_id, NULL::uuid AS order_item_id, \
+                m.org_ingredient_id AS inventory_item_id, i.name AS item_name, i.unit::text AS unit, \
+                (-m.quantity)::float8 AS quantity_deducted, m.type::text AS source, m.created_at \
+           FROM inventory_movements m \
+           JOIN org_ingredients i ON i.id = m.org_ingredient_id \
+          WHERE m.source_type = 'order' \
+            AND m.source_id IN (SELECT o.id FROM orders o WHERE o.till_id = $1) \
+          ORDER BY m.created_at, m.id",
+    )
+    .bind(till_id)
+    .fetch_all(pool)
+    .await?)
 }
 
 // ── GET /reports/branches/:id/sales ──────────────────────────
@@ -1047,7 +1114,7 @@ pub async fn branch_teller_stats(
                 )::bigint
             END AS avg_order_value,
             COUNT(o.id) FILTER (WHERE o.status = 'voided')::bigint AS voided,
-            COUNT(DISTINCT o.shift_id)::bigint AS shifts
+            COUNT(DISTINCT o.till_id)::bigint AS shifts
         FROM orders o
         JOIN users u ON u.id = o.teller_id
         LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
@@ -2054,7 +2121,7 @@ async fn require_shift_branch_access(
     claims: &Claims,
     shift_id: Uuid,
 ) -> Result<Uuid, AppError> {
-    let branch_id: Option<Uuid> = sqlx::query_scalar("SELECT branch_id FROM shifts WHERE id = $1")
+    let branch_id: Option<Uuid> = sqlx::query_scalar("SELECT branch_id FROM tills WHERE id = $1")
         .bind(shift_id)
         .fetch_optional(pool)
         .await?

@@ -443,11 +443,14 @@ pub(crate) fn derive(
 
 /// The effective settings for a branch: its own row, else the org-wide row, else
 /// the built-in defaults. Never fails for want of configuration.
-pub async fn load_settings(
-    pool: &PgPool,
+pub async fn load_settings<'e, E>(
+    pool: E,
     org_id: Uuid,
     branch_id: Option<Uuid>,
-) -> Result<AttendanceSettings, AppError> {
+) -> Result<AttendanceSettings, AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let row = sqlx::query_as::<_, AttendanceSettings>(&format!(
         "SELECT {SETTINGS_COLS} FROM attendance_settings \
          WHERE org_id = $1 AND (branch_id = $2 OR branch_id IS NULL) \

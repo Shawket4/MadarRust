@@ -9,9 +9,62 @@ use crate::{
     auth::{guards::require_same_org, jwt::Claims},
     errors::{AppError, AppErrorResponse},
     permissions::checker::check_permission,
-    uploads::handlers::delete_old_image,
 };
 use utoipa::{IntoParams, ToSchema};
+
+// ── Image slot (Track B4) ─────────────────────────────────────
+
+/// After a JSON write of `image_url`: `Some(None)` clears `image_group_id`;
+/// `Some(Some(url))` different from before is staged into the asset pipeline.
+pub(crate) async fn image_url_side_effects(
+    pool: &PgPool,
+    table: crate::assets::ingest::AssetTable,
+    org_id: Uuid,
+    id: Uuid,
+    new: Option<&Option<String>>,
+    old: Option<&str>,
+    claims: &Claims,
+) -> Result<(), AppError> {
+    let tbl = match table {
+        crate::assets::ingest::AssetTable::Categories => "categories",
+        crate::assets::ingest::AssetTable::MenuItems => "menu_items",
+        crate::assets::ingest::AssetTable::Bundles => "bundles",
+        _ => return Ok(()),
+    };
+    match new {
+        Some(None) => {
+            sqlx::query(&format!("UPDATE {tbl} SET image_group_id = NULL WHERE id = $1"))
+                .bind(id)
+                .execute(pool)
+                .await?;
+        }
+        Some(Some(url)) if Some(url.as_str()) != old && !url.is_empty() => {
+            crate::uploads::handlers::stage_image_url(pool, org_id, table, id, url, claims.user_id_safe().ok()).await?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn attach_item_refs(pool: &PgPool, org_id: Uuid, items: &mut [MenuItem]) -> Result<(), AppError> {
+    let ids: Vec<Uuid> = items.iter().map(|i| i.id).collect();
+    let mut refs = crate::assets::refs::slot_refs(pool, org_id, crate::assets::ingest::AssetTable::MenuItems,
+        crate::assets::ingest::AssetField::Image, &ids).await?;
+    for i in items.iter_mut() {
+        i.image = refs.remove(&i.id);
+    }
+    Ok(())
+}
+
+async fn attach_category_refs(pool: &PgPool, org_id: Uuid, rows: &mut [Category]) -> Result<(), AppError> {
+    let ids: Vec<Uuid> = rows.iter().map(|i| i.id).collect();
+    let mut refs = crate::assets::refs::slot_refs(pool, org_id, crate::assets::ingest::AssetTable::Categories,
+        crate::assets::ingest::AssetField::Image, &ids).await?;
+    for i in rows.iter_mut() {
+        i.image = refs.remove(&i.id);
+    }
+    Ok(())
+}
 
 // ── Models ────────────────────────────────────────────────────
 
@@ -24,6 +77,10 @@ pub struct Category {
     pub name_translations: serde_json::Value,
     #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
     pub image_url: Option<String>,
+    /// Asset refs (Track B4, §11.10); null when no asset or not attached by this endpoint.
+    #[sqlx(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<crate::assets::refs::AssetGroupRef>,
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -43,6 +100,10 @@ pub struct MenuItem {
     pub description_translations: serde_json::Value,
     #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
     pub image_url: Option<String>,
+    /// Asset refs (Track B4, §11.10); null when no asset or not attached by this endpoint.
+    #[sqlx(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<crate::assets::refs::AssetGroupRef>,
     pub base_price: i32,
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
@@ -472,6 +533,8 @@ pub async fn list_categories(
     .fetch_all(pool.get_ref())
     .await?;
 
+    let mut rows = rows;
+    attach_category_refs(pool.get_ref(), query.org_id, &mut rows).await?;
     Ok(HttpResponse::Ok().json(rows))
 }
 
@@ -512,6 +575,11 @@ pub async fn create_category(
     .bind(&mut_body.image_url)
     .fetch_one(pool.get_ref())
     .await?;
+
+    if let Some(url) = mut_body.image_url.clone() {
+        image_url_side_effects(pool.get_ref(), crate::assets::ingest::AssetTable::Categories, row.org_id, row.id,
+            Some(&Some(url)), None, &claims).await?;
+    }
 
     Ok(HttpResponse::Created().json(row))
 }
@@ -573,14 +641,11 @@ pub async fn update_category(
     .await?
     .ok_or_else(|| AppError::NotFound("Category not found".into()))?;
 
-    // If explicit null, cleanup old image from storage
-    if mut_body.image_url == Some(None)
-        && let Some(old_url) = existing.image_url
-    {
-        let uploads_dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
-        let base_url = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
-        delete_old_image(&old_url, &base_url, &uploads_dir, Some(existing.org_id)).await;
-    }
+    // Image slot (§11.5 W3): null clears the asset reference (no file delete —
+    // assets are content-addressed); a new URL is routed through the asset
+    // pipeline.
+    image_url_side_effects(pool.get_ref(), crate::assets::ingest::AssetTable::Categories, existing.org_id, *id,
+        mut_body.image_url.as_ref(), existing.image_url.as_deref(), &claims).await?;
 
     Ok(HttpResponse::Ok().json(row))
 }
@@ -654,7 +719,7 @@ pub async fn list_menu_items(
     // base_price) and branch-disabled items are excluded — the per-branch menu the POS
     // consumes. When null the LEFT JOIN matches nothing (NULL branch_id) so this is the
     // plain org catalog, preserving the legacy contract.
-    let items = sqlx::query_as::<_, MenuItem>(
+    let mut items = sqlx::query_as::<_, MenuItem>(
         "SELECT mi.id, mi.org_id, mi.category_id, mi.name, mi.name_translations,
                 mi.description, mi.description_translations, mi.image_url,
                 COALESCE(bmo.price_override, mi.base_price) AS base_price,
@@ -691,6 +756,7 @@ pub async fn list_menu_items(
         let mut steps_by_item =
             crate::recipes::steps::fetch_org_steps(pool.get_ref(), query.org_id).await?;
         let mut result: Vec<MenuItemFull> = vec![];
+        attach_item_refs(pool.get_ref(), query.org_id, &mut items).await?;
         for item in items {
             let mut sizes = fetch_sizes(pool.get_ref(), item.id).await?;
             // Branch menu (branch_id set): overlay this branch's per-size price overrides
@@ -722,6 +788,7 @@ pub async fn list_menu_items(
             .body(body));
     }
 
+    attach_item_refs(pool.get_ref(), query.org_id, &mut items).await?;
     let body = web::Bytes::from(serde_json::to_vec(&items).map_err(|_| AppError::Internal)?);
     if let Some(c) = &cache {
         c.put(query.org_id, &variant, body.clone()).await;
@@ -865,8 +932,9 @@ pub async fn get_menu_item(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
 
-    let item = fetch_menu_item(pool.get_ref(), *id).await?;
+    let mut item = fetch_menu_item(pool.get_ref(), *id).await?;
     require_same_org(&claims, Some(item.org_id))?;
+    attach_item_refs(pool.get_ref(), item.org_id, std::slice::from_mut(&mut item)).await?;
 
     let sizes = fetch_sizes(pool.get_ref(), *id).await?;
     let addon_slots = fetch_addon_slots(pool.get_ref(), *id).await?;
@@ -957,6 +1025,11 @@ pub async fn create_menu_item(
     .await?;
 
     tx.commit().await?;
+
+    if let Some(url) = mut_body.image_url.clone() {
+        image_url_side_effects(pool.get_ref(), crate::assets::ingest::AssetTable::MenuItems, item.org_id, item.id,
+            Some(&Some(url)), None, &claims).await?;
+    }
 
     Ok(HttpResponse::Created().json(MenuItemFull {
         item,
@@ -1088,14 +1161,9 @@ pub async fn update_menu_item(
 
     tx.commit().await?;
 
-    // If explicit null, cleanup old image from storage
-    if mut_body.image_url == Some(None)
-        && let Some(old_url) = existing.image_url
-    {
-        let uploads_dir = std::env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
-        let base_url = std::env::var("UPLOADS_BASE_URL").unwrap_or_default();
-        delete_old_image(&old_url, &base_url, &uploads_dir, Some(existing.org_id)).await;
-    }
+    // Image slot (§11.5 W4).
+    image_url_side_effects(pool.get_ref(), crate::assets::ingest::AssetTable::MenuItems, existing.org_id, *id,
+        mut_body.image_url.as_ref(), existing.image_url.as_deref(), &claims).await?;
 
     Ok(HttpResponse::Ok().json(item))
 }
@@ -2932,6 +3000,70 @@ async fn fetch_item_recipes(pool: &PgPool, item_id: Uuid) -> Result<Vec<MenuItem
     .bind(item_id)
     .fetch_all(pool)
     .await?)
+}
+
+/// The branch-effective `/addon-items` shape for a set of addon ids, keyed by id,
+/// on one connection (sync pull projection). Unlike the list route a
+/// branch-disabled addon is KEPT with `is_available: false`, so turning one back
+/// on is an ordinary upsert on the device.
+pub(crate) async fn addon_items_by_ids(
+    conn: &mut sqlx::PgConnection,
+    org_id: Uuid,
+    branch_id: Uuid,
+    ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, serde_json::Value>, AppError> {
+    let mut rows = sqlx::query_as::<_, AddonItem>(
+        "SELECT a.id, a.org_id, a.name, a.name_translations, a.type as addon_type,
+                COALESCE(bao.price_override, a.default_price) AS default_price,
+                a.is_active, a.created_at, a.updated_at,
+                (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id LIMIT 1) as primary_ingredient_id
+         FROM addon_items a
+         LEFT JOIN branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $2
+         WHERE a.org_id = $1 AND a.id = ANY($3)",
+    )
+    .bind(org_id)
+    .bind(branch_id)
+    .bind(ids)
+    .fetch_all(&mut *conn)
+    .await?;
+    let available: std::collections::HashMap<Uuid, bool> = sqlx::query_as::<_, (Uuid, bool)>(
+        "SELECT addon_item_id, is_available FROM branch_addon_overrides WHERE branch_id = $1 AND addon_item_id = ANY($2)",
+    )
+    .bind(branch_id)
+    .bind(ids)
+    .fetch_all(&mut *conn)
+    .await?
+    .into_iter()
+    .collect();
+    let mut ingredients: std::collections::HashMap<Uuid, Vec<AddonItemIngredient>> = std::collections::HashMap::new();
+    type IngRow = (Uuid, Option<Uuid>, sqlx::types::BigDecimal, String, String);
+    for (addon, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) in sqlx::query_as::<_, IngRow>(
+        "SELECT addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit \
+           FROM addon_item_ingredients WHERE addon_item_id = ANY($1) ORDER BY addon_item_id, ingredient_name",
+    )
+    .bind(ids)
+    .fetch_all(&mut *conn)
+    .await?
+    {
+        ingredients.entry(addon).or_default().push(AddonItemIngredient {
+            org_ingredient_id,
+            quantity_used,
+            ingredient_name,
+            ingredient_unit,
+        });
+    }
+    let mut out = std::collections::HashMap::new();
+    for mut a in rows.drain(..) {
+        a.ingredients = ingredients.remove(&a.id).unwrap_or_default();
+        let id = a.id;
+        let mut v = serde_json::to_value(&a).unwrap_or(serde_json::Value::Null);
+        if let serde_json::Value::Object(m) = &mut v {
+            m.remove("org_id");
+            m.insert("is_available".into(), serde_json::Value::Bool(available.get(&id).copied().unwrap_or(true)));
+        }
+        out.insert(id, v);
+    }
+    Ok(out)
 }
 
 async fn fetch_addon_ingredients(

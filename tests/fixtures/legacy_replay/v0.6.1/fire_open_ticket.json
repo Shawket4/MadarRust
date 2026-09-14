@@ -1,0 +1,39 @@
+{
+  "op": "fire_open_ticket",
+  "origin_device_id": "00000000-0000-4000-8000-000000000060",
+  "request": {
+    "branch_id": "00000000-0000-4000-8000-000000000002",
+    "guest_count": 2,
+    "idempotency_key": "00000000-0000-4000-8000-000000000030",
+    "items": [
+      {
+        "addons": [
+          {
+            "addon_item_id": "00000000-0000-4000-8000-000000000011",
+            "quantity": 1,
+            "unit_price": 1000
+          }
+        ],
+        "menu_item_id": "00000000-0000-4000-8000-000000000010",
+        "optional_field_ids": [
+          "00000000-0000-4000-8000-000000000012"
+        ],
+        "quantity": 2,
+        "size_label": "Large",
+        "unit_price": 6500
+      },
+      {
+        "addons": [],
+        "menu_item_id": "00000000-0000-4000-8000-000000000110",
+        "optional_field_ids": [],
+        "quantity": 1,
+        "size_label": null,
+        "unit_price": 4000
+      }
+    ],
+    "notes": null,
+    "round_idempotency_key": "00000000-0000-4000-8000-000000000031",
+    "table_id": "00000000-0000-4000-8000-000000000032"
+  },
+  "teller_id": "00000000-0000-4000-8000-000000000001"
+}

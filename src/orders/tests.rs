@@ -102,7 +102,7 @@ async fn grant_permission(pool: &PgPool, role: &str, resource: &str, action: &st
 
 async fn seed_shift(pool: &PgPool, branch_id: Uuid, user_id: Uuid) -> Uuid {
     let shift_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO shifts (id, branch_id, teller_id, status, opening_cash) VALUES ($1, $2, $3, 'open', 10000)")
+    sqlx::query("INSERT INTO tills (id, branch_id, teller_id, status, opening_cash) VALUES ($1, $2, $3, 'open', 10000)")
         .bind(shift_id)
         .bind(branch_id)
         .bind(user_id)
@@ -230,7 +230,7 @@ async fn test_create_order_success(pool: PgPool) {
 
     let req_body = CreateOrderRequest {
         branch_id,
-        shift_id,
+        till_id: shift_id,
         payment_method: "cash".to_string(),
         customer_name: Some("John Doe".to_string()),
         notes: None,
@@ -312,7 +312,7 @@ async fn test_order_ref_generated_and_decoded(pool: PgPool) {
 
     let make_body = || CreateOrderRequest {
         branch_id,
-        shift_id,
+        till_id: shift_id,
         payment_method: "cash".to_string(),
         customer_name: None,
         notes: None,
@@ -469,7 +469,7 @@ async fn test_create_order_with_addons_and_discount(pool: PgPool) {
 
     let req_body = CreateOrderRequest {
         branch_id,
-        shift_id,
+        till_id: shift_id,
         payment_method: "card".to_string(),
         customer_name: None,
         notes: None,
@@ -565,7 +565,7 @@ async fn test_milk_swap_converts_units_across_base_units(pool: PgPool) {
 
     let req_body = CreateOrderRequest {
         branch_id,
-        shift_id,
+        till_id: shift_id,
         payment_method: "cash".to_string(),
         customer_name: None,
         notes: None,
@@ -681,7 +681,7 @@ async fn test_standalone_resolver_swap_additive_and_optional(pool: PgPool) {
 
     let req_body = CreateOrderRequest {
         branch_id,
-        shift_id,
+        till_id: shift_id,
         payment_method: "cash".to_string(),
         customer_name: None,
         notes: None,
@@ -783,7 +783,7 @@ async fn test_list_orders(pool: PgPool) {
     for _ in 0..2 {
         let req_body = CreateOrderRequest {
             branch_id,
-            shift_id,
+            till_id: shift_id,
             payment_method: "cash".to_string(),
             customer_name: None,
             notes: None,
@@ -896,7 +896,7 @@ async fn test_list_orders_all_branches(pool: PgPool) {
     for (branch_id, shift_id) in [(branch_a, shift_a), (branch_b, shift_b)] {
         let body = CreateOrderRequest {
             branch_id,
-            shift_id,
+            till_id: shift_id,
             payment_method: "cash".to_string(),
             customer_name: None,
             notes: None,
@@ -1019,7 +1019,7 @@ async fn test_void_order(pool: PgPool) {
 
     let req_body = CreateOrderRequest {
         branch_id,
-        shift_id,
+        till_id: shift_id,
         payment_method: "cash".to_string(),
         customer_name: None,
         notes: None,
@@ -1114,7 +1114,7 @@ async fn test_void_no_restock_logs_waste(pool: PgPool) {
 
     let req_body = CreateOrderRequest {
         branch_id,
-        shift_id,
+        till_id: shift_id,
         payment_method: "cash".to_string(),
         customer_name: None,
         notes: None,
@@ -1275,7 +1275,7 @@ async fn test_order_cost_snapshot_with_recipe_and_addon(pool: PgPool) {
 
     let req_body = CreateOrderRequest {
         branch_id,
-        shift_id,
+        till_id: shift_id,
         payment_method: "cash".to_string(),
         customer_name: None,
         notes: None,
@@ -1356,7 +1356,7 @@ async fn test_order_cost_missing_without_recipe(pool: PgPool) {
 
     let req_body = CreateOrderRequest {
         branch_id,
-        shift_id,
+        till_id: shift_id,
         payment_method: "cash".to_string(),
         customer_name: None,
         notes: None,
@@ -1415,7 +1415,7 @@ macro_rules! order_app {
 fn simple_order(branch_id: Uuid, shift_id: Uuid, menu_item_id: Uuid) -> CreateOrderRequest {
     CreateOrderRequest {
         branch_id,
-        shift_id,
+        till_id: shift_id,
         payment_method: "cash".to_string(),
         customer_name: None,
         notes: None,
@@ -1782,7 +1782,7 @@ async fn test_idempotency_key_replays_same_order(pool: PgPool) {
         ids[0], ids[1],
         "same idempotency key must return the same order"
     );
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE shift_id=$1")
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE till_id=$1")
         .bind(shift_id)
         .fetch_one(&pool)
         .await
@@ -1850,7 +1850,7 @@ async fn test_order_rejected_on_closed_shift(pool: PgPool) {
     let cat_id = seed_category(&pool, org_id).await;
     let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
 
-    sqlx::query("UPDATE shifts SET status='closed', closed_at=now() WHERE id=$1")
+    sqlx::query("UPDATE tills SET status='closed', closed_at=now() WHERE id=$1")
         .bind(shift_id)
         .execute(&pool)
         .await
@@ -2144,7 +2144,7 @@ async fn test_create_order_records_charged_prices_and_flags(pool: PgPool) {
     let of = post(
         CreateOrderRequest {
             branch_id,
-            shift_id,
+            till_id: shift_id,
             payment_method: "cash".to_string(),
             items: vec![OrderItemInput {
                 menu_item_id: Some(item),
@@ -2187,7 +2187,7 @@ async fn test_create_order_records_charged_prices_and_flags(pool: PgPool) {
     let of2 = post(
         CreateOrderRequest {
             branch_id,
-            shift_id,
+            till_id: shift_id,
             payment_method: "cash".to_string(),
             items: vec![OrderItemInput {
                 menu_item_id: Some(item),
@@ -2825,7 +2825,7 @@ async fn seed_branch2(pool: &PgPool, org_id: Uuid) -> Uuid {
     id
 }
 async fn orders_on_shift(pool: &PgPool, shift_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE shift_id=$1")
+    sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE till_id=$1")
         .bind(shift_id)
         .fetch_one(pool)
         .await
@@ -2851,7 +2851,7 @@ async fn test_order_records_shift_branch_authoritatively(pool: PgPool) {
     assert_eq!(of.order.branch_id, branch_id);
 
     let (db_branch, db_shift): (Uuid, Uuid) =
-        sqlx::query_as("SELECT branch_id, shift_id FROM orders WHERE id=$1")
+        sqlx::query_as("SELECT branch_id, till_id FROM orders WHERE id=$1")
             .bind(of.order.id)
             .fetch_one(&pool)
             .await
@@ -2945,7 +2945,7 @@ async fn test_order_on_closed_shift_files_nothing(pool: PgPool) {
     let cat_id = seed_category(&pool, org_id).await;
     let item = seed_menu_item(&pool, org_id, cat_id).await;
 
-    sqlx::query("UPDATE shifts SET status='closed', closed_at=now() WHERE id=$1")
+    sqlx::query("UPDATE tills SET status='closed', closed_at=now() WHERE id=$1")
         .bind(shift_id)
         .execute(&pool)
         .await
@@ -2998,12 +2998,12 @@ async fn test_two_open_shifts_route_orders_correctly(pool: PgPool) {
     assert_eq!((a.order.shift_id, a.order.branch_id), (shift_1, branch_1));
     assert_eq!((b.order.shift_id, b.order.branch_id), (shift_2, branch_2));
 
-    let in_1: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM orders WHERE shift_id=$1")
+    let in_1: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM orders WHERE till_id=$1")
         .bind(shift_1)
         .fetch_all(&pool)
         .await
         .unwrap();
-    let in_2: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM orders WHERE shift_id=$1")
+    let in_2: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM orders WHERE till_id=$1")
         .bind(shift_2)
         .fetch_all(&pool)
         .await
@@ -3425,7 +3425,7 @@ async fn renaming_a_payment_method_carries_history(pool: PgPool) {
     grant_permission(&pool, "org_admin", "payment_methods", "update").await;
 
     sqlx::query(
-        "INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal,
+        "INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, subtotal,
              discount_amount, tax_amount, total_amount, status, order_number, payment_method,
              tip_amount, tip_payment_method, tip_is_cash, order_ref)
          VALUES (gen_random_uuid(), $1, $2, $3, gen_random_uuid(), 1000, 0, 0, 1000,
@@ -3439,7 +3439,7 @@ async fn renaming_a_payment_method_carries_history(pool: PgPool) {
     .unwrap();
     sqlx::query(
         "INSERT INTO order_payments (order_id, method, amount, is_cash)
-         SELECT id, 'card', 1000, false FROM orders WHERE shift_id = $1",
+         SELECT id, 'card', 1000, false FROM orders WHERE till_id = $1",
     )
     .bind(shift_id)
     .execute(&pool)
@@ -3756,7 +3756,7 @@ async fn a_sale_that_has_refunded_money_cannot_be_voided(pool: PgPool) {
     )
     .await;
     sqlx::query(
-        "INSERT INTO order_refunds (order_id, shift_id, amount, method, is_cash, reason, issued_by) \
+        "INSERT INTO order_refunds (order_id, till_id, amount, method, is_cash, reason, issued_by) \
          VALUES ($1, $2, 100, 'cash', true, 'goodwill', $3)",
     )
     .bind(order_id)

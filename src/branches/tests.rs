@@ -465,7 +465,7 @@ async fn test_delete_branch_refused_while_a_shift_is_open(pool: PgPool) {
 
     // `closed_at IS NULL` — the shift is still running. (The default till is
     // filled in by a trigger.)
-    sqlx::query("INSERT INTO shifts (branch_id, teller_id) VALUES ($1, $2)")
+    sqlx::query("INSERT INTO tills (branch_id, teller_id) VALUES ($1, $2)")
         .bind(branch_id)
         .bind(teller_id)
         .execute(&pool)

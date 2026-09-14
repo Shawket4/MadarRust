@@ -148,6 +148,12 @@ impl Dataset {
 
 /// Look up a dataset by id.
 pub fn dataset(id: &str) -> Option<&'static Dataset> {
+    let id = if id == "shifts" {
+        crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ANALYTICS_ALIAS, "dataset_shifts");
+        "tills"
+    } else {
+        id
+    }; // pre-rework id
     DATASETS.iter().find(|d| d.id == id)
 }
 
@@ -1474,10 +1480,6 @@ const SHIFT_JOINS: &[Join] = &[
         id: "teller",
         sql: "LEFT JOIN users u ON u.id = s.teller_id",
     },
-    Join {
-        id: "till",
-        sql: "LEFT JOIN tills tl ON tl.id = s.till_id",
-    },
 ];
 
 const SHIFT_MEASURES: &[Meas] = &[
@@ -1576,10 +1578,10 @@ const SHIFT_DIMS: &[Dim] = dims_with_time!(
         },
         Dim {
             id: "till",
-            label: "Till",
-            expr: "COALESCE(tl.name,'Unassigned')",
+            label: "Device",
+            expr: "COALESCE(s.device_label, s.device_code, 'Unassigned')",
             kind: ColumnKind::Label,
-            joins: &["till"],
+            joins: &[],
             time: false
         },
         Dim {
@@ -2207,11 +2209,11 @@ pub const DATASETS: &[Dataset] = &[
         default_viz: Viz::Bar,
     },
     Dataset {
-        id: "shifts",
-        title: "Shifts",
-        help: "One row per till shift. Use for cash control: drawer variance, short \
+        id: "tills",
+        title: "Tills",
+        help: "One row per till (sales session). Use for cash control: drawer variance, short \
                shifts, force-closes, and shift length by teller or branch.",
-        from: "shifts s",
+        from: "tills s",
         branch_col: "s.branch_id",
         time_col: "s.opened_at",
         time_is_date: false,

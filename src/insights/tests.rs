@@ -210,7 +210,7 @@ async fn seed_costed_recipe(pool: &PgPool, org_id: Uuid, item: Uuid, cost: f64) 
 async fn seed_order(pool: &PgPool, branch_id: Uuid, org_id: Uuid) -> Uuid {
     // Reuse the branch's open shift if one exists (one open shift per till).
     let existing: Option<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT id, teller_id FROM shifts WHERE branch_id = $1 AND status = 'open' LIMIT 1",
+        "SELECT id, teller_id FROM tills WHERE branch_id = $1 AND status = 'open' LIMIT 1",
     )
     .bind(branch_id)
     .fetch_optional(pool)
@@ -218,11 +218,11 @@ async fn seed_order(pool: &PgPool, branch_id: Uuid, org_id: Uuid) -> Uuid {
     .unwrap();
     if let Some((shift, teller)) = existing {
         return sqlx::query_scalar(
-            "INSERT INTO orders (branch_id, teller_id, shift_id, idempotency_key, subtotal, \
+            "INSERT INTO orders (branch_id, teller_id, till_id, idempotency_key, subtotal, \
                  discount_amount, tax_amount, total_amount, status, order_number, payment_method, \
                  order_ref) \
              VALUES ($1, $2, $3, gen_random_uuid(), 0, 0, 0, 0, 'completed', \
-                 COALESCE((SELECT MAX(order_number) + 1 FROM orders WHERE shift_id = $3), 1), \
+                 COALESCE((SELECT MAX(order_number) + 1 FROM orders WHERE till_id = $3), 1), \
                  'cash', gen_random_uuid()::text) RETURNING id",
         )
         .bind(branch_id)
@@ -234,7 +234,7 @@ async fn seed_order(pool: &PgPool, branch_id: Uuid, org_id: Uuid) -> Uuid {
     }
     let teller = seed_user(pool, org_id, "teller").await;
     let shift: Uuid = sqlx::query_scalar(
-        "INSERT INTO shifts (branch_id, teller_id, status, opening_cash) \
+        "INSERT INTO tills (branch_id, teller_id, status, opening_cash) \
          VALUES ($1, $2, 'open', 0) RETURNING id",
     )
     .bind(branch_id)
@@ -243,7 +243,7 @@ async fn seed_order(pool: &PgPool, branch_id: Uuid, org_id: Uuid) -> Uuid {
     .await
     .unwrap();
     sqlx::query_scalar(
-        "INSERT INTO orders (branch_id, teller_id, shift_id, idempotency_key, subtotal, \
+        "INSERT INTO orders (branch_id, teller_id, till_id, idempotency_key, subtotal, \
              discount_amount, tax_amount, total_amount, status, order_number, payment_method, \
              order_ref) \
          VALUES ($1, $2, $3, gen_random_uuid(), 0, 0, 0, 0, 'completed', 1, 'cash', \

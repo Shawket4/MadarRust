@@ -111,12 +111,30 @@ fn global_per_minute() -> f64 {
 
 /// `(tokens, last refill)` per client.
 static BUCKETS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, (f64, std::time::Instant)>>,
+    std::sync::Mutex<std::collections::HashMap<String, (f64, std::time::Instant, f64)>>,
 > = std::sync::LazyLock::new(Default::default);
 
-/// Spend a token for `key`, refilling first. False when the bucket is empty.
+/// The ceiling for one ADDRESS across every account behind it. The person
+/// bucket is what an honest till spends; this one stops a single address from
+/// multiplying the allowance by holding many accounts (N x 200). Ten tills'
+/// worth by default — a busy shop behind one router stays well inside it.
+const PER_ADDRESS_PER_MINUTE: f64 = 2000.0;
+
+fn per_address_per_minute() -> f64 {
+    std::env::var("MADAR_RATE_LIMIT_PER_ADDRESS_PER_MINUTE")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|n| (1.0..=1_000_000.0).contains(n))
+        .unwrap_or(PER_ADDRESS_PER_MINUTE)
+}
+
+/// Spend a token for `key` from the general bucket. False when it is empty.
 fn take_token(key: &str) -> bool {
-    let per_minute = global_per_minute();
+    take_token_at(key, global_per_minute())
+}
+
+/// Spend a token for `key` from a bucket of `per_minute`, refilling first.
+fn take_token_at(key: &str, per_minute: f64) -> bool {
     let per_second = per_minute / 60.0;
     let now = std::time::Instant::now();
     let mut map = BUCKETS.lock().unwrap_or_else(|e| e.into_inner());
@@ -124,12 +142,12 @@ fn take_token(key: &str) -> bool {
     // A bucket that has been full for a whole window is a client that has gone
     // away; dropping it is what keeps this map the size of the ACTIVE clients
     // rather than of everyone who has ever called.
-    map.retain(|_, (tokens, last)| {
-        let refilled = *tokens + now.duration_since(*last).as_secs_f64() * per_second;
-        refilled < per_minute
+    map.retain(|_, (tokens, last, cap)| {
+        let refilled = *tokens + now.duration_since(*last).as_secs_f64() * (*cap / 60.0);
+        refilled < *cap
     });
 
-    let entry = map.entry(key.to_string()).or_insert((per_minute, now));
+    let entry = map.entry(key.to_string()).or_insert((per_minute, now, per_minute));
     let refilled =
         (entry.0 + now.duration_since(entry.1).as_secs_f64() * per_second).min(per_minute);
     entry.1 = now;
@@ -141,11 +159,33 @@ fn take_token(key: &str) -> bool {
     true
 }
 
+/// The caller's address (`unknown` without a socket).
+fn address_of(req: &actix_web::dev::ServiceRequest) -> String {
+    req.peer_addr().map(|s| s.ip().to_string()).unwrap_or_else(|| "unknown".into())
+}
+
 /// Who this request is, for limiting: the person if we know them, the address
 /// if we do not.
+///
+/// This gate is mounted on the App, OUTSIDE the scopes' `JwtMiddleware`, so the
+/// claims that middleware inserts are not there yet when it runs: reading only
+/// the extensions keyed EVERY request by its peer address, and every till,
+/// kitchen screen and phone behind one shop router spent one shared allowance
+/// (found replaying a 1000-sale offline backlog, which paced the other tills'
+/// sign-ins). The bearer is verified here instead — verified, not just decoded,
+/// so a forged token cannot choose whose allowance it spends.
 fn limiter_key(req: &actix_web::dev::ServiceRequest) -> String {
     crate::orgs::handlers::extract_claims(req.request())
         .ok()
+        .or_else(|| {
+            let token = req
+                .headers()
+                .get("Authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))?;
+            let secret = req.app_data::<actix_web::web::Data<crate::auth::jwt::JwtSecret>>()?;
+            crate::auth::jwt::verify_token(secret, token).ok()
+        })
         .and_then(|c| c.user_id_safe().ok())
         .map(|id| id.to_string())
         .unwrap_or_else(|| {
@@ -190,7 +230,7 @@ pub async fn throttle_exports(
                 ))
                 .into());
             }
-        } else if !take_token(&key) {
+        } else if !take_token(&key) || (key != address_of(&req) && !take_token_at(&format!("addr:{}", address_of(&req)), per_address_per_minute())) {
             return Err(crate::errors::AppError::TooManyRequests(
                 "Too many requests just now. This will clear in a moment.".into(),
             )
@@ -203,6 +243,135 @@ pub async fn throttle_exports(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An anonymous caller has no person, so the ADDRESS is the key, through the
+    /// whole middleware stack: one address runs dry, another does not.
+    #[actix_web::test]
+    async fn anonymous_requests_are_keyed_by_address() {
+        use actix_web::{App, HttpResponse, test, web};
+        let app = test::init_service(
+            App::new()
+                .wrap(actix_web::middleware::from_fn(throttle_exports))
+                .route("/public/ping", web::get().to(HttpResponse::Ok)),
+        )
+        .await;
+        let call = |addr: &str| test::TestRequest::get().uri("/public/ping").peer_addr(addr.parse().unwrap()).to_request();
+        macro_rules! status {
+            ($r:expr) => {
+                match $r {
+                    Ok(r) => r.status(),
+                    Err(e) => e.error_response().status(),
+                }
+            };
+        }
+        for _ in 0..global_per_minute() as usize {
+            assert!(status!(test::try_call_service(&app, call("10.9.0.1:4000")).await).is_success());
+        }
+        assert_eq!(status!(test::try_call_service(&app, call("10.9.0.1:4001")).await), actix_web::http::StatusCode::TOO_MANY_REQUESTS,
+            "a new port on the same address is the same caller");
+        assert!(status!(test::try_call_service(&app, call("10.9.0.2:4000")).await).is_success(), "another address is not");
+    }
+
+    /// Many accounts behind one address cannot multiply the allowance past the
+    /// address ceiling.
+    #[actix_web::test]
+    async fn many_accounts_share_one_address_ceiling() {
+        use crate::auth::jwt::{JwtSecret, create_token};
+        use crate::models::UserRole;
+        use actix_web::{App, HttpResponse, test, web};
+        let secret = JwtSecret("address-ceiling-test-secret".into());
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(JwtSecret(secret.0.clone())))
+                .wrap(actix_web::middleware::from_fn(throttle_exports))
+                .service(web::scope("/api").wrap(crate::auth::middleware::JwtMiddleware).route("/ping", web::get().to(HttpResponse::Ok))),
+        )
+        .await;
+        let per_person = global_per_minute() as usize;
+        let ceiling = per_address_per_minute() as usize;
+        let accounts = ceiling / per_person + 2;
+        let mut ok = 0usize;
+        let mut paced = 0usize;
+        let started = std::time::Instant::now();
+        for _ in 0..accounts {
+            let token = create_token(&secret, uuid::Uuid::new_v4(), None, UserRole::Teller, None, 1).unwrap();
+            for _ in 0..per_person {
+                let req = test::TestRequest::get()
+                    .uri("/api/ping")
+                    .insert_header(("Authorization", format!("Bearer {token}")))
+                    .peer_addr("10.9.9.9:5000".parse().unwrap())
+                    .to_request();
+                match test::try_call_service(&app, req).await {
+                    Ok(r) if r.status().is_success() => ok += 1,
+                    Ok(r) => assert_eq!(r.status(), actix_web::http::StatusCode::TOO_MANY_REQUESTS),
+                    Err(e) => {
+                        assert_eq!(e.error_response().status(), actix_web::http::StatusCode::TOO_MANY_REQUESTS);
+                        paced += 1;
+                    }
+                }
+            }
+        }
+        // The address bucket refills continuously while the loop runs.
+        let refilled = (started.elapsed().as_secs_f64() * per_address_per_minute() / 60.0).ceil() as usize;
+        assert!(ok <= ceiling + refilled, "{ok} requests passed one address, ceiling {ceiling} (+{refilled} refilled)");
+        assert!(ok < accounts * per_person, "the accounts did not multiply the allowance");
+        assert!(ok >= ceiling - 1, "the ceiling is reached, not undercut ({ok})");
+        assert!(paced > 0);
+    }
+
+    /// Two people at one address each get their own allowance, through the
+    /// real middleware stack order (the gate on the App, the JWT check inside a
+    /// scope); an anonymous caller is still keyed by address.
+    #[actix_web::test]
+    async fn people_behind_one_address_do_not_share_an_allowance() {
+        use crate::auth::jwt::{JwtSecret, create_token};
+        use crate::models::UserRole;
+        use actix_web::{App, HttpResponse, test, web};
+        let secret = JwtSecret("limiter-key-test-secret".into());
+        let token = |id| create_token(&secret, id, None, UserRole::Teller, None, 1).unwrap();
+        let (alice, bob) = (token(uuid::Uuid::new_v4()), token(uuid::Uuid::new_v4()));
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(JwtSecret(secret.0.clone())))
+                .wrap(actix_web::middleware::from_fn(throttle_exports))
+                .service(
+                    web::scope("/api")
+                        .wrap(crate::auth::middleware::JwtMiddleware)
+                        .route("/ping", web::get().to(HttpResponse::Ok)),
+                ),
+        )
+        .await;
+        let call = |bearer: String| {
+            test::TestRequest::get()
+                .uri("/api/ping")
+                .insert_header(("Authorization", format!("Bearer {bearer}")))
+                .peer_addr("10.0.0.7:5000".parse().unwrap())
+                .to_request()
+        };
+        let per_minute = global_per_minute() as usize;
+        for _ in 0..per_minute {
+            let r = test::call_service(&app, call(alice.clone())).await;
+            assert!(r.status().is_success());
+        }
+        let paced = test::try_call_service(&app, call(alice.clone())).await;
+        let status = match paced {
+            Ok(r) => r.status(),
+            Err(e) => e.error_response().status(),
+        };
+        assert_eq!(status, actix_web::http::StatusCode::TOO_MANY_REQUESTS, "alice spent hers");
+        let r = test::call_service(&app, call(bob.clone())).await;
+        assert!(r.status().is_success(), "bob, at the same address, has spent nothing");
+        // A forged bearer is not a person: it is keyed by the address.
+        let forged = JwtSecret("not-the-secret".into());
+        let fake = create_token(&forged, uuid::Uuid::new_v4(), None, UserRole::Teller, None, 1).unwrap();
+        let req = test::TestRequest::get()
+            .uri("/api/ping")
+            .insert_header(("Authorization", format!("Bearer {fake}")))
+            .peer_addr("10.0.0.7:5000".parse().unwrap())
+            .app_data(web::Data::new(JwtSecret(secret.0.clone())))
+            .to_srv_request();
+        assert_eq!(limiter_key(&req), "10.0.0.7");
+    }
 
     #[test]
     fn the_bucket_refills_rather_than_opening_on_the_minute() {

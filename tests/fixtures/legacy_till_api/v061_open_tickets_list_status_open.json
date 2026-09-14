@@ -1,0 +1,9 @@
+{
+  "body": [],
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/open-tickets?branch_id=10000000-0000-4000-8000-0000000000b1&status=open"
+  },
+  "status": 200
+}

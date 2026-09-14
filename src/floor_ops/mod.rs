@@ -87,8 +87,19 @@ pub(crate) async fn transfer_view<'e, E>(
 where
     E: PgExecutor<'e>,
 {
+    Ok(transfer_views(executor, &[id]).await?.pop())
+}
+
+/// Many transfer views in one query (sync pull projection), in no particular order.
+pub(crate) async fn transfer_views<'e, E>(
+    executor: E,
+    ids: &[Uuid],
+) -> Result<Vec<TransferView>, AppError>
+where
+    E: PgExecutor<'e>,
+{
     #[allow(clippy::type_complexity)]
-    let row: Option<(
+    let rows: Vec<(
         Uuid,
         Uuid,
         String,
@@ -109,46 +120,49 @@ where
                 (SELECT ot.ticket_ref FROM open_tickets ot WHERE ot.id = t.occupant_id), \
                 t.from_table_id, t.target_section_id, t.target_table_id, t.note, t.status, \
                 t.requested_by, t.fulfilled_table_id, t.created_at, t.resolved_at, t.updated_at \
-         FROM table_transfer_requests t WHERE t.id = $1",
+         FROM table_transfer_requests t WHERE t.id = ANY($1)",
     )
-    .bind(id)
-    .fetch_optional(executor)
+    .bind(ids)
+    .fetch_all(executor)
     .await?;
-    Ok(row.map(
-        |(
-            id,
-            branch_id,
-            occupant_kind,
-            occupant_id,
-            occupant_label,
-            from_table_id,
-            target_section_id,
-            target_table_id,
-            note,
-            status,
-            requested_by,
-            fulfilled_table_id,
-            created_at,
-            resolved_at,
-            updated_at,
-        )| TransferView {
-            id,
-            branch_id,
-            occupant_kind,
-            occupant_id,
-            occupant_label,
-            from_table_id,
-            target_section_id,
-            target_table_id,
-            note,
-            status,
-            requested_by,
-            fulfilled_table_id,
-            created_at,
-            resolved_at,
-            updated_at,
-        },
-    ))
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                branch_id,
+                occupant_kind,
+                occupant_id,
+                occupant_label,
+                from_table_id,
+                target_section_id,
+                target_table_id,
+                note,
+                status,
+                requested_by,
+                fulfilled_table_id,
+                created_at,
+                resolved_at,
+                updated_at,
+            )| TransferView {
+                id,
+                branch_id,
+                occupant_kind,
+                occupant_id,
+                occupant_label,
+                from_table_id,
+                target_section_id,
+                target_table_id,
+                note,
+                status,
+                requested_by,
+                fulfilled_table_id,
+                created_at,
+                resolved_at,
+                updated_at,
+            },
+        )
+        .collect())
 }
 
 // ── Table occupancy: the ledger ──────────────────────────────────────────────
@@ -214,7 +228,7 @@ impl Hand {
         E: PgExecutor<'e>,
     {
         let till_id: Option<Uuid> = sqlx::query_scalar(
-            "SELECT till_id FROM shifts \
+            "SELECT id FROM tills \
               WHERE teller_id = $1 AND branch_id = $2 AND status = 'open' \
               ORDER BY opened_at DESC LIMIT 1",
         )
@@ -410,9 +424,10 @@ pub(crate) struct Taken {
 /// * another hand's hold or a booking  -> refused `TABLE_HELD`, when holding;
 /// * plates still on it (`dirty`)      -> refused `TABLE_DIRTY`, whoever asks.
 ///
-/// "Same hand" is the same user or the same till: a draft parked by the
-/// morning teller is re-held by the afternoon one on the same till after a
-/// shift handover, and that is one hold, not a fight over the table.
+/// "Same hand" is the same user, or ANY teller with an open till at the
+/// branch (holds are branch-wide): a draft parked by the morning teller is
+/// picked up by the afternoon one, and the hold moves to the afternoon
+/// teller's till -- one hold, not a fight over the table.
 pub(crate) async fn take_table(
     tx: &mut Transaction<'_, Postgres>,
     table_id: Uuid,
@@ -440,9 +455,15 @@ pub(crate) async fn take_table(
             ));
         }
         (Some(o), Holder::Party) => {
-            let same_hand = o.started_by == Some(by.user_id)
-                || (by.till_id.is_some() && o.started_till_id == by.till_id);
+            let same_hand = o.started_by == Some(by.user_id) || by.till_id.is_some();
             if o.held_by == "party" && same_hand {
+                if by.till_id.is_some() && o.started_till_id != by.till_id {
+                    sqlx::query("UPDATE table_occupancies SET started_till_id = $2 WHERE id = $1")
+                        .bind(o.id)
+                        .bind(by.till_id)
+                        .execute(&mut **tx)
+                        .await?;
+                }
                 return Ok(Taken { landed: false });
             }
             return Err(refused(

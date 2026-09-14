@@ -236,20 +236,19 @@ pub struct Ground {
 }
 
 impl Ground {
-    pub async fn load<'e, E>(
-        exec: E,
+    /// On the caller's connection — inside a booking write that is its
+    /// transaction, so the availability answer never takes a second one.
+    pub async fn load(
+        conn: &mut sqlx::PgConnection,
         branch_id: Uuid,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
         exclude_booking: Option<Uuid>,
-    ) -> Result<Self, AppError>
-    where
-        E: PgExecutor<'e> + Copy,
-    {
+    ) -> Result<Self, AppError> {
         Ok(Self {
-            tables: load_tables(exec, branch_id).await?,
-            claims: load_claims(exec, branch_id, from, to, exclude_booking).await?,
-            occupied: occupied_now(exec, branch_id).await?,
+            tables: load_tables(&mut *conn, branch_id).await?,
+            claims: load_claims(&mut *conn, branch_id, from, to, exclude_booking).await?,
+            occupied: occupied_now(&mut *conn, branch_id).await?,
         })
     }
 

@@ -96,6 +96,18 @@ sentry-actix       = "0.49"
 # turns those into breadcrumbs and an issue arrives carrying the queries that
 # ran just before it. See `observability::tracing_layer` for the mapping.
 sentry-tracing     = "0.49"
+# Assets (src/assets): one ingest pipeline. `webp` wraps libwebp (vendored C
+# build) for the lossy q80/m6 encoder the image crate lacks; `zstd` compresses
+# Lottie JSON once; `tar` writes deterministic ustar headers for base bundles and
+# the top-up stream; `hmac` signs org-scoped asset URLs; `infer` sniffs magic
+# bytes so a client MIME/extension is never trusted.
+webp               = "0.3"
+zstd               = "0.13"
+tar                = "0.4"
+hmac               = "0.12"
+infer              = "0.19"
+url                = "2"
+bytes              = "1"
 
 [profile.release]
 lto = true
@@ -144,6 +156,10 @@ path = "src/bin/backfill_menu_unification.rs"
 [[bin]]
 name = "bundle-margin-flip"
 path = "src/bin/bundle_margin_flip.rs"
+
+[[bin]]
+name = "backfill-assets"
+path = "src/bin/backfill-assets.rs"
 
 [[bin]]
 name = "fuzz-token"

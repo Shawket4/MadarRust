@@ -1,0 +1,75 @@
+{
+  "body": [
+    {
+      "bill": {
+        "discount_amount": 0,
+        "service_charge_amount": 0,
+        "service_charge_rate": 0.0,
+        "subtotal": 10000,
+        "tax_amount": 0,
+        "tax_inclusive": false,
+        "tax_rate": 0.0,
+        "total": 10000
+      },
+      "booking_id": null,
+      "branch_id": "10000000-0000-4000-8000-0000000000b1",
+      "customer_name": null,
+      "discount_id": null,
+      "discount_type": null,
+      "discount_value": null,
+      "guest_count": 3,
+      "id": "987c4bfd-e730-4297-b5a9-44aef9075147",
+      "items": [
+        {
+          "id": "7aa48aae-6d48-47d9-ab67-d518e7acb1b7",
+          "line": {
+            "input": {
+              "addons": [],
+              "bundle_components": [],
+              "bundle_id": null,
+              "menu_item_id": "10000000-0000-4000-8000-0000000e0001",
+              "notes": null,
+              "optional_field_ids": [],
+              "quantity": 2,
+              "size_label": null,
+              "unit_price": 5000
+            },
+            "line_total": 10000,
+            "modifiers": [],
+            "name": "Latte",
+            "qty": 2,
+            "size_label": null,
+            "unit_price": 5000
+          },
+          "line_total": 10000,
+          "menu_item_id": "10000000-0000-4000-8000-0000000e0001",
+          "round_fired_at": "2026-01-01T00:00:00Z",
+          "round_number": 1,
+          "voided": false
+        }
+      ],
+      "notes": null,
+      "opened_at": "2026-01-01T00:00:00Z",
+      "opened_by": "10000000-0000-4000-8000-00000000aa01",
+      "opened_by_name": "Waiter Whisky",
+      "order_id": null,
+      "ready": false,
+      "ready_at": null,
+      "settled_at": null,
+      "status": "open",
+      "subtotal": 10000,
+      "table_id": null,
+      "ticket_ref": "T-GLDB-YYMMDD-0001",
+      "timezone": "Africa/Cairo",
+      "void_note": null,
+      "void_reason": null,
+      "voided_at": null
+    }
+  ],
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/open-tickets?branch_id=10000000-0000-4000-8000-0000000000b1"
+  },
+  "status": 200
+}

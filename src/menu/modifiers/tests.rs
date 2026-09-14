@@ -288,7 +288,7 @@ async fn seed_order_with_addon(pool: &PgPool, org: Uuid, item: Uuid, option_id: 
     let branch = seed_branch(pool, org).await;
     let teller = seed_user(pool, org).await;
     let shift: Uuid = sqlx::query_scalar(
-        "INSERT INTO shifts (branch_id, teller_id) VALUES ($1, $2) RETURNING id",
+        "INSERT INTO tills (branch_id, teller_id) VALUES ($1, $2) RETURNING id",
     )
     .bind(branch)
     .bind(teller)
@@ -296,7 +296,7 @@ async fn seed_order_with_addon(pool: &PgPool, org: Uuid, item: Uuid, option_id: 
     .await
     .unwrap();
     let order: Uuid = sqlx::query_scalar(
-        "INSERT INTO orders (branch_id, shift_id, teller_id, order_number, status, \
+        "INSERT INTO orders (branch_id, till_id, teller_id, order_number, status, \
                              payment_method, subtotal, total_amount, order_ref) \
          VALUES ($1, $2, $3, 1, 'completed', 'cash', 4000, 4000, gen_random_uuid()::text) \
          RETURNING id",

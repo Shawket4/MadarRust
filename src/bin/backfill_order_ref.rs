@@ -179,7 +179,7 @@ async fn run(
             FROM orders o
             JOIN branches b ON b.id = o.branch_id
             JOIN organizations bo ON bo.id = b.org_id
-            JOIN shifts   s ON s.id = o.shift_id
+            JOIN tills   s ON s.id = o.till_id
             WHERE o.order_ref IS NULL
               AND ($1::uuid IS NULL OR b.org_id   = $1)
               AND ($2::uuid IS NULL OR o.branch_id = $2)

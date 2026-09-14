@@ -1,0 +1,73 @@
+{
+  "body": {
+    "bill": {
+      "discount_amount": 0,
+      "service_charge_amount": 0,
+      "service_charge_rate": 0.0,
+      "subtotal": 5000,
+      "tax_amount": 0,
+      "tax_inclusive": false,
+      "tax_rate": 0.0,
+      "total": 5000
+    },
+    "booking_id": null,
+    "branch_id": "10000000-0000-4000-8000-0000000000a1",
+    "customer_name": null,
+    "discount_id": null,
+    "discount_type": null,
+    "discount_value": null,
+    "guest_count": 2,
+    "id": "a58d30fe-5e26-4707-9cda-aa901a0eded2",
+    "items": [
+      {
+        "id": "54a225cb-a74e-4178-a89d-fcbb7693b4c8",
+        "line": {
+          "input": {
+            "addons": [],
+            "bundle_components": [],
+            "bundle_id": null,
+            "menu_item_id": "10000000-0000-4000-8000-0000000e0001",
+            "notes": null,
+            "optional_field_ids": [],
+            "quantity": 1,
+            "size_label": null,
+            "unit_price": 5000
+          },
+          "line_total": 5000,
+          "modifiers": [],
+          "name": "Latte",
+          "qty": 1,
+          "size_label": null,
+          "unit_price": 5000
+        },
+        "line_total": 5000,
+        "menu_item_id": "10000000-0000-4000-8000-0000000e0001",
+        "round_fired_at": "2026-01-01T00:00:00Z",
+        "round_number": 1,
+        "voided": false
+      }
+    ],
+    "notes": null,
+    "opened_at": "2026-01-01T00:00:00Z",
+    "opened_by": "10000000-0000-4000-8000-00000000aa01",
+    "opened_by_name": "Waiter Whisky",
+    "order_id": "2a818841-f495-4d29-803a-32c92cbbaf61",
+    "ready": false,
+    "ready_at": null,
+    "settled_at": "2026-01-01T00:00:00Z",
+    "status": "settled",
+    "subtotal": 5000,
+    "table_id": null,
+    "ticket_ref": "T-GLDA-YYMMDD-0001",
+    "timezone": "Africa/Cairo",
+    "void_note": null,
+    "void_reason": null,
+    "voided_at": null
+  },
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/open-tickets/a58d30fe-5e26-4707-9cda-aa901a0eded2"
+  },
+  "status": 200
+}

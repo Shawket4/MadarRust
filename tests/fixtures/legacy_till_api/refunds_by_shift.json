@@ -1,0 +1,33 @@
+{
+  "body": {
+    "refund_count": 1,
+    "refunded_amount": 1000,
+    "refunded_cash": 1000,
+    "refunds": [
+      {
+        "amount": 1000,
+        "branch_id": "10000000-0000-4000-8000-0000000000a1",
+        "client_ref": "50000000-0000-4000-8000-000000000001",
+        "created_at": "2026-01-01T00:00:00Z",
+        "id": "d4e9618e-3cef-4f5f-84f2-6d9d59c842b0",
+        "is_cash": true,
+        "issued_at": "2026-01-01T00:00:00Z",
+        "issued_by": "10000000-0000-4000-8000-00000000ee0a",
+        "issued_by_name": "Teller Alpha",
+        "lines": [],
+        "method": "cash",
+        "note": null,
+        "order_id": "5ac9c381-f94d-4935-a51c-c83e2c43c245",
+        "reason": "quality_issue",
+        "shift_id": "20000000-0000-4000-8000-0000000000a1"
+      }
+    ],
+    "shift_id": "20000000-0000-4000-8000-0000000000a1"
+  },
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/refunds/shift/20000000-0000-4000-8000-0000000000a1"
+  },
+  "status": 200
+}

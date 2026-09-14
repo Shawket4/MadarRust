@@ -1,0 +1,35 @@
+{
+  "body": {
+    "branch_id": "10000000-0000-4000-8000-0000000000c1",
+    "branch_name": null,
+    "cash_discrepancy": null,
+    "closed_at": "2026-01-01T00:00:00Z",
+    "closed_by": "10000000-0000-4000-8000-00000000ad01",
+    "closing_cash_declared": null,
+    "closing_cash_system": 0,
+    "force_close_reason": "golden capture",
+    "force_closed_at": "2026-01-01T00:00:00Z",
+    "force_closed_by": "10000000-0000-4000-8000-00000000ad01",
+    "id": "20000000-0000-4000-8000-0000000000f1",
+    "notes": null,
+    "opened_at": "2026-01-01T00:00:00Z",
+    "opening_cash": 0,
+    "opening_cash_edit_reason": null,
+    "opening_cash_original": null,
+    "opening_cash_was_edited": false,
+    "status": "force_closed",
+    "teller_id": "10000000-0000-4000-8000-00000000ad01",
+    "teller_name": "Golden Admin",
+    "till_id": null,
+    "till_name": null,
+    "timezone": "Africa/Cairo"
+  },
+  "request": {
+    "body": {
+      "reason": "golden capture"
+    },
+    "method": "POST",
+    "path": "/shifts/20000000-0000-4000-8000-0000000000f1/force-close"
+  },
+  "status": 200
+}

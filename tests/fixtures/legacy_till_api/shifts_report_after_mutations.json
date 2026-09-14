@@ -1,0 +1,85 @@
+{
+  "body": {
+    "cash_adjustments": 0,
+    "cash_in_refunded_sales": 0,
+    "cash_movements": [
+      {
+        "amount": 500,
+        "corrects_id": null,
+        "corrects_kind": null,
+        "created_at": "2026-01-01T00:00:00Z",
+        "id": "6b179fb4-3348-4696-b96f-f82182bf4f13",
+        "kind": "pay_in",
+        "moved_by_name": "Teller Alpha",
+        "note": "coins"
+      },
+      {
+        "amount": -1500,
+        "corrects_id": null,
+        "corrects_kind": null,
+        "created_at": "2026-01-01T00:00:00Z",
+        "id": "06fd7dad-a123-4f10-8279-1c23525cc9ab",
+        "kind": "pay_out",
+        "moved_by_name": "Teller Alpha",
+        "note": "golden pay out"
+      }
+    ],
+    "cash_movements_in": 500,
+    "cash_movements_net": -1000,
+    "cash_movements_out": 1500,
+    "cash_tips": 0,
+    "expected_cash": 20000,
+    "net_payments": 20000,
+    "non_cash_tips": 0,
+    "payment_summary": [
+      {
+        "is_cash": true,
+        "order_count": 3,
+        "payment_method": "cash",
+        "total": 20000
+      }
+    ],
+    "printed_at": "2026-01-01T00:00:00Z",
+    "refunds_issued_amount": 1000,
+    "refunds_issued_cash": 1000,
+    "refunds_issued_count": 1,
+    "safe_drops": 0,
+    "shift": {
+      "branch_id": "10000000-0000-4000-8000-0000000000a1",
+      "branch_name": null,
+      "cash_discrepancy": null,
+      "closed_at": null,
+      "closed_by": null,
+      "closing_cash_declared": null,
+      "closing_cash_system": null,
+      "force_close_reason": null,
+      "force_closed_at": null,
+      "force_closed_by": null,
+      "id": "20000000-0000-4000-8000-0000000000a1",
+      "notes": null,
+      "opened_at": "2026-01-01T00:00:00Z",
+      "opening_cash": 2000,
+      "opening_cash_edit_reason": null,
+      "opening_cash_original": 2000,
+      "opening_cash_was_edited": false,
+      "status": "open",
+      "teller_id": "10000000-0000-4000-8000-00000000ee0a",
+      "teller_name": "Teller Alpha",
+      "till_id": "3635fec2-1026-492a-bfea-0b030739d277",
+      "till_name": "Till 1",
+      "timezone": "Africa/Cairo"
+    },
+    "standard_float": null,
+    "suggested_safe_drop": null,
+    "timezone": "Africa/Cairo",
+    "total_payments": 20000,
+    "total_tips": 0,
+    "voided_amount": 5000
+  },
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/shifts/20000000-0000-4000-8000-0000000000a1/report"
+  },
+  "status": 200
+}

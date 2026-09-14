@@ -1,0 +1,13 @@
+{
+  "body": {
+    "has_open_shift": false,
+    "open_shift": null,
+    "suggested_opening_cash": 10000
+  },
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/shifts/branches/10000000-0000-4000-8000-0000000000a1/current"
+  },
+  "status": 200
+}

@@ -144,7 +144,7 @@ pub async fn table(pool: web::Data<PgPool>, id: web::Path<Uuid>) -> Result<HttpR
     let (branch_id, org_id, label, branch_name) =
         row.ok_or_else(|| AppError::NotFound("No table at that code".into()))?;
 
-    let accepting = crate::shifts::handlers::branch_has_open_shift(pool.get_ref(), branch_id)
+    let accepting = crate::tills::handlers::branch_has_open_till(pool.get_ref(), branch_id)
         .await
         .unwrap_or(false);
 
@@ -302,7 +302,7 @@ pub async fn create_table_order(
     // The branch-open gate, explicitly. `ActingContext::guest` is not a replay
     // — see its note — so nothing is skipping this on our behalf, and a scan
     // while the shop is shut must be refused before anything is written.
-    if !crate::shifts::handlers::branch_has_open_shift(pool.get_ref(), branch_id).await? {
+    if !crate::tills::handlers::branch_has_open_till(pool.get_ref(), branch_id).await? {
         return Err(AppError::Conflict("The kitchen is closed right now".into()));
     }
 

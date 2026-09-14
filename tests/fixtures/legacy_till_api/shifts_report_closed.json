@@ -1,0 +1,68 @@
+{
+  "body": {
+    "cash_adjustments": 0,
+    "cash_in_refunded_sales": 0,
+    "cash_movements": [
+      {
+        "amount": 2000,
+        "corrects_id": null,
+        "corrects_kind": null,
+        "created_at": "2026-01-01T00:00:00Z",
+        "id": "98739161-2c9b-4f0a-b14f-430a0e80aa9b",
+        "kind": "pay_in",
+        "moved_by_name": "Teller Alpha",
+        "note": "float"
+      }
+    ],
+    "cash_movements_in": 2000,
+    "cash_movements_net": 2000,
+    "cash_movements_out": 0,
+    "cash_tips": 0,
+    "expected_cash": 2000,
+    "net_payments": 0,
+    "non_cash_tips": 0,
+    "payment_summary": [],
+    "printed_at": "2026-01-01T00:00:00Z",
+    "refunds_issued_amount": 0,
+    "refunds_issued_cash": 0,
+    "refunds_issued_count": 0,
+    "safe_drops": 0,
+    "shift": {
+      "branch_id": "10000000-0000-4000-8000-0000000000a1",
+      "branch_name": null,
+      "cash_discrepancy": 0,
+      "closed_at": "2026-01-01T00:00:00Z",
+      "closed_by": "10000000-0000-4000-8000-00000000ee0a",
+      "closing_cash_declared": 2000,
+      "closing_cash_system": 2000,
+      "force_close_reason": null,
+      "force_closed_at": null,
+      "force_closed_by": null,
+      "id": "20000000-0000-4000-8000-0000000000c1",
+      "notes": null,
+      "opened_at": "2026-01-01T00:00:00Z",
+      "opening_cash": 0,
+      "opening_cash_edit_reason": null,
+      "opening_cash_original": null,
+      "opening_cash_was_edited": false,
+      "status": "closed",
+      "teller_id": "10000000-0000-4000-8000-00000000ee0a",
+      "teller_name": "Teller Alpha",
+      "till_id": "3635fec2-1026-492a-bfea-0b030739d277",
+      "till_name": "Till 1",
+      "timezone": "Africa/Cairo"
+    },
+    "standard_float": null,
+    "suggested_safe_drop": null,
+    "timezone": "Africa/Cairo",
+    "total_payments": 0,
+    "total_tips": 0,
+    "voided_amount": 0
+  },
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/shifts/20000000-0000-4000-8000-0000000000c1/report"
+  },
+  "status": 200
+}

@@ -19,8 +19,8 @@ use crate::orders::handlers::{
 use crate::permissions::checker::check_permission;
 use crate::realtime::event::{BranchEvent, Topic};
 use crate::realtime::hub::BranchEventHub;
-use crate::shifts::handlers::branch_has_open_shift;
 use crate::sync::ActingContext;
+use crate::tills::handlers::branch_has_open_till;
 
 // ── Requests ──────────────────────────────────────────────────
 
@@ -80,7 +80,8 @@ pub const DISCOUNT_NONE: &str = "none";
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct SettleOpenTicketRequest {
-    pub shift_id: Uuid,
+    #[serde(alias = "shift_id")]
+    pub till_id: Uuid,
     pub payment_method: String,
     /// Settle-time discount. ABSENT (all three fields) means the waiter's
     /// ticket discount is inherited, as it always was — but the till can now
@@ -215,7 +216,10 @@ async fn require_ticket_branch_access(
     require_branch_access(pool, claims, branch_id).await
 }
 
-async fn table_label(pool: &PgPool, table_id: Option<Uuid>) -> Result<Option<String>, AppError> {
+async fn table_label<'e, E>(pool: E, table_id: Option<Uuid>) -> Result<Option<String>, AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     match table_id {
         Some(t) => Ok(
             sqlx::query_scalar("SELECT label FROM branch_tables WHERE id = $1")
@@ -283,7 +287,10 @@ pub(crate) async fn create_open_ticket_inner(
     }
     // The branch must be operating (any till open) to fire to the kitchen. Replay
     // is recorded history (the gate was answered LAN-first at fire time) → skip.
-    if !actor.replay && !branch_has_open_shift(pool.get_ref(), body.branch_id).await? {
+    if !actor.replay
+        && !crate::tills::handlers::branch_has_open_till(pool.get_ref(), body.branch_id).await?
+    {
+        crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ERROR_WORDING, "fire_no_open_shift");
         return Err(AppError::Conflict(
             "No open shift at this branch — open a till first".into(),
         ));
@@ -331,6 +338,17 @@ pub(crate) async fn create_open_ticket_inner(
             .await?
             .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
 
+    // Resolve the round against the catalogue BEFORE taking the transaction:
+    // one connection per request, never a second one while `tx` is held.
+    let lines = super::resolve_ticket_lines(
+        pool.get_ref(),
+        org_id,
+        body.branch_id,
+        &body.items,
+        client_prices(&actor),
+    )
+    .await?;
+
     let now = chrono::Utc::now();
     let mut tx = pool.get_ref().begin().await?;
     let ticket_ref = mint_ticket_ref(&mut tx, body.branch_id, now).await?;
@@ -350,7 +368,7 @@ pub(crate) async fn create_open_ticket_inner(
         None => false,
     };
     let table_id = if claimable { body.table_id } else { None };
-    let label = table_label(pool.get_ref(), table_id).await?;
+    let label = table_label(&mut *tx, table_id).await?;
 
     let open_ticket_id: Uuid = sqlx::query_scalar(
         "INSERT INTO open_tickets \
@@ -395,16 +413,14 @@ pub(crate) async fn create_open_ticket_inner(
     let kt_id = Some(
         fire_round(
             &mut tx,
-            pool.get_ref(),
             org_id,
             body.branch_id,
             open_ticket_id,
             actor.teller_id,
             body.round_idempotency_key,
-            &body.items,
+            lines,
             label.as_deref(),
             Some(ticket_ref.as_str()),
-            client_prices(&actor),
         )
         .await?,
     );
@@ -514,21 +530,27 @@ pub(crate) async fn add_round_inner(
     }
 
     let label = table_label(pool.get_ref(), table_id).await?;
+    let lines = super::resolve_ticket_lines(
+        pool.get_ref(),
+        org_id,
+        branch_id,
+        &body.items,
+        client_prices(&actor),
+    )
+    .await?;
     let mut tx = pool.get_ref().begin().await?;
     // The round number is allocated by the database under the ticket's row
     // lock (see `fire_round`) — never computed here from MAX + 1.
     let kt_id = fire_round(
         &mut tx,
-        pool.get_ref(),
         org_id,
         branch_id,
         id,
         actor.teller_id,
         body.idempotency_key,
-        &body.items,
+        lines,
         label.as_deref(),
         ticket_ref.as_deref(),
-        client_prices(&actor),
     )
     .await?;
     tx.commit().await?;
@@ -1241,7 +1263,10 @@ pub(crate) async fn settle_open_ticket_inner(
         branch_id,
         loyalty_customer_id: body.loyalty_customer_id,
         loyalty_redemptions: redemptions,
-        shift_id: body.shift_id,
+        till_id: body.till_id,
+        device_id: None,
+        device_code: None,
+        verification: None,
         payment_method: body.payment_method.clone(),
         customer_name,
         notes,

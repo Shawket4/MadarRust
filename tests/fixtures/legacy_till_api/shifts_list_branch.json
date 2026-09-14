@@ -1,0 +1,66 @@
+{
+  "body": {
+    "data": [
+      {
+        "branch_id": "10000000-0000-4000-8000-0000000000a1",
+        "branch_name": "Golden A",
+        "cash_discrepancy": null,
+        "closed_at": null,
+        "closed_by": null,
+        "closing_cash_declared": null,
+        "closing_cash_system": null,
+        "force_close_reason": null,
+        "force_closed_at": null,
+        "force_closed_by": null,
+        "id": "20000000-0000-4000-8000-0000000000a1",
+        "notes": null,
+        "opened_at": "2026-01-01T00:00:00Z",
+        "opening_cash": 2000,
+        "opening_cash_edit_reason": null,
+        "opening_cash_original": 2000,
+        "opening_cash_was_edited": false,
+        "status": "open",
+        "teller_id": "10000000-0000-4000-8000-00000000ee0a",
+        "teller_name": "Teller Alpha",
+        "till_id": "3635fec2-1026-492a-bfea-0b030739d277",
+        "till_name": "Till 1",
+        "timezone": "Africa/Cairo"
+      },
+      {
+        "branch_id": "10000000-0000-4000-8000-0000000000a1",
+        "branch_name": "Golden A",
+        "cash_discrepancy": 0,
+        "closed_at": "2026-01-01T00:00:00Z",
+        "closed_by": "10000000-0000-4000-8000-00000000ee0a",
+        "closing_cash_declared": 2000,
+        "closing_cash_system": 2000,
+        "force_close_reason": null,
+        "force_closed_at": null,
+        "force_closed_by": null,
+        "id": "20000000-0000-4000-8000-0000000000c1",
+        "notes": null,
+        "opened_at": "2026-01-01T00:00:00Z",
+        "opening_cash": 0,
+        "opening_cash_edit_reason": null,
+        "opening_cash_original": null,
+        "opening_cash_was_edited": false,
+        "status": "closed",
+        "teller_id": "10000000-0000-4000-8000-00000000ee0a",
+        "teller_name": "Teller Alpha",
+        "till_id": "3635fec2-1026-492a-bfea-0b030739d277",
+        "till_name": "Till 1",
+        "timezone": "Africa/Cairo"
+      }
+    ],
+    "page": 1,
+    "per_page": 3,
+    "total": 2,
+    "total_pages": 1
+  },
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/shifts/branches/10000000-0000-4000-8000-0000000000a1?page=1&per_page=3"
+  },
+  "status": 200
+}

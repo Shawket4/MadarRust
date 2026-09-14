@@ -11,6 +11,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("", web::post().to(handlers::create_branch))
             .route("/{id}", web::get().to(handlers::get_branch))
             .route("/{id}", web::put().to(handlers::update_branch))
+            .route("/{id}", web::patch().to(handlers::patch_branch))
             .route("/{id}", web::delete().to(handlers::delete_branch))
             // QR
             .route("/{id}/qr", web::get().to(qr_handlers::branch_qr))

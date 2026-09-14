@@ -526,7 +526,7 @@ fn addon_cost(deductions: &[SnapshotDeduction], addon_item_id: Uuid) -> Option<i
 /// refused rather than recorded.
 pub struct FinalizeCtx<'a> {
     pub branch_id: Uuid,
-    pub shift_id: Uuid,
+    pub till_id: Uuid,
     pub teller_id: Uuid,
     pub payment_method: &'a str,
     pub is_cash: bool,
@@ -580,9 +580,9 @@ pub async fn apply_snapshot(
     deductions: &[SnapshotDeduction],
 ) -> Result<(MaterializedOrder, Vec<String>), AppError> {
     let order_number: i32 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(order_number), 0) + 1 FROM orders WHERE shift_id = $1",
+        "SELECT COALESCE(MAX(order_number), 0) + 1 FROM orders WHERE till_id = $1",
     )
-    .bind(ctx.shift_id)
+    .bind(ctx.till_id)
     .fetch_one(&mut **tx)
     .await?;
 
@@ -623,7 +623,7 @@ pub async fn apply_snapshot(
     let order_id: Uuid = sqlx::query_scalar(
         r#"
         INSERT INTO orders
-            (branch_id, shift_id, teller_id, order_number,
+            (branch_id, till_id, teller_id, order_number,
              payment_method, subtotal,
              discount_type, discount_value, discount_amount, discount_id,
              tax_amount, total_amount, tip_amount, status,
@@ -643,7 +643,7 @@ pub async fn apply_snapshot(
         "#,
     )
     .bind(ctx.branch_id)
-    .bind(ctx.shift_id)
+    .bind(ctx.till_id)
     .bind(ctx.teller_id)
     .bind(order_number)
     .bind(ctx.payment_method)

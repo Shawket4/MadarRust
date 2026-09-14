@@ -13,7 +13,7 @@ use crate::floor_ops::handlers::{
     CreateFloorTransferRequest, FulfillTransferRequest, SwapTablesRequest,
 };
 use crate::orders::handlers::{CreateOrderRequest, VoidOrderRequest};
-use crate::shifts::handlers::{CashMovementRequest, CloseShiftRequest, OpenShiftRequest};
+use crate::tills::handlers::{CashMovementRequest, CloseTillRequest, OpenTillRequest};
 use crate::tickets::handlers::{
     AddRoundRequest, CreateOpenTicketRequest, SettleOpenTicketRequest, VoidOpenTicketRequest,
 };
@@ -36,18 +36,35 @@ pub struct ReleaseReplay {
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ReplayOp {
-    OpenShift {
+    /// Permanent alias `open_shift` (POS v0.5.1 / v0.6.0).
+    #[serde(alias = "open_shift")]
+    OpenTill {
         teller_id: Uuid,
         branch_id: Uuid,
-        request: OpenShiftRequest,
+        #[serde(default)]
+        device_id: Option<Uuid>,
+        #[serde(default)]
+        device_code: Option<String>,
+        #[serde(default)]
+        verification: Option<String>,
+        request: OpenTillRequest,
     },
-    CloseShift {
+    /// Permanent alias `close_shift`.
+    #[serde(alias = "close_shift")]
+    CloseTill {
         teller_id: Uuid,
-        shift_id: Uuid,
-        request: CloseShiftRequest,
+        #[serde(alias = "shift_id")]
+        till_id: Uuid,
+        #[serde(default)]
+        device_id: Option<Uuid>,
+        request: CloseTillRequest,
     },
     CreateOrder {
         teller_id: Uuid,
+        #[serde(default)]
+        device_id: Option<Uuid>,
+        #[serde(default)]
+        device_code: Option<String>,
         request: CreateOrderRequest,
     },
     VoidOrder {
@@ -77,7 +94,10 @@ pub enum ReplayOp {
     },
     CashMovement {
         teller_id: Uuid,
-        shift_id: Uuid,
+        #[serde(alias = "shift_id")]
+        till_id: Uuid,
+        #[serde(default)]
+        device_id: Option<Uuid>,
         request: CashMovementRequest,
     },
     // Open-ticket ops. Typically a waiter fires and adds rounds, the cashier
@@ -195,8 +215,8 @@ pub enum ReplayOp {
 impl ReplayOp {
     fn teller_id(&self) -> Uuid {
         match self {
-            ReplayOp::OpenShift { teller_id, .. }
-            | ReplayOp::CloseShift { teller_id, .. }
+            ReplayOp::OpenTill { teller_id, .. }
+            | ReplayOp::CloseTill { teller_id, .. }
             | ReplayOp::CreateOrder { teller_id, .. }
             | ReplayOp::VoidOrder { teller_id, .. }
             | ReplayOp::RefundOrder { teller_id, .. }
@@ -250,9 +270,9 @@ impl ReplayOp {
     /// re-created the drift this function exists to prevent.
     fn required_permissions(&self) -> &'static [(&'static str, &'static str)] {
         match self {
-            ReplayOp::OpenShift { .. } => &[("shifts", "create")],
-            ReplayOp::CloseShift { .. } => &[("shifts", "update")],
-            ReplayOp::CashMovement { .. } => &[("shifts", "update")],
+            ReplayOp::OpenTill { .. } => &[("tills", "create")],
+            ReplayOp::CloseTill { .. } => &[("tills", "update")],
+            ReplayOp::CashMovement { .. } => &[("tills", "update")],
             ReplayOp::CreateOrder { .. } => &[("orders", "create")],
             // A void is its own rung. Ringing up is `create`; voiding is
             // `delete` — nothing hard-deletes an order, so the rung was free,
@@ -315,6 +335,13 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
         .ok_or_else(|| AppError::Unauthorized("Missing authentication".into()))
 }
 
+/// An old envelope names the till `shift_id`: at the top (`close_shift`,
+/// `cash_movement`) or inside the request (`create_order`, `settle_open_ticket`,
+/// `refund_order`).
+pub fn replay_names_shift_id(body: &serde_json::Value) -> bool {
+    body.get("shift_id").is_some() || body.get("request").and_then(|r| r.get("shift_id")).is_some()
+}
+
 /// POST /sync/replay — flush ONE queued op, attributed to its embedded teller.
 ///
 /// Authorization, in two parts that answer two different questions:
@@ -338,14 +365,25 @@ pub async fn replay(
     req: HttpRequest,
     pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
-    body: web::Json<ReplayOp>,
+    body: web::Json<serde_json::Value>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
+    // Old POS (v0.5.1 / v0.6.0) queue `open_shift` / `close_shift`; their acks
+    // keep the legacy `Shift` / `CloseShiftResponse` shapes.
+    let legacy_op = matches!(body.get("op").and_then(|v| v.as_str()), Some("open_shift" | "close_shift"));
+    if legacy_op {
+        crate::client_seen::legacy_hit(crate::client_seen::KIND_REPLAY_LEGACY_OP);
+    }
+    if replay_names_shift_id(&body) {
+        crate::client_seen::legacy_hit(crate::client_seen::KIND_REPLAY_SHIFT_ID_FIELD);
+    }
     let token_org = claims
         .org_id()
         .ok_or_else(|| AppError::Unauthorized("Token has no organization".into()))?;
 
-    let op = body.into_inner();
+    let header_device = crate::devices::DeviceHeader::from_request_headers(&req);
+    let op: ReplayOp = serde_json::from_value(body.into_inner())
+        .map_err(|e| AppError::BadRequest(format!("Json deserialize error: {e}")))?;
     let teller_id = op.teller_id();
 
     // ATTRIBUTION. The embedded actor must be a real, active till user of the
@@ -392,33 +430,111 @@ pub async fn replay(
     }
 
     // The target must belong to the bearer's org — block any cross-org replay.
-    op_branch_must_be_in_org(pool.get_ref(), &op, token_org).await?;
+    let op_branch = op_branch_must_be_in_org(pool.get_ref(), &op, token_org).await?;
 
     let actor = ActingContext::replay_with_role(teller_id, token_org, actor_role);
+    let op_branch = match (op_branch, &op) {
+        (Some(b), _) => Some(b),
+        // A till opened by this very op, a sale on it: the branch is on the op.
+        (None, ReplayOp::OpenTill { branch_id, .. }) => Some(*branch_id),
+        (None, ReplayOp::CreateOrder { request, .. }) => Some(request.branch_id),
+        _ => None,
+    };
+    let result = replay_dispatch(&req, &pool, &hub, op, actor, legacy_op, header_device).await;
+    stamp_sync_seq(pool.get_ref(), op_branch, result).await
+}
+
+/// `X-Madar-Sync-Seq` on a replay answer (OFFLINE_B_DESIGN §4): the branch
+/// changefeed's committed horizon once the op has committed. Every change the op
+/// made has a seq at or below it, so a device whose cursor has reached it and
+/// whose feed still does not list the row knows the row is really gone — no
+/// time-based grace needed. Absent when the branch cannot be resolved.
+pub(crate) const SYNC_SEQ_HEADER: &str = "X-Madar-Sync-Seq";
+
+async fn stamp_sync_seq(
+    pool: &PgPool,
+    branch: Option<Uuid>,
+    result: Result<HttpResponse, AppError>,
+) -> Result<HttpResponse, AppError> {
+    let mut resp = result?;
+    if let Some(branch) = branch {
+        if resp.status().is_success() {
+            let seq: Option<i64> = sqlx::query_scalar("SELECT sync_safe_horizon($1, 0, 200)")
+                .bind(branch)
+                .fetch_one(pool)
+                .await
+                .ok();
+            if let Some(seq) = seq.filter(|s| *s > 0) {
+                if let Ok(v) = actix_web::http::header::HeaderValue::from_str(&seq.to_string()) {
+                    resp.headers_mut().insert(actix_web::http::header::HeaderName::from_static("x-madar-sync-seq"), v);
+                }
+            }
+        }
+    }
+    Ok(resp)
+}
+
+async fn replay_dispatch(
+    req: &HttpRequest,
+    pool: &crate::db::Db,
+    hub: &web::Data<BranchEventHub>,
+    op: ReplayOp,
+    actor: ActingContext,
+    legacy_op: bool,
+    header_device: Option<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let _ = req;
     match op {
-        ReplayOp::OpenShift {
-            branch_id, request, ..
+        ReplayOp::OpenTill {
+            branch_id, device_id, device_code, verification, request, ..
         } => {
-            crate::shifts::handlers::open_shift_inner(
-                pool.clone(),
+            let (till, created) = crate::tills::handlers::open_till_inner(
+                pool,
+                Some(hub.get_ref()),
                 branch_id,
-                web::Json(request),
+                request,
                 actor,
+                crate::tills::handlers::OpenMeta { device_id: device_id.or(header_device), device_code, verification },
             )
-            .await
+            .await?;
+            let mut out = if created { HttpResponse::Created() } else { HttpResponse::Ok() };
+            if legacy_op {
+                let shift = crate::tills::legacy::legacy_shift(pool, till, crate::tills::legacy::LegacyJoins::Till).await?;
+                return Ok(out.json(shift));
+            }
+            Ok(out.json(till))
         }
-        ReplayOp::CloseShift {
-            shift_id, request, ..
+        ReplayOp::CloseTill {
+            till_id, device_id, mut request, ..
         } => {
-            crate::shifts::handlers::close_shift_inner(
-                pool.clone(),
-                shift_id,
-                web::Json(request),
+            request.device_id = request.device_id.or(device_id).or(header_device);
+            // An already-closed till is returned as stored; the old backend read
+            // it back WITH the drawer join, a fresh close without it.
+            let already_closed = legacy_op
+                && crate::tills::handlers::fetch_till_or_404(pool, till_id).await?.status != "open";
+            let resp = crate::tills::handlers::close_till_inner(
+                pool,
+                Some(hub.get_ref()),
+                till_id,
+                request,
                 actor,
             )
-            .await
+            .await?;
+            if legacy_op {
+                let shift = crate::tills::legacy::legacy_shift(
+                    pool,
+                    resp.till,
+                    if already_closed { crate::tills::legacy::LegacyJoins::Till } else { crate::tills::legacy::LegacyJoins::None },
+                ).await?;
+                return Ok(HttpResponse::Ok().json(crate::tills::legacy::CloseShiftResponse { shift }));
+            }
+            Ok(HttpResponse::Ok().json(resp))
         }
-        ReplayOp::CreateOrder { request, .. } => {
+        ReplayOp::CreateOrder { device_id, device_code, mut request, .. } => {
+            request.device_id = request.device_id.or(device_id).or(header_device);
+            if request.device_code.is_none() {
+                request.device_code = device_code;
+            }
             // Replay never fires to the KDS (the order is historical) → hub = None.
             // A replayed direct sale has no waiter (only ticket settles do) → None.
             crate::orders::handlers::create_order_inner(
@@ -447,7 +563,7 @@ pub async fn replay(
         }
         ReplayOp::AwardLoyaltyPoints { request, .. } => {
             crate::loyalty::award::award_inner(
-                pool.get_ref(),
+                pool,
                 request,
                 Some(actor.teller_id),
                 Some(actor.org_id),
@@ -455,12 +571,14 @@ pub async fn replay(
             .await
         }
         ReplayOp::CashMovement {
-            shift_id, request, ..
+            till_id, device_id, mut request, ..
         } => {
-            crate::shifts::handlers::add_cash_movement_inner(
-                pool.clone(),
-                shift_id,
-                web::Json(request),
+            request.device_id = request.device_id.or(device_id).or(header_device);
+            crate::tills::handlers::add_cash_movement_inner(
+                pool,
+                Some(hub.get_ref()),
+                till_id,
+                request,
                 actor,
             )
             .await
@@ -546,7 +664,7 @@ pub async fn replay(
         // Bump/unbump: publish so other KDS/till devices reflect the bump live.
         ReplayOp::BumpKitchenItem { item_id, .. } => {
             crate::kitchen::kds::set_bump_inner(
-                pool.get_ref(),
+                pool,
                 Some(hub.get_ref()),
                 &actor,
                 item_id,
@@ -556,7 +674,7 @@ pub async fn replay(
         }
         ReplayOp::UnbumpKitchenItem { item_id, .. } => {
             crate::kitchen::kds::set_bump_inner(
-                pool.get_ref(),
+                pool,
                 Some(hub.get_ref()),
                 &actor,
                 item_id,
@@ -667,10 +785,10 @@ pub async fn replay(
             ..
         } => {
             let resp =
-                crate::bookings::handlers::seat_inner(pool.get_ref(), booking_id, &request, &actor)
+                crate::bookings::handlers::seat_inner(pool, booking_id, &request, &actor)
                     .await?;
             crate::bookings::publish_booking(
-                pool.get_ref(),
+                pool,
                 hub.get_ref(),
                 "booking.changed",
                 booking_id,
@@ -679,9 +797,9 @@ pub async fn replay(
             Ok(resp)
         }
         ReplayOp::NoShowBooking { booking_id, .. } => {
-            let resp = crate::bookings::handlers::no_show_inner(pool.get_ref(), booking_id).await?;
+            let resp = crate::bookings::handlers::no_show_inner(pool, booking_id).await?;
             crate::bookings::publish_booking(
-                pool.get_ref(),
+                pool,
                 hub.get_ref(),
                 "booking.changed",
                 booking_id,
@@ -695,31 +813,31 @@ pub async fn replay(
 /// Verify the op's effective branch belongs to `org` (resolving shift / order to
 /// their branch first). A missing target is left to the inner handler (it will
 /// 404/409 idempotently) — we only reject a target that exists in a DIFFERENT org.
-async fn op_branch_must_be_in_org(pool: &PgPool, op: &ReplayOp, org: Uuid) -> Result<(), AppError> {
-    let branch_org: Option<Uuid> = match op {
-        ReplayOp::OpenShift { branch_id, .. } => {
-            sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1")
+async fn op_branch_must_be_in_org(pool: &PgPool, op: &ReplayOp, org: Uuid) -> Result<Option<Uuid>, AppError> {
+    let branch_org: Option<(Uuid, Uuid)> = match op {
+        ReplayOp::OpenTill { branch_id, .. } => {
+            sqlx::query_as::<_, (Uuid, Uuid)>("SELECT id, org_id FROM branches WHERE id = $1")
                 .bind(branch_id)
                 .fetch_optional(pool)
                 .await?
         }
         ReplayOp::CreateOrder { request, .. } => {
-            sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1")
+            sqlx::query_as::<_, (Uuid, Uuid)>("SELECT id, org_id FROM branches WHERE id = $1")
                 .bind(request.branch_id)
                 .fetch_optional(pool)
                 .await?
         }
-        ReplayOp::CloseShift { shift_id, .. } | ReplayOp::CashMovement { shift_id, .. } => {
-            sqlx::query_scalar(
-                "SELECT b.org_id FROM shifts s JOIN branches b ON b.id = s.branch_id WHERE s.id = $1",
+        ReplayOp::CloseTill { till_id, .. } | ReplayOp::CashMovement { till_id, .. } => {
+            sqlx::query_as::<_, (Uuid, Uuid)>(
+                "SELECT b.id, b.org_id FROM tills s JOIN branches b ON b.id = s.branch_id WHERE s.id = $1",
             )
-            .bind(shift_id)
+            .bind(till_id)
             .fetch_optional(pool)
             .await?
         }
         ReplayOp::VoidOrder { order_id, .. } => {
-            sqlx::query_scalar(
-                "SELECT b.org_id FROM orders o JOIN branches b ON b.id = o.branch_id WHERE o.id = $1",
+            sqlx::query_as::<_, (Uuid, Uuid)>(
+                "SELECT b.id, b.org_id FROM orders o JOIN branches b ON b.id = o.branch_id WHERE o.id = $1",
             )
             .bind(order_id)
             .fetch_optional(pool)
@@ -728,8 +846,8 @@ async fn op_branch_must_be_in_org(pool: &PgPool, op: &ReplayOp, org: Uuid) -> Re
         // Resolved through the order the money goes back against; the
         // `order_refunds` trigger then refuses a shift at any other branch.
         ReplayOp::RefundOrder { request, .. } => {
-            sqlx::query_scalar(
-                "SELECT b.org_id FROM orders o JOIN branches b ON b.id = o.branch_id WHERE o.id = $1",
+            sqlx::query_as::<_, (Uuid, Uuid)>(
+                "SELECT b.id, b.org_id FROM orders o JOIN branches b ON b.id = o.branch_id WHERE o.id = $1",
             )
             .bind(request.order_id)
             .fetch_optional(pool)
@@ -738,13 +856,13 @@ async fn op_branch_must_be_in_org(pool: &PgPool, op: &ReplayOp, org: Uuid) -> Re
         // Resolved through the branch the op names; `award_inner` then re-checks
         // it against the ORDER's own org, which is the boundary that counts.
         ReplayOp::AwardLoyaltyPoints { request, .. } => {
-            sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1")
+            sqlx::query_as::<_, (Uuid, Uuid)>("SELECT id, org_id FROM branches WHERE id = $1")
                 .bind(request.branch_id)
                 .fetch_optional(pool)
                 .await?
         }
         ReplayOp::FireOpenTicket { request, .. } => {
-            sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1")
+            sqlx::query_as::<_, (Uuid, Uuid)>("SELECT id, org_id FROM branches WHERE id = $1")
                 .bind(request.branch_id)
                 .fetch_optional(pool)
                 .await?
@@ -753,16 +871,16 @@ async fn op_branch_must_be_in_org(pool: &PgPool, op: &ReplayOp, org: Uuid) -> Re
         | ReplayOp::SettleOpenTicket { ticket_id, .. }
         | ReplayOp::VoidOpenTicket { ticket_id, .. }
         | ReplayOp::VoidTicketLine { ticket_id, .. } => {
-            sqlx::query_scalar(
-                "SELECT b.org_id FROM open_tickets ot JOIN branches b ON b.id = ot.branch_id WHERE ot.id = $1",
+            sqlx::query_as::<_, (Uuid, Uuid)>(
+                "SELECT b.id, b.org_id FROM open_tickets ot JOIN branches b ON b.id = ot.branch_id WHERE ot.id = $1",
             )
             .bind(ticket_id)
             .fetch_optional(pool)
             .await?
         }
         ReplayOp::BumpKitchenItem { item_id, .. } | ReplayOp::UnbumpKitchenItem { item_id, .. } => {
-            sqlx::query_scalar(
-                "SELECT b.org_id FROM kitchen_ticket_items kti \
+            sqlx::query_as::<_, (Uuid, Uuid)>(
+                "SELECT b.id, b.org_id FROM kitchen_ticket_items kti \
                  JOIN kitchen_tickets kt ON kt.id = kti.kitchen_ticket_id \
                  JOIN branches b ON b.id = kt.branch_id WHERE kti.id = $1",
             )
@@ -771,7 +889,7 @@ async fn op_branch_must_be_in_org(pool: &PgPool, op: &ReplayOp, org: Uuid) -> Re
             .await?
         }
         ReplayOp::SwapTables { request, .. } => {
-            sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1")
+            sqlx::query_as::<_, (Uuid, Uuid)>("SELECT id, org_id FROM branches WHERE id = $1")
                 .bind(request.branch_id)
                 .fetch_optional(pool)
                 .await?
@@ -781,8 +899,8 @@ async fn op_branch_must_be_in_org(pool: &PgPool, op: &ReplayOp, org: Uuid) -> Re
         ReplayOp::ClearTable { table_id, .. }
         | ReplayOp::HoldTable { table_id, .. }
         | ReplayOp::ReleaseTable { table_id, .. } => {
-            sqlx::query_scalar(
-                "SELECT b.org_id FROM branch_tables bt JOIN branches b ON b.id = bt.branch_id \
+            sqlx::query_as::<_, (Uuid, Uuid)>(
+                "SELECT b.id, b.org_id FROM branch_tables bt JOIN branches b ON b.id = bt.branch_id \
                  WHERE bt.id = $1",
             )
             .bind(table_id)
@@ -790,29 +908,30 @@ async fn op_branch_must_be_in_org(pool: &PgPool, op: &ReplayOp, org: Uuid) -> Re
             .await?
         }
         ReplayOp::CreateTableTransfer { request, .. } => {
-            sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1")
+            sqlx::query_as::<_, (Uuid, Uuid)>("SELECT id, org_id FROM branches WHERE id = $1")
                 .bind(request.branch_id)
                 .fetch_optional(pool)
                 .await?
         }
         ReplayOp::CancelTableTransfer { transfer_id, .. }
         | ReplayOp::FulfillTableTransfer { transfer_id, .. } => {
-            sqlx::query_scalar("SELECT org_id FROM table_transfer_requests WHERE id = $1")
+            sqlx::query_as::<_, (Uuid, Uuid)>("SELECT branch_id, org_id FROM table_transfer_requests WHERE id = $1")
                 .bind(transfer_id)
                 .fetch_optional(pool)
                 .await?
         }
         ReplayOp::SeatBooking { booking_id, .. } | ReplayOp::NoShowBooking { booking_id, .. } => {
-            sqlx::query_scalar("SELECT org_id FROM bookings WHERE id = $1")
+            sqlx::query_as::<_, (Uuid, Uuid)>("SELECT branch_id, org_id FROM bookings WHERE id = $1")
                 .bind(booking_id)
                 .fetch_optional(pool)
                 .await?
         }
     };
     match branch_org {
-        Some(o) if o != org => Err(AppError::Forbidden(
+        Some((_, o)) if o != org => Err(AppError::Forbidden(
             "Replay target belongs to another organization".into(),
         )),
-        _ => Ok(()), // same org, or not-yet-present (inner handler resolves it)
+        // same org, or not-yet-present (inner handler resolves it)
+        other => Ok(other.map(|(branch, _)| branch)),
     }
 }

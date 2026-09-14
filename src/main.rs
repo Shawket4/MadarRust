@@ -15,9 +15,9 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 use madar_rust::openapi::ApiDoc;
 use madar_rust::{
-    ai, analytics, auth, bookings, branches, bundles, costing, delivery, demo, discounts, insights,
+    ai, analytics, auth, bookings, branches, bundles, costing, delivery, demo, devices, discounts, insights,
     integrations, inventory, kitchen, loyalty, menu, orders, orgs, payment_methods, permissions,
-    purchasing, qr_card, realtime, recipes, refunds, reports, reservations, shifts, staff,
+    purchasing, qr_card, realtime, recipes, refunds, reports, reservations, staff,
     stocktakes, sync, tickets, tills, uploads, users,
 };
 
@@ -57,6 +57,10 @@ fn main() -> std::io::Result<()> {
 }
 
 async fn run() -> std::io::Result<()> {
+    // Every required setting is checked before the database is touched, so a
+    // bad deploy exits with a list of what is wrong instead of migrating and
+    // then panicking in a background task.
+    madar_rust::boot_config::validate_or_exit();
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let jwt_secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
     let uploads_dir = env::var("UPLOADS_DIR").unwrap_or_else(|_| "./uploads".to_string());
@@ -133,6 +137,10 @@ async fn run() -> std::io::Result<()> {
     // scheduler; every step is idempotent. No-op when ATTENDANCE_SWEEP_ENABLED
     // is falsy.
     staff::jobs::spawn(pool.get_ref().clone());
+    madar_rust::assets::worker::spawn(pool.get_ref().clone());
+    madar_rust::assets::bundle::spawn(pool.get_ref().clone());
+    madar_rust::sync::pull::sweeper::spawn(pool.get_ref().clone());
+    madar_rust::sync::pull::listener::spawn(pool.get_ref().clone(), realtime_bus.get_ref().clone());
     loyalty::birthdays::spawn(pool.get_ref().clone());
     loyalty::winback::spawn(pool.get_ref().clone());
     loyalty::wallet::refresh::spawn(pool.get_ref().clone());
@@ -227,6 +235,10 @@ async fn run() -> std::io::Result<()> {
             .wrap(actix_web::middleware::from_fn(
                 madar_rust::rate_limit::throttle_exports,
             ))
+            // Client version telemetry + legacy path hits (LEGACY_REMOVAL.md
+            // Phase T). App-level so it sees every route; it reads the org the
+            // scope's JwtMiddleware resolved after the handler ran.
+            .wrap(actix_web::middleware::from_fn(madar_rust::client_seen::record))
             // Outermost middleware (actix runs the LAST `wrap` first), as
             // sentry-actix requires: every downstream handler then runs on this
             // request's Hub, so anything they capture carries the request
@@ -268,7 +280,8 @@ async fn run() -> std::io::Result<()> {
             .configure(menu::routes::configure)
             .configure(inventory::routes::configure)
             .configure(recipes::routes::configure)
-            .configure(shifts::routes::configure)
+            .configure(tills::legacy_routes::configure)
+            .configure(devices::routes::configure)
             .configure(staff::routes::configure)
             .configure(tills::routes::configure)
             // One `/floor` scope: `reservations::routes` owns it and pulls the
@@ -280,6 +293,7 @@ async fn run() -> std::io::Result<()> {
             .configure(kitchen::routes::configure)
             .configure(tickets::routes::configure)
             .configure(stocktakes::routes::configure)
+            .configure(madar_rust::assets::routes::configure)
             .configure(sync::routes::configure)
             .configure(purchasing::routes::configure)
             .configure(orders::routes::configure)

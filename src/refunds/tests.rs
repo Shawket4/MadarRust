@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::auth::jwt::JwtSecret;
 use crate::models::UserRole;
-use crate::refunds::handlers::{RefundIssued, shift_cash_refunds};
+use crate::refunds::handlers::{RefundIssued, till_cash_refunds};
 use crate::refunds::routes;
 
 fn get_secret() -> JwtSecret {
@@ -103,24 +103,14 @@ async fn seed_shift(pool: &PgPool, branch_id: Uuid, teller_id: Uuid, status: &st
     // One drawer per shift: `idx_shifts_one_open_per_till` allows a single
     // open shift on a till, and the branch's default till would otherwise be
     // shared by every teller these tests seat at it.
-    let till_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO tills (org_id, branch_id, name) \
-         SELECT org_id, id, $2 FROM branches WHERE id = $1 RETURNING id",
-    )
-    .bind(branch_id)
-    .bind(format!("Till {}", &Uuid::new_v4().to_string()[..8]))
-    .fetch_one(pool)
-    .await
-    .unwrap();
     let shift_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO shifts (id, branch_id, teller_id, till_id, status, opening_cash, closed_at) \
-         VALUES ($1, $2, $3, $4, $5::shift_status, 10000, $6)",
+        "INSERT INTO tills (id, branch_id, teller_id, status, opening_cash, closed_at) \
+         VALUES ($1, $2, $3, $4::till_status, 10000, $5)",
     )
     .bind(shift_id)
     .bind(branch_id)
     .bind(teller_id)
-    .bind(till_id)
     .bind(status)
     .bind((status != "open").then(chrono::Utc::now))
     .execute(pool)
@@ -141,7 +131,7 @@ async fn seed_order(
 ) -> (Uuid, Uuid) {
     let order_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref) \
+        "INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref) \
          VALUES ($1, $2, $3, $4, gen_random_uuid(), $5, 0, $5, 'completed', 1, 'cash', gen_random_uuid()::text)",
     )
     .bind(order_id)
@@ -378,7 +368,7 @@ async fn a_refund_outside_an_open_shift_is_refused(pool: PgPool) {
     let t = seed_till(&pool).await;
 
     // The teller's shift closes; the sale stays on the books.
-    sqlx::query("UPDATE shifts SET status = 'closed', closed_at = now() WHERE id = $1")
+    sqlx::query("UPDATE tills SET status = 'closed', closed_at = now() WHERE id = $1")
         .bind(t.shift_id)
         .execute(&pool)
         .await
@@ -458,7 +448,7 @@ async fn cash_refunds_are_a_drawer_figure_keyed_on_the_issuing_shift(pool: PgPoo
     );
 
     // Only the cash leg leaves the drawer.
-    assert_eq!(shift_cash_refunds(&pool, t.shift_id).await.unwrap(), 50);
+    assert_eq!(till_cash_refunds(&pool, t.shift_id).await.unwrap(), 50);
 
     // Flipping the method's flag afterwards does not move the closed figure —
     // is_cash was snapshotted at issue.
@@ -469,7 +459,7 @@ async fn cash_refunds_are_a_drawer_figure_keyed_on_the_issuing_shift(pool: PgPoo
     .execute(&pool)
     .await
     .unwrap();
-    assert_eq!(shift_cash_refunds(&pool, t.shift_id).await.unwrap(), 50);
+    assert_eq!(till_cash_refunds(&pool, t.shift_id).await.unwrap(), 50);
 
     // The shift view carries both figures and the rows.
     let resp = test::call_service(
@@ -686,7 +676,7 @@ async fn another_orgs_order_is_not_found(pool: PgPool) {
 /// twice and both moves are real.
 #[sqlx::test]
 async fn a_cash_refund_leaves_the_drawer_and_a_refunded_sale_still_entered_it(pool: PgPool) {
-    use crate::shifts::handlers::compute_system_cash;
+    use crate::tills::handlers::compute_system_cash;
     let app = app!(pool);
     let t = seed_till(&pool).await;
 
@@ -721,7 +711,7 @@ async fn a_cash_refund_leaves_the_drawer_and_a_refunded_sale_still_entered_it(po
         "a fully refunded sale's cash tender stays in the drawer maths; only \
          the cash actually handed back comes off"
     );
-    assert_eq!(shift_cash_refunds(&pool, t.shift_id).await.unwrap(), 170);
+    assert_eq!(till_cash_refunds(&pool, t.shift_id).await.unwrap(), 170);
 }
 
 /// The refund comes off the drawer it was ISSUED from, which need not be the
@@ -730,7 +720,7 @@ async fn a_cash_refund_leaves_the_drawer_and_a_refunded_sale_still_entered_it(po
 /// alone.
 #[sqlx::test]
 async fn a_refund_from_another_shift_lightens_that_drawer_not_the_sales(pool: PgPool) {
-    use crate::shifts::handlers::compute_system_cash;
+    use crate::tills::handlers::compute_system_cash;
     let app = app!(pool);
     let t = seed_till(&pool).await;
     let other_teller = seed_user(&pool, t.org_id, "teller").await;

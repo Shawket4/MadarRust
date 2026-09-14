@@ -1,0 +1,66 @@
+{
+  "body": {
+    "amount_tendered": null,
+    "branch_id": "10000000-0000-4000-8000-0000000000b1",
+    "change_given": null,
+    "created_at": "2026-01-01T00:00:00Z",
+    "customer_name": null,
+    "delivery_channel": null,
+    "delivery_fee": 0,
+    "delivery_lat": null,
+    "delivery_lng": null,
+    "delivery_order_id": null,
+    "discount_amount": 0,
+    "discount_id": null,
+    "discount_rate": 0.0,
+    "discount_type": null,
+    "discount_value": 0,
+    "id": "dd1862bc-856e-4a14-94fb-3e55c50709d0",
+    "loyalty_customer_id": null,
+    "loyalty_member_name": null,
+    "notes": null,
+    "order_number": 1,
+    "order_ref": "GLDB-YYMMDD-200000-001",
+    "order_type": "dine_in",
+    "payment_legs": [
+      {
+        "amount": 10000,
+        "method": "card"
+      }
+    ],
+    "payment_method": "card",
+    "price_expected_total": 10000,
+    "price_flagged": false,
+    "service_charge_amount": 0,
+    "shift_id": "20000000-0000-4000-8000-0000000000b1",
+    "status": "completed",
+    "subtotal": 10000,
+    "tax_amount": 0,
+    "teller_id": "10000000-0000-4000-8000-00000000ee0b",
+    "teller_name": "Teller Bravo",
+    "timezone": "Africa/Cairo",
+    "tip_amount": 0,
+    "tip_payment_method": null,
+    "total_amount": 10000,
+    "void_note": null,
+    "void_reason": null,
+    "voided_at": null,
+    "voided_by": null,
+    "waiter_id": "10000000-0000-4000-8000-00000000aa01",
+    "waiter_name": "Waiter Whisky"
+  },
+  "request": {
+    "body": {
+      "op": "settle_open_ticket",
+      "request": {
+        "payment_method": "card",
+        "shift_id": "20000000-0000-4000-8000-0000000000b1"
+      },
+      "teller_id": "10000000-0000-4000-8000-00000000ee0b",
+      "ticket_id": "987c4bfd-e730-4297-b5a9-44aef9075147"
+    },
+    "method": "POST",
+    "path": "/sync/replay"
+  },
+  "status": 200
+}

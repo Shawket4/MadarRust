@@ -27,10 +27,10 @@ const MAX_PER_PAGE: i64 = 1000;
 
 // ── Shared SELECT fragment ────────────────────────────────────
 const ORDER_SELECT: &str =
-    "SELECT o.id, o.branch_id, o.shift_id, o.teller_id, u.name AS teller_name,
+    "SELECT o.id, o.branch_id, o.till_id, o.till_id AS shift_id, o.teller_id, u.name AS teller_name,
      o.waiter_id, w.name AS waiter_name,
      o.order_number, o.order_ref, o.status::text, o.payment_method::text,
-     COALESCE((SELECT json_agg(json_build_object('method', op.method, 'amount', op.amount) ORDER BY op.id)
+     COALESCE((SELECT json_agg(json_build_object('method', op.method, 'amount', op.amount, 'is_cash', op.is_cash) ORDER BY op.id)
                FROM order_payments op WHERE op.order_id = o.id), '[]'::json) AS payment_legs,
      o.subtotal, o.discount_type::text, o.discount_value,
      o.discount_amount, o.tax_amount, o.service_charge_amount, o.total_amount,
@@ -40,7 +40,9 @@ const ORDER_SELECT: &str =
      o.voided_at, o.void_reason::text, o.void_note, o.voided_by,
      o.loyalty_customer_id, lc.name AS loyalty_member_name,
      o.price_flagged, o.price_expected_total, o.created_at,
-     effective_timezone(o.branch_id) AS timezone
+     effective_timezone(o.branch_id) AS timezone,
+     o.idempotency_key, o.open_ticket_id,
+     o.device_id, o.device_code, CASE WHEN o.device_code IS NOT NULL THEN o.device_code || '-' || o.order_number ELSE o.order_number::text END AS display_number, o.verification
      FROM orders o JOIN users u ON u.id = o.teller_id
      LEFT JOIN users w ON w.id = o.waiter_id
      LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id
@@ -119,12 +121,18 @@ pub(crate) fn parse_uuid_csv(param: &str, raw: &str) -> Result<Option<Vec<Uuid>>
 pub struct PaymentLeg {
     pub method: String,
     pub amount: i32,
+    /// The leg's stored cash flag (`order_payments.is_cash`), the one the drawer
+    /// counts by. Additive; `null` for a leg recorded before the flag existed.
+    #[serde(default)]
+    pub is_cash: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct Order {
     pub id: Uuid,
     pub branch_id: Uuid,
+    pub till_id: Uuid,
+    /// DEPRECATED: same value as `till_id` (required by POS v0.5.1/v0.6.0).
     pub shift_id: Uuid,
     pub teller_id: Uuid,
     pub teller_name: String,
@@ -235,6 +243,36 @@ pub struct Order {
     #[serde(default)]
     #[sqlx(default)]
     pub timezone: Option<String>,
+    /// The client-minted key the sale was created with (a till's sale, or the
+    /// ticket id of a settled bill). An offline POS identifies its own row by it
+    /// when a list read brings the sale back (OFFLINE_B_DESIGN §7). Additive.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub idempotency_key: Option<Uuid>,
+    /// The open ticket this sale settled, if any. Additive.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub open_ticket_id: Option<Uuid>,
+    /// The device that numbered this sale (contract R4). `null` for server-numbered
+    /// orders (old clients, dashboard, delivery).
+    #[serde(default)]
+    #[sqlx(default)]
+    pub device_id: Option<Uuid>,
+    /// That device's code (`36B`), stored with the order. `null` when server-numbered.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub device_code: Option<String>,
+    /// What receipts and lists show: `<device_code>-<order_number>` (`36B-12`)
+    /// for a device-numbered sale, else `order_number` as text.
+    #[serde(default)]
+    #[sqlx(default)]
+    #[schema(example = "36B-12")]
+    pub display_number: String,
+    /// `server` | `lan` | `unverified` — the till's verification as the ringing
+    /// device knew it; `null` when not recorded.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub verification: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -451,7 +489,17 @@ pub struct OrderItemInput {
 #[derive(Deserialize, Serialize, Default, ToSchema)]
 pub struct CreateOrderRequest {
     pub branch_id: Uuid,
-    pub shift_id: Uuid,
+    #[serde(alias = "shift_id")]
+    pub till_id: Uuid,
+    /// The device ringing the order (else `X-Madar-Device`).
+    #[serde(default)]
+    pub device_id: Option<Uuid>,
+    /// The device's code; with `device_id` + `order_number` the number is stored verbatim.
+    #[serde(default)]
+    pub device_code: Option<String>,
+    /// `server` | `lan` | `unverified` — the till's verification as the device knew it.
+    #[serde(default)]
+    pub verification: Option<String>,
     pub payment_method: String,
     pub customer_name: Option<String>,
     pub notes: Option<String>,
@@ -485,12 +533,14 @@ pub struct CreateOrderRequest {
     // response — even months later — dedups against `orders.idempotency_key`.
     #[serde(default)]
     pub idempotency_key: Option<Uuid>,
-    /// IGNORED by the server (accepted for backward compatibility only). The
-    /// authoritative per-shift number is ALWAYS `MAX(order_number)+1` computed under
-    /// the shift advisory lock — never the client value, which is used only on the
-    /// device's local receipt. The byte-identical-at-reprint guarantee rides on
-    /// `order_ref`, not this field. Two tills on one shift get distinct numbers
-    /// (UNIQUE(shift_id, order_number) + the lock).
+    /// The device's own order number (contract R4): its per-business-day
+    /// sequence, the same counter as the `NNNN` of its `order_ref`. Stored
+    /// VERBATIM when the request also names `device_id` and a non-blank
+    /// `device_code` — the order then reads `display_number` `<device_code>-<n>`.
+    /// Without all three (old clients, dashboard, delivery) it is ignored and the
+    /// server numbers the sale per till: `MAX(order_number)+1` over the till's
+    /// server-numbered orders, under the till advisory lock
+    /// (`uq_orders_till_legacy_number`).
     #[serde(default)]
     pub order_number: Option<i32>,
     /// Client-minted order reference (`<BRANCH>-<YYMMDD>-<DEVICE>-<NNNN>`). Stored
@@ -547,7 +597,8 @@ pub struct VoidOrderRequest {
 #[into_params(parameter_in = Query)]
 pub struct ListOrdersQuery {
     pub branch_id: Option<Uuid>,
-    pub shift_id: Option<Uuid>,
+    #[serde(alias = "shift_id")]
+    pub till_id: Option<Uuid>,
     pub updated_after: Option<chrono::DateTime<chrono::Utc>>,
     pub page: Option<i64>,
     pub per_page: Option<i64>,
@@ -666,7 +717,8 @@ pub struct ExportResponse {
 #[into_params(parameter_in = Query)]
 pub struct ExportOrdersQuery {
     pub branch_id: Option<Uuid>,
-    pub shift_id: Option<Uuid>,
+    #[serde(alias = "shift_id")]
+    pub till_id: Option<Uuid>,
     pub teller_name: Option<String>,
     /// Filter by the WAITER who opened the ticket (ILIKE, partial match).
     pub waiter_name: Option<String>,
@@ -1351,10 +1403,54 @@ pub async fn create_order(
             .and_then(|v| v.to_str().ok())
             .and_then(|s| Uuid::parse_str(s).ok());
     }
+    let header_device = crate::devices::DeviceHeader::from_request_headers(&req);
+    if body.device_id.is_none() {
+        body.device_id = header_device;
+    }
+    // A till bound to another device refuses live sales from this one.
+    crate::tills::handlers::guard_till_device(pool.get_ref(), body.till_id, header_device).await?;
+    let actor = ActingContext::live(&claims)?;
+    // Live only: the method must be in the effective set for branch ∩ person ∩
+    // device (replay never rejects on availability — the sale happened).
+    // Only an owner with an allow-list restricts; an unrestricted shop keeps
+    // accepting what it always did.
+    let restricted: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM branch_payment_methods WHERE branch_id = $1) \
+             OR EXISTS (SELECT 1 FROM user_payment_methods WHERE user_id = $2) \
+             OR EXISTS (SELECT 1 FROM device_payment_methods WHERE device_id = $3)",
+    )
+    .bind(body.branch_id)
+    .bind(actor.teller_id)
+    .bind(body.device_id)
+    .fetch_one(pool.get_ref())
+    .await?;
+    let allowed = if restricted {
+        crate::payment_methods::availability::effective_method_names(
+            pool.get_ref(),
+            actor.org_id,
+            body.branch_id,
+            Some(actor.teller_id),
+            body.device_id,
+        )
+        .await?
+    } else {
+        Vec::new()
+    };
+    let mut used: Vec<&str> = if restricted { vec![body.payment_method.as_str()] } else { Vec::new() };
+    if let (true, Some(splits)) = (restricted, &body.payment_splits) {
+        used.extend(splits.iter().map(|p| p.method.as_str()));
+    }
+    if let Some(bad) = used.into_iter().find(|m| !allowed.iter().any(|a| a.eq_ignore_ascii_case(m))) {
+        return Err(AppError::Coded {
+            status: 422,
+            code: "PAYMENT_METHOD_UNAVAILABLE",
+            reason: format!("Payment method `{bad}` is not available at this till"),
+        });
+    }
     create_order_inner(
         pool.clone(),
         body,
-        ActingContext::live(&claims)?,
+        actor,
         hub.as_ref().map(|d| d.get_ref()),
         None, // a direct POS sale has no waiter — only ticket settles do
     )
@@ -1448,11 +1544,11 @@ pub(crate) async fn create_order_inner(
         None
     };
     let shift_ok: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM shifts \
+        "SELECT EXISTS(SELECT 1 FROM tills \
          WHERE id = $1 AND branch_id = $2 AND (status = 'open' OR $4) \
            AND ($3::uuid IS NULL OR teller_id = $3))",
     )
-    .bind(body.shift_id)
+    .bind(body.till_id)
     .bind(body.branch_id)
     .bind(teller_match)
     .bind(actor.replay)
@@ -1828,7 +1924,7 @@ pub(crate) async fn create_order_inner(
     let mut tx = pool.get_ref().begin().await?;
 
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text))")
-        .bind(body.shift_id.to_string())
+        .bind(body.till_id.to_string())
         .execute(&mut *tx)
         .await?;
 
@@ -1842,8 +1938,8 @@ pub(crate) async fn create_order_inner(
     // own shift — so a sale can never be mis-registered onto the wrong shift or
     // branch.
     let shift_row: Option<(Uuid, Uuid, String)> =
-        sqlx::query_as("SELECT branch_id, teller_id, status::text FROM shifts WHERE id = $1")
-            .bind(body.shift_id)
+        sqlx::query_as("SELECT branch_id, teller_id, status::text FROM tills WHERE id = $1")
+            .bind(body.till_id)
             .fetch_optional(&mut *tx)
             .await?;
     let (shift_branch_id, shift_teller_id, shift_status) = shift_row.ok_or_else(|| {
@@ -1871,16 +1967,39 @@ pub(crate) async fn create_order_inner(
         ));
     }
 
-    // order_number stays SERVER-COMPUTED and per-shift — it's `UNIQUE(shift_id,
-    // order_number)`, so a client value can't be authoritative (two devices would
-    // both mint #1 into a shared shift and collide). A POS device PREDICTS the same
-    // per-shift number offline (single numberer per shift) for its receipt.
-    let order_number: i32 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(order_number), 0) + 1 FROM orders WHERE shift_id = $1",
-    )
-    .bind(body.shift_id)
-    .fetch_one(&mut *tx)
-    .await?;
+    // R4: a device that numbers its own sales (per business day) sends
+    // device_id + device_code + order_number — stored verbatim. Anything else
+    // (old clients, dashboard, delivery) keeps the legacy per-till counter over
+    // the till's un-deviced orders (`uq_orders_till_legacy_number`).
+    let mut device_numbered = match (&body.device_id, &body.device_code, body.order_number) {
+        (Some(_), Some(code), Some(n)) if !code.trim().is_empty() => Some(n),
+        _ => None,
+    };
+    // A device rings sales before it ever calls /devices/register (and a
+    // backlog replays days later): register it on first contact (§2.4), as the
+    // till open, close and refund paths do, instead of failing the sale on the
+    // devices FK. A device id another org owns is not visible here; the sale
+    // is then server-numbered rather than refused.
+    if let (Some(_), Some(device)) = (device_numbered, body.device_id)
+        && crate::devices::ensure_registered(&mut tx, actor.org_id, device, Some(shift_branch_id), body.device_code.as_deref())
+            .await?
+            .is_none()
+    {
+        device_numbered = None;
+    }
+    let order_number: i32 = match device_numbered {
+        Some(n) => n,
+        None => sqlx::query_scalar(
+            "SELECT COALESCE(MAX(order_number) FILTER (WHERE device_id IS NULL), 0) + 1 FROM orders WHERE till_id = $1",
+        )
+        .bind(body.till_id)
+        .fetch_one(&mut *tx)
+        .await?,
+    };
+    let (order_device_id, order_device_code) = match device_numbered {
+        Some(_) => (body.device_id, body.device_code.clone()),
+        None => (None, None),
+    };
 
     // The order_ref IS client-authoritative: a POS device mints it once with its
     // MANAGED DEVICE CODE + a per-device-day sequence (independent of order_number),
@@ -1889,7 +2008,22 @@ pub(crate) async fn create_order_inner(
     // → the server mints the deterministic <BRANCH>-<YYMMDD>-<SHIFT6>-<NNN> fallback.
     // The global UNIQUE(order_ref) index backstops either path.
     let order_ref = match &body.order_ref {
-        Some(r) => r.clone(),
+        // R5: the same ref minted by a DIFFERENT device (two devices sharing a
+        // code offline) is kept, suffixed with that device; the same device and
+        // ref is an idempotent duplicate (handled at the unique violation below).
+        Some(r) => {
+            let clash: Option<Option<Uuid>> =
+                sqlx::query_scalar("SELECT device_id FROM orders WHERE order_ref = $1")
+                    .bind(r)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            match (clash, body.device_id) {
+                (Some(other), Some(mine)) if other != Some(mine) => {
+                    format!("{r}~{}", mine.simple().to_string()[..4].to_uppercase())
+                }
+                _ => r.clone(),
+            }
+        }
         None => {
             let (branch_code, biz_date): (String, chrono::NaiveDate) = sqlx::query_as(
                 "SELECT b.code, ($1::timestamptz AT TIME ZONE COALESCE(b.timezone, o.timezone)::text)::date
@@ -1899,7 +2033,7 @@ pub(crate) async fn create_order_inner(
             .bind(body.branch_id)
             .fetch_one(&mut *tx)
             .await?;
-            let shift6 = body.shift_id.simple().to_string()[..6].to_uppercase();
+            let shift6 = body.till_id.simple().to_string()[..6].to_uppercase();
             format!(
                 "{}-{}-{}-{:03}",
                 branch_code,
@@ -1925,7 +2059,7 @@ pub(crate) async fn create_order_inner(
     let order = match sqlx::query_as::<_, Order>(
         r#"
         INSERT INTO orders
-            (branch_id, shift_id, teller_id, order_number,
+            (branch_id, till_id, teller_id, order_number,
              payment_method, subtotal, discount_type, discount_value,
              discount_amount, tax_amount, total_amount,
              amount_tendered, change_given, tip_amount, tip_payment_method,
@@ -1933,12 +2067,13 @@ pub(crate) async fn create_order_inner(
              idempotency_key, created_at, tip_is_cash, order_ref,
              price_flagged, price_expected_total, waiter_id, loyalty_customer_id,
              service_charge_amount, tax_rate_applied, service_charge_rate_applied,
-             tax_inclusive, service_charge_taxable_applied, order_type, open_ticket_id)
+             tax_inclusive, service_charge_taxable_applied, order_type, open_ticket_id,
+             device_id, device_code, verification)
         VALUES ($1, $2, $3, $4, $5, $6, $7::discount_type, $8,
                 $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'completed', $19, $20, $21, $22,
-                $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)
+                $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36)
         RETURNING
-            id, branch_id, shift_id, teller_id,
+            id, branch_id, till_id, till_id AS shift_id, teller_id,
             (SELECT name FROM users WHERE id = $3) AS teller_name,
             waiter_id, (SELECT name FROM users WHERE id = $25) AS waiter_name,
             order_number, order_ref, status::text, payment_method::text,
@@ -1954,11 +2089,12 @@ pub(crate) async fn create_order_inner(
             (SELECT customer_lng FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_lng,
             voided_at, void_reason::text, void_note, voided_by,
             price_flagged, price_expected_total, created_at,
-            effective_timezone(branch_id) AS timezone
+            effective_timezone(branch_id) AS timezone,
+            device_id, device_code, CASE WHEN device_code IS NOT NULL THEN device_code || '-' || order_number ELSE order_number::text END AS display_number, verification
         "#,
     )
     .bind(shift_branch_id) // authoritative: the order's branch IS its shift's branch
-    .bind(body.shift_id)
+    .bind(body.till_id)
     .bind(actor.teller_id)
     .bind(order_number)
     .bind(&body.payment_method)
@@ -2000,6 +2136,13 @@ pub(crate) async fn create_order_inner(
     .bind(policy.service_charge_taxable)
     .bind(order_type)
     .bind(ticket.as_ref().map(|t| t.open_ticket_id))
+    .bind(order_device_id)
+    .bind(order_device_code.as_deref())
+    .bind(if actor.replay {
+        body.verification.clone().or_else(|| body.device_id.map(|_| "unverified".to_string()))
+    } else {
+        Some("server".to_string())
+    })
     .fetch_one(&mut *tx)
     .await
     {
@@ -2053,14 +2196,15 @@ pub(crate) async fn create_order_inner(
     if let Some(t) = ticket {
         let linked = sqlx::query(
             "UPDATE open_tickets SET status = 'settled', settled_at = $5, order_id = $2, \
-                 settled_by = $3, settled_shift_id = $4, updated_at = now() \
+                 settled_by = $3, settled_till_id = $4, settled_device_id = $6, updated_at = now() \
              WHERE id = $1 AND status = 'open'",
         )
         .bind(t.open_ticket_id)
         .bind(order.id)
         .bind(actor.teller_id)
-        .bind(body.shift_id)
+        .bind(body.till_id)
         .bind(created_at)
+        .bind(body.device_id)
         .execute(&mut *tx)
         .await?;
         if linked.rows_affected() == 0 {
@@ -2116,7 +2260,7 @@ pub(crate) async fn create_order_inner(
                     "Split payment amounts must be greater than 0".into(),
                 ));
             }
-            validate_payment_method(pool.get_ref(), org_id, &split.method).await?;
+            validate_payment_method(&mut *tx, org_id, &split.method).await?;
             sqlx::query(
                 "INSERT INTO order_payments (order_id, method, amount, reference, is_cash) \
                  VALUES ($1, $2, $3, $4, $5)",
@@ -2152,14 +2296,15 @@ pub(crate) async fn create_order_inner(
     // (cash-only sum) and, guarded by the WHERE, for shifts still open.
     if actor.replay && shift_status != "open" {
         let system_cash =
-            crate::shifts::handlers::compute_system_cash(&mut *tx, body.shift_id).await?;
+            crate::tills::handlers::compute_system_cash(&mut *tx, body.till_id).await?;
         sqlx::query(
-            "UPDATE shifts SET closing_cash_system = $1 WHERE id = $2 AND status <> 'open'",
+            "UPDATE tills SET closing_cash_system = $1 WHERE id = $2 AND status <> 'open'",
         )
         .bind(system_cash as i32)
-        .bind(body.shift_id)
+        .bind(body.till_id)
         .execute(&mut *tx)
         .await?;
+        crate::tills::reconcile::recompute_after_late_replay(&mut tx, body.till_id, system_cash as i32).await?;
     }
 
     let mut order_items_full: Vec<OrderItemFull> = Vec::new();
@@ -2553,7 +2698,7 @@ pub async fn list_orders(
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
 
     let page = query.page.unwrap_or(1).max(1);
-    let default_per_page = if query.shift_id.is_some() {
+    let default_per_page = if query.till_id.is_some() {
         DEFAULT_PER_PAGE_SHIFT
     } else {
         DEFAULT_PER_PAGE_BRANCH
@@ -2584,17 +2729,17 @@ pub async fn list_orders(
     // branch_id is absent or the all-zeros (nil) UUID — every branch in the
     // caller's org (the "All branches" view). org_id was validated above, so
     // the org roll-up stays inside the caller's own org.
-    let all_branches = query.shift_id.is_none() && query.branch_id.is_none_or(|b| b.is_nil());
+    let all_branches = query.till_id.is_none() && query.branch_id.is_none_or(|b| b.is_nil());
 
-    let (scope_condition, scope_id): (&str, Uuid) = if let Some(shift_id) = query.shift_id {
-        let bid: Option<Uuid> = sqlx::query_scalar("SELECT branch_id FROM shifts WHERE id = $1")
+    let (scope_condition, scope_id): (&str, Uuid) = if let Some(shift_id) = query.till_id {
+        let bid: Option<Uuid> = sqlx::query_scalar("SELECT branch_id FROM tills WHERE id = $1")
             .bind(shift_id)
             .fetch_optional(pool.get_ref())
             .await?
             .flatten();
         let bid = bid.ok_or_else(|| AppError::NotFound("Shift not found".into()))?;
         require_branch_access(pool.get_ref(), &claims, bid).await?;
-        ("o.shift_id = $1", shift_id)
+        ("o.till_id = $1", shift_id)
     } else if all_branches {
         (
             "o.branch_id IN (SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL)",
@@ -2867,9 +3012,9 @@ pub(crate) async fn void_order_inner(
     // figure.) Replay bypasses this — the void happened while the shift was open.
     if !actor.replay && actor.role == UserRole::Teller {
         let shift_open: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND status = 'open')",
+            "SELECT EXISTS(SELECT 1 FROM tills WHERE id = $1 AND status = 'open')",
         )
-        .bind(order.shift_id)
+        .bind(order.till_id)
         .fetch_one(pool.get_ref())
         .await?;
         if !shift_open {
@@ -2934,11 +3079,11 @@ pub(crate) async fn void_order_inner(
                void_note   = $5
            WHERE id = $1 AND status <> 'voided'
            RETURNING
-               id, branch_id, shift_id, teller_id,
+               id, branch_id, till_id, till_id AS shift_id, teller_id,
                (SELECT name FROM users WHERE id = teller_id) AS teller_name,
                waiter_id, (SELECT name FROM users WHERE id = waiter_id) AS waiter_name,
                order_number, order_ref, status::text, payment_method::text,
-               COALESCE((SELECT json_agg(json_build_object('method', op.method, 'amount', op.amount) ORDER BY op.id)
+               COALESCE((SELECT json_agg(json_build_object('method', op.method, 'amount', op.amount, 'is_cash', op.is_cash) ORDER BY op.id)
                          FROM order_payments op WHERE op.order_id = orders.id), '[]'::json) AS payment_legs,
                subtotal, discount_type::text, discount_value,
                discount_amount, tax_amount, service_charge_amount, total_amount,
@@ -2950,7 +3095,8 @@ pub(crate) async fn void_order_inner(
                (SELECT customer_lng FROM delivery_orders WHERE id = orders.delivery_order_id) AS delivery_lng,
                voided_at, void_reason::text, void_note, voided_by,
             price_flagged, price_expected_total, created_at,
-            effective_timezone(branch_id) AS timezone"#,
+            effective_timezone(branch_id) AS timezone,
+            device_id, device_code, CASE WHEN device_code IS NOT NULL THEN device_code || '-' || order_number ELSE order_number::text END AS display_number, verification"#,
     )
     .bind(order_id)
     .bind(reason)
@@ -3463,6 +3609,17 @@ async fn fetch_orders_items_full_batch(
     pool: &PgPool,
     order_ids: &[Uuid],
 ) -> Result<std::collections::HashMap<Uuid, Vec<OrderItemFull>>, AppError> {
+    let mut conn = pool.acquire().await?;
+    fetch_orders_items_full_batch_on(&mut conn, order_ids).await
+}
+
+/// Every line of `order_ids` with its modifiers and bundle components, on ONE
+/// connection (the changefeed pull hydrates orders inside its snapshot
+/// transaction and must never take a second pooled connection).
+pub(crate) async fn fetch_orders_items_full_batch_on(
+    conn: &mut sqlx::PgConnection,
+    order_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, Vec<OrderItemFull>>, AppError> {
     use std::collections::HashMap;
 
     let mut by_order: HashMap<Uuid, Vec<OrderItemFull>> = HashMap::new();
@@ -3478,7 +3635,7 @@ async fn fetch_orders_items_full_batch(
          FROM order_items WHERE order_id = ANY($1) ORDER BY id",
     )
     .bind(order_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
 
     let item_ids: Vec<Uuid> = items.iter().map(|i| i.id).collect();
@@ -3490,7 +3647,7 @@ async fn fetch_orders_items_full_batch(
          FROM order_item_addons WHERE order_item_id = ANY($1) ORDER BY id",
     )
     .bind(&item_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?
     {
         addons_by_item.entry(a.order_item_id).or_default().push(a);
@@ -3503,7 +3660,7 @@ async fn fetch_orders_items_full_batch(
          FROM order_item_optionals WHERE order_item_id = ANY($1) ORDER BY id",
     )
     .bind(&item_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?
     {
         optionals_by_item
@@ -3526,7 +3683,7 @@ async fn fetch_orders_items_full_batch(
                  FROM order_line_bundle_components WHERE order_line_id = ANY($1)",
         )
         .bind(&bundle_line_ids)
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await?;
 
         let comp_item_ids: Vec<Uuid> = comp_rows.iter().map(|r| r.1).collect();
@@ -3535,7 +3692,7 @@ async fn fetch_orders_items_full_batch(
             let name_rows: Vec<(Uuid, String)> =
                 sqlx::query_as("SELECT id, name FROM menu_items WHERE id = ANY($1)")
                     .bind(&comp_item_ids)
-                    .fetch_all(pool)
+                    .fetch_all(&mut *conn)
                     .await?;
             item_names.extend(name_rows);
         }
@@ -3548,7 +3705,7 @@ async fn fetch_orders_items_full_batch(
              WHERE order_line_id = ANY($1) ORDER BY id",
         )
         .bind(&bundle_line_ids)
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await?
         {
             comp_addons
@@ -3565,7 +3722,7 @@ async fn fetch_orders_items_full_batch(
              WHERE order_line_id = ANY($1) ORDER BY id",
         )
         .bind(&bundle_line_ids)
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await?
         {
             comp_optionals
@@ -3659,11 +3816,14 @@ async fn require_branch_access(
     Ok(())
 }
 
-async fn validate_payment_method(
-    pool: &PgPool,
+async fn validate_payment_method<'e, E>(
+    pool: E,
     org_id: Uuid,
     method: &str,
-) -> Result<(), AppError> {
+) -> Result<(), AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM org_payment_methods WHERE org_id = $1 AND name = $2 AND is_active = true)"
     )
@@ -3795,17 +3955,17 @@ pub async fn export_orders(
 
     // Same scope rule as list_orders: shift, single branch, or every branch in
     // the org when no shift is given and branch_id is absent or the nil UUID.
-    let all_branches = query.shift_id.is_none() && query.branch_id.is_none_or(|b| b.is_nil());
+    let all_branches = query.till_id.is_none() && query.branch_id.is_none_or(|b| b.is_nil());
 
-    let (scope_condition, scope_id): (&str, Uuid) = if let Some(shift_id) = query.shift_id {
-        let bid: Option<Uuid> = sqlx::query_scalar("SELECT branch_id FROM shifts WHERE id = $1")
+    let (scope_condition, scope_id): (&str, Uuid) = if let Some(shift_id) = query.till_id {
+        let bid: Option<Uuid> = sqlx::query_scalar("SELECT branch_id FROM tills WHERE id = $1")
             .bind(shift_id)
             .fetch_optional(pool.get_ref())
             .await?
             .flatten();
         let bid = bid.ok_or_else(|| AppError::NotFound("Shift not found".into()))?;
         require_branch_access(pool.get_ref(), &claims, bid).await?;
-        ("o.shift_id = $1", shift_id)
+        ("o.till_id = $1", shift_id)
     } else if all_branches {
         (
             "o.branch_id IN (SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL)",

@@ -1323,7 +1323,7 @@ pub async fn generate_period(
         .execute(&mut *tx)
         .await?;
 
-    let settings = load_settings(pool.get_ref(), org_id, None).await?;
+    let settings = load_settings(&mut *tx, org_id, None).await?;
     let computed = compute_payslips(
         &mut tx,
         org_id,

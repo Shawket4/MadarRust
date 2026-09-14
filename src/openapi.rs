@@ -43,9 +43,10 @@ use utoipa::{
         (name = "recipes",      description = "Org-level recipes referencing the ingredient catalog."),
         (name = "inventory",    description = "Org-level ingredient catalog and branch-level stock."),
         (name = "orders",       description = "Order lifecycle, split payments, voids, aggregator handling."),
-        (name = "shifts",       description = "Shift open/close, cash reconciliation, printable reports."),
+        (name = "shifts",       description = "DEPRECATED legacy adapters over `tills` for POS v0.5.1/v0.6.0."),
+        (name = "devices",      description = "POS/KDS installations: code (order-number prefix), label, last seen."),
         (name = "refunds",      description = "Money returned against a settled order, out of a shift's drawer. Append-only; distinct from a void (a void says the sale never happened). The order's status flips to `refunded` only when refunds reach its total."),
-        (name = "tills",        description = "Physical cash drawers (registers) per branch — the unit of shift concurrency and cash continuity."),
+        (name = "tills",        description = "Tills: a person's sales session with its own drawer, opened on and bound to a device; open/close with per-method reconciliation, cash movements, Z report."),
         (name = "realtime",     description = "The unified per-branch SSE bus — one connection multiplexing delivery/kitchen/tickets/orders, filtered by topic + permission."),
         (name = "kitchen",      description = "Kitchen Display System: stations, category→station routing, routing mode, the KDS feed, and per-line bump."),
         (name = "open_tickets", description = "Waiter fire-now-pay-later open tickets: fire, add rounds, settle into a paid dine-in order."),
@@ -108,6 +109,7 @@ paths(
         crate::branches::handlers::get_branch,
         crate::branches::handlers::create_branch,
         crate::branches::handlers::update_branch,
+        crate::branches::handlers::patch_branch,
         crate::branches::handlers::delete_branch,
         crate::branches::handlers::list_timezones,
         // ── orgs ────────────────────────────────────────────────────
@@ -179,6 +181,7 @@ paths(
         crate::menu::studio::duplicate_item,
         // ── POS catalog sync (Wave 2, new unified tables) ───────────
         crate::menu::catalog_sync::catalog_sync,
+        crate::sync::pull::pull,
         // ── menu studio: modifiers + pricing (Wave 2, new tables) ───
         crate::menu::modifiers::list_groups,
         crate::menu::modifiers::create_group,
@@ -194,6 +197,11 @@ paths(
         crate::menu::modifiers::get_item_cost,
         // ── uploads ───────────────────────────────────────────────────
         crate::uploads::handlers::upload_menu_item_image,
+        crate::uploads::handlers::upload_category_image,
+        crate::uploads::handlers::upload_bundle_image,
+        crate::assets::handlers::get_job,
+        crate::assets::handlers::get_bundle,
+        crate::assets::handlers::top_up,
         // ── inventory ─────────────────────────────────────────────────
         crate::inventory::handlers::list_ingredient_categories,
         crate::inventory::handlers::create_ingredient_category,
@@ -239,26 +247,40 @@ paths(
         crate::bundles::handlers::activate_bundle,
         crate::bundles::handlers::archive_bundle,
         crate::bundles::handlers::bundle_performance,
-        // ── shifts ────────────────────────────────────────────────────
-        crate::shifts::handlers::get_current_shift,
-        crate::shifts::handlers::open_shift,
-        crate::shifts::handlers::list_shifts,
-        crate::shifts::handlers::get_shift,
-        crate::shifts::handlers::get_shift_report,
-        crate::shifts::handlers::add_cash_movement,
-        crate::shifts::handlers::list_cash_movements,
-        crate::shifts::handlers::close_shift,
-        crate::shifts::handlers::force_close_shift,
-        crate::shifts::handlers::delete_shift,
+        // ── tills (a person's sales session) ─────────────────────────
+        crate::tills::handlers::get_current_till,
+        crate::tills::handlers::open_till,
+        crate::tills::handlers::list_tills,
+        crate::tills::handlers::list_open_tills,
+        crate::tills::handlers::get_open_bills_notice,
+        crate::tills::handlers::get_till,
+        crate::tills::handlers::get_till_report,
+        crate::tills::handlers::close_preview,
+        crate::tills::handlers::close_till,
+        crate::tills::handlers::force_close_till,
+        crate::tills::handlers::add_cash_movement,
+        crate::tills::handlers::list_cash_movements,
+        crate::tills::handlers::delete_till,
+        crate::refunds::handlers::list_till_refunds,
+        // ── devices ──────────────────────────────────────────────────
+        crate::devices::handlers::register_device,
+        crate::devices::handlers::list_devices,
+        crate::client_seen::handlers::list_client_versions,
+        crate::devices::handlers::update_device,
+        // ── legacy /shifts + /tills entity adapters (until cutover) ──
+        crate::tills::legacy_routes::get_current_shift,
+        crate::tills::legacy_routes::open_shift,
+        crate::tills::legacy_routes::list_shifts,
+        crate::tills::legacy_routes::force_close_shift,
+        crate::tills::legacy_routes::get_shift,
+        crate::tills::legacy_routes::get_shift_report,
+        crate::tills::legacy_routes::add_cash_movement,
+        crate::tills::legacy_routes::close_shift,
+        crate::tills::legacy_routes::legacy_list_till_entities,
         // ── refunds ───────────────────────────────────────────────────
         crate::refunds::handlers::create_refund,
         crate::refunds::handlers::list_order_refunds,
-        crate::refunds::handlers::list_shift_refunds,
         crate::refunds::handlers::get_refund,
-        crate::tills::handlers::list_tills,
-        crate::tills::handlers::create_till,
-        crate::tills::handlers::update_till,
-        crate::tills::handlers::delete_till,
         crate::realtime::stream::stream,
         crate::kitchen::stations::list_stations,
         crate::kitchen::stations::create_station,
@@ -461,6 +483,8 @@ paths(
         crate::orders::handlers::export_orders,
         // ── reports ───────────────────────────────────────────────────
         crate::reports::handlers::shift_summary,
+        crate::reports::handlers::till_summary,
+        crate::reports::handlers::till_deductions,
         crate::reports::handlers::shift_deductions,
         crate::reports::handlers::branch_sales,
         crate::reports::handlers::branch_stock,
@@ -538,6 +562,8 @@ paths(
         crate::qr_card::handlers::list_marketing_links,
     ),
     components(schemas(
+        crate::assets::handlers::AssetJobView,
+        crate::assets::handlers::TopUpRequest,
         // Most schemas are pulled in transitively via path responses, but
         // listing the shared error body explicitly makes it discoverable.
         crate::errors::ErrorBody,
@@ -600,10 +626,18 @@ paths(
         crate::orders::handlers::PaginatedOrdersFull,
         // Delivery context nested on the single-order detail (GET /orders/{id}).
         crate::orders::handlers::OrderDeliveryInfo,
-        crate::shifts::handlers::PaginatedShifts,
         crate::tills::handlers::Till,
-        crate::tills::handlers::CreateTillRequest,
-        crate::tills::handlers::UpdateTillRequest,
+        crate::tills::handlers::TillStatus,
+        crate::tills::handlers::TillVerification,
+        crate::tills::handlers::TillBrief,
+        crate::tills::handlers::PaginatedTills,
+        crate::tills::reconcile::TillReconciliationLine,
+        crate::tills::reconcile::ReconciliationInput,
+        crate::tills::legacy::Shift,
+        crate::tills::legacy::PaginatedShifts,
+        crate::devices::handlers::Device,
+        crate::devices::handlers::DeviceKind,
+        crate::client_seen::handlers::ClientSeen,
         // ── reservations + floor plan ─────────────────────────────────
         crate::reservations::floor::FloorSection,
         crate::reservations::floor::FloorTable,
@@ -707,6 +741,12 @@ struct SecurityAddon;
 
 impl Modify for SecurityAddon {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        // Payment-method availability (TILLS_CONTRACT §2.3) keeps its own doc
+        // next to the handlers; fold it into the aggregate spec.
+        openapi.merge(
+            <crate::payment_methods::availability::AvailabilityApiDoc as utoipa::OpenApi>::openapi(),
+        );
+
         let components = openapi
             .components
             .as_mut()

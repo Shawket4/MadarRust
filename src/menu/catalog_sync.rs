@@ -49,7 +49,7 @@
 use actix_web::HttpMessage;
 use actix_web::{HttpRequest, HttpResponse, web};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::{
@@ -210,6 +210,8 @@ pub async fn catalog_sync(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
+    // LEGACY_REMOVAL.md §8.1: no dashboard caller; POS < B only.
+    crate::client_seen::legacy_hit(crate::client_seen::KIND_CATALOG_SYNC);
 
     let q = query.into_inner();
 
@@ -266,6 +268,9 @@ async fn build_catalog_snapshot(
     channel: Option<&str>,
     catalog_revision: i64,
 ) -> Result<CatalogSyncResponse, AppError> {
+    // One connection for the whole build (never two at once from one request).
+    let mut conn = pool.acquire().await?;
+    let conn: &mut PgConnection = &mut conn;
     // ── Active items for the org. ──
     let item_rows: Vec<(Uuid, String, serde_json::Value, Option<Uuid>)> = sqlx::query_as(
         "SELECT id, name, name_translations, category_id \
@@ -274,7 +279,7 @@ async fn build_catalog_snapshot(
          ORDER BY name, id",
     )
     .bind(org_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
     let item_ids: Vec<Uuid> = item_rows.iter().map(|r| r.0).collect();
 
@@ -282,11 +287,11 @@ async fn build_catalog_snapshot(
     // LEFT JOIN the three scope rows and COALESCE most-specific-first; price and
     // availability resolve independently (a scope row may set only one). The
     // catalog default price is menu_item_sizes.price; avail defaults to TRUE.
-    let sizes_by_item = load_sizes(pool, &item_ids, branch_id, channel).await?;
+    let sizes_by_item = load_sizes(&mut *conn, &item_ids, branch_id, channel).await?;
 
     // ── Attached modifier groups → options (resolved) + option recipes. ──
     let (groups_by_item, referenced_ingredient_ids) =
-        load_modifier_groups(pool, &item_ids, branch_id, channel).await?;
+        load_modifier_groups(&mut *conn, &item_ids, branch_id, channel).await?;
 
     // ── Assemble items. ──
     let mut items = Vec::with_capacity(item_rows.len());
@@ -302,7 +307,7 @@ async fn build_catalog_snapshot(
     }
 
     // ── Ingredients referenced by the returned option recipes (active only). ──
-    let ingredients = load_referenced_ingredients(pool, &referenced_ingredient_ids).await?;
+    let ingredients = load_referenced_ingredients(&mut *conn, &referenced_ingredient_ids).await?;
 
     Ok(CatalogSyncResponse {
         catalog_revision,
@@ -315,7 +320,7 @@ async fn build_catalog_snapshot(
 /// Load active sizes for the items, keyed by menu_item_id, with price/availability
 /// resolved for `(branch, channel)` via the documented COALESCE precedence.
 async fn load_sizes(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     item_ids: &[Uuid],
     branch_id: Uuid,
     channel: Option<&str>,
@@ -348,7 +353,7 @@ async fn load_sizes(
     .bind(item_ids)
     .bind(branch_id)
     .bind(channel)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
 
     for (menu_item_id, id, label, price, is_available) in rows {
@@ -388,7 +393,7 @@ struct RawGroupAttachment {
 /// * option price/availability resolved for `(branch, channel)` per §3;
 /// * option recipe = recipe_lines WHERE owner_type='modifier_option' AND owner_id=option.id.
 async fn load_modifier_groups(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     item_ids: &[Uuid],
     branch_id: Uuid,
     channel: Option<&str>,
@@ -431,7 +436,7 @@ async fn load_modifier_groups(
          ORDER BY mimg.menu_item_id, mimg.sort, mg.name",
     )
     .bind(item_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
 
     let attachments: Vec<RawGroupAttachment> = attach_rows
@@ -473,7 +478,7 @@ async fn load_modifier_groups(
         g
     };
     let (options_by_group, recipes_by_option, referenced_ingredient_ids) =
-        load_group_options(pool, &group_ids, branch_id, channel).await?;
+        load_group_options(&mut *conn, &group_ids, branch_id, channel).await?;
 
     for a in &attachments {
         let all_opts = options_by_group.get(&a.group_id);
@@ -536,7 +541,7 @@ struct RawOption {
 /// Returns `(options_by_group, recipes_by_option, referenced_ingredient_ids)`.
 #[allow(clippy::type_complexity)]
 async fn load_group_options(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     group_ids: &[Uuid],
     branch_id: Uuid,
     channel: Option<&str>,
@@ -578,7 +583,7 @@ async fn load_group_options(
     .bind(group_ids)
     .bind(branch_id)
     .bind(channel)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
 
     let mut option_ids = Vec::with_capacity(opt_rows.len());
@@ -605,7 +610,7 @@ async fn load_group_options(
              ORDER BY owner_id, ingredient_id",
         )
         .bind(&option_ids)
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await?;
 
         for (owner_id, ingredient_id, quantity, unit) in recipe_rows {
@@ -630,7 +635,7 @@ async fn load_group_options(
 /// An ingredient soft-deleted/inactive is silently dropped from the list (the recipe
 /// line still references its id; the POS treats an absent ingredient as unknown).
 async fn load_referenced_ingredients(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     ingredient_ids: &[Uuid],
 ) -> Result<Vec<SyncIngredient>, AppError> {
     if ingredient_ids.is_empty() {
@@ -642,7 +647,7 @@ async fn load_referenced_ingredients(
          ORDER BY name",
     )
     .bind(ingredient_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
     Ok(rows
         .into_iter()
@@ -652,3 +657,98 @@ async fn load_referenced_ingredients(
 
 #[cfg(test)]
 mod tests;
+
+/// `SyncItem`s for a set of ids, resolved for `branch_id` (default channel).
+/// Inactive or deleted items are omitted (sync pull projection).
+pub(crate) async fn sync_items_by_ids(
+    conn: &mut PgConnection,
+    org_id: Uuid,
+    branch_id: Uuid,
+    ids: &[Uuid],
+) -> Result<Vec<SyncItem>, AppError> {
+    let item_rows: Vec<(Uuid, String, serde_json::Value, Option<Uuid>)> = sqlx::query_as(
+        "SELECT id, name, name_translations, category_id FROM menu_items \
+         WHERE org_id = $1 AND id = ANY($2) AND is_active = true AND deleted_at IS NULL",
+    )
+    .bind(org_id)
+    .bind(ids)
+    .fetch_all(&mut *conn)
+    .await?;
+    let item_ids: Vec<Uuid> = item_rows.iter().map(|r| r.0).collect();
+    let sizes_by_item = load_sizes(&mut *conn, &item_ids, branch_id, None).await?;
+    let (groups_by_item, _) = load_modifier_groups(&mut *conn, &item_ids, branch_id, None).await?;
+    Ok(item_rows
+        .into_iter()
+        .map(|(id, name, name_translations, category_id)| SyncItem {
+            id,
+            name,
+            name_translations,
+            category_id,
+            sizes: sizes_by_item.get(&id).cloned().unwrap_or_default(),
+            modifier_groups: groups_by_item.get(&id).cloned().unwrap_or_default(),
+        })
+        .collect())
+}
+
+/// Per delivery channel, the sizes and modifier options of `ids` whose price or
+/// availability for `(branch_id, channel)` differs from the in-store resolution:
+/// `{ "<channel>": { "sizes": { "<size_id>": {price, is_available} },
+///                   "options": { "<option_id>": {price, is_available} } } }`.
+/// Items with no channel difference get no entry (sync pull projection).
+pub(crate) async fn sync_channel_prices_by_ids(
+    conn: &mut PgConnection,
+    org_id: Uuid,
+    branch_id: Uuid,
+    ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, serde_json::Value>, AppError> {
+    use serde_json::{json, Map, Value};
+    let item_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM menu_items WHERE org_id = $1 AND id = ANY($2) AND is_active = true AND deleted_at IS NULL",
+    )
+    .bind(org_id)
+    .bind(ids)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut out: std::collections::HashMap<Uuid, Map<String, Value>> = std::collections::HashMap::new();
+    if item_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let base_sizes = load_sizes(&mut *conn, &item_ids, branch_id, None).await?;
+    let (base_groups, _) = load_modifier_groups(&mut *conn, &item_ids, branch_id, None).await?;
+    let channels: Vec<String> =
+        sqlx::query_scalar("SELECT unnest(enum_range(NULL::delivery_channel))::text").fetch_all(&mut *conn).await?;
+    for channel in &channels {
+        let sizes = load_sizes(&mut *conn, &item_ids, branch_id, Some(channel)).await?;
+        let (groups, _) = load_modifier_groups(&mut *conn, &item_ids, branch_id, Some(channel)).await?;
+        for item in &item_ids {
+            let mut size_diff = Map::new();
+            let base: std::collections::HashMap<Uuid, (i32, bool)> = base_sizes
+                .get(item)
+                .map(|v| v.iter().map(|s| (s.id, (s.price, s.is_available))).collect())
+                .unwrap_or_default();
+            for s in sizes.get(item).map(Vec::as_slice).unwrap_or_default() {
+                if base.get(&s.id) != Some(&(s.price, s.is_available)) {
+                    size_diff.insert(s.id.to_string(), json!({ "price": s.price, "is_available": s.is_available }));
+                }
+            }
+            let base_opts: std::collections::HashMap<Uuid, (i32, bool)> = base_groups
+                .get(item)
+                .map(|g| g.iter().flat_map(|g| g.options.iter().map(|o| (o.id, (o.price, o.is_available)))).collect())
+                .unwrap_or_default();
+            let mut opt_diff = Map::new();
+            for g in groups.get(item).map(Vec::as_slice).unwrap_or_default() {
+                for o in &g.options {
+                    if base_opts.get(&o.id) != Some(&(o.price, o.is_available)) {
+                        opt_diff.insert(o.id.to_string(), json!({ "price": o.price, "is_available": o.is_available }));
+                    }
+                }
+            }
+            if !size_diff.is_empty() || !opt_diff.is_empty() {
+                out.entry(*item)
+                    .or_default()
+                    .insert(channel.clone(), json!({ "sizes": size_diff, "options": opt_diff }));
+            }
+        }
+    }
+    Ok(out.into_iter().map(|(k, v)| (k, Value::Object(v))).collect())
+}

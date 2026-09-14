@@ -52,7 +52,7 @@ pub(crate) struct Seeded {
 /// exposes joins for, so a broken join surfaces here rather than in production.
 pub(crate) async fn seed(pool: &PgPool, label: &str) -> Seeded {
     let (admin, other_admin) = (Uuid::new_v4(), Uuid::new_v4());
-    let (org, teller, branch, till, shift) = (
+    let (org, teller, branch, _till, shift) = (
         Uuid::new_v4(),
         Uuid::new_v4(),
         Uuid::new_v4(),
@@ -99,22 +99,14 @@ pub(crate) async fn seed(pool: &PgPool, label: &str) -> Seeded {
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO tills (id, org_id, branch_id, name) VALUES ($1,$2,$3,'Till 1')")
-        .bind(till)
-        .bind(org)
-        .bind(branch)
-        .execute(pool)
-        .await
-        .unwrap();
     sqlx::query(
-        "INSERT INTO shifts (id, branch_id, teller_id, till_id, status, opening_cash, \
+        "INSERT INTO tills (id, branch_id, teller_id, status, opening_cash, \
          closing_cash_declared, closing_cash_system, closed_at) \
-         VALUES ($1,$2,$3,$4,'closed',10000,25000,25500, now())",
+         VALUES ($1,$2,$3,'closed',10000,25000,25500, now())",
     )
     .bind(shift)
     .bind(branch)
     .bind(teller)
-    .bind(till)
     .execute(pool)
     .await
     .unwrap();
@@ -147,7 +139,7 @@ pub(crate) async fn seed(pool: &PgPool, label: &str) -> Seeded {
         let subtotal = unit * qty;
         let total = subtotal - discount;
         sqlx::query(
-            "INSERT INTO orders (id, branch_id, shift_id, teller_id, order_number, payment_method, \
+            "INSERT INTO orders (id, branch_id, till_id, teller_id, order_number, payment_method, \
              order_ref, status, subtotal, discount_amount, total_amount, order_type) \
              VALUES ($1,$2,$3,$4,$5,'cash',$6,'completed',$7,$8,$9,'dine_in')",
         )
@@ -659,14 +651,14 @@ async fn a_partial_refund_is_netted_from_revenue_and_reported_apart(pool: PgPool
     let s = seed(&pool, "a").await;
     // The seed's Latte order: 10000, paid in cash, sold in the seeded shift.
     let (latte_order, shift, teller): (Uuid, Uuid, Uuid) = sqlx::query_as(
-        "SELECT o.id, o.shift_id, o.teller_id FROM orders o WHERE o.branch_id = $1 AND o.total_amount = 10000",
+        "SELECT o.id, o.till_id, o.teller_id FROM orders o WHERE o.branch_id = $1 AND o.total_amount = 10000",
     )
     .bind(s.branch)
     .fetch_one(&pool)
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO order_refunds (order_id, shift_id, amount, method, is_cash, reason, issued_by)
+        "INSERT INTO order_refunds (order_id, till_id, amount, method, is_cash, reason, issued_by)
          VALUES ($1, $2, 1000, 'cash', true, 'quality_issue', $3)",
     )
     .bind(latte_order)
@@ -732,7 +724,7 @@ async fn a_partial_refund_is_netted_from_revenue_and_reported_apart(pool: PgPool
     // Refund the rest: the status flips, the sale leaves `sold` and takes its
     // refunds with it, and the refunds dataset counts it as fully refunded.
     sqlx::query(
-        "INSERT INTO order_refunds (order_id, shift_id, amount, method, is_cash, reason, issued_by)
+        "INSERT INTO order_refunds (order_id, till_id, amount, method, is_cash, reason, issued_by)
          VALUES ($1, $2, 9000, 'card', false, 'quality_issue', $3)",
     )
     .bind(latte_order)

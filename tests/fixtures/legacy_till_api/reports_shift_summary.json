@@ -1,0 +1,40 @@
+{
+  "body": {
+    "branch_id": "10000000-0000-4000-8000-0000000000a1",
+    "branch_name": "Golden A",
+    "cash_discrepancy": null,
+    "cash_tips": 0,
+    "closed_at": null,
+    "closing_cash_declared": null,
+    "closing_cash_system": null,
+    "gross_sales": 20000,
+    "opened_at": "2026-01-01T00:00:00Z",
+    "opening_cash": 2000,
+    "refunded_amount": 0,
+    "refunds_issued_amount": 0,
+    "refunds_issued_cash": 0,
+    "refunds_issued_count": 0,
+    "revenue_by_method": {
+      "card": 5000,
+      "cash": 15000
+    },
+    "shift_id": "20000000-0000-4000-8000-0000000000a1",
+    "status": "open",
+    "teller_id": "10000000-0000-4000-8000-00000000ee0a",
+    "teller_name": "Teller Alpha",
+    "total_delivery_fees": 0,
+    "total_discount": 0,
+    "total_orders": 3,
+    "total_revenue": 20000,
+    "total_service_charge": 0,
+    "total_tax": 0,
+    "total_tips": 0,
+    "voided_orders": 0
+  },
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/reports/shifts/20000000-0000-4000-8000-0000000000a1/summary"
+  },
+  "status": 200
+}

@@ -1,0 +1,15 @@
+{
+  "body": {
+    "refund_count": 0,
+    "refunded_amount": 0,
+    "refunded_cash": 0,
+    "refunds": [],
+    "shift_id": "20000000-0000-4000-8000-0000000000a1"
+  },
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/refunds/shift/20000000-0000-4000-8000-0000000000a1"
+  },
+  "status": 200
+}

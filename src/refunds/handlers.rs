@@ -37,8 +37,11 @@ pub struct CreateRefundRequest {
     /// The shift whose drawer the money leaves. Omit for a live request and the
     /// actor's own open shift at the order's branch is used; a replayed offline
     /// refund must name the shift it was issued in, the way a queued sale does.
+    #[serde(default, alias = "shift_id")]
+    pub till_id: Option<Uuid>,
+    /// The device issuing the refund (else the `X-Madar-Device` header).
     #[serde(default)]
-    pub shift_id: Option<Uuid>,
+    pub device_id: Option<Uuid>,
     /// Minor units, > 0. Together with every refund already on the order it
     /// may not exceed `orders.total_amount`.
     pub amount: i32,
@@ -68,7 +71,9 @@ pub struct Refund {
     pub branch_id: Uuid,
     pub order_id: Uuid,
     /// The shift the refund was ISSUED in — the drawer the money left. Not
-    /// necessarily the shift the order was sold in.
+    /// necessarily the till the order was sold in.
+    pub till_id: Uuid,
+    /// DEPRECATED: same value as `till_id`.
     pub shift_id: Uuid,
     pub amount: i32,
     pub method: String,
@@ -147,7 +152,9 @@ pub struct OrderRefunds {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
-pub struct ShiftRefunds {
+pub struct TillRefunds {
+    pub till_id: Uuid,
+    /// DEPRECATED: same value as `till_id` (POS v0.6.0 decodes `ShiftRefunds`).
     pub shift_id: Uuid,
     #[serde(flatten)]
     pub totals: RefundTotals,
@@ -172,12 +179,18 @@ pub async fn create_refund(
     req: HttpRequest,
     pool: crate::db::Db,
     body: web::Json<CreateRefundRequest>,
+    device: crate::devices::DeviceHeader,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "refunds", "create").await?;
     let order = fetch_refundable_order(pool.get_ref(), body.order_id, claims.org_id()).await?;
     require_branch_access(pool.get_ref(), &claims, order.branch_id).await?;
-    create_refund_inner(pool.clone(), body, ActingContext::live(&claims)?).await
+    let mut body = body.into_inner();
+    body.device_id = body.device_id.or(device.0);
+    if let Some(till) = body.till_id {
+        crate::tills::handlers::guard_till_device(pool.get_ref(), till, device.0).await?;
+    }
+    create_refund_inner(pool.clone(), web::Json(body), ActingContext::live(&claims)?).await
 }
 
 /// The slice of an order a refund needs to know.
@@ -288,7 +301,7 @@ pub(crate) async fn create_refund_inner(
         ))
     })?;
 
-    let shift_id = resolve_refund_shift(pool.get_ref(), &body, &order, &actor).await?;
+    let shift_id = resolve_refund_till(pool.get_ref(), &body, &order, &actor).await?;
 
     // Serialize against a concurrent close exactly like a sale or a cash
     // movement does: close_shift snapshots `closing_cash_system` under this
@@ -303,12 +316,13 @@ pub(crate) async fn create_refund_inner(
 
     if !actor.replay {
         let still_open: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND status = 'open')",
+            "SELECT EXISTS(SELECT 1 FROM tills WHERE id = $1 AND status = 'open')",
         )
         .bind(shift_id)
         .fetch_one(&mut *tx)
         .await?;
         if !still_open {
+            crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ERROR_WORDING, "refund_needs_open_shift");
             return Err(AppError::BadRequest(
                 "Refunds can only be issued in an open shift".into(),
             ));
@@ -340,12 +354,18 @@ pub(crate) async fn create_refund_inner(
         )));
     }
 
+    let device_id = match body.device_id {
+        Some(d) => crate::devices::ensure_registered(&mut tx, actor.org_id, d, Some(order.branch_id), None)
+            .await?
+            .map(|_| d),
+        None => None,
+    };
     let refund_id: Uuid = match sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO order_refunds
-            (org_id, branch_id, order_id, shift_id, amount, method, is_cash,
-             reason, note, issued_by, issued_at, client_ref)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            (org_id, branch_id, order_id, till_id, amount, method, is_cash,
+             reason, note, issued_by, issued_at, client_ref, device_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         RETURNING id
         "#,
     )
@@ -361,6 +381,7 @@ pub(crate) async fn create_refund_inner(
     .bind(actor.teller_id)
     .bind(issued_at)
     .bind(body.client_ref)
+    .bind(device_id)
     .fetch_one(&mut *tx)
     .await
     {
@@ -422,20 +443,20 @@ pub(crate) async fn create_refund_inner(
 /// Which drawer the money leaves. Named by the request, or — live only — the
 /// actor's own open shift at the order's branch. The trigger refuses a shift
 /// at another branch; this says so before the insert, in words.
-async fn resolve_refund_shift(
+async fn resolve_refund_till(
     pool: &PgPool,
     body: &CreateRefundRequest,
     order: &RefundableOrder,
     actor: &ActingContext,
 ) -> Result<Uuid, AppError> {
-    if let Some(shift_id) = body.shift_id {
+    if let Some(shift_id) = body.till_id {
         let shift: Option<(Uuid, Uuid, String)> =
-            sqlx::query_as("SELECT branch_id, teller_id, status::text FROM shifts WHERE id = $1")
+            sqlx::query_as("SELECT branch_id, teller_id, status::text FROM tills WHERE id = $1")
                 .bind(shift_id)
                 .fetch_optional(pool)
                 .await?;
         let Some((shift_branch, shift_teller, shift_status)) = shift else {
-            return Err(AppError::NotFound("Shift not found".into()));
+            return Err(AppError::NotFound("Till not found".into()));
         };
         if shift_branch != order.branch_id {
             return Err(AppError::BadRequest(
@@ -447,10 +468,11 @@ async fn resolve_refund_shift(
         // Replay bypasses this: a different teller may be flushing the device.
         if !actor.replay && actor.role == UserRole::Teller && shift_teller != actor.teller_id {
             return Err(AppError::Forbidden(
-                "You can only issue refunds from your own shift".into(),
+                "You can only issue refunds from your own till".into(),
             ));
         }
         if !actor.replay && shift_status != "open" {
+            crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ERROR_WORDING, "refund_needs_open_shift");
             return Err(AppError::BadRequest(
                 "Refunds can only be issued in an open shift".into(),
             ));
@@ -460,19 +482,21 @@ async fn resolve_refund_shift(
 
     if actor.replay {
         return Err(AppError::BadRequest(
-            "A replayed refund must name the shift it was issued in".into(),
+            "A replayed refund must name the till it was issued in".into(),
         ));
     }
 
-    // `idx_shifts_one_open_per_teller`: at most one row.
+    // A person may (rarely, flagged) hold two open tills: use the newest.
     sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM shifts WHERE teller_id = $1 AND branch_id = $2 AND status = 'open'",
+        "SELECT id FROM tills WHERE teller_id = $1 AND branch_id = $2 AND status = 'open' \
+         ORDER BY opened_at DESC LIMIT 1",
     )
     .bind(actor.teller_id)
     .bind(order.branch_id)
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| {
+        crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ERROR_WORDING, "refund_no_open_shift");
         AppError::BadRequest(
             "You have no open shift at this branch — open one before issuing a refund".into(),
         )
@@ -512,40 +536,41 @@ pub async fn list_order_refunds(
     }))
 }
 
-// ── GET /refunds/shift/:shift_id ──────────────────────────────
+// ── GET /tills/:till_id/refunds (legacy: /refunds/shift/:id) ──
 
 #[utoipa::path(
     get,
-    path = "/refunds/shift/{shift_id}",
+    path = "/tills/{till_id}/refunds",
     tag = "refunds",
-    params(("shift_id" = Uuid, Path, description = "Shift ID")),
-    responses((status = 200, description = "Refunds issued in one shift", body = ShiftRefunds), AppErrorResponse),
+    params(("till_id" = Uuid, Path, description = "Till ID")),
+    responses((status = 200, description = "Refunds issued from one till (also served at the deprecated /refunds/shift/{till_id})", body = TillRefunds), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
-pub async fn list_shift_refunds(
+pub async fn list_till_refunds(
     req: HttpRequest,
     pool: crate::db::Db,
     shift_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "refunds", "read").await?;
-    let branch_id: Uuid = sqlx::query_scalar("SELECT branch_id FROM shifts WHERE id = $1")
+    let branch_id: Uuid = sqlx::query_scalar("SELECT branch_id FROM tills WHERE id = $1")
         .bind(*shift_id)
         .fetch_optional(pool.get_ref())
         .await?
-        .ok_or_else(|| AppError::NotFound("Shift not found".into()))?;
+        .ok_or_else(|| AppError::NotFound("Till not found".into()))?;
     require_branch_access(pool.get_ref(), &claims, branch_id).await?;
 
     let mut conn = pool.get_ref().acquire().await?;
-    let totals = shift_refund_totals(&mut conn, *shift_id).await?;
+    let totals = till_refund_totals(&mut conn, *shift_id).await?;
     let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM order_refunds WHERE shift_id = $1 ORDER BY issued_at DESC, created_at DESC",
+        "SELECT id FROM order_refunds WHERE till_id = $1 ORDER BY issued_at DESC, created_at DESC",
     )
     .bind(*shift_id)
     .fetch_all(&mut *conn)
     .await?;
     let refunds = fetch_refunds_by_ids(&mut conn, &ids).await?;
-    Ok(HttpResponse::Ok().json(ShiftRefunds {
+    Ok(HttpResponse::Ok().json(TillRefunds {
+        till_id: *shift_id,
         shift_id: *shift_id,
         totals,
         refunds,
@@ -574,6 +599,7 @@ pub async fn get_refund(
         .await?
         .pop()
         .ok_or_else(|| AppError::NotFound("Refund not found".into()))?;
+    drop(conn); // back to the pool before the access check takes one
     require_branch_access(pool.get_ref(), &claims, refund.refund.branch_id).await?;
     Ok(HttpResponse::Ok().json(refund))
 }
@@ -594,13 +620,13 @@ pub async fn fetch_order_refunds(
 /// the refund was issued in, not the shift the order was sold in. The drawer
 /// maths (`compute_system_cash`) subtracts it; the snapshotted `is_cash` is
 /// what makes the figure stable after a payment method's flag is flipped.
-pub async fn shift_cash_refunds<'e, E>(executor: E, shift_id: Uuid) -> Result<i64, sqlx::Error>
+pub async fn till_cash_refunds<'e, E>(executor: E, shift_id: Uuid) -> Result<i64, sqlx::Error>
 where
     E: sqlx::PgExecutor<'e>,
 {
     sqlx::query_scalar::<_, i64>(
         "SELECT COALESCE(SUM(amount), 0)::bigint FROM order_refunds \
-         WHERE shift_id = $1 AND is_cash",
+         WHERE till_id = $1 AND is_cash",
     )
     .bind(shift_id)
     .fetch_one(executor)
@@ -609,7 +635,7 @@ where
 
 /// Everything returned in one shift, cash and otherwise — for the shift
 /// report / Z-report alongside the cash figure above.
-pub async fn shift_refund_totals(
+pub async fn till_refund_totals(
     conn: &mut PgConnection,
     shift_id: Uuid,
 ) -> Result<RefundTotals, AppError> {
@@ -617,7 +643,7 @@ pub async fn shift_refund_totals(
         "SELECT COALESCE(SUM(amount), 0)::bigint                        AS refunded_amount, \
                 COALESCE(SUM(amount) FILTER (WHERE is_cash), 0)::bigint AS refunded_cash, \
                 COUNT(*)::bigint                                        AS refund_count \
-         FROM order_refunds WHERE shift_id = $1",
+         FROM order_refunds WHERE till_id = $1",
     )
     .bind(shift_id)
     .fetch_one(&mut *conn)
@@ -734,7 +760,7 @@ async fn fetch_refunds_by_ids(
     }
     let refunds = sqlx::query_as::<_, Refund>(
         r#"
-        SELECT r.id, r.branch_id, r.order_id, r.shift_id, r.amount, r.method, r.is_cash,
+        SELECT r.id, r.branch_id, r.order_id, r.till_id, r.till_id AS shift_id, r.amount, r.method, r.is_cash,
                r.reason, r.note, r.issued_by,
                (SELECT name FROM users WHERE id = r.issued_by) AS issued_by_name,
                r.issued_at, r.client_ref, r.created_at

@@ -1,0 +1,80 @@
+{
+  "body": [
+    {
+      "address_line": "12 Main St",
+      "branch_id": "10000000-0000-4000-8000-0000000000b1",
+      "cancel_reason": null,
+      "cancel_restocked": null,
+      "cancelled_at": null,
+      "cart": {
+        "lines": [
+          {
+            "addons": [],
+            "cost_missing": true,
+            "item_name": "Latte",
+            "line_cost": null,
+            "line_total": 5000,
+            "menu_item_id": "10000000-0000-4000-8000-0000000e0001",
+            "name_translations": {},
+            "notes": null,
+            "optionals": [],
+            "quantity": 1,
+            "size_label": null,
+            "unit_cost": null,
+            "unit_price": 5000
+          }
+        ]
+      },
+      "channel": "in_mall",
+      "confirmed_at": null,
+      "created_at": "2026-01-01T00:00:00Z",
+      "customer_lat": 30.0,
+      "customer_lng": 31.0,
+      "customer_name": "Golden Guest",
+      "customer_phone": "201000000000",
+      "delivered_at": null,
+      "delivery_fee": 300,
+      "delivery_notes": null,
+      "delivery_ref": "D-GLDB-YYMMDD-0001",
+      "delivery_zone_id": null,
+      "discount_amount": 0,
+      "discount_id": null,
+      "discount_rate": 0.0,
+      "discount_type": null,
+      "discount_value": 0,
+      "distance_source": "haversine",
+      "extra_prep_minutes": 0,
+      "floor": "2",
+      "id": "446a2848-0493-4c65-9bf3-6c0544b5d96b",
+      "landmark": null,
+      "order_id": null,
+      "org_id": "10000000-0000-4000-8000-000000000001",
+      "otp_verified": true,
+      "out_for_delivery_at": null,
+      "payment_method": null,
+      "payment_method_hint": "cash",
+      "place_name": "Shop 12",
+      "preparing_at": null,
+      "ready_at": null,
+      "receipt_printed_at": null,
+      "rejected_at": null,
+      "road_distance_meters": 0,
+      "service_charge_amount": 0,
+      "service_charge_rate_applied": 0.0,
+      "status": "received",
+      "subtotal": 5000,
+      "tax_amount": 0,
+      "tax_inclusive": false,
+      "tax_rate_applied": 0.0,
+      "total": 5300,
+      "unit_number": "B4",
+      "updated_at": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/delivery-orders?branch_id=10000000-0000-4000-8000-0000000000b1&limit=5"
+  },
+  "status": 200
+}

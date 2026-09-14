@@ -92,6 +92,14 @@ pub struct Branch {
     /// everyone; an explicit `true` does the reverse. This is the OVERRIDE —
     /// the resolved answer is `branches::policy::require_table_for_orders`.
     pub require_table_for_orders: Option<bool>,
+    /// A bill left open longer than this many hours is flagged as OLD (till
+    /// open notice, close warning, Z report). 1..168, default 3.
+    #[schema(example = 3, minimum = 1, maximum = 168)]
+    pub old_bill_hours: i16,
+    /// The drawer's standard opening float in minor units; drives the till
+    /// report's `standard_float` / `suggested_safe_drop`. `null` = none set.
+    #[schema(example = 50000, minimum = 0)]
+    pub standard_float: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -192,6 +200,15 @@ pub struct UpdateBranchRequest {
     pub longitude: Option<Option<f64>>,
 
     pub geo_radius_meters: Option<i32>,
+
+    /// Hours after which an open bill counts as old (1..168).
+    #[schema(minimum = 1, maximum = 168)]
+    pub old_bill_hours: Option<i16>,
+
+    /// Standard opening float in minor units (>= 0); explicit `null` clears it.
+    #[serde(default, deserialize_with = "double_option")]
+    #[schema(nullable, value_type = Option<i32>, minimum = 0)]
+    pub standard_float: Option<Option<i32>>,
 }
 
 /// Deserializes a field that can be:
@@ -235,7 +252,7 @@ pub async fn list_branches(
                    COALESCE(b.timezone, o.timezone)::text AS timezone,
                    b.printer_brand, b.printer_ip::text, b.printer_port,
                    b.is_active, o.logo_url as org_logo_url,
-                   b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable, b.require_table_for_orders,
+                   b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable, b.require_table_for_orders, b.old_bill_hours, b.standard_float,
                    b.created_at, b.updated_at
             FROM branches b
             JOIN organizations o ON o.id = b.org_id
@@ -255,7 +272,7 @@ pub async fn list_branches(
                    COALESCE(b.timezone, o.timezone)::text AS timezone,
                    b.printer_brand, b.printer_ip::text, b.printer_port,
                    b.is_active, o.logo_url as org_logo_url,
-                   b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable, b.require_table_for_orders,
+                   b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable, b.require_table_for_orders, b.old_bill_hours, b.standard_float,
                    b.created_at, b.updated_at
             FROM branches b
             JOIN organizations o ON o.id = b.org_id
@@ -329,14 +346,14 @@ pub async fn create_branch(
             VALUES ($1, $2, $3, $4, $5::timezone_name, $6, $7::inet, $8, $9, $10, $11)
             RETURNING id, org_id, code, name, address, phone, timezone,
                       printer_brand, printer_ip, printer_port,
-                      is_active, latitude, longitude, geo_radius_meters, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders,
+                      is_active, latitude, longitude, geo_radius_meters, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, old_bill_hours, standard_float,
                       created_at, updated_at
         )
         SELECT i.id, i.org_id, i.code, i.name, i.address, i.phone,
                COALESCE(i.timezone, o.timezone)::text AS timezone,
                i.printer_brand, i.printer_ip::text, i.printer_port,
                i.is_active, o.logo_url as org_logo_url,
-               i.latitude, i.longitude, i.geo_radius_meters, i.tax_rate, i.tax_inclusive, i.service_charge_rate, i.service_charge_taxable, i.require_table_for_orders,
+               i.latitude, i.longitude, i.geo_radius_meters, i.tax_rate, i.tax_inclusive, i.service_charge_rate, i.service_charge_taxable, i.require_table_for_orders, i.old_bill_hours, i.standard_float,
                i.created_at, i.updated_at
         FROM inserted i
         JOIN organizations o ON o.id = i.org_id
@@ -356,18 +373,34 @@ pub async fn create_branch(
     .fetch_one(pool.get_ref())
     .await?;
 
-    // Every branch gets a default "Till 1" drawer out of the box, so the dashboard
-    // and devices have a till to bind to and shifts can open without extra setup.
-    sqlx::query(
-        "INSERT INTO tills (org_id, branch_id, name, is_default, is_active) \
-         VALUES ($1, $2, 'Till 1', true, true) ON CONFLICT DO NOTHING",
-    )
-    .bind(branch.org_id)
-    .bind(branch.id)
-    .execute(pool.get_ref())
-    .await?;
-
     Ok(HttpResponse::Created().json(branch))
+}
+
+/// `PATCH /branches/{id}` — the same partial update as `PUT` (the contract
+/// names both; every field is already optional).
+#[utoipa::path(
+    patch,
+    path = "/branches/{id}",
+    tag = "branches",
+    operation_id = "patch_branch",
+    params(
+        ("id" = Uuid, Path, description = "Branch ID")
+    ),
+    request_body = UpdateBranchRequest,
+    responses(
+        (status = 200, description = "Branch updated", body = Branch),
+        AppErrorResponse,
+    ),
+    security(("bearer_jwt" = []))
+)]
+pub async fn patch_branch(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    id: web::Path<Uuid>,
+    body: web::Json<UpdateBranchRequest>,
+    hub: Option<web::Data<crate::realtime::hub::BranchEventHub>>,
+) -> Result<HttpResponse, AppError> {
+    update_branch(req, pool, id, body, hub).await
 }
 
 #[utoipa::path(
@@ -389,6 +422,7 @@ pub async fn update_branch(
     pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<UpdateBranchRequest>,
+    hub: Option<web::Data<crate::realtime::hub::BranchEventHub>>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "branches", "update").await?;
@@ -424,6 +458,17 @@ pub async fn update_branch(
                  0.14 means 14%"
             )));
         }
+    }
+
+    if let Some(h) = body.old_bill_hours
+        && !(1..=168).contains(&h)
+    {
+        return Err(AppError::BadRequest("old_bill_hours must be between 1 and 168".into()));
+    }
+    if let Some(Some(f)) = body.standard_float
+        && f < 0
+    {
+        return Err(AppError::BadRequest("standard_float must be zero or more (minor units)".into()));
     }
 
     let branch = sqlx::query_as::<_, Branch>(
@@ -466,6 +511,8 @@ pub async fn update_branch(
                 -- The table rule clears the same way. A defaulted false here
                 -- would be the org flag silently switched off at this branch.
                 require_table_for_orders = CASE WHEN $26 THEN $27 ELSE require_table_for_orders END,
+                old_bill_hours    = COALESCE($28, old_bill_hours),
+                standard_float    = CASE WHEN $29 THEN $30 ELSE standard_float END,
                 -- Editing a branch has to MOVE this, and it did not.
                 --
                 -- The loyalty pass refresh decides a card is stale by comparing
@@ -479,14 +526,14 @@ pub async fn update_branch(
             WHERE id = $1 AND deleted_at IS NULL
             RETURNING id, org_id, code, name, address, phone, timezone,
                       printer_brand, printer_ip, printer_port,
-                      is_active, latitude, longitude, geo_radius_meters, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders,
+                      is_active, latitude, longitude, geo_radius_meters, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, old_bill_hours, standard_float,
                       created_at, updated_at
         )
         SELECT u.id, u.org_id, u.code, u.name, u.address, u.phone,
                COALESCE(u.timezone, o.timezone)::text AS timezone,
                u.printer_brand, u.printer_ip::text, u.printer_port,
                u.is_active, o.logo_url as org_logo_url,
-               u.latitude, u.longitude, u.geo_radius_meters, u.tax_rate, u.tax_inclusive, u.service_charge_rate, u.service_charge_taxable, u.require_table_for_orders,
+               u.latitude, u.longitude, u.geo_radius_meters, u.tax_rate, u.tax_inclusive, u.service_charge_rate, u.service_charge_taxable, u.require_table_for_orders, u.old_bill_hours, u.standard_float,
                u.created_at, u.updated_at
         FROM updated u
         JOIN organizations o ON o.id = u.org_id
@@ -521,9 +568,22 @@ pub async fn update_branch(
     .bind(body.service_charge_taxable.and_then(|o| o))
     .bind(body.require_table_for_orders.is_some())
     .bind(body.require_table_for_orders.and_then(|o| o))
+    .bind(body.old_bill_hours)
+    .bind(body.standard_float.is_some())
+    .bind(body.standard_float.and_then(|o| o))
     .fetch_optional(pool.get_ref())
     .await?
     .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+
+    // Contract §2.x: tills listen for the old-bill threshold / float changing.
+    if branch.old_bill_hours != existing.old_bill_hours || branch.standard_float != existing.standard_float {
+        crate::tills::handlers::publish(
+            hub.as_ref().map(|h| h.get_ref()),
+            branch.id,
+            "branch.settings_changed",
+            serde_json::json!({ "branch_id": branch.id, "old_bill_hours": branch.old_bill_hours }),
+        );
+    }
 
     Ok(HttpResponse::Ok().json(branch))
 }
@@ -592,7 +652,7 @@ async fn live_at_branch(pool: &PgPool, branch_id: Uuid) -> Result<Vec<String>, A
     // tickets, and a parked cart is now a ticket like any other.
     let row: (i64, i64, i64, i64) = sqlx::query_as(
         "SELECT \
-           (SELECT count(*) FROM shifts WHERE branch_id = $1 AND closed_at IS NULL), \
+           (SELECT count(*) FROM tills WHERE branch_id = $1 AND closed_at IS NULL), \
            (SELECT count(*) FROM open_tickets WHERE branch_id = $1 \
              AND status NOT IN ('settled','voided')), \
            (SELECT count(*) FROM branch_tables WHERE branch_id = $1 \
@@ -613,6 +673,7 @@ async fn live_at_branch(pool: &PgPool, branch_id: Uuid) -> Result<Vec<String>, A
     };
     let mut out = Vec::new();
     if row.0 > 0 {
+        crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ERROR_WORDING, "branch_delete_open_shifts");
         out.push(plural(row.0, "open shift", "open shifts"));
     }
     if row.1 > 0 {
@@ -675,7 +736,7 @@ async fn fetch_branch(pool: &PgPool, id: Uuid) -> Result<Branch, AppError> {
                COALESCE(b.timezone, o.timezone)::text AS timezone,
                b.printer_brand, b.printer_ip::text, b.printer_port,
                b.is_active, o.logo_url as org_logo_url,
-               b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable, b.require_table_for_orders,
+               b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable, b.require_table_for_orders, b.old_bill_hours, b.standard_float,
                b.created_at, b.updated_at
         FROM branches b
         JOIN organizations o ON o.id = b.org_id

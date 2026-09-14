@@ -133,6 +133,20 @@ pub async fn fetch_delivery_order(
         .await?)
 }
 
+/// Many delivery orders in one query (sync pull projection).
+pub async fn fetch_delivery_orders<'e, E>(
+    exec: E,
+    ids: &[Uuid],
+) -> Result<Vec<DeliveryOrder>, AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    Ok(sqlx::query_as(&format!("{DO_SELECT} WHERE id = ANY($1)"))
+        .bind(ids)
+        .fetch_all(exec)
+        .await?)
+}
+
 pub async fn fetch_delivery_order_by_idem(
     pool: &PgPool,
     key: Uuid,
@@ -501,7 +515,8 @@ pub async fn cancel_delivery_order(
 
 #[derive(Deserialize, ToSchema)]
 pub struct FinalizeInput {
-    pub shift_id: Uuid,
+    #[serde(alias = "shift_id")]
+    pub till_id: Uuid,
     /// The actual method the customer paid (overrides the hint). Must be an org method.
     pub payment_method: String,
 }
@@ -563,15 +578,16 @@ pub async fn finalize_delivery_order(
         None
     };
     let shift_ok: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND branch_id = $2 AND status = 'open' \
+        "SELECT EXISTS(SELECT 1 FROM tills WHERE id = $1 AND branch_id = $2 AND status = 'open' \
          AND ($3::uuid IS NULL OR teller_id = $3))",
     )
-    .bind(body.shift_id)
+    .bind(body.till_id)
     .bind(order.branch_id)
     .bind(teller_match)
     .fetch_one(pool.get_ref())
     .await?;
     if !shift_ok {
+        crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ERROR_WORDING, "finalize_shift_not_open");
         return Err(AppError::BadRequest(
             "Shift is not open, does not belong to this branch, or is not yours.".into(),
         ));
@@ -592,15 +608,16 @@ pub async fn finalize_delivery_order(
 
     // Same per-shift advisory lock the POS create path uses (cash TOCTOU).
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text))")
-        .bind(body.shift_id.to_string())
+        .bind(body.till_id.to_string())
         .execute(&mut *tx)
         .await?;
     let still_open: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM shifts WHERE id = $1 AND status = 'open')")
-            .bind(body.shift_id)
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tills WHERE id = $1 AND status = 'open')")
+            .bind(body.till_id)
             .fetch_one(&mut *tx)
             .await?;
     if !still_open {
+        crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ERROR_WORDING, "finalize_shift_closed");
         return Err(AppError::Conflict(
             "Shift was closed before finalize".into(),
         ));
@@ -629,7 +646,7 @@ pub async fn finalize_delivery_order(
     // ruling, and both tables CHECK it.
     let ctx = FinalizeCtx {
         branch_id: order.branch_id,
-        shift_id: body.shift_id,
+        till_id: body.till_id,
         teller_id: claims.user_id(),
         payment_method: &body.payment_method,
         is_cash,

@@ -273,74 +273,137 @@ pub async fn compute_item_cost(pool: &PgPool, item_id: Uuid) -> Result<Option<i3
 /// (`bundle_components` carry no size). Unlike the retired engine this costs the recipe
 /// matched to that size, uses `Decimal`, is branch-aware, and never treats a recipe-less
 /// item as free — so an unknown-cost component now correctly blocks the margin floor.
-pub async fn component_cost(
-    pool: &PgPool,
+pub async fn component_cost<'e, E>(
+    exec: E,
     org_id: Uuid,
     item_id: Uuid,
     branch_id: Option<Uuid>,
-) -> Result<Option<i64>, AppError> {
-    let skus = crate::costing::sku_costs_for_items(pool, org_id, &[item_id], branch_id).await?;
-    // Pick the base size: `one_size` first, then the lexicographically-first label.
-    let base = skus.iter().min_by(|a, b| {
-        (a.size_label != "one_size", &a.size_label)
-            .cmp(&(b.size_label != "one_size", &b.size_label))
-    });
-    Ok(match base {
+) -> Result<Option<i64>, AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let skus = crate::costing::sku_costs_for_items(exec, org_id, &[item_id], branch_id).await?;
+    Ok(base_costs(&skus).remove(&item_id).flatten())
+}
+
+/// Base-size cost per item out of a set of SKU rows (see [`component_cost`]):
+/// an item with no SKU row is absent; a present item maps to `None` when its
+/// base size's rollup is unknown.
+fn base_costs(skus: &[crate::costing::SkuCost]) -> std::collections::HashMap<Uuid, Option<i64>> {
+    let mut base: std::collections::HashMap<Uuid, &crate::costing::SkuCost> =
+        std::collections::HashMap::new();
+    for s in skus {
+        // Pick the base size: `one_size` first, then the lexicographically-first label.
+        let better = match base.get(&s.menu_item_id) {
+            None => true,
+            Some(cur) => {
+                (s.size_label != "one_size", &s.size_label)
+                    < (cur.size_label != "one_size", &cur.size_label)
+            }
+        };
+        if better {
+            base.insert(s.menu_item_id, s);
+        }
+    }
+    base.into_iter()
         // A complete rollup: `cost` may still be None (no recipe) → unknown.
-        Some(s) if !s.cost_missing => s.cost,
-        // No SKU row, or an incomplete rollup → unknown.
-        _ => None,
-    })
+        .map(|(id, s)| (id, if s.cost_missing { None } else { s.cost }))
+        .collect()
 }
 
 pub async fn fetch_bundle_full(
     pool: &PgPool,
     id: Uuid,
 ) -> Result<Option<BundleWithComponents>, AppError> {
-    let bundle = sqlx::query_as::<_, Bundle>(
+    let mut conn = pool.acquire().await?;
+    Ok(fetch_bundles_full(&mut conn, &[id]).await?.pop())
+}
+
+/// Many hydrated bundles in a fixed number of queries (bundles, components,
+/// branch availability, one cost rollup per org), in the order of `ids`
+/// (missing ids are skipped). Runs on the caller's connection.
+pub async fn fetch_bundles_full(
+    conn: &mut sqlx::PgConnection,
+    ids: &[Uuid],
+) -> Result<Vec<BundleWithComponents>, AppError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let bundles = sqlx::query_as::<_, Bundle>(
         "SELECT id, org_id, name, name_translations, description, description_translations, \
                 price, status, image_url, available_from_time, available_until_time, \
                 available_from_date, available_until_date, created_at, updated_at, created_by \
-         FROM bundles WHERE id = $1",
+         FROM bundles WHERE id = ANY($1)",
     )
-    .bind(id)
-    .fetch_optional(pool)
+    .bind(ids)
+    .fetch_all(&mut *conn)
     .await?;
+    if bundles.is_empty() {
+        return Ok(Vec::new());
+    }
+    let found: Vec<Uuid> = bundles.iter().map(|b| b.id).collect();
 
-    let Some(bundle) = bundle else {
-        return Ok(None);
-    };
-
+    #[allow(clippy::type_complexity)]
     let component_rows: Vec<(Uuid, Uuid, Uuid, i32, i32, String, i32)> = sqlx::query_as(
         r#"
         SELECT bc.id, bc.bundle_id, bc.item_id, bc.quantity, bc.position,
                mi.name as item_name, mi.base_price as item_price
         FROM bundle_components bc
         JOIN menu_items mi ON mi.id = bc.item_id
-        WHERE bc.bundle_id = $1
-        ORDER BY bc.position ASC, bc.id ASC
+        WHERE bc.bundle_id = ANY($1)
+        ORDER BY bc.bundle_id, bc.position ASC, bc.id ASC
         "#,
     )
-    .bind(id)
-    .fetch_all(pool)
+    .bind(&found)
+    .fetch_all(&mut *conn)
     .await?;
 
-    let mut components = Vec::new();
-    let mut computed_cost: i64 = 0;
-    let mut cost_missing = false;
+    // One canonical cost rollup per org for every component item.
+    let org_of: std::collections::HashMap<Uuid, Uuid> =
+        bundles.iter().map(|b| (b.id, b.org_id)).collect();
+    let mut items_by_org: std::collections::BTreeMap<Uuid, Vec<Uuid>> =
+        std::collections::BTreeMap::new();
+    for row in &component_rows {
+        let v = items_by_org.entry(org_of[&row.1]).or_default();
+        if !v.contains(&row.2) {
+            v.push(row.2);
+        }
+    }
+    let mut cost_of: std::collections::HashMap<(Uuid, Uuid), Option<i64>> =
+        std::collections::HashMap::new();
+    for (org, items) in &items_by_org {
+        let skus = crate::costing::sku_costs_for_items(&mut *conn, *org, items, None).await?;
+        for (item, c) in base_costs(&skus) {
+            cost_of.insert((*org, item), c);
+        }
+    }
 
+    let branch_rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT bundle_id, branch_id FROM bundle_branch_availability WHERE bundle_id = ANY($1)",
+    )
+    .bind(&found)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut branches_of: std::collections::HashMap<Uuid, Vec<Uuid>> =
+        std::collections::HashMap::new();
+    for (bundle_id, branch_id) in branch_rows {
+        branches_of.entry(bundle_id).or_default().push(branch_id);
+    }
+
+    let mut components_of: std::collections::HashMap<Uuid, (Vec<BundleComponentHydrated>, i64, bool)> =
+        std::collections::HashMap::new();
     for row in component_rows {
         // Canonical cost at the component's base size. An unknown cost counts as
         // 0 on the WIRE (old-client parse compat) but flips the missing flags so
         // new consumers never mistake the partial figure for real money.
-        let item_cost = component_cost(pool, bundle.org_id, row.2, None).await?;
+        let item_cost = cost_of.get(&(org_of[&row.1], row.2)).copied().flatten();
+        let entry = components_of.entry(row.1).or_insert_with(|| (Vec::new(), 0, false));
         if let Some(c) = item_cost {
-            computed_cost += c * row.3 as i64;
+            entry.1 += c * row.3 as i64;
         } else {
-            cost_missing = true;
+            entry.2 = true;
         }
-
-        components.push(BundleComponentHydrated {
+        entry.0.push(BundleComponentHydrated {
             id: row.0,
             bundle_id: row.1,
             item_id: row.2,
@@ -353,25 +416,29 @@ pub async fn fetch_bundle_full(
         });
     }
 
-    let branch_rows: Vec<(Uuid,)> =
-        sqlx::query_as("SELECT branch_id FROM bundle_branch_availability WHERE bundle_id = $1")
-            .bind(id)
-            .fetch_all(pool)
-            .await?;
-
-    let branch_ids = branch_rows.into_iter().map(|r| r.0).collect();
-
-    Ok(Some(BundleWithComponents {
-        bundle,
-        components,
-        branch_ids,
-        computed_cost,
-        cost_missing: Some(cost_missing),
-    }))
+    let mut by_id: std::collections::HashMap<Uuid, BundleWithComponents> = bundles
+        .into_iter()
+        .map(|bundle| {
+            let (components, computed_cost, cost_missing) =
+                components_of.remove(&bundle.id).unwrap_or_default();
+            let branch_ids = branches_of.remove(&bundle.id).unwrap_or_default();
+            (
+                bundle.id,
+                BundleWithComponents {
+                    bundle,
+                    components,
+                    branch_ids,
+                    computed_cost,
+                    cost_missing: Some(cost_missing),
+                },
+            )
+        })
+        .collect();
+    Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
 }
 
 async fn validate_bundle_rules(
-    pool: &PgPool,
+    conn: &mut sqlx::PgConnection,
     org_id: Uuid,
     price: i32,
     components: &[CreateBundleComponentInput],
@@ -400,7 +467,7 @@ async fn validate_bundle_rules(
         "SELECT id, org_id, base_price, is_active FROM menu_items WHERE id = ANY($1) AND deleted_at IS NULL"
     )
     .bind(&item_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
 
     if active_items.len() != item_ids.len() {
@@ -433,7 +500,7 @@ async fn validate_bundle_rules(
         // floor (V24). Drafts can still be created; link all recipe ingredients
         // before activating. Via the canonical engine a recipe-less component is
         // now UNKNOWN (not free), so it too blocks activation.
-        let Some(item_cost) = component_cost(pool, org_id, c.item_id, None).await? else {
+        let Some(item_cost) = component_cost(&mut *conn, org_id, c.item_id, None).await? else {
             return Err(AppError::BadRequest(format!(
                 "Component {} has an unknown ingredient cost — link all recipe ingredients before activating the bundle",
                 item_info.0
@@ -684,6 +751,11 @@ pub async fn create_bundle(
     .await?;
 
     tx.commit().await?;
+    // Image slot (Track B4, §11.5 W2).
+    if let Some(url) = mut_body.image_url.clone() {
+        crate::menu::handlers::image_url_side_effects(pool.get_ref(), crate::assets::ingest::AssetTable::Bundles,
+            bundle.org_id, bundle.id, Some(&Some(url)), None, &claims).await?;
+    }
 
     let full = fetch_bundle_full(pool.get_ref(), bundle.id)
         .await?
@@ -873,7 +945,7 @@ pub async fn update_bundle(
     // If bundle is Active, we must run the validation checks on the modified state!
     if original.bundle.status == BundleStatus::Active {
         validate_bundle_rules(
-            pool.get_ref(),
+            &mut tx,
             original.bundle.org_id,
             price,
             &updated_components,
@@ -930,6 +1002,13 @@ pub async fn update_bundle(
     }
 
     tx.commit().await?;
+    // Image slot (Track B4, §11.5 W2): a changed URL goes through the asset pipeline.
+    if let Some(url) = mut_body.image_url.as_ref()
+        && original.bundle.image_url.as_deref() != Some(url.as_str())
+    {
+        crate::menu::handlers::image_url_side_effects(pool.get_ref(), crate::assets::ingest::AssetTable::Bundles,
+            original.bundle.org_id, original.bundle.id, Some(&Some(url.clone())), original.bundle.image_url.as_deref(), &claims).await?;
+    }
 
     let full = fetch_bundle_full(pool.get_ref(), original.bundle.id)
         .await?
@@ -1040,7 +1119,7 @@ pub async fn activate_bundle(
 
     // Perform strict validations on activation
     validate_bundle_rules(
-        pool.get_ref(),
+        &mut *pool.get_ref().acquire().await?,
         full.bundle.org_id,
         full.bundle.price,
         &components,

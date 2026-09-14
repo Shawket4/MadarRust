@@ -305,8 +305,8 @@ pub async fn seed_full(
     // ── An open shift (teller = the demo admin) ─────────────────────────────
     let shift_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO shifts (id, branch_id, teller_id, status, opening_cash, opened_at) \
-         VALUES ($1, $2, $3, 'open'::shift_status, 50000, now())",
+        "INSERT INTO tills (id, branch_id, teller_id, status, opening_cash, opened_at) \
+         VALUES ($1, $2, $3, 'open'::till_status, 50000, now())",
     )
     .bind(shift_id)
     .bind(branch_id)
@@ -337,7 +337,7 @@ pub async fn seed_full(
         let order_ref = format!("DMO-{}", order_id.simple());
         sqlx::query(
             "INSERT INTO orders \
-             (id, branch_id, shift_id, teller_id, order_number, status, payment_method, \
+             (id, branch_id, till_id, teller_id, order_number, status, payment_method, \
               subtotal, tax_amount, total_amount, created_at, order_ref) \
              VALUES ($1, $2, $3, $4, $5, 'completed'::order_status, 'Cash', $6, $7, $8, $9, $10)",
         )

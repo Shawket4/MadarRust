@@ -689,17 +689,16 @@ pub async fn decide_request(
         attendance_record_id: Option<Uuid>,
     }
 
-    let mut tx = pool.begin().await?;
-    // FOR UPDATE: two managers hitting Approve at once must not both spend the
-    // same days of leave.
+    // A first, unlocked read decides who may act and applies an approved
+    // correction's punch; the locked read below re-validates before the flip.
     let existing: Row = sqlx::query_as(
         "SELECT user_id, kind, leave_type_id, on_date, end_date, is_half_day, status, \
                 from_time, to_time, attendance_record_id \
-           FROM staff_requests WHERE id = $1 AND org_id = $2 FOR UPDATE",
+           FROM staff_requests WHERE id = $1 AND org_id = $2",
     )
     .bind(*id)
     .bind(org_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(pool.get_ref())
     .await?
     .ok_or_else(|| AppError::NotFound("Request not found".into()))?;
 
@@ -728,7 +727,9 @@ pub async fn decide_request(
     }
 
     // ── An approved correction rewrites the punch ───────────────
-    // Applied BEFORE the status flip, and outside the transaction, on purpose:
+    // Applied BEFORE the status flip, and outside the transaction, on purpose
+    // (and before the transaction is even opened, so the request never holds
+    // two pooled connections — the locked re-read below re-checks everything):
     // writing the punch is IDEMPOTENT (the same values produce the same row),
     // whereas approving is not. If the status update then fails, the manager
     // retries and lands in exactly the same place. The reverse order could
@@ -769,6 +770,37 @@ pub async fn decide_request(
             Some(caller),
         )
         .await?;
+    }
+
+    let mut tx = pool.begin().await?;
+    // FOR UPDATE: two managers hitting Approve at once must not both spend the
+    // same days of leave.
+    let existing: Row = sqlx::query_as(
+        "SELECT user_id, kind, leave_type_id, on_date, end_date, is_half_day, status, \
+                from_time, to_time, attendance_record_id \
+           FROM staff_requests WHERE id = $1 AND org_id = $2 FOR UPDATE",
+    )
+    .bind(*id)
+    .bind(org_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Request not found".into()))?;
+
+    if existing.status == decision {
+        return Err(AppError::Conflict(format!(
+            "This request is already {decision}"
+        )));
+    }
+    if existing.status == "rejected" || existing.status == "cancelled" {
+        return Err(AppError::Conflict(format!(
+            "This request was already {} and cannot be changed",
+            existing.status
+        )));
+    }
+    if existing.status == "approved" && decision == "rejected" {
+        return Err(AppError::Conflict(
+            "An approved request cannot be rejected — cancel it instead".into(),
+        ));
     }
 
     // ── Leave balance arithmetic ────────────────────────────────

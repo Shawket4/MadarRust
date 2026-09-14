@@ -39,7 +39,7 @@ The Flutter side additionally needs `melos run bridge` when the FRB surface chan
 ## Development Workflow
 - **Build**: `cargo build`
 - **Run**: `cargo run`
-- **Test**: `cargo test`
+- **Test**: `DATABASE_URL=postgres://shawket@localhost:5433/madar cargo nextest run` (see "Running the test suite fast" below; plain `cargo test` still works but is slower and a hung test hangs the whole run)
 - **Check**: `cargo check`
 - **OpenAPI Export**: `cargo run --bin export-openapi`
 - **Reprice order cost snapshots at current recipes & ingredient costs** (operator-only, never exposed over HTTP):
@@ -47,6 +47,13 @@ The Flutter side additionally needs `melos run bridge` when the FRB surface chan
   Rewrites `order_items.unit_cost/line_cost` + addon/optional/bundle-component costs as if each
   line were ordered today (current recipe/addon rollups × quantities — mirrors the menu-engineering
   `cost_basis=current` view). Always `--dry-run` first.
+
+## Deploy: required environment
+The server checks its required settings BEFORE connecting or running migrations (`src/boot_config.rs`) and exits with every problem listed, so a bad `.env` never migrates prod and then crash-loops:
+- `DATABASE_URL`, `JWT_SECRET` — always.
+- `ASSET_URL_SECRET` — **release builds** (>= 32 bytes, `openssl rand -hex 32`; a fresh value per environment). It keys the signed org-scoped asset URLs; debug builds fall back to a dev key.
+- `SSL_CERT_FILE` / `SSL_KEY_FILE` — optional, but once both are set they must be readable.
+See `.env.example` (prod), `deploy/demo/.env.example` (demo) and `docker-compose.loadtest.yml` (load rig).
 
 ## Robustness & Pre-push Testing
 Deterministic test tooling guards the codebase (especially the money/cost engine). Run it locally **before pushing** with the tiered gate:
@@ -64,6 +71,18 @@ The tools (and where they live):
 - **RESTler** (`scripts/restler-run.sh`, `scripts/openapi_31_to_30.py`) — stateful API fuzzing. RESTler's amd64 .NET **segfaults under Rosetta**, so it needs a real x86_64 VM: `colima start --arch x86_64 --vm-type qemu` (after `brew install qemu lima-additional-guestagents`). RESTler can't parse OpenAPI 3.1, so the spec is downconverted to 3.0 first.
 - **k6 load testing** (`scripts/loadtest.sh`, `docker-compose.loadtest.yml`, `loadtest/`) — drives the real release binary in Docker, **resource-capped to mimic the prod VPS** (1 vCPU / 4 GB, Postgres co-resident: both containers pinned to `cpuset: "0"`), with [k6](https://k6.io) on the host. Profiles `smoke|ramp|soak|spike|pos-day|all`; `scripts/loadtest.sh ramp`. Authenticated org-admin read/write mix (writes hit the money engine). Caveat: Apple-silicon cores are faster than a Hostinger vCPU, so absolute latency is optimistic — throttle with `BACKEND_CPUS=0.5`. See `loadtest/README.md`.
 - **CI** (`.github/workflows/ci.yml`) — PR gate (test + clippy + fmt with a Postgres service) + nightly mutants/fuzz; mirrors `preflight.sh`.
+
+### Running the test suite fast
+The Rust code is not what's slow: each `#[sqlx::test]` creates a fresh database and replays the full migration set, then drops it. Postgres disk syncing and migration replay dominate. So:
+- **Use the dedicated throwaway test cluster on port 5433**, never the real `:5432` server (which holds `madar_dev`, `madar_prodcopy` and other real data). It runs with `fsync=off`, `synchronous_commit=off`, `full_page_writes=off`, `autovacuum=off`, `max_connections=500` — safe only because nothing on it matters.
+  - Data dir `~/.madar-test-pg`; start: `/opt/homebrew/opt/postgresql@17/bin/pg_ctl -D ~/.madar-test-pg -l ~/.madar-test-pg/server.log start`.
+  - Bootstrap once: `initdb -D ~/.madar-test-pg -U shawket --auth=trust`, append the settings above + `port = 5433` to its `postgresql.conf`, then `psql -p 5433 -d postgres -c "CREATE ROLE sufrix NOLOGIN" -c "CREATE ROLE madar_app NOLOGIN"`, `createdb -p 5433 madar`, `DATABASE_URL=postgres://shawket@localhost:5433/madar sqlx migrate run` (the compile-time `sqlx::query!` checks need a migrated `madar` DB there; re-run `sqlx migrate run` after adding a migration).
+- **Use `cargo nextest run`** (`brew install cargo-nextest`; config in `.config/nextest.toml`): real per-test parallelism, and a test slower than 60s is flagged and killed at 3 min instead of silently hanging the run. Filter while iterating: `cargo nextest run --lib -E 'test(tills::)'`.
+- **Pre-migrated template (template DB + migration baseline in one):** on the 5433 cluster `template1` is itself migrated (`DATABASE_URL=postgres://shawket@localhost:5433/template1 sqlx migrate run`). `#[sqlx::test]`'s `CREATE DATABASE` copies `template1`, so every per-test DB is born with the full schema and `_sqlx_migrations` already filled — sqlx sees all checksums match and replays nothing. No test code changes, no squashed migration file to keep in sync. **After adding or editing a migration, re-run `sqlx migrate run` on both `template1` and `madar` on 5433**; a checksum mismatch error in tests means the template is stale. Never do this on `:5432`.
+- **Never pass `--no-capture` to nextest for a multi-test run**: it forces tests to run one at a time and looks exactly like a hang. Failing tests print their output anyway. Don't pipe a run through `sort`/`uniq`, which hides all progress until the end.
+- **Never run two full suites at once** against the same cluster, and never pass `--test-threads` below the default without a reason.
+- **A run that sits at ~0% CPU with test connections idle (`ClientRead`) is a deadlock in app code** (usually a handler holding a transaction while waiting for a second pool connection, or an advisory lock), not slowness. nextest's timeout names the test; fix the cause.
+- Test databases are named `_sqlx_test_*`; after killed runs drop leftovers: `psql -p 5433 -d postgres -Atc "select 'drop database \"'||datname||'\";' from pg_database where datname like '_sqlx_test%'" | psql -p 5433 -d postgres`.
 
 Notes:
 - Tests + mutants need Postgres and `DATABASE_URL` set **at build time** (the suite uses the `sqlx::query!` compile-time macro and `#[sqlx::test]` per-test DBs): `DATABASE_URL=postgres://shawket@localhost:5432/madar cargo test --lib` (local dev DB is `madar`, owned by superuser `shawket`).
@@ -118,6 +137,22 @@ The POS is offline-first. Every mutating POS operation is split **live route** /
 same code path (see `src/sync/handlers.rs` and the `*_inner` fns in `tickets`,
 `held_orders`). If you add a POS-facing mutation, split it the same way or offline
 tills silently lose the write.
+
+### The POS changefeed (`/sync/pull`, offline plan B)
+Every table a POS shows reaches devices through `sync_changes` (`src/sync/pull`).
+- **A new POS-visible table needs a sync trigger**: an `AFTER INSERT OR UPDATE
+  OR DELETE` trigger named `sync_emit` running `sync_emit_<table>()`, a row in
+  `sync_source_tables()`, and a line in the migration's `SOURCE TABLES` header.
+  `tills_migration_tests::every_projection_source_table_has_emitter` fails
+  otherwise. A projection change for a type is enough when the table already
+  re-emits that type.
+- **A report formula change regenerates the shared vectors.** Changing
+  `compute_system_cash`, `report_figures` or the close-method figures means
+  `MADAR_WRITE_TILL_VECTORS=1 cargo nextest run -E 'test(till_report_vectors)'`
+  and copying `tests/fixtures/till_report_vectors.json` into madar's
+  `rust-core/crates/madar-core/tests/fixtures/`; the POS computes the same
+  figures offline and its test asserts that file.
+- Additive fields only on payloads the POS mirrors (old tablets decode them).
 
 ### Realtime
 `src/realtime` publishes per-branch events consumers subscribe to, e.g.

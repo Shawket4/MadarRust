@@ -43,7 +43,7 @@ pub const RESOURCES: &[&str] = &[
     "refunds",
     "payments",
     "payment_methods",
-    "shifts",
+    "tills",
     "soft_serve_batches",
     "discounts",
     "reports",

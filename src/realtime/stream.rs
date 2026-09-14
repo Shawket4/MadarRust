@@ -43,10 +43,20 @@ pub(crate) async fn permitted_topics(
     };
     let mut out = Vec::new();
     for t in candidates {
-        let (res, act) = t.permission();
-        if check_permission(pool, claims, res, act).await.is_ok() {
+        let allowed = match t.permission() {
+            None => true,
+            Some((res, act)) => check_permission(pool, claims, res, act).await.is_ok(),
+        };
+        if allowed {
             out.push(t);
         }
+    }
+    // `sync` carries no data of its own, and `payment_methods` only says a
+    // Charge screen should re-read: on the default subscription they ride along
+    // only with a readable data topic, so a caller who can read nothing else still
+    // gets the terminal 403 (as before `payment_methods` became its own topic).
+    if requested.is_none() && out.iter().all(|t| matches!(t, Topic::Sync | Topic::PaymentMethods)) {
+        out.clear();
     }
     out
 }

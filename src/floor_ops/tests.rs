@@ -165,7 +165,7 @@ async fn rows_on(pool: &PgPool, table: Uuid) -> i64 {
         .unwrap()
 }
 async fn till_of_open_shift(pool: &PgPool, teller: Uuid) -> Uuid {
-    sqlx::query_scalar("SELECT till_id FROM shifts WHERE teller_id = $1 AND status = 'open'")
+    sqlx::query_scalar("SELECT id FROM tills WHERE teller_id = $1 AND status = 'open'")
         .bind(teller)
         .fetch_one(pool)
         .await
@@ -179,7 +179,7 @@ async fn refusal_code(resp: actix_web::dev::ServiceResponse) -> Option<String> {
 /// An open shift, returning its id (the settle path needs one to bank into).
 async fn open_shift_row(pool: &PgPool, branch: Uuid, teller: Uuid) -> Uuid {
     sqlx::query_scalar(
-        "INSERT INTO shifts (branch_id, teller_id, status, opening_cash) \
+        "INSERT INTO tills (branch_id, teller_id, status, opening_cash) \
          VALUES ($1,$2,'open',0) RETURNING id",
     )
     .bind(branch)
@@ -200,7 +200,7 @@ async fn seed_cash_method(pool: &PgPool, org: Uuid) {
 }
 async fn shift_row(pool: &PgPool, branch: Uuid, teller: Uuid) {
     sqlx::query(
-        "INSERT INTO shifts (branch_id, teller_id, status, opening_cash) VALUES ($1,$2,'open',0)",
+        "INSERT INTO tills (branch_id, teller_id, status, opening_cash) VALUES ($1,$2,'open',0)",
     )
     .bind(branch)
     .bind(teller)
@@ -769,17 +769,14 @@ async fn a_hold_is_owned_by_the_till_that_placed_it(pool: PgPool) {
 
     // Shift handover on the same drawer: the afternoon teller inherits the
     // parked draft, and re-holding its table is a yes, not a new row.
-    sqlx::query("UPDATE shifts SET status = 'closed', closed_at = now() WHERE id = $1")
+    sqlx::query("UPDATE tills SET status = 'closed', closed_at = now() WHERE id = $1")
         .bind(shift)
         .execute(&pool)
         .await
         .unwrap();
     open_shift_row(&pool, branch, afternoon).await;
-    assert_eq!(
-        till_of_open_shift(&pool, afternoon).await,
-        till,
-        "same till"
-    );
+    // Tills are per person now: the hold moves to the afternoon teller's till.
+    let till = till_of_open_shift(&pool, afternoon).await;
     let resp = post_json!(
         app,
         a,
@@ -1524,7 +1521,7 @@ async fn seed_order_for_ticket(
 ) {
     // One open shift per teller, so reuse this teller's if it already has one.
     let shift: Uuid = sqlx::query_scalar(
-        "INSERT INTO shifts (branch_id, teller_id, opening_cash, status) \
+        "INSERT INTO tills (branch_id, teller_id, opening_cash, status) \
          VALUES ($1,$2,0,'open') \
          ON CONFLICT DO NOTHING RETURNING id",
     )
@@ -1534,7 +1531,7 @@ async fn seed_order_for_ticket(
     .await
     .unwrap()
     .unwrap_or(
-        sqlx::query_scalar("SELECT id FROM shifts WHERE teller_id = $1 AND status = 'open'")
+        sqlx::query_scalar("SELECT id FROM tills WHERE teller_id = $1 AND status = 'open'")
             .bind(teller)
             .fetch_one(pool)
             .await
@@ -1542,7 +1539,7 @@ async fn seed_order_for_ticket(
     );
     let _ = org;
     sqlx::query(
-        "INSERT INTO orders (branch_id, shift_id, teller_id, order_number, order_ref, \
+        "INSERT INTO orders (branch_id, till_id, teller_id, order_number, order_ref, \
              status, payment_method, subtotal, total_amount, open_ticket_id, \
              voided_at, voided_by) \
          VALUES ($1,$2,$3,$7,'O-' || $7::text, \

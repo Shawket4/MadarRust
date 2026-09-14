@@ -103,7 +103,7 @@ async fn grant_permission(pool: &PgPool, role: &str, resource: &str, action: &st
 
 async fn seed_shift(pool: &PgPool, branch_id: Uuid, user_id: Uuid) -> Uuid {
     let shift_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO shifts (id, branch_id, teller_id, status, opening_cash) VALUES ($1, $2, $3, 'open', 10000)")
+    sqlx::query("INSERT INTO tills (id, branch_id, teller_id, status, opening_cash) VALUES ($1, $2, $3, 'open', 10000)")
         .bind(shift_id)
         .bind(branch_id)
         .bind(user_id)
@@ -174,7 +174,7 @@ async fn seed_branch_inventory(pool: &PgPool, branch_id: Uuid, ing_id: Uuid, sto
 async fn seed_order(pool: &PgPool, branch_id: Uuid, teller_id: Uuid, shift_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, customer_name, subtotal, discount_amount, tax_amount, total_amount, status, order_number, payment_method, order_ref)
+        "INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, customer_name, subtotal, discount_amount, tax_amount, total_amount, status, order_number, payment_method, order_ref)
          VALUES ($1, $2, $3, $4, gen_random_uuid(), 'Customer', 500, 0, 70, 570, 'completed', 1, 'cash', gen_random_uuid()::text)"
     )
     .bind(id)
@@ -210,7 +210,7 @@ async fn test_shift_summary(pool: PgPool) {
     let token = generate_org_admin_token(user_id, org_id);
     let shift_id = seed_shift(&pool, branch_id, user_id).await;
 
-    grant_permission(&pool, "org_admin", "shifts", "read").await;
+    grant_permission(&pool, "org_admin", "tills", "read").await;
     grant_permission(&pool, "org_admin", "orders", "read").await;
 
     // Seed an order
@@ -503,7 +503,7 @@ async fn test_branch_waiter_stats(pool: PgPool) {
     // Direct teller sale (no waiter); inline because seed_order hardcodes
     // order_number 1 and shifts are unique per open teller.
     sqlx::query(
-        "INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, customer_name, subtotal, discount_amount, tax_amount, total_amount, status, order_number, payment_method, order_ref)
+        "INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, customer_name, subtotal, discount_amount, tax_amount, total_amount, status, order_number, payment_method, order_ref)
          VALUES (gen_random_uuid(), $1, $2, $3, gen_random_uuid(), 'Customer', 500, 0, 70, 570, 'completed', 2, 'cash', gen_random_uuid()::text)"
     )
     .bind(branch_id)
@@ -1268,7 +1268,7 @@ async fn test_shift_summary_split_payment_not_double_counted(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
-    grant_permission(&pool, "org_admin", "shifts", "read").await;
+    grant_permission(&pool, "org_admin", "tills", "read").await;
     grant_permission(&pool, "org_admin", "orders", "read").await;
     let shift_id = seed_shift(&pool, branch_id, user_id).await;
     let token = generate_org_admin_token(user_id, org_id);
@@ -1276,7 +1276,7 @@ async fn test_shift_summary_split_payment_not_double_counted(pool: PgPool) {
     // One order, total 570, paid by cash 300 + card 270 → TWO order_payments rows.
     let order_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, discount_amount, tax_amount, total_amount, status, order_number, payment_method, order_ref)
+        "INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, subtotal, discount_amount, tax_amount, total_amount, status, order_number, payment_method, order_ref)
          VALUES ($1,$2,$3,$4, gen_random_uuid(), 500, 0, 70, 570, 'completed', 1, 'cash', gen_random_uuid()::text)"
     ).bind(order_id).bind(branch_id).bind(user_id).bind(shift_id).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO order_payments (order_id, method, amount) VALUES ($1,'cash',300),($1,'card',270)")
@@ -1319,7 +1319,7 @@ async fn test_org_branch_comparison_split_payment_revenue(pool: PgPool) {
 
     let order_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal, discount_amount, tax_amount, total_amount, status, order_number, payment_method, order_ref)
+        "INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, subtotal, discount_amount, tax_amount, total_amount, status, order_number, payment_method, order_ref)
          VALUES ($1,$2,$3,$4, gen_random_uuid(), 500, 0, 70, 570, 'completed', 1, 'cash', gen_random_uuid()::text)"
     ).bind(order_id).bind(branch_id).bind(user_id).bind(shift_id).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO order_payments (order_id, method, amount) VALUES ($1,'cash',300),($1,'card',270)")
@@ -1472,7 +1472,7 @@ async fn seed_paid_order(
     };
 
     sqlx::query(
-        "INSERT INTO orders (id, branch_id, teller_id, shift_id, idempotency_key, subtotal,
+        "INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, subtotal,
              discount_amount, tax_amount, total_amount, status, order_number, payment_method,
              tip_amount, tip_payment_method, tip_is_cash, order_ref)
          VALUES ($1, $2, $3, $4, gen_random_uuid(), $5, 0, 0, $5, $6::order_status, $7, $8,
@@ -1520,7 +1520,7 @@ async fn sales_and_shift_reports_reconcile(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
             .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
-            .configure(crate::shifts::routes::configure),
+            .configure(crate::tills::legacy_routes::configure),
     )
     .await;
 
@@ -1531,7 +1531,7 @@ async fn sales_and_shift_reports_reconcile(pool: PgPool) {
     let shift_id = seed_shift(&pool, branch_id, user_id).await;
 
     grant_permission(&pool, "org_admin", "orders", "read").await;
-    grant_permission(&pool, "org_admin", "shifts", "read").await;
+    grant_permission(&pool, "org_admin", "tills", "read").await;
 
     seed_paid_order(
         &pool,
@@ -1610,7 +1610,7 @@ async fn sales_and_shift_reports_reconcile(pool: PgPool) {
             .to_request();
         test::read_body_json(test::call_service(&app, req).await).await
     };
-    let shift: crate::shifts::handlers::ShiftReportResponse = {
+    let shift: crate::tills::legacy::ShiftReportResponse = {
         let req = test::TestRequest::get()
             .uri(&format!("/shifts/{shift_id}/report"))
             .insert_header(("Authorization", format!("Bearer {token}")))
@@ -1682,7 +1682,7 @@ fn status_predicates_are_unified() {
             include_str!("../reports/handlers.rs"),
         ),
         ("orders/handlers.rs", include_str!("../orders/handlers.rs")),
-        ("shifts/handlers.rs", include_str!("../shifts/handlers.rs")),
+        ("tills/handlers.rs", include_str!("../tills/handlers.rs")),
         (
             "insights/handlers.rs",
             include_str!("../insights/handlers.rs"),
@@ -1747,7 +1747,7 @@ async fn seed_refund(
     method: &str,
 ) {
     sqlx::query(
-        "INSERT INTO order_refunds (order_id, shift_id, amount, method, is_cash, reason, issued_by)
+        "INSERT INTO order_refunds (order_id, till_id, amount, method, is_cash, reason, issued_by)
          VALUES ($1, $2, $3, $4, $4 = 'cash', 'customer_request', $5)",
     )
     .bind(order_id)
@@ -1768,7 +1768,7 @@ async fn a_partial_refund_comes_off_revenue_but_not_off_money_in(pool: PgPool) {
     let user_id = seed_user(&pool, org_id, "org_admin").await;
     let token = generate_org_admin_token(user_id, org_id);
     grant_permission(&pool, "org_admin", "orders", "read").await;
-    grant_permission(&pool, "org_admin", "shifts", "read").await;
+    grant_permission(&pool, "org_admin", "tills", "read").await;
 
     // Two shifts on the branch: the sale is made in A, one of the refunds is
     // issued from B's drawer.
@@ -1777,7 +1777,7 @@ async fn a_partial_refund_comes_off_revenue_but_not_off_money_in(pool: PgPool) {
     // B is an earlier, closed one on the same branch.
     let shift_b = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO shifts (id, branch_id, teller_id, status, opening_cash, closed_at)
+        "INSERT INTO tills (id, branch_id, teller_id, status, opening_cash, closed_at)
          VALUES ($1, $2, $3, 'closed', 10000, now())",
     )
     .bind(shift_b)

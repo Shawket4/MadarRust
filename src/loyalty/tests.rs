@@ -645,6 +645,83 @@ async fn a_leap_day_birthday_is_greeted_every_year(pool: PgPool) {
     assert!(matches(1, 1, "2026-01-01").await);
 }
 
+/// The sweep's REAL query runs and picks exactly the members it should. It used
+/// to be built with `\` continuations, so its `--` comment swallowed the rest of
+/// the SQL and every tick failed with a syntax error — which no test ran.
+#[sqlx::test]
+async fn the_birthday_sweep_query_runs_and_finds_who_is_due(pool: PgPool) {
+    use crate::loyalty::birthdays::{due_greetings, run_tick};
+    // The tick itself runs its query cleanly (no one is due yet).
+    run_tick(&pool).await.expect("birthday tick runs");
+
+    let org = seed_org(&pool).await;
+    enable_program(&pool, org, 100, 10, false).await;
+    sqlx::query("UPDATE loyalty_settings SET birthday_enabled = true WHERE org_id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let born = |phone: &'static str, token: &'static str, month: i16, day: i16| {
+        let pool = pool.clone();
+        async move {
+            let id = seed_member(&pool, org, phone, token).await;
+            sqlx::query(
+                "UPDATE loyalty_customers SET birth_month = $2, birth_day = $3 WHERE id = $1",
+            )
+            .bind(id)
+            .bind(month)
+            .bind(day)
+            .execute(&pool)
+            .await
+            .unwrap();
+            id
+        }
+    };
+    let march = born("01000000001", "tok-bd-1", 3, 17).await;
+    let leap = born("01000000002", "tok-bd-2", 2, 29).await;
+    let other = born("01000000003", "tok-bd-3", 7, 1).await;
+
+    let ids = |on: &'static str| {
+        let pool = pool.clone();
+        async move {
+            let d = chrono::NaiveDate::parse_from_str(on, "%Y-%m-%d").unwrap();
+            let mut v: Vec<Uuid> = due_greetings(&pool, Some(d))
+                .await
+                .expect("due query runs")
+                .into_iter()
+                .filter(|g| g.org_id == org)
+                .map(|g| g.id)
+                .collect();
+            v.sort();
+            v
+        }
+    };
+    assert_eq!(ids("2025-03-17").await, vec![march]);
+    assert_eq!(
+        ids("2025-02-28").await,
+        vec![leap],
+        "a leap-day birthday on the 28th of a common year"
+    );
+    assert!(
+        ids("2024-02-28").await.is_empty(),
+        "not the day before a real 29th"
+    );
+    assert_eq!(ids("2024-02-29").await, vec![leap]);
+    assert_eq!(ids("2025-07-01").await, vec![other]);
+
+    // Greeted this year → not due again this year, due again next year.
+    sqlx::query(
+        "INSERT INTO loyalty_birthday_greetings (customer_id, org_id, year, reward_amount) VALUES ($1, $2, 2025, NULL)",
+    )
+    .bind(march)
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(ids("2025-03-17").await.is_empty());
+    assert_eq!(ids("2026-03-17").await, vec![march]);
+}
+
 /// A field the shop turned off must not be storable by posting past the form.
 #[sqlx::test]
 async fn a_birthday_is_only_kept_where_the_shop_asked_for_one(pool: PgPool) {
@@ -1078,7 +1155,7 @@ async fn seed_cash_method(pool: &PgPool, org: Uuid) {
 
 async fn open_shift_row(pool: &PgPool, branch: Uuid, teller: Uuid) -> Uuid {
     sqlx::query_scalar(
-        "INSERT INTO shifts (branch_id, teller_id, status, opening_cash) \
+        "INSERT INTO tills (branch_id, teller_id, status, opening_cash) \
          VALUES ($1,$2,'open',0) RETURNING id",
     )
     .bind(branch)
@@ -2607,7 +2684,7 @@ async fn seed_settled_order(
     number: i32,
 ) -> Uuid {
     sqlx::query_scalar(
-        "INSERT INTO orders (branch_id, shift_id, teller_id, idempotency_key, subtotal, \
+        "INSERT INTO orders (branch_id, till_id, teller_id, idempotency_key, subtotal, \
              discount_amount, tax_amount, total_amount, status, order_number, \
              payment_method, order_ref) \
          VALUES ($1,$2,$3, gen_random_uuid(), $4, 0, 0, $4, 'completed', $5, 'cash', \

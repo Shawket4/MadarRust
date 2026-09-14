@@ -79,6 +79,12 @@ impl Preset {
 }
 
 pub fn preset(id: &str) -> Option<&'static Preset> {
+    let id = if id == "shift_cash_summary" {
+        crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ANALYTICS_ALIAS, "preset_shift_cash_summary");
+        "till_cash_summary"
+    } else {
+        id
+    }; // pre-rework id
     PRESETS.iter().find(|p| p.id == id)
 }
 
@@ -236,12 +242,12 @@ pub const PRESETS: &[Preset] = &[
         dims: ["tender_kind"], measures: ["paid_amount"], filters: [],
         sort: Some(("paid_amount", Dir::Desc)), limit: 5, viz: Viz::Donut, period: PeriodPreset::Last30Days, share: true,
         "The cash share of takings — the figure that drives drawer and banking load."),
-    preset!("drawer_variance", "Drawer variance", "Cash control", "shifts", "shifts",
+    preset!("drawer_variance", "Drawer variance", "Cash control", "tills", "tills",
         dims: ["teller"], measures: ["shift_count", "abs_discrepancy", "short_count"],
         filters: [("shift_status", "closed")], sort: Some(("abs_discrepancy", Dir::Desc)), limit: 30,
         viz: Viz::Bar, period: PeriodPreset::Last30Days, share: false,
         "Cash variance by teller. Uses absolute variance so overs and shorts do not cancel out."),
-    preset!("shift_cash_summary", "Shift cash summary", "Cash control", "shifts", "shifts",
+    preset!("till_cash_summary", "Till cash summary", "Cash control", "tills", "tills",
         dims: ["day"], measures: ["shift_count", "declared_cash", "system_cash", "discrepancy"],
         filters: [("shift_status", "closed")], sort: None, limit: 90, viz: Viz::Line,
         period: PeriodPreset::Last30Days, share: false,
@@ -393,7 +399,7 @@ pub const DEFAULT_BOARDS: &[BoardTemplate] = &[
         description: "Loss prevention: drawer variance, voids and refunds by reason and by cashier, and the cash share of takings.",
         widgets: &[
             "drawer_variance",
-            "shift_cash_summary",
+            "till_cash_summary",
             "voids_by_reason",
             "voids_by_cashier",
             "refunds_by_day",

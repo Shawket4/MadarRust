@@ -91,10 +91,13 @@ pub struct TableBookingHint {
 
 /// Attach each table's next booking (the earliest active claim that has not
 /// ended and starts within the next 24 hours).
-pub(crate) async fn attach_next_bookings(
-    pool: &PgPool,
+pub(crate) async fn attach_next_bookings<'e, E>(
+    pool: E,
     tables: &mut [FloorTable],
-) -> Result<(), AppError> {
+) -> Result<(), AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     if tables.is_empty() {
         return Ok(());
     }
@@ -711,4 +714,18 @@ pub(crate) async fn fetch_table_branch(pool: &PgPool, table_id: Uuid) -> Result<
         .fetch_optional(pool)
         .await?
         .ok_or_else(|| AppError::NotFound("Table not found".into()))
+}
+
+/// Floor tables by id, with their next bookings (sync pull projection).
+pub(crate) async fn tables_by_ids(
+    conn: &mut sqlx::PgConnection,
+    ids: &[Uuid],
+) -> Result<Vec<FloorTable>, AppError> {
+    let mut tables: Vec<FloorTable> =
+        sqlx::query_as(&format!("SELECT {TABLE_COLS} FROM branch_tables WHERE id = ANY($1)"))
+            .bind(ids)
+            .fetch_all(&mut *conn)
+            .await?;
+    attach_next_bookings(&mut *conn, &mut tables).await?;
+    Ok(tables)
 }

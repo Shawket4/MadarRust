@@ -11,14 +11,17 @@ pub mod ai;
 pub mod analytics;
 pub mod auth;
 pub mod bookings;
+pub mod boot_config;
 pub mod branches;
 pub mod bundles;
 pub mod cache;
+pub mod client_seen;
 pub mod clock;
 pub mod costing;
 pub mod db;
 pub mod decimals;
 pub mod delivery;
+pub mod devices;
 pub mod demo;
 pub mod discounts;
 pub mod errors;
@@ -46,9 +49,9 @@ pub mod recipes;
 pub mod refunds;
 pub mod reports;
 pub mod reservations;
-pub mod shifts;
 pub mod staff;
 pub mod stocktakes;
+pub mod assets;
 pub mod sync;
 pub mod tax;
 pub mod tickets;
@@ -60,7 +63,12 @@ pub mod uploads;
 pub mod users;
 
 #[cfg(test)]
+mod pool_discipline_tests;
+#[cfg(test)]
 pub mod e2e_tests;
 
 #[cfg(test)]
 pub mod rls_tests;
+
+#[cfg(test)]
+mod tills_migration_tests;
