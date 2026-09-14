@@ -721,11 +721,12 @@ pub(crate) async fn tables_by_ids(
     conn: &mut sqlx::PgConnection,
     ids: &[Uuid],
 ) -> Result<Vec<FloorTable>, AppError> {
-    let mut tables: Vec<FloorTable> =
-        sqlx::query_as(&format!("SELECT {TABLE_COLS} FROM branch_tables WHERE id = ANY($1)"))
-            .bind(ids)
-            .fetch_all(&mut *conn)
-            .await?;
+    let mut tables: Vec<FloorTable> = sqlx::query_as(&format!(
+        "SELECT {TABLE_COLS} FROM branch_tables WHERE id = ANY($1)"
+    ))
+    .bind(ids)
+    .fetch_all(&mut *conn)
+    .await?;
     attach_next_bookings(&mut *conn, &mut tables).await?;
     Ok(tables)
 }

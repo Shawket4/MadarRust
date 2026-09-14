@@ -40,7 +40,12 @@ impl Debouncer {
 
     /// Branches whose trailing publish is due at `now`.
     pub fn due(&mut self, now: Instant) -> Vec<Uuid> {
-        let due: Vec<Uuid> = self.pending.iter().filter(|(_, at)| **at <= now).map(|(b, _)| *b).collect();
+        let due: Vec<Uuid> = self
+            .pending
+            .iter()
+            .filter(|(_, at)| **at <= now)
+            .map(|(b, _)| *b)
+            .collect();
         for b in &due {
             self.pending.remove(b);
             self.last.insert(*b, now);
@@ -50,7 +55,14 @@ impl Debouncer {
 }
 
 pub fn publish(hub: &BranchEventHub, branch: Uuid) {
-    hub.publish(branch, BranchEvent::new(Topic::Sync, "sync.changed", &serde_json::json!({ "branch_id": branch })));
+    hub.publish(
+        branch,
+        BranchEvent::new(
+            Topic::Sync,
+            "sync.changed",
+            &serde_json::json!({ "branch_id": branch }),
+        ),
+    );
 }
 
 pub fn spawn(pool: PgPool, hub: BranchEventHub) {

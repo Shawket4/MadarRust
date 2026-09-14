@@ -65,11 +65,13 @@ pub async fn run_due(
     for (branch_id, since) in due {
         match build_branch(pool, store, branch_id).await {
             Ok(b) => {
-                sqlx::query("DELETE FROM asset_bundle_dirty WHERE branch_id = $1 AND dirty_since <= $2")
-                    .bind(branch_id)
-                    .bind(since)
-                    .execute(pool)
-                    .await?;
+                sqlx::query(
+                    "DELETE FROM asset_bundle_dirty WHERE branch_id = $1 AND dirty_since <= $2",
+                )
+                .bind(branch_id)
+                .bind(since)
+                .execute(pool)
+                .await?;
                 if let Some(b) = b {
                     out.push(b);
                 }
@@ -145,7 +147,11 @@ pub async fn build_branch(
     // top-up path reports them as missing.
     let files: Vec<TarFile> = files
         .into_iter()
-        .filter(|f| std::fs::metadata(&f.path).map(|m| m.len() == f.bytes).unwrap_or(false))
+        .filter(|f| {
+            std::fs::metadata(&f.path)
+                .map(|m| m.len() == f.bytes)
+                .unwrap_or(false)
+        })
         .collect();
 
     let latest: Option<(i64, String)> = sqlx::query_as(

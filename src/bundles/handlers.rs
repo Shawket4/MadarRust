@@ -390,14 +390,18 @@ pub async fn fetch_bundles_full(
         branches_of.entry(bundle_id).or_default().push(branch_id);
     }
 
-    let mut components_of: std::collections::HashMap<Uuid, (Vec<BundleComponentHydrated>, i64, bool)> =
-        std::collections::HashMap::new();
+    let mut components_of: std::collections::HashMap<
+        Uuid,
+        (Vec<BundleComponentHydrated>, i64, bool),
+    > = std::collections::HashMap::new();
     for row in component_rows {
         // Canonical cost at the component's base size. An unknown cost counts as
         // 0 on the WIRE (old-client parse compat) but flips the missing flags so
         // new consumers never mistake the partial figure for real money.
         let item_cost = cost_of.get(&(org_of[&row.1], row.2)).copied().flatten();
-        let entry = components_of.entry(row.1).or_insert_with(|| (Vec::new(), 0, false));
+        let entry = components_of
+            .entry(row.1)
+            .or_insert_with(|| (Vec::new(), 0, false));
         if let Some(c) = item_cost {
             entry.1 += c * row.3 as i64;
         } else {
@@ -753,8 +757,16 @@ pub async fn create_bundle(
     tx.commit().await?;
     // Image slot (Track B4, §11.5 W2).
     if let Some(url) = mut_body.image_url.clone() {
-        crate::menu::handlers::image_url_side_effects(pool.get_ref(), crate::assets::ingest::AssetTable::Bundles,
-            bundle.org_id, bundle.id, Some(&Some(url)), None, &claims).await?;
+        crate::menu::handlers::image_url_side_effects(
+            pool.get_ref(),
+            crate::assets::ingest::AssetTable::Bundles,
+            bundle.org_id,
+            bundle.id,
+            Some(&Some(url)),
+            None,
+            &claims,
+        )
+        .await?;
     }
 
     let full = fetch_bundle_full(pool.get_ref(), bundle.id)
@@ -944,13 +956,7 @@ pub async fn update_bundle(
 
     // If bundle is Active, we must run the validation checks on the modified state!
     if original.bundle.status == BundleStatus::Active {
-        validate_bundle_rules(
-            &mut tx,
-            original.bundle.org_id,
-            price,
-            &updated_components,
-        )
-        .await?;
+        validate_bundle_rules(&mut tx, original.bundle.org_id, price, &updated_components).await?;
     }
 
     // Update bundles row
@@ -1006,8 +1012,16 @@ pub async fn update_bundle(
     if let Some(url) = mut_body.image_url.as_ref()
         && original.bundle.image_url.as_deref() != Some(url.as_str())
     {
-        crate::menu::handlers::image_url_side_effects(pool.get_ref(), crate::assets::ingest::AssetTable::Bundles,
-            original.bundle.org_id, original.bundle.id, Some(&Some(url.clone())), original.bundle.image_url.as_deref(), &claims).await?;
+        crate::menu::handlers::image_url_side_effects(
+            pool.get_ref(),
+            crate::assets::ingest::AssetTable::Bundles,
+            original.bundle.org_id,
+            original.bundle.id,
+            Some(&Some(url.clone())),
+            original.bundle.image_url.as_deref(),
+            &claims,
+        )
+        .await?;
     }
 
     let full = fetch_bundle_full(pool.get_ref(), original.bundle.id)

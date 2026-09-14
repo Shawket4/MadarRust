@@ -450,14 +450,13 @@ async fn test_put_sizes_roundtrip_and_soft_deactivate(pool: PgPool) {
     // mirroring the proven pattern in costing/tests.rs.
     let branch = seed_branch(&pool, org).await;
     let teller = seed_user(&pool, org).await;
-    let shift: Uuid = sqlx::query_scalar(
-        "INSERT INTO tills (branch_id, teller_id) VALUES ($1, $2) RETURNING id",
-    )
-    .bind(branch)
-    .bind(teller)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let shift: Uuid =
+        sqlx::query_scalar("INSERT INTO tills (branch_id, teller_id) VALUES ($1, $2) RETURNING id")
+            .bind(branch)
+            .bind(teller)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     let cust_order: Uuid = sqlx::query_scalar(
         "INSERT INTO orders (branch_id, till_id, teller_id, order_number, status, \
                              payment_method, subtotal, total_amount, order_ref) \

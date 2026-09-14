@@ -15,16 +15,20 @@ struct Shop {
 }
 
 async fn shop(pool: &PgPool) -> Shop {
-    let org: Uuid = sqlx::query_scalar("INSERT INTO organizations (name, slug) VALUES ('Gaps Org', $1) RETURNING id")
-        .bind(format!("gaps-{}", Uuid::new_v4()))
-        .fetch_one(pool)
-        .await
-        .unwrap();
-    let branch: Uuid = sqlx::query_scalar("INSERT INTO branches (org_id, name, code) VALUES ($1, 'Gaps', 'GAPS') RETURNING id")
-        .bind(org)
-        .fetch_one(pool)
-        .await
-        .unwrap();
+    let org: Uuid = sqlx::query_scalar(
+        "INSERT INTO organizations (name, slug) VALUES ('Gaps Org', $1) RETURNING id",
+    )
+    .bind(format!("gaps-{}", Uuid::new_v4()))
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let branch: Uuid = sqlx::query_scalar(
+        "INSERT INTO branches (org_id, name, code) VALUES ($1, 'Gaps', 'GAPS') RETURNING id",
+    )
+    .bind(org)
+    .fetch_one(pool)
+    .await
+    .unwrap();
     let teller: Uuid = sqlx::query_scalar(
         "INSERT INTO users (org_id, name, email, password_hash, role) VALUES ($1, 'Sara', $2, 'x', 'teller') RETURNING id",
     )
@@ -33,15 +37,29 @@ async fn shop(pool: &PgPool) -> Shop {
     .fetch_one(pool)
     .await
     .unwrap();
-    Shop { org, branch, teller }
+    Shop {
+        org,
+        branch,
+        teller,
+    }
 }
 
 fn req(branch: Uuid) -> PullRequest {
-    PullRequest { branch_id: branch, device_id: None, types: None, limit: None, ledger_page_size: None, snapshot_cursor: None }
+    PullRequest {
+        branch_id: branch,
+        device_id: None,
+        types: None,
+        limit: None,
+        ledger_page_size: None,
+        snapshot_cursor: None,
+    }
 }
 
 fn row<'a>(resp: &'a super::PullResponse, ty: &str, id: Uuid) -> Option<&'a Value> {
-    resp.data.get(ty)?.iter().find(|r| r["id"] == id.to_string())
+    resp.data
+        .get(ty)?
+        .iter()
+        .find(|r| r["id"] == id.to_string())
 }
 
 fn change<'a>(resp: &'a super::PullResponse, ty: &str, id: Uuid) -> Option<&'a super::PullChange> {
@@ -84,7 +102,10 @@ async fn an_addon_item_rides_the_feed_branch_effective(pool: PgPool) {
     assert_eq!(a["is_available"], true);
     assert_eq!(a["ingredients"][0]["ingredient_name"], "Oat");
     assert!(a.get("org_id").is_none());
-    assert!(full.checksums.contains_key("addon_item"), "a state type is checksummed");
+    assert!(
+        full.checksums.contains_key("addon_item"),
+        "a state type is checksummed"
+    );
 
     // A branch override: new price, then switched off — each an incremental change.
     sqlx::query("INSERT INTO branch_addon_overrides (branch_id, addon_item_id, price_override) VALUES ($1, $2, 1800)")
@@ -93,7 +114,9 @@ async fn an_addon_item_rides_the_feed_branch_effective(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let inc = pull_core(&pool, s.org, &req(s.branch), full.next).await.unwrap();
+    let inc = pull_core(&pool, s.org, &req(s.branch), full.next)
+        .await
+        .unwrap();
     let c = change(&inc, "addon_item", addon).expect("override re-emits the addon");
     assert_eq!(c.data.as_ref().unwrap()["default_price"], 1800);
     sqlx::query("UPDATE branch_addon_overrides SET is_available = false WHERE branch_id = $1")
@@ -101,8 +124,17 @@ async fn an_addon_item_rides_the_feed_branch_effective(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let inc2 = pull_core(&pool, s.org, &req(s.branch), inc.next).await.unwrap();
-    assert_eq!(change(&inc2, "addon_item", addon).unwrap().data.as_ref().unwrap()["is_available"], false);
+    let inc2 = pull_core(&pool, s.org, &req(s.branch), inc.next)
+        .await
+        .unwrap();
+    assert_eq!(
+        change(&inc2, "addon_item", addon)
+            .unwrap()
+            .data
+            .as_ref()
+            .unwrap()["is_available"],
+        false
+    );
 
     // An ingredient edit re-emits; a delete is a delete.
     sqlx::query("UPDATE addon_item_ingredients SET quantity_used = 0.3 WHERE addon_item_id = $1")
@@ -110,10 +142,18 @@ async fn an_addon_item_rides_the_feed_branch_effective(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let inc3 = pull_core(&pool, s.org, &req(s.branch), inc2.next).await.unwrap();
+    let inc3 = pull_core(&pool, s.org, &req(s.branch), inc2.next)
+        .await
+        .unwrap();
     assert!(change(&inc3, "addon_item", addon).is_some());
-    sqlx::query("DELETE FROM addon_items WHERE id = $1").bind(addon).execute(&pool).await.unwrap();
-    let inc4 = pull_core(&pool, s.org, &req(s.branch), inc3.next).await.unwrap();
+    sqlx::query("DELETE FROM addon_items WHERE id = $1")
+        .bind(addon)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let inc4 = pull_core(&pool, s.org, &req(s.branch), inc3.next)
+        .await
+        .unwrap();
     assert_eq!(change(&inc4, "addon_item", addon).unwrap().op, "delete");
 }
 
@@ -122,11 +162,15 @@ async fn an_addon_item_rides_the_feed_branch_effective(pool: PgPool) {
 #[sqlx::test]
 async fn an_addon_item_rides_the_feed_after_the_contract_shim(pool: PgPool) {
     let s = shop(&pool).await;
-    sqlx::raw_sql(include_str!("../../../deploy/menu_unification_shim.sql")).execute(&pool).await.unwrap();
-    let kind: String = sqlx::query_scalar("SELECT relkind::text FROM pg_class WHERE relname = 'addon_items'")
-        .fetch_one(&pool)
+    sqlx::raw_sql(include_str!("../../../deploy/menu_unification_shim.sql"))
+        .execute(&pool)
         .await
         .unwrap();
+    let kind: String =
+        sqlx::query_scalar("SELECT relkind::text FROM pg_class WHERE relname = 'addon_items'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(kind, "v", "the shim turned the legacy table into a view");
 
     let group: Uuid = sqlx::query_scalar(
@@ -144,30 +188,53 @@ async fn an_addon_item_rides_the_feed_after_the_contract_shim(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .unwrap();
-    let inc = pull_core(&pool, s.org, &req(s.branch), full.next).await.unwrap();
+    let inc = pull_core(&pool, s.org, &req(s.branch), full.next)
+        .await
+        .unwrap();
     let c = change(&inc, "addon_item", opt).expect("a new addon option emits");
     assert_eq!(c.op, "upsert");
     assert_eq!(c.data.as_ref().unwrap()["default_price"], 1500);
     assert_eq!(c.data.as_ref().unwrap()["addon_type"], "milk_type");
 
     // Its recipe line (the ingredient it uses), under a rename of that ingredient.
-    let ing: Uuid = sqlx::query_scalar("INSERT INTO org_ingredients (org_id, name, unit) VALUES ($1, 'Oat', 'l') RETURNING id")
-        .bind(s.org)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let ing: Uuid = sqlx::query_scalar(
+        "INSERT INTO org_ingredients (org_id, name, unit) VALUES ($1, 'Oat', 'l') RETURNING id",
+    )
+    .bind(s.org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     sqlx::query("INSERT INTO recipe_lines (owner_type, owner_id, ingredient_id, quantity, unit) VALUES ('modifier_option', $1, $2, 0.25, 'l')")
         .bind(opt)
         .bind(ing)
         .execute(&pool)
         .await
         .unwrap();
-    let inc2 = pull_core(&pool, s.org, &req(s.branch), inc.next).await.unwrap();
-    assert_eq!(change(&inc2, "addon_item", opt).unwrap().data.as_ref().unwrap()["ingredients"][0]["ingredient_name"], "Oat");
-    sqlx::query("UPDATE org_ingredients SET name = 'Oat drink' WHERE id = $1").bind(ing).execute(&pool).await.unwrap();
-    let inc3 = pull_core(&pool, s.org, &req(s.branch), inc2.next).await.unwrap();
+    let inc2 = pull_core(&pool, s.org, &req(s.branch), inc.next)
+        .await
+        .unwrap();
     assert_eq!(
-        change(&inc3, "addon_item", opt).expect("an ingredient rename re-emits").data.as_ref().unwrap()["ingredients"][0]["ingredient_name"],
+        change(&inc2, "addon_item", opt)
+            .unwrap()
+            .data
+            .as_ref()
+            .unwrap()["ingredients"][0]["ingredient_name"],
+        "Oat"
+    );
+    sqlx::query("UPDATE org_ingredients SET name = 'Oat drink' WHERE id = $1")
+        .bind(ing)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let inc3 = pull_core(&pool, s.org, &req(s.branch), inc2.next)
+        .await
+        .unwrap();
+    assert_eq!(
+        change(&inc3, "addon_item", opt)
+            .expect("an ingredient rename re-emits")
+            .data
+            .as_ref()
+            .unwrap()["ingredients"][0]["ingredient_name"],
         "Oat drink"
     );
 
@@ -178,24 +245,52 @@ async fn an_addon_item_rides_the_feed_after_the_contract_shim(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let inc4 = pull_core(&pool, s.org, &req(s.branch), inc3.next).await.unwrap();
-    let d = change(&inc4, "addon_item", opt).expect("override re-emits").data.clone().unwrap();
-    assert_eq!((d["default_price"].clone(), d["is_available"].clone()), (1800.into(), false.into()));
+    let inc4 = pull_core(&pool, s.org, &req(s.branch), inc3.next)
+        .await
+        .unwrap();
+    let d = change(&inc4, "addon_item", opt)
+        .expect("override re-emits")
+        .data
+        .clone()
+        .unwrap();
+    assert_eq!(
+        (d["default_price"].clone(), d["is_available"].clone()),
+        (1800.into(), false.into())
+    );
 
     // Deleting the option retires it; deleting a whole group retires its options.
-    sqlx::query("DELETE FROM modifier_options WHERE id = $1").bind(opt).execute(&pool).await.unwrap();
-    let inc5 = pull_core(&pool, s.org, &req(s.branch), inc4.next).await.unwrap();
+    sqlx::query("DELETE FROM modifier_options WHERE id = $1")
+        .bind(opt)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let inc5 = pull_core(&pool, s.org, &req(s.branch), inc4.next)
+        .await
+        .unwrap();
     assert_eq!(change(&inc5, "addon_item", opt).unwrap().op, "delete");
     let opt2: Uuid = sqlx::query_scalar("INSERT INTO modifier_options (group_id, name, legacy_source) VALUES ($1, 'Soy', 'addon') RETURNING id")
         .bind(group)
         .fetch_one(&pool)
         .await
         .unwrap();
-    let inc6 = pull_core(&pool, s.org, &req(s.branch), inc5.next).await.unwrap();
+    let inc6 = pull_core(&pool, s.org, &req(s.branch), inc5.next)
+        .await
+        .unwrap();
     assert_eq!(change(&inc6, "addon_item", opt2).unwrap().op, "upsert");
-    sqlx::query("DELETE FROM modifier_groups WHERE id = $1").bind(group).execute(&pool).await.unwrap();
-    let inc7 = pull_core(&pool, s.org, &req(s.branch), inc6.next).await.unwrap();
-    assert_eq!(change(&inc7, "addon_item", opt2).expect("the group delete retires its options").op, "delete");
+    sqlx::query("DELETE FROM modifier_groups WHERE id = $1")
+        .bind(group)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let inc7 = pull_core(&pool, s.org, &req(s.branch), inc6.next)
+        .await
+        .unwrap();
+    assert_eq!(
+        change(&inc7, "addon_item", opt2)
+            .expect("the group delete retires its options")
+            .op,
+        "delete"
+    );
 
     // And a full snapshot agrees with the incremental feed.
     let again = pull_core(&pool, s.org, &req(s.branch), None).await.unwrap();
@@ -207,7 +302,12 @@ async fn a_tellers_effective_permissions_ride_the_feed(pool: PgPool) {
     let s = shop(&pool).await;
     let full = pull_core(&pool, s.org, &req(s.branch), None).await.unwrap();
     let t = row(&full, "teller", s.teller).expect("teller projected");
-    let perms: Vec<String> = t["permissions"].as_array().unwrap().iter().map(|p| p.as_str().unwrap().to_string()).collect();
+    let perms: Vec<String> = t["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap().to_string())
+        .collect();
     let role_granted: Vec<String> = sqlx::query_scalar(
         "SELECT resource::text || ':' || action::text FROM role_permissions WHERE role = 'teller' AND granted ORDER BY 1",
     )
@@ -215,7 +315,10 @@ async fn a_tellers_effective_permissions_ride_the_feed(pool: PgPool) {
     .await
     .unwrap();
     assert!(!role_granted.is_empty());
-    assert_eq!(perms, role_granted, "no override: exactly the role's grants, granted only");
+    assert_eq!(
+        perms, role_granted,
+        "no override: exactly the role's grants, granted only"
+    );
 
     // Revoke one for this person: it leaves their list through an incremental change.
     let revoked = role_granted[0].clone();
@@ -227,9 +330,21 @@ async fn a_tellers_effective_permissions_ride_the_feed(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let inc = pull_core(&pool, s.org, &req(s.branch), full.next).await.unwrap();
-    let data = change(&inc, "teller", s.teller).expect("override re-emits the teller").data.clone().unwrap();
-    assert!(!data["permissions"].as_array().unwrap().iter().any(|p| p == revoked.as_str()));
+    let inc = pull_core(&pool, s.org, &req(s.branch), full.next)
+        .await
+        .unwrap();
+    let data = change(&inc, "teller", s.teller)
+        .expect("override re-emits the teller")
+        .data
+        .clone()
+        .unwrap();
+    assert!(
+        !data["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == revoked.as_str())
+    );
 
     // A role default changing re-emits every user of that role.
     let (r2, a2) = role_granted[1].split_once(':').unwrap();
@@ -239,23 +354,50 @@ async fn a_tellers_effective_permissions_ride_the_feed(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let inc2 = pull_core(&pool, s.org, &req(s.branch), inc.next).await.unwrap();
-    let data2 = change(&inc2, "teller", s.teller).expect("role default re-emits").data.clone().unwrap();
-    assert!(!data2["permissions"].as_array().unwrap().iter().any(|p| p == role_granted[1].as_str()));
+    let inc2 = pull_core(&pool, s.org, &req(s.branch), inc.next)
+        .await
+        .unwrap();
+    let data2 = change(&inc2, "teller", s.teller)
+        .expect("role default re-emits")
+        .data
+        .clone()
+        .unwrap();
+    assert!(
+        !data2["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == role_granted[1].as_str())
+    );
 }
 
 #[sqlx::test]
 async fn branch_settings_carry_the_delivery_prep_minutes(pool: PgPool) {
     let s = shop(&pool).await;
     let full = pull_core(&pool, s.org, &req(s.branch), None).await.unwrap();
-    assert_eq!(row(&full, "branch_settings", s.branch).unwrap()["delivery_prep_minutes"], 20, "the table default");
-    sqlx::query("INSERT INTO branch_delivery_settings (branch_id, prep_time_minutes) VALUES ($1, 35)")
-        .bind(s.branch)
-        .execute(&pool)
+    assert_eq!(
+        row(&full, "branch_settings", s.branch).unwrap()["delivery_prep_minutes"],
+        20,
+        "the table default"
+    );
+    sqlx::query(
+        "INSERT INTO branch_delivery_settings (branch_id, prep_time_minutes) VALUES ($1, 35)",
+    )
+    .bind(s.branch)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let inc = pull_core(&pool, s.org, &req(s.branch), full.next)
         .await
         .unwrap();
-    let inc = pull_core(&pool, s.org, &req(s.branch), full.next).await.unwrap();
-    assert_eq!(change(&inc, "branch_settings", s.branch).unwrap().data.as_ref().unwrap()["delivery_prep_minutes"], 35);
+    assert_eq!(
+        change(&inc, "branch_settings", s.branch)
+            .unwrap()
+            .data
+            .as_ref()
+            .unwrap()["delivery_prep_minutes"],
+        35
+    );
 }
 
 #[sqlx::test]
@@ -307,8 +449,17 @@ async fn an_order_carries_its_lines_and_drawer_fields_but_no_cost(pool: PgPool) 
     assert_eq!(o["items"][0]["quantity"], 2);
     let mut all = Vec::new();
     keys(o, &mut all);
-    for banned in ["deductions_snapshot", "line_cost", "unit_cost", "cost_missing", "cost"] {
-        assert!(!all.iter().any(|k| k == banned), "no `{banned}` on the wire");
+    for banned in [
+        "deductions_snapshot",
+        "line_cost",
+        "unit_cost",
+        "cost_missing",
+        "cost",
+    ] {
+        assert!(
+            !all.iter().any(|k| k == banned),
+            "no `{banned}` on the wire"
+        );
     }
 
     // A refund carries its lines and who issued it.
@@ -331,17 +482,32 @@ async fn an_order_carries_its_lines_and_drawer_fields_but_no_cost(pool: PgPool) 
         .execute(&pool)
         .await
         .unwrap();
-    let inc = pull_core(&pool, s.org, &req(s.branch), full.next).await.unwrap();
-    let r = change(&inc, "refund", refund).expect("refund change").data.clone().unwrap();
+    let inc = pull_core(&pool, s.org, &req(s.branch), full.next)
+        .await
+        .unwrap();
+    let r = change(&inc, "refund", refund)
+        .expect("refund change")
+        .data
+        .clone()
+        .unwrap();
     assert_eq!(r["issued_by_name"], "Sara");
     assert_eq!(r["lines"][0]["item_name"], "Latte");
 
     // A till keeps what its Z report needs.
     let t = row(&full, "till", till).unwrap();
-    for k in ["opening_cash", "opening_cash_was_edited", "closing_cash_system", "status"] {
+    for k in [
+        "opening_cash",
+        "opening_cash_was_edited",
+        "closing_cash_system",
+        "status",
+    ] {
         assert!(t.get(k).is_some(), "till carries `{k}`");
     }
-    assert_eq!(t["reconciliation"], serde_json::json!([]), "an open till has no close lines yet");
+    assert_eq!(
+        t["reconciliation"],
+        serde_json::json!([]),
+        "an open till has no close lines yet"
+    );
 
     // Closed with a per-method reconciliation: the lines ride the till row.
     sqlx::query("UPDATE tills SET status = 'closed', closed_at = now(), closing_cash_declared = 0, closing_cash_system = 0, reconciliation_status = 'clean' WHERE id = $1")
@@ -355,8 +521,14 @@ async fn an_order_carries_its_lines_and_drawer_fields_but_no_cost(pool: PgPool) 
         .execute(&pool)
         .await
         .unwrap();
-    let inc2 = pull_core(&pool, s.org, &req(s.branch), inc.next).await.unwrap();
-    let tr = change(&inc2, "till", till).expect("the close re-emits the till").data.clone().unwrap();
+    let inc2 = pull_core(&pool, s.org, &req(s.branch), inc.next)
+        .await
+        .unwrap();
+    let tr = change(&inc2, "till", till)
+        .expect("the close re-emits the till")
+        .data
+        .clone()
+        .unwrap();
     assert_eq!(tr["reconciliation"][0]["method"], "Cash");
     assert_eq!(tr["reconciliation"][0]["status"], "checked");
 }
@@ -364,18 +536,23 @@ async fn an_order_carries_its_lines_and_drawer_fields_but_no_cost(pool: PgPool) 
 #[sqlx::test]
 async fn a_menu_item_lists_only_the_channel_prices_that_differ(pool: PgPool) {
     let s = shop(&pool).await;
-    let item: Uuid = sqlx::query_scalar("INSERT INTO menu_items (org_id, name) VALUES ($1, 'Latte') RETURNING id")
-        .bind(s.org)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let item: Uuid = sqlx::query_scalar(
+        "INSERT INTO menu_items (org_id, name) VALUES ($1, 'Latte') RETURNING id",
+    )
+    .bind(s.org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     let size: Uuid = sqlx::query_scalar("INSERT INTO menu_item_sizes (menu_item_id, label, price) VALUES ($1, 'M', 1000) RETURNING id")
         .bind(item)
         .fetch_one(&pool)
         .await
         .unwrap();
     let full = pull_core(&pool, s.org, &req(s.branch), None).await.unwrap();
-    assert_eq!(row(&full, "menu_item", item).unwrap()["channel_prices"], serde_json::json!({}));
+    assert_eq!(
+        row(&full, "menu_item", item).unwrap()["channel_prices"],
+        serde_json::json!({})
+    );
 
     sqlx::query(
         "INSERT INTO menu_price_overrides (scope, channel, target_type, target_id, price) VALUES ('channel', 'outside', 'menu_item_size', $1, 1300)",
@@ -384,21 +561,39 @@ async fn a_menu_item_lists_only_the_channel_prices_that_differ(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    let inc = pull_core(&pool, s.org, &req(s.branch), full.next).await.unwrap();
-    let cp = change(&inc, "menu_item", item).expect("a channel override re-emits").data.clone().unwrap()["channel_prices"].clone();
+    let inc = pull_core(&pool, s.org, &req(s.branch), full.next)
+        .await
+        .unwrap();
+    let cp = change(&inc, "menu_item", item)
+        .expect("a channel override re-emits")
+        .data
+        .clone()
+        .unwrap()["channel_prices"]
+        .clone();
     assert_eq!(cp["outside"]["sizes"][size.to_string()]["price"], 1300);
-    assert!(cp.get("in_mall").is_none(), "an unchanged channel is not listed");
+    assert!(
+        cp.get("in_mall").is_none(),
+        "an unchanged channel is not listed"
+    );
 }
 
 #[test]
 fn payment_availability_has_its_own_topic() {
     use crate::realtime::event::Topic;
-    assert_eq!(crate::payment_methods::availability::AVAILABILITY_TOPIC, Topic::PaymentMethods);
+    assert_eq!(
+        crate::payment_methods::availability::AVAILABILITY_TOPIC,
+        Topic::PaymentMethods
+    );
     assert_eq!(Topic::parse("payment_methods"), Some(Topic::PaymentMethods));
-    assert_eq!(Topic::PaymentMethods.permission(), Some(("payment_methods", "read")));
+    assert_eq!(
+        Topic::PaymentMethods.permission(),
+        Some(("payment_methods", "read"))
+    );
     assert!(Topic::ALL.contains(&Topic::PaymentMethods));
     // Old subscriptions are unaffected: every earlier topic still parses as before.
-    for t in ["delivery", "tickets", "kitchen", "orders", "floor", "bookings", "tills", "sync"] {
+    for t in [
+        "delivery", "tickets", "kitchen", "orders", "floor", "bookings", "tills", "sync",
+    ] {
         assert_eq!(Topic::parse(t).unwrap().as_str(), t);
     }
 }
@@ -426,7 +621,14 @@ async fn seed_orders(pool: &PgPool, s: &Shop, till: Uuid, n: usize) -> Vec<Uuid>
 }
 
 fn paged(branch: Uuid, size: i64, cursor: Option<super::SnapshotCursor>) -> PullRequest {
-    PullRequest { branch_id: branch, device_id: None, types: None, limit: None, ledger_page_size: Some(size), snapshot_cursor: cursor }
+    PullRequest {
+        branch_id: branch,
+        device_id: None,
+        types: None,
+        limit: None,
+        ledger_page_size: Some(size),
+        snapshot_cursor: cursor,
+    }
 }
 
 /// A paged full snapshot is the same snapshot as the unpaged one: every ledger
@@ -444,21 +646,34 @@ async fn a_paged_snapshot_is_the_unpaged_snapshot(pool: PgPool) {
         .unwrap();
     let orders = seed_orders(&pool, &s, till, 350).await;
     // The feed has not seen these change for days: only the OPEN till keeps them.
-    sqlx::query("UPDATE sync_changes SET changed_at = now() - interval '5 days' WHERE branch_id = $1")
-        .bind(s.branch)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE sync_changes SET changed_at = now() - interval '5 days' WHERE branch_id = $1",
+    )
+    .bind(s.branch)
+    .execute(&pool)
+    .await
+    .unwrap();
     let whole = pull_core(&pool, s.org, &req(s.branch), None).await.unwrap();
     assert_eq!(whole.data["order"].len(), 350);
 
-    let p1 = pull_core(&pool, s.org, &paged(s.branch, 100, None), None).await.unwrap();
+    let p1 = pull_core(&pool, s.org, &paged(s.branch, 100, None), None)
+        .await
+        .unwrap();
     assert!(p1.full && p1.has_more);
-    assert!(p1.types.iter().any(|t| t == "category"), "state types on page one");
+    assert!(
+        p1.types.iter().any(|t| t == "category"),
+        "state types on page one"
+    );
     assert!(!p1.checksums.is_empty() && p1.asset_bundle.is_some());
-    let ledger_on_p1: usize = super::LEDGER_TYPES.iter().map(|t| p1.data.get(*t).map(Vec::len).unwrap_or(0)).sum();
+    let ledger_on_p1: usize = super::LEDGER_TYPES
+        .iter()
+        .map(|t| p1.data.get(*t).map(Vec::len).unwrap_or(0))
+        .sum();
     assert_eq!(ledger_on_p1, 100);
-    let mut cursor = p1.snapshot_cursor.clone().expect("a cursor for the next page");
+    let mut cursor = p1
+        .snapshot_cursor
+        .clone()
+        .expect("a cursor for the next page");
     assert_eq!(p1.next, Some(cursor.horizon));
 
     // Mid-paging: close the till, and change one order already sent.
@@ -467,22 +682,62 @@ async fn a_paged_snapshot_is_the_unpaged_snapshot(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let late = sqlx::query_scalar::<_, Uuid>("SELECT id FROM orders WHERE till_id = $1 ORDER BY order_number DESC LIMIT 1")
-        .bind(till)
-        .fetch_one(&pool)
+    let late = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM orders WHERE till_id = $1 ORDER BY order_number DESC LIMIT 1",
+    )
+    .bind(till)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE orders SET notes = 'changed while paging' WHERE id = $1")
+        .bind(late)
+        .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("UPDATE orders SET notes = 'changed while paging' WHERE id = $1").bind(late).execute(&pool).await.unwrap();
 
-    let mut seen: Vec<String> = p1.data.get("order").map(|v| v.iter().map(|r| r["id"].as_str().unwrap().to_string()).collect()).unwrap_or_default();
+    let mut seen: Vec<String> = p1
+        .data
+        .get("order")
+        .map(|v| {
+            v.iter()
+                .map(|r| r["id"].as_str().unwrap().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
     let mut pages = 1;
     loop {
-        let p = pull_core(&pool, s.org, &paged(s.branch, 100, Some(cursor.clone())), None).await.unwrap();
+        let p = pull_core(
+            &pool,
+            s.org,
+            &paged(s.branch, 100, Some(cursor.clone())),
+            None,
+        )
+        .await
+        .unwrap();
         pages += 1;
-        assert!(p.checksums.is_empty() && p.asset_bundle.is_none(), "page {pages}: first-page extras only once");
-        assert!(p.types.iter().all(|t| super::is_ledger(t)), "later pages carry ledger types only");
-        assert_eq!(p.next, Some(cursor.horizon), "one horizon for the whole snapshot");
-        seen.extend(p.data.get("order").map(|v| v.iter().map(|r| r["id"].as_str().unwrap().to_string()).collect::<Vec<_>>()).unwrap_or_default());
+        assert!(
+            p.checksums.is_empty() && p.asset_bundle.is_none(),
+            "page {pages}: first-page extras only once"
+        );
+        assert!(
+            p.types.iter().all(|t| super::is_ledger(t)),
+            "later pages carry ledger types only"
+        );
+        assert_eq!(
+            p.next,
+            Some(cursor.horizon),
+            "one horizon for the whole snapshot"
+        );
+        seen.extend(
+            p.data
+                .get("order")
+                .map(|v| {
+                    v.iter()
+                        .map(|r| r["id"].as_str().unwrap().to_string())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        );
         match p.snapshot_cursor {
             Some(c) => {
                 assert!(p.has_more);
@@ -502,12 +757,29 @@ async fn a_paged_snapshot_is_the_unpaged_snapshot(pool: PgPool) {
     got.dedup();
     assert_eq!(got.len(), seen.len(), "no row twice");
     want.sort();
-    assert_eq!(got, want, "every unchanged row of the closed-while-paging till, once");
-    let inc = pull_core(&pool, s.org, &req(s.branch), Some(cursor.horizon)).await.unwrap();
-    assert!(change(&inc, "order", late).is_some(), "the row changed while paging arrives incrementally");
+    assert_eq!(
+        got, want,
+        "every unchanged row of the closed-while-paging till, once"
+    );
+    let inc = pull_core(&pool, s.org, &req(s.branch), Some(cursor.horizon))
+        .await
+        .unwrap();
+    assert!(
+        change(&inc, "order", late).is_some(),
+        "the row changed while paging arrives incrementally"
+    );
     assert!(change(&inc, "till", till).is_some());
     // Old clients are unchanged: paging is opt-in and only for full pulls.
-    assert!(pull_core(&pool, s.org, &paged(s.branch, 100, None), Some(cursor.horizon)).await.is_err());
+    assert!(
+        pull_core(
+            &pool,
+            s.org,
+            &paged(s.branch, 100, None),
+            Some(cursor.horizon)
+        )
+        .await
+        .is_err()
+    );
 }
 
 /// Role defaults are global (no org on `role_permissions`); a change re-projects
@@ -545,11 +817,29 @@ async fn a_role_default_reprojects_only_users_it_can_affect(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let inc = pull_core(&pool, s.org, &req(s.branch), full.next).await.unwrap();
-    assert!(change(&inc, "teller", s.teller).is_some(), "a user on the role default is re-projected");
-    assert!(change(&inc, "teller", pinned).is_none(), "a user whose override pins that permission is not");
-    let data = change(&inc, "teller", s.teller).unwrap().data.clone().unwrap();
-    assert!(!data["permissions"].as_array().unwrap().iter().any(|p| p == format!("{res}:{act}").as_str()));
+    let inc = pull_core(&pool, s.org, &req(s.branch), full.next)
+        .await
+        .unwrap();
+    assert!(
+        change(&inc, "teller", s.teller).is_some(),
+        "a user on the role default is re-projected"
+    );
+    assert!(
+        change(&inc, "teller", pinned).is_none(),
+        "a user whose override pins that permission is not"
+    );
+    let data = change(&inc, "teller", s.teller)
+        .unwrap()
+        .data
+        .clone()
+        .unwrap();
+    assert!(
+        !data["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == format!("{res}:{act}").as_str())
+    );
     // Insert and delete statements fire too.
     sqlx::query("DELETE FROM role_permissions WHERE role = 'teller' AND resource = $1::permission_resource AND action = $2::permission_action")
         .bind(&res)
@@ -557,7 +847,9 @@ async fn a_role_default_reprojects_only_users_it_can_affect(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let inc2 = pull_core(&pool, s.org, &req(s.branch), inc.next).await.unwrap();
+    let inc2 = pull_core(&pool, s.org, &req(s.branch), inc.next)
+        .await
+        .unwrap();
     assert!(change(&inc2, "teller", s.teller).is_some());
     assert!(change(&inc2, "teller", pinned).is_none());
 }
@@ -573,7 +865,11 @@ fn test_secret() -> crate::auth::jwt::JwtSecret {
 async fn the_report_and_replay_answers_carry_feed_horizons(pool: PgPool) {
     use actix_web::{App, test, web};
     let s = shop(&pool).await;
-    sqlx::query("UPDATE users SET pin_hash = 'x' WHERE id = $1").bind(s.teller).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE users SET pin_hash = 'x' WHERE id = $1")
+        .bind(s.teller)
+        .execute(&pool)
+        .await
+        .unwrap();
     for action in ["read", "update"] {
         sqlx::query("INSERT INTO permissions (user_id, resource, action, granted) VALUES ($1, 'tills', $2::permission_action, true) ON CONFLICT DO NOTHING")
             .bind(s.teller)
@@ -597,16 +893,26 @@ async fn the_report_and_replay_answers_carry_feed_horizons(pool: PgPool) {
             .configure(crate::sync::routes::configure),
     )
     .await;
-    let token = crate::auth::jwt::create_token(&test_secret(), s.teller, Some(s.org), crate::models::UserRole::Teller, Some(s.branch), 1).unwrap();
+    let token = crate::auth::jwt::create_token(
+        &test_secret(),
+        s.teller,
+        Some(s.org),
+        crate::models::UserRole::Teller,
+        Some(s.branch),
+        1,
+    )
+    .unwrap();
     let head = |p: &PgPool| {
         let p = p.clone();
         let b = s.branch;
         async move {
-            sqlx::query_scalar::<_, i64>("SELECT COALESCE(max(seq), 0) FROM sync_changes WHERE branch_id = $1")
-                .bind(b)
-                .fetch_one(&p)
-                .await
-                .unwrap()
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COALESCE(max(seq), 0) FROM sync_changes WHERE branch_id = $1",
+            )
+            .bind(b)
+            .fetch_one(&p)
+            .await
+            .unwrap()
         }
     };
 
@@ -614,13 +920,21 @@ async fn the_report_and_replay_answers_carry_feed_horizons(pool: PgPool) {
         "request": {"amount": 500, "note": "float", "client_ref": Uuid::new_v4()}});
     let resp = test::call_service(
         &app,
-        test::TestRequest::post().uri("/sync/replay").insert_header(("Authorization", format!("Bearer {token}"))).set_json(&op).to_request(),
+        test::TestRequest::post()
+            .uri("/sync/replay")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(&op)
+            .to_request(),
     )
     .await;
     let status = resp.status();
     let headers = resp.headers().clone();
     let body = test::read_body(resp).await;
-    assert!(status.is_success(), "{status} {}", String::from_utf8_lossy(&body));
+    assert!(
+        status.is_success(),
+        "{status} {}",
+        String::from_utf8_lossy(&body)
+    );
     let seq: i64 = headers
         .get(crate::sync::handlers::SYNC_SEQ_HEADER)
         .expect("a replay answer names its horizon")
@@ -628,19 +942,32 @@ async fn the_report_and_replay_answers_carry_feed_horizons(pool: PgPool) {
         .unwrap()
         .parse()
         .unwrap();
-    assert_eq!(seq, head(&pool).await, "every change the op made is at or below it");
-    let movement_seq: i64 = sqlx::query_scalar("SELECT seq FROM sync_changes WHERE branch_id = $1 AND type = 'cash_movement'")
-        .bind(s.branch)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    assert_eq!(
+        seq,
+        head(&pool).await,
+        "every change the op made is at or below it"
+    );
+    let movement_seq: i64 = sqlx::query_scalar(
+        "SELECT seq FROM sync_changes WHERE branch_id = $1 AND type = 'cash_movement'",
+    )
+    .bind(s.branch)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert!(movement_seq <= seq);
 
     let report: serde_json::Value = test::call_and_read_body_json(
         &app,
-        test::TestRequest::get().uri(&format!("/tills/{till}/report")).insert_header(("Authorization", format!("Bearer {token}"))).to_request(),
+        test::TestRequest::get()
+            .uri(&format!("/tills/{till}/report"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
     )
     .await;
-    assert_eq!(report["as_of_seq"].as_i64(), Some(head(&pool).await), "the report includes the feed up to its horizon");
+    assert_eq!(
+        report["as_of_seq"].as_i64(),
+        Some(head(&pool).await),
+        "the report includes the feed up to its horizon"
+    );
     assert_eq!(report["cash_movements_net"].as_i64(), Some(500));
 }

@@ -56,7 +56,9 @@ async fn main() {
             "--assets-dir" => assets_dir = Some(val(&mut args).into()),
             "--step-animations-dir" => steps_dir = Some(val(&mut args).into()),
             "--prune-originals" => prune = true,
-            "--i-have-verified" => verified_run = Some(val(&mut args).parse().unwrap_or_else(|_| usage())),
+            "--i-have-verified" => {
+                verified_run = Some(val(&mut args).parse().unwrap_or_else(|_| usage()))
+            }
             "--allow-partial" => allow_partial = true,
             _ => usage(),
         }
@@ -65,7 +67,9 @@ async fn main() {
         usage();
     }
     if prune && (dry_run || verified_run.is_none()) {
-        eprintln!("--prune-originals needs --i-have-verified <run-id> and never runs with --dry-run");
+        eprintln!(
+            "--prune-originals needs --i-have-verified <run-id> and never runs with --dry-run"
+        );
         std::process::exit(2);
     }
 
@@ -108,7 +112,8 @@ async fn main() {
         run_id: run_id.unwrap_or_else(Uuid::new_v4),
         verify_only,
         store,
-        step_animations_dir: steps_dir.or_else(|| Some(madar_rust::recipes::steps::animations_dir().into())),
+        step_animations_dir: steps_dir
+            .or_else(|| Some(madar_rust::recipes::steps::animations_dir().into())),
     };
     match backfill::run(&pool, &opts).await {
         Ok(report) => {

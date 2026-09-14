@@ -149,7 +149,10 @@ impl Dataset {
 /// Look up a dataset by id.
 pub fn dataset(id: &str) -> Option<&'static Dataset> {
     let id = if id == "shifts" {
-        crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ANALYTICS_ALIAS, "dataset_shifts");
+        crate::client_seen::legacy_hit_at(
+            crate::client_seen::KIND_ANALYTICS_ALIAS,
+            "dataset_shifts",
+        );
         "tills"
     } else {
         id

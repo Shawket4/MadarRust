@@ -64,8 +64,18 @@ fn legacy_replay_envelopes_deserialize_into_current_replay_op() {
             }
             envelopes += 1;
         }
-        assert!(envelopes >= 14, "{release}: only {envelopes} envelopes found");
-        assert_eq!(finalize, 1, "{release}: delivery_finalize.body.json missing");
+        assert!(
+            envelopes >= 14,
+            "{release}: only {envelopes} envelopes found"
+        );
+        assert_eq!(
+            finalize, 1,
+            "{release}: delivery_finalize.body.json missing"
+        );
     }
-    assert!(failures.is_empty(), "legacy envelopes rejected:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "legacy envelopes rejected:\n{}",
+        failures.join("\n")
+    );
 }

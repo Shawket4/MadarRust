@@ -332,7 +332,10 @@ pub(crate) async fn create_refund_inner(
         .fetch_one(&mut *tx)
         .await?;
         if !still_open {
-            crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ERROR_WORDING, "refund_needs_open_shift");
+            crate::client_seen::legacy_hit_at(
+                crate::client_seen::KIND_ERROR_WORDING,
+                "refund_needs_open_shift",
+            );
             return Err(AppError::BadRequest(
                 "Refunds can only be issued in an open shift".into(),
             ));
@@ -365,9 +368,11 @@ pub(crate) async fn create_refund_inner(
     }
 
     let device_id = match body.device_id {
-        Some(d) => crate::devices::ensure_registered(&mut tx, actor.org_id, d, Some(order.branch_id), None)
-            .await?
-            .map(|_| d),
+        Some(d) => {
+            crate::devices::ensure_registered(&mut tx, actor.org_id, d, Some(order.branch_id), None)
+                .await?
+                .map(|_| d)
+        }
         None => None,
     };
     let refund_id: Uuid = match sqlx::query_scalar::<_, Uuid>(
@@ -482,7 +487,10 @@ async fn resolve_refund_till(
             ));
         }
         if !actor.replay && shift_status != "open" {
-            crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ERROR_WORDING, "refund_needs_open_shift");
+            crate::client_seen::legacy_hit_at(
+                crate::client_seen::KIND_ERROR_WORDING,
+                "refund_needs_open_shift",
+            );
             return Err(AppError::BadRequest(
                 "Refunds can only be issued in an open shift".into(),
             ));
@@ -506,7 +514,10 @@ async fn resolve_refund_till(
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| {
-        crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ERROR_WORDING, "refund_no_open_shift");
+        crate::client_seen::legacy_hit_at(
+            crate::client_seen::KIND_ERROR_WORDING,
+            "refund_no_open_shift",
+        );
         AppError::BadRequest(
             "You have no open shift at this branch — open one before issuing a refund".into(),
         )

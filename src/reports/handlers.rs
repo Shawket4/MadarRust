@@ -497,7 +497,10 @@ pub async fn shift_deductions(
 ///
 /// Waste and staff meals are recorded against the BRANCH (`source_type` `waste`,
 /// no order, no till), so no till's deductions include them.
-pub(crate) async fn till_deduction_rows(pool: &PgPool, till_id: Uuid) -> Result<Vec<DeductionLogRow>, AppError> {
+pub(crate) async fn till_deduction_rows(
+    pool: &PgPool,
+    till_id: Uuid,
+) -> Result<Vec<DeductionLogRow>, AppError> {
     Ok(sqlx::query_as::<_, DeductionLogRow>(
         "SELECT m.id, m.source_id AS order_id, NULL::uuid AS order_item_id, \
                 m.org_ingredient_id AS inventory_item_id, i.name AS item_name, i.unit::text AS unit, \

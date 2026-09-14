@@ -89,15 +89,52 @@ struct SourceDef {
 }
 
 const SOURCES: &[SourceDef] = &[
-    SourceDef { table: "menu_items", field: "image", org_col: "org_id", url_col: "image_url", purpose: AssetPurpose::MenuItemPhoto, group_col: "image_group_id" },
-    SourceDef { table: "categories", field: "image", org_col: "org_id", url_col: "image_url", purpose: AssetPurpose::CategoryPhoto, group_col: "image_group_id" },
-    SourceDef { table: "bundles", field: "image", org_col: "org_id", url_col: "image_url", purpose: AssetPurpose::BundlePhoto, group_col: "image_group_id" },
-    SourceDef { table: "organizations", field: "logo", org_col: "id", url_col: "logo_url", purpose: AssetPurpose::OrgLogo, group_col: "logo_group_id" },
-    SourceDef { table: "organizations", field: "brand_card_image", org_col: "id", url_col: "brand_card_image", purpose: AssetPurpose::LoyaltyCardImage, group_col: "brand_card_image_group_id" },
+    SourceDef {
+        table: "menu_items",
+        field: "image",
+        org_col: "org_id",
+        url_col: "image_url",
+        purpose: AssetPurpose::MenuItemPhoto,
+        group_col: "image_group_id",
+    },
+    SourceDef {
+        table: "categories",
+        field: "image",
+        org_col: "org_id",
+        url_col: "image_url",
+        purpose: AssetPurpose::CategoryPhoto,
+        group_col: "image_group_id",
+    },
+    SourceDef {
+        table: "bundles",
+        field: "image",
+        org_col: "org_id",
+        url_col: "image_url",
+        purpose: AssetPurpose::BundlePhoto,
+        group_col: "image_group_id",
+    },
+    SourceDef {
+        table: "organizations",
+        field: "logo",
+        org_col: "id",
+        url_col: "logo_url",
+        purpose: AssetPurpose::OrgLogo,
+        group_col: "logo_group_id",
+    },
+    SourceDef {
+        table: "organizations",
+        field: "brand_card_image",
+        org_col: "id",
+        url_col: "brand_card_image",
+        purpose: AssetPurpose::LoyaltyCardImage,
+        group_col: "brand_card_image_group_id",
+    },
 ];
 
 fn source_def(table: &str, field: &str) -> Option<&'static SourceDef> {
-    SOURCES.iter().find(|s| s.table == table && s.field == field)
+    SOURCES
+        .iter()
+        .find(|s| s.table == table && s.field == field)
 }
 
 async fn discover(pool: &PgPool, opts: &BackfillOptions) -> Result<Vec<Item>, AppError> {
@@ -128,9 +165,10 @@ async fn discover(pool: &PgPool, opts: &BackfillOptions) -> Result<Vec<Item>, Ap
     if opts.org.is_none()
         && let Some(dir) = &opts.step_animations_dir
     {
-        let slugs: Vec<String> = sqlx::query_scalar("SELECT slug FROM recipe_step_presets ORDER BY slug")
-            .fetch_all(pool)
-            .await?;
+        let slugs: Vec<String> =
+            sqlx::query_scalar("SELECT slug FROM recipe_step_presets ORDER BY slug")
+                .fetch_all(pool)
+                .await?;
         for slug in slugs {
             items.push(Item {
                 table: "recipe_step_presets",
@@ -138,7 +176,11 @@ async fn discover(pool: &PgPool, opts: &BackfillOptions) -> Result<Vec<Item>, Ap
                 id: slug.clone(),
                 org_id: None,
                 legacy_url: format!("{}/{slug}.json", crate::recipes::steps::STATIC_URL_PREFIX),
-                legacy_path: Some(dir.join(format!("{slug}.json")).to_string_lossy().to_string()),
+                legacy_path: Some(
+                    dir.join(format!("{slug}.json"))
+                        .to_string_lossy()
+                        .to_string(),
+                ),
             });
         }
     }
@@ -180,7 +222,10 @@ async fn probe(item: &Item, store: &AssetStore) -> Probe {
             return if item.legacy_url.starts_with("https://") && item.legacy_path.is_none() {
                 Probe::External
             } else {
-                Probe::Missing(format!("file not found: {}", item.legacy_path.as_deref().unwrap_or("")))
+                Probe::Missing(format!(
+                    "file not found: {}",
+                    item.legacy_path.as_deref().unwrap_or("")
+                ))
             };
         }
     };
@@ -236,7 +281,9 @@ async fn ingest_phase(pool: &PgPool, opts: &BackfillOptions) -> Result<(), AppEr
     for r in rows {
         let table: String = r.get("source_table");
         let field: String = r.get("source_field");
-        let Some(item) = item_from_row(&r, &table, &field) else { continue };
+        let Some(item) = item_from_row(&r, &table, &field) else {
+            continue;
+        };
         let pk = (item.table, item.id.clone(), item.field);
         let set = |status: &'static str, err: Option<String>| {
             sqlx::query(
@@ -260,15 +307,19 @@ async fn ingest_phase(pool: &PgPool, opts: &BackfillOptions) -> Result<(), AppEr
                 continue;
             }
             Probe::External => match url::Url::parse(&item.legacy_url) {
-                Ok(u) => match super::ingest::load_source(super::ingest::IngestSource::Url(u)).await {
-                    Ok(b) => b,
-                    Err(e) => {
-                        set("missing", Some(e.to_string())).execute(pool).await?;
-                        continue;
+                Ok(u) => {
+                    match super::ingest::load_source(super::ingest::IngestSource::Url(u)).await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            set("missing", Some(e.to_string())).execute(pool).await?;
+                            continue;
+                        }
                     }
-                },
+                }
                 Err(_) => {
-                    set("broken", Some("unparseable url".into())).execute(pool).await?;
+                    set("broken", Some("unparseable url".into()))
+                        .execute(pool)
+                        .await?;
                     continue;
                 }
             },
@@ -336,7 +387,11 @@ fn item_from_row(r: &sqlx::postgres::PgRow, table: &str, field: &str) -> Option<
 /// row at the group (only when its slot is still empty or already this group,
 /// and its legacy URL is still the one discovered) and map the legacy path.
 async fn verify_phase(pool: &PgPool, opts: &BackfillOptions) -> Result<(), AppError> {
-    let statuses: &[&str] = if opts.verify_only { &["ingested", "verified"] } else { &["ingested"] };
+    let statuses: &[&str] = if opts.verify_only {
+        &["ingested", "verified"]
+    } else {
+        &["ingested"]
+    };
     let rows = sqlx::query(
         "SELECT source_table, source_id, source_field, org_id, legacy_url, legacy_path, group_id FROM asset_backfill_items \
          WHERE status = ANY($1) AND group_id IS NOT NULL AND ($2::uuid IS NULL OR org_id = $2) \
@@ -349,7 +404,9 @@ async fn verify_phase(pool: &PgPool, opts: &BackfillOptions) -> Result<(), AppEr
     for r in rows {
         let table: String = r.get("source_table");
         let field: String = r.get("source_field");
-        let Some(item) = item_from_row(&r, &table, &field) else { continue };
+        let Some(item) = item_from_row(&r, &table, &field) else {
+            continue;
+        };
         let group_id: Uuid = r.get("group_id");
         let mark = |status: &'static str, err: Option<String>| {
             sqlx::query(
@@ -398,9 +455,12 @@ async fn verify_phase(pool: &PgPool, opts: &BackfillOptions) -> Result<(), AppEr
         };
         if !applied {
             drop(tx);
-            mark("skipped", Some("row changed since discovery (newer upload kept)".into()))
-                .execute(pool)
-                .await?;
+            mark(
+                "skipped",
+                Some("row changed since discovery (newer upload kept)".into()),
+            )
+            .execute(pool)
+            .await?;
             continue;
         }
         if item.table != "recipe_step_presets"
@@ -537,7 +597,10 @@ async fn report(pool: &PgPool, opts: &BackfillOptions) -> Result<Report, AppErro
     b.saved = b.source - b.stored;
     Ok(Report {
         run_id: opts.run_id,
-        org_scope: opts.org.map(|o| o.to_string()).unwrap_or_else(|| "all".into()),
+        org_scope: opts
+            .org
+            .map(|o| o.to_string())
+            .unwrap_or_else(|| "all".into()),
         dry_run: false,
         totals: t,
         bytes: b,
@@ -551,7 +614,10 @@ async fn dry_run(pool: &PgPool, opts: &BackfillOptions) -> Result<Report, AppErr
     if let Some(l) = opts.limit {
         items.truncate(l.max(0) as usize);
     }
-    let mut t = Totals { discovered: items.len() as i64, ..Default::default() };
+    let mut t = Totals {
+        discovered: items.len() as i64,
+        ..Default::default()
+    };
     let mut b = ByteTotals::default();
     let mut failed = Vec::new();
     let mut seen_sources: BTreeMap<(Option<Uuid>, String), ()> = BTreeMap::new();
@@ -560,7 +626,10 @@ async fn dry_run(pool: &PgPool, opts: &BackfillOptions) -> Result<Report, AppErr
         let (status, err) = match probe(it, &opts.store).await {
             Probe::Missing(e) => ("missing", Some(e)),
             Probe::Broken(e) => ("broken", Some(e)),
-            Probe::External => ("skipped", Some("external url (fetched only in a real run)".into())),
+            Probe::External => (
+                "skipped",
+                Some("external url (fetched only in a real run)".into()),
+            ),
             Probe::Ok(bytes) => {
                 let hash = super::sha256_hex(&bytes);
                 if seen_sources.insert((it.org_id, hash), ()).is_some() {
@@ -606,7 +675,10 @@ async fn dry_run(pool: &PgPool, opts: &BackfillOptions) -> Result<Report, AppErr
     b.saved = b.source - b.stored;
     Ok(Report {
         run_id: opts.run_id,
-        org_scope: opts.org.map(|o| o.to_string()).unwrap_or_else(|| "all".into()),
+        org_scope: opts
+            .org
+            .map(|o| o.to_string())
+            .unwrap_or_else(|| "all".into()),
         dry_run: true,
         totals: t,
         bytes: b,
@@ -663,7 +735,9 @@ pub async fn prune(
     .fetch_one(pool)
     .await?;
     if verified == 0 {
-        return Err(AppError::BadRequest(format!("run {verified_run} has no verified items")));
+        return Err(AppError::BadRequest(format!(
+            "run {verified_run} has no verified items"
+        )));
     }
     if bad > 0 && !allow_partial {
         return Err(AppError::BadRequest(format!(
@@ -681,9 +755,14 @@ pub async fn prune(
     .bind(org)
     .fetch_all(pool)
     .await?;
-    let mut rep = PruneReport { run_id: verified_run, ..Default::default() };
+    let mut rep = PruneReport {
+        run_id: verified_run,
+        ..Default::default()
+    };
     for (rel,) in rows {
-        let Some(path) = store.legacy_file(&rel) else { continue };
+        let Some(path) = store.legacy_file(&rel) else {
+            continue;
+        };
         match tokio::fs::metadata(&path).await {
             Ok(m) if m.is_file() => {
                 if tokio::fs::remove_file(&path).await.is_ok() {

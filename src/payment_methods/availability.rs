@@ -186,20 +186,32 @@ impl Owner {
     /// The owner row must exist in the caller's org (404 otherwise — no leak).
     fn owner_sql(self) -> &'static str {
         match self {
-            Owner::Branch => "SELECT EXISTS (SELECT 1 FROM branches WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL)",
-            Owner::User => "SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL)",
+            Owner::Branch => {
+                "SELECT EXISTS (SELECT 1 FROM branches WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL)"
+            }
+            Owner::User => {
+                "SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL)"
+            }
             Owner::Device => "SELECT EXISTS (SELECT 1 FROM devices WHERE id = $1 AND org_id = $2)",
         }
     }
 }
 
-async fn ensure_branch_in_org(pool: &PgPool, org_id: Uuid, branch_id: Uuid) -> Result<(), AppError> {
+async fn ensure_branch_in_org(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Uuid,
+) -> Result<(), AppError> {
     let ok: bool = sqlx::query_scalar(Owner::Branch.owner_sql())
         .bind(branch_id)
         .bind(org_id)
         .fetch_one(pool)
         .await?;
-    if ok { Ok(()) } else { Err(AppError::NotFound("Branch not found".into())) }
+    if ok {
+        Ok(())
+    } else {
+        Err(AppError::NotFound("Branch not found".into()))
+    }
 }
 
 async fn ids_for(pool: &PgPool, owner: Owner, id: Uuid) -> Result<Vec<Uuid>, AppError> {
@@ -209,7 +221,10 @@ async fn ids_for(pool: &PgPool, owner: Owner, id: Uuid) -> Result<Vec<Uuid>, App
         owner.table(),
         owner.column()
     );
-    Ok(sqlx::query_scalar::<_, Uuid>(&sql).bind(id).fetch_all(pool).await?)
+    Ok(sqlx::query_scalar::<_, Uuid>(&sql)
+        .bind(id)
+        .fetch_all(pool)
+        .await?)
 }
 
 // ── GET /payment-methods/availability ────────────────────────────
@@ -265,14 +280,23 @@ pub async fn load_availability(
 
     Ok(PaymentMethodAvailability {
         branch_id,
-        branch: AllowList { restricted: !branch_ids.is_empty(), payment_method_ids: branch_ids },
+        branch: AllowList {
+            restricted: !branch_ids.is_empty(),
+            payment_method_ids: branch_ids,
+        },
         users: user_rows
             .into_iter()
-            .map(|(user_id, payment_method_ids)| UserAllowList { user_id, payment_method_ids })
+            .map(|(user_id, payment_method_ids)| UserAllowList {
+                user_id,
+                payment_method_ids,
+            })
             .collect(),
         devices: device_rows
             .into_iter()
-            .map(|(device_id, payment_method_ids)| DeviceAllowList { device_id, payment_method_ids })
+            .map(|(device_id, payment_method_ids)| DeviceAllowList {
+                device_id,
+                payment_method_ids,
+            })
             .collect(),
     })
 }
@@ -296,14 +320,22 @@ async fn put_list(
     if let Some(hub) = hub {
         let branches: Vec<Uuid> = match owner {
             Owner::Branch => vec![owner_id],
-            Owner::Device => sqlx::query_scalar("SELECT branch_id FROM devices WHERE id = $1 AND branch_id IS NOT NULL")
+            Owner::Device => {
+                sqlx::query_scalar(
+                    "SELECT branch_id FROM devices WHERE id = $1 AND branch_id IS NOT NULL",
+                )
                 .bind(owner_id)
                 .fetch_all(pool.get_ref())
-                .await?,
-            Owner::User => sqlx::query_scalar("SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL")
+                .await?
+            }
+            Owner::User => {
+                sqlx::query_scalar(
+                    "SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL",
+                )
                 .bind(org_id)
                 .fetch_all(pool.get_ref())
-                .await?,
+                .await?
+            }
         };
         for branch_id in branches {
             hub.publish(
@@ -337,7 +369,9 @@ pub async fn replace_list(
         return Err(AppError::Coded {
             status: 400,
             code: CODE_EMPTY_ALLOW_LIST,
-            reason: format!("{CODE_EMPTY_ALLOW_LIST}: a restricted list needs at least one payment method"),
+            reason: format!(
+                "{CODE_EMPTY_ALLOW_LIST}: a restricted list needs at least one payment method"
+            ),
         });
     }
     let exists: bool = sqlx::query_scalar(owner.owner_sql())
@@ -370,10 +404,14 @@ pub async fn replace_list(
         .bind(format!("pm-availability:{owner_id}"))
         .execute(&mut *tx)
         .await?;
-    sqlx::query(&format!("DELETE FROM {} WHERE {} = $1", owner.table(), owner.column()))
-        .bind(owner_id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(&format!(
+        "DELETE FROM {} WHERE {} = $1",
+        owner.table(),
+        owner.column()
+    ))
+    .bind(owner_id)
+    .execute(&mut *tx)
+    .await?;
     if body.restricted {
         sqlx::query(&format!(
             "INSERT INTO {} ({}, payment_method_id, org_id) SELECT $1, unnest($2::uuid[]), $3",
@@ -389,7 +427,10 @@ pub async fn replace_list(
     tx.commit().await?;
 
     let stored = ids_for(pool, owner, owner_id).await?;
-    Ok(AllowList { restricted: !stored.is_empty(), payment_method_ids: stored })
+    Ok(AllowList {
+        restricted: !stored.is_empty(),
+        payment_method_ids: stored,
+    })
 }
 
 #[utoipa::path(
@@ -468,7 +509,8 @@ pub async fn get_effective(
     check_permission(pool.get_ref(), &claims, "payment_methods", "read").await?;
     let org_id = org_of(&claims)?;
     ensure_branch_in_org(pool.get_ref(), org_id, q.branch_id).await?;
-    let rows = effective_methods(pool.get_ref(), org_id, q.branch_id, q.user_id, q.device_id).await?;
+    let rows =
+        effective_methods(pool.get_ref(), org_id, q.branch_id, q.user_id, q.device_id).await?;
     Ok(HttpResponse::Ok().json(rows))
 }
 

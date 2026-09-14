@@ -13,10 +13,10 @@ use crate::floor_ops::handlers::{
     CreateFloorTransferRequest, FulfillTransferRequest, SwapTablesRequest,
 };
 use crate::orders::handlers::{CreateOrderRequest, VoidOrderRequest};
-use crate::tills::handlers::{CashMovementRequest, CloseTillRequest, OpenTillRequest};
 use crate::tickets::handlers::{
     AddRoundRequest, CreateOpenTicketRequest, SettleOpenTicketRequest, VoidOpenTicketRequest,
 };
+use crate::tills::handlers::{CashMovementRequest, CloseTillRequest, OpenTillRequest};
 
 /// The release op's body. The branch is not on the wire (the table resolves it,
 /// like a clear); `bus` is the one thing the till knows and the server cannot
@@ -339,7 +339,11 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 /// `cash_movement`) or inside the request (`create_order`, `settle_open_ticket`,
 /// `refund_order`).
 pub fn replay_names_shift_id(body: &serde_json::Value) -> bool {
-    body.get("shift_id").is_some() || body.get("request").and_then(|r| r.get("shift_id")).is_some()
+    body.get("shift_id").is_some()
+        || body
+            .get("request")
+            .and_then(|r| r.get("shift_id"))
+            .is_some()
 }
 
 /// POST /sync/replay — flush ONE queued op, attributed to its embedded teller.
@@ -370,7 +374,10 @@ pub async fn replay(
     let claims = extract_claims(&req)?;
     // Old POS (v0.5.1 / v0.6.0) queue `open_shift` / `close_shift`; their acks
     // keep the legacy `Shift` / `CloseShiftResponse` shapes.
-    let legacy_op = matches!(body.get("op").and_then(|v| v.as_str()), Some("open_shift" | "close_shift"));
+    let legacy_op = matches!(
+        body.get("op").and_then(|v| v.as_str()),
+        Some("open_shift" | "close_shift")
+    );
     if legacy_op {
         crate::client_seen::legacy_hit(crate::client_seen::KIND_REPLAY_LEGACY_OP);
     }
@@ -466,7 +473,10 @@ async fn stamp_sync_seq(
                 .ok();
             if let Some(seq) = seq.filter(|s| *s > 0) {
                 if let Ok(v) = actix_web::http::header::HeaderValue::from_str(&seq.to_string()) {
-                    resp.headers_mut().insert(actix_web::http::header::HeaderName::from_static("x-madar-sync-seq"), v);
+                    resp.headers_mut().insert(
+                        actix_web::http::header::HeaderName::from_static("x-madar-sync-seq"),
+                        v,
+                    );
                 }
             }
         }
@@ -486,7 +496,12 @@ async fn replay_dispatch(
     let _ = req;
     match op {
         ReplayOp::OpenTill {
-            branch_id, device_id, device_code, verification, request, ..
+            branch_id,
+            device_id,
+            device_code,
+            verification,
+            request,
+            ..
         } => {
             let (till, created) = crate::tills::handlers::open_till_inner(
                 pool,
@@ -494,24 +509,43 @@ async fn replay_dispatch(
                 branch_id,
                 request,
                 actor,
-                crate::tills::handlers::OpenMeta { device_id: device_id.or(header_device), device_code, verification },
+                crate::tills::handlers::OpenMeta {
+                    device_id: device_id.or(header_device),
+                    device_code,
+                    verification,
+                },
             )
             .await?;
-            let mut out = if created { HttpResponse::Created() } else { HttpResponse::Ok() };
+            let mut out = if created {
+                HttpResponse::Created()
+            } else {
+                HttpResponse::Ok()
+            };
             if legacy_op {
-                let shift = crate::tills::legacy::legacy_shift(pool, till, crate::tills::legacy::LegacyJoins::Till).await?;
+                let shift = crate::tills::legacy::legacy_shift(
+                    pool,
+                    till,
+                    crate::tills::legacy::LegacyJoins::Till,
+                )
+                .await?;
                 return Ok(out.json(shift));
             }
             Ok(out.json(till))
         }
         ReplayOp::CloseTill {
-            till_id, device_id, mut request, ..
+            till_id,
+            device_id,
+            mut request,
+            ..
         } => {
             request.device_id = request.device_id.or(device_id).or(header_device);
             // An already-closed till is returned as stored; the old backend read
             // it back WITH the drawer join, a fresh close without it.
             let already_closed = legacy_op
-                && crate::tills::handlers::fetch_till_or_404(pool, till_id).await?.status != "open";
+                && crate::tills::handlers::fetch_till_or_404(pool, till_id)
+                    .await?
+                    .status
+                    != "open";
             let resp = crate::tills::handlers::close_till_inner(
                 pool,
                 Some(hub.get_ref()),
@@ -524,13 +558,25 @@ async fn replay_dispatch(
                 let shift = crate::tills::legacy::legacy_shift(
                     pool,
                     resp.till,
-                    if already_closed { crate::tills::legacy::LegacyJoins::Till } else { crate::tills::legacy::LegacyJoins::None },
-                ).await?;
-                return Ok(HttpResponse::Ok().json(crate::tills::legacy::CloseShiftResponse { shift }));
+                    if already_closed {
+                        crate::tills::legacy::LegacyJoins::Till
+                    } else {
+                        crate::tills::legacy::LegacyJoins::None
+                    },
+                )
+                .await?;
+                return Ok(
+                    HttpResponse::Ok().json(crate::tills::legacy::CloseShiftResponse { shift })
+                );
             }
             Ok(HttpResponse::Ok().json(resp))
         }
-        ReplayOp::CreateOrder { device_id, device_code, mut request, .. } => {
+        ReplayOp::CreateOrder {
+            device_id,
+            device_code,
+            mut request,
+            ..
+        } => {
             request.device_id = request.device_id.or(device_id).or(header_device);
             if request.device_code.is_none() {
                 request.device_code = device_code;
@@ -571,7 +617,10 @@ async fn replay_dispatch(
             .await
         }
         ReplayOp::CashMovement {
-            till_id, device_id, mut request, ..
+            till_id,
+            device_id,
+            mut request,
+            ..
         } => {
             request.device_id = request.device_id.or(device_id).or(header_device);
             crate::tills::handlers::add_cash_movement_inner(
@@ -663,24 +712,12 @@ async fn replay_dispatch(
         }
         // Bump/unbump: publish so other KDS/till devices reflect the bump live.
         ReplayOp::BumpKitchenItem { item_id, .. } => {
-            crate::kitchen::kds::set_bump_inner(
-                pool,
-                Some(hub.get_ref()),
-                &actor,
-                item_id,
-                true,
-            )
-            .await
+            crate::kitchen::kds::set_bump_inner(pool, Some(hub.get_ref()), &actor, item_id, true)
+                .await
         }
         ReplayOp::UnbumpKitchenItem { item_id, .. } => {
-            crate::kitchen::kds::set_bump_inner(
-                pool,
-                Some(hub.get_ref()),
-                &actor,
-                item_id,
-                false,
-            )
-            .await
+            crate::kitchen::kds::set_bump_inner(pool, Some(hub.get_ref()), &actor, item_id, false)
+                .await
         }
         // Cross-table floor ops: publish (hub = Some) so other tills' canvases
         // update live; the cores dedup before publishing, same as tickets.
@@ -785,26 +822,15 @@ async fn replay_dispatch(
             ..
         } => {
             let resp =
-                crate::bookings::handlers::seat_inner(pool, booking_id, &request, &actor)
-                    .await?;
-            crate::bookings::publish_booking(
-                pool,
-                hub.get_ref(),
-                "booking.changed",
-                booking_id,
-            )
-            .await;
+                crate::bookings::handlers::seat_inner(pool, booking_id, &request, &actor).await?;
+            crate::bookings::publish_booking(pool, hub.get_ref(), "booking.changed", booking_id)
+                .await;
             Ok(resp)
         }
         ReplayOp::NoShowBooking { booking_id, .. } => {
             let resp = crate::bookings::handlers::no_show_inner(pool, booking_id).await?;
-            crate::bookings::publish_booking(
-                pool,
-                hub.get_ref(),
-                "booking.changed",
-                booking_id,
-            )
-            .await;
+            crate::bookings::publish_booking(pool, hub.get_ref(), "booking.changed", booking_id)
+                .await;
             Ok(resp)
         }
     }
@@ -813,7 +839,11 @@ async fn replay_dispatch(
 /// Verify the op's effective branch belongs to `org` (resolving shift / order to
 /// their branch first). A missing target is left to the inner handler (it will
 /// 404/409 idempotently) — we only reject a target that exists in a DIFFERENT org.
-async fn op_branch_must_be_in_org(pool: &PgPool, op: &ReplayOp, org: Uuid) -> Result<Option<Uuid>, AppError> {
+async fn op_branch_must_be_in_org(
+    pool: &PgPool,
+    op: &ReplayOp,
+    org: Uuid,
+) -> Result<Option<Uuid>, AppError> {
     let branch_org: Option<(Uuid, Uuid)> = match op {
         ReplayOp::OpenTill { branch_id, .. } => {
             sqlx::query_as::<_, (Uuid, Uuid)>("SELECT id, org_id FROM branches WHERE id = $1")

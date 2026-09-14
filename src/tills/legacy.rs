@@ -145,13 +145,24 @@ pub async fn legacy_shift(
         till.branch_name = None;
     }
     if matches!(joins, LegacyJoins::None) {
-        return Ok(Shift { till, till_id: None, till_name: None });
+        return Ok(Shift {
+            till,
+            till_id: None,
+            till_name: None,
+        });
     }
     let till_id = legacy_till_entity_id(pool, till.branch_id).await;
-    Ok(Shift { till, till_id: Some(till_id), till_name: Some("Till 1".into()) })
+    Ok(Shift {
+        till,
+        till_id: Some(till_id),
+        till_name: Some("Till 1".into()),
+    })
 }
 
 /// `uuid v5(NAMESPACE_OID, "madar-legacy-till:"+branch_id)`.
 pub fn synthesized_till_id(branch_id: Uuid) -> Uuid {
-    Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("madar-legacy-till:{branch_id}").as_bytes())
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        format!("madar-legacy-till:{branch_id}").as_bytes(),
+    )
 }

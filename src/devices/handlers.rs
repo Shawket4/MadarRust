@@ -98,7 +98,9 @@ async fn fetch_device(pool: &sqlx::PgPool, id: Uuid) -> Result<Device, AppError>
 }
 
 fn clean_label(l: Option<&str>) -> Option<String> {
-    l.map(str::trim).filter(|s| !s.is_empty()).map(|s| s.chars().take(120).collect())
+    l.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(120).collect())
 }
 
 #[utoipa::path(post, path = "/devices/register", tag = "devices",
@@ -117,10 +119,14 @@ pub async fn register_device(
     require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
     let code = body.code.trim().to_ascii_uppercase();
     if !valid_code(&code) {
-        return Err(AppError::BadRequest("Device code must be 1-6 letters or digits".into()));
+        return Err(AppError::BadRequest(
+            "Device code must be 1-6 letters or digits".into(),
+        ));
     }
     if !matches!(body.kind.as_str(), "pos" | "kds" | "waiter") {
-        return Err(AppError::BadRequest("kind must be pos, kds or waiter".into()));
+        return Err(AppError::BadRequest(
+            "kind must be pos, kds or waiter".into(),
+        ));
     }
     sqlx::query(
         "INSERT INTO devices (id, org_id, branch_id, code, label, kind, platform, app_version) \
@@ -184,7 +190,9 @@ pub async fn update_device(
         Some(c) => {
             let c = c.trim().to_ascii_uppercase();
             if !valid_code(&c) {
-                return Err(AppError::BadRequest("Device code must be 1-6 letters or digits".into()));
+                return Err(AppError::BadRequest(
+                    "Device code must be 1-6 letters or digits".into(),
+                ));
             }
             c
         }

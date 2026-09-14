@@ -174,7 +174,13 @@ pub async fn system_totals_by_method(
     };
     out.insert(
         0,
-        MethodTotal { method, payment_method_id, is_cash: true, system_total: expected_cash, order_count: cash_orders },
+        MethodTotal {
+            method,
+            payment_method_id,
+            is_cash: true,
+            system_total: expected_cash,
+            order_count: cash_orders,
+        },
     );
     Ok(out)
 }
@@ -184,7 +190,9 @@ fn clamp_i32(v: i64) -> i32 {
 }
 
 fn blank_to_none(s: Option<&str>) -> Option<String> {
-    s.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+    s.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// Rollup: any disagreed → `disagreed`, else any unreviewed → `unreviewed`, else `clean`.
@@ -197,7 +205,11 @@ pub fn rollup_status<'a>(statuses: impl IntoIterator<Item = &'a str>) -> &'stati
             _ => {}
         }
     }
-    if unreviewed { STATUS_UNREVIEWED } else { STATUS_CLEAN }
+    if unreviewed {
+        STATUS_UNREVIEWED
+    } else {
+        STATUS_CLEAN
+    }
 }
 
 /// A line to insert, before it has a timestamp.
@@ -229,19 +241,29 @@ pub fn plan_lines(
     let mut lines = Vec::with_capacity(totals.len() + 1);
     let cash = totals.iter().find(|t| t.is_cash);
     lines.push(PlannedLine {
-        method: cash.map(|c| c.method.clone()).unwrap_or_else(|| CASH_FALLBACK_NAME.into()),
+        method: cash
+            .map(|c| c.method.clone())
+            .unwrap_or_else(|| CASH_FALLBACK_NAME.into()),
         payment_method_id: cash.and_then(|c| c.payment_method_id),
         is_cash: true,
         system_total: closing_cash_system,
         order_count: cash.map(|c| clamp_i32(c.order_count)).unwrap_or(0),
-        status: if closing_cash_declared == closing_cash_system { "checked" } else { "disagreed" },
+        status: if closing_cash_declared == closing_cash_system {
+            "checked"
+        } else {
+            "disagreed"
+        },
         declared_amount: Some(closing_cash_declared),
         note: blank_to_none(cash_note),
     });
     let cash_method = lines[0].method.clone();
 
     let find_input = |method: &str| inputs.iter().find(|i| i.method.trim() == method);
-    let plan_one = |method: &str, pmid: Option<Uuid>, total: i64, count: i64| -> Result<PlannedLine, AppError> {
+    let plan_one = |method: &str,
+                    pmid: Option<Uuid>,
+                    total: i64,
+                    count: i64|
+     -> Result<PlannedLine, AppError> {
         let system_total = clamp_i32(total);
         let base = PlannedLine {
             method: method.to_string(),
@@ -253,9 +275,15 @@ pub fn plan_lines(
             declared_amount: None,
             note: None,
         };
-        let Some(input) = find_input(method) else { return Ok(base) };
+        let Some(input) = find_input(method) else {
+            return Ok(base);
+        };
         match input.status.trim() {
-            "checked" => Ok(PlannedLine { status: "checked", note: blank_to_none(input.note.as_deref()), ..base }),
+            "checked" => Ok(PlannedLine {
+                status: "checked",
+                note: blank_to_none(input.note.as_deref()),
+                ..base
+            }),
             "disagreed" => {
                 let amount = match input.declared_amount {
                     Some(a) => a,
@@ -264,7 +292,9 @@ pub fn plan_lines(
                         return Err(AppError::Coded {
                             status: 400,
                             code: CODE_AMOUNT_REQUIRED,
-                            reason: format!("{CODE_AMOUNT_REQUIRED}: enter the amount you see for {method}"),
+                            reason: format!(
+                                "{CODE_AMOUNT_REQUIRED}: enter the amount you see for {method}"
+                            ),
                         });
                     }
                 };
@@ -275,11 +305,18 @@ pub fn plan_lines(
                         return Err(AppError::Coded {
                             status: 400,
                             code: CODE_NOTE_REQUIRED,
-                            reason: format!("{CODE_NOTE_REQUIRED}: add a note for the difference on {method}"),
+                            reason: format!(
+                                "{CODE_NOTE_REQUIRED}: add a note for the difference on {method}"
+                            ),
                         });
                     }
                 };
-                Ok(PlannedLine { status: "disagreed", declared_amount: Some(amount), note: Some(note), ..base })
+                Ok(PlannedLine {
+                    status: "disagreed",
+                    declared_amount: Some(amount),
+                    note: Some(note),
+                    ..base
+                })
             }
             _ if replay => Ok(base),
             other => Err(AppError::BadRequest(format!(
@@ -289,13 +326,22 @@ pub fn plan_lines(
     };
 
     for t in totals.iter().filter(|t| !t.is_cash) {
-        lines.push(plan_one(&t.method, t.payment_method_id, t.system_total, t.order_count)?);
+        lines.push(plan_one(
+            &t.method,
+            t.payment_method_id,
+            t.system_total,
+            t.order_count,
+        )?);
     }
     // Inputs naming a method not used on the till: stored with system total 0.
     let mut extra: Vec<&ReconciliationInput> = Vec::new();
     for i in inputs {
         let m = i.method.trim();
-        if m.is_empty() || m == cash_method || lines.iter().any(|l| l.method == m) || extra.iter().any(|e| e.method.trim() == m) {
+        if m.is_empty()
+            || m == cash_method
+            || lines.iter().any(|l| l.method == m)
+            || extra.iter().any(|e| e.method.trim() == m)
+        {
             continue;
         }
         extra.push(i);
@@ -306,7 +352,8 @@ pub fn plan_lines(
     Ok(lines)
 }
 
-const LINE_COLUMNS: &str = "method, payment_method_id, is_cash, system_total, current_system_total, order_count,
+const LINE_COLUMNS: &str =
+    "method, payment_method_id, is_cash, system_total, current_system_total, order_count,
     status, declared_amount, note, reconciled_by, reconciled_at,
     (current_system_total <> system_total) AS changed_after_close";
 
@@ -322,14 +369,18 @@ pub(crate) async fn stored_lines_by_till(
     .bind(till_ids)
     .fetch_all(&mut *conn)
     .await?;
-    let mut out: std::collections::HashMap<Uuid, Vec<TillReconciliationLine>> = std::collections::HashMap::new();
+    let mut out: std::collections::HashMap<Uuid, Vec<TillReconciliationLine>> =
+        std::collections::HashMap::new();
     for (till, line) in rows {
         out.entry(till).or_default().push(line.0);
     }
     Ok(out)
 }
 
-async fn stored_lines(conn: &mut sqlx::PgConnection, till_id: Uuid) -> Result<Vec<TillReconciliationLine>, AppError> {
+async fn stored_lines(
+    conn: &mut sqlx::PgConnection,
+    till_id: Uuid,
+) -> Result<Vec<TillReconciliationLine>, AppError> {
     Ok(sqlx::query_as::<_, TillReconciliationLine>(&format!(
         "SELECT {LINE_COLUMNS} FROM till_reconciliations WHERE till_id = $1 ORDER BY is_cash DESC, method"
     ))
@@ -366,7 +417,14 @@ pub async fn write_close_reconciliation(
         return Ok((existing, status));
     }
     let totals = system_totals_by_method(conn, till_id, closing_cash_system as i64).await?;
-    let planned = plan_lines(&totals, closing_cash_declared, closing_cash_system, cash_note, inputs, replay)?;
+    let planned = plan_lines(
+        &totals,
+        closing_cash_declared,
+        closing_cash_system,
+        cash_note,
+        inputs,
+        replay,
+    )?;
     insert_planned(conn, till_id, actor, &planned).await
 }
 
@@ -387,7 +445,14 @@ pub async fn write_force_close_reconciliation(
         return Ok((existing, status));
     }
     let totals = system_totals_by_method(conn, till_id, closing_cash_system as i64).await?;
-    let planned = force_close_lines(plan_lines(&totals, closing_cash_system, closing_cash_system, None, &[], true)?);
+    let planned = force_close_lines(plan_lines(
+        &totals,
+        closing_cash_system,
+        closing_cash_system,
+        None,
+        &[],
+        true,
+    )?);
     insert_planned(conn, till_id, actor, &planned).await
 }
 
@@ -395,7 +460,12 @@ pub async fn write_force_close_reconciliation(
 pub fn force_close_lines(planned: Vec<PlannedLine>) -> Vec<PlannedLine> {
     planned
         .into_iter()
-        .map(|l| PlannedLine { status: STATUS_UNREVIEWED, declared_amount: None, note: None, ..l })
+        .map(|l| PlannedLine {
+            status: STATUS_UNREVIEWED,
+            declared_amount: None,
+            note: None,
+            ..l
+        })
         .collect()
 }
 
@@ -455,9 +525,15 @@ pub async fn recompute_after_late_replay(
     for t in &totals {
         let current = clamp_i32(t.system_total);
         let target = if t.is_cash {
-            existing.iter().find(|l| l.is_cash).map(|l| l.method.clone())
+            existing
+                .iter()
+                .find(|l| l.is_cash)
+                .map(|l| l.method.clone())
         } else {
-            existing.iter().find(|l| !l.is_cash && l.method == t.method).map(|l| l.method.clone())
+            existing
+                .iter()
+                .find(|l| !l.is_cash && l.method == t.method)
+                .map(|l| l.method.clone())
         };
         match target {
             Some(method) => {
@@ -491,7 +567,11 @@ pub async fn recompute_after_late_replay(
         }
     }
     // Methods whose money all went away after close (e.g. a late void) read 0 now.
-    let used: Vec<String> = totals.iter().filter(|t| !t.is_cash).map(|t| t.method.clone()).collect();
+    let used: Vec<String> = totals
+        .iter()
+        .filter(|t| !t.is_cash)
+        .map(|t| t.method.clone())
+        .collect();
     sqlx::query(
         "UPDATE till_reconciliations SET current_system_total = 0
          WHERE till_id = $1 AND NOT is_cash AND method <> ALL($2)",

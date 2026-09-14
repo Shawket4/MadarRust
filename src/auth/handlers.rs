@@ -335,7 +335,11 @@ pub async fn login(
             open_shift_branch = %open_branch, attempted_branch = ?body.branch_id,
             "login blocked: user has an open shift at a different branch"
         );
-        crate::client_seen::legacy_hit_for_org(crate::client_seen::KIND_ERROR_WORDING, "login_blocked_open_shift", user.org_id);
+        crate::client_seen::legacy_hit_for_org(
+            crate::client_seen::KIND_ERROR_WORDING,
+            "login_blocked_open_shift",
+            user.org_id,
+        );
         return Err(AppError::Conflict(
             "You already have an open shift at another branch. Close it before signing in here."
                 .into(),
@@ -651,7 +655,11 @@ pub async fn permissions(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRe
     let legacy: Vec<UserPermissionItem> = permissions
         .iter()
         .filter(|p| p.resource == "tills")
-        .map(|p| UserPermissionItem { resource: "shifts".into(), action: p.action.clone(), granted: p.granted })
+        .map(|p| UserPermissionItem {
+            resource: "shifts".into(),
+            action: p.action.clone(),
+            granted: p.granted,
+        })
         .collect();
     permissions.extend(legacy);
     if crate::client_seen::is_legacy_pos_request(req.headers()) {

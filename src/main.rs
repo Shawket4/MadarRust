@@ -15,9 +15,9 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 use madar_rust::openapi::ApiDoc;
 use madar_rust::{
-    ai, analytics, auth, bookings, branches, bundles, costing, delivery, demo, devices, discounts, insights,
-    integrations, inventory, kitchen, loyalty, menu, orders, orgs, payment_methods, permissions,
-    purchasing, qr_card, realtime, recipes, refunds, reports, reservations, staff,
+    ai, analytics, auth, bookings, branches, bundles, costing, delivery, demo, devices, discounts,
+    insights, integrations, inventory, kitchen, loyalty, menu, orders, orgs, payment_methods,
+    permissions, purchasing, qr_card, realtime, recipes, refunds, reports, reservations, staff,
     stocktakes, sync, tickets, tills, uploads, users,
 };
 
@@ -238,7 +238,9 @@ async fn run() -> std::io::Result<()> {
             // Client version telemetry + legacy path hits (LEGACY_REMOVAL.md
             // Phase T). App-level so it sees every route; it reads the org the
             // scope's JwtMiddleware resolved after the handler ran.
-            .wrap(actix_web::middleware::from_fn(madar_rust::client_seen::record))
+            .wrap(actix_web::middleware::from_fn(
+                madar_rust::client_seen::record,
+            ))
             // Outermost middleware (actix runs the LAST `wrap` first), as
             // sentry-actix requires: every downstream handler then runs on this
             // request's Hub, so anything they capture carries the request

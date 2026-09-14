@@ -701,7 +701,7 @@ pub(crate) async fn sync_channel_prices_by_ids(
     branch_id: Uuid,
     ids: &[Uuid],
 ) -> Result<std::collections::HashMap<Uuid, serde_json::Value>, AppError> {
-    use serde_json::{json, Map, Value};
+    use serde_json::{Map, Value, json};
     let item_ids: Vec<Uuid> = sqlx::query_scalar(
         "SELECT id FROM menu_items WHERE org_id = $1 AND id = ANY($2) AND is_active = true AND deleted_at IS NULL",
     )
@@ -709,46 +709,68 @@ pub(crate) async fn sync_channel_prices_by_ids(
     .bind(ids)
     .fetch_all(&mut *conn)
     .await?;
-    let mut out: std::collections::HashMap<Uuid, Map<String, Value>> = std::collections::HashMap::new();
+    let mut out: std::collections::HashMap<Uuid, Map<String, Value>> =
+        std::collections::HashMap::new();
     if item_ids.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
     let base_sizes = load_sizes(&mut *conn, &item_ids, branch_id, None).await?;
     let (base_groups, _) = load_modifier_groups(&mut *conn, &item_ids, branch_id, None).await?;
     let channels: Vec<String> =
-        sqlx::query_scalar("SELECT unnest(enum_range(NULL::delivery_channel))::text").fetch_all(&mut *conn).await?;
+        sqlx::query_scalar("SELECT unnest(enum_range(NULL::delivery_channel))::text")
+            .fetch_all(&mut *conn)
+            .await?;
     for channel in &channels {
         let sizes = load_sizes(&mut *conn, &item_ids, branch_id, Some(channel)).await?;
-        let (groups, _) = load_modifier_groups(&mut *conn, &item_ids, branch_id, Some(channel)).await?;
+        let (groups, _) =
+            load_modifier_groups(&mut *conn, &item_ids, branch_id, Some(channel)).await?;
         for item in &item_ids {
             let mut size_diff = Map::new();
             let base: std::collections::HashMap<Uuid, (i32, bool)> = base_sizes
                 .get(item)
-                .map(|v| v.iter().map(|s| (s.id, (s.price, s.is_available))).collect())
+                .map(|v| {
+                    v.iter()
+                        .map(|s| (s.id, (s.price, s.is_available)))
+                        .collect()
+                })
                 .unwrap_or_default();
             for s in sizes.get(item).map(Vec::as_slice).unwrap_or_default() {
                 if base.get(&s.id) != Some(&(s.price, s.is_available)) {
-                    size_diff.insert(s.id.to_string(), json!({ "price": s.price, "is_available": s.is_available }));
+                    size_diff.insert(
+                        s.id.to_string(),
+                        json!({ "price": s.price, "is_available": s.is_available }),
+                    );
                 }
             }
             let base_opts: std::collections::HashMap<Uuid, (i32, bool)> = base_groups
                 .get(item)
-                .map(|g| g.iter().flat_map(|g| g.options.iter().map(|o| (o.id, (o.price, o.is_available)))).collect())
+                .map(|g| {
+                    g.iter()
+                        .flat_map(|g| g.options.iter().map(|o| (o.id, (o.price, o.is_available))))
+                        .collect()
+                })
                 .unwrap_or_default();
             let mut opt_diff = Map::new();
             for g in groups.get(item).map(Vec::as_slice).unwrap_or_default() {
                 for o in &g.options {
                     if base_opts.get(&o.id) != Some(&(o.price, o.is_available)) {
-                        opt_diff.insert(o.id.to_string(), json!({ "price": o.price, "is_available": o.is_available }));
+                        opt_diff.insert(
+                            o.id.to_string(),
+                            json!({ "price": o.price, "is_available": o.is_available }),
+                        );
                     }
                 }
             }
             if !size_diff.is_empty() || !opt_diff.is_empty() {
-                out.entry(*item)
-                    .or_default()
-                    .insert(channel.clone(), json!({ "sizes": size_diff, "options": opt_diff }));
+                out.entry(*item).or_default().insert(
+                    channel.clone(),
+                    json!({ "sizes": size_diff, "options": opt_diff }),
+                );
             }
         }
     }
-    Ok(out.into_iter().map(|(k, v)| (k, Value::Object(v))).collect())
+    Ok(out
+        .into_iter()
+        .map(|(k, v)| (k, Value::Object(v)))
+        .collect())
 }

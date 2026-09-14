@@ -11,13 +11,13 @@
 //!   (each with `seq`) plus the ledger window (last 48 h + every open till's
 //!   history), per-type checksums and the latest asset bundle.
 pub mod checksum;
+#[cfg(test)]
+mod gaps_tests;
 pub mod listener;
 pub mod projection;
 pub mod sweeper;
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod gaps_tests;
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -33,10 +33,29 @@ use crate::errors::{AppError, AppErrorResponse};
 
 /// Every wire type, in the order the POS lists them (`ALL_TYPES`).
 pub const ALL_TYPES: &[&str] = &[
-    "category", "menu_item", "bundle", "ingredient", "payment_method", "payment_availability",
-    "discount", "branch_settings", "device", "teller", "floor_section", "floor_table",
-    "table_occupancy", "table_transfer", "open_ticket", "kitchen_ticket", "delivery", "booking",
-    "till", "cash_movement", "order", "refund", "addon_item",
+    "category",
+    "menu_item",
+    "bundle",
+    "ingredient",
+    "payment_method",
+    "payment_availability",
+    "discount",
+    "branch_settings",
+    "device",
+    "teller",
+    "floor_section",
+    "floor_table",
+    "table_occupancy",
+    "table_transfer",
+    "open_ticket",
+    "kitchen_ticket",
+    "delivery",
+    "booking",
+    "till",
+    "cash_movement",
+    "order",
+    "refund",
+    "addon_item",
 ];
 /// Ledger types: never checksummed; windowed in full snapshots.
 pub const LEDGER_TYPES: &[&str] = &["till", "cash_movement", "order", "refund"];
@@ -158,7 +177,11 @@ pub struct PullResponse {
 }
 
 fn coded(code: &'static str, reason: &str) -> AppError {
-    AppError::Coded { status: 400, code, reason: reason.into() }
+    AppError::Coded {
+        status: 400,
+        code,
+        reason: reason.into(),
+    }
 }
 
 #[utoipa::path(post, path = "/sync/pull", tag = "sync",
@@ -174,48 +197,85 @@ pub async fn pull(
     let claims = crate::tills::handlers::extract_claims(&req)?;
     let body = body.into_inner();
     crate::tills::handlers::require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
-    let org_id: Uuid = sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
-        .bind(body.branch_id)
-        .fetch_optional(pool.get_ref())
-        .await?
-        .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    let org_id: Uuid =
+        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
+            .bind(body.branch_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
     if claims.role != crate::models::UserRole::SuperAdmin && claims.org_id() != Some(org_id) {
-        return Err(AppError::Forbidden("Branch belongs to another organization".into()));
+        return Err(AppError::Forbidden(
+            "Branch belongs to another organization".into(),
+        ));
     }
     let resp = pull_core(pool.get_ref(), org_id, &body, q.since).await?;
     Ok(HttpResponse::Ok().json(resp))
 }
 
 /// Everything behind the route (tests call it directly).
-pub async fn pull_core(pool: &PgPool, org_id: Uuid, body: &PullRequest, since: Option<i64>) -> Result<PullResponse, AppError> {
+pub async fn pull_core(
+    pool: &PgPool,
+    org_id: Uuid,
+    body: &PullRequest,
+    since: Option<i64>,
+) -> Result<PullResponse, AppError> {
     let types: Vec<String> = match &body.types {
         Some(t) => {
             if since.is_some() {
-                return Err(coded("TYPES_REQUIRE_FULL", "`types` is only valid for a full pull (no `since`)"));
+                return Err(coded(
+                    "TYPES_REQUIRE_FULL",
+                    "`types` is only valid for a full pull (no `since`)",
+                ));
             }
             for ty in t {
                 if !ALL_TYPES.contains(&ty.as_str()) {
-                    return Err(coded("UNKNOWN_SYNC_TYPE", &format!("Unknown sync type `{ty}`")));
+                    return Err(coded(
+                        "UNKNOWN_SYNC_TYPE",
+                        &format!("Unknown sync type `{ty}`"),
+                    ));
                 }
             }
-            ALL_TYPES.iter().filter(|a| t.iter().any(|x| x == *a)).map(|s| s.to_string()).collect()
+            ALL_TYPES
+                .iter()
+                .filter(|a| t.iter().any(|x| x == *a))
+                .map(|s| s.to_string())
+                .collect()
         }
         None => ALL_TYPES.iter().map(|s| s.to_string()).collect(),
     };
     let limit = body.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     if since.is_some() && (body.snapshot_cursor.is_some() || body.ledger_page_size.is_some()) {
-        return Err(coded("PAGING_REQUIRES_FULL", "`ledger_page_size` / `snapshot_cursor` are only valid for a full pull"));
+        return Err(coded(
+            "PAGING_REQUIRES_FULL",
+            "`ledger_page_size` / `snapshot_cursor` are only valid for a full pull",
+        ));
     }
     match since {
         Some(since) => incremental(pool, org_id, body.branch_id, since, limit).await,
         None => match body.ledger_page_size {
-            Some(size) => full_paged(pool, org_id, body.branch_id, &types, size.clamp(100, 10_000), body.snapshot_cursor.clone()).await,
+            Some(size) => {
+                full_paged(
+                    pool,
+                    org_id,
+                    body.branch_id,
+                    &types,
+                    size.clamp(100, 10_000),
+                    body.snapshot_cursor.clone(),
+                )
+                .await
+            }
             None => full(pool, org_id, body.branch_id, &types).await,
         },
     }
 }
 
-async fn incremental(pool: &PgPool, org_id: Uuid, branch: Uuid, since: i64, limit: i64) -> Result<PullResponse, AppError> {
+async fn incremental(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch: Uuid,
+    since: i64,
+    limit: i64,
+) -> Result<PullResponse, AppError> {
     let server_time = Utc::now().to_rfc3339();
     let (purged, head): (i64, i64) = sqlx::query_as(
         "SELECT COALESCE((SELECT purged_through_seq FROM sync_feed_watermarks WHERE branch_id = $1), 0), \
@@ -225,7 +285,12 @@ async fn incremental(pool: &PgPool, org_id: Uuid, branch: Uuid, since: i64, limi
     .fetch_one(pool)
     .await?;
     if since < purged || since > head {
-        return Ok(PullResponse { resync_required: true, since: Some(since), server_time, ..Default::default() });
+        return Ok(PullResponse {
+            resync_required: true,
+            since: Some(since),
+            server_time,
+            ..Default::default()
+        });
     }
     // Autocommit statement BEFORE reading (B1 amendment R-horizon).
     let horizon: i64 = sqlx::query_scalar("SELECT sync_safe_horizon($1, $2)")
@@ -249,13 +314,19 @@ async fn incremental(pool: &PgPool, org_id: Uuid, branch: Uuid, since: i64, limi
         .take(limit as usize)
         .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
         .collect();
-    let next = if has_more { rows.last().map(|r| r.0).unwrap_or(since) } else { horizon };
+    let next = if has_more {
+        rows.last().map(|r| r.0).unwrap_or(since)
+    } else {
+        horizon
+    };
 
     // Projections and checksums read one snapshot on ONE connection: a pull
     // never holds a second pooled connection (a pool of 5 would otherwise
     // deadlock under 6 concurrent pulls).
     let mut tx = pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *tx).await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await?;
     let mut wanted: BTreeMap<String, Vec<Uuid>> = BTreeMap::new();
     for (_, ty, id, op) in &rows {
         if op == "upsert" {
@@ -271,9 +342,19 @@ async fn incremental(pool: &PgPool, org_id: Uuid, branch: Uuid, since: i64, limi
     let changes = rows
         .into_iter()
         .map(|(seq, ty, id, op)| {
-            let data = if op == "upsert" { projected.remove(&(ty.clone(), id)) } else { None };
+            let data = if op == "upsert" {
+                projected.remove(&(ty.clone(), id))
+            } else {
+                None
+            };
             let op = if data.is_some() { "upsert" } else { "delete" }.to_string();
-            PullChange { seq, ty, id, op, data }
+            PullChange {
+                seq,
+                ty,
+                id,
+                op,
+                data,
+            }
         })
         .collect();
     let checksums = if has_more {
@@ -294,13 +375,23 @@ async fn incremental(pool: &PgPool, org_id: Uuid, branch: Uuid, since: i64, limi
     })
 }
 
-async fn full(pool: &PgPool, org_id: Uuid, branch: Uuid, types: &[String]) -> Result<PullResponse, AppError> {
+async fn full(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch: Uuid,
+    types: &[String],
+) -> Result<PullResponse, AppError> {
     let server_time = Utc::now().to_rfc3339();
-    let horizon: i64 = sqlx::query_scalar("SELECT sync_safe_horizon($1, 0)").bind(branch).fetch_one(pool).await?;
+    let horizon: i64 = sqlx::query_scalar("SELECT sync_safe_horizon($1, 0)")
+        .bind(branch)
+        .fetch_one(pool)
+        .await?;
     let window_from = Utc::now() - chrono::Duration::hours(LEDGER_WINDOW_HOURS);
 
     let mut tx = pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *tx).await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await?;
     let mut data = BTreeMap::new();
     for ty in types {
         let rows: Vec<(Uuid, i64)> = if is_ledger(ty) {
@@ -362,7 +453,9 @@ async fn full(pool: &PgPool, org_id: Uuid, branch: Uuid, types: &[String]) -> Re
         types: types.to_vec(),
         data,
         checksums,
-        ledger_window: Some(LedgerWindow { from: window_from.to_rfc3339() }),
+        ledger_window: Some(LedgerWindow {
+            from: window_from.to_rfc3339(),
+        }),
         asset_bundle: Some(asset_bundle),
         ..Default::default()
     })
@@ -384,10 +477,14 @@ async fn full_paged(
     let cursor = match cursor {
         Some(c) => c,
         None => {
-            let horizon: i64 = sqlx::query_scalar("SELECT sync_safe_horizon($1, 0)").bind(branch).fetch_one(pool).await?;
+            let horizon: i64 = sqlx::query_scalar("SELECT sync_safe_horizon($1, 0)")
+                .bind(branch)
+                .fetch_one(pool)
+                .await?;
             SnapshotCursor {
                 horizon,
-                window_from: (Utc::now() - chrono::Duration::hours(LEDGER_WINDOW_HOURS)).to_rfc3339(),
+                window_from: (Utc::now() - chrono::Duration::hours(LEDGER_WINDOW_HOURS))
+                    .to_rfc3339(),
                 started_at: server_time.clone(),
                 after_seq: 0,
             }
@@ -396,14 +493,21 @@ async fn full_paged(
     let parse = |t: &str, what: &str| {
         chrono::DateTime::parse_from_rfc3339(t)
             .map(|d| d.with_timezone(&Utc))
-            .map_err(|_| coded("BAD_SNAPSHOT_CURSOR", &format!("snapshot_cursor.{what} is not RFC 3339")))
+            .map_err(|_| {
+                coded(
+                    "BAD_SNAPSHOT_CURSOR",
+                    &format!("snapshot_cursor.{what} is not RFC 3339"),
+                )
+            })
     };
     let window_from = parse(&cursor.window_from, "window_from")?;
     let started_at = parse(&cursor.started_at, "started_at")?;
     let ledger: Vec<String> = types.iter().filter(|t| is_ledger(t)).cloned().collect();
 
     let mut tx = pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *tx).await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await?;
     let mut data: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     let mut page_types: Vec<String> = Vec::new();
     if first {
@@ -437,7 +541,11 @@ async fn full_paged(
     let rows: Vec<(String, Uuid, i64)> = rows.into_iter().take(size as usize).collect();
     let last_seq = rows.last().map(|r| r.2).unwrap_or(cursor.after_seq);
     for ty in &ledger {
-        let of_type: Vec<(Uuid, i64)> = rows.iter().filter(|r| &r.0 == ty).map(|r| (r.1, r.2)).collect();
+        let of_type: Vec<(Uuid, i64)> = rows
+            .iter()
+            .filter(|r| &r.0 == ty)
+            .map(|r| (r.1, r.2))
+            .collect();
         let ids: Vec<Uuid> = of_type.iter().map(|r| r.0).collect();
         let mut projected = projection::project(&mut tx, org_id, branch, ty, &ids).await?;
         data.insert(ty.clone(), with_seq(of_type, &mut projected));
@@ -445,7 +553,10 @@ async fn full_paged(
     }
     let (checksums, asset_bundle) = if first {
         let type_refs: Vec<&str> = types.iter().map(String::as_str).collect();
-        (state_checksums(&mut tx, branch, &type_refs, cursor.horizon).await?, Some(latest_asset_bundle(&mut tx, org_id, branch).await?))
+        (
+            state_checksums(&mut tx, branch, &type_refs, cursor.horizon).await?,
+            Some(latest_asset_bundle(&mut tx, org_id, branch).await?),
+        )
     } else {
         (BTreeMap::new(), None)
     };
@@ -458,9 +569,14 @@ async fn full_paged(
         types: page_types,
         data,
         checksums,
-        ledger_window: Some(LedgerWindow { from: cursor.window_from.clone() }),
+        ledger_window: Some(LedgerWindow {
+            from: cursor.window_from.clone(),
+        }),
         asset_bundle,
-        snapshot_cursor: has_more.then(|| SnapshotCursor { after_seq: last_seq, ..cursor }),
+        snapshot_cursor: has_more.then(|| SnapshotCursor {
+            after_seq: last_seq,
+            ..cursor
+        }),
         ..Default::default()
     })
 }
@@ -477,7 +593,11 @@ fn with_seq(rows: Vec<(Uuid, i64)>, projected: &mut HashMap<Uuid, Value>) -> Vec
         .collect()
 }
 
-async fn latest_asset_bundle(conn: &mut PgConnection, org_id: Uuid, branch: Uuid) -> Result<Option<AssetBundleRef>, AppError> {
+async fn latest_asset_bundle(
+    conn: &mut PgConnection,
+    org_id: Uuid,
+    branch: Uuid,
+) -> Result<Option<AssetBundleRef>, AppError> {
     Ok(sqlx::query("SELECT seq, bytes, sha256 FROM asset_bundles WHERE branch_id = $1 ORDER BY seq DESC LIMIT 1")
         .bind(branch)
         .fetch_optional(&mut *conn)
@@ -548,14 +668,25 @@ async fn state_checksums(
           WHERE c.branch_id = $1 AND c.op = 'upsert' AND c.seq <= $2 AND c.type = ANY($3) \
             AND CASE c.type{cases} ELSE false END"
     );
-    let rows: Vec<(String, Uuid, i64)> =
-        sqlx::query_as(&sql).bind(branch).bind(horizon).bind(&state).fetch_all(&mut *conn).await?;
-    let mut rows_of: BTreeMap<String, Vec<(String, i64)>> = state.iter().map(|t| (t.to_string(), Vec::new())).collect();
+    let rows: Vec<(String, Uuid, i64)> = sqlx::query_as(&sql)
+        .bind(branch)
+        .bind(horizon)
+        .bind(&state)
+        .fetch_all(&mut *conn)
+        .await?;
+    let mut rows_of: BTreeMap<String, Vec<(String, i64)>> =
+        state.iter().map(|t| (t.to_string(), Vec::new())).collect();
     for (ty, id, seq) in rows {
         rows_of.entry(ty).or_default().push((id.to_string(), seq));
     }
     for (ty, rows) in rows_of {
-        by_type.insert(ty, TypeChecksum { count: rows.len() as i64, checksum: checksum::checksum_of(&rows) });
+        by_type.insert(
+            ty,
+            TypeChecksum {
+                count: rows.len() as i64,
+                checksum: checksum::checksum_of(&rows),
+            },
+        );
     }
     Ok(by_type)
 }

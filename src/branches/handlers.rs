@@ -463,12 +463,16 @@ pub async fn update_branch(
     if let Some(h) = body.old_bill_hours
         && !(1..=168).contains(&h)
     {
-        return Err(AppError::BadRequest("old_bill_hours must be between 1 and 168".into()));
+        return Err(AppError::BadRequest(
+            "old_bill_hours must be between 1 and 168".into(),
+        ));
     }
     if let Some(Some(f)) = body.standard_float
         && f < 0
     {
-        return Err(AppError::BadRequest("standard_float must be zero or more (minor units)".into()));
+        return Err(AppError::BadRequest(
+            "standard_float must be zero or more (minor units)".into(),
+        ));
     }
 
     let branch = sqlx::query_as::<_, Branch>(
@@ -576,7 +580,9 @@ pub async fn update_branch(
     .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
 
     // Contract §2.x: tills listen for the old-bill threshold / float changing.
-    if branch.old_bill_hours != existing.old_bill_hours || branch.standard_float != existing.standard_float {
+    if branch.old_bill_hours != existing.old_bill_hours
+        || branch.standard_float != existing.standard_float
+    {
         crate::tills::handlers::publish(
             hub.as_ref().map(|h| h.get_ref()),
             branch.id,
@@ -673,7 +679,10 @@ async fn live_at_branch(pool: &PgPool, branch_id: Uuid) -> Result<Vec<String>, A
     };
     let mut out = Vec::new();
     if row.0 > 0 {
-        crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ERROR_WORDING, "branch_delete_open_shifts");
+        crate::client_seen::legacy_hit_at(
+            crate::client_seen::KIND_ERROR_WORDING,
+            "branch_delete_open_shifts",
+        );
         out.push(plural(row.0, "open shift", "open shifts"));
     }
     if row.1 > 0 {

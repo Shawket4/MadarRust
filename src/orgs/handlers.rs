@@ -7,6 +7,9 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
+    assets::ingest::{
+        AssetField, AssetPurpose, AssetTable, AssetTarget, IngestSource, MAX_RAW_BYTES, stage,
+    },
     auth::{
         guards::{require_same_org, require_super_admin},
         jwt::Claims,
@@ -14,7 +17,6 @@ use crate::{
     branches::handlers::validate_timezone,
     errors::{AppError, AppErrorResponse},
     permissions::checker::check_permission,
-    assets::ingest::{AssetField, AssetPurpose, AssetTable, AssetTarget, IngestSource, MAX_RAW_BYTES, stage},
 };
 
 // ── Models ────────────────────────────────────────────────────
@@ -765,7 +767,8 @@ pub async fn upload_org_logo(
     }
 
     let existing = fetch_org(pool.get_ref(), *org_id).await?;
-    let bytes = read_file_field(&mut mp, "logo").await?
+    let bytes = read_file_field(&mut mp, "logo")
+        .await?
         .ok_or_else(|| AppError::BadRequest("No logo file received in field 'logo'".into()))?;
     // The palette and `is_mark` are derived by the worker from the stored
     // lossless original, so they can never disagree with the stored pixels.
@@ -831,7 +834,8 @@ pub async fn upload_org_card_image(
     }
 
     let existing = fetch_org(pool.get_ref(), *org_id).await?;
-    let bytes = read_file_field(&mut mp, "image").await?
+    let bytes = read_file_field(&mut mp, "image")
+        .await?
         .ok_or_else(|| AppError::BadRequest("No file received in field 'image'".into()))?;
     let job = stage(
         pool.get_ref(),
@@ -839,7 +843,11 @@ pub async fn upload_org_card_image(
         AssetPurpose::LoyaltyCardImage,
         IngestSource::Bytes(bytes.into()),
         None,
-        AssetTarget::new(AssetTable::Organizations, *org_id, AssetField::BrandCardImage),
+        AssetTarget::new(
+            AssetTable::Organizations,
+            *org_id,
+            AssetField::BrandCardImage,
+        ),
         claims.user_id_safe().ok(),
     )
     .await?;

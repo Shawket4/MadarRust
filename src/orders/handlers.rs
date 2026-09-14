@@ -1477,11 +1477,18 @@ pub async fn create_order(
     } else {
         Vec::new()
     };
-    let mut used: Vec<&str> = if restricted { vec![body.payment_method.as_str()] } else { Vec::new() };
+    let mut used: Vec<&str> = if restricted {
+        vec![body.payment_method.as_str()]
+    } else {
+        Vec::new()
+    };
     if let (true, Some(splits)) = (restricted, &body.payment_splits) {
         used.extend(splits.iter().map(|p| p.method.as_str()));
     }
-    if let Some(bad) = used.into_iter().find(|m| !allowed.iter().any(|a| a.eq_ignore_ascii_case(m))) {
+    if let Some(bad) = used
+        .into_iter()
+        .find(|m| !allowed.iter().any(|a| a.eq_ignore_ascii_case(m)))
+    {
         return Err(AppError::Coded {
             status: 422,
             code: "PAYMENT_METHOD_UNAVAILABLE",
@@ -2054,9 +2061,15 @@ pub(crate) async fn create_order_inner(
     // devices FK. A device id another org owns is not visible here; the sale
     // is then server-numbered rather than refused.
     if let (Some(_), Some(device)) = (device_numbered, body.device_id)
-        && crate::devices::ensure_registered(&mut tx, actor.org_id, device, Some(shift_branch_id), body.device_code.as_deref())
-            .await?
-            .is_none()
+        && crate::devices::ensure_registered(
+            &mut tx,
+            actor.org_id,
+            device,
+            Some(shift_branch_id),
+            body.device_code.as_deref(),
+        )
+        .await?
+        .is_none()
     {
         device_numbered = None;
     }
@@ -2379,14 +2392,17 @@ pub(crate) async fn create_order_inner(
     if actor.replay && shift_status != "open" {
         let system_cash =
             crate::tills::handlers::compute_system_cash(&mut *tx, body.till_id).await?;
-        sqlx::query(
-            "UPDATE tills SET closing_cash_system = $1 WHERE id = $2 AND status <> 'open'",
+        sqlx::query("UPDATE tills SET closing_cash_system = $1 WHERE id = $2 AND status <> 'open'")
+            .bind(system_cash as i32)
+            .bind(body.till_id)
+            .execute(&mut *tx)
+            .await?;
+        crate::tills::reconcile::recompute_after_late_replay(
+            &mut tx,
+            body.till_id,
+            system_cash as i32,
         )
-        .bind(system_cash as i32)
-        .bind(body.till_id)
-        .execute(&mut *tx)
         .await?;
-        crate::tills::reconcile::recompute_after_late_replay(&mut tx, body.till_id, system_cash as i32).await?;
     }
 
     let mut order_items_full: Vec<OrderItemFull> = Vec::new();
@@ -3898,11 +3914,7 @@ async fn require_branch_access(
     Ok(())
 }
 
-async fn validate_payment_method<'e, E>(
-    pool: E,
-    org_id: Uuid,
-    method: &str,
-) -> Result<(), AppError>
+async fn validate_payment_method<'e, E>(pool: E, org_id: Uuid, method: &str) -> Result<(), AppError>
 where
     E: sqlx::PgExecutor<'e>,
 {

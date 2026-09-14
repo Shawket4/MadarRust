@@ -752,7 +752,11 @@ async fn the_refund_trigger_splits_tax_exactly_like_the_engine(pool: PgPool) {
             let amount = 1 + (i * 131) % total;
             (total, tax, sc, before, amount)
         })
-        .chain([(12540, 1540, 1000, 2508, 1001), (2, 1, 1, 0, 1), (10, 5, 0, 1, 1)])
+        .chain([
+            (12540, 1540, 1000, 2508, 1001),
+            (2, 1, 1, 0, 1),
+            (10, 5, 0, 1, 1),
+        ])
         .collect();
     for (total, tax, sc, before, amount) in cases {
         let (t, s): (i32, i32) = sqlx::query_as(

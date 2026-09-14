@@ -172,7 +172,11 @@ impl CashMovementKind {
     }
 
     pub fn from_sign(amount: i32) -> Self {
-        if amount < 0 { Self::PayOut } else { Self::PayIn }
+        if amount < 0 {
+            Self::PayOut
+        } else {
+            Self::PayIn
+        }
     }
 
     fn allows_sign(self, amount: i32) -> bool {
@@ -475,10 +479,12 @@ pub(crate) async fn fetch_till<'e, E: sqlx::PgExecutor<'e>>(
     exec: E,
     till_id: Uuid,
 ) -> Result<Option<Till>, sqlx::Error> {
-    sqlx::query_as::<_, Till>(&format!("SELECT {TILL_COLUMNS} {TILL_FROM} WHERE s.id = $1"))
-        .bind(till_id)
-        .fetch_optional(exec)
-        .await
+    sqlx::query_as::<_, Till>(&format!(
+        "SELECT {TILL_COLUMNS} {TILL_FROM} WHERE s.id = $1"
+    ))
+    .bind(till_id)
+    .fetch_optional(exec)
+    .await
 }
 
 pub(crate) async fn fetch_till_or_404(pool: &PgPool, till_id: Uuid) -> Result<Till, AppError> {
@@ -488,7 +494,10 @@ pub(crate) async fn fetch_till_or_404(pool: &PgPool, till_id: Uuid) -> Result<Ti
 }
 
 /// Any open till at this branch (the "branch is operating" gate a waiter fire checks).
-pub(crate) async fn branch_has_open_till<'e, E>(executor: E, branch_id: Uuid) -> Result<bool, sqlx::Error>
+pub(crate) async fn branch_has_open_till<'e, E>(
+    executor: E,
+    branch_id: Uuid,
+) -> Result<bool, sqlx::Error>
 where
     E: sqlx::PgExecutor<'e>,
 {
@@ -522,7 +531,10 @@ async fn last_close_declared<'e, E: sqlx::PgExecutor<'e>>(
 
 /// Expected cash in a till's drawer: float + cash tenders + cash tips (not
 /// voided) + movements − cash refunds issued from this till.
-pub(crate) async fn compute_system_cash<'e, E>(executor: E, till_id: Uuid) -> Result<i64, sqlx::Error>
+pub(crate) async fn compute_system_cash<'e, E>(
+    executor: E,
+    till_id: Uuid,
+) -> Result<i64, sqlx::Error>
 where
     E: sqlx::PgExecutor<'e>,
 {
@@ -542,7 +554,10 @@ where
         "#,
         TENDERED = crate::orders::TENDERED
     );
-    sqlx::query_scalar::<_, i64>(&sql).bind(till_id).fetch_one(executor).await
+    sqlx::query_scalar::<_, i64>(&sql)
+        .bind(till_id)
+        .fetch_one(executor)
+        .await
 }
 
 /// Branch bill counts (open bills notice / last-till warning / close snapshot).
@@ -580,7 +595,12 @@ fn last_till_warning(notice: &OpenBillsNotice, other_open: bool) -> Option<LastT
     })
 }
 
-pub(crate) fn publish(hub: Option<&BranchEventHub>, branch_id: Uuid, event: &str, payload: serde_json::Value) {
+pub(crate) fn publish(
+    hub: Option<&BranchEventHub>,
+    branch_id: Uuid,
+    event: &str,
+    payload: serde_json::Value,
+) {
     if let Some(hub) = hub {
         hub.publish(branch_id, BranchEvent::new(Topic::Tills, event, &payload));
     }
@@ -598,10 +618,11 @@ pub(crate) async fn guard_till_device<'e, E: sqlx::PgExecutor<'e>>(
     device: Option<Uuid>,
 ) -> Result<(), AppError> {
     let Some(dev) = device else { return Ok(()) };
-    let bound: Option<Option<Uuid>> = sqlx::query_scalar("SELECT device_id FROM tills WHERE id = $1")
-        .bind(till_id)
-        .fetch_optional(exec)
-        .await?;
+    let bound: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT device_id FROM tills WHERE id = $1")
+            .bind(till_id)
+            .fetch_optional(exec)
+            .await?;
     match bound.flatten() {
         Some(b) if b != dev => Err(AppError::Refused {
             code: "TILL_BOUND_TO_OTHER_DEVICE",
@@ -646,20 +667,29 @@ pub(crate) async fn current_till(
     .bind(person)
     .fetch_all(pool)
     .await?;
-    let here = open.iter().find(|t| device.is_some() && t.device_id == device && t.branch_id == branch_id);
-    let open_till = here.or_else(|| open.iter().find(|t| t.branch_id == branch_id)).cloned();
+    let here = open
+        .iter()
+        .find(|t| device.is_some() && t.device_id == device && t.branch_id == branch_id);
+    let open_till = here
+        .or_else(|| open.iter().find(|t| t.branch_id == branch_id))
+        .cloned();
     let open_elsewhere = open
         .iter()
         .filter(|t| device.is_none() || t.device_id != device)
         .map(TillBrief::from)
         .collect();
-    let open_at_branch = open.iter().filter(|t| t.branch_id == branch_id).map(TillBrief::from).collect();
+    let open_at_branch = open
+        .iter()
+        .filter(|t| t.branch_id == branch_id)
+        .map(TillBrief::from)
+        .collect();
     let last = last_close_declared(pool, person, branch_id).await?;
-    let float: Option<i32> = sqlx::query_scalar("SELECT standard_float FROM branches WHERE id = $1")
-        .bind(branch_id)
-        .fetch_optional(pool)
-        .await?
-        .flatten();
+    let float: Option<i32> =
+        sqlx::query_scalar("SELECT standard_float FROM branches WHERE id = $1")
+            .bind(branch_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
     Ok(TillPreFill {
         has_open_till: open_till.is_some(),
         open_till,
@@ -695,10 +725,19 @@ pub async fn open_till(
         branch_id.into_inner(),
         body.into_inner(),
         ActingContext::live(&claims)?,
-        OpenMeta { device_id: device.0, device_code: None, verification: None },
+        OpenMeta {
+            device_id: device.0,
+            device_code: None,
+            verification: None,
+        },
     )
     .await?;
-    Ok(if created { HttpResponse::Created() } else { HttpResponse::Ok() }.json(till))
+    Ok(if created {
+        HttpResponse::Created()
+    } else {
+        HttpResponse::Ok()
+    }
+    .json(till))
 }
 
 /// Who/where an open came from (replay envelope fields; live: the header).
@@ -722,13 +761,17 @@ pub(crate) async fn open_till_inner(
     meta: OpenMeta,
 ) -> Result<(Till, bool), AppError> {
     if !actor.replay && matches!(actor.role, UserRole::Waiter | UserRole::Kitchen) {
-        return Err(AppError::Forbidden("Waiters and kitchen screens do not open tills".into()));
+        return Err(AppError::Forbidden(
+            "Waiters and kitchen screens do not open tills".into(),
+        ));
     }
     if let Some(id) = body.id
         && let Some(existing) = fetch_till(pool, id).await?
     {
         if existing.branch_id != branch_id {
-            return Err(AppError::Conflict("That till id belongs to another branch".into()));
+            return Err(AppError::Conflict(
+                "That till id belongs to another branch".into(),
+            ));
         }
         return Ok((existing, false));
     }
@@ -752,7 +795,12 @@ pub(crate) async fn open_till_inner(
     .await?;
 
     let verification = if actor.replay {
-        match (meta.verification.as_deref().or(body.verification.as_deref()), device_id) {
+        match (
+            meta.verification
+                .as_deref()
+                .or(body.verification.as_deref()),
+            device_id,
+        ) {
             (Some(v @ ("server" | "lan" | "unverified")), _) => v.to_string(),
             (_, Some(_)) => "unverified".into(),
             (_, None) => "legacy".into(),
@@ -765,13 +813,17 @@ pub(crate) async fn open_till_inner(
                 till: serde_json::to_value(TillBrief::from(other)).unwrap_or_default(),
             });
         }
-        if let Some(here) = others.iter().find(|t| device_id.is_some() && t.device_id == device_id) {
+        if let Some(here) = others
+            .iter()
+            .find(|t| device_id.is_some() && t.device_id == device_id)
+        {
             return Ok((here.clone(), false));
         }
         if let Some(other) = others.first() {
             return Err(AppError::RefusedWith {
                 code: "TILL_OPEN_ELSEWHERE",
-                reason: "You already have an open till on another device. Close it there first.".into(),
+                reason: "You already have an open till on another device. Close it there first."
+                    .into(),
                 till: serde_json::to_value(TillBrief::from(other)).unwrap_or_default(),
             });
         }
@@ -780,8 +832,14 @@ pub(crate) async fn open_till_inner(
 
     let snapshot = match device_id {
         Some(d) => {
-            crate::devices::ensure_registered(&mut tx, actor.org_id, d, Some(branch_id), meta.device_code.as_deref())
-                .await?
+            crate::devices::ensure_registered(
+                &mut tx,
+                actor.org_id,
+                d,
+                Some(branch_id),
+                meta.device_code.as_deref(),
+            )
+            .await?
         }
         None => None,
     };
@@ -791,10 +849,15 @@ pub(crate) async fn open_till_inner(
     let was_edited = expected_opening.is_some_and(|exp| exp != body.opening_cash);
     if !actor.replay && was_edited && body.edit_reason.as_deref().unwrap_or("").trim().is_empty() {
         return Err(AppError::BadRequest(
-            "Opening cash differs from your last declared closing cash; edit_reason is required.".into(),
+            "Opening cash differs from your last declared closing cash; edit_reason is required."
+                .into(),
         ));
     }
-    let edit_reason = if was_edited { body.edit_reason.as_deref() } else { None };
+    let edit_reason = if was_edited {
+        body.edit_reason.as_deref()
+    } else {
+        None
+    };
     let other = if actor.replay { others.first() } else { None };
 
     let inserted = sqlx::query(
@@ -825,11 +888,21 @@ pub(crate) async fn open_till_inner(
 
     let till = fetch_till_or_404(pool, till_id).await?;
     if inserted.rows_affected() == 1 {
-        publish(hub, branch_id, "till.opened", serde_json::json!({ "till": TillBrief::from(&till) }));
+        publish(
+            hub,
+            branch_id,
+            "till.opened",
+            serde_json::json!({ "till": TillBrief::from(&till) }),
+        );
         if let Some(o) = other {
-            publish(hub, branch_id, "till.flagged", serde_json::json!({
-                "till_id": till.id, "other_till_id": o.id, "branch_id": branch_id, "teller_id": till.teller_id,
-            }));
+            publish(
+                hub,
+                branch_id,
+                "till.flagged",
+                serde_json::json!({
+                    "till_id": till.id, "other_till_id": o.id, "branch_id": branch_id, "teller_id": till.teller_id,
+                }),
+            );
         }
     }
     Ok((till, inserted.rows_affected() == 1))
@@ -849,7 +922,8 @@ pub async fn list_tills(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "tills", "read").await?;
-    Ok(HttpResponse::Ok().json(list_tills_core(&req, pool.get_ref(), &claims, *branch_id, &query).await?))
+    Ok(HttpResponse::Ok()
+        .json(list_tills_core(&req, pool.get_ref(), &claims, *branch_id, &query).await?))
 }
 
 pub(crate) async fn list_tills_core(
@@ -863,7 +937,10 @@ pub(crate) async fn list_tills_core(
         let org = claims
             .scope_org(crate::auth::middleware::header_org_id(req))
             .ok_or_else(|| AppError::Forbidden("No organization in scope".into()))?;
-        ("s.branch_id IN (SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL)", org)
+        (
+            "s.branch_id IN (SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL)",
+            org,
+        )
     } else {
         require_branch_access(pool, claims, branch_id).await?;
         ("s.branch_id = $1", branch_id)
@@ -871,7 +948,9 @@ pub(crate) async fn list_tills_core(
     if let Some(st) = &query.status
         && !matches!(st.as_str(), "open" | "closed" | "force_closed")
     {
-        return Err(AppError::BadRequest("status must be open, closed or force_closed".into()));
+        return Err(AppError::BadRequest(
+            "status must be open, closed or force_closed".into(),
+        ));
     }
     let filter = format!(
         "{scope} AND ($2::text IS NULL OR s.status::text = $2) AND ($3::uuid IS NULL OR s.teller_id = $3) \
@@ -893,7 +972,10 @@ pub(crate) async fn list_tills_core(
     let (page, per_page) = if paginate {
         (
             query.page.unwrap_or(1).max(1),
-            query.per_page.unwrap_or(DEFAULT_TILLS_PER_PAGE).clamp(1, MAX_TILLS_PER_PAGE),
+            query
+                .per_page
+                .unwrap_or(DEFAULT_TILLS_PER_PAGE)
+                .clamp(1, MAX_TILLS_PER_PAGE),
         )
     } else {
         (1, total.max(1))
@@ -912,7 +994,13 @@ pub(crate) async fn list_tills_core(
     .bind((page - 1) * per_page)
     .fetch_all(pool)
     .await?;
-    Ok(PaginatedTills { data, total, page, per_page, total_pages: (total + per_page - 1) / per_page })
+    Ok(PaginatedTills {
+        data,
+        total,
+        page,
+        per_page,
+        total_pages: (total + per_page - 1) / per_page,
+    })
 }
 
 #[utoipa::path(get, path = "/tills/branches/{branch_id}/open", tag = "tills",
@@ -957,7 +1045,11 @@ pub async fn get_open_bills_notice(
     params(("till_id" = Uuid, Path, description = "Till ID")),
     responses((status = 200, description = "Till", body = Till), AppErrorResponse),
     security(("bearer_jwt" = [])))]
-pub async fn get_till(req: HttpRequest, pool: crate::db::Db, till_id: web::Path<Uuid>) -> Result<HttpResponse, AppError> {
+pub async fn get_till(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    till_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "tills", "read").await?;
     let till = fetch_till_or_404(pool.get_ref(), *till_id).await?;
@@ -969,7 +1061,11 @@ pub async fn get_till(req: HttpRequest, pool: crate::db::Db, till_id: web::Path<
     params(("till_id" = Uuid, Path, description = "Till ID")),
     responses((status = 200, description = "Till (Z) report", body = TillReportResponse), AppErrorResponse),
     security(("bearer_jwt" = [])))]
-pub async fn get_till_report(req: HttpRequest, pool: crate::db::Db, till_id: web::Path<Uuid>) -> Result<HttpResponse, AppError> {
+pub async fn get_till_report(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    till_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "tills", "read").await?;
     let till = fetch_till_or_404(pool.get_ref(), *till_id).await?;
@@ -993,7 +1089,11 @@ pub async fn get_till_report(req: HttpRequest, pool: crate::db::Db, till_id: web
     Ok(HttpResponse::Ok().json(TillReportResponse {
         old_bills_at_close: till.old_bills_at_close,
         open_bills_at_close: till.open_bills_at_close,
-        order_number_range: OrderNumberRange { device_code: device_code.or(till.device_code.clone()), first, last },
+        order_number_range: OrderNumberRange {
+            device_code: device_code.or(till.device_code.clone()),
+            first,
+            last,
+        },
         figures,
         reconciliation,
         till,
@@ -1001,7 +1101,10 @@ pub async fn get_till_report(req: HttpRequest, pool: crate::db::Db, till_id: web
     }))
 }
 
-pub(crate) async fn report_figures(pool: &PgPool, till: &Till) -> Result<TillReportFigures, AppError> {
+pub(crate) async fn report_figures(
+    pool: &PgPool,
+    till: &Till,
+) -> Result<TillReportFigures, AppError> {
     let till_id = till.id;
     let payment_summary = sqlx::query_as::<_, PaymentSummaryRow>(
         r#"SELECT op.method::text AS payment_method,
@@ -1060,7 +1163,11 @@ pub(crate) async fn report_figures(pool: &PgPool, till: &Till) -> Result<TillRep
     .fetch_all(pool)
     .await?;
     let bucket_total = |bucket: &str| -> i64 {
-        cash_movements.iter().filter(|m| m.bucket() == bucket).map(|m| m.amount as i64).sum()
+        cash_movements
+            .iter()
+            .filter(|m| m.bucket() == bucket)
+            .map(|m| m.amount as i64)
+            .sum()
     };
     let cash_movements_in = bucket_total("pay_in");
     let cash_movements_out = -bucket_total("pay_out");
@@ -1153,10 +1260,21 @@ pub async fn add_cash_movement(
     if till_bound_elsewhere(&till, device.0) {
         guard_till_device(pool.get_ref(), till.id, device.0).await?;
     }
-    add_cash_movement_inner(pool.get_ref(), hub.as_ref().map(|h| h.get_ref()), till_id.into_inner(), body, ActingContext::live(&claims)?).await
+    add_cash_movement_inner(
+        pool.get_ref(),
+        hub.as_ref().map(|h| h.get_ref()),
+        till_id.into_inner(),
+        body,
+        ActingContext::live(&claims)?,
+    )
+    .await
 }
 
-async fn fetch_cash_movement_by_client_ref(pool: &PgPool, client_ref: Uuid, org_id: Uuid) -> Result<Option<CashMovement>, AppError> {
+async fn fetch_cash_movement_by_client_ref(
+    pool: &PgPool,
+    client_ref: Uuid,
+    org_id: Uuid,
+) -> Result<Option<CashMovement>, AppError> {
     Ok(sqlx::query_as::<_, CashMovement>(&format!(
         "SELECT {CASH_MOVEMENT_COLUMNS} FROM till_cash_movements m WHERE m.client_ref = $1 \
            AND m.till_id IN (SELECT s.id FROM tills s JOIN branches b ON b.id = s.branch_id WHERE b.org_id = $2)"
@@ -1176,18 +1294,24 @@ pub(crate) async fn add_cash_movement_inner(
 ) -> Result<HttpResponse, AppError> {
     let till = fetch_till_or_404(pool, till_id).await?;
     if !actor.replay && actor.role == UserRole::Teller && till.teller_id != actor.teller_id {
-        return Err(AppError::Forbidden("You can only add cash movements to your own till".into()));
+        return Err(AppError::Forbidden(
+            "You can only add cash movements to your own till".into(),
+        ));
     }
     if body.amount == 0 {
         return Err(AppError::BadRequest("Amount cannot be zero".into()));
     }
     if body.note.trim().is_empty() {
-        return Err(AppError::BadRequest("Note is required for cash movements".into()));
+        return Err(AppError::BadRequest(
+            "Note is required for cash movements".into(),
+        ));
     }
     if let Some(ts) = body.created_at {
         crate::clock::reject_if_future(ts, "created_at")?;
     }
-    let kind = body.kind.unwrap_or_else(|| CashMovementKind::from_sign(body.amount));
+    let kind = body
+        .kind
+        .unwrap_or_else(|| CashMovementKind::from_sign(body.amount));
     if !kind.allows_sign(body.amount) {
         return Err(AppError::BadRequest(match kind {
             CashMovementKind::PayIn => "A pay-in must be a positive amount".into(),
@@ -1197,7 +1321,9 @@ pub(crate) async fn add_cash_movement_inner(
         }));
     }
     if body.corrects_id.is_some() && kind != CashMovementKind::Correction {
-        return Err(AppError::BadRequest("Only a correction can name the movement it corrects".into()));
+        return Err(AppError::BadRequest(
+            "Only a correction can name the movement it corrects".into(),
+        ));
     }
     if let Some(cref) = body.client_ref
         && let Some(existing) = fetch_cash_movement_by_client_ref(pool, cref, actor.org_id).await?
@@ -1210,10 +1336,11 @@ pub(crate) async fn add_cash_movement_inner(
         .bind(till_id.to_string())
         .execute(&mut *tx)
         .await?;
-    let still_open: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tills WHERE id = $1 AND status = 'open')")
-        .bind(till_id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let still_open: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tills WHERE id = $1 AND status = 'open')")
+            .bind(till_id)
+            .fetch_one(&mut *tx)
+            .await?;
     if !still_open {
         return Err(AppError::Coded {
             status: 400,
@@ -1230,11 +1357,21 @@ pub(crate) async fn add_cash_movement_inner(
         .fetch_optional(&mut *tx)
         .await?;
         match corrected {
-            None => return Err(AppError::NotFound("The movement to correct was not found".into())),
-            Some((other, _, _)) if other != till_id => {
-                return Err(AppError::BadRequest("A correction must undo a movement on the same till".into()));
+            None => {
+                return Err(AppError::NotFound(
+                    "The movement to correct was not found".into(),
+                ));
             }
-            Some((_, _, true)) => return Err(AppError::Conflict("That movement has already been corrected".into())),
+            Some((other, _, _)) if other != till_id => {
+                return Err(AppError::BadRequest(
+                    "A correction must undo a movement on the same till".into(),
+                ));
+            }
+            Some((_, _, true)) => {
+                return Err(AppError::Conflict(
+                    "That movement has already been corrected".into(),
+                ));
+            }
             Some((_, original, _)) if original.checked_neg() != Some(body.amount) => {
                 return Err(AppError::BadRequest(format!(
                     "A correction must reverse the movement exactly: expected {}",
@@ -1245,9 +1382,11 @@ pub(crate) async fn add_cash_movement_inner(
         }
     }
     let device_id = match body.device_id {
-        Some(d) => crate::devices::ensure_registered(&mut tx, actor.org_id, d, Some(till.branch_id), None)
-            .await?
-            .map(|_| d),
+        Some(d) => {
+            crate::devices::ensure_registered(&mut tx, actor.org_id, d, Some(till.branch_id), None)
+                .await?
+                .map(|_| d)
+        }
         None => None,
     };
     let inserted = sqlx::query_scalar::<_, Uuid>(
@@ -1268,11 +1407,13 @@ pub(crate) async fn add_cash_movement_inner(
     let id = match inserted {
         Ok(id) => id,
         Err(sqlx::Error::Database(db))
-            if db.code().as_deref() == Some("23505") && db.constraint().is_some_and(|c| c.contains("client_ref")) =>
+            if db.code().as_deref() == Some("23505")
+                && db.constraint().is_some_and(|c| c.contains("client_ref")) =>
         {
             drop(tx);
             if let Some(cref) = body.client_ref
-                && let Some(existing) = fetch_cash_movement_by_client_ref(pool, cref, actor.org_id).await?
+                && let Some(existing) =
+                    fetch_cash_movement_by_client_ref(pool, cref, actor.org_id).await?
             {
                 return Ok(HttpResponse::Ok().json(existing));
             }
@@ -1287,10 +1428,15 @@ pub(crate) async fn add_cash_movement_inner(
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
-    publish(hub, till.branch_id, "till.cash_movement", serde_json::json!({
-        "till_id": till_id, "branch_id": till.branch_id, "movement_id": movement.id,
-        "amount": movement.amount, "kind": movement.kind,
-    }));
+    publish(
+        hub,
+        till.branch_id,
+        "till.cash_movement",
+        serde_json::json!({
+            "till_id": till_id, "branch_id": till.branch_id, "movement_id": movement.id,
+            "amount": movement.amount, "kind": movement.kind,
+        }),
+    );
     Ok(HttpResponse::Created().json(movement))
 }
 
@@ -1298,7 +1444,11 @@ pub(crate) async fn add_cash_movement_inner(
     params(("till_id" = Uuid, Path, description = "Till ID")),
     responses((status = 200, description = "Cash movements", body = Vec<CashMovement>), AppErrorResponse),
     security(("bearer_jwt" = [])))]
-pub async fn list_cash_movements(req: HttpRequest, pool: crate::db::Db, till_id: web::Path<Uuid>) -> Result<HttpResponse, AppError> {
+pub async fn list_cash_movements(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    till_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "tills", "read").await?;
     let till = fetch_till_or_404(pool.get_ref(), *till_id).await?;
@@ -1318,7 +1468,11 @@ pub async fn list_cash_movements(req: HttpRequest, pool: crate::db::Db, till_id:
     params(("till_id" = Uuid, Path, description = "Till ID")),
     responses((status = 200, description = "What the close screen shows", body = CloseTillPreview), AppErrorResponse),
     security(("bearer_jwt" = [])))]
-pub async fn close_preview(req: HttpRequest, pool: crate::db::Db, till_id: web::Path<Uuid>) -> Result<HttpResponse, AppError> {
+pub async fn close_preview(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    till_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "tills", "update").await?;
     let till = fetch_till_or_404(pool.get_ref(), *till_id).await?;
@@ -1373,7 +1527,14 @@ pub async fn close_till(
     require_branch_access(pool.get_ref(), &claims, till.branch_id).await?;
     let mut body = body.into_inner();
     body.device_id = body.device_id.or(device.0);
-    let out = close_till_inner(pool.get_ref(), hub.as_ref().map(|h| h.get_ref()), till_id.into_inner(), body, ActingContext::live(&claims)?).await?;
+    let out = close_till_inner(
+        pool.get_ref(),
+        hub.as_ref().map(|h| h.get_ref()),
+        till_id.into_inner(),
+        body,
+        ActingContext::live(&claims)?,
+    )
+    .await?;
     Ok(HttpResponse::Ok().json(out))
 }
 
@@ -1386,38 +1547,53 @@ pub(crate) async fn close_till_inner(
 ) -> Result<CloseTillResponse, AppError> {
     let till = fetch_till_or_404(pool, till_id).await?;
     if !actor.replay && actor.role == UserRole::Teller && till.teller_id != actor.teller_id {
-        return Err(AppError::Forbidden("You can only close your own till".into()));
+        return Err(AppError::Forbidden(
+            "You can only close your own till".into(),
+        ));
     }
     if till.status != "open" {
         let reconciliation = reconcile::lines_for_till(pool, till_id).await?;
-        return Ok(CloseTillResponse { till, reconciliation, last_till_warning: None });
+        return Ok(CloseTillResponse {
+            till,
+            reconciliation,
+            last_till_warning: None,
+        });
     }
     let closed_at = body.closed_at.unwrap_or_else(Utc::now);
     crate::clock::reject_if_future(closed_at, "closed_at")?;
     if closed_at < till.opened_at {
-        return Err(AppError::BadRequest("closed_at cannot be before the till was opened".into()));
+        return Err(AppError::BadRequest(
+            "closed_at cannot be before the till was opened".into(),
+        ));
     }
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text))")
         .bind(till_id.to_string())
         .execute(&mut *tx)
         .await?;
-    let still_open: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tills WHERE id = $1 AND status = 'open')")
-        .bind(till_id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let still_open: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tills WHERE id = $1 AND status = 'open')")
+            .bind(till_id)
+            .fetch_one(&mut *tx)
+            .await?;
     if !still_open {
         tx.rollback().await?;
         let till = fetch_till_or_404(pool, till_id).await?;
         let reconciliation = reconcile::lines_for_till(pool, till_id).await?;
-        return Ok(CloseTillResponse { till, reconciliation, last_till_warning: None });
+        return Ok(CloseTillResponse {
+            till,
+            reconciliation,
+            last_till_warning: None,
+        });
     }
     let closing_cash_system = cash_to_i32(compute_system_cash(&mut *tx, till_id).await?)?;
     let notice = open_bills_notice(&mut *tx, till.branch_id).await?;
     let device_id = match body.device_id {
-        Some(d) => crate::devices::ensure_registered(&mut tx, actor.org_id, d, Some(till.branch_id), None)
-            .await?
-            .map(|_| d),
+        Some(d) => {
+            crate::devices::ensure_registered(&mut tx, actor.org_id, d, Some(till.branch_id), None)
+                .await?
+                .map(|_| d)
+        }
         None => None,
     };
     sqlx::query(
@@ -1450,16 +1626,30 @@ pub(crate) async fn close_till_inner(
     let other_open = branch_has_open_till(&mut *tx, till.branch_id).await?;
     // Unbumped kitchen tickets retire only when the LAST till at the branch closes.
     if !other_open {
-        crate::kitchen::retire_unbumped_at_till_close(&mut tx, till.branch_id, Some(actor.teller_id)).await?;
+        crate::kitchen::retire_unbumped_at_till_close(
+            &mut tx,
+            till.branch_id,
+            Some(actor.teller_id),
+        )
+        .await?;
     }
     tx.commit().await?;
 
     let closed = fetch_till_or_404(pool, till_id).await?;
-    publish(hub, closed.branch_id, "till.closed", serde_json::json!({
-        "till_id": till_id, "branch_id": closed.branch_id, "teller_id": closed.teller_id, "status": "closed",
-        "device_id": device_id, "reconciliation_status": rollup, "last_till": !other_open,
-    }));
-    Ok(CloseTillResponse { till: closed, reconciliation, last_till_warning: last_till_warning(&notice, other_open) })
+    publish(
+        hub,
+        closed.branch_id,
+        "till.closed",
+        serde_json::json!({
+            "till_id": till_id, "branch_id": closed.branch_id, "teller_id": closed.teller_id, "status": "closed",
+            "device_id": device_id, "reconciliation_status": rollup, "last_till": !other_open,
+        }),
+    );
+    Ok(CloseTillResponse {
+        till: closed,
+        reconciliation,
+        last_till_warning: last_till_warning(&notice, other_open),
+    })
 }
 
 #[utoipa::path(post, path = "/tills/{till_id}/force-close", tag = "tills",
@@ -1478,8 +1668,13 @@ pub async fn force_close_till(
     check_permission(pool.get_ref(), &claims, "tills", "update").await?;
     let till = fetch_till_or_404(pool.get_ref(), *till_id).await?;
     require_branch_access(pool.get_ref(), &claims, till.branch_id).await?;
-    if matches!(claims.role, UserRole::Teller | UserRole::Waiter | UserRole::Kitchen) {
-        return Err(AppError::Forbidden("Only managers can force close a till".into()));
+    if matches!(
+        claims.role,
+        UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
+    ) {
+        return Err(AppError::Forbidden(
+            "Only managers can force close a till".into(),
+        ));
     }
     if till.status != "open" {
         return Ok(HttpResponse::Ok().json(till));
@@ -1490,10 +1685,11 @@ pub async fn force_close_till(
         .bind(till_id.to_string())
         .execute(&mut *tx)
         .await?;
-    let still_open: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tills WHERE id = $1 AND status = 'open')")
-        .bind(*till_id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let still_open: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tills WHERE id = $1 AND status = 'open')")
+            .bind(*till_id)
+            .fetch_one(&mut *tx)
+            .await?;
     if !still_open {
         tx.rollback().await?;
         return Ok(HttpResponse::Ok().json(fetch_till_or_404(pool.get_ref(), *till_id).await?));
@@ -1501,7 +1697,9 @@ pub async fn force_close_till(
     let closing_cash_system = cash_to_i32(compute_system_cash(&mut *tx, *till_id).await?)?;
     let notice = open_bills_notice(&mut *tx, till.branch_id).await?;
     let device_id = match body.device_id.or(device.0) {
-        Some(d) => crate::devices::ensure_registered(&mut tx, org, d, Some(till.branch_id), None).await?.map(|_| d),
+        Some(d) => crate::devices::ensure_registered(&mut tx, org, d, Some(till.branch_id), None)
+            .await?
+            .map(|_| d),
         None => None,
     };
     sqlx::query(
@@ -1518,18 +1716,33 @@ pub async fn force_close_till(
     .bind(notice.old_bills_count as i32)
     .execute(&mut *tx)
     .await?;
-    let (_, rollup) =
-        reconcile::write_force_close_reconciliation(&mut tx, *till_id, claims.user_id(), closing_cash_system).await?;
+    let (_, rollup) = reconcile::write_force_close_reconciliation(
+        &mut tx,
+        *till_id,
+        claims.user_id(),
+        closing_cash_system,
+    )
+    .await?;
     let other_open = branch_has_open_till(&mut *tx, till.branch_id).await?;
     if !other_open {
-        crate::kitchen::retire_unbumped_at_till_close(&mut tx, till.branch_id, Some(claims.user_id())).await?;
+        crate::kitchen::retire_unbumped_at_till_close(
+            &mut tx,
+            till.branch_id,
+            Some(claims.user_id()),
+        )
+        .await?;
     }
     tx.commit().await?;
     let closed = fetch_till_or_404(pool.get_ref(), *till_id).await?;
-    publish(hub.as_ref().map(|h| h.get_ref()), closed.branch_id, "till.closed", serde_json::json!({
-        "till_id": closed.id, "branch_id": closed.branch_id, "teller_id": closed.teller_id, "status": "force_closed",
-        "device_id": device_id, "reconciliation_status": rollup, "last_till": !other_open,
-    }));
+    publish(
+        hub.as_ref().map(|h| h.get_ref()),
+        closed.branch_id,
+        "till.closed",
+        serde_json::json!({
+            "till_id": closed.id, "branch_id": closed.branch_id, "teller_id": closed.teller_id, "status": "force_closed",
+            "device_id": device_id, "reconciliation_status": rollup, "last_till": !other_open,
+        }),
+    );
     Ok(HttpResponse::Ok().json(closed))
 }
 
@@ -1539,29 +1752,44 @@ pub async fn force_close_till(
     params(("till_id" = Uuid, Path, description = "Till ID")),
     responses((status = 204, description = "Till deleted"), AppErrorResponse),
     security(("bearer_jwt" = [])))]
-pub async fn delete_till(req: HttpRequest, pool: crate::db::Db, till_id: web::Path<Uuid>) -> Result<HttpResponse, AppError> {
+pub async fn delete_till(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    till_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     if claims.role != UserRole::OrgAdmin && claims.role != UserRole::SuperAdmin {
-        return Err(AppError::Forbidden("Only organization administrators can delete tills".into()));
+        return Err(AppError::Forbidden(
+            "Only organization administrators can delete tills".into(),
+        ));
     }
     let till = fetch_till_or_404(pool.get_ref(), *till_id).await?;
     require_branch_access(pool.get_ref(), &claims, till.branch_id).await?;
     if till.status == "open" {
-        return Err(AppError::Conflict("Cannot delete an open till — force-close it first.".into()));
+        return Err(AppError::Conflict(
+            "Cannot delete an open till — force-close it first.".into(),
+        ));
     }
-    let has_real_orders: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM orders WHERE till_id = $1 AND status <> 'voided')")
-            .bind(*till_id)
-            .fetch_one(pool.get_ref())
-            .await?;
+    let has_real_orders: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM orders WHERE till_id = $1 AND status <> 'voided')",
+    )
+    .bind(*till_id)
+    .fetch_one(pool.get_ref())
+    .await?;
     if has_real_orders {
         return Err(AppError::Conflict(
             "Cannot delete a till that has recorded (non-voided) orders — its sales are part of the financial record.".into(),
         ));
     }
     let mut tx = pool.get_ref().begin().await?;
-    sqlx::query("DELETE FROM orders WHERE till_id = $1").bind(*till_id).execute(&mut *tx).await?;
-    sqlx::query("DELETE FROM tills WHERE id = $1").bind(*till_id).execute(&mut *tx).await?;
+    sqlx::query("DELETE FROM orders WHERE till_id = $1")
+        .bind(*till_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM tills WHERE id = $1")
+        .bind(*till_id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -1579,7 +1807,11 @@ fn cash_to_i32(v: i64) -> Result<i32, AppError> {
     i32::try_from(v).map_err(|_| AppError::Internal)
 }
 
-pub(crate) async fn require_branch_access(pool: &PgPool, claims: &Claims, branch_id: Uuid) -> Result<(), AppError> {
+pub(crate) async fn require_branch_access(
+    pool: &PgPool,
+    claims: &Claims,
+    branch_id: Uuid,
+) -> Result<(), AppError> {
     if claims.role == UserRole::SuperAdmin {
         return Ok(());
     }
@@ -1591,9 +1823,14 @@ pub(crate) async fn require_branch_access(pool: &PgPool, claims: &Claims, branch
             .flatten();
     let branch_org = branch_org.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
     if claims.org_id() != Some(branch_org) {
-        return Err(AppError::Forbidden("Branch belongs to a different org".into()));
+        return Err(AppError::Forbidden(
+            "Branch belongs to a different org".into(),
+        ));
     }
-    if matches!(claims.role, UserRole::OrgAdmin | UserRole::Teller | UserRole::Waiter | UserRole::Kitchen) {
+    if matches!(
+        claims.role,
+        UserRole::OrgAdmin | UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
+    ) {
         return Ok(());
     }
     let assigned: bool = sqlx::query_scalar(

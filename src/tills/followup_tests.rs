@@ -20,13 +20,27 @@ fn uid(s: &str) -> Uuid {
 }
 
 fn bearer(user: &str, role: UserRole) -> (&'static str, String) {
-    let tok = create_token(&JwtSecret(SECRET.into()), uid(user), Some(uid(ORG)), role, None, 24).unwrap();
+    let tok = create_token(
+        &JwtSecret(SECRET.into()),
+        uid(user),
+        Some(uid(ORG)),
+        role,
+        None,
+        24,
+    )
+    .unwrap();
     ("Authorization", format!("Bearer {tok}"))
 }
 
 async fn seeded(pool: &PgPool) {
-    crate::permissions::seeder::seed_role_permissions(pool).await.unwrap();
-    let seed = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/legacy_till_golden/seed.sql")).unwrap();
+    crate::permissions::seeder::seed_role_permissions(pool)
+        .await
+        .unwrap();
+    let seed = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/scripts/legacy_till_golden/seed.sql"
+    ))
+    .unwrap();
     sqlx::raw_sql(&seed).execute(pool).await.expect("seed.sql");
 }
 
@@ -52,7 +66,11 @@ macro_rules! app {
 /// Open a till for teller A at branch A (new route) and ring one cash and one card sale.
 async fn till_with_sales<S, B>(app: &S) -> Uuid
 where
-    S: actix_web::dev::Service<actix_http::Request, Response = actix_web::dev::ServiceResponse<B>, Error = actix_web::Error>,
+    S: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse<B>,
+            Error = actix_web::Error,
+        >,
     B: actix_web::body::MessageBody,
 {
     let till = Uuid::new_v4();
@@ -79,7 +97,11 @@ where
         }
         let r = test::call_service(
             app,
-            test::TestRequest::post().uri("/orders").insert_header(bearer(TELLER_A, UserRole::Teller)).set_json(body).to_request(),
+            test::TestRequest::post()
+                .uri("/orders")
+                .insert_header(bearer(TELLER_A, UserRole::Teller))
+                .set_json(body)
+                .to_request(),
         )
         .await;
         assert_eq!(r.status(), StatusCode::CREATED);
@@ -123,7 +145,10 @@ async fn force_close_reconciliation_is_not_counted(pool: PgPool) {
     assert_eq!(cash.2, "unreviewed", "the cash row was never counted");
     assert_eq!(cash.3, None, "no declared amount on a force-close");
     assert_eq!(cash.4, 6000, "the system total is still snapshotted");
-    assert_eq!((lines[1].0.as_str(), lines[1].2.as_str(), lines[1].3), ("card", "unreviewed", None));
+    assert_eq!(
+        (lines[1].0.as_str(), lines[1].2.as_str(), lines[1].3),
+        ("card", "unreviewed", None)
+    );
 
     // A repeated force-close does not rewrite the lines.
     let r = test::call_service(
@@ -136,7 +161,11 @@ async fn force_close_reconciliation_is_not_counted(pool: PgPool) {
     )
     .await;
     assert_eq!(r.status(), StatusCode::OK);
-    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM till_reconciliations WHERE till_id = $1").bind(till).fetch_one(&pool).await.unwrap();
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM till_reconciliations WHERE till_id = $1")
+        .bind(till)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(n, 2);
 }
 
@@ -161,12 +190,13 @@ async fn legacy_force_close_shape_unchanged(pool: PgPool) {
     assert_eq!(body["id"], json!(till));
     assert!(body.get("till_id").is_some());
     assert!(body["closing_cash_declared"].is_null());
-    let (status, declared): (String, Option<i32>) =
-        sqlx::query_as("SELECT status, declared_amount FROM till_reconciliations WHERE till_id = $1 AND is_cash")
-            .bind(till)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let (status, declared): (String, Option<i32>) = sqlx::query_as(
+        "SELECT status, declared_amount FROM till_reconciliations WHERE till_id = $1 AND is_cash",
+    )
+    .bind(till)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!((status.as_str(), declared), ("unreviewed", None));
 }
 
@@ -174,11 +204,27 @@ async fn legacy_force_close_shape_unchanged(pool: PgPool) {
 fn force_close_lines_clear_every_count() {
     use crate::tills::reconcile::*;
     let totals = vec![
-        MethodTotal { method: "cash".into(), payment_method_id: None, is_cash: true, system_total: 900, order_count: 2 },
-        MethodTotal { method: "card".into(), payment_method_id: None, is_cash: false, system_total: 400, order_count: 1 },
+        MethodTotal {
+            method: "cash".into(),
+            payment_method_id: None,
+            is_cash: true,
+            system_total: 900,
+            order_count: 2,
+        },
+        MethodTotal {
+            method: "card".into(),
+            payment_method_id: None,
+            is_cash: false,
+            system_total: 400,
+            order_count: 1,
+        },
     ];
     let lines = force_close_lines(plan_lines(&totals, 900, 900, None, &[], true).unwrap());
-    assert!(lines.iter().all(|l| l.status == STATUS_UNREVIEWED && l.declared_amount.is_none() && l.note.is_none()));
+    assert!(
+        lines.iter().all(|l| l.status == STATUS_UNREVIEWED
+            && l.declared_amount.is_none()
+            && l.note.is_none())
+    );
     assert_eq!(lines[0].system_total, 900);
 }
 
@@ -189,11 +235,12 @@ async fn till_deductions_list_the_ledger_rows_of_the_tills_orders(pool: PgPool) 
     seeded(&pool).await;
     let app = app!(pool);
     let till = till_with_sales(&app).await;
-    let orders: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM orders WHERE till_id = $1 ORDER BY order_number")
-        .bind(till)
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+    let orders: Vec<Uuid> =
+        sqlx::query_scalar("SELECT id FROM orders WHERE till_id = $1 ORDER BY order_number")
+            .bind(till)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
     let beans: Uuid = sqlx::query_scalar(
         "INSERT INTO org_ingredients (org_id, name, unit, category_id) \
          VALUES ($1, 'Beans', 'g'::inventory_unit, ingredient_category_id($1, 'coffee_bean')) RETURNING id",
@@ -223,10 +270,16 @@ async fn till_deductions_list_the_ledger_rows_of_the_tills_orders(pool: PgPool) 
         .unwrap();
     }
 
-    for path in [format!("/reports/tills/{till}/deductions"), format!("/reports/shifts/{till}/deductions")] {
+    for path in [
+        format!("/reports/tills/{till}/deductions"),
+        format!("/reports/shifts/{till}/deductions"),
+    ] {
         let r = test::call_service(
             &app,
-            test::TestRequest::get().uri(&path).insert_header(bearer(ADMIN, UserRole::OrgAdmin)).to_request(),
+            test::TestRequest::get()
+                .uri(&path)
+                .insert_header(bearer(ADMIN, UserRole::OrgAdmin))
+                .to_request(),
         )
         .await;
         assert_eq!(r.status(), StatusCode::OK, "{path}");
@@ -253,7 +306,9 @@ async fn empty_restricted_allow_list_has_a_structured_code(pool: PgPool) {
     let r = test::call_service(
         &app,
         test::TestRequest::put()
-            .uri(&format!("/payment-methods/availability/branches/{BRANCH_A}"))
+            .uri(&format!(
+                "/payment-methods/availability/branches/{BRANCH_A}"
+            ))
             .insert_header(bearer(ADMIN, UserRole::OrgAdmin))
             .set_json(json!({ "restricted": true, "payment_method_ids": [] }))
             .to_request(),
@@ -262,15 +317,30 @@ async fn empty_restricted_allow_list_has_a_structured_code(pool: PgPool) {
     assert_eq!(r.status(), StatusCode::BAD_REQUEST);
     let body: Value = test::read_body_json(r).await;
     assert_eq!(body["code"], "EMPTY_ALLOW_LIST");
-    assert_eq!(body["error"], "EMPTY_ALLOW_LIST: a restricted list needs at least one payment method");
+    assert_eq!(
+        body["error"],
+        "EMPTY_ALLOW_LIST: a restricted list needs at least one payment method"
+    );
 }
 
 #[core::prelude::v1::test]
 fn reconciliation_refusals_carry_codes() {
     use crate::tills::reconcile::*;
     let totals = vec![
-        MethodTotal { method: "cash".into(), payment_method_id: None, is_cash: true, system_total: 0, order_count: 0 },
-        MethodTotal { method: "card".into(), payment_method_id: None, is_cash: false, system_total: 900, order_count: 1 },
+        MethodTotal {
+            method: "cash".into(),
+            payment_method_id: None,
+            is_cash: true,
+            system_total: 0,
+            order_count: 0,
+        },
+        MethodTotal {
+            method: "card".into(),
+            payment_method_id: None,
+            is_cash: false,
+            system_total: 900,
+            order_count: 1,
+        },
     ];
     let input = |amount, note: Option<&str>| ReconciliationInput {
         method: "card".into(),
@@ -279,10 +349,17 @@ fn reconciliation_refusals_carry_codes() {
         note: note.map(Into::into),
     };
     let e = plan_lines(&totals, 0, 0, None, &[input(None, Some("x"))], false).unwrap_err();
-    assert!(matches!(&e, crate::errors::AppError::Coded { status: 400, code, .. } if *code == CODE_AMOUNT_REQUIRED));
-    assert!(e.to_string().starts_with("RECONCILIATION_AMOUNT_REQUIRED: "));
+    assert!(
+        matches!(&e, crate::errors::AppError::Coded { status: 400, code, .. } if *code == CODE_AMOUNT_REQUIRED)
+    );
+    assert!(
+        e.to_string()
+            .starts_with("RECONCILIATION_AMOUNT_REQUIRED: ")
+    );
     let e = plan_lines(&totals, 0, 0, None, &[input(Some(800), None)], false).unwrap_err();
-    assert!(matches!(&e, crate::errors::AppError::Coded { status: 400, code, .. } if *code == CODE_NOTE_REQUIRED));
+    assert!(
+        matches!(&e, crate::errors::AppError::Coded { status: 400, code, .. } if *code == CODE_NOTE_REQUIRED)
+    );
 }
 
 // ── (e) tenant grants ───────────────────────────────────────────────────────
@@ -325,7 +402,10 @@ async fn legacy_entity_id_reads_the_archive_as_the_tenant(pool: PgPool) {
     .await
     .unwrap();
     let tenant = crate::db::tenant_pool(&pool, uid(ORG)).await;
-    assert_eq!(crate::tills::legacy::legacy_till_entity_id(&tenant, uid(BRANCH_A)).await, archived);
+    assert_eq!(
+        crate::tills::legacy::legacy_till_entity_id(&tenant, uid(BRANCH_A)).await,
+        archived
+    );
     let other = crate::db::tenant_pool(&pool, Uuid::new_v4()).await;
     assert_eq!(
         crate::tills::legacy::legacy_till_entity_id(&other, uid(BRANCH_A)).await,
@@ -341,7 +421,12 @@ async fn branch_old_bill_hours_and_standard_float_read_and_write(pool: PgPool) {
     seeded(&pool).await;
     let app = app!(pool);
     let admin = bearer(ADMIN, UserRole::OrgAdmin);
-    let get = |h: (&'static str, String)| test::TestRequest::get().uri(&format!("/branches/{BRANCH_A}")).insert_header(h).to_request();
+    let get = |h: (&'static str, String)| {
+        test::TestRequest::get()
+            .uri(&format!("/branches/{BRANCH_A}"))
+            .insert_header(h)
+            .to_request()
+    };
 
     let r = test::call_service(&app, get(admin.clone())).await;
     assert_eq!(r.status(), StatusCode::OK);
@@ -361,7 +446,10 @@ async fn branch_old_bill_hours_and_standard_float_read_and_write(pool: PgPool) {
     .await;
     assert_eq!(r.status(), StatusCode::OK);
     let b: Value = test::read_body_json(r).await;
-    assert_eq!((b["old_bill_hours"].clone(), b["standard_float"].clone()), (json!(6), json!(50000)));
+    assert_eq!(
+        (b["old_bill_hours"].clone(), b["standard_float"].clone()),
+        (json!(6), json!(50000))
+    );
 
     // PUT leaves absent fields alone; explicit null clears the float.
     let r = test::call_service(
@@ -375,7 +463,10 @@ async fn branch_old_bill_hours_and_standard_float_read_and_write(pool: PgPool) {
     .await;
     assert_eq!(r.status(), StatusCode::OK);
     let b: Value = test::read_body_json(r).await;
-    assert_eq!((b["old_bill_hours"].clone(), b["standard_float"].clone()), (json!(6), json!(50000)));
+    assert_eq!(
+        (b["old_bill_hours"].clone(), b["standard_float"].clone()),
+        (json!(6), json!(50000))
+    );
     let r = test::call_service(
         &app,
         test::TestRequest::put()
@@ -390,7 +481,11 @@ async fn branch_old_bill_hours_and_standard_float_read_and_write(pool: PgPool) {
     assert_eq!(b["old_bill_hours"], 6);
 
     // Validation: out of range → 400, nothing written.
-    for bad in [json!({ "old_bill_hours": 0 }), json!({ "old_bill_hours": 169 }), json!({ "standard_float": -1 })] {
+    for bad in [
+        json!({ "old_bill_hours": 0 }),
+        json!({ "old_bill_hours": 169 }),
+        json!({ "standard_float": -1 }),
+    ] {
         let r = test::call_service(
             &app,
             test::TestRequest::patch()
@@ -402,15 +497,20 @@ async fn branch_old_bill_hours_and_standard_float_read_and_write(pool: PgPool) {
         .await;
         assert_eq!(r.status(), StatusCode::BAD_REQUEST, "{bad}");
     }
-    let (hours, float): (i16, Option<i32>) = sqlx::query_as("SELECT old_bill_hours, standard_float FROM branches WHERE id = $1")
-        .bind(uid(BRANCH_A))
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let (hours, float): (i16, Option<i32>) =
+        sqlx::query_as("SELECT old_bill_hours, standard_float FROM branches WHERE id = $1")
+            .bind(uid(BRANCH_A))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!((hours, float), (6, None));
 
     // The till report's standard float reads the branch column.
-    sqlx::query("UPDATE branches SET standard_float = 40000 WHERE id = $1").bind(uid(BRANCH_A)).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE branches SET standard_float = 40000 WHERE id = $1")
+        .bind(uid(BRANCH_A))
+        .execute(&pool)
+        .await
+        .unwrap();
     let r = test::call_service(&app, get(admin.clone())).await;
     let b: Value = test::read_body_json(r).await;
     assert_eq!(b["standard_float"], 40000);
@@ -447,18 +547,31 @@ async fn order_responses_carry_device_numbering(pool: PgPool) {
         assert_eq!(o["device_id"], json!(device), "{what}");
         assert_eq!(o["device_code"], "36B", "{what}");
         assert_eq!(o["display_number"], "36B-12", "{what}");
-        assert_eq!(o["verification"], "server", "{what}: a live sale is server-verified");
+        assert_eq!(
+            o["verification"], "server",
+            "{what}: a live sale is server-verified"
+        );
         assert_eq!(o["order_number"], 12, "{what}");
     };
     expect(&created, "create");
     let id = created["id"].as_str().unwrap().to_string();
 
-    let r = test::call_service(&app, test::TestRequest::get().uri(&format!("/orders/{id}")).insert_header(teller.clone()).to_request()).await;
+    let r = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/orders/{id}"))
+            .insert_header(teller.clone())
+            .to_request(),
+    )
+    .await;
     expect(&test::read_body_json::<Value, _>(r).await, "get");
 
     let r = test::call_service(
         &app,
-        test::TestRequest::get().uri(&format!("/orders?branch_id={BRANCH_A}&till_id={till}")).insert_header(teller.clone()).to_request(),
+        test::TestRequest::get()
+            .uri(&format!("/orders?branch_id={BRANCH_A}&till_id={till}"))
+            .insert_header(teller.clone())
+            .to_request(),
     )
     .await;
     let list: Value = test::read_body_json(r).await;
@@ -499,6 +612,10 @@ async fn replayed_sale_registers_an_unknown_device(pool: PgPool) {
     assert!(status.is_success(), "{status}: {body}");
     assert_eq!(body["display_number"], "7QX-3");
     assert_eq!(body["verification"], "unverified");
-    let code: String = sqlx::query_scalar("SELECT code FROM devices WHERE id = $1").bind(device).fetch_one(&pool).await.unwrap();
+    let code: String = sqlx::query_scalar("SELECT code FROM devices WHERE id = $1")
+        .bind(device)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(code, "7QX");
 }

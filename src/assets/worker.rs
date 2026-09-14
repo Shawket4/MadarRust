@@ -15,9 +15,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use super::AssetStore;
-use super::ingest::{
-    AssetPurpose, AssetTarget, IngestSource, SourceKind, attach, ingest_with,
-};
+use super::ingest::{AssetPurpose, AssetTarget, IngestSource, SourceKind, attach, ingest_with};
 use crate::errors::AppError;
 
 pub const MAX_ATTEMPTS: i32 = 5;
@@ -90,7 +88,10 @@ pub async fn run_one(pool: &PgPool, store: &AssetStore) -> Result<Option<JobResu
         }
         Err(e) => {
             let msg = e.to_string();
-            let permanent = matches!(e, AppError::BadRequest(_) | AppError::NotFound(_) | AppError::Forbidden(_));
+            let permanent = matches!(
+                e,
+                AppError::BadRequest(_) | AppError::NotFound(_) | AppError::Forbidden(_)
+            );
             if attempts >= MAX_ATTEMPTS || permanent {
                 sqlx::query(
                     "UPDATE asset_jobs SET status = 'failed', last_error = $2, updated_at = now() WHERE id = $1",

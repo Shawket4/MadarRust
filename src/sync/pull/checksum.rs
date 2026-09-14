@@ -23,7 +23,12 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|r| (r["id"].as_str().unwrap().to_string(), r["seq"].as_i64().unwrap()))
+            .map(|r| {
+                (
+                    r["id"].as_str().unwrap().to_string(),
+                    r["seq"].as_i64().unwrap(),
+                )
+            })
             .collect();
         assert_eq!(super::checksum_of(&rows), v["checksum"].as_str().unwrap());
     }

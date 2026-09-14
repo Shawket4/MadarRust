@@ -66,7 +66,9 @@ pub async fn list_client_versions(
         .ok_or_else(|| AppError::BadRequest("A token with an organization is required".into()))?;
     let days = q.days.unwrap_or(14);
     if !(1..=365).contains(&days) {
-        return Err(AppError::BadRequest("days must be between 1 and 365".into()));
+        return Err(AppError::BadRequest(
+            "days must be between 1 and 365".into(),
+        ));
     }
     let legacy_only = q.legacy_only.unwrap_or(true);
     let rows = sqlx::query_as::<_, ClientSeen>(

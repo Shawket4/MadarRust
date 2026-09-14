@@ -20,10 +20,16 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-const PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/till_report_vectors.json");
+const PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/till_report_vectors.json"
+);
 
 fn id(label: &str) -> Uuid {
-    Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("till-vector:{label}").as_bytes())
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        format!("till-vector:{label}").as_bytes(),
+    )
 }
 
 /// One scenario: SQL run with `{org}`, `{branch}`, `{sara}`, `{omar}` and every
@@ -216,17 +222,37 @@ async fn run_scenario(pool: &PgPool, sc: &Scenario) -> Value {
         card = id(&format!("{}:pm:card", sc.name)),
     );
     sqlx::raw_sql(&setup).execute(pool).await.expect("setup");
-    let mut sql = sc.sql.replace("{org}", &org.to_string()).replace("{branch}", &branch.to_string());
-    sql = sql.replace("{sara}", &sara.to_string()).replace("{omar}", &omar.to_string());
+    let mut sql = sc
+        .sql
+        .replace("{org}", &org.to_string())
+        .replace("{branch}", &branch.to_string());
+    sql = sql
+        .replace("{sara}", &sara.to_string())
+        .replace("{omar}", &omar.to_string());
     while let Some(start) = sql.find("{id:") {
         let end = start + sql[start..].find('}').unwrap();
         let label = sql[start + 4..end].to_string();
-        sql.replace_range(start..=end, &id(&format!("{}:{label}", sc.name)).to_string());
+        sql.replace_range(
+            start..=end,
+            &id(&format!("{}:{label}", sc.name)).to_string(),
+        );
     }
-    sqlx::raw_sql(&sql).execute(pool).await.unwrap_or_else(|e| panic!("{}: {e}", sc.name));
+    sqlx::raw_sql(&sql)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|e| panic!("{}: {e}", sc.name));
 
-    let body = crate::sync::pull::PullRequest { branch_id: branch, device_id: None, types: None, limit: None, ledger_page_size: None, snapshot_cursor: None };
-    let full = crate::sync::pull::pull_core(pool, org, &body, None).await.unwrap();
+    let body = crate::sync::pull::PullRequest {
+        branch_id: branch,
+        device_id: None,
+        types: None,
+        limit: None,
+        ledger_page_size: None,
+        snapshot_cursor: None,
+    };
+    let full = crate::sync::pull::pull_core(pool, org, &body, None)
+        .await
+        .unwrap();
     // Rows exactly as the device receives them, minus the per-database `seq`.
     let rows = |ty: &str| -> Vec<Value> {
         let mut v: Vec<Value> = full.data.get(ty).cloned().unwrap_or_default();
@@ -242,13 +268,20 @@ async fn run_scenario(pool: &PgPool, sc: &Scenario) -> Value {
     let mut tills = serde_json::Map::new();
     for label in sc.tills {
         let till_id = id(&format!("{}:{label}", sc.name));
-        let till = crate::tills::handlers::fetch_till_or_404(pool, till_id).await.unwrap();
-        let system_cash = crate::tills::handlers::compute_system_cash(pool, till_id).await.unwrap();
-        let f = crate::tills::handlers::report_figures(pool, &till).await.unwrap();
-        let mut conn = pool.acquire().await.unwrap();
-        let methods = crate::tills::reconcile::system_totals_by_method(&mut conn, till_id, f.expected_cash)
+        let till = crate::tills::handlers::fetch_till_or_404(pool, till_id)
             .await
             .unwrap();
+        let system_cash = crate::tills::handlers::compute_system_cash(pool, till_id)
+            .await
+            .unwrap();
+        let f = crate::tills::handlers::report_figures(pool, &till)
+            .await
+            .unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        let methods =
+            crate::tills::reconcile::system_totals_by_method(&mut conn, till_id, f.expected_cash)
+                .await
+                .unwrap();
         tills.insert(
             till_id.to_string(),
             json!({
@@ -310,7 +343,12 @@ fn scrub(v: &mut Value) {
             // Legs are ordered by their random row id on the wire; the order
             // carries no meaning, so the vector pins one.
             if let Some(Value::Array(legs)) = m.get_mut("payment_legs") {
-                legs.sort_by_key(|l| (l["method"].as_str().unwrap_or("").to_string(), l["amount"].as_i64()));
+                legs.sort_by_key(|l| {
+                    (
+                        l["method"].as_str().unwrap_or("").to_string(),
+                        l["amount"].as_i64(),
+                    )
+                });
             }
             m.values_mut().for_each(scrub);
         }
@@ -338,7 +376,8 @@ async fn till_report_vectors(pool: PgPool) {
         std::fs::write(PATH, &text).unwrap();
         return;
     }
-    let committed = std::fs::read_to_string(PATH).expect("tests/fixtures/till_report_vectors.json (regenerate: see module docs)");
+    let committed = std::fs::read_to_string(PATH)
+        .expect("tests/fixtures/till_report_vectors.json (regenerate: see module docs)");
     let committed: Value = serde_json::from_str(&committed).unwrap();
     assert_eq!(
         committed, doc,

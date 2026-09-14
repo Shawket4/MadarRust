@@ -6,10 +6,12 @@ use serde::Deserialize;
 use utoipa::IntoParams;
 use uuid::Uuid;
 
-use super::handlers::{self as h, CashMovementRequest, CloseTillRequest, ForceCloseRequest, ListTillsQuery};
+use super::handlers::{
+    self as h, CashMovementRequest, CloseTillRequest, ForceCloseRequest, ListTillsQuery,
+};
 use super::legacy::{
-    CloseShiftResponse, LegacyTill, OpenShiftRequest, PaginatedShifts, Shift, ShiftPreFill,
-    ShiftReportResponse, LegacyJoins, legacy_shift, synthesized_till_id,
+    CloseShiftResponse, LegacyJoins, LegacyTill, OpenShiftRequest, PaginatedShifts, Shift,
+    ShiftPreFill, ShiftReportResponse, legacy_shift, synthesized_till_id,
 };
 use crate::{
     auth::middleware::JwtMiddleware,
@@ -25,12 +27,21 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/shifts")
             .wrap(JwtMiddleware)
-            .route("/branches/{branch_id}/current", web::get().to(get_current_shift))
+            .route(
+                "/branches/{branch_id}/current",
+                web::get().to(get_current_shift),
+            )
             .route("/branches/{branch_id}/open", web::post().to(open_shift))
             .route("/branches/{branch_id}", web::get().to(list_shifts))
             .route("/{shift_id}/report", web::get().to(get_shift_report))
-            .route("/{shift_id}/cash-movements", web::post().to(add_cash_movement))
-            .route("/{shift_id}/cash-movements", web::get().to(h::list_cash_movements))
+            .route(
+                "/{shift_id}/cash-movements",
+                web::post().to(add_cash_movement),
+            )
+            .route(
+                "/{shift_id}/cash-movements",
+                web::get().to(h::list_cash_movements),
+            )
             .route("/{shift_id}/close", web::post().to(close_shift))
             .route("/{shift_id}/force-close", web::post().to(force_close_shift))
             .route("/{shift_id}", web::get().to(get_shift))
@@ -75,7 +86,11 @@ pub async fn get_current_shift(
     };
     Ok(HttpResponse::Ok().json(ShiftPreFill {
         has_open_shift: open.is_some(),
-        suggested_opening_cash: if open.is_some() { 0 } else { pre.suggested_opening_cash },
+        suggested_opening_cash: if open.is_some() {
+            0
+        } else {
+            pre.suggested_opening_cash
+        },
         open_shift: match open {
             Some(t) => Some(legacy_shift(pool.get_ref(), t, LegacyJoins::Till).await?),
             None => None,
@@ -107,15 +122,27 @@ pub async fn open_shift(
     )
     .await;
     match res {
-        Ok((till, true)) => Ok(HttpResponse::Created().json(legacy_shift(pool.get_ref(), till, LegacyJoins::Till).await?)),
-        Ok((till, false)) => Ok(HttpResponse::Ok().json(legacy_shift(pool.get_ref(), till, LegacyJoins::Till).await?)),
-        Err(AppError::RefusedWith { code, .. }) => Err(AppError::Conflict(if code == "TILL_OPEN_AT_OTHER_BRANCH" {
-            crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ERROR_WORDING, "open_shift_other_branch");
-            "You already have an open shift at another branch. Close it before opening a new one.".into()
-        } else {
-            crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ERROR_WORDING, "open_shift_this_branch");
-            "You already have an open shift at this branch.".into()
-        })),
+        Ok((till, true)) => Ok(HttpResponse::Created()
+            .json(legacy_shift(pool.get_ref(), till, LegacyJoins::Till).await?)),
+        Ok((till, false)) => {
+            Ok(HttpResponse::Ok()
+                .json(legacy_shift(pool.get_ref(), till, LegacyJoins::Till).await?))
+        }
+        Err(AppError::RefusedWith { code, .. }) => {
+            Err(AppError::Conflict(if code == "TILL_OPEN_AT_OTHER_BRANCH" {
+                crate::client_seen::legacy_hit_at(
+                    crate::client_seen::KIND_ERROR_WORDING,
+                    "open_shift_other_branch",
+                );
+                "You already have an open shift at another branch. Close it before opening a new one.".into()
+            } else {
+                crate::client_seen::legacy_hit_at(
+                    crate::client_seen::KIND_ERROR_WORDING,
+                    "open_shift_this_branch",
+                );
+                "You already have an open shift at this branch.".into()
+            }))
+        }
         Err(e) => Err(e),
     }
 }
@@ -139,7 +166,11 @@ pub async fn list_shifts(
 ) -> Result<HttpResponse, AppError> {
     let claims = h::extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "tills", "read").await?;
-    let query = ListTillsQuery { page: q.page, per_page: q.per_page, ..Default::default() };
+    let query = ListTillsQuery {
+        page: q.page,
+        per_page: q.per_page,
+        ..Default::default()
+    };
     let p = h::list_tills_core(&req, pool.get_ref(), &claims, *branch_id, &query).await?;
     let mut data = Vec::with_capacity(p.data.len());
     for t in p.data {
@@ -179,7 +210,11 @@ pub async fn force_close_shift(
     params(("shift_id" = Uuid, Path, description = "Till ID")),
     responses((status = 200, description = "DEPRECATED — use /tills/{till_id}", body = Shift), AppErrorResponse),
     security(("bearer_jwt" = [])))]
-pub async fn get_shift(req: HttpRequest, pool: crate::db::Db, id: web::Path<Uuid>) -> Result<HttpResponse, AppError> {
+pub async fn get_shift(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
     let claims = h::extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "tills", "read").await?;
     let till = h::fetch_till_or_404(pool.get_ref(), *id).await?;
@@ -191,13 +226,20 @@ pub async fn get_shift(req: HttpRequest, pool: crate::db::Db, id: web::Path<Uuid
     params(("shift_id" = Uuid, Path, description = "Till ID")),
     responses((status = 200, description = "DEPRECATED — use /tills/{till_id}/report", body = ShiftReportResponse), AppErrorResponse),
     security(("bearer_jwt" = [])))]
-pub async fn get_shift_report(req: HttpRequest, pool: crate::db::Db, id: web::Path<Uuid>) -> Result<HttpResponse, AppError> {
+pub async fn get_shift_report(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
     let claims = h::extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "tills", "read").await?;
     let till = h::fetch_till_or_404(pool.get_ref(), *id).await?;
     h::require_branch_access(pool.get_ref(), &claims, till.branch_id).await?;
     let figures = h::report_figures(pool.get_ref(), &till).await?;
-    Ok(HttpResponse::Ok().json(ShiftReportResponse { shift: legacy_shift(pool.get_ref(), till, LegacyJoins::Till).await?, figures }))
+    Ok(HttpResponse::Ok().json(ShiftReportResponse {
+        shift: legacy_shift(pool.get_ref(), till, LegacyJoins::Till).await?,
+        figures,
+    }))
 }
 
 #[utoipa::path(post, path = "/shifts/{shift_id}/cash-movements", tag = "shifts", operation_id = "legacy_add_shift_cash_movement",
@@ -215,16 +257,29 @@ pub async fn add_cash_movement(
     check_permission(pool.get_ref(), &claims, "tills", "update").await?;
     let till = h::fetch_till_or_404(pool.get_ref(), *id).await?;
     h::require_branch_access(pool.get_ref(), &claims, till.branch_id).await?;
-    h::add_cash_movement_inner(pool.get_ref(), hub.as_ref().map(|h| h.get_ref()), *id, body.into_inner(), ActingContext::live(&claims)?)
-        .await
-        .map_err(legacy_error)
+    h::add_cash_movement_inner(
+        pool.get_ref(),
+        hub.as_ref().map(|h| h.get_ref()),
+        *id,
+        body.into_inner(),
+        ActingContext::live(&claims)?,
+    )
+    .await
+    .map_err(legacy_error)
 }
 
 /// Old clients read prose, not codes: keep 400 bodies they used to get.
 pub(crate) fn legacy_error(e: AppError) -> AppError {
     match e {
-        AppError::Coded { status: 400, reason, .. } => {
-            crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ERROR_WORDING, "legacy_error_till_to_shift");
+        AppError::Coded {
+            status: 400,
+            reason,
+            ..
+        } => {
+            crate::client_seen::legacy_hit_at(
+                crate::client_seen::KIND_ERROR_WORDING,
+                "legacy_error_till_to_shift",
+            );
             AppError::BadRequest(reason.replace("till", "shift"))
         }
         other => other,
@@ -249,8 +304,26 @@ pub async fn close_shift(
     let already_closed = till.status != "open";
     let mut body = body.into_inner();
     body.reconciliation = None;
-    let out = h::close_till_inner(pool.get_ref(), hub.as_ref().map(|h| h.get_ref()), *id, body, ActingContext::live(&claims)?).await?;
-    Ok(HttpResponse::Ok().json(CloseShiftResponse { shift: legacy_shift(pool.get_ref(), out.till, if already_closed { LegacyJoins::Till } else { LegacyJoins::None }).await? }))
+    let out = h::close_till_inner(
+        pool.get_ref(),
+        hub.as_ref().map(|h| h.get_ref()),
+        *id,
+        body,
+        ActingContext::live(&claims)?,
+    )
+    .await?;
+    Ok(HttpResponse::Ok().json(CloseShiftResponse {
+        shift: legacy_shift(
+            pool.get_ref(),
+            out.till,
+            if already_closed {
+                LegacyJoins::Till
+            } else {
+                LegacyJoins::None
+            },
+        )
+        .await?,
+    }))
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -318,10 +391,18 @@ pub async fn till_entity_gone() -> Result<HttpResponse, AppError> {
 }
 
 /// `DELETE /tills/{id}`: a sales session (T13) when the id is one, else the gone entity.
-pub async fn delete_till_or_entity(req: HttpRequest, pool: crate::db::Db, id: web::Path<Uuid>) -> Result<HttpResponse, AppError> {
+pub async fn delete_till_or_entity(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tills WHERE id = $1)")
         .bind(*id)
         .fetch_one(pool.get_ref())
         .await?;
-    if exists { h::delete_till(req, pool, id).await } else { till_entity_gone().await }
+    if exists {
+        h::delete_till(req, pool, id).await
+    } else {
+        till_entity_gone().await
+    }
 }

@@ -31,7 +31,11 @@ pub const CLIENT_HEADER: &str = "X-Madar-Client";
 
 /// `^[A-Z0-9]{1,6}$`, the `devices.code` CHECK.
 pub fn valid_code(code: &str) -> bool {
-    !code.is_empty() && code.len() <= 6 && code.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    !code.is_empty()
+        && code.len() <= 6
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
 }
 
 /// The code a device gets when it was never told one (auto-registered from a
@@ -94,7 +98,10 @@ impl ClientHeader {
             return Self::default();
         };
         let (head, platform) = match raw.split_once('(') {
-            Some((h, rest)) => (h.trim(), Some(rest.trim_end_matches(')').trim().to_string())),
+            Some((h, rest)) => (
+                h.trim(),
+                Some(rest.trim_end_matches(')').trim().to_string()),
+            ),
             None => (raw, None),
         };
         let (app, version) = match head.split_once('/') {
@@ -109,7 +116,11 @@ impl ClientHeader {
     }
 
     pub fn from_request_headers(req: &HttpRequest) -> Self {
-        Self::parse(req.headers().get(CLIENT_HEADER).and_then(|v| v.to_str().ok()))
+        Self::parse(
+            req.headers()
+                .get(CLIENT_HEADER)
+                .and_then(|v| v.to_str().ok()),
+        )
     }
 
     /// Header absent, or a `pos` build older than 0.7.0 (the tills rework).
@@ -176,11 +187,13 @@ pub async fn ensure_registered(
         .filter(|c| valid_code(c))
         .unwrap_or_else(|| fallback_code(device_id));
     let branch_id = match branch_id {
-        Some(b) => sqlx::query_scalar::<_, Uuid>("SELECT id FROM branches WHERE id = $1 AND org_id = $2")
-            .bind(b)
-            .bind(org_id)
-            .fetch_optional(&mut *conn)
-            .await?,
+        Some(b) => {
+            sqlx::query_scalar::<_, Uuid>("SELECT id FROM branches WHERE id = $1 AND org_id = $2")
+                .bind(b)
+                .bind(org_id)
+                .fetch_optional(&mut *conn)
+                .await?
+        }
         None => None,
     };
     let inserted: Option<(String, Option<String>)> = sqlx::query_as(

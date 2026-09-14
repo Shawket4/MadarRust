@@ -15,16 +15,20 @@ struct Shop {
 }
 
 async fn shop(pool: &PgPool) -> Shop {
-    let org: Uuid = sqlx::query_scalar("INSERT INTO organizations (name, slug) VALUES ('Pull Org', $1) RETURNING id")
-        .bind(format!("pull-{}", Uuid::new_v4()))
-        .fetch_one(pool)
-        .await
-        .unwrap();
-    let branch: Uuid = sqlx::query_scalar("INSERT INTO branches (org_id, name, code) VALUES ($1, 'Pull', 'PULL') RETURNING id")
-        .bind(org)
-        .fetch_one(pool)
-        .await
-        .unwrap();
+    let org: Uuid = sqlx::query_scalar(
+        "INSERT INTO organizations (name, slug) VALUES ('Pull Org', $1) RETURNING id",
+    )
+    .bind(format!("pull-{}", Uuid::new_v4()))
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let branch: Uuid = sqlx::query_scalar(
+        "INSERT INTO branches (org_id, name, code) VALUES ($1, 'Pull', 'PULL') RETURNING id",
+    )
+    .bind(org)
+    .fetch_one(pool)
+    .await
+    .unwrap();
     let admin: Uuid = sqlx::query_scalar(
         "INSERT INTO users (org_id, name, email, password_hash, role) VALUES ($1, 'Admin', $2, 'x', 'org_admin') RETURNING id",
     )
@@ -46,7 +50,14 @@ async fn category(pool: &PgPool, org: Uuid, name: &str) -> Uuid {
 }
 
 fn req(branch: Uuid) -> PullRequest {
-    PullRequest { branch_id: branch, device_id: None, types: None, limit: None, ledger_page_size: None, snapshot_cursor: None }
+    PullRequest {
+        branch_id: branch,
+        device_id: None,
+        types: None,
+        limit: None,
+        ledger_page_size: None,
+        snapshot_cursor: None,
+    }
 }
 
 async fn head(pool: &PgPool, branch: Uuid) -> i64 {
@@ -63,19 +74,31 @@ async fn pull_full_snapshot_includes_all_types_and_next(pool: PgPool) {
     let cat = category(&pool, s.org, "Drinks").await;
     let resp = pull_core(&pool, s.org, &req(s.branch), None).await.unwrap();
     assert!(resp.full);
-    assert_eq!(resp.types, ALL_TYPES.iter().map(|t| t.to_string()).collect::<Vec<_>>());
+    assert_eq!(
+        resp.types,
+        ALL_TYPES.iter().map(|t| t.to_string()).collect::<Vec<_>>()
+    );
     assert_eq!(resp.next, Some(head(&pool, s.branch).await));
     let cats = &resp.data["category"];
-    let row = cats.iter().find(|r| r["id"] == json!(cat)).expect("category in snapshot");
+    let row = cats
+        .iter()
+        .find(|r| r["id"] == json!(cat))
+        .expect("category in snapshot");
     assert_eq!(row["name"], "Drinks");
     assert!(row["seq"].as_i64().unwrap() > 0);
     assert!(row.get("org_id").is_none(), "lean: no org_id");
     let settings = &resp.data["branch_settings"];
     assert!(settings.iter().any(|r| r["id"] == json!(s.branch)));
     assert!(resp.ledger_window.is_some());
-    assert!(resp.asset_bundle.is_some(), "full carries asset_bundle (null when none built)");
+    assert!(
+        resp.asset_bundle.is_some(),
+        "full carries asset_bundle (null when none built)"
+    );
     for ty in super::LEDGER_TYPES {
-        assert!(!resp.checksums.contains_key(*ty), "ledger types are not checksummed");
+        assert!(
+            !resp.checksums.contains_key(*ty),
+            "ledger types are not checksummed"
+        );
     }
 }
 
@@ -90,15 +113,29 @@ async fn pull_incremental_returns_changes_after_since(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let resp = pull_core(&pool, s.org, &req(s.branch), Some(since)).await.unwrap();
+    let resp = pull_core(&pool, s.org, &req(s.branch), Some(since))
+        .await
+        .unwrap();
     assert!(!resp.full && !resp.has_more);
     assert!(resp.changes.iter().all(|c| c.seq > since));
-    let new = resp.changes.iter().find(|c| c.id == cat).expect("new category change");
+    let new = resp
+        .changes
+        .iter()
+        .find(|c| c.id == cat)
+        .expect("new category change");
     assert_eq!(new.op, "upsert");
     assert_eq!(new.data.as_ref().unwrap()["name"], "New");
-    assert!(resp.changes.iter().any(|c| c.ty == "category" && c.op == "delete"), "soft delete leaves the live set");
+    assert!(
+        resp.changes
+            .iter()
+            .any(|c| c.ty == "category" && c.op == "delete"),
+        "soft delete leaves the live set"
+    );
     assert_eq!(resp.next, Some(head(&pool, s.branch).await));
-    assert!(resp.checksums.contains_key("category"), "final page carries checksums");
+    assert!(
+        resp.checksums.contains_key("category"),
+        "final page carries checksums"
+    );
 }
 
 #[sqlx::test]
@@ -114,17 +151,28 @@ async fn pull_horizon_never_skips_inflight_commit(pool: PgPool) {
         .unwrap();
     // T2 commits a higher seq.
     category(&pool, s.org, "Committed").await;
-    let resp = pull_core(&pool, s.org, &req(s.branch), Some(since)).await.unwrap();
-    assert_eq!(resp.next, Some(since), "cannot see past an in-flight emitter");
+    let resp = pull_core(&pool, s.org, &req(s.branch), Some(since))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.next,
+        Some(since),
+        "cannot see past an in-flight emitter"
+    );
     assert!(resp.changes.is_empty());
     t1.commit().await.unwrap();
-    let resp = pull_core(&pool, s.org, &req(s.branch), Some(since)).await.unwrap();
+    let resp = pull_core(&pool, s.org, &req(s.branch), Some(since))
+        .await
+        .unwrap();
     let names: Vec<&str> = resp
         .changes
         .iter()
         .filter_map(|c| c.data.as_ref().and_then(|d| d["name"].as_str()))
         .collect();
-    assert!(names.contains(&"Inflight") && names.contains(&"Committed"), "{names:?}");
+    assert!(
+        names.contains(&"Inflight") && names.contains(&"Committed"),
+        "{names:?}"
+    );
 }
 
 #[sqlx::test]
@@ -169,10 +217,17 @@ async fn pull_resync_required_after_purge(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    let resp = pull_core(&pool, s.org, &req(s.branch), Some(h - 1)).await.unwrap();
+    let resp = pull_core(&pool, s.org, &req(s.branch), Some(h - 1))
+        .await
+        .unwrap();
     assert!(resp.resync_required);
-    let ahead = pull_core(&pool, s.org, &req(s.branch), Some(h + 1000)).await.unwrap();
-    assert!(ahead.resync_required, "a cursor ahead of the head also resyncs");
+    let ahead = pull_core(&pool, s.org, &req(s.branch), Some(h + 1000))
+        .await
+        .unwrap();
+    assert!(
+        ahead.resync_required,
+        "a cursor ahead of the head also resyncs"
+    );
 }
 
 #[sqlx::test]
@@ -181,13 +236,25 @@ async fn pull_types_subset_requires_no_since(pool: PgPool) {
     let mut r = req(s.branch);
     r.types = Some(vec!["category".into()]);
     let err = pull_core(&pool, s.org, &r, Some(0)).await.unwrap_err();
-    assert!(matches!(err, crate::errors::AppError::Coded { code: "TYPES_REQUIRE_FULL", .. }));
+    assert!(matches!(
+        err,
+        crate::errors::AppError::Coded {
+            code: "TYPES_REQUIRE_FULL",
+            ..
+        }
+    ));
     let resp = pull_core(&pool, s.org, &r, None).await.unwrap();
     assert_eq!(resp.types, vec!["category".to_string()]);
     assert_eq!(resp.data.len(), 1);
     r.types = Some(vec!["nope".into()]);
     let err = pull_core(&pool, s.org, &r, None).await.unwrap_err();
-    assert!(matches!(err, crate::errors::AppError::Coded { code: "UNKNOWN_SYNC_TYPE", .. }));
+    assert!(matches!(
+        err,
+        crate::errors::AppError::Coded {
+            code: "UNKNOWN_SYNC_TYPE",
+            ..
+        }
+    ));
 }
 
 #[sqlx::test]
@@ -203,7 +270,12 @@ async fn pull_checksums_match_reference_formula(pool: PgPool) {
         }
         let pairs: Vec<(String, i64)> = rows
             .iter()
-            .map(|r| (r["id"].as_str().unwrap().to_string(), r["seq"].as_i64().unwrap()))
+            .map(|r| {
+                (
+                    r["id"].as_str().unwrap().to_string(),
+                    r["seq"].as_i64().unwrap(),
+                )
+            })
             .collect();
         let c = &resp.checksums[ty];
         assert_eq!(c.count, pairs.len() as i64, "{ty}");
@@ -240,15 +312,26 @@ async fn pull_ledger_window_includes_open_till_history(pool: PgPool) {
         .unwrap();
     let resp = pull_core(&pool, s.org, &req(s.branch), None).await.unwrap();
     let tills: Vec<&Value> = resp.data["till"].iter().collect();
-    assert!(tills.iter().any(|t| t["id"] == json!(old_open)), "open till's history is always in the window");
-    assert!(!tills.iter().any(|t| t["id"] == json!(old_closed)), "old closed till is outside the window");
+    assert!(
+        tills.iter().any(|t| t["id"] == json!(old_open)),
+        "open till's history is always in the window"
+    );
+    assert!(
+        !tills.iter().any(|t| t["id"] == json!(old_closed)),
+        "old closed till is outside the window"
+    );
 }
 
 #[sqlx::test]
 async fn pull_gzip_negotiated(pool: PgPool) {
     let s = shop(&pool).await;
     for i in 0..40 {
-        category(&pool, s.org, &format!("Category number {i} with a long enough name")).await;
+        category(
+            &pool,
+            s.org,
+            &format!("Category number {i} with a long enough name"),
+        )
+        .await;
     }
     let app = test::init_service(
         App::new()
@@ -258,7 +341,15 @@ async fn pull_gzip_negotiated(pool: PgPool) {
             .configure(crate::sync::routes::configure),
     )
     .await;
-    let token = create_token(&JwtSecret("test_secret".into()), s.admin, Some(s.org), UserRole::OrgAdmin, None, 24).unwrap();
+    let token = create_token(
+        &JwtSecret("test_secret".into()),
+        s.admin,
+        Some(s.org),
+        UserRole::OrgAdmin,
+        None,
+        24,
+    )
+    .unwrap();
     for (accept, want) in [("br", "br"), ("gzip", "gzip")] {
         let resp = test::call_service(
             &app,
@@ -287,8 +378,18 @@ async fn legacy_catalog_sync_unchanged(pool: PgPool) {
             .configure(crate::menu::routes::configure),
     )
     .await;
-    let token = create_token(&JwtSecret("test_secret".into()), s.admin, Some(s.org), UserRole::OrgAdmin, None, 24).unwrap();
-    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
+    let token = create_token(
+        &JwtSecret("test_secret".into()),
+        s.admin,
+        Some(s.org),
+        UserRole::OrgAdmin,
+        None,
+        24,
+    )
+    .unwrap();
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
     let resp = test::call_service(
         &app,
         test::TestRequest::get()
@@ -327,13 +428,19 @@ async fn sweeper_emits_time_based_deletes_and_raises_watermark(pool: PgPool) {
     assert_eq!(op(pool.clone()).await, "upsert");
     // Time passes: the slot ended days ago, with no write to fire a trigger.
     let mut conn = pool.acquire().await.unwrap();
-    sqlx::query("SET session_replication_role = replica").execute(&mut *conn).await.unwrap();
+    sqlx::query("SET session_replication_role = replica")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
     sqlx::query("UPDATE bookings SET starts_at = now() - interval '3 days 1 hour', ends_at = now() - interval '3 days' WHERE id = $1")
         .bind(booking)
         .execute(&mut *conn)
         .await
         .unwrap();
-    sqlx::query("SET session_replication_role = origin").execute(&mut *conn).await.unwrap();
+    sqlx::query("SET session_replication_role = origin")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
     drop(conn);
 
     // An old tombstone to purge.
@@ -357,14 +464,21 @@ async fn sweeper_emits_time_based_deletes_and_raises_watermark(pool: PgPool) {
     assert!(report.deletes_emitted >= 1, "{report:?}");
     assert!(report.tombstones_purged >= 1, "{report:?}");
     assert_eq!(op(pool.clone()).await, "delete");
-    let wm: i64 = sqlx::query_scalar("SELECT purged_through_seq FROM sync_feed_watermarks WHERE branch_id = $1")
-        .bind(s.branch)
-        .fetch_one(&pool)
+    let wm: i64 = sqlx::query_scalar(
+        "SELECT purged_through_seq FROM sync_feed_watermarks WHERE branch_id = $1",
+    )
+    .bind(s.branch)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(wm >= ghost_seq);
+    let resp = pull_core(&pool, s.org, &req(s.branch), Some(ghost_seq - 1))
         .await
         .unwrap();
-    assert!(wm >= ghost_seq);
-    let resp = pull_core(&pool, s.org, &req(s.branch), Some(ghost_seq - 1)).await.unwrap();
-    assert!(resp.resync_required, "a cursor before the purge must resync");
+    assert!(
+        resp.resync_required,
+        "a cursor before the purge must resync"
+    );
 }
 
 #[::core::prelude::v1::test]
@@ -377,10 +491,16 @@ fn sync_changed_debounced_per_branch() {
     assert!(d.on_notify(a, t0), "first change publishes immediately");
     assert!(d.on_notify(b, t0), "other branches are independent");
     assert!(!d.on_notify(a, t0 + DEBOUNCE / 4));
-    assert!(!d.on_notify(a, t0 + DEBOUNCE / 2), "a burst folds into one trailing event");
+    assert!(
+        !d.on_notify(a, t0 + DEBOUNCE / 2),
+        "a burst folds into one trailing event"
+    );
     assert!(d.due(t0 + DEBOUNCE / 2).is_empty());
     assert_eq!(d.due(t0 + DEBOUNCE), vec![a]);
-    assert!(d.due(t0 + DEBOUNCE * 2).is_empty(), "exactly one trailing publish");
+    assert!(
+        d.due(t0 + DEBOUNCE * 2).is_empty(),
+        "exactly one trailing publish"
+    );
 }
 
 #[sqlx::test]
@@ -400,7 +520,10 @@ async fn sync_changed_realtime_published_debounced(pool: PgPool) {
         assert_eq!(ev.data["branch_id"], json!(s.branch));
         events += 1;
     }
-    assert!((1..=2).contains(&events), "five changes in a burst → one immediate + at most one trailing event, got {events}");
+    assert!(
+        (1..=2).contains(&events),
+        "five changes in a burst → one immediate + at most one trailing event, got {events}"
+    );
 }
 
 /// One live entity of every one of the 22 types at `s.branch`, plus rows whose
@@ -500,12 +623,14 @@ END $$;
     .unwrap();
     assert_eq!(stale.len(), 3);
     for id in &stale {
-        let op: String = sqlx::query_scalar("SELECT op FROM sync_changes WHERE branch_id = $1 AND entity_id = $2")
-            .bind(s.branch)
-            .bind(id)
-            .fetch_one(pool)
-            .await
-            .unwrap();
+        let op: String = sqlx::query_scalar(
+            "SELECT op FROM sync_changes WHERE branch_id = $1 AND entity_id = $2",
+        )
+        .bind(s.branch)
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
         assert_eq!(op, "upsert", "precondition: the feed row is stale");
     }
     stale
@@ -519,7 +644,10 @@ fn store_from_full(resp: &super::PullResponse) -> Store {
     for ty in ALL_TYPES {
         let rows = store.entry(ty.to_string()).or_default();
         for r in resp.data.get(*ty).into_iter().flatten() {
-            rows.insert(r["id"].as_str().unwrap().to_string(), r["seq"].as_i64().unwrap());
+            rows.insert(
+                r["id"].as_str().unwrap().to_string(),
+                r["seq"].as_i64().unwrap(),
+            );
         }
     }
     store
@@ -551,9 +679,16 @@ fn mismatches(store: &Store, resp: &super::PullResponse) -> Vec<String> {
             bad.push(format!("{ty}: no checksum"));
             continue;
         };
-        let pairs: Vec<(String, i64)> = store[*ty].iter().map(|(id, seq)| (id.clone(), *seq)).collect();
+        let pairs: Vec<(String, i64)> = store[*ty]
+            .iter()
+            .map(|(id, seq)| (id.clone(), *seq))
+            .collect();
         if c.count != pairs.len() as i64 || c.checksum != checksum_of(&pairs) {
-            bad.push(format!("{ty}: server count {} vs store {}", c.count, pairs.len()));
+            bad.push(format!(
+                "{ty}: server count {} vs store {}",
+                c.count,
+                pairs.len()
+            ));
         }
     }
     bad
@@ -566,34 +701,72 @@ async fn pull_checksums_equal_projected_sets_for_every_type(pool: PgPool) {
 
     let full = pull_core(&pool, s.org, &req(s.branch), None).await.unwrap();
     for ty in ALL_TYPES {
-        assert!(!full.data.get(*ty).is_none_or(|v| v.is_empty()), "fixture seeds a live `{ty}`");
+        assert!(
+            !full.data.get(*ty).is_none_or(|v| v.is_empty()),
+            "fixture seeds a live `{ty}`"
+        );
     }
     let mut store = store_from_full(&full);
     for id in &stale {
-        assert!(store.values().all(|rows| !rows.contains_key(&id.to_string())), "stale {id} does not project");
+        assert!(
+            store
+                .values()
+                .all(|rows| !rows.contains_key(&id.to_string())),
+            "stale {id} does not project"
+        );
     }
-    assert_eq!(mismatches(&store, &full), Vec::<String>::new(), "full snapshot checksums = its own data");
+    assert_eq!(
+        mismatches(&store, &full),
+        Vec::<String>::new(),
+        "full snapshot checksums = its own data"
+    );
 
     // A clean incremental pull right after the full one: nothing changed, and
     // no type reports a mismatch (so no type is re-fetched).
-    let inc = pull_core(&pool, s.org, &req(s.branch), full.next).await.unwrap();
+    let inc = pull_core(&pool, s.org, &req(s.branch), full.next)
+        .await
+        .unwrap();
     assert!(!inc.has_more && inc.changes.is_empty(), "{:?}", inc.changes);
     apply_changes(&mut store, &inc);
     assert_eq!(mismatches(&store, &inc), Vec::<String>::new());
 
     // Changes after that, including one that leaves a live set, still match.
     category(&pool, s.org, "Cold").await;
-    sqlx::query("UPDATE discounts SET is_active = false WHERE org_id = $1").bind(s.org).execute(&pool).await.unwrap();
-    let inc2 = pull_core(&pool, s.org, &req(s.branch), inc.next).await.unwrap();
-    assert!(inc2.changes.iter().any(|c| c.ty == "discount" && c.op == "delete"));
+    sqlx::query("UPDATE discounts SET is_active = false WHERE org_id = $1")
+        .bind(s.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let inc2 = pull_core(&pool, s.org, &req(s.branch), inc.next)
+        .await
+        .unwrap();
+    assert!(
+        inc2.changes
+            .iter()
+            .any(|c| c.ty == "discount" && c.op == "delete")
+    );
     apply_changes(&mut store, &inc2);
     assert_eq!(mismatches(&store, &inc2), Vec::<String>::new());
 
     // An incremental that SEES a stale row (its feed row moved) sends a delete.
-    sqlx::query("SELECT sync_emit($1, 'booking', $2, 'upsert')").bind(s.branch).bind(stale[2]).execute(&pool).await.unwrap();
-    let inc3 = pull_core(&pool, s.org, &req(s.branch), inc2.next).await.unwrap();
-    let ch = inc3.changes.iter().find(|c| c.id == stale[2]).expect("the re-emitted booking");
-    assert_eq!(ch.op, "delete", "a booking that no longer projects is a delete");
+    sqlx::query("SELECT sync_emit($1, 'booking', $2, 'upsert')")
+        .bind(s.branch)
+        .bind(stale[2])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let inc3 = pull_core(&pool, s.org, &req(s.branch), inc2.next)
+        .await
+        .unwrap();
+    let ch = inc3
+        .changes
+        .iter()
+        .find(|c| c.id == stale[2])
+        .expect("the re-emitted booking");
+    assert_eq!(
+        ch.op, "delete",
+        "a booking that no longer projects is a delete"
+    );
     apply_changes(&mut store, &inc3);
     assert_eq!(mismatches(&store, &inc3), Vec::<String>::new());
 }
@@ -606,7 +779,10 @@ async fn pull_checksums_equal_projected_sets_for_every_type(pool: PgPool) {
 async fn pull_concurrent_pulls_on_small_pool_all_complete(pool: PgPool) {
     let s = shop(&pool).await;
     seed_every_type(&pool, &s).await;
-    let since = pull_core(&pool, s.org, &req(s.branch), None).await.unwrap().next;
+    let since = pull_core(&pool, s.org, &req(s.branch), None)
+        .await
+        .unwrap()
+        .next;
     category(&pool, s.org, "After").await;
 
     let small = sqlx::postgres::PgPoolOptions::new()
@@ -624,9 +800,12 @@ async fn pull_concurrent_pulls_on_small_pool_all_complete(pool: PgPool) {
             pull_core(&small, org, &req(branch), since).await
         }));
     }
-    let all = tokio::time::timeout(std::time::Duration::from_secs(60), futures::future::join_all(tasks))
-        .await
-        .expect("16 pulls on a pool of 2 finish (no deadlock)");
+    let all = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        futures::future::join_all(tasks),
+    )
+    .await
+    .expect("16 pulls on a pool of 2 finish (no deadlock)");
     for r in all {
         let resp = r.unwrap().expect("pull ok");
         assert!(resp.full || resp.changes.iter().any(|c| c.ty == "category"));

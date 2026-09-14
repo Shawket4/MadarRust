@@ -24,7 +24,8 @@ const SECRET: &str = "test_secret";
 const FIXED_TS: &str = "2026-01-01T00:00:00Z";
 
 fn read_json(rel: &str) -> Value {
-    let text = std::fs::read_to_string(format!("{ROOT}/{rel}")).unwrap_or_else(|e| panic!("{rel}: {e}"));
+    let text =
+        std::fs::read_to_string(format!("{ROOT}/{rel}")).unwrap_or_else(|e| panic!("{rel}: {e}"));
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("{rel}: {e}"))
 }
 
@@ -102,12 +103,24 @@ fn compare(path: &str, golden: &Value, actual: &Value, ids: &mut Ids, diffs: &mu
                 compare(&format!("{path}[{i}]"), gv, av, ids, diffs);
             }
         }
-        (Value::String(g), Value::String(a)) if g != a && is_uuid(g) && is_uuid(a) && !ids.known.contains(g) => {
+        (Value::String(g), Value::String(a))
+            if g != a && is_uuid(g) && is_uuid(a) && !ids.known.contains(g) =>
+        {
             // Server-minted id: must map one-to-one for the whole scenario.
-            let f = ids.fwd.entry(g.clone()).or_insert_with(|| a.clone()).clone();
-            let b = ids.back.entry(a.clone()).or_insert_with(|| g.clone()).clone();
+            let f = ids
+                .fwd
+                .entry(g.clone())
+                .or_insert_with(|| a.clone())
+                .clone();
+            let b = ids
+                .back
+                .entry(a.clone())
+                .or_insert_with(|| g.clone())
+                .clone();
             if &f != a || &b != g {
-                diffs.push(format!("{path}: id {g} → {a} breaks the mapping ({g} ↦ {f}, {b} ↦ {a})"));
+                diffs.push(format!(
+                    "{path}: id {g} → {a} breaks the mapping ({g} ↦ {f}, {b} ↦ {a})"
+                ));
             }
         }
         (Value::Number(g), Value::Number(a)) if g.as_f64() == a.as_f64() => {}
@@ -118,7 +131,9 @@ fn compare(path: &str, golden: &Value, actual: &Value, ids: &mut Ids, diffs: &mu
 
 fn subst(v: &Value, vars: &HashMap<String, Value>) -> Value {
     match v {
-        Value::Object(m) => Value::Object(m.iter().map(|(k, x)| (k.clone(), subst(x, vars))).collect()),
+        Value::Object(m) => {
+            Value::Object(m.iter().map(|(k, x)| (k.clone(), subst(x, vars))).collect())
+        }
         Value::Array(a) => Value::Array(a.iter().map(|x| subst(x, vars)).collect()),
         Value::String(s) => Value::String(subst_str(s, vars)),
         other => other.clone(),
@@ -132,8 +147,15 @@ fn subst_str(s: &str, vars: &HashMap<String, Value>) -> String {
         out.push_str(&rest[..start]);
         let end = rest[start..].find("}}").expect("unterminated {{") + start;
         let name = &rest[start + 2..end];
-        let val = vars.get(name).unwrap_or_else(|| panic!("unbound var {name}"));
-        out.push_str(val.as_str().map(str::to_string).unwrap_or_else(|| val.to_string()).as_str());
+        let val = vars
+            .get(name)
+            .unwrap_or_else(|| panic!("unbound var {name}"));
+        out.push_str(
+            val.as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| val.to_string())
+                .as_str(),
+        );
         rest = &rest[end + 2..];
     }
     out.push_str(rest);
@@ -141,16 +163,20 @@ fn subst_str(s: &str, vars: &HashMap<String, Value>) -> String {
 }
 
 fn dig<'a>(v: &'a Value, path: &str) -> &'a Value {
-    path.split('.').fold(v, |v, part| match part.parse::<usize>() {
-        Ok(i) if v.is_array() => &v[i],
-        _ => &v[part],
-    })
+    path.split('.')
+        .fold(v, |v, part| match part.parse::<usize>() {
+            Ok(i) if v.is_array() => &v[i],
+            _ => &v[part],
+        })
 }
 
 #[sqlx::test]
 async fn legacy_goldens_match_value_for_value(pool: PgPool) {
-    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
-    let seed = std::fs::read_to_string(format!("{ROOT}/scripts/legacy_till_golden/seed.sql")).unwrap();
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
+    let seed =
+        std::fs::read_to_string(format!("{ROOT}/scripts/legacy_till_golden/seed.sql")).unwrap();
     sqlx::raw_sql(&seed).execute(&pool).await.expect("seed.sql");
 
     let hub = web::Data::new(crate::realtime::hub::BranchEventHub::new());
@@ -173,14 +199,29 @@ async fn legacy_goldens_match_value_for_value(pool: PgPool) {
     let scenario = read_json("scripts/legacy_till_golden/scenario.json");
     let manifest = read_json("tests/fixtures/legacy_till_api/manifest.json");
     let keys = |k: &str| -> HashSet<String> {
-        manifest[k].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect()
+        manifest[k]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
     };
-    let rules = Rules { ts_keys: keys("volatile_timestamp_keys"), ref_keys: keys("dated_ref_keys") };
+    let rules = Rules {
+        ts_keys: keys("volatile_timestamp_keys"),
+        ref_keys: keys("dated_ref_keys"),
+    };
 
-    let mut vars: HashMap<String, Value> =
-        scenario["vars"].as_object().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let mut vars: HashMap<String, Value> = scenario["vars"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     let mut ids = Ids {
-        known: vars.values().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+        known: vars
+            .values()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
         fwd: HashMap::new(),
         back: HashMap::new(),
     };
@@ -226,7 +267,8 @@ async fn legacy_goldens_match_value_for_value(pool: PgPool) {
         let mut body: Value = if bytes.is_empty() {
             Value::Null
         } else {
-            serde_json::from_slice(&bytes).unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into()))
+            serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into()))
         };
         if let Some(expect) = step["expect"].as_u64() {
             assert_eq!(u64::from(status), expect, "{method} {path}: {body}");
@@ -234,11 +276,16 @@ async fn legacy_goldens_match_value_for_value(pool: PgPool) {
         if let Some(bind) = step["bind"].as_object() {
             for (var, p) in bind {
                 let v = dig(&body, p.as_str().unwrap());
-                assert!(!v.is_null(), "{method} {path}: cannot bind {var} from {p}: {body}");
+                assert!(
+                    !v.is_null(),
+                    "{method} {path}: cannot bind {var} from {p}: {body}"
+                );
                 vars.insert(var.clone(), v.clone());
             }
         }
-        let Some(name) = step["save"].as_str() else { continue };
+        let Some(name) = step["save"].as_str() else {
+            continue;
+        };
         saved.insert(format!("{name}.json"));
         let golden = read_json(&format!("tests/fixtures/legacy_till_api/{name}.json"));
         let mut diffs = Vec::new();
@@ -248,24 +295,38 @@ async fn legacy_goldens_match_value_for_value(pool: PgPool) {
         rules.scrub(&mut body, None);
         compare("$", &golden["body"], &body, &mut ids, &mut diffs);
         if !diffs.is_empty() {
-            report.push(format!("{name} ({method} {path}):\n    {}", diffs.join("\n    ")));
+            report.push(format!(
+                "{name} ({method} {path}):\n    {}",
+                diffs.join("\n    ")
+            ));
         }
     }
 
     // Every golden on disk is exercised.
     for f in manifest["files"].as_array().unwrap() {
         let file = f["file"].as_str().unwrap();
-        assert!(saved.contains(file), "golden {file} is not wired into scenario.json");
+        assert!(
+            saved.contains(file),
+            "golden {file} is not wired into scenario.json"
+        );
     }
-    assert!(report.is_empty(), "legacy drift in {} golden(s):\n{}", report.len(), report.join("\n"));
+    assert!(
+        report.is_empty(),
+        "legacy drift in {} golden(s):\n{}",
+        report.len(),
+        report.join("\n")
+    );
 }
 
 /// `DELETE /shifts/{id}` (T13 through the legacy route): an empty, closed
 /// till is deleted (204) and is gone afterwards; a till with sales is not.
 #[sqlx::test]
 async fn legacy_delete_shift_route(pool: PgPool) {
-    crate::permissions::seeder::seed_role_permissions(&pool).await.unwrap();
-    let seed = std::fs::read_to_string(format!("{ROOT}/scripts/legacy_till_golden/seed.sql")).unwrap();
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
+    let seed =
+        std::fs::read_to_string(format!("{ROOT}/scripts/legacy_till_golden/seed.sql")).unwrap();
     sqlx::raw_sql(&seed).execute(&pool).await.expect("seed.sql");
     let app = test::init_service(
         App::new()
@@ -279,7 +340,15 @@ async fn legacy_delete_shift_route(pool: PgPool) {
     let org = uuid::Uuid::parse_str("10000000-0000-4000-8000-000000000001").unwrap();
     let admin = uuid::Uuid::parse_str("10000000-0000-4000-8000-00000000ad01").unwrap();
     let branch = "10000000-0000-4000-8000-0000000000a1";
-    let tok = create_token(&JwtSecret(SECRET.into()), admin, Some(org), UserRole::OrgAdmin, None, 24).unwrap();
+    let tok = create_token(
+        &JwtSecret(SECRET.into()),
+        admin,
+        Some(org),
+        UserRole::OrgAdmin,
+        None,
+        24,
+    )
+    .unwrap();
     let auth = ("Authorization", format!("Bearer {tok}"));
 
     let empty = uuid::Uuid::new_v4();
@@ -306,13 +375,19 @@ async fn legacy_delete_shift_route(pool: PgPool) {
 
     let resp = test::call_service(
         &app,
-        test::TestRequest::delete().uri(&format!("/shifts/{empty}")).insert_header(auth.clone()).to_request(),
+        test::TestRequest::delete()
+            .uri(&format!("/shifts/{empty}"))
+            .insert_header(auth.clone())
+            .to_request(),
     )
     .await;
     assert_eq!(resp.status(), 204);
     let resp = test::call_service(
         &app,
-        test::TestRequest::get().uri(&format!("/shifts/{empty}")).insert_header(auth.clone()).to_request(),
+        test::TestRequest::get()
+            .uri(&format!("/shifts/{empty}"))
+            .insert_header(auth.clone())
+            .to_request(),
     )
     .await;
     assert_eq!(resp.status(), 404);
@@ -347,7 +422,10 @@ async fn legacy_delete_shift_route(pool: PgPool) {
     assert_eq!(resp.status(), 201);
     let resp = test::call_service(
         &app,
-        test::TestRequest::delete().uri(&format!("/shifts/{busy}")).insert_header(auth.clone()).to_request(),
+        test::TestRequest::delete()
+            .uri(&format!("/shifts/{busy}"))
+            .insert_header(auth.clone())
+            .to_request(),
     )
     .await;
     assert!(resp.status().is_client_error(), "{}", resp.status());

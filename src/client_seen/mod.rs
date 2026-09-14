@@ -109,17 +109,29 @@ tokio::task_local! {
 /// A legacy code path was taken. Logs `legacy_hit{kind}` and notes it for the
 /// request's `client_seen` row. Never fails.
 pub fn legacy_hit(kind: &'static str) {
-    note(LegacyHit { kind, site: None, org_id: None });
+    note(LegacyHit {
+        kind,
+        site: None,
+        org_id: None,
+    });
 }
 
 /// [`legacy_hit`] naming the site within the kind.
 pub fn legacy_hit_at(kind: &'static str, site: &'static str) {
-    note(LegacyHit { kind, site: Some(site), org_id: None });
+    note(LegacyHit {
+        kind,
+        site: Some(site),
+        org_id: None,
+    });
 }
 
 /// [`legacy_hit_at`] on a route with no token, when the handler knows the org.
 pub fn legacy_hit_for_org(kind: &'static str, site: &'static str, org_id: Option<Uuid>) {
-    note(LegacyHit { kind, site: Some(site), org_id });
+    note(LegacyHit {
+        kind,
+        site: Some(site),
+        org_id,
+    });
 }
 
 fn note(hit: LegacyHit) {
@@ -161,7 +173,11 @@ pub fn mirror_list_route(method: &actix_web::http::Method, path: &str, query: &s
     if method != actix_web::http::Method::GET {
         return false;
     }
-    let has = |key: &str| query.split('&').any(|pair| pair.split('=').next() == Some(key));
+    let has = |key: &str| {
+        query
+            .split('&')
+            .any(|pair| pair.split('=').next() == Some(key))
+    };
     let segs: Vec<&str> = path.trim_end_matches('/').split('/').collect();
     match segs.as_slice() {
         ["", "menu-items"] => query.split('&').any(|p| p == "full=true"),
@@ -196,7 +212,9 @@ pub fn mirror_list_route(method: &actix_web::http::Method, path: &str, query: &s
 /// `X-Madar-Client` names a POS or KDS build (`pos/…`, `kds/…`).
 pub fn is_native_client(headers: &actix_web::http::header::HeaderMap) -> bool {
     matches!(
-        ClientHeader::parse(headers.get(CLIENT_HEADER).and_then(|v| v.to_str().ok())).app.as_deref(),
+        ClientHeader::parse(headers.get(CLIENT_HEADER).and_then(|v| v.to_str().ok()))
+            .app
+            .as_deref(),
         Some("pos" | "kds")
     )
 }
@@ -205,7 +223,9 @@ pub fn is_native_client(headers: &actix_web::http::header::HeaderMap) -> bool {
 pub fn query_uses_shift_id(method: &actix_web::http::Method, path: &str, query: &str) -> bool {
     method == actix_web::http::Method::GET
         && matches!(path, "/orders" | "/orders/export")
-        && query.split('&').any(|pair| pair.split('=').next() == Some("shift_id"))
+        && query
+            .split('&')
+            .any(|pair| pair.split('=').next() == Some("shift_id"))
 }
 
 /// Live POST routes whose body structs accept `shift_id` as an alias of `till_id`.
@@ -226,7 +246,11 @@ pub fn body_names_shift_id(body: &[u8]) -> bool {
 }
 
 fn header_str<'a>(headers: &'a actix_web::http::header::HeaderMap, name: &str) -> Option<&'a str> {
-    headers.get(name).and_then(|v| v.to_str().ok()).map(str::trim).filter(|s| !s.is_empty())
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 /// A web browser's User-Agent (the dashboard, in a browser or the Tauri webview).
@@ -278,7 +302,9 @@ pub fn seen_key(device_id: Option<Uuid>, branch_id: Option<Uuid>, client: Option
         Some(d) => format!("d:{d}"),
         None => format!(
             "c:{}:{}",
-            branch_id.map(|b| b.to_string()).unwrap_or_else(|| "-".into()),
+            branch_id
+                .map(|b| b.to_string())
+                .unwrap_or_else(|| "-".into()),
             client.unwrap_or("-")
         ),
     }
@@ -293,7 +319,9 @@ fn throttle_map() -> &'static Mutex<HashMap<String, Instant>> {
 
 /// True when `key` was not let through within [`THROTTLE`]; marks it now.
 pub fn throttle_allows(key: &str, now: Instant) -> bool {
-    let Ok(mut map) = throttle_map().lock() else { return false };
+    let Ok(mut map) = throttle_map().lock() else {
+        return false;
+    };
     if map.len() > 50_000 {
         map.retain(|_, t| now.duration_since(*t) < THROTTLE);
     }
@@ -327,7 +355,11 @@ pub struct Sighting {
 
 /// Upsert one sighting. `last_legacy_*` move only when a legacy kind is present.
 pub async fn upsert(pool: &PgPool, s: &Sighting) -> Result<(), sqlx::Error> {
-    let key = seen_key(s.device_id, s.branch_id.or(s.branch_hint), s.client.as_deref());
+    let key = seen_key(
+        s.device_id,
+        s.branch_id.or(s.branch_hint),
+        s.client.as_deref(),
+    );
     let last_kind = s.legacy_kinds.last().copied();
     let kinds: Vec<String> = s.legacy_kinds.iter().map(|k| k.to_string()).collect();
     sqlx::query(
@@ -375,7 +407,9 @@ pub async fn record(
     // The ROOT pool (owner role; the table is written for the org the token
     // names). Taken now: after routing, a scope's own pool (reports' read
     // replica) would shadow it.
-    let pool = req.app_data::<web::Data<PgPool>>().map(|p| p.get_ref().clone());
+    let pool = req
+        .app_data::<web::Data<PgPool>>()
+        .map(|p| p.get_ref().clone());
     let hits = Arc::new(Mutex::new(Vec::new()));
 
     let path = req.path().to_string();
@@ -388,7 +422,8 @@ pub async fn record(
         if query_uses_shift_id(&method, &path, req.query_string()) {
             v.push(KIND_SHIFT_ID_QUERY);
         }
-        if is_native_client(req.headers()) && mirror_list_route(&method, &path, req.query_string()) {
+        if is_native_client(req.headers()) && mirror_list_route(&method, &path, req.query_string())
+        {
             v.push(KIND_MIRROR_LIST_POS);
         }
         v
@@ -410,28 +445,52 @@ pub async fn record(
             let aliased = body_names_shift_id(&bytes);
             req.set_payload(actix_web::dev::Payload::from(bytes));
             if aliased {
-                hits.lock().map(|mut h| h.push(LegacyHit { kind: KIND_SHIFT_ID_BODY, site: None, org_id: None })).ok();
+                hits.lock()
+                    .map(|mut h| {
+                        h.push(LegacyHit {
+                            kind: KIND_SHIFT_ID_BODY,
+                            site: None,
+                            org_id: None,
+                        })
+                    })
+                    .ok();
                 tracing::info!(target: "madar.legacy", kind = KIND_SHIFT_ID_BODY, site = "", "legacy_hit");
             }
         }
     }
     for kind in pre {
-        hits.lock().map(|mut h| h.push(LegacyHit { kind, site: None, org_id: None })).ok();
+        hits.lock()
+            .map(|mut h| {
+                h.push(LegacyHit {
+                    kind,
+                    site: None,
+                    org_id: None,
+                })
+            })
+            .ok();
         tracing::info!(target: "madar.legacy", kind, site = "", "legacy_hit");
     }
 
     let headers = req.headers().clone();
-    let res = HITS.scope(hits.clone(), async move { next.call(req).await }).await?;
+    let res = HITS
+        .scope(hits.clone(), async move { next.call(req).await })
+        .await?;
 
     let claims = res.request().extensions().get::<Claims>().cloned();
     let hits = hits.lock().map(|v| v.clone()).unwrap_or_default();
-    let org = claims.as_ref().and_then(|c| c.org_id()).or_else(|| hits.iter().find_map(|h| h.org_id));
+    let org = claims
+        .as_ref()
+        .and_then(|c| c.org_id())
+        .or_else(|| hits.iter().find_map(|h| h.org_id));
     if let (Some(pool), Some(org_id)) = (pool, org) {
         let device_id = DeviceHeader::from_request_headers(res.request());
         let branch_id = claims.as_ref().and_then(|c| c.branch_id());
         let branch_hint = branch_header(&headers);
         let client = client_string(&headers);
-        let key = format!("{org_id}|{}", seen_key(device_id, branch_id.or(branch_hint), client.as_deref()));
+        let key = format!(
+            "{org_id}|{}",
+            seen_key(device_id, branch_id.or(branch_hint), client.as_deref())
+        );
         let now = Instant::now();
         let mut kinds: Vec<&'static str> = Vec::new();
         for h in &hits {

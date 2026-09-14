@@ -19,7 +19,10 @@ pub struct SweepReport {
 }
 
 pub fn spawn(pool: PgPool) {
-    if std::env::var("SYNC_SWEEP_ENABLED").map(|v| v == "false").unwrap_or(false) {
+    if std::env::var("SYNC_SWEEP_ENABLED")
+        .map(|v| v == "false")
+        .unwrap_or(false)
+    {
         tracing::info!("sync changefeed sweep disabled (SYNC_SWEEP_ENABLED)");
         return;
     }
@@ -47,7 +50,10 @@ pub async fn sweep_once(pool: &PgPool) -> Result<SweepReport, sqlx::Error> {
         return Ok(SweepReport::default());
     }
     let result = sweep_locked(&mut conn).await;
-    let _ = sqlx::query("SELECT pg_advisory_unlock($1)").bind(SWEEP_LOCK).execute(&mut *conn).await;
+    let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(SWEEP_LOCK)
+        .execute(&mut *conn)
+        .await;
     result
 }
 
@@ -88,5 +94,8 @@ async fn sweep_locked(conn: &mut sqlx::PgConnection) -> Result<SweepReport, sqlx
         .execute(&mut *conn)
         .await?;
     }
-    Ok(SweepReport { deletes_emitted, tombstones_purged })
+    Ok(SweepReport {
+        deletes_emitted,
+        tombstones_purged,
+    })
 }

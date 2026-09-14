@@ -296,7 +296,10 @@ pub(crate) async fn create_open_ticket_inner(
     if !actor.replay
         && !crate::tills::handlers::branch_has_open_till(pool.get_ref(), body.branch_id).await?
     {
-        crate::client_seen::legacy_hit_at(crate::client_seen::KIND_ERROR_WORDING, "fire_no_open_shift");
+        crate::client_seen::legacy_hit_at(
+            crate::client_seen::KIND_ERROR_WORDING,
+            "fire_no_open_shift",
+        );
         return Err(AppError::Conflict(
             "No open shift at this branch — open a till first".into(),
         ));

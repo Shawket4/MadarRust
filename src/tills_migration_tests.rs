@@ -170,13 +170,17 @@ impl Drop for FreshDb {
         let opts = self.base.clone().database("postgres");
         // Drop runs outside any async context guarantee: use a private runtime.
         let _ = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
             rt.block_on(async move {
                 use sqlx::Connection;
                 if let Ok(mut conn) = sqlx::PgConnection::connect_with(&opts).await {
-                    let _ = sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))
-                        .execute(&mut conn)
-                        .await;
+                    let _ =
+                        sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))
+                            .execute(&mut conn)
+                            .await;
                 }
             });
         })
@@ -719,8 +723,19 @@ async fn down_script_round_trip(pool: PgPool) {
         bindings_before
     );
     assert_eq!(lines(&pool, "SELECT id::text || coalesce(started_till_id::text,'-') || coalesce(ended_till_id::text,'-') FROM table_occupancies ORDER BY id").await, occ_before);
-    let rework_in = REWORK_VERSIONS.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
-    assert_eq!(i64_of(&pool, &format!("SELECT count(*) FROM _sqlx_migrations WHERE version IN ({rework_in})")).await, 0);
+    let rework_in = REWORK_VERSIONS
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(
+        i64_of(
+            &pool,
+            &format!("SELECT count(*) FROM _sqlx_migrations WHERE version IN ({rework_in})")
+        )
+        .await,
+        0
+    );
     // The old one-open-per-teller rule is back.
     assert!(
         sqlx::query("INSERT INTO tills (branch_id, teller_id, status) VALUES ($1, $2, 'open')")
@@ -755,7 +770,10 @@ async fn down_script_round_trip(pool: PgPool) {
 async fn changefeed_backfill_restamped_to_business_time(pool: PgPool) {
     let (pool, _fresh) = fresh(&pool).await;
     migrate_pre(&pool).await;
-    sqlx::raw_sql(FIXTURE).execute(&pool).await.expect("fixture");
+    sqlx::raw_sql(FIXTURE)
+        .execute(&pool)
+        .await
+        .expect("fixture");
     // History is old: every ledger row happened on 2026-09-01.
     sqlx::raw_sql(
         "SET session_replication_role = replica;
@@ -769,45 +787,72 @@ async fn changefeed_backfill_restamped_to_business_time(pool: PgPool) {
     .unwrap();
     // Up to (and including) the changefeed, but NOT the restamp yet: this is
     // what a rehearsal database looks like today.
-    subset(|v| v <= 20260914090600).run(&pool).await.expect("rework up to the feed");
-    let stamp = format!("(SELECT installed_on FROM _sqlx_migrations WHERE version = 20260914090300)");
+    subset(|v| v <= 20260914090600)
+        .run(&pool)
+        .await
+        .expect("rework up to the feed");
+    let stamp =
+        format!("(SELECT installed_on FROM _sqlx_migrations WHERE version = 20260914090300)");
     let ledger_at_stamp = format!(
         "SELECT count(*) FROM sync_changes WHERE type IN ('till','cash_movement','order','refund') AND changed_at = {stamp}"
     );
     let backfilled = i64_of(&pool, &ledger_at_stamp).await;
-    assert!(backfilled >= 8, "the bug: every ledger row stamped as changed at migration time ({backfilled})");
-    let state_before = i64_of(&pool, &format!("SELECT count(*) FROM sync_changes WHERE type = 'menu_item' AND changed_at = {stamp}")).await;
+    assert!(
+        backfilled >= 8,
+        "the bug: every ledger row stamped as changed at migration time ({backfilled})"
+    );
+    let state_before = i64_of(
+        &pool,
+        &format!(
+            "SELECT count(*) FROM sync_changes WHERE type = 'menu_item' AND changed_at = {stamp}"
+        ),
+    )
+    .await;
     // A change made after the feed exists keeps its real stamp.
-    sqlx::query(&format!("UPDATE orders SET total_amount = total_amount WHERE id = '{O1}'"))
-        .execute(&pool)
-        .await
-        .unwrap();
-    let o1_changed: chrono::DateTime<chrono::Utc> =
-        sqlx::query_scalar(&format!("SELECT changed_at FROM sync_changes WHERE type = 'order' AND entity_id = '{O1}'"))
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    sqlx::query(&format!(
+        "UPDATE orders SET total_amount = total_amount WHERE id = '{O1}'"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let o1_changed: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(&format!(
+        "SELECT changed_at FROM sync_changes WHERE type = 'order' AND entity_id = '{O1}'"
+    ))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     migrate_rest(&pool).await;
 
-    assert_eq!(i64_of(&pool, &ledger_at_stamp).await, 0, "no backfilled ledger row keeps the migration-time stamp");
-    let o3: chrono::DateTime<chrono::Utc> =
-        sqlx::query_scalar(&format!("SELECT changed_at FROM sync_changes WHERE type = 'order' AND entity_id = '{O3}'"))
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(o3.to_rfc3339(), "2026-09-01T10:00:00+00:00", "an order takes its own business time, not updated_at");
-    let o1_after: chrono::DateTime<chrono::Utc> =
-        sqlx::query_scalar(&format!("SELECT changed_at FROM sync_changes WHERE type = 'order' AND entity_id = '{O1}'"))
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    assert_eq!(
+        i64_of(&pool, &ledger_at_stamp).await,
+        0,
+        "no backfilled ledger row keeps the migration-time stamp"
+    );
+    let o3: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(&format!(
+        "SELECT changed_at FROM sync_changes WHERE type = 'order' AND entity_id = '{O3}'"
+    ))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        o3.to_rfc3339(),
+        "2026-09-01T10:00:00+00:00",
+        "an order takes its own business time, not updated_at"
+    );
+    let o1_after: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(&format!(
+        "SELECT changed_at FROM sync_changes WHERE type = 'order' AND entity_id = '{O1}'"
+    ))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(o1_after, o1_changed, "a real post-feed change is untouched");
-    let closed_till: chrono::DateTime<chrono::Utc> =
-        sqlx::query_scalar(&format!("SELECT changed_at FROM sync_changes WHERE type = 'till' AND entity_id = '{S1}'"))
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let closed_till: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(&format!(
+        "SELECT changed_at FROM sync_changes WHERE type = 'till' AND entity_id = '{S1}'"
+    ))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(closed_till.to_rfc3339(), "2026-09-01T12:00:00+00:00");
     assert_eq!(
         i64_of(&pool, &format!("SELECT count(*) FROM sync_changes WHERE type = 'menu_item' AND changed_at = {stamp}")).await,
@@ -818,18 +863,46 @@ async fn changefeed_backfill_restamped_to_business_time(pool: PgPool) {
     // The full pull: the closed till's old history is out of the window; the
     // open till's whole history and the just-changed order are in.
     let org = u(ORG);
-    let req = crate::sync::pull::PullRequest { branch_id: u(B1), device_id: None, types: None, limit: None, ledger_page_size: None, snapshot_cursor: None };
-    let resp = crate::sync::pull::pull_core(&pool, org, &req, None).await.unwrap();
+    let req = crate::sync::pull::PullRequest {
+        branch_id: u(B1),
+        device_id: None,
+        types: None,
+        limit: None,
+        ledger_page_size: None,
+        snapshot_cursor: None,
+    };
+    let resp = crate::sync::pull::pull_core(&pool, org, &req, None)
+        .await
+        .unwrap();
     let ids = |ty: &str| -> Vec<String> {
-        resp.data[ty].iter().map(|r| r["id"].as_str().unwrap().to_string()).collect()
+        resp.data[ty]
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect()
     };
     let orders = ids("order");
-    assert!(orders.contains(&O3.to_string()), "open till's order is in: {orders:?}");
-    assert!(orders.contains(&O1.to_string()), "changed-now order is in: {orders:?}");
-    assert!(!orders.contains(&"00000000-0000-4000-8000-00000000d002".to_string()), "old closed-till order is out: {orders:?}");
+    assert!(
+        orders.contains(&O3.to_string()),
+        "open till's order is in: {orders:?}"
+    );
+    assert!(
+        orders.contains(&O1.to_string()),
+        "changed-now order is in: {orders:?}"
+    );
+    assert!(
+        !orders.contains(&"00000000-0000-4000-8000-00000000d002".to_string()),
+        "old closed-till order is out: {orders:?}"
+    );
     let tills = ids("till");
-    assert!(tills.contains(&S2.to_string()) && !tills.contains(&S1.to_string()), "{tills:?}");
-    assert_eq!(ids("refund").len(), 1, "the refund was issued from the open till S2, so its history is in");
+    assert!(
+        tills.contains(&S2.to_string()) && !tills.contains(&S1.to_string()),
+        "{tills:?}"
+    );
+    assert_eq!(
+        ids("refund").len(),
+        1,
+        "the refund was issued from the open till S2, so its history is in"
+    );
 }
 
 #[sqlx::test(migrations = false)]

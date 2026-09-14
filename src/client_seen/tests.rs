@@ -23,7 +23,15 @@ fn uid(s: &str) -> Uuid {
 }
 
 fn bearer(user: &str, org: Uuid, role: UserRole) -> (&'static str, String) {
-    let tok = create_token(&JwtSecret(SECRET.into()), uid(user), Some(org), role, None, 24).unwrap();
+    let tok = create_token(
+        &JwtSecret(SECRET.into()),
+        uid(user),
+        Some(org),
+        role,
+        None,
+        24,
+    )
+    .unwrap();
     ("Authorization", format!("Bearer {tok}"))
 }
 
@@ -42,57 +50,121 @@ fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
 
 #[core::prelude::v1::test]
 fn classifies_legacy_routes_by_path() {
-    assert_eq!(route_kind("/shifts/branches/x/current"), Some(KIND_SHIFTS_ROUTE));
+    assert_eq!(
+        route_kind("/shifts/branches/x/current"),
+        Some(KIND_SHIFTS_ROUTE)
+    );
     assert_eq!(route_kind("/shifts"), Some(KIND_SHIFTS_ROUTE));
-    assert_eq!(route_kind("/refunds/shift/abc"), Some(KIND_REFUNDS_SHIFT_ROUTE));
-    assert_eq!(route_kind("/reports/shifts/abc/summary"), Some(KIND_REPORTS_SHIFTS_ROUTE));
+    assert_eq!(
+        route_kind("/refunds/shift/abc"),
+        Some(KIND_REFUNDS_SHIFT_ROUTE)
+    );
+    assert_eq!(
+        route_kind("/reports/shifts/abc/summary"),
+        Some(KIND_REPORTS_SHIFTS_ROUTE)
+    );
     assert_eq!(route_kind("/tills/branches/x/current"), None);
     assert_eq!(route_kind("/shiftsx"), None);
-    assert_eq!(route_kind("/staff/shifts"), None, "HR work shifts are not legacy");
+    assert_eq!(
+        route_kind("/staff/shifts"),
+        None,
+        "HR work shifts are not legacy"
+    );
     assert_eq!(route_kind("/reports/tills/abc/summary"), None);
 }
 
 #[core::prelude::v1::test]
 fn detects_shift_id_in_queries_and_bodies() {
-    assert!(query_uses_shift_id(&Method::GET, "/orders", "branch_id=a&shift_id=b"));
-    assert!(query_uses_shift_id(&Method::GET, "/orders/export", "shift_id=b"));
-    assert!(!query_uses_shift_id(&Method::GET, "/orders", "till_id=b&note=shift_id"));
+    assert!(query_uses_shift_id(
+        &Method::GET,
+        "/orders",
+        "branch_id=a&shift_id=b"
+    ));
+    assert!(query_uses_shift_id(
+        &Method::GET,
+        "/orders/export",
+        "shift_id=b"
+    ));
+    assert!(!query_uses_shift_id(
+        &Method::GET,
+        "/orders",
+        "till_id=b&note=shift_id"
+    ));
     assert!(!query_uses_shift_id(&Method::POST, "/orders", "shift_id=b"));
 
-    for p in ["/orders", "/refunds", "/open-tickets/1/settle", "/delivery-orders/1/finalize"] {
+    for p in [
+        "/orders",
+        "/refunds",
+        "/open-tickets/1/settle",
+        "/delivery-orders/1/finalize",
+    ] {
         assert!(body_may_alias_shift_id(&Method::POST, p), "{p}");
     }
     assert!(!body_may_alias_shift_id(&Method::GET, "/orders"));
     assert!(!body_may_alias_shift_id(&Method::POST, "/orders/1/void"));
     assert!(body_names_shift_id(br#"{"branch_id":"x","shift_id":"y"}"#));
-    assert!(!body_names_shift_id(br#"{"till_id":"y","note":"shift id"}"#));
+    assert!(!body_names_shift_id(
+        br#"{"till_id":"y","note":"shift id"}"#
+    ));
 }
 
 #[core::prelude::v1::test]
 fn client_string_version_and_legacy_pos() {
-    let h = headers(&[("x-madar-client", "pos/0.7.2 (ios)"), ("user-agent", "madar-core/0.1.0")]);
+    let h = headers(&[
+        ("x-madar-client", "pos/0.7.2 (ios)"),
+        ("user-agent", "madar-core/0.1.0"),
+    ]);
     assert_eq!(client_string(&h).as_deref(), Some("pos/0.7.2 (ios)"));
     assert_eq!(app_version(&h).as_deref(), Some("0.7.2"));
     assert!(!is_legacy_pos_request(&h));
-    assert_eq!(app_version(&headers(&[("x-madar-client", "kds/1.2.3")])).as_deref(), Some("1.2.3"));
+    assert_eq!(
+        app_version(&headers(&[("x-madar-client", "kds/1.2.3")])).as_deref(),
+        Some("1.2.3")
+    );
 
     let old = headers(&[("user-agent", "madar-core/0.6.1")]);
     assert_eq!(client_string(&old).as_deref(), Some("madar-core/0.6.1"));
-    assert_eq!(app_version(&old), None, "a User-Agent is never an app version (that is the crate's)");
-    assert_eq!(app_version(&headers(&[("user-agent", "Dart/3.4 (dart:io)")])), None);
-    assert!(is_legacy_pos_request(&old), "no X-Madar-Client = a pre-0.7 POS");
-    assert!(is_legacy_pos_request(&headers(&[("x-madar-client", "pos/0.6.9")])));
-    let browser = headers(&[("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/17.0 Safari/605.1.15")]);
+    assert_eq!(
+        app_version(&old),
+        None,
+        "a User-Agent is never an app version (that is the crate's)"
+    );
+    assert_eq!(
+        app_version(&headers(&[("user-agent", "Dart/3.4 (dart:io)")])),
+        None
+    );
+    assert!(
+        is_legacy_pos_request(&old),
+        "no X-Madar-Client = a pre-0.7 POS"
+    );
+    assert!(is_legacy_pos_request(&headers(&[(
+        "x-madar-client",
+        "pos/0.6.9"
+    )])));
+    let browser = headers(&[(
+        "user-agent",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/17.0 Safari/605.1.15",
+    )]);
     assert!(!is_legacy_pos_request(&browser), "the dashboard");
     assert_eq!(client_string(&browser).as_deref(), Some(DASHBOARD_CLIENT));
-    assert_eq!(app_version(&browser), None, "a browser's Mozilla/5.0 is not a version");
-    let dash = headers(&[("x-madar-client", "dashboard/2026.9"), ("user-agent", "Mozilla/5.0")]);
+    assert_eq!(
+        app_version(&browser),
+        None,
+        "a browser's Mozilla/5.0 is not a version"
+    );
+    let dash = headers(&[
+        ("x-madar-client", "dashboard/2026.9"),
+        ("user-agent", "Mozilla/5.0"),
+    ]);
     assert!(!is_legacy_pos_request(&dash));
     assert_eq!(app_version(&dash), None, "the dashboard has no app version");
     assert_eq!(app_version(&headers(&[("x-madar-client", "pos")])), None);
     assert!(is_native_client(&h) && !is_native_client(&old) && !is_native_client(&dash));
     let b = Uuid::new_v4();
-    assert_eq!(branch_header(&headers(&[("x-madar-branch", &b.to_string())])), Some(b));
+    assert_eq!(
+        branch_header(&headers(&[("x-madar-branch", &b.to_string())])),
+        Some(b)
+    );
     assert_eq!(branch_header(&headers(&[("x-madar-branch", "nope")])), None);
     assert_eq!(client_string(&HeaderMap::new()), None);
 }
@@ -139,7 +211,10 @@ fn seen_key_prefers_the_device() {
     let d = Uuid::new_v4();
     let b = Uuid::new_v4();
     assert_eq!(seen_key(Some(d), Some(b), Some("x")), format!("d:{d}"));
-    assert_eq!(seen_key(None, Some(b), Some("pos/0.6")), format!("c:{b}:pos/0.6"));
+    assert_eq!(
+        seen_key(None, Some(b), Some("pos/0.6")),
+        format!("c:{b}:pos/0.6")
+    );
     assert_eq!(seen_key(None, None, None), "c:-:-");
 }
 
@@ -149,8 +224,14 @@ fn throttle_lets_one_through_per_minute() {
     let t0 = Instant::now();
     assert!(throttle_allows(&key, t0));
     assert!(!throttle_allows(&key, t0 + Duration::from_secs(59)));
-    assert!(throttle_allows(&key, t0 + THROTTLE + Duration::from_secs(1)));
-    assert!(throttle_allows(&format!("{key}|other"), t0), "keys are independent");
+    assert!(throttle_allows(
+        &key,
+        t0 + THROTTLE + Duration::from_secs(1)
+    ));
+    assert!(
+        throttle_allows(&format!("{key}|other"), t0),
+        "keys are independent"
+    );
 }
 
 #[tokio::test]
@@ -176,20 +257,41 @@ async fn deep_sites_report_through_the_task_local() {
 #[core::prelude::v1::test]
 fn replay_shift_id_detection() {
     use crate::sync::handlers::replay_names_shift_id;
-    assert!(replay_names_shift_id(&json!({"op": "close_shift", "shift_id": "x", "request": {}})));
-    assert!(replay_names_shift_id(&json!({"op": "create_order", "request": {"shift_id": "x"}})));
-    assert!(!replay_names_shift_id(&json!({"op": "close_till", "till_id": "x", "request": {"till_id": "x"}})));
+    assert!(replay_names_shift_id(
+        &json!({"op": "close_shift", "shift_id": "x", "request": {}})
+    ));
+    assert!(replay_names_shift_id(
+        &json!({"op": "create_order", "request": {"shift_id": "x"}})
+    ));
+    assert!(!replay_names_shift_id(
+        &json!({"op": "close_till", "till_id": "x", "request": {"till_id": "x"}})
+    ));
 }
 
 // ── DB ───────────────────────────────────────────────────────────────────────
 
 async fn seeded(pool: &PgPool) {
-    crate::permissions::seeder::seed_role_permissions(pool).await.unwrap();
-    let seed = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/legacy_till_golden/seed.sql")).unwrap();
+    crate::permissions::seeder::seed_role_permissions(pool)
+        .await
+        .unwrap();
+    let seed = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/scripts/legacy_till_golden/seed.sql"
+    ))
+    .unwrap();
     sqlx::raw_sql(&seed).execute(pool).await.expect("seed.sql");
 }
 
-type Row = (String, Option<Uuid>, Option<Uuid>, Option<String>, Option<String>, Option<String>, Option<String>, Vec<String>);
+type Row = (
+    String,
+    Option<Uuid>,
+    Option<Uuid>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Vec<String>,
+);
 
 async fn row(pool: &PgPool, org: Uuid, key: &str) -> Option<Row> {
     sqlx::query_as(
@@ -213,7 +315,10 @@ async fn wait_for(pool: &PgPool, org: Uuid, key: &str, pred: impl Fn(&Row) -> bo
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("client_seen {key} never reached the expected state: {:?}", row(pool, org, key).await);
+    panic!(
+        "client_seen {key} never reached the expected state: {:?}",
+        row(pool, org, key).await
+    );
 }
 
 #[sqlx::test]
@@ -236,21 +341,62 @@ async fn upsert_keeps_first_seen_and_accumulates_legacy_kinds(pool: PgPool) {
     let r = row(&pool, org, &key).await.unwrap();
     assert_eq!((r.5.as_deref(), r.6.as_deref(), r.7.len()), (None, None, 0));
     let first: chrono::DateTime<chrono::Utc> =
-        sqlx::query_scalar("SELECT first_seen_at FROM client_seen WHERE seen_key = $1").bind(&key).fetch_one(&pool).await.unwrap();
+        sqlx::query_scalar("SELECT first_seen_at FROM client_seen WHERE seen_key = $1")
+            .bind(&key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
 
-    upsert(&pool, &Sighting { legacy_kinds: vec![KIND_SHIFTS_ROUTE], path: "/shifts/x/report".into(), ..base.clone() }).await.unwrap();
-    upsert(&pool, &Sighting { legacy_kinds: vec![KIND_REPLAY_LEGACY_OP], path: "/sync/replay".into(), ..base.clone() }).await.unwrap();
+    upsert(
+        &pool,
+        &Sighting {
+            legacy_kinds: vec![KIND_SHIFTS_ROUTE],
+            path: "/shifts/x/report".into(),
+            ..base.clone()
+        },
+    )
+    .await
+    .unwrap();
+    upsert(
+        &pool,
+        &Sighting {
+            legacy_kinds: vec![KIND_REPLAY_LEGACY_OP],
+            path: "/sync/replay".into(),
+            ..base.clone()
+        },
+    )
+    .await
+    .unwrap();
     // A plain sighting later does not erase the legacy trail; a newer client string wins.
-    upsert(&pool, &Sighting { client: Some("pos/0.7.1 (android)".into()), app_version: Some("0.7.1".into()), ..base.clone() }).await.unwrap();
+    upsert(
+        &pool,
+        &Sighting {
+            client: Some("pos/0.7.1 (android)".into()),
+            app_version: Some("0.7.1".into()),
+            ..base.clone()
+        },
+    )
+    .await
+    .unwrap();
 
     let r = row(&pool, org, &key).await.unwrap();
     assert_eq!(r.3.as_deref(), Some("pos/0.7.1 (android)"));
     assert_eq!(r.4.as_deref(), Some("0.7.1"));
     assert_eq!(r.5.as_deref(), Some(KIND_REPLAY_LEGACY_OP));
     assert_eq!(r.6.as_deref(), Some("/sync/replay"));
-    assert_eq!(r.7, vec![KIND_SHIFTS_ROUTE.to_string(), KIND_REPLAY_LEGACY_OP.to_string()]);
+    assert_eq!(
+        r.7,
+        vec![
+            KIND_SHIFTS_ROUTE.to_string(),
+            KIND_REPLAY_LEGACY_OP.to_string()
+        ]
+    );
     let (first2, n): (chrono::DateTime<chrono::Utc>, i64) =
-        sqlx::query_as("SELECT min(first_seen_at), count(*) FROM client_seen WHERE org_id = $1").bind(org).fetch_one(&pool).await.unwrap();
+        sqlx::query_as("SELECT min(first_seen_at), count(*) FROM client_seen WHERE org_id = $1")
+            .bind(org)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!((first2, n), (first, 1));
 }
 
@@ -258,21 +404,29 @@ async fn upsert_keeps_first_seen_and_accumulates_legacy_kinds(pool: PgPool) {
 async fn client_seen_is_tenant_isolated(pool: PgPool) {
     seeded(&pool).await;
     let org = uid(ORG);
-    upsert(&pool, &Sighting {
-        org_id: org,
-        branch_id: None,
-        branch_hint: None,
-        device_id: None,
-        client: Some("madar-core/0.5.1".into()),
-        app_version: Some("0.5.1".into()),
-        legacy_kinds: vec![KIND_SHIFTS_ROUTE],
-        path: "/shifts".into(),
-    })
+    upsert(
+        &pool,
+        &Sighting {
+            org_id: org,
+            branch_id: None,
+            branch_hint: None,
+            device_id: None,
+            client: Some("madar-core/0.5.1".into()),
+            app_version: Some("0.5.1".into()),
+            legacy_kinds: vec![KIND_SHIFTS_ROUTE],
+            path: "/shifts".into(),
+        },
+    )
     .await
     .unwrap();
     let mine = crate::db::tenant_pool(&pool, org).await;
     let other = crate::db::tenant_pool(&pool, Uuid::new_v4()).await;
-    let n = |p: PgPool| async move { sqlx::query_scalar::<_, i64>("SELECT count(*) FROM client_seen").fetch_one(&p).await.unwrap() };
+    let n = |p: PgPool| async move {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM client_seen")
+            .fetch_one(&p)
+            .await
+            .unwrap()
+    };
     assert_eq!(n(mine).await, 1);
     assert_eq!(n(other).await, 0);
 }
@@ -326,9 +480,15 @@ async fn middleware_records_devices_and_legacy_paths(pool: PgPool) {
     let got = wait_for(&pool, org, &key, |r| r.5.is_some()).await;
     assert_eq!(got.2, Some(old_device));
     assert_eq!(got.3.as_deref(), Some("madar-core/0.6.0"));
-    assert_eq!(got.4, None, "the old tablet's User-Agent is its core crate, not an app version");
+    assert_eq!(
+        got.4, None,
+        "the old tablet's User-Agent is its core crate, not an app version"
+    );
     assert_eq!(got.5.as_deref(), Some(KIND_SHIFTS_ROUTE));
-    assert_eq!(got.6.as_deref(), Some(&*format!("/shifts/branches/{BRANCH_A}/open")));
+    assert_eq!(
+        got.6.as_deref(),
+        Some(&*format!("/shifts/branches/{BRANCH_A}/open"))
+    );
 
     // The same tablet sells with a `shift_id` body: the body still reaches the handler intact.
     let r = test::call_service(
@@ -348,7 +508,10 @@ async fn middleware_records_devices_and_legacy_paths(pool: PgPool) {
     assert_eq!(r.status(), StatusCode::CREATED);
     let order: Value = test::read_body_json(r).await;
     assert_eq!(order["till_id"], json!(shift));
-    wait_for(&pool, org, &key, |r| r.7.iter().any(|k| k == KIND_SHIFT_ID_BODY)).await;
+    wait_for(&pool, org, &key, |r| {
+        r.7.iter().any(|k| k == KIND_SHIFT_ID_BODY)
+    })
+    .await;
 
     // Query alias, legacy replay op, and the permissions payload read by an old POS.
     let r = test::call_service(
@@ -367,8 +530,10 @@ async fn middleware_records_devices_and_legacy_paths(pool: PgPool) {
             .uri("/sync/replay")
             .insert_header(teller.clone())
             .insert_header(("X-Madar-Device", old_device.to_string()))
-            .set_json(json!({ "op": "close_shift", "teller_id": TELLER_A, "shift_id": shift,
-                              "request": { "closing_cash_declared": 5000, "cash_note": null } }))
+            .set_json(
+                json!({ "op": "close_shift", "teller_id": TELLER_A, "shift_id": shift,
+                              "request": { "closing_cash_declared": 5000, "cash_note": null } }),
+            )
             .to_request(),
     )
     .await;
@@ -385,9 +550,14 @@ async fn middleware_records_devices_and_legacy_paths(pool: PgPool) {
     .await;
     assert_eq!(r.status(), StatusCode::OK);
     let got = wait_for(&pool, org, &key, |r| {
-        [KIND_SHIFT_ID_QUERY, KIND_REPLAY_LEGACY_OP, KIND_REPLAY_SHIFT_ID_FIELD, KIND_PERM_PAYLOAD_OLD]
-            .iter()
-            .all(|k| r.7.iter().any(|x| x == k))
+        [
+            KIND_SHIFT_ID_QUERY,
+            KIND_REPLAY_LEGACY_OP,
+            KIND_REPLAY_SHIFT_ID_FIELD,
+            KIND_PERM_PAYLOAD_OLD,
+        ]
+        .iter()
+        .all(|k| r.7.iter().any(|x| x == k))
     })
     .await;
     assert!(got.7.iter().any(|k| k == KIND_SHIFTS_ROUTE));
@@ -422,7 +592,10 @@ async fn middleware_records_devices_and_legacy_paths(pool: PgPool) {
     let rows: Vec<Value> = test::read_body_json(r).await;
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0]["device_id"], json!(old_device));
-    assert_eq!(rows[0]["branch_name"], "Golden A", "no branch claim on a teller token: resolved from the device row the open registered");
+    assert_eq!(
+        rows[0]["branch_name"], "Golden A",
+        "no branch claim on a teller token: resolved from the device row the open registered"
+    );
     assert!(rows[0]["legacy_kinds"].as_array().unwrap().len() >= 5);
     let r = test::call_service(
         &app,
@@ -433,14 +606,27 @@ async fn middleware_records_devices_and_legacy_paths(pool: PgPool) {
     )
     .await;
     let all: Vec<Value> = test::read_body_json(r).await;
-    assert!(all.iter().any(|r| r["device_id"] == json!(new_device) && r["app_version"] == "0.7.3"));
+    assert!(
+        all.iter()
+            .any(|r| r["device_id"] == json!(new_device) && r["app_version"] == "0.7.3")
+    );
     let r = test::call_service(
         &app,
-        test::TestRequest::get().uri("/devices/client-versions?days=0").insert_header(bearer(ADMIN, org, UserRole::OrgAdmin)).to_request(),
+        test::TestRequest::get()
+            .uri("/devices/client-versions?days=0")
+            .insert_header(bearer(ADMIN, org, UserRole::OrgAdmin))
+            .to_request(),
     )
     .await;
     assert_eq!(r.status(), StatusCode::BAD_REQUEST);
-    let r = test::call_service(&app, test::TestRequest::get().uri("/devices/client-versions").insert_header(teller.clone()).to_request()).await;
+    let r = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/devices/client-versions")
+            .insert_header(teller.clone())
+            .to_request(),
+    )
+    .await;
     assert_eq!(r.status(), StatusCode::FORBIDDEN);
 }
 
@@ -451,17 +637,30 @@ async fn middleware_records_legacy_report_and_refund_routes_without_a_device(poo
     let app = telemetry_app!(pool);
     let admin = bearer(ADMIN, org, UserRole::OrgAdmin);
     let missing = Uuid::new_v4();
-    for path in [format!("/reports/shifts/{missing}/summary"), format!("/refunds/shift/{missing}")] {
+    for path in [
+        format!("/reports/shifts/{missing}/summary"),
+        format!("/refunds/shift/{missing}"),
+    ] {
         let r = test::call_service(
             &app,
-            test::TestRequest::get().uri(&path).insert_header(admin.clone()).insert_header(("User-Agent", "Dart/3.4 (dart:io)")).to_request(),
+            test::TestRequest::get()
+                .uri(&path)
+                .insert_header(admin.clone())
+                .insert_header(("User-Agent", "Dart/3.4 (dart:io)"))
+                .to_request(),
         )
         .await;
         assert!(r.status().is_client_error(), "{path}: {}", r.status());
     }
     // Anonymous client: keyed by branch + client string.
     let got = wait_for(&pool, org, "c:-:Dart/3.4 (dart:io)", |r| r.7.len() == 2).await;
-    assert_eq!(got.7, vec![KIND_REFUNDS_SHIFT_ROUTE.to_string(), KIND_REPORTS_SHIFTS_ROUTE.to_string()]);
+    assert_eq!(
+        got.7,
+        vec![
+            KIND_REFUNDS_SHIFT_ROUTE.to_string(),
+            KIND_REPORTS_SHIFTS_ROUTE.to_string()
+        ]
+    );
     assert_eq!(got.4, None, "Dart/3.4 is the runtime, not an app version");
 }
 
@@ -469,10 +668,19 @@ async fn middleware_records_legacy_report_and_refund_routes_without_a_device(poo
 async fn unauthenticated_requests_are_not_recorded(pool: PgPool) {
     seeded(&pool).await;
     let app = telemetry_app!(pool);
-    let r = test::call_service(&app, test::TestRequest::get().uri(&format!("/shifts/branches/{BRANCH_A}/current")).to_request()).await;
+    let r = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/shifts/branches/{BRANCH_A}/current"))
+            .to_request(),
+    )
+    .await;
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM client_seen").fetch_one(&pool).await.unwrap();
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM client_seen")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(n, 0);
 }
 
@@ -481,12 +689,25 @@ async fn handler_sites_report_their_kind() {
     let (res, hits) = collect_hits(crate::tills::legacy_routes::till_entity_gone()).await;
     assert!(res.is_err());
     let (_, wording) = collect_hits(async {
-        crate::tills::legacy_routes::legacy_error(crate::errors::AppError::Coded { status: 400, code: "X", reason: "till".into() })
+        crate::tills::legacy_routes::legacy_error(crate::errors::AppError::Coded {
+            status: 400,
+            code: "X",
+            reason: "till".into(),
+        })
     })
     .await;
-    let (_, untouched) = collect_hits(async { crate::tills::legacy_routes::legacy_error(crate::errors::AppError::NotFound("x".into())) }).await;
-    assert_eq!(hits.iter().map(|h| h.kind).collect::<Vec<_>>(), vec![KIND_TILLS_ENTITY_GONE]);
-    assert_eq!(wording.iter().map(|h| (h.kind, h.site)).collect::<Vec<_>>(), vec![(KIND_ERROR_WORDING, Some("legacy_error_till_to_shift"))]);
+    let (_, untouched) = collect_hits(async {
+        crate::tills::legacy_routes::legacy_error(crate::errors::AppError::NotFound("x".into()))
+    })
+    .await;
+    assert_eq!(
+        hits.iter().map(|h| h.kind).collect::<Vec<_>>(),
+        vec![KIND_TILLS_ENTITY_GONE]
+    );
+    assert_eq!(
+        wording.iter().map(|h| (h.kind, h.site)).collect::<Vec<_>>(),
+        vec![(KIND_ERROR_WORDING, Some("legacy_error_till_to_shift"))]
+    );
     assert!(untouched.is_empty());
 }
 
@@ -506,7 +727,10 @@ async fn branch_resolves_from_the_device_row_then_the_header(pool: PgPool) {
         .await
         .unwrap();
     let call = |device: Option<Uuid>, branch: Option<String>, client: &'static str| {
-        let mut r = test::TestRequest::get().uri("/auth/permissions").insert_header(admin.clone()).insert_header(("X-Madar-Client", client));
+        let mut r = test::TestRequest::get()
+            .uri("/auth/permissions")
+            .insert_header(admin.clone())
+            .insert_header(("X-Madar-Client", client));
         if let Some(d) = device {
             r = r.insert_header(("X-Madar-Device", d.to_string()));
         }
@@ -516,7 +740,15 @@ async fn branch_resolves_from_the_device_row_then_the_header(pool: PgPool) {
         r.to_request()
     };
     // The device row wins over the header.
-    let r = test::call_service(&app, call(Some(registered), Some(BRANCH_A.into()), "pos/0.7.4 (android)")).await;
+    let r = test::call_service(
+        &app,
+        call(
+            Some(registered),
+            Some(BRANCH_A.into()),
+            "pos/0.7.4 (android)",
+        ),
+    )
+    .await;
     assert_eq!(r.status(), StatusCode::OK);
     let got = wait_for(&pool, org, &format!("d:{registered}"), |_| true).await;
     assert_eq!(got.1, Some(uid("10000000-0000-4000-8000-0000000000b1")));
@@ -524,8 +756,17 @@ async fn branch_resolves_from_the_device_row_then_the_header(pool: PgPool) {
 
     // An unregistered device: the header names the branch.
     let unknown = Uuid::new_v4();
-    test::call_service(&app, call(Some(unknown), Some(BRANCH_A.into()), "pos/0.7.4 (ios)")).await;
-    assert_eq!(wait_for(&pool, org, &format!("d:{unknown}"), |_| true).await.1, Some(uid(BRANCH_A)));
+    test::call_service(
+        &app,
+        call(Some(unknown), Some(BRANCH_A.into()), "pos/0.7.4 (ios)"),
+    )
+    .await;
+    assert_eq!(
+        wait_for(&pool, org, &format!("d:{unknown}"), |_| true)
+            .await
+            .1,
+        Some(uid(BRANCH_A))
+    );
 
     // A branch of another org is ignored.
     let other_org = Uuid::new_v4();
@@ -538,7 +779,11 @@ async fn branch_resolves_from_the_device_row_then_the_header(pool: PgPool) {
         .await
         .unwrap();
     let stray = Uuid::new_v4();
-    test::call_service(&app, call(Some(stray), Some(foreign.to_string()), "kds/0.7.4")).await;
+    test::call_service(
+        &app,
+        call(Some(stray), Some(foreign.to_string()), "kds/0.7.4"),
+    )
+    .await;
     let got = wait_for(&pool, org, &format!("d:{stray}"), |_| true).await;
     assert_eq!(got.1, None);
 }
@@ -559,8 +804,14 @@ async fn browsers_are_the_dashboard_without_a_version(pool: PgPool) {
     .await;
     assert_eq!(r.status(), StatusCode::OK);
     let got = wait_for(&pool, org, "c:-:dashboard", |_| true).await;
-    assert_eq!((got.3.as_deref(), got.4.as_deref()), (Some(DASHBOARD_CLIENT), None));
-    assert!(got.7.is_empty(), "the dashboard never takes the permissions mirror path");
+    assert_eq!(
+        (got.3.as_deref(), got.4.as_deref()),
+        (Some(DASHBOARD_CLIENT), None)
+    );
+    assert!(
+        got.7.is_empty(),
+        "the dashboard never takes the permissions mirror path"
+    );
 }
 
 #[sqlx::test]
@@ -573,11 +824,18 @@ async fn mirror_lists_and_catalog_sync_are_recorded_for_native_clients(pool: PgP
     // A dashboard read of the same list is not a mirror hit.
     let r = test::call_service(
         &app,
-        test::TestRequest::get().uri(&format!("/categories?org_id={ORG}")).insert_header(admin.clone()).insert_header(("User-Agent", "Mozilla/5.0")).to_request(),
+        test::TestRequest::get()
+            .uri(&format!("/categories?org_id={ORG}"))
+            .insert_header(admin.clone())
+            .insert_header(("User-Agent", "Mozilla/5.0"))
+            .to_request(),
     )
     .await;
     assert_eq!(r.status(), StatusCode::OK);
-    for uri in [format!("/categories?org_id={ORG}"), format!("/catalog/sync?branch_id={BRANCH_A}")] {
+    for uri in [
+        format!("/categories?org_id={ORG}"),
+        format!("/catalog/sync?branch_id={BRANCH_A}"),
+    ] {
         let r = test::call_service(
             &app,
             test::TestRequest::get()
@@ -591,8 +849,16 @@ async fn mirror_lists_and_catalog_sync_are_recorded_for_native_clients(pool: PgP
         assert_eq!(r.status(), StatusCode::OK, "{uri}");
     }
     let got = wait_for(&pool, org, &format!("d:{device}"), |r| r.7.len() == 2).await;
-    assert_eq!(got.7, vec![KIND_CATALOG_SYNC.to_string(), KIND_MIRROR_LIST_POS.to_string()]);
+    assert_eq!(
+        got.7,
+        vec![
+            KIND_CATALOG_SYNC.to_string(),
+            KIND_MIRROR_LIST_POS.to_string()
+        ]
+    );
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let dash = row(&pool, org, "c:-:dashboard").await.expect("dashboard seen");
+    let dash = row(&pool, org, "c:-:dashboard")
+        .await
+        .expect("dashboard seen");
     assert!(dash.7.is_empty(), "{:?}", dash.7);
 }

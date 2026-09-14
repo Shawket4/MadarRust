@@ -4,7 +4,9 @@ use uuid::Uuid;
 
 use crate::auth::jwt::JwtSecret;
 use crate::models::UserRole;
-use crate::tills::handlers::{CashMovement, CashMovementRequest, CloseTillRequest as CloseShiftRequest, ForceCloseRequest};
+use crate::tills::handlers::{
+    CashMovement, CashMovementRequest, CloseTillRequest as CloseShiftRequest, ForceCloseRequest,
+};
 use crate::tills::legacy::*;
 use crate::tills::legacy_routes as routes;
 
@@ -2217,11 +2219,12 @@ async fn at_most_one_open_till_per_person(pool: PgPool) {
     assert_eq!(body["code"], "TILL_OPEN_AT_OTHER_BRANCH");
     assert_eq!(body["till"]["id"], first["id"]);
 
-    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM tills WHERE teller_id=$1 AND status='open'")
-        .bind(teller)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let n: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM tills WHERE teller_id=$1 AND status='open'")
+            .bind(teller)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(n, 1);
 }
 
@@ -2233,7 +2236,9 @@ async fn at_most_one_open_till_per_person(pool: PgPool) {
 #[sqlx::test]
 async fn replay_open_till_duplicate_flags_and_both_are_visible(pool: PgPool) {
     use crate::sync::ActingContext;
-    use crate::tills::handlers::{OpenMeta, OpenTillRequest, PaginatedTills, TillPreFill, open_till_inner};
+    use crate::tills::handlers::{
+        OpenMeta, OpenTillRequest, PaginatedTills, TillPreFill, open_till_inner,
+    };
 
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
@@ -2247,31 +2252,78 @@ async fn replay_open_till_duplicate_flags_and_both_are_visible(pool: PgPool) {
         edit_reason: Some("float".into()),
         opened_at: None,
         device_id: Some(device),
-        verification: if replay { Some("unverified".into()) } else { None },
+        verification: if replay {
+            Some("unverified".into())
+        } else {
+            None
+        },
     };
-    let actor = |replay: bool| ActingContext { teller_id: user_id, org_id, role: UserRole::OrgAdmin, replay };
+    let actor = |replay: bool| ActingContext {
+        teller_id: user_id,
+        org_id,
+        role: UserRole::OrgAdmin,
+        replay,
+    };
 
-    let (first, created) =
-        open_till_inner(&pool, None, branch_id, open(false, dev_a), actor(false), OpenMeta::default()).await.unwrap();
+    let (first, created) = open_till_inner(
+        &pool,
+        None,
+        branch_id,
+        open(false, dev_a),
+        actor(false),
+        OpenMeta::default(),
+    )
+    .await
+    .unwrap();
     assert!(created && !first.opened_while_another_open);
 
     // Live, the second open is refused…
-    let live = open_till_inner(&pool, None, branch_id, open(false, dev_b), actor(false), OpenMeta::default()).await;
-    assert!(matches!(live, Err(crate::errors::AppError::RefusedWith { code: "TILL_OPEN_ELSEWHERE", .. })));
+    let live = open_till_inner(
+        &pool,
+        None,
+        branch_id,
+        open(false, dev_b),
+        actor(false),
+        OpenMeta::default(),
+    )
+    .await;
+    assert!(matches!(
+        live,
+        Err(crate::errors::AppError::RefusedWith {
+            code: "TILL_OPEN_ELSEWHERE",
+            ..
+        })
+    ));
     // …but the offline one, replayed, is accepted and flagged.
-    let (second, created) =
-        open_till_inner(&pool, None, branch_id, open(true, dev_b), actor(true), OpenMeta::default()).await.unwrap();
+    let (second, created) = open_till_inner(
+        &pool,
+        None,
+        branch_id,
+        open(true, dev_b),
+        actor(true),
+        OpenMeta::default(),
+    )
+    .await
+    .unwrap();
     assert!(created);
-    assert!(second.opened_while_another_open, "the replayed second open is flagged");
-    assert_eq!(second.other_till_id, Some(first.id), "and linked to the till that was already open");
+    assert!(
+        second.opened_while_another_open,
+        "the replayed second open is flagged"
+    );
+    assert_eq!(
+        second.other_till_id,
+        Some(first.id),
+        "and linked to the till that was already open"
+    );
     assert!(second.flagged_at.is_some());
-    let open_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM tills WHERE teller_id = $1 AND branch_id = $2 AND status = 'open'")
-            .bind(user_id)
-            .bind(branch_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let open_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM tills WHERE teller_id = $1 AND branch_id = $2 AND status = 'open'",
+    )
+    .bind(user_id)
+    .bind(branch_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(open_count, 2, "both stay open");
 
     let app = test::init_service(
@@ -2296,9 +2348,21 @@ async fn replay_open_till_duplicate_flags_and_both_are_visible(pool: PgPool) {
     assert!(resp.status().is_success());
     let pre: TillPreFill = test::read_body_json(resp).await;
     assert_eq!(pre.open_till.as_ref().map(|t| t.id), Some(first.id));
-    let at_branch: Vec<(Uuid, bool)> = pre.open_at_branch.iter().map(|t| (t.id, t.opened_while_another_open)).collect();
-    assert_eq!(at_branch, vec![(second.id, true), (first.id, false)], "both, newest first, flag visible");
-    assert!(pre.open_elsewhere.iter().any(|t| t.id == second.id && t.opened_while_another_open));
+    let at_branch: Vec<(Uuid, bool)> = pre
+        .open_at_branch
+        .iter()
+        .map(|t| (t.id, t.opened_while_another_open))
+        .collect();
+    assert_eq!(
+        at_branch,
+        vec![(second.id, true), (first.id, false)],
+        "both, newest first, flag visible"
+    );
+    assert!(
+        pre.open_elsewhere
+            .iter()
+            .any(|t| t.id == second.id && t.opened_while_another_open)
+    );
 
     // T1 with no device header: still both.
     let resp = test::call_service(
@@ -2320,8 +2384,12 @@ async fn replay_open_till_duplicate_flags_and_both_are_visible(pool: PgPool) {
             .to_request();
         test::call_service(&app, req)
     };
-    let flagged: PaginatedTills = test::read_body_json(list("status=open&flagged=true").await).await;
-    assert_eq!(flagged.data.iter().map(|t| t.id).collect::<Vec<_>>(), vec![second.id]);
+    let flagged: PaginatedTills =
+        test::read_body_json(list("status=open&flagged=true").await).await;
+    assert_eq!(
+        flagged.data.iter().map(|t| t.id).collect::<Vec<_>>(),
+        vec![second.id]
+    );
     assert_eq!(flagged.data[0].other_till_id, Some(first.id));
     let all_open: PaginatedTills = test::read_body_json(list("status=open").await).await;
     assert_eq!(all_open.data.len(), 2);

@@ -147,7 +147,9 @@ fn take_token_at(key: &str, per_minute: f64) -> bool {
         refilled < *cap
     });
 
-    let entry = map.entry(key.to_string()).or_insert((per_minute, now, per_minute));
+    let entry = map
+        .entry(key.to_string())
+        .or_insert((per_minute, now, per_minute));
     let refilled =
         (entry.0 + now.duration_since(entry.1).as_secs_f64() * per_second).min(per_minute);
     entry.1 = now;
@@ -161,7 +163,9 @@ fn take_token_at(key: &str, per_minute: f64) -> bool {
 
 /// The caller's address (`unknown` without a socket).
 fn address_of(req: &actix_web::dev::ServiceRequest) -> String {
-    req.peer_addr().map(|s| s.ip().to_string()).unwrap_or_else(|| "unknown".into())
+    req.peer_addr()
+        .map(|s| s.ip().to_string())
+        .unwrap_or_else(|| "unknown".into())
 }
 
 /// Who this request is, for limiting: the person if we know them, the address
@@ -230,7 +234,13 @@ pub async fn throttle_exports(
                 ))
                 .into());
             }
-        } else if !take_token(&key) || (key != address_of(&req) && !take_token_at(&format!("addr:{}", address_of(&req)), per_address_per_minute())) {
+        } else if !take_token(&key)
+            || (key != address_of(&req)
+                && !take_token_at(
+                    &format!("addr:{}", address_of(&req)),
+                    per_address_per_minute(),
+                ))
+        {
             return Err(crate::errors::AppError::TooManyRequests(
                 "Too many requests just now. This will clear in a moment.".into(),
             )
@@ -255,7 +265,12 @@ mod tests {
                 .route("/public/ping", web::get().to(HttpResponse::Ok)),
         )
         .await;
-        let call = |addr: &str| test::TestRequest::get().uri("/public/ping").peer_addr(addr.parse().unwrap()).to_request();
+        let call = |addr: &str| {
+            test::TestRequest::get()
+                .uri("/public/ping")
+                .peer_addr(addr.parse().unwrap())
+                .to_request()
+        };
         macro_rules! status {
             ($r:expr) => {
                 match $r {
@@ -265,11 +280,19 @@ mod tests {
             };
         }
         for _ in 0..global_per_minute() as usize {
-            assert!(status!(test::try_call_service(&app, call("10.9.0.1:4000")).await).is_success());
+            assert!(
+                status!(test::try_call_service(&app, call("10.9.0.1:4000")).await).is_success()
+            );
         }
-        assert_eq!(status!(test::try_call_service(&app, call("10.9.0.1:4001")).await), actix_web::http::StatusCode::TOO_MANY_REQUESTS,
-            "a new port on the same address is the same caller");
-        assert!(status!(test::try_call_service(&app, call("10.9.0.2:4000")).await).is_success(), "another address is not");
+        assert_eq!(
+            status!(test::try_call_service(&app, call("10.9.0.1:4001")).await),
+            actix_web::http::StatusCode::TOO_MANY_REQUESTS,
+            "a new port on the same address is the same caller"
+        );
+        assert!(
+            status!(test::try_call_service(&app, call("10.9.0.2:4000")).await).is_success(),
+            "another address is not"
+        );
     }
 
     /// Many accounts behind one address cannot multiply the allowance past the
@@ -284,7 +307,11 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(JwtSecret(secret.0.clone())))
                 .wrap(actix_web::middleware::from_fn(throttle_exports))
-                .service(web::scope("/api").wrap(crate::auth::middleware::JwtMiddleware).route("/ping", web::get().to(HttpResponse::Ok))),
+                .service(
+                    web::scope("/api")
+                        .wrap(crate::auth::middleware::JwtMiddleware)
+                        .route("/ping", web::get().to(HttpResponse::Ok)),
+                ),
         )
         .await;
         let per_person = global_per_minute() as usize;
@@ -294,7 +321,15 @@ mod tests {
         let mut paced = 0usize;
         let started = std::time::Instant::now();
         for _ in 0..accounts {
-            let token = create_token(&secret, uuid::Uuid::new_v4(), None, UserRole::Teller, None, 1).unwrap();
+            let token = create_token(
+                &secret,
+                uuid::Uuid::new_v4(),
+                None,
+                UserRole::Teller,
+                None,
+                1,
+            )
+            .unwrap();
             for _ in 0..per_person {
                 let req = test::TestRequest::get()
                     .uri("/api/ping")
@@ -305,17 +340,30 @@ mod tests {
                     Ok(r) if r.status().is_success() => ok += 1,
                     Ok(r) => assert_eq!(r.status(), actix_web::http::StatusCode::TOO_MANY_REQUESTS),
                     Err(e) => {
-                        assert_eq!(e.error_response().status(), actix_web::http::StatusCode::TOO_MANY_REQUESTS);
+                        assert_eq!(
+                            e.error_response().status(),
+                            actix_web::http::StatusCode::TOO_MANY_REQUESTS
+                        );
                         paced += 1;
                     }
                 }
             }
         }
         // The address bucket refills continuously while the loop runs.
-        let refilled = (started.elapsed().as_secs_f64() * per_address_per_minute() / 60.0).ceil() as usize;
-        assert!(ok <= ceiling + refilled, "{ok} requests passed one address, ceiling {ceiling} (+{refilled} refilled)");
-        assert!(ok < accounts * per_person, "the accounts did not multiply the allowance");
-        assert!(ok >= ceiling - 1, "the ceiling is reached, not undercut ({ok})");
+        let refilled =
+            (started.elapsed().as_secs_f64() * per_address_per_minute() / 60.0).ceil() as usize;
+        assert!(
+            ok <= ceiling + refilled,
+            "{ok} requests passed one address, ceiling {ceiling} (+{refilled} refilled)"
+        );
+        assert!(
+            ok < accounts * per_person,
+            "the accounts did not multiply the allowance"
+        );
+        assert!(
+            ok >= ceiling - 1,
+            "the ceiling is reached, not undercut ({ok})"
+        );
         assert!(paced > 0);
     }
 
@@ -358,12 +406,27 @@ mod tests {
             Ok(r) => r.status(),
             Err(e) => e.error_response().status(),
         };
-        assert_eq!(status, actix_web::http::StatusCode::TOO_MANY_REQUESTS, "alice spent hers");
+        assert_eq!(
+            status,
+            actix_web::http::StatusCode::TOO_MANY_REQUESTS,
+            "alice spent hers"
+        );
         let r = test::call_service(&app, call(bob.clone())).await;
-        assert!(r.status().is_success(), "bob, at the same address, has spent nothing");
+        assert!(
+            r.status().is_success(),
+            "bob, at the same address, has spent nothing"
+        );
         // A forged bearer is not a person: it is keyed by the address.
         let forged = JwtSecret("not-the-secret".into());
-        let fake = create_token(&forged, uuid::Uuid::new_v4(), None, UserRole::Teller, None, 1).unwrap();
+        let fake = create_token(
+            &forged,
+            uuid::Uuid::new_v4(),
+            None,
+            UserRole::Teller,
+            None,
+            1,
+        )
+        .unwrap();
         let req = test::TestRequest::get()
             .uri("/api/ping")
             .insert_header(("Authorization", format!("Bearer {fake}")))

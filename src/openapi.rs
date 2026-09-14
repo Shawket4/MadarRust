@@ -744,7 +744,8 @@ impl Modify for SecurityAddon {
         // Payment-method availability (TILLS_CONTRACT §2.3) keeps its own doc
         // next to the handlers; fold it into the aggregate spec.
         openapi.merge(
-            <crate::payment_methods::availability::AvailabilityApiDoc as utoipa::OpenApi>::openapi(),
+            <crate::payment_methods::availability::AvailabilityApiDoc as utoipa::OpenApi>::openapi(
+            ),
         );
 
         let components = openapi

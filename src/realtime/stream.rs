@@ -55,7 +55,11 @@ pub(crate) async fn permitted_topics(
     // Charge screen should re-read: on the default subscription they ride along
     // only with a readable data topic, so a caller who can read nothing else still
     // gets the terminal 403 (as before `payment_methods` became its own topic).
-    if requested.is_none() && out.iter().all(|t| matches!(t, Topic::Sync | Topic::PaymentMethods)) {
+    if requested.is_none()
+        && out
+            .iter()
+            .all(|t| matches!(t, Topic::Sync | Topic::PaymentMethods))
+    {
         out.clear();
     }
     out

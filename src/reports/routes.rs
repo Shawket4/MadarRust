@@ -11,8 +11,14 @@ pub fn configure(cfg: &mut web::ServiceConfig, read_pool: web::Data<PgPool>) {
         web::scope("/reports")
             .app_data(read_pool)
             .wrap(JwtMiddleware)
-            .route("/tills/{till_id}/summary", web::get().to(handlers::till_summary))
-            .route("/tills/{till_id}/deductions", web::get().to(handlers::till_deductions))
+            .route(
+                "/tills/{till_id}/summary",
+                web::get().to(handlers::till_summary),
+            )
+            .route(
+                "/tills/{till_id}/deductions",
+                web::get().to(handlers::till_deductions),
+            )
             .route(
                 "/shifts/{shift_id}/summary",
                 web::get().to(handlers::shift_summary),

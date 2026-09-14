@@ -15,13 +15,19 @@ use crate::errors::AppError;
 
 /// `tile` hash of an asset group column (`<alias>.<col>`).
 fn tile_hash(group_col: &str) -> String {
-    format!("(SELECT a.hash FROM assets a WHERE a.group_id = {group_col} AND a.variant = 'tile' ORDER BY a.created_at DESC LIMIT 1)")
+    format!(
+        "(SELECT a.hash FROM assets a WHERE a.group_id = {group_col} AND a.variant = 'tile' ORDER BY a.created_at DESC LIMIT 1)"
+    )
 }
 
 /// Run `SELECT id, <json>` and key the objects by id. The builders are `json_*`,
 /// not `jsonb_*`: the value is only ever re-serialized, and skipping jsonb's
 /// binary conversion is a third of the cost of a 25k-order window.
-async fn by_sql(conn: &mut PgConnection, sql: &str, ids: &[Uuid]) -> Result<HashMap<Uuid, Value>, AppError> {
+async fn by_sql(
+    conn: &mut PgConnection,
+    sql: &str,
+    ids: &[Uuid],
+) -> Result<HashMap<Uuid, Value>, AppError> {
     let rows: Vec<(Uuid, Value)> = sqlx::query_as(sql).bind(ids).fetch_all(&mut *conn).await?;
     Ok(rows.into_iter().collect())
 }
@@ -46,13 +52,19 @@ fn strip_deep(v: &mut Value, key: &str) {
     }
 }
 
-fn keyed<T: serde::Serialize>(items: impl IntoIterator<Item = T>, strip_keys: &[&str]) -> HashMap<Uuid, Value> {
+fn keyed<T: serde::Serialize>(
+    items: impl IntoIterator<Item = T>,
+    strip_keys: &[&str],
+) -> HashMap<Uuid, Value> {
     items
         .into_iter()
         .filter_map(|it| {
             let mut v = serde_json::to_value(it).ok()?;
             strip(&mut v, strip_keys);
-            let id = v.get("id")?.as_str().and_then(|s| Uuid::parse_str(s).ok())?;
+            let id = v
+                .get("id")?
+                .as_str()
+                .and_then(|s| Uuid::parse_str(s).ok())?;
             Some((id, v))
         })
         .collect()
@@ -69,48 +81,77 @@ fn keyed<T: serde::Serialize>(items: impl IntoIterator<Item = T>, strip_keys: &[
 /// the sweeper emitted its delete).
 pub fn projects_sql(ty: &str) -> Option<&'static str> {
     Some(match ty {
-        "category" => "EXISTS (SELECT 1 FROM categories x WHERE x.id = $ID AND sync_live_category(x))",
-        "menu_item" => "EXISTS (SELECT 1 FROM menu_items x WHERE x.id = $ID AND sync_live_menu_item(x))",
+        "category" => {
+            "EXISTS (SELECT 1 FROM categories x WHERE x.id = $ID AND sync_live_category(x))"
+        }
+        "menu_item" => {
+            "EXISTS (SELECT 1 FROM menu_items x WHERE x.id = $ID AND sync_live_menu_item(x))"
+        }
         "bundle" => "EXISTS (SELECT 1 FROM bundles x WHERE x.id = $ID AND sync_live_bundle(x))",
-        "ingredient" => "EXISTS (SELECT 1 FROM org_ingredients x WHERE x.id = $ID AND sync_live_ingredient(x))",
+        "ingredient" => {
+            "EXISTS (SELECT 1 FROM org_ingredients x WHERE x.id = $ID AND sync_live_ingredient(x))"
+        }
         "payment_method" => "EXISTS (SELECT 1 FROM org_payment_methods x WHERE x.id = $ID)",
         "payment_availability" => {
             "(EXISTS (SELECT 1 FROM branch_payment_methods x WHERE x.branch_id = $ID) \
               OR EXISTS (SELECT 1 FROM user_payment_methods x WHERE x.user_id = $ID) \
               OR EXISTS (SELECT 1 FROM device_payment_methods x WHERE x.device_id = $ID))"
         }
-        "discount" => "EXISTS (SELECT 1 FROM discounts x WHERE x.id = $ID AND sync_live_discount(x))",
-        "branch_settings" => "EXISTS (SELECT 1 FROM branches x WHERE x.id = $ID AND sync_live_branch_settings(x))",
+        "discount" => {
+            "EXISTS (SELECT 1 FROM discounts x WHERE x.id = $ID AND sync_live_discount(x))"
+        }
+        "branch_settings" => {
+            "EXISTS (SELECT 1 FROM branches x WHERE x.id = $ID AND sync_live_branch_settings(x))"
+        }
         "device" => "EXISTS (SELECT 1 FROM devices x WHERE x.id = $ID AND sync_live_device(x))",
         "teller" => "EXISTS (SELECT 1 FROM users x WHERE x.id = $ID AND sync_live_teller(x))",
         "floor_section" => "EXISTS (SELECT 1 FROM floor_sections x WHERE x.id = $ID)",
-        "floor_table" => "EXISTS (SELECT 1 FROM branch_tables x WHERE x.id = $ID AND sync_live_floor_table(x))",
+        "floor_table" => {
+            "EXISTS (SELECT 1 FROM branch_tables x WHERE x.id = $ID AND sync_live_floor_table(x))"
+        }
         "table_occupancy" => {
             "EXISTS (SELECT 1 FROM table_occupancies x WHERE x.id = $ID AND sync_live_table_occupancy(x))"
         }
         "table_transfer" => {
             "EXISTS (SELECT 1 FROM table_transfer_requests x WHERE x.id = $ID AND sync_live_table_transfer(x))"
         }
-        "open_ticket" => "EXISTS (SELECT 1 FROM open_tickets x WHERE x.id = $ID AND sync_live_open_ticket(x))",
+        "open_ticket" => {
+            "EXISTS (SELECT 1 FROM open_tickets x WHERE x.id = $ID AND sync_live_open_ticket(x))"
+        }
         "kitchen_ticket" => {
             "EXISTS (SELECT 1 FROM kitchen_tickets x WHERE x.id = $ID AND sync_live_kitchen_ticket(x))"
         }
-        "delivery" => "EXISTS (SELECT 1 FROM delivery_orders x WHERE x.id = $ID AND sync_live_delivery(x))",
+        "delivery" => {
+            "EXISTS (SELECT 1 FROM delivery_orders x WHERE x.id = $ID AND sync_live_delivery(x))"
+        }
         "booking" => "EXISTS (SELECT 1 FROM bookings x WHERE x.id = $ID AND sync_live_booking(x))",
         "till" => "EXISTS (SELECT 1 FROM tills x WHERE x.id = $ID)",
         "cash_movement" => "EXISTS (SELECT 1 FROM till_cash_movements x WHERE x.id = $ID)",
         "order" => "EXISTS (SELECT 1 FROM orders x WHERE x.id = $ID)",
         "refund" => "EXISTS (SELECT 1 FROM order_refunds x WHERE x.id = $ID)",
-        "addon_item" => "EXISTS (SELECT 1 FROM addon_items x WHERE x.id = $ID AND sync_live_addon_item(x.id))",
+        "addon_item" => {
+            "EXISTS (SELECT 1 FROM addon_items x WHERE x.id = $ID AND sync_live_addon_item(x.id))"
+        }
         _ => return None,
     })
 }
 
 /// The ids of `ids` that are in `ty`'s projected set (see [`projects_sql`]).
-async fn projectable(conn: &mut PgConnection, ty: &str, ids: &[Uuid]) -> Result<Vec<Uuid>, AppError> {
-    let pred = projects_sql(ty).ok_or_else(|| AppError::BadRequest(format!("Unknown sync type `{ty}`")))?;
-    let sql = format!("SELECT i FROM unnest($1::uuid[]) AS u(i) WHERE {}", pred.replace("$ID", "u.i"));
-    Ok(sqlx::query_scalar(&sql).bind(ids).fetch_all(&mut *conn).await?)
+async fn projectable(
+    conn: &mut PgConnection,
+    ty: &str,
+    ids: &[Uuid],
+) -> Result<Vec<Uuid>, AppError> {
+    let pred = projects_sql(ty)
+        .ok_or_else(|| AppError::BadRequest(format!("Unknown sync type `{ty}`")))?;
+    let sql = format!(
+        "SELECT i FROM unnest($1::uuid[]) AS u(i) WHERE {}",
+        pred.replace("$ID", "u.i")
+    );
+    Ok(sqlx::query_scalar(&sql)
+        .bind(ids)
+        .fetch_all(&mut *conn)
+        .await?)
 }
 
 /// The CURRENT projection of every id of `ids` that is in `ty`'s projected set,

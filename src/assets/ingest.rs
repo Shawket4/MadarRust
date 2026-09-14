@@ -103,7 +103,11 @@ impl AssetPurpose {
     /// `asset_groups.profile`: which conversion recipe made the group. Dedup
     /// (by source or by pixels) never crosses profiles.
     pub fn profile(self) -> &'static str {
-        if self.keeps_original() { "keeps_original" } else { "photo" }
+        if self.keeps_original() {
+            "keeps_original"
+        } else {
+            "photo"
+        }
     }
 }
 
@@ -299,7 +303,9 @@ impl IngestOutcome {
     pub fn variant(&self, name: &str) -> Option<&AssetRef> {
         let exact = |n: &str| self.variants.iter().find(|v| v.variant == n);
         match name {
-            "thumb" => exact("thumb").or_else(|| exact("tile")).or_else(|| exact("full")),
+            "thumb" => exact("thumb")
+                .or_else(|| exact("tile"))
+                .or_else(|| exact("full")),
             "tile" => exact("tile").or_else(|| exact("full")),
             n => exact(n),
         }
@@ -372,7 +378,9 @@ pub fn lottie_meta(raw: &[u8]) -> Option<(Option<i32>, Option<i32>)> {
 fn check_purpose(purpose: AssetPurpose, sniffed: Sniffed) -> Result<(), AppError> {
     match (purpose.is_animation(), sniffed) {
         (true, Sniffed::Lottie) | (false, Sniffed::Image(_)) => Ok(()),
-        (true, _) => Err(AppError::BadRequest("Expected a Lottie JSON animation".into())),
+        (true, _) => Err(AppError::BadRequest(
+            "Expected a Lottie JSON animation".into(),
+        )),
         (false, _) => Err(AppError::BadRequest("Expected an image".into())),
     }
 }
@@ -427,7 +435,9 @@ pub async fn stage_with(
     actor: Option<Uuid>,
 ) -> Result<Uuid, AppError> {
     if org_id.is_none() && !purpose.is_animation() {
-        return Err(AppError::BadRequest("An image must belong to an organisation".into()));
+        return Err(AppError::BadRequest(
+            "An image must belong to an organisation".into(),
+        ));
     }
     let slot = target.slot()?;
     let job_id = Uuid::new_v4();
@@ -446,7 +456,9 @@ pub async fn stage_with(
                 IngestSource::Url(_) => unreachable!(),
             };
             if raw.len() > MAX_RAW_BYTES {
-                return Err(AppError::BadRequest("File too large (max 20 MB raw)".into()));
+                return Err(AppError::BadRequest(
+                    "File too large (max 20 MB raw)".into(),
+                ));
             }
             let sniffed = sniff(&raw)?;
             check_purpose(purpose, sniffed)?;
@@ -512,17 +524,26 @@ pub fn check_url_syntax(u: &url::Url) -> Result<(), AppError> {
         return Err(AppError::BadRequest("Image URLs must use https".into()));
     }
     if !u.username().is_empty() || u.password().is_some() {
-        return Err(AppError::BadRequest("Image URLs must not carry credentials".into()));
+        return Err(AppError::BadRequest(
+            "Image URLs must not carry credentials".into(),
+        ));
     }
     match u.host() {
-        Some(url::Host::Ipv4(ip)) if !is_public_ip(IpAddr::V4(ip)) => {
-            Err(AppError::BadRequest("Image URL points at a private address".into()))
-        }
-        Some(url::Host::Ipv6(ip)) if !is_public_ip(IpAddr::V6(ip)) => {
-            Err(AppError::BadRequest("Image URL points at a private address".into()))
-        }
-        Some(url::Host::Domain(d)) if d.eq_ignore_ascii_case("localhost") || d.ends_with(".localhost") || d.ends_with(".internal") || d.ends_with(".local") => {
-            Err(AppError::BadRequest("Image URL points at a private address".into()))
+        Some(url::Host::Ipv4(ip)) if !is_public_ip(IpAddr::V4(ip)) => Err(AppError::BadRequest(
+            "Image URL points at a private address".into(),
+        )),
+        Some(url::Host::Ipv6(ip)) if !is_public_ip(IpAddr::V6(ip)) => Err(AppError::BadRequest(
+            "Image URL points at a private address".into(),
+        )),
+        Some(url::Host::Domain(d))
+            if d.eq_ignore_ascii_case("localhost")
+                || d.ends_with(".localhost")
+                || d.ends_with(".internal")
+                || d.ends_with(".local") =>
+        {
+            Err(AppError::BadRequest(
+                "Image URL points at a private address".into(),
+            ))
         }
         None => Err(AppError::BadRequest("Image URL has no host".into())),
         _ => Ok(()),
@@ -568,14 +589,12 @@ async fn fetch_url(u: &url::Url) -> Result<Vec<u8>, AppError> {
         .ok_or_else(|| AppError::BadRequest("Image URL has no host".into()))?
         .to_string();
     let port = u.port_or_known_default().unwrap_or(443);
-    let addrs: Vec<std::net::SocketAddr> = tokio::time::timeout(
-        URL_TIMEOUT,
-        tokio::net::lookup_host((host.as_str(), port)),
-    )
-    .await
-    .map_err(|_| AppError::BadRequest("Image URL did not resolve in time".into()))?
-    .map_err(|_| AppError::BadRequest("Image URL did not resolve".into()))?
-    .collect();
+    let addrs: Vec<std::net::SocketAddr> =
+        tokio::time::timeout(URL_TIMEOUT, tokio::net::lookup_host((host.as_str(), port)))
+            .await
+            .map_err(|_| AppError::BadRequest("Image URL did not resolve in time".into()))?
+            .map_err(|_| AppError::BadRequest("Image URL did not resolve".into()))?
+            .collect();
     // Every resolved address must be public, and the request is pinned to the
     // one we checked (no DNS rebinding between check and connect).
     let addr = match addrs.first() {
@@ -604,8 +623,13 @@ async fn fetch_url(u: &url::Url) -> Result<Vec<u8>, AppError> {
             resp.status()
         )));
     }
-    if resp.content_length().is_some_and(|l| l as usize > MAX_URL_BYTES) {
-        return Err(AppError::BadRequest("Image URL too large (max 10 MB)".into()));
+    if resp
+        .content_length()
+        .is_some_and(|l| l as usize > MAX_URL_BYTES)
+    {
+        return Err(AppError::BadRequest(
+            "Image URL too large (max 10 MB)".into(),
+        ));
     }
     let mut out = Vec::new();
     while let Some(chunk) = resp
@@ -615,7 +639,9 @@ async fn fetch_url(u: &url::Url) -> Result<Vec<u8>, AppError> {
     {
         out.extend_from_slice(&chunk);
         if out.len() > MAX_URL_BYTES {
-            return Err(AppError::BadRequest("Image URL too large (max 10 MB)".into()));
+            return Err(AppError::BadRequest(
+                "Image URL too large (max 10 MB)".into(),
+            ));
         }
     }
     Ok(out)
@@ -649,7 +675,10 @@ pub fn libwebp_version() -> String {
 
 pub fn encoder_string(kind: &str) -> String {
     if kind == "animation" {
-        format!("{ENCODER_VERSION} zstd-{} l{ZSTD_LEVEL}", zstd::zstd_safe::version_string())
+        format!(
+            "{ENCODER_VERSION} zstd-{} l{ZSTD_LEVEL}",
+            zstd::zstd_safe::version_string()
+        )
     } else {
         format!(
             "{ENCODER_VERSION} libwebp-{} q{} m{WEBP_METHOD} lanczos3",
@@ -906,16 +935,24 @@ pub async fn ingest_bytes(
     actor: Option<Uuid>,
 ) -> Result<IngestOutcome, AppError> {
     if org_id.is_none() && !purpose.is_animation() {
-        return Err(AppError::BadRequest("An image must belong to an organisation".into()));
+        return Err(AppError::BadRequest(
+            "An image must belong to an organisation".into(),
+        ));
     }
     if raw.len() > MAX_RAW_BYTES {
-        return Err(AppError::BadRequest("File too large (max 20 MB raw)".into()));
+        return Err(AppError::BadRequest(
+            "File too large (max 20 MB raw)".into(),
+        ));
     }
     // 1. source_hash of the bytes AS RECEIVED, before anything touches them.
     let source_hash = sha256_hex(&raw);
     let sniffed = sniff(&raw)?;
     check_purpose(purpose, sniffed)?;
-    let kind = if purpose.is_animation() { "animation" } else { "image" };
+    let kind = if purpose.is_animation() {
+        "animation"
+    } else {
+        "image"
+    };
     let encoder = encoder_string(kind);
 
     // 2. Per-org dedup on the source. Scoped to this org only (or to the global
@@ -923,8 +960,7 @@ pub async fn ingest_bytes(
     //    profiles: a logo must not reuse the photo group made from the same file
     //    (it has no `original`).
     let profile = purpose.profile();
-    if let Some(found) =
-        find_group_by_source(pool, org_id, &source_hash, &encoder, profile).await?
+    if let Some(found) = find_group_by_source(pool, org_id, &source_hash, &encoder, profile).await?
     {
         return Ok(found);
     }
@@ -948,7 +984,13 @@ pub async fn ingest_bytes(
         .into_iter()
         .map(|v| (sha256_hex(&v.bytes), v))
         .collect();
-    let rank = |v: &str| match v { "full" => 0, "original" => 1, "tile" => 2, "thumb" => 3, _ => 4 };
+    let rank = |v: &str| match v {
+        "full" => 0,
+        "original" => 1,
+        "tile" => 2,
+        "thumb" => 3,
+        _ => 4,
+    };
     hashed.sort_by_key(|(_, v)| rank(v.variant));
     let mut seen = std::collections::HashSet::new();
     hashed.retain(|(h, v)| v.variant == "original" || seen.insert(h.clone()));
@@ -972,8 +1014,10 @@ pub async fn ingest_bytes(
         .bind(profile)
         .fetch_all(pool)
         .await?;
-        let mut ours: Vec<(&str, &str)> =
-            hashed.iter().map(|(h, v)| (v.variant, h.as_str())).collect();
+        let mut ours: Vec<(&str, &str)> = hashed
+            .iter()
+            .map(|(h, v)| (v.variant, h.as_str()))
+            .collect();
         ours.sort();
         for group_id in candidates {
             let variants = group_variants(pool, org_id, group_id).await?;
@@ -983,7 +1027,12 @@ pub async fn ingest_bytes(
                 .collect();
             theirs.sort();
             if theirs == ours {
-                return Ok(IngestOutcome { group_id, org_id, variants, deduped: true });
+                return Ok(IngestOutcome {
+                    group_id,
+                    org_id,
+                    variants,
+                    deduped: true,
+                });
             }
         }
     }
@@ -1004,7 +1053,8 @@ pub async fn ingest_bytes(
         actor,
     };
     if let Err(e) = store_group(pool, store, &new_group, &hashed).await {
-        let unique = matches!(&e, StoreError::Db(sqlx::Error::Database(d)) if d.is_unique_violation());
+        let unique =
+            matches!(&e, StoreError::Db(sqlx::Error::Database(d)) if d.is_unique_violation());
         // A concurrent ingest (backfill vs worker) of the same source won the
         // race: its group is the answer.
         if unique
@@ -1162,8 +1212,12 @@ async fn store_group_tx(
         }
     }
     #[cfg(test)]
-    if g.org_id.is_some_and(|o| FAIL_BEFORE_COMMIT.lock().unwrap().contains(&o)) {
-        return Err(StoreError::Io(std::io::Error::other("injected failure before commit")));
+    if g.org_id
+        .is_some_and(|o| FAIL_BEFORE_COMMIT.lock().unwrap().contains(&o))
+    {
+        return Err(StoreError::Io(std::io::Error::other(
+            "injected failure before commit",
+        )));
     }
     tx.commit().await?;
     Ok(())
@@ -1171,7 +1225,8 @@ async fn store_group_tx(
 
 /// Test hook: `store_group` for these orgs fails after writing its files.
 #[cfg(test)]
-pub(crate) static FAIL_BEFORE_COMMIT: std::sync::Mutex<Vec<Uuid>> = std::sync::Mutex::new(Vec::new());
+pub(crate) static FAIL_BEFORE_COMMIT: std::sync::Mutex<Vec<Uuid>> =
+    std::sync::Mutex::new(Vec::new());
 
 async fn find_group_by_source(
     pool: &PgPool,
@@ -1294,7 +1349,9 @@ pub async fn attach(
     match row_org {
         None => return Err(AppError::NotFound(format!("{} row not found", slot.table))),
         Some(o) if o != org_id => {
-            return Err(AppError::Forbidden("asset belongs to a different org".into()));
+            return Err(AppError::Forbidden(
+                "asset belongs to a different org".into(),
+            ));
         }
         _ => {}
     }

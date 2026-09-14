@@ -109,7 +109,9 @@ pub async fn serve_asset(
     let jwt_ok = !signed
         && optional_claims(&req).is_some_and(|c| match org_id {
             None => true,
-            Some(o) => c.org_id() == Some(o) || (c.role == UserRole::SuperAdmin && c.org_id.is_none()),
+            Some(o) => {
+                c.org_id() == Some(o) || (c.role == UserRole::SuperAdmin && c.org_id.is_none())
+            }
         });
     if !signed && !jwt_ok {
         return Err(not_found());
@@ -160,7 +162,9 @@ pub fn parse_range(h: Option<&str>, len: u64) -> RangeSpec {
     match (a.parse::<u64>().ok(), b.parse::<u64>().ok()) {
         (Some(s), Some(e)) if s <= e && s < len => RangeSpec::Partial(s, e.min(len - 1)),
         (Some(s), None) if b.is_empty() && s < len => RangeSpec::Partial(s, len - 1),
-        (None, Some(n)) if a.is_empty() && n > 0 => RangeSpec::Partial(len.saturating_sub(n), len - 1),
+        (None, Some(n)) if a.is_empty() && n > 0 => {
+            RangeSpec::Partial(len.saturating_sub(n), len - 1)
+        }
         (Some(_), _) | (None, Some(_)) => RangeSpec::Unsatisfiable,
         _ => RangeSpec::Full,
     }
@@ -189,7 +193,10 @@ pub async fn serve_ranged(
             .insert_header(("X-Content-Type-Options", "nosniff"));
         b
     };
-    if let Some(inm) = req.headers().get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok())
+    if let Some(inm) = req
+        .headers()
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
         && inm.split(',').any(|t| t.trim() == etag || t.trim() == "*")
     {
         return Ok(builder(StatusCode::NOT_MODIFIED).finish());
@@ -202,7 +209,9 @@ pub async fn serve_ranged(
         .unwrap_or(true);
     let range = if if_range_ok {
         parse_range(
-            req.headers().get(header::RANGE).and_then(|v| v.to_str().ok()),
+            req.headers()
+                .get(header::RANGE)
+                .and_then(|v| v.to_str().ok()),
             len,
         )
     } else {
@@ -240,7 +249,10 @@ pub async fn serve_ranged(
             Ok(0) => None,
             Ok(n) => {
                 buf.truncate(n);
-                Some((Ok::<_, std::io::Error>(Bytes::from(buf)), (f, left - n as u64)))
+                Some((
+                    Ok::<_, std::io::Error>(Bytes::from(buf)),
+                    (f, left - n as u64),
+                ))
             }
             Err(e) => Some((Err(e), (f, 0))),
         }
@@ -273,11 +285,13 @@ pub struct AssetJobView {
 pub async fn get_job(req: HttpRequest, id: web::Path<Uuid>) -> Result<HttpResponse, AppError> {
     let c = claims(&req)?;
     let pool = base_pool(&req)?;
-    let row = sqlx::query("SELECT id, org_id, status, last_error, result_group_id FROM asset_jobs WHERE id = $1")
-        .bind(*id)
-        .fetch_optional(&pool)
-        .await?
-        .ok_or_else(not_found)?;
+    let row = sqlx::query(
+        "SELECT id, org_id, status, last_error, result_group_id FROM asset_jobs WHERE id = $1",
+    )
+    .bind(*id)
+    .fetch_optional(&pool)
+    .await?
+    .ok_or_else(not_found)?;
     let org_id: Option<Uuid> = row.get("org_id");
     let allowed = c.role == UserRole::SuperAdmin || (org_id.is_some() && c.org_id() == org_id);
     if !allowed {
@@ -294,7 +308,10 @@ pub async fn get_job(req: HttpRequest, id: web::Path<Uuid>) -> Result<HttpRespon
         .bind(aid)
         .fetch_all(&pool)
         .await?;
-        let variants: Vec<AssetRef> = rows.iter().map(|r| asset_ref_from_row(r, DASHBOARD_TTL)).collect();
+        let variants: Vec<AssetRef> = rows
+            .iter()
+            .map(|r| asset_ref_from_row(r, DASHBOARD_TTL))
+            .collect();
         let pos = variants
             .iter()
             .find(|v| v.variant == "tile" || v.variant == "animation")
@@ -302,7 +319,11 @@ pub async fn get_job(req: HttpRequest, id: web::Path<Uuid>) -> Result<HttpRespon
             .cloned();
         let full = variants.iter().find(|v| v.variant == "full").cloned();
         if let Some(pos) = pos {
-            result = Some(AssetJobResult { pos, full, variants });
+            result = Some(AssetJobResult {
+                pos,
+                full,
+                variants,
+            });
         }
     }
     Ok(HttpResponse::Ok().json(AssetJobView {
@@ -438,7 +459,12 @@ pub async fn top_up(
             .map(|m| m.len() == bytes)
             .unwrap_or(false);
         if on_disk && !files.iter().any(|f| f.hash == hash && f.ext == ext) {
-            files.push(TarFile { hash, ext, bytes, path });
+            files.push(TarFile {
+                hash,
+                ext,
+                bytes,
+                path,
+            });
         }
     }
     super::tarball::sort_files(&mut files);
@@ -457,7 +483,10 @@ pub async fn top_up(
 /// `GET /uploads/{tail}`: the original file while it exists; after prune (or
 /// for URLs minted by `attach`) a 302 to a 7-day signed URL of the `full`
 /// variant via `asset_legacy_paths`; otherwise 404.
-pub async fn legacy_upload(req: HttpRequest, tail: web::Path<String>) -> Result<HttpResponse, AppError> {
+pub async fn legacy_upload(
+    req: HttpRequest,
+    tail: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
     let rel = tail.into_inner();
     let st = store(&req);
     let file = st.legacy_file(&rel).ok_or_else(not_found)?;
@@ -465,10 +494,26 @@ pub async fn legacy_upload(req: HttpRequest, tail: web::Path<String>) -> Result<
         && m.is_file()
     {
         // Unauthenticated: the org is the path's first segment (`<org>/<dir>/…`).
-        let org = rel.trim_start_matches('/').split('/').next().and_then(|seg| Uuid::parse_str(seg).ok());
-        crate::client_seen::legacy_hit_for_org(crate::client_seen::KIND_UPLOADS_LEGACY_PATH, "original", org);
+        let org = rel
+            .trim_start_matches('/')
+            .split('/')
+            .next()
+            .and_then(|seg| Uuid::parse_str(seg).ok());
+        crate::client_seen::legacy_hit_for_org(
+            crate::client_seen::KIND_UPLOADS_LEGACY_PATH,
+            "original",
+            org,
+        );
         let ct = mime_for_legacy(&rel);
-        let etag = format!("\"{:x}-{:x}\"", m.len(), m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0));
+        let etag = format!(
+            "\"{:x}-{:x}\"",
+            m.len(),
+            m.modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        );
         return serve_ranged(&req, &file, ct, &etag, "public, max-age=86400").await;
     }
     let pool = base_pool(&req)?;
@@ -480,7 +525,11 @@ pub async fn legacy_upload(req: HttpRequest, tail: web::Path<String>) -> Result<
     .fetch_optional(&pool)
     .await?
     .ok_or_else(not_found)?;
-    crate::client_seen::legacy_hit_for_org(crate::client_seen::KIND_UPLOADS_LEGACY_REDIRECT, "signed_full", Some(row.get("org_id")));
+    crate::client_seen::legacy_hit_for_org(
+        crate::client_seen::KIND_UPLOADS_LEGACY_REDIRECT,
+        "signed_full",
+        Some(row.get("org_id")),
+    );
     let url = super::ingest::signed_url(
         row.get("org_id"),
         &row.get::<String, _>("hash"),

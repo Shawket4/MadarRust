@@ -157,7 +157,9 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 pub fn is_hash(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// The HMAC key for signed asset URLs. `ASSET_URL_SECRET` (>= 32 bytes). Debug

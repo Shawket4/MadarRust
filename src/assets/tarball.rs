@@ -136,7 +136,11 @@ fn async_stream(
                     buf.extend_from_slice(&header("index.json", index.len() as u64));
                     buf.extend_from_slice(&index);
                     buf.extend(std::iter::repeat_n(0u8, padding(index.len() as u64)));
-                    let next = if files.is_empty() { St::End } else { St::File(0) };
+                    let next = if files.is_empty() {
+                        St::End
+                    } else {
+                        St::File(0)
+                    };
                     Some((Ok(Bytes::from(buf)), (next, files, missing)))
                 }
                 St::File(i) => {

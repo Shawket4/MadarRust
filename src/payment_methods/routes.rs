@@ -10,7 +10,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .wrap(JwtMiddleware)
             .route("", web::get().to(list_payment_methods))
             .route("", web::post().to(create_payment_method))
-            .route("/availability", web::get().to(availability::get_availability))
+            .route(
+                "/availability",
+                web::get().to(availability::get_availability),
+            )
             .route(
                 "/availability/branches/{id}",
                 web::put().to(availability::put_branch_availability),

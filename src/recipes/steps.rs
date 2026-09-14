@@ -236,13 +236,17 @@ pub async fn reconcile(pool: &PgPool, dir: &Path) -> Result<(), sqlx::Error> {
         .await
         {
             Ok(o) => {
-                sqlx::query("UPDATE recipe_step_presets SET animation_group_id = $1 WHERE slug = $2")
-                    .bind(o.group_id)
-                    .bind(&s.slug)
-                    .execute(pool)
-                    .await?;
+                sqlx::query(
+                    "UPDATE recipe_step_presets SET animation_group_id = $1 WHERE slug = $2",
+                )
+                .bind(o.group_id)
+                .bind(&s.slug)
+                .execute(pool)
+                .await?;
             }
-            Err(e) => tracing::warn!(slug = %s.slug, error = %e, "step animation asset ingest failed"),
+            Err(e) => {
+                tracing::warn!(slug = %s.slug, error = %e, "step animation asset ingest failed")
+            }
         }
     }
     // A preset whose file stopped shipping is retired, never deleted: the items

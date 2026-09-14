@@ -395,7 +395,13 @@ pub async fn load(pool: &sqlx::PgPool, org_id: uuid::Uuid) -> Result<OrgBrand, s
     // ingested, pixels are read from the stored lossless `original` rather than
     // the legacy file (which may have been pruned). Registered by URL so every
     // `read_upload` caller resolves it without a signature change.
-    register_asset_files(pool, org_id, row.logo_url.as_deref(), row.brand_card_image.as_deref()).await;
+    register_asset_files(
+        pool,
+        org_id,
+        row.logo_url.as_deref(),
+        row.brand_card_image.as_deref(),
+    )
+    .await;
 
     // The tier gate, applied once and here. The shop's NAME is always its own —
     // a card that does not say whose it is helps nobody, and the name is not
@@ -579,9 +585,11 @@ pub fn card_banner(brand: &OrgBrand, w: u32, h: u32) -> Option<image::DynamicIma
     Some(img.resize_to_fill(w, h, image::imageops::FilterType::Lanczos3))
 }
 
-fn asset_files() -> &'static std::sync::RwLock<std::collections::HashMap<String, std::path::PathBuf>> {
-    static MAP: std::sync::OnceLock<std::sync::RwLock<std::collections::HashMap<String, std::path::PathBuf>>> =
-        std::sync::OnceLock::new();
+fn asset_files() -> &'static std::sync::RwLock<std::collections::HashMap<String, std::path::PathBuf>>
+{
+    static MAP: std::sync::OnceLock<
+        std::sync::RwLock<std::collections::HashMap<String, std::path::PathBuf>>,
+    > = std::sync::OnceLock::new();
     MAP.get_or_init(Default::default)
 }
 
@@ -608,14 +616,19 @@ pub async fn register_asset_files(
         Err(_) => return,
     };
     let store = crate::assets::AssetStore::from_env();
-    let Ok(mut map) = asset_files().write() else { return };
+    let Ok(mut map) = asset_files().write() else {
+        return;
+    };
     if map.len() > 10_000 {
         map.clear();
     }
     for (slot, o, hash, ext) in rows {
         let url = if slot == "logo" { logo_url } else { card_url };
         if let Some(u) = url {
-            map.insert(u.to_string(), store.path_for_key(&crate::assets::AssetStore::key(o, &hash, &ext)));
+            map.insert(
+                u.to_string(),
+                store.path_for_key(&crate::assets::AssetStore::key(o, &hash, &ext)),
+            );
         }
     }
 }
@@ -631,7 +644,10 @@ pub async fn register_asset_files(
 /// file — and neither may climb out of the uploads directory.
 pub fn read_upload(url: &str) -> Option<image::DynamicImage> {
     if let Some(path) = asset_file_for(url) {
-        if let Some(img) = std::fs::read(&path).ok().and_then(|b| image::load_from_memory(&b).ok()) {
+        if let Some(img) = std::fs::read(&path)
+            .ok()
+            .and_then(|b| image::load_from_memory(&b).ok())
+        {
             return Some(img);
         }
     }

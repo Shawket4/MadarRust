@@ -33,33 +33,63 @@ pub(crate) async fn image_url_side_effects(
     };
     match new {
         Some(None) => {
-            sqlx::query(&format!("UPDATE {tbl} SET image_group_id = NULL WHERE id = $1"))
-                .bind(id)
-                .execute(pool)
-                .await?;
+            sqlx::query(&format!(
+                "UPDATE {tbl} SET image_group_id = NULL WHERE id = $1"
+            ))
+            .bind(id)
+            .execute(pool)
+            .await?;
         }
         Some(Some(url)) if Some(url.as_str()) != old && !url.is_empty() => {
-            crate::uploads::handlers::stage_image_url(pool, org_id, table, id, url, claims.user_id_safe().ok()).await?;
+            crate::uploads::handlers::stage_image_url(
+                pool,
+                org_id,
+                table,
+                id,
+                url,
+                claims.user_id_safe().ok(),
+            )
+            .await?;
         }
         _ => {}
     }
     Ok(())
 }
 
-async fn attach_item_refs(pool: &PgPool, org_id: Uuid, items: &mut [MenuItem]) -> Result<(), AppError> {
+async fn attach_item_refs(
+    pool: &PgPool,
+    org_id: Uuid,
+    items: &mut [MenuItem],
+) -> Result<(), AppError> {
     let ids: Vec<Uuid> = items.iter().map(|i| i.id).collect();
-    let mut refs = crate::assets::refs::slot_refs(pool, org_id, crate::assets::ingest::AssetTable::MenuItems,
-        crate::assets::ingest::AssetField::Image, &ids).await?;
+    let mut refs = crate::assets::refs::slot_refs(
+        pool,
+        org_id,
+        crate::assets::ingest::AssetTable::MenuItems,
+        crate::assets::ingest::AssetField::Image,
+        &ids,
+    )
+    .await?;
     for i in items.iter_mut() {
         i.image = refs.remove(&i.id);
     }
     Ok(())
 }
 
-async fn attach_category_refs(pool: &PgPool, org_id: Uuid, rows: &mut [Category]) -> Result<(), AppError> {
+async fn attach_category_refs(
+    pool: &PgPool,
+    org_id: Uuid,
+    rows: &mut [Category],
+) -> Result<(), AppError> {
     let ids: Vec<Uuid> = rows.iter().map(|i| i.id).collect();
-    let mut refs = crate::assets::refs::slot_refs(pool, org_id, crate::assets::ingest::AssetTable::Categories,
-        crate::assets::ingest::AssetField::Image, &ids).await?;
+    let mut refs = crate::assets::refs::slot_refs(
+        pool,
+        org_id,
+        crate::assets::ingest::AssetTable::Categories,
+        crate::assets::ingest::AssetField::Image,
+        &ids,
+    )
+    .await?;
     for i in rows.iter_mut() {
         i.image = refs.remove(&i.id);
     }
@@ -577,8 +607,16 @@ pub async fn create_category(
     .await?;
 
     if let Some(url) = mut_body.image_url.clone() {
-        image_url_side_effects(pool.get_ref(), crate::assets::ingest::AssetTable::Categories, row.org_id, row.id,
-            Some(&Some(url)), None, &claims).await?;
+        image_url_side_effects(
+            pool.get_ref(),
+            crate::assets::ingest::AssetTable::Categories,
+            row.org_id,
+            row.id,
+            Some(&Some(url)),
+            None,
+            &claims,
+        )
+        .await?;
     }
 
     Ok(HttpResponse::Created().json(row))
@@ -644,8 +682,16 @@ pub async fn update_category(
     // Image slot (§11.5 W3): null clears the asset reference (no file delete —
     // assets are content-addressed); a new URL is routed through the asset
     // pipeline.
-    image_url_side_effects(pool.get_ref(), crate::assets::ingest::AssetTable::Categories, existing.org_id, *id,
-        mut_body.image_url.as_ref(), existing.image_url.as_deref(), &claims).await?;
+    image_url_side_effects(
+        pool.get_ref(),
+        crate::assets::ingest::AssetTable::Categories,
+        existing.org_id,
+        *id,
+        mut_body.image_url.as_ref(),
+        existing.image_url.as_deref(),
+        &claims,
+    )
+    .await?;
 
     Ok(HttpResponse::Ok().json(row))
 }
@@ -1027,8 +1073,16 @@ pub async fn create_menu_item(
     tx.commit().await?;
 
     if let Some(url) = mut_body.image_url.clone() {
-        image_url_side_effects(pool.get_ref(), crate::assets::ingest::AssetTable::MenuItems, item.org_id, item.id,
-            Some(&Some(url)), None, &claims).await?;
+        image_url_side_effects(
+            pool.get_ref(),
+            crate::assets::ingest::AssetTable::MenuItems,
+            item.org_id,
+            item.id,
+            Some(&Some(url)),
+            None,
+            &claims,
+        )
+        .await?;
     }
 
     Ok(HttpResponse::Created().json(MenuItemFull {
@@ -1162,8 +1216,16 @@ pub async fn update_menu_item(
     tx.commit().await?;
 
     // Image slot (§11.5 W4).
-    image_url_side_effects(pool.get_ref(), crate::assets::ingest::AssetTable::MenuItems, existing.org_id, *id,
-        mut_body.image_url.as_ref(), existing.image_url.as_deref(), &claims).await?;
+    image_url_side_effects(
+        pool.get_ref(),
+        crate::assets::ingest::AssetTable::MenuItems,
+        existing.org_id,
+        *id,
+        mut_body.image_url.as_ref(),
+        existing.image_url.as_deref(),
+        &claims,
+    )
+    .await?;
 
     Ok(HttpResponse::Ok().json(item))
 }
@@ -3035,7 +3097,8 @@ pub(crate) async fn addon_items_by_ids(
     .await?
     .into_iter()
     .collect();
-    let mut ingredients: std::collections::HashMap<Uuid, Vec<AddonItemIngredient>> = std::collections::HashMap::new();
+    let mut ingredients: std::collections::HashMap<Uuid, Vec<AddonItemIngredient>> =
+        std::collections::HashMap::new();
     type IngRow = (Uuid, Option<Uuid>, sqlx::types::BigDecimal, String, String);
     for (addon, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) in sqlx::query_as::<_, IngRow>(
         "SELECT addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit \
@@ -3059,7 +3122,10 @@ pub(crate) async fn addon_items_by_ids(
         let mut v = serde_json::to_value(&a).unwrap_or(serde_json::Value::Null);
         if let serde_json::Value::Object(m) = &mut v {
             m.remove("org_id");
-            m.insert("is_available".into(), serde_json::Value::Bool(available.get(&id).copied().unwrap_or(true)));
+            m.insert(
+                "is_available".into(),
+                serde_json::Value::Bool(available.get(&id).copied().unwrap_or(true)),
+            );
         }
         out.insert(id, v);
     }
