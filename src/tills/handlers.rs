@@ -325,6 +325,13 @@ pub struct TillReportResponse {
     pub old_bills_at_close: Option<i32>,
     pub open_bills_at_close: Option<i32>,
     pub order_number_range: OrderNumberRange,
+    /// The branch changefeed horizon read BEFORE the figures (OFFLINE_B_DESIGN
+    /// §7): every change with `seq <= as_of_seq` is in this report. A device
+    /// whose cursor has reached it, with nothing of the till still on its way,
+    /// can take these figures as the authority. `0` when no horizon was
+    /// available (then it is never newer than any cursor). Additive.
+    #[serde(default)]
+    pub as_of_seq: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
@@ -947,6 +954,14 @@ pub async fn get_till_report(req: HttpRequest, pool: crate::db::Db, till_id: web
     check_permission(pool.get_ref(), &claims, "tills", "read").await?;
     let till = fetch_till_or_404(pool.get_ref(), *till_id).await?;
     require_branch_access(pool.get_ref(), &claims, till.branch_id).await?;
+    // Horizon first, figures after: the figures then include at least everything
+    // up to it (READ COMMITTED; the horizon waits out uncommitted emitters).
+    let as_of_seq: i64 = sqlx::query_scalar("SELECT sync_safe_horizon($1, 0, 200)")
+        .bind(till.branch_id)
+        .fetch_one(pool.get_ref())
+        .await
+        .unwrap_or(0);
+    let till = fetch_till_or_404(pool.get_ref(), *till_id).await?;
     let figures = report_figures(pool.get_ref(), &till).await?;
     let reconciliation = reconcile::lines_for_till(pool.get_ref(), till.id).await?;
     let (device_code, first, last): (Option<String>, Option<i32>, Option<i32>) = sqlx::query_as(
@@ -962,6 +977,7 @@ pub async fn get_till_report(req: HttpRequest, pool: crate::db::Db, till_id: web
         figures,
         reconciliation,
         till,
+        as_of_seq,
     }))
 }
 

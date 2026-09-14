@@ -67,6 +67,30 @@ pub struct PullRequest {
     /// Page size for incremental pulls, 1..5000 (default 2000).
     #[serde(default)]
     pub limit: Option<i64>,
+    /// Opt-in paging of a FULL snapshot's ledger rows (tills, orders, cash,
+    /// refunds), 100..10000 rows a page. Absent = the whole snapshot in one
+    /// response (what every older client gets).
+    #[serde(default)]
+    pub ledger_page_size: Option<i64>,
+    /// The `snapshot_cursor` of the previous page of a paged full snapshot.
+    #[serde(default)]
+    pub snapshot_cursor: Option<SnapshotCursor>,
+}
+
+/// Where a paged full snapshot stands. Every page reads the same horizon and
+/// window, so the pages together are ONE snapshot: a ledger row that changes
+/// while the pages are fetched moves past the horizon and arrives in the
+/// incremental pull that follows (`since = next`), never twice and never lost.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, ToSchema)]
+pub struct SnapshotCursor {
+    pub horizon: i64,
+    /// The ledger window start of this snapshot (RFC 3339).
+    pub window_from: String,
+    /// When the snapshot began (RFC 3339): a till that closes while the pages
+    /// are fetched keeps its rows in the later pages.
+    pub started_at: String,
+    /// Ledger rows with `seq` above this come next.
+    pub after_seq: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, ToSchema)]
@@ -126,6 +150,11 @@ pub struct PullResponse {
     /// Full responses only: the latest built base bundle, or null.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub asset_bundle: Option<Option<AssetBundleRef>>,
+    /// A paged full snapshot with more pages: send it back as `snapshot_cursor`.
+    /// State types, checksums and the asset bundle come on the FIRST page only;
+    /// `types` on each page lists what that page covers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_cursor: Option<SnapshotCursor>,
 }
 
 fn coded(code: &'static str, reason: &str) -> AppError {
@@ -174,9 +203,15 @@ pub async fn pull_core(pool: &PgPool, org_id: Uuid, body: &PullRequest, since: O
         None => ALL_TYPES.iter().map(|s| s.to_string()).collect(),
     };
     let limit = body.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    if since.is_some() && (body.snapshot_cursor.is_some() || body.ledger_page_size.is_some()) {
+        return Err(coded("PAGING_REQUIRES_FULL", "`ledger_page_size` / `snapshot_cursor` are only valid for a full pull"));
+    }
     match since {
         Some(since) => incremental(pool, org_id, body.branch_id, since, limit).await,
-        None => full(pool, org_id, body.branch_id, &types).await,
+        None => match body.ledger_page_size {
+            Some(size) => full_paged(pool, org_id, body.branch_id, &types, size.clamp(100, 10_000), body.snapshot_cursor.clone()).await,
+            None => full(pool, org_id, body.branch_id, &types).await,
+        },
     }
 }
 
@@ -332,6 +367,144 @@ async fn full(pool: &PgPool, org_id: Uuid, branch: Uuid, types: &[String]) -> Re
         ..Default::default()
     })
 }
+
+/// A full snapshot in pages (see [`SnapshotCursor`]). Page one is everything a
+/// full pull returns except that ledger rows stop at `size`; later pages carry
+/// only ledger rows, in seq order, of the same snapshot.
+async fn full_paged(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch: Uuid,
+    types: &[String],
+    size: i64,
+    cursor: Option<SnapshotCursor>,
+) -> Result<PullResponse, AppError> {
+    let server_time = Utc::now().to_rfc3339();
+    let first = cursor.is_none();
+    let cursor = match cursor {
+        Some(c) => c,
+        None => {
+            let horizon: i64 = sqlx::query_scalar("SELECT sync_safe_horizon($1, 0)").bind(branch).fetch_one(pool).await?;
+            SnapshotCursor {
+                horizon,
+                window_from: (Utc::now() - chrono::Duration::hours(LEDGER_WINDOW_HOURS)).to_rfc3339(),
+                started_at: server_time.clone(),
+                after_seq: 0,
+            }
+        }
+    };
+    let parse = |t: &str, what: &str| {
+        chrono::DateTime::parse_from_rfc3339(t)
+            .map(|d| d.with_timezone(&Utc))
+            .map_err(|_| coded("BAD_SNAPSHOT_CURSOR", &format!("snapshot_cursor.{what} is not RFC 3339")))
+    };
+    let window_from = parse(&cursor.window_from, "window_from")?;
+    let started_at = parse(&cursor.started_at, "started_at")?;
+    let ledger: Vec<String> = types.iter().filter(|t| is_ledger(t)).cloned().collect();
+
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *tx).await?;
+    let mut data: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    let mut page_types: Vec<String> = Vec::new();
+    if first {
+        for ty in types.iter().filter(|t| !is_ledger(t)) {
+            let rows: Vec<(Uuid, i64)> = sqlx::query_as(
+                "SELECT entity_id, seq FROM sync_changes \
+                  WHERE branch_id = $1 AND type = $2 AND op = 'upsert' AND seq <= $3 ORDER BY seq",
+            )
+            .bind(branch)
+            .bind(ty)
+            .bind(cursor.horizon)
+            .fetch_all(&mut *tx)
+            .await?;
+            let ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
+            let mut projected = projection::project(&mut tx, org_id, branch, ty, &ids).await?;
+            data.insert(ty.clone(), with_seq(rows, &mut projected));
+            page_types.push(ty.clone());
+        }
+    }
+    let rows: Vec<(String, Uuid, i64)> = sqlx::query_as(LEDGER_PAGE_SQL)
+        .bind(branch)
+        .bind(&ledger)
+        .bind(cursor.horizon)
+        .bind(window_from)
+        .bind(started_at)
+        .bind(cursor.after_seq)
+        .bind(size + 1)
+        .fetch_all(&mut *tx)
+        .await?;
+    let has_more = rows.len() as i64 > size;
+    let rows: Vec<(String, Uuid, i64)> = rows.into_iter().take(size as usize).collect();
+    let last_seq = rows.last().map(|r| r.2).unwrap_or(cursor.after_seq);
+    for ty in &ledger {
+        let of_type: Vec<(Uuid, i64)> = rows.iter().filter(|r| &r.0 == ty).map(|r| (r.1, r.2)).collect();
+        let ids: Vec<Uuid> = of_type.iter().map(|r| r.0).collect();
+        let mut projected = projection::project(&mut tx, org_id, branch, ty, &ids).await?;
+        data.insert(ty.clone(), with_seq(of_type, &mut projected));
+        page_types.push(ty.clone());
+    }
+    let (checksums, asset_bundle) = if first {
+        let type_refs: Vec<&str> = types.iter().map(String::as_str).collect();
+        (state_checksums(&mut tx, branch, &type_refs, cursor.horizon).await?, Some(latest_asset_bundle(&mut tx, org_id, branch).await?))
+    } else {
+        (BTreeMap::new(), None)
+    };
+    tx.commit().await?;
+    Ok(PullResponse {
+        full: true,
+        next: Some(cursor.horizon),
+        has_more,
+        server_time,
+        types: page_types,
+        data,
+        checksums,
+        ledger_window: Some(LedgerWindow { from: cursor.window_from.clone() }),
+        asset_bundle,
+        snapshot_cursor: has_more.then(|| SnapshotCursor { after_seq: last_seq, ..cursor }),
+        ..Default::default()
+    })
+}
+
+fn with_seq(rows: Vec<(Uuid, i64)>, projected: &mut HashMap<Uuid, Value>) -> Vec<Value> {
+    rows.into_iter()
+        .filter_map(|(id, seq)| {
+            let mut v = projected.remove(&id)?;
+            if let Value::Object(m) = &mut v {
+                m.insert("seq".into(), Value::from(seq));
+            }
+            Some(v)
+        })
+        .collect()
+}
+
+async fn latest_asset_bundle(conn: &mut PgConnection, org_id: Uuid, branch: Uuid) -> Result<Option<AssetBundleRef>, AppError> {
+    Ok(sqlx::query("SELECT seq, bytes, sha256 FROM asset_bundles WHERE branch_id = $1 ORDER BY seq DESC LIMIT 1")
+        .bind(branch)
+        .fetch_optional(&mut *conn)
+        .await?
+        .map(|r| {
+            let seq: i64 = r.get(0);
+            AssetBundleRef { url: format!("/sync/asset-bundles/{org_id}/assets-{branch}-{seq}.tar"), seq, bytes: r.get(1), sha256: r.get(2) }
+        }))
+}
+
+/// A page of a paged snapshot's ledger rows: the window of [`LEDGER_WINDOW_SQL`]
+/// over every ledger type at once, in seq order after the cursor. A till counts
+/// as open if it was open when the snapshot began (`closed_at >= $5`).
+const LEDGER_PAGE_SQL: &str = "\
+SELECT c.type, c.entity_id, c.seq FROM sync_changes c
+ WHERE c.branch_id = $1 AND c.type = ANY($2) AND c.op = 'upsert' AND c.seq <= $3 AND c.seq > $6
+   AND (c.changed_at >= $4
+        OR (c.type = 'till'          AND EXISTS (SELECT 1 FROM tills t WHERE t.id = c.entity_id
+                                              AND (t.status = 'open' OR t.closed_at >= $5)))
+        OR (c.type = 'cash_movement' AND EXISTS (SELECT 1 FROM till_cash_movements m JOIN tills t ON t.id = m.till_id
+                                              WHERE m.id = c.entity_id AND (t.status = 'open' OR t.closed_at >= $5)))
+        OR (c.type = 'order'         AND EXISTS (SELECT 1 FROM orders o JOIN tills t ON t.id = o.till_id
+                                              WHERE o.id = c.entity_id AND (t.status = 'open' OR t.closed_at >= $5)))
+        OR (c.type = 'refund'        AND EXISTS (SELECT 1 FROM order_refunds r JOIN tills t ON t.id = r.till_id
+                                              WHERE r.id = c.entity_id AND (t.status = 'open' OR t.closed_at >= $5))))
+ ORDER BY c.seq
+ LIMIT $7";
 
 /// Ledger rows of a full snapshot: changed inside the window, or belonging to
 /// a till that is still open (its whole history).

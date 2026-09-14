@@ -193,7 +193,7 @@ async fn run_scenario(pool: &PgPool, sc: &Scenario) -> Value {
     }
     sqlx::raw_sql(&sql).execute(pool).await.unwrap_or_else(|e| panic!("{}: {e}", sc.name));
 
-    let body = crate::sync::pull::PullRequest { branch_id: branch, device_id: None, types: None, limit: None };
+    let body = crate::sync::pull::PullRequest { branch_id: branch, device_id: None, types: None, limit: None, ledger_page_size: None, snapshot_cursor: None };
     let full = crate::sync::pull::pull_core(pool, org, &body, None).await.unwrap();
     // Rows exactly as the device receives them, minus the per-database `seq`.
     let rows = |ty: &str| -> Vec<Value> {

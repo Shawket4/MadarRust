@@ -37,7 +37,7 @@ async fn shop(pool: &PgPool) -> Shop {
 }
 
 fn req(branch: Uuid) -> PullRequest {
-    PullRequest { branch_id: branch, device_id: None, types: None, limit: None }
+    PullRequest { branch_id: branch, device_id: None, types: None, limit: None, ledger_page_size: None, snapshot_cursor: None }
 }
 
 fn row<'a>(resp: &'a super::PullResponse, ty: &str, id: Uuid) -> Option<&'a Value> {
@@ -401,4 +401,246 @@ fn payment_availability_has_its_own_topic() {
     for t in ["delivery", "tickets", "kitchen", "orders", "floor", "bookings", "tills", "sync"] {
         assert_eq!(Topic::parse(t).unwrap().as_str(), t);
     }
+}
+
+// ── Offline B phase 1 follow-ups: paging, horizons, role scoping ───────────
+
+async fn seed_orders(pool: &PgPool, s: &Shop, till: Uuid, n: usize) -> Vec<Uuid> {
+    let mut out = Vec::new();
+    for i in 0..n {
+        let id: Uuid = sqlx::query_scalar(
+            "INSERT INTO orders (branch_id, till_id, teller_id, order_number, payment_method, subtotal, total_amount, idempotency_key, order_ref)
+             VALUES ($1, $2, $3, $4, 'cash', 100, 100, $5, 'PAGE-' || $4::text) RETURNING id",
+        )
+        .bind(s.branch)
+        .bind(till)
+        .bind(s.teller)
+        .bind(i as i32 + 1)
+        .bind(Uuid::new_v4())
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        out.push(id);
+    }
+    out
+}
+
+fn paged(branch: Uuid, size: i64, cursor: Option<super::SnapshotCursor>) -> PullRequest {
+    PullRequest { branch_id: branch, device_id: None, types: None, limit: None, ledger_page_size: Some(size), snapshot_cursor: cursor }
+}
+
+/// A paged full snapshot is the same snapshot as the unpaged one: every ledger
+/// row exactly once, state types and checksums on page one, one horizon; a row
+/// changed while paging moves to the incremental pull; a till closed while
+/// paging keeps its rows in the later pages.
+#[sqlx::test]
+async fn a_paged_snapshot_is_the_unpaged_snapshot(pool: PgPool) {
+    let s = shop(&pool).await;
+    let till: Uuid = sqlx::query_scalar("INSERT INTO tills (branch_id, teller_id, status, opening_cash) VALUES ($1, $2, 'open', 0) RETURNING id")
+        .bind(s.branch)
+        .bind(s.teller)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let orders = seed_orders(&pool, &s, till, 350).await;
+    // The feed has not seen these change for days: only the OPEN till keeps them.
+    sqlx::query("UPDATE sync_changes SET changed_at = now() - interval '5 days' WHERE branch_id = $1")
+        .bind(s.branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let whole = pull_core(&pool, s.org, &req(s.branch), None).await.unwrap();
+    assert_eq!(whole.data["order"].len(), 350);
+
+    let p1 = pull_core(&pool, s.org, &paged(s.branch, 100, None), None).await.unwrap();
+    assert!(p1.full && p1.has_more);
+    assert!(p1.types.iter().any(|t| t == "category"), "state types on page one");
+    assert!(!p1.checksums.is_empty() && p1.asset_bundle.is_some());
+    let ledger_on_p1: usize = super::LEDGER_TYPES.iter().map(|t| p1.data.get(*t).map(Vec::len).unwrap_or(0)).sum();
+    assert_eq!(ledger_on_p1, 100);
+    let mut cursor = p1.snapshot_cursor.clone().expect("a cursor for the next page");
+    assert_eq!(p1.next, Some(cursor.horizon));
+
+    // Mid-paging: close the till, and change one order already sent.
+    sqlx::query("UPDATE tills SET status = 'closed', closed_at = now(), closing_cash_declared = 0 WHERE id = $1")
+        .bind(till)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let late = sqlx::query_scalar::<_, Uuid>("SELECT id FROM orders WHERE till_id = $1 ORDER BY order_number DESC LIMIT 1")
+        .bind(till)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE orders SET notes = 'changed while paging' WHERE id = $1").bind(late).execute(&pool).await.unwrap();
+
+    let mut seen: Vec<String> = p1.data.get("order").map(|v| v.iter().map(|r| r["id"].as_str().unwrap().to_string()).collect()).unwrap_or_default();
+    let mut pages = 1;
+    loop {
+        let p = pull_core(&pool, s.org, &paged(s.branch, 100, Some(cursor.clone())), None).await.unwrap();
+        pages += 1;
+        assert!(p.checksums.is_empty() && p.asset_bundle.is_none(), "page {pages}: first-page extras only once");
+        assert!(p.types.iter().all(|t| super::is_ledger(t)), "later pages carry ledger types only");
+        assert_eq!(p.next, Some(cursor.horizon), "one horizon for the whole snapshot");
+        seen.extend(p.data.get("order").map(|v| v.iter().map(|r| r["id"].as_str().unwrap().to_string()).collect::<Vec<_>>()).unwrap_or_default());
+        match p.snapshot_cursor {
+            Some(c) => {
+                assert!(p.has_more);
+                assert!(c.after_seq > cursor.after_seq);
+                cursor = c;
+            }
+            None => {
+                assert!(!p.has_more);
+                break;
+            }
+        }
+    }
+    let mut want: Vec<String> = orders.iter().map(|o| o.to_string()).collect();
+    want.retain(|o| *o != late.to_string());
+    let mut got = seen.clone();
+    got.sort();
+    got.dedup();
+    assert_eq!(got.len(), seen.len(), "no row twice");
+    want.sort();
+    assert_eq!(got, want, "every unchanged row of the closed-while-paging till, once");
+    let inc = pull_core(&pool, s.org, &req(s.branch), Some(cursor.horizon)).await.unwrap();
+    assert!(change(&inc, "order", late).is_some(), "the row changed while paging arrives incrementally");
+    assert!(change(&inc, "till", till).is_some());
+    // Old clients are unchanged: paging is opt-in and only for full pulls.
+    assert!(pull_core(&pool, s.org, &paged(s.branch, 100, None), Some(cursor.horizon)).await.is_err());
+}
+
+/// Role defaults are global (no org on `role_permissions`); a change re-projects
+/// only the users whose EFFECTIVE permission it can move — one with a per-user
+/// override for that permission is left alone — once per statement.
+#[sqlx::test]
+async fn a_role_default_reprojects_only_users_it_can_affect(pool: PgPool) {
+    let s = shop(&pool).await;
+    let pinned: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (org_id, name, email, password_hash, role) VALUES ($1, 'Pinned', $2, 'x', 'teller') RETURNING id",
+    )
+    .bind(s.org)
+    .bind(format!("{}@gaps.test", Uuid::new_v4()))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (res, act): (String, String) = sqlx::query_as(
+        "SELECT resource::text, action::text FROM role_permissions WHERE role = 'teller' AND granted ORDER BY 1, 2 LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO permissions (user_id, resource, action, granted) VALUES ($1, $2::permission_resource, $3::permission_action, true)")
+        .bind(pinned)
+        .bind(&res)
+        .bind(&act)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let full = pull_core(&pool, s.org, &req(s.branch), None).await.unwrap();
+    // One statement changing several roles' rows at once (including the teller default).
+    sqlx::query("UPDATE role_permissions SET granted = NOT granted WHERE role IN ('teller', 'waiter') AND resource = $1::permission_resource AND action = $2::permission_action")
+        .bind(&res)
+        .bind(&act)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let inc = pull_core(&pool, s.org, &req(s.branch), full.next).await.unwrap();
+    assert!(change(&inc, "teller", s.teller).is_some(), "a user on the role default is re-projected");
+    assert!(change(&inc, "teller", pinned).is_none(), "a user whose override pins that permission is not");
+    let data = change(&inc, "teller", s.teller).unwrap().data.clone().unwrap();
+    assert!(!data["permissions"].as_array().unwrap().iter().any(|p| p == format!("{res}:{act}").as_str()));
+    // Insert and delete statements fire too.
+    sqlx::query("DELETE FROM role_permissions WHERE role = 'teller' AND resource = $1::permission_resource AND action = $2::permission_action")
+        .bind(&res)
+        .bind(&act)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let inc2 = pull_core(&pool, s.org, &req(s.branch), inc.next).await.unwrap();
+    assert!(change(&inc2, "teller", s.teller).is_some());
+    assert!(change(&inc2, "teller", pinned).is_none());
+}
+
+fn test_secret() -> crate::auth::jwt::JwtSecret {
+    crate::auth::jwt::JwtSecret("gaps-secret".into())
+}
+
+/// The Z report names the feed horizon its figures include, and a replayed op's
+/// answer names the horizon that includes the op — the two numbers a device
+/// compares with its cursor instead of guessing by time.
+#[sqlx::test]
+async fn the_report_and_replay_answers_carry_feed_horizons(pool: PgPool) {
+    use actix_web::{App, test, web};
+    let s = shop(&pool).await;
+    sqlx::query("UPDATE users SET pin_hash = 'x' WHERE id = $1").bind(s.teller).execute(&pool).await.unwrap();
+    for action in ["read", "update"] {
+        sqlx::query("INSERT INTO permissions (user_id, resource, action, granted) VALUES ($1, 'tills', $2::permission_action, true) ON CONFLICT DO NOTHING")
+            .bind(s.teller)
+            .bind(action)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let till: Uuid = sqlx::query_scalar("INSERT INTO tills (branch_id, teller_id, status, opening_cash) VALUES ($1, $2, 'open', 0) RETURNING id")
+        .bind(s.branch)
+        .bind(s.teller)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(test_secret()))
+            .app_data(web::Data::new(crate::realtime::hub::BranchEventHub::new()))
+            .configure(crate::tills::routes::configure)
+            .configure(crate::sync::routes::configure),
+    )
+    .await;
+    let token = crate::auth::jwt::create_token(&test_secret(), s.teller, Some(s.org), crate::models::UserRole::Teller, Some(s.branch), 1).unwrap();
+    let head = |p: &PgPool| {
+        let p = p.clone();
+        let b = s.branch;
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT COALESCE(max(seq), 0) FROM sync_changes WHERE branch_id = $1")
+                .bind(b)
+                .fetch_one(&p)
+                .await
+                .unwrap()
+        }
+    };
+
+    let op = serde_json::json!({"op": "cash_movement", "teller_id": s.teller, "till_id": till,
+        "request": {"amount": 500, "note": "float", "client_ref": Uuid::new_v4()}});
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post().uri("/sync/replay").insert_header(("Authorization", format!("Bearer {token}"))).set_json(&op).to_request(),
+    )
+    .await;
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let body = test::read_body(resp).await;
+    assert!(status.is_success(), "{status} {}", String::from_utf8_lossy(&body));
+    let seq: i64 = headers
+        .get(crate::sync::handlers::SYNC_SEQ_HEADER)
+        .expect("a replay answer names its horizon")
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(seq, head(&pool).await, "every change the op made is at or below it");
+    let movement_seq: i64 = sqlx::query_scalar("SELECT seq FROM sync_changes WHERE branch_id = $1 AND type = 'cash_movement'")
+        .bind(s.branch)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(movement_seq <= seq);
+
+    let report: serde_json::Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get().uri(&format!("/tills/{till}/report")).insert_header(("Authorization", format!("Bearer {token}"))).to_request(),
+    )
+    .await;
+    assert_eq!(report["as_of_seq"].as_i64(), Some(head(&pool).await), "the report includes the feed up to its horizon");
+    assert_eq!(report["cash_movements_net"].as_i64(), Some(500));
 }

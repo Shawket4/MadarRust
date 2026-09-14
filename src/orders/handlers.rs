@@ -30,7 +30,7 @@ const ORDER_SELECT: &str =
     "SELECT o.id, o.branch_id, o.till_id, o.till_id AS shift_id, o.teller_id, u.name AS teller_name,
      o.waiter_id, w.name AS waiter_name,
      o.order_number, o.order_ref, o.status::text, o.payment_method::text,
-     COALESCE((SELECT json_agg(json_build_object('method', op.method, 'amount', op.amount) ORDER BY op.id)
+     COALESCE((SELECT json_agg(json_build_object('method', op.method, 'amount', op.amount, 'is_cash', op.is_cash) ORDER BY op.id)
                FROM order_payments op WHERE op.order_id = o.id), '[]'::json) AS payment_legs,
      o.subtotal, o.discount_type::text, o.discount_value,
      o.discount_amount, o.tax_amount, o.service_charge_amount, o.total_amount,
@@ -41,6 +41,7 @@ const ORDER_SELECT: &str =
      o.loyalty_customer_id, lc.name AS loyalty_member_name,
      o.price_flagged, o.price_expected_total, o.created_at,
      effective_timezone(o.branch_id) AS timezone,
+     o.idempotency_key, o.open_ticket_id,
      o.device_id, o.device_code, CASE WHEN o.device_code IS NOT NULL THEN o.device_code || '-' || o.order_number ELSE o.order_number::text END AS display_number, o.verification
      FROM orders o JOIN users u ON u.id = o.teller_id
      LEFT JOIN users w ON w.id = o.waiter_id
@@ -120,6 +121,10 @@ pub(crate) fn parse_uuid_csv(param: &str, raw: &str) -> Result<Option<Vec<Uuid>>
 pub struct PaymentLeg {
     pub method: String,
     pub amount: i32,
+    /// The leg's stored cash flag (`order_payments.is_cash`), the one the drawer
+    /// counts by. Additive; `null` for a leg recorded before the flag existed.
+    #[serde(default)]
+    pub is_cash: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -238,6 +243,16 @@ pub struct Order {
     #[serde(default)]
     #[sqlx(default)]
     pub timezone: Option<String>,
+    /// The client-minted key the sale was created with (a till's sale, or the
+    /// ticket id of a settled bill). An offline POS identifies its own row by it
+    /// when a list read brings the sale back (OFFLINE_B_DESIGN §7). Additive.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub idempotency_key: Option<Uuid>,
+    /// The open ticket this sale settled, if any. Additive.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub open_ticket_id: Option<Uuid>,
     /// The device that numbered this sale (contract R4). `null` for server-numbered
     /// orders (old clients, dashboard, delivery).
     #[serde(default)]
@@ -3068,7 +3083,7 @@ pub(crate) async fn void_order_inner(
                (SELECT name FROM users WHERE id = teller_id) AS teller_name,
                waiter_id, (SELECT name FROM users WHERE id = waiter_id) AS waiter_name,
                order_number, order_ref, status::text, payment_method::text,
-               COALESCE((SELECT json_agg(json_build_object('method', op.method, 'amount', op.amount) ORDER BY op.id)
+               COALESCE((SELECT json_agg(json_build_object('method', op.method, 'amount', op.amount, 'is_cash', op.is_cash) ORDER BY op.id)
                          FROM order_payments op WHERE op.order_id = orders.id), '[]'::json) AS payment_legs,
                subtotal, discount_type::text, discount_value,
                discount_amount, tax_amount, service_charge_amount, total_amount,

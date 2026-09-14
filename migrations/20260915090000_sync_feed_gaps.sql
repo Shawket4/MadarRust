@@ -217,21 +217,36 @@ BEGIN
     RETURN NULL;
 END $$;
 
--- A role default changed (super admin only, rare): every non-deleted user of
--- that role re-projects, in every org.
+-- A role default changed (super admin only, rare). Role defaults are global —
+-- `role_permissions` has no org — so the change is real in every org that has
+-- users of the role; it cannot be scoped to one org without changing what a
+-- permission means. What IS scoped: one statement-level pass per change (not a
+-- pass per row), only the (role, resource, action) triples that changed, and
+-- only the users whose EFFECTIVE permission can move — a per-user override for
+-- the same resource/action pins theirs, so they are not re-projected. Each org's
+-- users are emitted to that org's branches only.
 CREATE FUNCTION sync_emit_role_permissions() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
     u uuid;
-    rl user_role := CASE WHEN TG_OP = 'DELETE' THEN OLD.role ELSE NEW.role END;
 BEGIN
-    FOR u IN SELECT id FROM users WHERE role = rl AND deleted_at IS NULL ORDER BY id LOOP
+    CREATE TEMP TABLE IF NOT EXISTS _sync_role_perm_changes (role user_role, resource permission_resource, action permission_action) ON COMMIT DROP;
+    TRUNCATE _sync_role_perm_changes;
+    IF TG_OP IN ('INSERT', 'UPDATE') THEN
+        INSERT INTO _sync_role_perm_changes SELECT n.role, n.resource, n.action FROM new_rows n;
+    END IF;
+    IF TG_OP IN ('UPDATE', 'DELETE') THEN
+        INSERT INTO _sync_role_perm_changes SELECT o.role, o.resource, o.action FROM old_rows o;
+    END IF;
+    FOR u IN
+        SELECT DISTINCT usr.id
+          FROM _sync_role_perm_changes c
+          JOIN users usr ON usr.role = c.role AND usr.deleted_at IS NULL AND usr.org_id IS NOT NULL
+         WHERE NOT EXISTS (SELECT 1 FROM permissions p
+                            WHERE p.user_id = usr.id AND p.resource = c.resource AND p.action = c.action)
+         ORDER BY usr.id
+    LOOP
         PERFORM sync_touch_teller(u);
     END LOOP;
-    IF TG_OP = 'UPDATE' AND OLD.role IS DISTINCT FROM NEW.role THEN
-        FOR u IN SELECT id FROM users WHERE role = OLD.role AND deleted_at IS NULL ORDER BY id LOOP
-            PERFORM sync_touch_teller(u);
-        END LOOP;
-    END IF;
     RETURN NULL;
 END $$;
 
@@ -374,7 +389,12 @@ BEGIN
     END LOOP;
 END $$;
 CREATE TRIGGER sync_emit AFTER INSERT OR UPDATE OR DELETE ON branch_delivery_settings FOR EACH ROW EXECUTE FUNCTION sync_emit_branch_delivery_settings();
-CREATE TRIGGER sync_emit AFTER INSERT OR UPDATE OR DELETE ON role_permissions FOR EACH ROW EXECUTE FUNCTION sync_emit_role_permissions();
+CREATE TRIGGER sync_emit AFTER UPDATE ON role_permissions REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows
+    FOR EACH STATEMENT EXECUTE FUNCTION sync_emit_role_permissions();
+CREATE TRIGGER sync_emit_insert AFTER INSERT ON role_permissions REFERENCING NEW TABLE AS new_rows
+    FOR EACH STATEMENT EXECUTE FUNCTION sync_emit_role_permissions();
+CREATE TRIGGER sync_emit_delete AFTER DELETE ON role_permissions REFERENCING OLD TABLE AS old_rows
+    FOR EACH STATEMENT EXECUTE FUNCTION sync_emit_role_permissions();
 
 -- Backfill the new type so the feed is complete from the moment this runs.
 -- (A device's next full pull lists it; an incremental pull sees the rows as

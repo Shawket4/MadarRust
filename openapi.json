@@ -58932,6 +58932,14 @@
             "type": "string",
             "format": "uuid"
           },
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The client-minted key the sale was created with (a till's sale, or the\nticket id of a settled bill). An offline POS identifies its own row by it\nwhen a list read brings the sale back (OFFLINE_B_DESIGN §7). Additive."
+          },
           "loyalty_customer_id": {
             "type": [
               "string",
@@ -58952,6 +58960,14 @@
               "string",
               "null"
             ]
+          },
+          "open_ticket_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The open ticket this sale settled, if any. Additive."
           },
           "order_number": {
             "type": "integer",
@@ -60872,6 +60888,13 @@
             "type": "integer",
             "format": "int32"
           },
+          "is_cash": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "The leg's stored cash flag (`order_payments.is_cash`), the one the drawer\ncounts by. Additive; `null` for a leg recorded before the flag existed."
+          },
           "method": {
             "type": "string"
           }
@@ -62491,6 +62514,14 @@
             ],
             "format": "uuid"
           },
+          "ledger_page_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Opt-in paging of a FULL snapshot's ledger rows (tills, orders, cash,\nrefunds), 100..10000 rows a page. Absent = the whole snapshot in one\nresponse (what every older client gets)."
+          },
           "limit": {
             "type": [
               "integer",
@@ -62498,6 +62529,17 @@
             ],
             "format": "int64",
             "description": "Page size for incremental pulls, 1..5000 (default 2000)."
+          },
+          "snapshot_cursor": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SnapshotCursor",
+                "description": "The `snapshot_cursor` of the previous page of a paged full snapshot."
+              }
+            ]
           },
           "types": {
             "type": [
@@ -62584,6 +62626,17 @@
               "null"
             ],
             "format": "int64"
+          },
+          "snapshot_cursor": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SnapshotCursor",
+                "description": "A paged full snapshot with more pages: send it back as `snapshot_cursor`.\nState types, checksums and the asset bundle come on the FIRST page only;\n`types` on each page lists what that page covers."
+              }
+            ]
           },
           "types": {
             "type": "array",
@@ -65565,6 +65618,35 @@
           }
         }
       },
+      "SnapshotCursor": {
+        "type": "object",
+        "description": "Where a paged full snapshot stands. Every page reads the same horizon and\nwindow, so the pages together are ONE snapshot: a ledger row that changes\nwhile the pages are fetched moves past the horizon and arrives in the\nincremental pull that follows (`since = next`), never twice and never lost.",
+        "required": [
+          "horizon",
+          "window_from",
+          "started_at",
+          "after_seq"
+        ],
+        "properties": {
+          "after_seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Ledger rows with `seq` above this come next."
+          },
+          "horizon": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "started_at": {
+            "type": "string",
+            "description": "When the snapshot began (RFC 3339): a till that closes while the pages\nare fetched keeps its rows in the later pages."
+          },
+          "window_from": {
+            "type": "string",
+            "description": "The ledger window start of this snapshot (RFC 3339)."
+          }
+        }
+      },
       "Sort": {
         "type": "object",
         "required": [
@@ -67723,6 +67805,11 @@
               "order_number_range"
             ],
             "properties": {
+              "as_of_seq": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The branch changefeed horizon read BEFORE the figures (OFFLINE_B_DESIGN\n§7): every change with `seq <= as_of_seq` is in this report. A device\nwhose cursor has reached it, with nothing of the till still on its way,\ncan take these figures as the authority. `0` when no horizon was\navailable (then it is never newer than any cursor). Additive."
+              },
               "old_bills_at_close": {
                 "type": [
                   "integer",

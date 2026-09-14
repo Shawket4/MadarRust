@@ -46,7 +46,7 @@ async fn category(pool: &PgPool, org: Uuid, name: &str) -> Uuid {
 }
 
 fn req(branch: Uuid) -> PullRequest {
-    PullRequest { branch_id: branch, device_id: None, types: None, limit: None }
+    PullRequest { branch_id: branch, device_id: None, types: None, limit: None, ledger_page_size: None, snapshot_cursor: None }
 }
 
 async fn head(pool: &PgPool, branch: Uuid) -> i64 {
