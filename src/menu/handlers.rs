@@ -581,6 +581,8 @@ pub async fn create_category(
             Some(&Some(url)), None, &claims).await?;
     }
 
+    let mut row = row;
+    attach_category_refs(pool.get_ref(), row.org_id, std::slice::from_mut(&mut row)).await?;
     Ok(HttpResponse::Created().json(row))
 }
 
@@ -647,6 +649,8 @@ pub async fn update_category(
     image_url_side_effects(pool.get_ref(), crate::assets::ingest::AssetTable::Categories, existing.org_id, *id,
         mut_body.image_url.as_ref(), existing.image_url.as_deref(), &claims).await?;
 
+    let mut row = row;
+    attach_category_refs(pool.get_ref(), existing.org_id, std::slice::from_mut(&mut row)).await?;
     Ok(HttpResponse::Ok().json(row))
 }
 
@@ -849,7 +853,7 @@ pub async fn list_menu_catalog(
         Some("overridden") => "(bmo.branch_id IS NOT NULL) DESC, mi.name ASC",
         _ => "mi.name ASC",
     };
-    let rows = sqlx::query_as::<_, MenuItem>(&format!(
+    let mut rows = sqlx::query_as::<_, MenuItem>(&format!(
         "SELECT mi.id, mi.org_id, mi.category_id, mi.name, mi.name_translations,
                 mi.description, mi.description_translations, mi.image_url,
                 mi.base_price, mi.is_active,
@@ -887,6 +891,9 @@ pub async fn list_menu_catalog(
     } else {
         ((total as f64) / (per_page as f64)).ceil() as i64
     };
+
+    // Same `image` asset refs as GET /menu-items/{id}.
+    attach_item_refs(pool.get_ref(), query.org_id, &mut rows).await?;
 
     // Embed per-SKU costs for just this page so the dashboard catalog renders
     // food-cost chips in the same round trip.
@@ -1031,6 +1038,8 @@ pub async fn create_menu_item(
             Some(&Some(url)), None, &claims).await?;
     }
 
+    let mut item = item;
+    attach_item_refs(pool.get_ref(), item.org_id, std::slice::from_mut(&mut item)).await?;
     Ok(HttpResponse::Created().json(MenuItemFull {
         item,
         sizes: vec![],
@@ -1165,6 +1174,8 @@ pub async fn update_menu_item(
     image_url_side_effects(pool.get_ref(), crate::assets::ingest::AssetTable::MenuItems, existing.org_id, *id,
         mut_body.image_url.as_ref(), existing.image_url.as_deref(), &claims).await?;
 
+    let mut item = item;
+    attach_item_refs(pool.get_ref(), existing.org_id, std::slice::from_mut(&mut item)).await?;
     Ok(HttpResponse::Ok().json(item))
 }
 

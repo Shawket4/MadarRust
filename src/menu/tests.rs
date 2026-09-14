@@ -2105,3 +2105,201 @@ async fn test_menu_catalog_overridden_filter_and_sort(pool: PgPool) {
     let page: PaginatedMenuItems = test::read_body_json(resp).await;
     assert_eq!(page.data[0].item.id, latte, "overridden item sorts first");
 }
+
+// ── `image` asset refs on every menu/category/bundle read ────────────────────
+
+async fn attach_photo(
+    pool: &PgPool,
+    store: &crate::assets::AssetStore,
+    org: Uuid,
+    table: crate::assets::ingest::AssetTable,
+    purpose: crate::assets::ingest::AssetPurpose,
+    id: Uuid,
+    seed: u32,
+) -> Uuid {
+    use crate::assets::ingest::*;
+    let o = ingest_bytes(
+        pool,
+        store,
+        Some(org),
+        purpose,
+        crate::assets::tests::photo_png(80, 60, seed),
+        SourceKind::Upload,
+        Some("x.png"),
+        None,
+    )
+    .await
+    .unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    attach(&mut conn, &AssetTarget::new(table, id, AssetField::Image), &o)
+        .await
+        .unwrap();
+    o.group_id
+}
+
+fn assert_image(v: &serde_json::Value, group: Uuid, ctx: &str) {
+    assert_eq!(
+        v["image"]["group_id"].as_str(),
+        Some(group.to_string().as_str()),
+        "{ctx}: missing image in {v}"
+    );
+    assert!(v["image"]["variants"]["tile"]["url"].is_string(), "{ctx}");
+    assert!(v.get("image_url").is_some(), "{ctx}: legacy image_url kept");
+}
+
+#[sqlx::test]
+async fn image_refs_on_all_menu_reads(pool: PgPool) {
+    use crate::assets::ingest::{AssetPurpose, AssetTable};
+    let (_d, store) = crate::assets::tests::tmp_store();
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+            .configure(crate::costing::routes::configure)
+            .configure(crate::bundles::routes::configure),
+    )
+    .await;
+    let org = seed_org(&pool).await;
+    let user = seed_user(&pool, org, "org_admin").await;
+    for a in ["read", "create", "update"] {
+        grant_permission(&pool, "org_admin", "menu_items", a).await;
+        grant_permission(&pool, "org_admin", "categories", a).await;
+    }
+    let cat = seed_category(&pool, org, "Mains").await;
+    let item = seed_menu_item(&pool, org, cat, "Burger", 1000).await;
+    let bundle = Uuid::new_v4();
+    sqlx::query("INSERT INTO bundles (id, org_id, name, price) VALUES ($1, $2, 'Combo', 900)")
+        .bind(bundle)
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let gi = attach_photo(&pool, &store, org, AssetTable::MenuItems, AssetPurpose::MenuItemPhoto, item, 1).await;
+    let gc = attach_photo(&pool, &store, org, AssetTable::Categories, AssetPurpose::CategoryPhoto, cat, 2).await;
+    let gb = attach_photo(&pool, &store, org, AssetTable::Bundles, AssetPurpose::BundlePhoto, bundle, 3).await;
+    // A third-party absolute URL is served verbatim (no uploads prefix).
+    let foodics = "https://foodics-console-production.s3.eu-west-1.amazonaws.com/images/x.jpg";
+    sqlx::query("UPDATE menu_items SET image_url = $1 WHERE id = $2")
+        .bind(foodics)
+        .bind(item)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let tok = generate_org_admin_token(user, org);
+    let get = |uri: String| {
+        test::TestRequest::get()
+            .uri(&uri)
+            .insert_header(("Authorization", format!("Bearer {tok}")))
+            .to_request()
+    };
+    let json = |r| async { test::read_body_json::<serde_json::Value, _>(r).await };
+
+    // Paginated catalog (the shape the owner reported without `image`).
+    let resp = test::call_service(&app, get(format!("/costing/catalog?org_id={org}&page=1&per_page=10"))).await;
+    assert!(resp.status().is_success());
+    let v = json(resp).await;
+    assert_image(&v["data"][0], gi, "costing/catalog");
+    assert_eq!(v["data"][0]["image_url"], foodics);
+    assert!(v["data"][0]["sku_costs"].is_array());
+
+    // Plain list, full list, get, studio.
+    let v = json(test::call_service(&app, get(format!("/menu-items?org_id={org}"))).await).await;
+    assert_image(&v[0], gi, "menu-items");
+    let v = json(test::call_service(&app, get(format!("/menu-items?org_id={org}&full=true"))).await).await;
+    assert_image(&v[0], gi, "menu-items full");
+    let v = json(test::call_service(&app, get(format!("/menu-items/{item}"))).await).await;
+    assert_image(&v, gi, "menu-items/{id}");
+    let resp = test::call_service(&app, get(format!("/menu-items/{item}/studio"))).await;
+    assert!(resp.status().is_success());
+    let v = json(resp).await;
+    assert_eq!(v["image"]["group_id"], gi.to_string(), "studio: {v}");
+
+    // PATCH menu item returns image.
+    let req = test::TestRequest::patch()
+        .uri(&format!("/menu-items/{item}"))
+        .insert_header(("Authorization", format!("Bearer {tok}")))
+        .set_json(serde_json::json!({"name": "Burger 2"}))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+    assert_image(&json(resp).await, gi, "PATCH menu-items");
+
+    // Categories: list + PATCH.
+    let v = json(test::call_service(&app, get(format!("/categories?org_id={org}"))).await).await;
+    assert_image(&v[0], gc, "categories");
+    let req = test::TestRequest::patch()
+        .uri(&format!("/categories/{cat}"))
+        .insert_header(("Authorization", format!("Bearer {tok}")))
+        .set_json(serde_json::json!({"name": "Mains 2"}))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+    assert_image(&json(resp).await, gc, "PATCH categories");
+
+    // Bundles: get + list.
+    let resp = test::call_service(&app, get(format!("/bundles/{bundle}"))).await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+    assert_image(&json(resp).await, gb, "bundles/{id}");
+    let resp = test::call_service(&app, get(format!("/bundles?org_id={org}"))).await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let v = json(resp).await;
+    assert_image(&v["data"][0], gb, "bundles list");
+}
+
+#[sqlx::test]
+async fn addon_items_optional_pagination(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org = seed_org(&pool).await;
+    let user = seed_user(&pool, org, "org_admin").await;
+    grant_permission(&pool, "org_admin", "menu_items", "read").await;
+    for (n, t) in [("Oat", "milk_type"), ("Almond", "milk_type"), ("Vanilla", "syrup"), ("Oatmeal Crumble", "topping")] {
+        sqlx::query("INSERT INTO addon_items (org_id, name, type, default_price) VALUES ($1, $2, $3, 100)")
+            .bind(org)
+            .bind(n)
+            .bind(t)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let tok = generate_org_admin_token(user, org);
+    let get = |uri: String| {
+        test::TestRequest::get()
+            .uri(&uri)
+            .insert_header(("Authorization", format!("Bearer {tok}")))
+            .to_request()
+    };
+
+    // Legacy: no page params → plain array of everything.
+    let v: serde_json::Value = test::call_and_read_body_json(&app, get(format!("/addon-items?org_id={org}"))).await;
+    assert_eq!(v.as_array().unwrap().len(), 4);
+
+    // Paginated shape.
+    let v: serde_json::Value =
+        test::call_and_read_body_json(&app, get(format!("/addon-items?org_id={org}&page=2&per_page=3"))).await;
+    assert_eq!(v["total"], 4);
+    assert_eq!(v["page"], 2);
+    assert_eq!(v["per_page"], 3);
+    assert_eq!(v["total_pages"], 2);
+    assert_eq!(v["data"].as_array().unwrap().len(), 1);
+    assert!(v["data"][0]["ingredients"].is_array());
+
+    // Search + type filter, paginated and not.
+    let v: serde_json::Value =
+        test::call_and_read_body_json(&app, get(format!("/addon-items?org_id={org}&search=oat&per_page=10"))).await;
+    assert_eq!(v["total"], 2);
+    let v: serde_json::Value = test::call_and_read_body_json(
+        &app,
+        get(format!("/addon-items?org_id={org}&search=oat&addon_type=milk_type")),
+    )
+    .await;
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    assert_eq!(v[0]["name"], "Oat");
+}

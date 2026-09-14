@@ -34,6 +34,11 @@ pub struct Bundle {
     pub price: i32,
     pub status: BundleStatus,
     pub image_url: Option<String>,
+    /// Asset refs (WebP variants, signed); absent when the bundle has no asset
+    /// group. Additive: `image_url` keeps its legacy value.
+    #[sqlx(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<crate::assets::refs::AssetGroupRef>,
     pub available_from_time: Option<NaiveTime>,
     pub available_until_time: Option<NaiveTime>,
     pub available_from_date: Option<NaiveDate>,
@@ -316,7 +321,22 @@ pub async fn fetch_bundle_full(
     id: Uuid,
 ) -> Result<Option<BundleWithComponents>, AppError> {
     let mut conn = pool.acquire().await?;
-    Ok(fetch_bundles_full(&mut conn, &[id]).await?.pop())
+    let mut full = fetch_bundles_full(&mut conn, &[id]).await?.pop();
+    drop(conn);
+    // `image` is attached here (API reads), not in `fetch_bundles_full`, which
+    // also feeds the POS changefeed projection where signed URLs would churn.
+    if let Some(b) = full.as_mut() {
+        let mut refs = crate::assets::refs::slot_refs(
+            pool,
+            b.bundle.org_id,
+            crate::assets::ingest::AssetTable::Bundles,
+            crate::assets::ingest::AssetField::Image,
+            &[b.bundle.id],
+        )
+        .await?;
+        b.bundle.image = refs.remove(&b.bundle.id);
+    }
+    Ok(full)
 }
 
 /// Many hydrated bundles in a fixed number of queries (bundles, components,
