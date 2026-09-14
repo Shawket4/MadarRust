@@ -613,8 +613,8 @@ pub async fn permissions(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRe
     .fetch_all(pool.get_ref())
     .await?;
 
-    let resources = crate::permissions::RESOURCES;
-    let actions = crate::permissions::ACTIONS;
+    let cells = crate::permissions::RESOURCES.len() * crate::permissions::ACTIONS.len()
+        + crate::permissions::EXTRA_PERMISSIONS.len();
 
     // Build O(1) lookup maps so the nested loop is O(n) not O(n²)
     let role_map: HashMap<(&str, &str), bool> = role_defaults
@@ -626,25 +626,23 @@ pub async fn permissions(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRe
         .map(|p| ((p.resource.as_str(), p.action.as_str()), p.granted))
         .collect();
 
-    let mut permissions = Vec::with_capacity(resources.len() * actions.len());
+    let mut permissions = Vec::with_capacity(cells);
 
-    for resource in resources {
-        for action in actions {
-            let role_default = role_map.get(&(resource, action)).copied();
-            let user_override = override_map.get(&(resource, action)).copied();
+    for (resource, action) in crate::permissions::permission_cells() {
+        let role_default = role_map.get(&(resource, action)).copied();
+        let user_override = override_map.get(&(resource, action)).copied();
 
-            let effective = if role == "super_admin" {
-                true
-            } else {
-                user_override.or(role_default).unwrap_or(false)
-            };
+        let effective = if role == "super_admin" {
+            true
+        } else {
+            user_override.or(role_default).unwrap_or(false)
+        };
 
-            permissions.push(UserPermissionItem {
-                resource: resource.to_string(),
-                action: action.to_string(),
-                granted: effective,
-            });
-        }
+        permissions.push(UserPermissionItem {
+            resource: resource.to_string(),
+            action: action.to_string(),
+            granted: effective,
+        });
     }
 
     // POS v0.5.1 / v0.6.0 gate on `has_permission("shifts", …)`: mirror every

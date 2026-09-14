@@ -408,9 +408,16 @@ keyed(crate::kitchen::kitchen_ticket_views(&mut *conn, ids).await?, &["org_id"])
                         'price_flagged', o.price_flagged, \
                         'loyalty_customer_id', o.loyalty_customer_id, 'loyalty_member_name', lc.name, \
                         'timezone', effective_timezone(o.branch_id), \
+                        'tax_inclusive', o.tax_inclusive, 'tax_rate_applied', o.tax_rate_applied, \
+                        'service_charge_rate_applied', o.service_charge_rate_applied, \
+                        'service_charge_taxable_applied', o.service_charge_taxable_applied, \
+                        'service_charge_waived_by', o.service_charge_waived_by, 'service_charge_waived_by_name', sw.name, \
+                        'service_charge_waived_at', o.service_charge_waived_at, \
+                        'service_charge_waived_amount', o.service_charge_waived_amount, \
                         'created_at', o.created_at) \
                    FROM orders o LEFT JOIN users u ON u.id = o.teller_id LEFT JOIN users w ON w.id = o.waiter_id \
                    LEFT JOIN loyalty_customers lc ON lc.id = o.loyalty_customer_id \
+                   LEFT JOIN users sw ON sw.id = o.service_charge_waived_by \
                   WHERE o.id = ANY($1)",
                 ids,
             )
@@ -435,7 +442,8 @@ keyed(crate::kitchen::kitchen_ticket_views(&mut *conn, ids).await?, &["org_id"])
                         'till_id', r.till_id, 'shift_id', r.till_id, 'amount', r.amount, \
                         'method', r.method, 'is_cash', r.is_cash, 'reason', r.reason, 'note', r.note, \
                         'issued_by', r.issued_by, 'issued_by_name', (SELECT name FROM users WHERE id = r.issued_by), \
-                        'issued_at', r.issued_at, 'client_ref', r.client_ref, 'created_at', r.created_at) \
+                        'issued_at', r.issued_at, 'client_ref', r.client_ref, 'created_at', r.created_at, \
+                        'tax_amount', r.tax_amount, 'service_charge_amount', r.service_charge_amount) \
                    FROM order_refunds r WHERE r.id = ANY($1)",
                 ids,
             )

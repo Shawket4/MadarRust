@@ -85,3 +85,24 @@ pub const RETIRED_RESOURCES: &[&str] = &[
 ];
 
 pub const ACTIONS: &[&str] = &["create", "read", "update", "delete"];
+
+/// Grants that are not one of the four CRUD rungs, as `(resource, action)`.
+///
+/// `permission_action` is shared by every resource, so a rung such as
+/// `waive_service` would otherwise appear on all forty of them. It means
+/// something on one, so it is listed on that one: `GET /auth/permissions` and
+/// the permission matrix append these after the CRUD grid, in this order.
+/// Appended, never interleaved, so a client that indexes the grid is unmoved.
+pub const EXTRA_PERMISSIONS: &[(&str, &str)] = &[
+    // Remove the service charge from a table's bill at settle.
+    ("orders", "waive_service"),
+];
+
+/// Every `(resource, action)` the matrix reports: the CRUD grid, then the
+/// extra grants.
+pub fn permission_cells() -> impl Iterator<Item = (&'static str, &'static str)> {
+    RESOURCES
+        .iter()
+        .flat_map(|r| ACTIONS.iter().map(move |a| (*r, *a)))
+        .chain(EXTRA_PERMISSIONS.iter().copied())
+}

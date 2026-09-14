@@ -16,7 +16,6 @@
 //! the quote and the door does not move a bill the customer already agreed.
 
 use chrono::NaiveTime;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use serde::Serialize;
 use sqlx::PgPool;
@@ -92,9 +91,10 @@ pub fn channel_discount_col(channel: &str) -> &'static str {
 /// The policy in force at a branch for an online order: the branch's tax,
 /// with the service charge pinned to zero.
 pub async fn online_tax_policy(pool: &PgPool, branch_id: Uuid) -> Result<TaxPolicy, AppError> {
-    let mut policy = crate::tax::policy::for_branch(pool, branch_id).await?;
-    policy.service_charge_rate = Decimal::ZERO;
-    Ok(policy)
+    let policy = crate::tax::policy::for_branch(pool, branch_id).await?;
+    // The channel rule is the shared engine's (`TaxPolicy::for_sale`), pinned
+    // against the till's copy by `tax_vectors.json`.
+    Ok(policy.for_sale(crate::tax::SaleChannel::Online, false))
 }
 
 /// What the storefront needs to render a bill honestly: the rate, and whether

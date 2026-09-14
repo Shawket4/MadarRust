@@ -300,6 +300,26 @@ pub struct TillReportFigures {
     pub refunds_issued_cash: i64,
     #[serde(default)]
     pub cash_in_refunded_sales: i64,
+    /// Tax on this till's sales, less the tax their refunds took back (a
+    /// partial refund takes back its pro-rata share; a voided or fully
+    /// refunded sale is out altogether). Additive.
+    #[serde(default)]
+    pub total_tax: i64,
+    /// Service charge on this till's sales, less what their refunds took back.
+    #[serde(default)]
+    pub total_service_charge: i64,
+    /// The tax and service charge inside the refunds issued FROM this till's
+    /// drawer (`refunds_issued_amount`'s split).
+    #[serde(default)]
+    pub refunds_issued_tax: i64,
+    #[serde(default)]
+    pub refunds_issued_service_charge: i64,
+    /// Table bills whose service charge was removed (`orders:waive_service`),
+    /// and what those charges came to. Not part of any total.
+    #[serde(default)]
+    pub service_charge_waived_count: i64,
+    #[serde(default)]
+    pub service_charge_waived_amount: i64,
     /// `branches.standard_float`.
     pub standard_float: Option<i64>,
     pub suggested_safe_drop: Option<i64>,
@@ -1004,6 +1024,25 @@ pub(crate) async fn report_figures(pool: &PgPool, till: &Till) -> Result<TillRep
     .bind(till_id)
     .fetch_one(pool)
     .await?;
+    let (total_tax, total_service_charge, service_charge_waived_count, service_charge_waived_amount): (i64, i64, i64, i64) =
+        sqlx::query_as(
+            r#"SELECT COALESCE(SUM(o.tax_amount - COALESCE(rf.refunded_tax, 0)), 0)::bigint,
+                      COALESCE(SUM(o.service_charge_amount - COALESCE(rf.refunded_service_charge, 0)), 0)::bigint,
+                      COUNT(*) FILTER (WHERE o.service_charge_waived_by IS NOT NULL)::bigint,
+                      COALESCE(SUM(o.service_charge_waived_amount), 0)::bigint
+               FROM orders o LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
+               WHERE o.till_id = $1 AND o.status NOT IN ('voided', 'refunded')"#,
+        )
+        .bind(till_id)
+        .fetch_one(pool)
+        .await?;
+    let (refunds_issued_tax, refunds_issued_service_charge): (i64, i64) = sqlx::query_as(
+        "SELECT COALESCE(SUM(tax_amount), 0)::bigint, COALESCE(SUM(service_charge_amount), 0)::bigint \
+         FROM order_refunds WHERE till_id = $1",
+    )
+    .bind(till_id)
+    .fetch_one(pool)
+    .await?;
     let voided_amount: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(total_amount), 0)::bigint FROM orders WHERE till_id = $1 AND status = 'voided'",
     )
@@ -1077,6 +1116,12 @@ pub(crate) async fn report_figures(pool: &PgPool, till: &Till) -> Result<TillRep
         refunds_issued_amount: refund_totals.refunded_amount,
         refunds_issued_cash: refund_totals.refunded_cash,
         cash_in_refunded_sales,
+        total_tax,
+        total_service_charge,
+        refunds_issued_tax,
+        refunds_issued_service_charge,
+        service_charge_waived_count,
+        service_charge_waived_amount,
         standard_float,
         suggested_safe_drop,
         expected_cash,

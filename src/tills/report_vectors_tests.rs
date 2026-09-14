@@ -157,6 +157,38 @@ INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ('{id:b}',
 "#,
     },
     Scenario {
+        name: "tax_service_partial_refunds_and_a_waiver",
+        tills: &["t1", "t2"],
+        sql: r#"
+INSERT INTO tills (id, branch_id, teller_id, status, opening_cash, opened_at) VALUES ('{id:t1}', '{branch}', '{sara}', 'open', 0, '2026-09-14 08:00+00');
+INSERT INTO tills (id, branch_id, teller_id, status, opening_cash, opened_at) VALUES ('{id:t2}', '{branch}', '{omar}', 'open', 0, '2026-09-14 08:00+00');
+-- a table's bill: 10% service, 14% on top of both; a fifth of it refunded in cash
+INSERT INTO orders (id, branch_id, till_id, teller_id, order_number, payment_method, order_ref, subtotal, service_charge_amount, tax_amount, total_amount,
+                    tax_rate_applied, service_charge_rate_applied, tax_inclusive, service_charge_taxable_applied, order_type, created_at)
+     VALUES ('{id:a}', '{branch}', '{id:t1}', '{sara}', 1, 'Cash', 'V-TA', 10000, 1000, 1540, 12540, 0.14, 0.10, false, true, 'dine_in', '2026-09-14 09:00+00');
+INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ('{id:a}', 'Cash', 12540, true);
+INSERT INTO order_refunds (id, org_id, branch_id, order_id, till_id, amount, method, is_cash, reason, issued_by, issued_at, created_at)
+     VALUES ('{id:ra}', '{org}', '{branch}', '{id:a}', '{id:t1}', 2508, 'Cash', true, 'quality_issue', '{sara}', '2026-09-14 10:00+00', '2026-09-14 10:00+00');
+-- and a second partial refund of the same bill, from Omar's drawer
+INSERT INTO order_refunds (id, org_id, branch_id, order_id, till_id, amount, method, is_cash, reason, issued_by, issued_at, created_at)
+     VALUES ('{id:ra2}', '{org}', '{branch}', '{id:a}', '{id:t2}', 1001, 'Card', false, 'overcharged', '{omar}', '2026-09-14 10:30+00', '2026-09-14 10:30+00');
+-- an inclusive takeaway, refunded in full: out of the tax altogether
+INSERT INTO orders (id, branch_id, till_id, teller_id, order_number, payment_method, order_ref, subtotal, tax_amount, total_amount,
+                    tax_rate_applied, service_charge_rate_applied, tax_inclusive, service_charge_taxable_applied, order_type, created_at)
+     VALUES ('{id:b}', '{branch}', '{id:t1}', '{sara}', 2, 'Card', 'V-TB', 5700, 700, 5700, 0.14, 0, true, true, 'takeaway', '2026-09-14 09:05+00');
+INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ('{id:b}', 'Card', 5700, false);
+INSERT INTO order_refunds (id, org_id, branch_id, order_id, till_id, amount, method, is_cash, reason, issued_by, issued_at, created_at)
+     VALUES ('{id:rb}', '{org}', '{branch}', '{id:b}', '{id:t1}', 5700, 'Card', false, 'wrong_order', '{sara}', '2026-09-14 10:05+00', '2026-09-14 10:05+00');
+-- a table's bill whose service charge Omar waived
+INSERT INTO orders (id, branch_id, till_id, teller_id, order_number, payment_method, order_ref, subtotal, tax_amount, total_amount,
+                    tax_rate_applied, service_charge_rate_applied, tax_inclusive, service_charge_taxable_applied, order_type,
+                    service_charge_waived_by, service_charge_waived_at, service_charge_waived_amount, created_at)
+     VALUES ('{id:c}', '{branch}', '{id:t1}', '{sara}', 3, 'Cash', 'V-TC', 4000, 560, 4560, 0.14, 0, false, true, 'dine_in',
+             '{omar}', '2026-09-14 09:10+00', 400, '2026-09-14 09:10+00');
+INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ('{id:c}', 'Cash', 4560, true);
+"#,
+    },
+    Scenario {
         name: "empty_till",
         tills: &["t1"],
         sql: r#"
@@ -241,6 +273,12 @@ async fn run_scenario(pool: &PgPool, sc: &Scenario) -> Value {
                 "refunds_issued_amount": f.refunds_issued_amount,
                 "refunds_issued_cash": f.refunds_issued_cash,
                 "cash_in_refunded_sales": f.cash_in_refunded_sales,
+                "total_tax": f.total_tax,
+                "total_service_charge": f.total_service_charge,
+                "refunds_issued_tax": f.refunds_issued_tax,
+                "refunds_issued_service_charge": f.refunds_issued_service_charge,
+                "service_charge_waived_count": f.service_charge_waived_count,
+                "service_charge_waived_amount": f.service_charge_waived_amount,
                 "close_methods": methods.iter().map(|m| json!({
                     "method": m.method, "is_cash": m.is_cash, "system_total": m.system_total, "order_count": m.order_count,
                     "payment_method_id": m.payment_method_id,

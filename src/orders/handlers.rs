@@ -42,9 +42,13 @@ const ORDER_SELECT: &str =
      o.price_flagged, o.price_expected_total, o.created_at,
      effective_timezone(o.branch_id) AS timezone,
      o.idempotency_key, o.open_ticket_id,
-     o.device_id, o.device_code, CASE WHEN o.device_code IS NOT NULL THEN o.device_code || '-' || o.order_number ELSE o.order_number::text END AS display_number, o.verification
+     o.device_id, o.device_code, CASE WHEN o.device_code IS NOT NULL THEN o.device_code || '-' || o.order_number ELSE o.order_number::text END AS display_number, o.verification,
+     o.tax_inclusive, o.tax_rate_applied, o.service_charge_rate_applied, o.service_charge_taxable_applied,
+     o.service_charge_waived_by, sw.name AS service_charge_waived_by_name,
+     o.service_charge_waived_at, o.service_charge_waived_amount
      FROM orders o JOIN users u ON u.id = o.teller_id
      LEFT JOIN users w ON w.id = o.waiter_id
+     LEFT JOIN users sw ON sw.id = o.service_charge_waived_by
      LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id
      LEFT JOIN loyalty_customers lc ON lc.id = o.loyalty_customer_id ";
 
@@ -273,6 +277,43 @@ pub struct Order {
     #[serde(default)]
     #[sqlx(default)]
     pub verification: Option<String>,
+    /// Whether this bill's prices included tax, as it was priced. A receipt
+    /// says "Prices include VAT" when true. `null` on a read that does not
+    /// resolve it. Additive.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub tax_inclusive: Option<bool>,
+    /// The tax rate the bill was priced under (a fraction). `null` for orders
+    /// from before rates were recorded. Additive.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub tax_rate_applied: Option<Decimal>,
+    /// The service charge rate the bill was priced under (a fraction); `0` on a
+    /// takeaway, a delivery, or a bill whose charge was waived. Additive.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub service_charge_rate_applied: Option<Decimal>,
+    /// Whether the service charge sat inside the tax base. Additive.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub service_charge_taxable_applied: Option<bool>,
+    /// Who removed the service charge from this table's bill (a holder of
+    /// `orders:waive_service`), or `null`. Additive.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub service_charge_waived_by: Option<Uuid>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub service_charge_waived_by_name: Option<String>,
+    /// When the service charge was removed. Additive.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub service_charge_waived_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// What the removed service charge came to, in minor units; `0` when
+    /// nothing was waived. Not part of the total. Additive.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub service_charge_waived_amount: Option<i32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -346,8 +387,8 @@ pub struct OrderItemOptional {
     // (and the generated client) advertise a `number`. Without this adapter the
     // POS can't decode the create-order response → the queued sale never acks and
     // dead-letters even though it was saved. Emit a real JSON number.
-    #[schema(value_type = Option<f64>)]
     #[serde(serialize_with = "crate::decimals::serialize_opt")]
+    #[schema(value_type = Option<f64>)]
     pub quantity_deducted: Option<sqlx::types::BigDecimal>,
     /// Ingredient cost per parent-item unit in piastres. `null` ⟺ unknown or
     /// no ingredient linked.
@@ -1471,6 +1512,14 @@ pub(crate) struct SettledTicket {
     /// for the caller to publish after the commit. Empty when the order came
     /// back from the idempotency shortcut — the settle that won did the work.
     pub floor: SettledFloor,
+    /// The policy the bill froze when the ticket was opened. `None` for a
+    /// ticket opened before bills froze their policy: the branch's, as then.
+    pub frozen_policy: Option<crate::tax::TaxPolicy>,
+    /// Who removed the service charge from this bill, when someone did. The
+    /// caller has already checked they hold `orders:waive_service`.
+    pub service_waived_by: Option<Uuid>,
+    /// When they did (the till's clock on a replay).
+    pub service_waived_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// The floor-side of a settle, done in the ORDER's transaction and reported
@@ -1624,7 +1673,14 @@ pub(crate) async fn create_order_inner(
     // org's otherwise. Read once, applied to both the expected and the recorded
     // breakdown, and recorded ON the order so a later rate change cannot
     // restate this bill.
-    let mut policy = crate::tax::policy::for_branch(pool.get_ref(), body.branch_id).await?;
+    //
+    // A table's bill is priced under the policy it FROZE when it was opened
+    // (owner decision 1), so a setting changed mid-service never re-prices a
+    // bill already on a table.
+    let branch_policy = match ticket.as_ref().and_then(|t| t.frozen_policy) {
+        Some(frozen) => frozen,
+        None => crate::tax::policy::for_branch(pool.get_ref(), body.branch_id).await?,
+    };
 
     // What kind of sale this is. A ticket settle is the party who ate here;
     // anything rung straight through the till is carried out. The service
@@ -1632,14 +1688,20 @@ pub(crate) async fn create_order_inner(
     // zero rate — and the zero is what gets recorded, because the rate an order
     // was priced under IS zero whatever the branch setting says, and the books
     // CHECK that a non-dine-in row carries neither the charge nor a rate for one.
-    let order_type = if ticket.is_some() {
-        "dine_in"
+    //
+    // The channel rule lives in the shared engine (`TaxPolicy::for_sale`),
+    // pinned against the till's copy by `tax_vectors.json`; so does the waiver,
+    // which prices a table's bill under a zero rate in exactly the same way.
+    let channel = if ticket.is_some() {
+        crate::tax::SaleChannel::DineIn
     } else {
-        "takeaway"
+        crate::tax::SaleChannel::Takeaway
     };
-    if order_type != "dine_in" {
-        policy.service_charge_rate = Decimal::ZERO;
-    }
+    let order_type = channel.as_str();
+    let service_waiver = ticket
+        .as_ref()
+        .and_then(|t| t.service_waived_by.map(|by| (by, t.service_waived_at)));
+    let policy = branch_policy.for_sale(channel, service_waiver.is_some());
 
     // ── Loyalty redemptions ─────────────────────────────────────────────────
     // Resolved BEFORE pricing: a reward changes what is owed, so a redemption
@@ -1814,6 +1876,17 @@ pub(crate) async fn create_order_inner(
     .clamp(0, subtotal);
     let breakdown = crate::tax::compute(subtotal as i64, discount_amount as i64, &policy);
     let service_charge_amount = breakdown.service_charge as i32;
+    // What the waiver took off: the charge this bill would have carried.
+    let service_charge_waived_amount = if service_waiver.is_some() {
+        crate::tax::compute(
+            subtotal as i64,
+            discount_amount as i64,
+            &branch_policy.for_sale(channel, false),
+        )
+        .service_charge as i32
+    } else {
+        0
+    };
     let tax_amount = breakdown.tax as i32;
     let total_amount = breakdown.total as i32;
 
@@ -2068,10 +2141,12 @@ pub(crate) async fn create_order_inner(
              price_flagged, price_expected_total, waiter_id, loyalty_customer_id,
              service_charge_amount, tax_rate_applied, service_charge_rate_applied,
              tax_inclusive, service_charge_taxable_applied, order_type, open_ticket_id,
-             device_id, device_code, verification)
+             device_id, device_code, verification,
+             service_charge_waived_by, service_charge_waived_at, service_charge_waived_amount)
         VALUES ($1, $2, $3, $4, $5, $6, $7::discount_type, $8,
                 $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'completed', $19, $20, $21, $22,
-                $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36)
+                $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36,
+                $37, $38, $39)
         RETURNING
             id, branch_id, till_id, till_id AS shift_id, teller_id,
             (SELECT name FROM users WHERE id = $3) AS teller_name,
@@ -2090,7 +2165,10 @@ pub(crate) async fn create_order_inner(
             voided_at, void_reason::text, void_note, voided_by,
             price_flagged, price_expected_total, created_at,
             effective_timezone(branch_id) AS timezone,
-            device_id, device_code, CASE WHEN device_code IS NOT NULL THEN device_code || '-' || order_number ELSE order_number::text END AS display_number, verification
+            device_id, device_code, CASE WHEN device_code IS NOT NULL THEN device_code || '-' || order_number ELSE order_number::text END AS display_number, verification,
+            tax_inclusive, tax_rate_applied, service_charge_rate_applied, service_charge_taxable_applied,
+            service_charge_waived_by, (SELECT name FROM users WHERE id = service_charge_waived_by) AS service_charge_waived_by_name,
+            service_charge_waived_at, service_charge_waived_amount
         "#,
     )
     .bind(shift_branch_id) // authoritative: the order's branch IS its shift's branch
@@ -2143,6 +2221,10 @@ pub(crate) async fn create_order_inner(
     } else {
         Some("server".to_string())
     })
+    // Who removed the service charge, when, and what it came to.
+    .bind(service_waiver.map(|(by, _)| by))
+    .bind(service_waiver.map(|(_, at)| at.unwrap_or(created_at)))
+    .bind(service_charge_waived_amount)
     .fetch_one(&mut *tx)
     .await
     {

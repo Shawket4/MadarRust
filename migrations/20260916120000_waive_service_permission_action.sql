@@ -1,0 +1,13 @@
+-- `orders:waive_service` — removing the service charge from a table's bill.
+--
+-- A PERMISSION, not a role (owner decision 3): the till offers "Remove service
+-- charge" only to someone whose effective permissions include it, and the
+-- settle refuses a waiver from anyone else, live or replayed. Managers hold it
+-- by default and nobody else does; every default is changeable per role and
+-- per user like any other grant.
+--
+-- Kept in its own migration and NOT used in-file: `ALTER TYPE ... ADD VALUE`
+-- cannot be used until the transaction that adds it commits. The per-role
+-- defaults are seeded at boot by `permissions::seeder` and by the next
+-- migration, so an environment that migrates before it boots holds them too.
+ALTER TYPE permission_action ADD VALUE IF NOT EXISTS 'waive_service';

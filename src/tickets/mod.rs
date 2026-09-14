@@ -135,6 +135,16 @@ pub struct TicketBill {
     /// The rates the figures were computed under, for the printed bill.
     pub tax_rate: Decimal,
     pub service_charge_rate: Decimal,
+    /// Whether the service charge sits inside the tax base. Frozen on the bill
+    /// with the rates, so a till re-pricing the bill (a discount, a reward, a
+    /// voided line) prices it the way the settle will. Additive: a bill from
+    /// an older server decodes as `true`, `TaxPolicy::default()`'s value.
+    #[serde(default = "crate::tickets::default_true")]
+    pub service_charge_taxable: bool,
+}
+
+pub(crate) fn default_true() -> bool {
+    true
 }
 
 /// Price an OPEN ticket's bill under the branch's current policy.
@@ -164,6 +174,7 @@ fn price_bill_under(
         total: b.total as i32,
         tax_rate: policy.tax_rate,
         service_charge_rate: policy.service_charge_rate,
+        service_charge_taxable: policy.service_charge_taxable,
     }
 }
 
@@ -186,9 +197,11 @@ async fn booked_bills(
         i32,
         Option<Decimal>,
         Option<Decimal>,
+        Option<bool>,
     )> = sqlx::query_as(
         "SELECT id, subtotal, discount_amount, service_charge_amount, tax_amount, tax_inclusive, \
-                    total_amount, tax_rate_applied, service_charge_rate_applied \
+                    total_amount, tax_rate_applied, service_charge_rate_applied, \
+                    service_charge_taxable_applied \
              FROM orders WHERE id = ANY($1)",
     )
     .bind(order_ids)
@@ -207,6 +220,7 @@ async fn booked_bills(
                 total,
                 tr,
                 sr,
+                st,
             )| {
                 (
                     id,
@@ -219,6 +233,7 @@ async fn booked_bills(
                         total,
                         tax_rate: tr.unwrap_or(Decimal::ZERO),
                         service_charge_rate: sr.unwrap_or(Decimal::ZERO),
+                        service_charge_taxable: st.unwrap_or(true),
                     },
                 )
             },
@@ -255,6 +270,38 @@ struct TicketRow {
     void_reason: Option<String>,
     void_note: Option<String>,
     timezone: Option<String>,
+    tax_rate_applied: Option<Decimal>,
+    tax_inclusive_applied: Option<bool>,
+    service_charge_rate_applied: Option<Decimal>,
+    service_charge_taxable_applied: Option<bool>,
+}
+
+impl TicketRow {
+    /// The policy this bill froze when it was opened, if it did.
+    fn frozen_policy(&self) -> Option<crate::tax::TaxPolicy> {
+        frozen_policy(
+            self.tax_rate_applied,
+            self.tax_inclusive_applied,
+            self.service_charge_rate_applied,
+            self.service_charge_taxable_applied,
+        )
+    }
+}
+
+/// A ticket's frozen policy from its four columns: all of them, or none (the
+/// table's CHECK makes a half-frozen row impossible; this stays total anyway).
+pub(crate) fn frozen_policy(
+    tax_rate: Option<Decimal>,
+    tax_inclusive: Option<bool>,
+    service_charge_rate: Option<Decimal>,
+    service_charge_taxable: Option<bool>,
+) -> Option<crate::tax::TaxPolicy> {
+    Some(crate::tax::TaxPolicy {
+        tax_rate: tax_rate?,
+        tax_inclusive: tax_inclusive?,
+        service_charge_rate: service_charge_rate?,
+        service_charge_taxable: service_charge_taxable?,
+    })
 }
 
 pub(crate) async fn open_ticket_view(
@@ -300,7 +347,9 @@ pub(crate) async fn open_ticket_views_on(
                 ot.subtotal, ot.discount_id, ot.discount_type, ot.discount_value, \
                 ot.order_id, ot.booking_id, ot.opened_at, ot.ready_at, ot.settled_at, \
                 ot.voided_at, ot.void_reason::text AS void_reason, ot.void_note, \
-                effective_timezone(ot.branch_id) AS timezone \
+                effective_timezone(ot.branch_id) AS timezone, \
+                ot.tax_rate_applied, ot.tax_inclusive_applied, ot.service_charge_rate_applied, \
+                ot.service_charge_taxable_applied \
          FROM open_tickets ot LEFT JOIN users u ON u.id = ot.opened_by WHERE ot.id = ANY($1)",
     )
     .bind(ids)
@@ -371,14 +420,16 @@ pub(crate) async fn open_ticket_views_on(
     let mut by_id: std::collections::HashMap<Uuid, OpenTicketView> =
         std::collections::HashMap::with_capacity(rows.len());
     for r in rows {
-        // Settled: what was booked. Otherwise: what would be, under today's
-        // policy — for a voided ticket that is history's curiosity, but a bill
-        // that prices to nothing would read as a defect.
+        // Settled: what was booked. Otherwise: what would be, under the policy
+        // the bill froze when it was opened (today's, for a ticket from before
+        // bills froze theirs) — for a voided ticket that is history's
+        // curiosity, but a bill that prices to nothing would read as a defect.
         let bill = match r.order_id.and_then(|o| booked.get(&o).cloned()) {
             Some(b) => b,
             None => {
+                let frozen = r.frozen_policy();
                 #[allow(clippy::map_entry)] // the insert awaits
-                if !policies.contains_key(&r.branch_id) {
+                if frozen.is_none() && !policies.contains_key(&r.branch_id) {
                     let p = crate::tax::policy::for_branch(&mut *conn, r.branch_id).await?;
                     policies.insert(r.branch_id, p);
                 }
@@ -393,7 +444,7 @@ pub(crate) async fn open_ticket_views_on(
                     ),
                 };
                 price_bill_under(
-                    &policies[&r.branch_id],
+                    frozen.as_ref().unwrap_or_else(|| &policies[&r.branch_id]),
                     r.subtotal,
                     dtype.as_deref(),
                     dvalue,

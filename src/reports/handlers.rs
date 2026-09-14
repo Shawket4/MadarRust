@@ -90,10 +90,17 @@ pub struct ShiftSummary {
     /// A fully refunded sale is out of all three (its status is `refunded`).
     #[serde(default)]
     pub refunded_amount: i64,
-    /// Service charge added to this shift's dine-in bills. Inside
-    /// `total_revenue` as the shop's income; see `analytics::schema` for why.
+    /// Service charge added to this shift's dine-in bills, less what refunds
+    /// took back. Inside `total_revenue` as the shop's income; see
+    /// `analytics::schema` for why.
     #[serde(default)]
     pub total_service_charge: i64,
+    /// Table bills whose service charge was removed by someone holding
+    /// `orders:waive_service`, and what those charges came to. Additive.
+    #[serde(default)]
+    pub service_charge_waived_count: i64,
+    #[serde(default)]
+    pub service_charge_waived_amount: i64,
     /// Delivery fees on this shift's sales. Inside `total_revenue` (the
     /// customer paid them) but outside the tax base and not food revenue.
     #[serde(default)]
@@ -169,10 +176,16 @@ pub struct BranchSalesReport {
     /// refunded order is out of every figure here by status).
     #[serde(default)]
     pub refunded_amount: i64,
-    /// Service charge on the dine-in bills in range — inside `total_revenue`
-    /// as the shop's income, not a pass-through.
+    /// Service charge on the dine-in bills in range, less what refunds took
+    /// back — inside `total_revenue` as the shop's income, not a pass-through.
     #[serde(default)]
     pub total_service_charge: i64,
+    /// Table bills in range whose service charge was waived, and what those
+    /// charges came to. Additive.
+    #[serde(default)]
+    pub service_charge_waived_count: i64,
+    #[serde(default)]
+    pub service_charge_waived_amount: i64,
     /// Delivery fees on the sales in range — inside `total_revenue`, outside
     /// the tax base, not food revenue.
     #[serde(default)]
@@ -383,8 +396,10 @@ pub async fn shift_summary(
               ) sub
             ), '{}'::json) AS revenue_by_method,
             COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_discount,
-            COALESCE(SUM(o.tax_amount)      FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_tax,
-            COALESCE(SUM(o.service_charge_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_service_charge,
+            COALESCE(SUM(o.tax_amount - COALESCE(rf.refunded_tax, 0)) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_tax,
+            COALESCE(SUM(o.service_charge_amount - COALESCE(rf.refunded_service_charge, 0)) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_service_charge,
+            COUNT(o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded') AND o.service_charge_waived_by IS NOT NULL)::bigint AS service_charge_waived_count,
+            COALESCE(SUM(o.service_charge_waived_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS service_charge_waived_amount,
             COALESCE(SUM(o.delivery_fee)    FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_delivery_fees,
             COALESCE(SUM(o.tip_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_tips,
             COALESCE(SUM(o.tip_amount) FILTER (
@@ -556,6 +571,8 @@ pub async fn branch_sales(
         gross_sales: i64,
         refunded_amount: i64,
         total_service_charge: i64,
+        service_charge_waived_count: i64,
+        service_charge_waived_amount: i64,
         total_delivery_fees: i64,
         total_line_items: i64,
         revenue_by_method: serde_json::Value,
@@ -570,7 +587,7 @@ pub async fn branch_sales(
             COUNT(*) FILTER (WHERE o.status = 'voided')::bigint AS voided_orders,
             COALESCE(SUM(o.subtotal)        FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS subtotal,
             COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_discount,
-            COALESCE(SUM(o.tax_amount)      FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_tax,
+            COALESCE(SUM(o.tax_amount - COALESCE(rf.refunded_tax, 0)) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_tax,
             -- Net of refunds against each sale; the two lines after it are the
             -- identity `gross_sales − refunded_amount = total_revenue`. The join
             -- on v_order_refund_totals is one row per order, so nothing here
@@ -579,7 +596,9 @@ pub async fn branch_sales(
                      FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_revenue,
             COALESCE(SUM(o.total_amount)    FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS gross_sales,
             COALESCE(SUM(rf.refunded_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS refunded_amount,
-            COALESCE(SUM(o.service_charge_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_service_charge,
+            COALESCE(SUM(o.service_charge_amount - COALESCE(rf.refunded_service_charge, 0)) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_service_charge,
+            COUNT(o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded') AND o.service_charge_waived_by IS NOT NULL)::bigint AS service_charge_waived_count,
+            COALESCE(SUM(o.service_charge_waived_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS service_charge_waived_amount,
             COALESCE(SUM(o.delivery_fee)    FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_delivery_fees,
             COALESCE((
               SELECT SUM(oi.quantity)::bigint
@@ -743,6 +762,8 @@ pub async fn branch_sales(
         gross_sales: totals.gross_sales,
         refunded_amount: totals.refunded_amount,
         total_service_charge: totals.total_service_charge,
+        service_charge_waived_count: totals.service_charge_waived_count,
+        service_charge_waived_amount: totals.service_charge_waived_amount,
         total_delivery_fees: totals.total_delivery_fees,
         total_line_items: totals.total_line_items,
         revenue_by_method: totals.revenue_by_method,
@@ -880,7 +901,7 @@ pub async fn branch_sales_timeseries(
                 COALESCE(SUM(rf.refunded_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS refunded,
                 COUNT(o.id)   FILTER (WHERE o.status  = 'voided')::bigint  AS voided,
                 COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS discount,
-                COALESCE(SUM(o.tax_amount)      FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS tax
+                COALESCE(SUM(o.tax_amount - COALESCE(rf.refunded_tax, 0)) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS tax
             FROM orders o
             LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
             WHERE o.branch_id = ANY($1)
@@ -1029,7 +1050,7 @@ pub async fn branch_sales_peak_hours(
                          FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS revenue,
                 COUNT(o.id)   FILTER (WHERE o.status  = 'voided')::bigint  AS voided,
                 COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS discount,
-                COALESCE(SUM(o.tax_amount)      FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS tax
+                COALESCE(SUM(o.tax_amount - COALESCE(rf.refunded_tax, 0)) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS tax
             FROM orders o
             LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
             WHERE o.branch_id = ANY($1)

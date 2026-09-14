@@ -387,6 +387,17 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         ("org_admin", "refunds", "read", true),
         ("branch_manager", "refunds", "create", true),
         ("branch_manager", "refunds", "read", true),
+        // ── removing the service charge from a table's bill ───────
+        // A permission, not a role (owner decision 3): the till offers the
+        // waiver only to someone holding it and the settle refuses anyone
+        // else. Managers by default; tellers, waiters and the KDS not — and
+        // every one of these is changeable per role and per user. The rows are
+        // explicit on both sides so the editor shows a default, not "no rule".
+        ("org_admin", "orders", "waive_service", true),
+        ("branch_manager", "orders", "waive_service", true),
+        ("teller", "orders", "waive_service", false),
+        ("waiter", "orders", "waive_service", false),
+        ("kitchen", "orders", "waive_service", false),
     ];
 
     for &(role, resource, action, granted) in defaults {

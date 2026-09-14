@@ -150,8 +150,8 @@ pub async fn get_permission_matrix(
     .fetch_all(pool.get_ref())
     .await?;
 
-    let resources = crate::permissions::RESOURCES;
-    let actions = crate::permissions::ACTIONS;
+    let cells = crate::permissions::RESOURCES.len() * crate::permissions::ACTIONS.len()
+        + crate::permissions::EXTRA_PERMISSIONS.len();
 
     // Build O(1) lookup maps so the nested loop is O(n) not O(n²)
     let role_map: HashMap<(&str, &str), bool> = role_defaults
@@ -163,22 +163,20 @@ pub async fn get_permission_matrix(
         .map(|p| ((p.resource.as_str(), p.action.as_str()), p.granted))
         .collect();
 
-    let mut matrix: Vec<PermissionMatrix> = Vec::with_capacity(resources.len() * actions.len());
+    let mut matrix: Vec<PermissionMatrix> = Vec::with_capacity(cells);
 
-    for resource in resources {
-        for action in actions {
-            let role_default = role_map.get(&(resource, action)).copied();
-            let user_override = override_map.get(&(resource, action)).copied();
-            let effective = user_override.or(role_default).unwrap_or(false);
+    for (resource, action) in crate::permissions::permission_cells() {
+        let role_default = role_map.get(&(resource, action)).copied();
+        let user_override = override_map.get(&(resource, action)).copied();
+        let effective = user_override.or(role_default).unwrap_or(false);
 
-            matrix.push(PermissionMatrix {
-                resource: resource.to_string(),
-                action: action.to_string(),
-                role_default,
-                user_override,
-                effective,
-            });
-        }
+        matrix.push(PermissionMatrix {
+            resource: resource.to_string(),
+            action: action.to_string(),
+            role_default,
+            user_override,
+            effective,
+        });
     }
 
     Ok(HttpResponse::Ok().json(matrix))

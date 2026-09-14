@@ -131,6 +131,12 @@ pub struct SettleOpenTicketRequest {
     /// exactly like a counter one — the cashier scans at settle either way.
     #[serde(default)]
     pub loyalty_redemptions: Vec<crate::orders::handlers::LoyaltyRedemptionInput>,
+    /// Remove the service charge from this bill. Only someone whose effective
+    /// permissions include `orders:waive_service` may send `true`; anyone else
+    /// is refused, live or replayed. The order records who and when. Absent
+    /// (every build before 0.7.2) means the charge stands.
+    #[serde(default)]
+    pub waive_service_charge: bool,
 }
 
 /// Why a bill is torn up. `reason` is typed; `note` is what actually happened,
@@ -349,6 +355,10 @@ pub(crate) async fn create_open_ticket_inner(
     )
     .await?;
 
+    // The policy this bill is priced under for its whole life, frozen now
+    // (owner decision 1). Read before the transaction, like the lines above.
+    let policy = crate::tax::policy::for_branch(pool.get_ref(), body.branch_id).await?;
+
     let now = chrono::Utc::now();
     let mut tx = pool.get_ref().begin().await?;
     let ticket_ref = mint_ticket_ref(&mut tx, body.branch_id, now).await?;
@@ -373,8 +383,11 @@ pub(crate) async fn create_open_ticket_inner(
     let open_ticket_id: Uuid = sqlx::query_scalar(
         "INSERT INTO open_tickets \
             (org_id, branch_id, table_id, ticket_ref, opened_by, customer_name, notes, guest_count, \
-             idempotency_key, discount_id, discount_type, discount_value, booking_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id",
+             idempotency_key, discount_id, discount_type, discount_value, booking_id, \
+             tax_rate_applied, tax_inclusive_applied, service_charge_rate_applied, \
+             service_charge_taxable_applied) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) \
+         RETURNING id",
     )
     .bind(org_id)
     .bind(body.branch_id)
@@ -389,6 +402,10 @@ pub(crate) async fn create_open_ticket_inner(
     .bind(&body.discount_type)
     .bind(body.discount_value)
     .bind(body.booking_id)
+    .bind(policy.tax_rate)
+    .bind(policy.tax_inclusive)
+    .bind(policy.service_charge_rate)
+    .bind(policy.service_charge_taxable)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -1128,9 +1145,15 @@ pub(crate) async fn settle_open_ticket_inner(
         Option<String>,
         Option<rust_decimal::Decimal>,
         Uuid,
+        Option<rust_decimal::Decimal>,
+        Option<bool>,
+        Option<rust_decimal::Decimal>,
+        Option<bool>,
     )> = sqlx::query_as(
         "SELECT branch_id, org_id, status::text, order_id, customer_name, notes, \
-                    discount_id, discount_type, discount_value, opened_by \
+                    discount_id, discount_type, discount_value, opened_by, \
+                    tax_rate_applied, tax_inclusive_applied, service_charge_rate_applied, \
+                    service_charge_taxable_applied \
              FROM open_tickets WHERE id = $1",
     )
     .bind(*id)
@@ -1147,6 +1170,10 @@ pub(crate) async fn settle_open_ticket_inner(
         t_disc_type,
         t_disc_value,
         opened_by,
+        f_tax_rate,
+        f_tax_inclusive,
+        f_sc_rate,
+        f_sc_taxable,
     )) = row
     else {
         return Err(AppError::NotFound("Open ticket not found".into()));
@@ -1166,6 +1193,29 @@ pub(crate) async fn settle_open_ticket_inner(
             return Ok(HttpResponse::Ok().json(order));
         }
         return Err(AppError::Conflict("Ticket is already settled".into()));
+    }
+
+    // Removing the service charge is a PERMISSION (`orders:waive_service`),
+    // checked against the acting user — the PIN user on a live settle, the
+    // op's embedded author on a replay — through the same resolver as every
+    // other grant, so a per-user grant or revocation holds offline too. It is
+    // checked AFTER the already-settled shortcut above, so a lost-ack replay
+    // still gets its order back.
+    if body.waive_service_charge {
+        let mut conn = pool.get_ref().acquire().await?;
+        crate::permissions::checker::check_permission_for_on(
+            &mut conn,
+            actor.teller_id,
+            &actor.role,
+            "orders",
+            "waive_service",
+        )
+        .await
+        .map_err(|_| {
+            AppError::Forbidden(
+                "Removing the service charge needs the \"Waive service charge\" permission".into(),
+            )
+        })?;
     }
 
     // Replay the stored client-priced items back through the POS create-order
@@ -1309,6 +1359,9 @@ pub(crate) async fn settle_open_ticket_inner(
         open_ticket_id: *id,
         waiter_id: opened_by,
         floor: Default::default(),
+        frozen_policy: super::frozen_policy(f_tax_rate, f_tax_inclusive, f_sc_rate, f_sc_taxable),
+        service_waived_by: body.waive_service_charge.then_some(actor.teller_id),
+        service_waived_at: body.settled_at,
     };
     create_order_inner(
         pool.clone(),

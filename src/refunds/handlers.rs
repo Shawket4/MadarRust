@@ -89,6 +89,16 @@ pub struct Refund {
     #[serde(default)]
     pub client_ref: Option<Uuid>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// How much of `amount` was tax, taken back pro rata of the order's own
+    /// tax (filled by the database, cumulatively across the order's refunds,
+    /// so a full refund takes back exactly the order's tax). Additive.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub tax_amount: i32,
+    /// How much of `amount` was service charge, the same way. Additive.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub service_charge_amount: i32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
@@ -763,7 +773,7 @@ async fn fetch_refunds_by_ids(
         SELECT r.id, r.branch_id, r.order_id, r.till_id, r.till_id AS shift_id, r.amount, r.method, r.is_cash,
                r.reason, r.note, r.issued_by,
                (SELECT name FROM users WHERE id = r.issued_by) AS issued_by_name,
-               r.issued_at, r.client_ref, r.created_at
+               r.issued_at, r.client_ref, r.created_at, r.tax_amount, r.service_charge_amount
         FROM order_refunds r
         WHERE r.id = ANY($1)
         "#,
