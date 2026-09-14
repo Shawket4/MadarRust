@@ -143,9 +143,26 @@ fn take_token(key: &str) -> bool {
 
 /// Who this request is, for limiting: the person if we know them, the address
 /// if we do not.
+///
+/// This gate is mounted on the App, OUTSIDE the scopes' `JwtMiddleware`, so the
+/// claims that middleware inserts are not there yet when it runs: reading only
+/// the extensions keyed EVERY request by its peer address, and every till,
+/// kitchen screen and phone behind one shop router spent one shared allowance
+/// (found replaying a 1000-sale offline backlog, which paced the other tills'
+/// sign-ins). The bearer is verified here instead — verified, not just decoded,
+/// so a forged token cannot choose whose allowance it spends.
 fn limiter_key(req: &actix_web::dev::ServiceRequest) -> String {
     crate::orgs::handlers::extract_claims(req.request())
         .ok()
+        .or_else(|| {
+            let token = req
+                .headers()
+                .get("Authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))?;
+            let secret = req.app_data::<actix_web::web::Data<crate::auth::jwt::JwtSecret>>()?;
+            crate::auth::jwt::verify_token(secret, token).ok()
+        })
         .and_then(|c| c.user_id_safe().ok())
         .map(|id| id.to_string())
         .unwrap_or_else(|| {
@@ -203,6 +220,60 @@ pub async fn throttle_exports(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two people at one address each get their own allowance, through the
+    /// real middleware stack order (the gate on the App, the JWT check inside a
+    /// scope); an anonymous caller is still keyed by address.
+    #[actix_web::test]
+    async fn people_behind_one_address_do_not_share_an_allowance() {
+        use crate::auth::jwt::{JwtSecret, create_token};
+        use crate::models::UserRole;
+        use actix_web::{App, HttpResponse, test, web};
+        let secret = JwtSecret("limiter-key-test-secret".into());
+        let token = |id| create_token(&secret, id, None, UserRole::Teller, None, 1).unwrap();
+        let (alice, bob) = (token(uuid::Uuid::new_v4()), token(uuid::Uuid::new_v4()));
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(JwtSecret(secret.0.clone())))
+                .wrap(actix_web::middleware::from_fn(throttle_exports))
+                .service(
+                    web::scope("/api")
+                        .wrap(crate::auth::middleware::JwtMiddleware)
+                        .route("/ping", web::get().to(HttpResponse::Ok)),
+                ),
+        )
+        .await;
+        let call = |bearer: String| {
+            test::TestRequest::get()
+                .uri("/api/ping")
+                .insert_header(("Authorization", format!("Bearer {bearer}")))
+                .peer_addr("10.0.0.7:5000".parse().unwrap())
+                .to_request()
+        };
+        let per_minute = global_per_minute() as usize;
+        for _ in 0..per_minute {
+            let r = test::call_service(&app, call(alice.clone())).await;
+            assert!(r.status().is_success());
+        }
+        let paced = test::try_call_service(&app, call(alice.clone())).await;
+        let status = match paced {
+            Ok(r) => r.status(),
+            Err(e) => e.error_response().status(),
+        };
+        assert_eq!(status, actix_web::http::StatusCode::TOO_MANY_REQUESTS, "alice spent hers");
+        let r = test::call_service(&app, call(bob.clone())).await;
+        assert!(r.status().is_success(), "bob, at the same address, has spent nothing");
+        // A forged bearer is not a person: it is keyed by the address.
+        let forged = JwtSecret("not-the-secret".into());
+        let fake = create_token(&forged, uuid::Uuid::new_v4(), None, UserRole::Teller, None, 1).unwrap();
+        let req = test::TestRequest::get()
+            .uri("/api/ping")
+            .insert_header(("Authorization", format!("Bearer {fake}")))
+            .peer_addr("10.0.0.7:5000".parse().unwrap())
+            .app_data(web::Data::new(JwtSecret(secret.0.clone())))
+            .to_srv_request();
+        assert_eq!(limiter_key(&req), "10.0.0.7");
+    }
 
     #[test]
     fn the_bucket_refills_rather_than_opening_on_the_minute() {

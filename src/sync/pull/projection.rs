@@ -101,7 +101,7 @@ pub fn projects_sql(ty: &str) -> Option<&'static str> {
         "cash_movement" => "EXISTS (SELECT 1 FROM till_cash_movements x WHERE x.id = $ID)",
         "order" => "EXISTS (SELECT 1 FROM orders x WHERE x.id = $ID)",
         "refund" => "EXISTS (SELECT 1 FROM order_refunds x WHERE x.id = $ID)",
-        "addon_item" => "EXISTS (SELECT 1 FROM addon_items x WHERE x.id = $ID AND sync_live_addon_item(x))",
+        "addon_item" => "EXISTS (SELECT 1 FROM addon_items x WHERE x.id = $ID AND sync_live_addon_item(x.id))",
         _ => return None,
     })
 }

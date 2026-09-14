@@ -16,39 +16,92 @@
 --
 -- SOURCE TABLES (additions; machine-read by the migration tests together with
 -- 20260914090300's header). Format:  table -> type[, type…]  (scope)
---   addon_items                -> addon_item                  (org fan-out)
---   addon_item_ingredients     -> addon_item (parent)         (org fan-out)
---   branch_addon_overrides     -> addon_item (that branch)
+--   addon_items                -> addon_item                  (org fan-out; legacy table)
+--   addon_item_ingredients     -> addon_item (parent)         (org fan-out; legacy table)
+--   branch_addon_overrides     -> addon_item (that branch; legacy table)
 --   branch_delivery_settings   -> branch_settings (that branch)
 --   role_permissions           -> teller (every user of the role) (org fan-out)
+--
+-- Tables of the original header that now ALSO emit `addon_item` (their registry
+-- rows gain the type; their emitter functions are replaced whole below):
+--   modifier_groups      (a legacy addon group: its options; a deleted group retires them)
+--   modifier_options     (legacy_source 'addon')
+--   recipe_lines         (owner_type 'modifier_option')
+--   menu_price_overrides (target_type 'modifier_option', branch scope)
+--   org_ingredients      (the ingredient an addon uses was renamed)
+--
+-- TWO SCHEMA STATES. Before the menu-unification contract shim
+-- (deploy/menu_unification_shim.sql) `addon_items`, `addon_item_ingredients` and
+-- `branch_addon_overrides` are TABLES the legacy handlers write. After it they are
+-- VIEWS over the unified tables, which cannot carry row triggers. So the legacy
+-- triggers are created only where the relation is a table, and the unified
+-- tables' emitters cover the view state. In the table state a unified write may
+-- touch an addon too: the feed is compacted, so a second emit only moves a seq.
 
 -- /addon-items lists inactive addons too (the till greys them); a branch that
 -- turned one off ships it with `is_available:false`. So every addon is live.
-CREATE FUNCTION sync_live_addon_item(r addon_items) RETURNS boolean LANGUAGE sql STABLE
-    AS $$ SELECT r.id IS NOT NULL $$;
+-- Keyed by id, never by the `addon_items` row type: the contract shim drops the
+-- table (CASCADE would take a function over its row type with it) and recreates it
+-- as a view; SQL/plpgsql bodies resolve the name at call time and keep working.
+CREATE FUNCTION sync_live_addon_item(p_id uuid) RETURNS boolean LANGUAGE sql STABLE
+    AS $$ SELECT p_id IS NOT NULL $$;
 
 CREATE FUNCTION sync_touch_addon_item(p_addon uuid, p_branch uuid DEFAULT NULL) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
     AS $$
 DECLARE
-    r addon_items;
+    o uuid;
 BEGIN
-    SELECT * INTO r FROM addon_items WHERE id = p_addon;
+    IF p_addon IS NULL THEN RETURN; END IF;
+    SELECT org_id INTO o FROM addon_items WHERE id = p_addon;
     IF NOT FOUND THEN RETURN; END IF;
     IF p_branch IS NULL THEN
-        PERFORM sync_emit_org(r.org_id, 'addon_item', r.id, sync_op(sync_live_addon_item(r)));
-    ELSIF EXISTS (SELECT 1 FROM branches WHERE id = p_branch AND org_id = r.org_id AND deleted_at IS NULL) THEN
-        PERFORM sync_emit(p_branch, 'addon_item', r.id, sync_op(sync_live_addon_item(r)));
+        PERFORM sync_emit_org(o, 'addon_item', p_addon, sync_op(sync_live_addon_item(p_addon)));
+    ELSIF EXISTS (SELECT 1 FROM branches WHERE id = p_branch AND org_id = o AND deleted_at IS NULL) THEN
+        PERFORM sync_emit(p_branch, 'addon_item', p_addon, sync_op(sync_live_addon_item(p_addon)));
     END IF;
 END;
 $$;
 
+-- An addon id that may have stopped being one: re-emit it if it still is,
+-- otherwise retire it from the org's branches.
+CREATE FUNCTION sync_touch_or_retire_addon_item(p_addon uuid, p_org uuid) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+    AS $$
+BEGIN
+    IF p_addon IS NULL THEN RETURN; END IF;
+    IF EXISTS (SELECT 1 FROM addon_items WHERE id = p_addon) THEN
+        PERFORM sync_touch_addon_item(p_addon);
+    ELSIF p_org IS NOT NULL THEN
+        PERFORM sync_emit_org(p_org, 'addon_item', p_addon, 'delete');
+    END IF;
+END;
+$$;
+
+-- Every addon the org's feed still lists that no longer exists (a group delete
+-- cascaded its options away before this trigger could name them).
+CREATE FUNCTION sync_touch_retired_addon_items(p_org uuid) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+    AS $$
+DECLARE
+    x uuid;
+BEGIN
+    FOR x IN SELECT DISTINCT s.entity_id FROM sync_changes s JOIN branches b ON b.id = s.branch_id
+              WHERE b.org_id = p_org AND s.type = 'addon_item' AND s.op = 'upsert'
+                AND NOT EXISTS (SELECT 1 FROM addon_items a WHERE a.id = s.entity_id)
+              ORDER BY 1 LOOP
+        PERFORM sync_emit_org(p_org, 'addon_item', x, 'delete');
+    END LOOP;
+END;
+$$;
+
+-- ── Legacy tables (table state only) ─────────────────────────────────────────
 CREATE FUNCTION sync_emit_addon_items() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
     IF TG_OP = 'DELETE' THEN
         PERFORM sync_emit_org(OLD.org_id, 'addon_item', OLD.id, 'delete');
     ELSE
-        PERFORM sync_emit_org(NEW.org_id, 'addon_item', NEW.id, sync_op(sync_live_addon_item(NEW)));
+        PERFORM sync_emit_org(NEW.org_id, 'addon_item', NEW.id, sync_op(sync_live_addon_item(NEW.id)));
     END IF;
     RETURN NULL;
 END $$;
@@ -66,6 +119,89 @@ CREATE FUNCTION sync_emit_branch_addon_overrides() RETURNS trigger LANGUAGE plpg
 BEGIN
     IF TG_OP IN ('UPDATE','DELETE') THEN PERFORM sync_touch_addon_item(OLD.addon_item_id, OLD.branch_id); END IF;
     IF TG_OP IN ('INSERT','UPDATE') THEN PERFORM sync_touch_addon_item(NEW.addon_item_id, NEW.branch_id); END IF;
+    RETURN NULL;
+END $$;
+
+-- ── Unified tables (both states): the original bodies, plus addon_item ──────
+CREATE OR REPLACE FUNCTION sync_emit_modifier_groups() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+    o uuid;
+BEGIN
+    -- On DELETE the link rows cascade (their own trigger re-emits the items).
+    IF TG_OP <> 'DELETE' THEN PERFORM sync_touch_menu_items_of_group(NEW.id); END IF;
+    IF TG_OP = 'DELETE' THEN
+        IF OLD.legacy_addon_type IS NOT NULL THEN PERFORM sync_touch_retired_addon_items(OLD.org_id); END IF;
+    ELSIF NEW.legacy_addon_type IS NOT NULL OR (TG_OP = 'UPDATE' AND OLD.legacy_addon_type IS NOT NULL) THEN
+        FOR o IN SELECT id FROM modifier_options WHERE group_id = NEW.id ORDER BY id LOOP
+            PERFORM sync_touch_or_retire_addon_item(o, NEW.org_id);
+        END LOOP;
+        IF TG_OP = 'UPDATE' AND OLD.org_id IS DISTINCT FROM NEW.org_id THEN
+            PERFORM sync_touch_retired_addon_items(OLD.org_id);
+        END IF;
+    END IF;
+    RETURN NULL;
+END $$;
+
+CREATE OR REPLACE FUNCTION sync_emit_modifier_options() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+    IF TG_OP IN ('UPDATE','DELETE') THEN PERFORM sync_touch_menu_items_of_group(OLD.group_id); END IF;
+    IF TG_OP IN ('INSERT','UPDATE') AND (TG_OP = 'INSERT' OR NEW.group_id IS DISTINCT FROM OLD.group_id) THEN
+        PERFORM sync_touch_menu_items_of_group(NEW.group_id);
+    END IF;
+    IF TG_OP IN ('UPDATE','DELETE') AND OLD.legacy_source = 'addon' THEN
+        PERFORM sync_touch_or_retire_addon_item(OLD.id, (SELECT org_id FROM modifier_groups WHERE id = OLD.group_id));
+    END IF;
+    IF TG_OP IN ('INSERT','UPDATE') AND NEW.legacy_source = 'addon' THEN
+        PERFORM sync_touch_addon_item(NEW.id);
+    END IF;
+    RETURN NULL;
+END $$;
+
+CREATE OR REPLACE FUNCTION sync_emit_recipe_lines() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+    IF TG_OP IN ('UPDATE','DELETE') THEN PERFORM sync_touch_recipe_owner(OLD.owner_type, OLD.owner_id); END IF;
+    IF TG_OP IN ('INSERT','UPDATE') AND (TG_OP = 'INSERT' OR (NEW.owner_type, NEW.owner_id) IS DISTINCT FROM (OLD.owner_type, OLD.owner_id)) THEN
+        PERFORM sync_touch_recipe_owner(NEW.owner_type, NEW.owner_id);
+    END IF;
+    IF TG_OP IN ('UPDATE','DELETE') AND OLD.owner_type = 'modifier_option' THEN PERFORM sync_touch_addon_item(OLD.owner_id); END IF;
+    IF TG_OP IN ('INSERT','UPDATE') AND NEW.owner_type = 'modifier_option' THEN PERFORM sync_touch_addon_item(NEW.owner_id); END IF;
+    RETURN NULL;
+END $$;
+
+CREATE OR REPLACE FUNCTION sync_emit_menu_price_overrides() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+    -- branch / branch_channel scope: that branch only; channel scope (branch_id NULL): org fan-out.
+    IF TG_OP IN ('UPDATE','DELETE') THEN
+        PERFORM sync_touch_price_override(OLD.target_type, OLD.target_id, OLD.branch_id);
+    END IF;
+    IF TG_OP IN ('INSERT','UPDATE') THEN
+        PERFORM sync_touch_price_override(NEW.target_type, NEW.target_id, NEW.branch_id);
+    END IF;
+    -- The addon list reads branch-scope overrides only.
+    IF TG_OP IN ('UPDATE','DELETE') AND OLD.target_type = 'modifier_option' AND OLD.scope = 'branch' THEN
+        PERFORM sync_touch_addon_item(OLD.target_id, OLD.branch_id);
+    END IF;
+    IF TG_OP IN ('INSERT','UPDATE') AND NEW.target_type = 'modifier_option' AND NEW.scope = 'branch' THEN
+        PERFORM sync_touch_addon_item(NEW.target_id, NEW.branch_id);
+    END IF;
+    RETURN NULL;
+END $$;
+
+CREATE OR REPLACE FUNCTION sync_emit_org_ingredients() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+    a uuid;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        PERFORM sync_emit_org(OLD.org_id, 'ingredient', OLD.id, 'delete');
+    ELSE
+        PERFORM sync_emit_org(NEW.org_id, 'ingredient', NEW.id, sync_op(sync_live_ingredient(NEW)));
+        -- An addon's ingredient lines show the ingredient's name and unit.
+        IF TG_OP = 'UPDATE' AND (OLD.name, OLD.unit) IS DISTINCT FROM (NEW.name, NEW.unit) THEN
+            FOR a IN SELECT DISTINCT addon_item_id FROM addon_item_ingredients WHERE org_ingredient_id = NEW.id ORDER BY 1 LOOP
+                PERFORM sync_touch_addon_item(a);
+            END LOOP;
+        END IF;
+    END IF;
     RETURN NULL;
 END $$;
 
@@ -107,10 +243,10 @@ CREATE OR REPLACE FUNCTION sync_source_tables() RETURNS TABLE (source_table text
         ('menu_items',                 ARRAY['menu_item']),
         ('menu_item_sizes',            ARRAY['menu_item']),
         ('menu_item_modifier_groups',  ARRAY['menu_item']),
-        ('modifier_groups',            ARRAY['menu_item']),
-        ('modifier_options',           ARRAY['menu_item']),
-        ('recipe_lines',               ARRAY['menu_item']),
-        ('menu_price_overrides',       ARRAY['menu_item']),
+        ('modifier_groups',            ARRAY['menu_item','addon_item']),
+        ('modifier_options',           ARRAY['menu_item','addon_item']),
+        ('recipe_lines',               ARRAY['menu_item','addon_item']),
+        ('menu_price_overrides',       ARRAY['menu_item','addon_item']),
         ('menu_item_recipe_steps',     ARRAY['menu_item']),
         ('recipe_step_presets',        ARRAY['menu_item']),
         ('menu_item_station_routes',   ARRAY['menu_item']),
@@ -118,7 +254,7 @@ CREATE OR REPLACE FUNCTION sync_source_tables() RETURNS TABLE (source_table text
         ('bundles',                    ARRAY['bundle']),
         ('bundle_components',          ARRAY['bundle']),
         ('bundle_branch_availability', ARRAY['bundle']),
-        ('org_ingredients',            ARRAY['ingredient']),
+        ('org_ingredients',            ARRAY['ingredient','addon_item']),
         ('org_payment_methods',        ARRAY['payment_method']),
         ('branch_payment_methods',     ARRAY['payment_availability']),
         ('user_payment_methods',       ARRAY['payment_availability']),
@@ -222,12 +358,21 @@ CREATE OR REPLACE FUNCTION sync_live_rows() RETURNS TABLE (branch_id uuid, type 
     UNION ALL
     SELECT x.branch_id, 'refund', x.id FROM order_refunds x
     UNION ALL
-    SELECT ob.branch_id, 'addon_item', x.id FROM addon_items x JOIN ob ON ob.org_id = x.org_id WHERE sync_live_addon_item(x)
+    SELECT ob.branch_id, 'addon_item', x.id FROM addon_items x JOIN ob ON ob.org_id = x.org_id WHERE sync_live_addon_item(x.id)
     $$;
 
-CREATE TRIGGER sync_emit AFTER INSERT OR UPDATE OR DELETE ON addon_items FOR EACH ROW EXECUTE FUNCTION sync_emit_addon_items();
-CREATE TRIGGER sync_emit AFTER INSERT OR UPDATE OR DELETE ON addon_item_ingredients FOR EACH ROW EXECUTE FUNCTION sync_emit_addon_item_ingredients();
-CREATE TRIGGER sync_emit AFTER INSERT OR UPDATE OR DELETE ON branch_addon_overrides FOR EACH ROW EXECUTE FUNCTION sync_emit_branch_addon_overrides();
+-- Legacy addon relations carry a trigger only while they are tables (see the header).
+DO $$
+DECLARE
+    t text;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['addon_items','addon_item_ingredients','branch_addon_overrides'] LOOP
+        IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'public' AND c.relname = t AND c.relkind IN ('r','p')) THEN
+            EXECUTE format('CREATE TRIGGER sync_emit AFTER INSERT OR UPDATE OR DELETE ON %I FOR EACH ROW EXECUTE FUNCTION %I()', t, 'sync_emit_' || t);
+        END IF;
+    END LOOP;
+END $$;
 CREATE TRIGGER sync_emit AFTER INSERT OR UPDATE OR DELETE ON branch_delivery_settings FOR EACH ROW EXECUTE FUNCTION sync_emit_branch_delivery_settings();
 CREATE TRIGGER sync_emit AFTER INSERT OR UPDATE OR DELETE ON role_permissions FOR EACH ROW EXECUTE FUNCTION sync_emit_role_permissions();
 

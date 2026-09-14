@@ -117,6 +117,91 @@ async fn an_addon_item_rides_the_feed_branch_effective(pool: PgPool) {
     assert_eq!(change(&inc4, "addon_item", addon).unwrap().op, "delete");
 }
 
+/// After the menu-unification contract shim the legacy addon relations are VIEWS
+/// (no row triggers): the unified tables' emitters carry `addon_item` instead.
+#[sqlx::test]
+async fn an_addon_item_rides_the_feed_after_the_contract_shim(pool: PgPool) {
+    let s = shop(&pool).await;
+    sqlx::raw_sql(include_str!("../../../deploy/menu_unification_shim.sql")).execute(&pool).await.unwrap();
+    let kind: String = sqlx::query_scalar("SELECT relkind::text FROM pg_class WHERE relname = 'addon_items'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(kind, "v", "the shim turned the legacy table into a view");
+
+    let group: Uuid = sqlx::query_scalar(
+        "INSERT INTO modifier_groups (org_id, name, legacy_addon_type) VALUES ($1, 'Milk', 'milk_type') RETURNING id",
+    )
+    .bind(s.org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let full = pull_core(&pool, s.org, &req(s.branch), None).await.unwrap();
+    let opt: Uuid = sqlx::query_scalar(
+        "INSERT INTO modifier_options (group_id, name, price, legacy_source) VALUES ($1, 'Oat milk', 1500, 'addon') RETURNING id",
+    )
+    .bind(group)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let inc = pull_core(&pool, s.org, &req(s.branch), full.next).await.unwrap();
+    let c = change(&inc, "addon_item", opt).expect("a new addon option emits");
+    assert_eq!(c.op, "upsert");
+    assert_eq!(c.data.as_ref().unwrap()["default_price"], 1500);
+    assert_eq!(c.data.as_ref().unwrap()["addon_type"], "milk_type");
+
+    // Its recipe line (the ingredient it uses), under a rename of that ingredient.
+    let ing: Uuid = sqlx::query_scalar("INSERT INTO org_ingredients (org_id, name, unit) VALUES ($1, 'Oat', 'l') RETURNING id")
+        .bind(s.org)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO recipe_lines (owner_type, owner_id, ingredient_id, quantity, unit) VALUES ('modifier_option', $1, $2, 0.25, 'l')")
+        .bind(opt)
+        .bind(ing)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let inc2 = pull_core(&pool, s.org, &req(s.branch), inc.next).await.unwrap();
+    assert_eq!(change(&inc2, "addon_item", opt).unwrap().data.as_ref().unwrap()["ingredients"][0]["ingredient_name"], "Oat");
+    sqlx::query("UPDATE org_ingredients SET name = 'Oat drink' WHERE id = $1").bind(ing).execute(&pool).await.unwrap();
+    let inc3 = pull_core(&pool, s.org, &req(s.branch), inc2.next).await.unwrap();
+    assert_eq!(
+        change(&inc3, "addon_item", opt).expect("an ingredient rename re-emits").data.as_ref().unwrap()["ingredients"][0]["ingredient_name"],
+        "Oat drink"
+    );
+
+    // A branch override switches it off at this branch.
+    sqlx::query("INSERT INTO menu_price_overrides (scope, branch_id, target_type, target_id, price, is_available) VALUES ('branch', $1, 'modifier_option', $2, 1800, false)")
+        .bind(s.branch)
+        .bind(opt)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let inc4 = pull_core(&pool, s.org, &req(s.branch), inc3.next).await.unwrap();
+    let d = change(&inc4, "addon_item", opt).expect("override re-emits").data.clone().unwrap();
+    assert_eq!((d["default_price"].clone(), d["is_available"].clone()), (1800.into(), false.into()));
+
+    // Deleting the option retires it; deleting a whole group retires its options.
+    sqlx::query("DELETE FROM modifier_options WHERE id = $1").bind(opt).execute(&pool).await.unwrap();
+    let inc5 = pull_core(&pool, s.org, &req(s.branch), inc4.next).await.unwrap();
+    assert_eq!(change(&inc5, "addon_item", opt).unwrap().op, "delete");
+    let opt2: Uuid = sqlx::query_scalar("INSERT INTO modifier_options (group_id, name, legacy_source) VALUES ($1, 'Soy', 'addon') RETURNING id")
+        .bind(group)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let inc6 = pull_core(&pool, s.org, &req(s.branch), inc5.next).await.unwrap();
+    assert_eq!(change(&inc6, "addon_item", opt2).unwrap().op, "upsert");
+    sqlx::query("DELETE FROM modifier_groups WHERE id = $1").bind(group).execute(&pool).await.unwrap();
+    let inc7 = pull_core(&pool, s.org, &req(s.branch), inc6.next).await.unwrap();
+    assert_eq!(change(&inc7, "addon_item", opt2).expect("the group delete retires its options").op, "delete");
+
+    // And a full snapshot agrees with the incremental feed.
+    let again = pull_core(&pool, s.org, &req(s.branch), None).await.unwrap();
+    assert!(row(&again, "addon_item", opt2).is_none());
+}
+
 #[sqlx::test]
 async fn a_tellers_effective_permissions_ride_the_feed(pool: PgPool) {
     let s = shop(&pool).await;
