@@ -1,7 +1,7 @@
 ---
 title: Privacy Policy
-version: 1.5
-effective: 2026-09-11
+version: 1.6
+effective: 2026-09-14
 ---
 
 # Privacy Policy
@@ -133,6 +133,15 @@ to you. Your password itself is never stored.
 Card payments are handled by the payment provider. **Madar never receives or stores card
 numbers** — only which method was used and the amount.
 
+### Device and app-version records
+
+For each POS or kitchen device that talks to our server (or, where a device does not send
+an identifier, for the connecting client), we record its device identifier, the app name
+and version it reports, its organisation and branch, the first and last time it was seen,
+and which older API features it last used. This runs so that old app versions can be
+retired safely and so support can diagnose a problem. See
+**[Data Retention Schedule](/data-retention.html)**.
+
 ## 3. What we do not do
 
 - No advertising identifiers, no cross-app tracking, no ad networks.
@@ -250,6 +259,41 @@ this happens at all.
 Primary systems are hosted in Europe. Backups are held on separate infrastructure under our
 control. Some providers listed under Sub-processors operate outside Egypt; that is
 identified there.
+
+Error and crash reports are an exception to "hosted in Europe": they are received by our
+server in Europe but are then processed and stored on a separate server we operate, which is
+not part of that European hosting. See **[Security](/security.html)**.
+
+### On the POS tablet itself
+
+Each POS tablet keeps a local copy of its branch's own operational data — orders and their
+items, payments, tills and cash movements, refunds, open bills and tables, kitchen tickets,
+deliveries and bookings — plus a queue of changes not yet sent to the server, so it keeps
+working while offline. That copy lives in the app's private storage on the device and is
+protected by the operating system's own device encryption; Madar adds no encryption layer of
+its own on top of it.
+
+Recent history is kept — the sync window covers roughly the last **48 hours** of ledger
+activity plus anything still open — and older rows are pruned automatically. Unsent changes
+are never pruned before the server confirms them, however old they get. Signing out of a
+device keeps its unsent sales rather than losing them, unless the device is wiped. If a
+tablet's local store is found to be damaged, the app exports its unsent queue to a file in
+its own private storage and deletes that file once the queue has been sent.
+
+**If a device is lost or stolen**, sign it out and change the PINs of the staff who used it.
+
+### Between a shop's own devices
+
+Devices at the same branch talk to each other directly over the shop's own Wi-Fi — orders,
+bill changes, voids, refunds and cash movements — so they stay in sync even without a
+connection to the server, and each keeps copies of the others' unsent changes until the
+server confirms them.
+
+These messages are **signed** with a key specific to the branch, so a device from another
+branch, or an outsider on the network, cannot forge or alter them. They are **not
+encrypted today** — anyone connected to the same Wi-Fi could read them. Encrypting this
+traffic is planned. Until then, restaurants should put their POS devices on a private,
+password-protected Wi-Fi network rather than an open or shared one.
 
 ## 8. How long we keep it
 

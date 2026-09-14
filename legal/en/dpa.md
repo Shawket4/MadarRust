@@ -1,7 +1,7 @@
 ---
 title: Data Processing Agreement
-version: 1.0
-effective: 2026-09-01
+version: 1.1
+effective: 2026-09-14
 ---
 
 # Data Processing Agreement (DPA)
@@ -66,10 +66,19 @@ Enabling it is the Restaurant's decision and its responsibility as employer.
 ## 5. Security measures
 
 Current measures include: role- and branch-scoped access enforced at the database level
-(row-level security); encryption in transit; key-based administrative access with
-protocol-restricted automation credentials; segregated, access-controlled backups whose
-restorability is verified by automated weekly test restores; and self-hosted error
-monitoring configured to exclude personal data, retained 30 days.
+(row-level security); TLS encryption in transit between devices and our server; key-based
+administrative access with protocol-restricted automation credentials; segregated,
+access-controlled backups whose restorability is verified by automated weekly test
+restores; and self-hosted error monitoring configured to exclude personal data, retained 30
+days.
+
+Traffic between a shop's own POS devices, syncing directly with each other over the shop's
+Wi-Fi rather than through our server, is **signed but not encrypted** today; encrypting it
+is planned. The Restaurant should run its POS devices on a private, password-protected
+network.
+
+Each POS device also keeps an offline copy of its branch's operational data, protected by
+the device's own operating-system encryption rather than by any additional layer we add.
 
 Backups are encrypted at rest and held on infrastructure separate from the production
 server. Security measures are described in full at

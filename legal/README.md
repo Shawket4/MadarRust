@@ -9,6 +9,13 @@ what data Madar collects and where it flows are accurate as of 2026-09-08. The *
 framing has not been reviewed by an Egyptian lawyer and must be before publication.
 
 Specifically needing counsel:
+- **Confirm and state the location of the self-hosted error-reporting server.** Reports are
+  received in Europe but processed and stored on a second server we operate that is not
+  part of that European hosting; the docs describe this without naming a country until the
+  owner confirms where it actually is.
+- **Set an automatic retention period for device version records** (device identifier, app
+  version, org/branch, first/last seen). Today they are kept only while the organisation's
+  account is active and deleted with it; there is no automatic pruning before that.
 - Whether Egypt's PDPL (Law 151/2020) executive regulations are in force, and therefore
   whether Data Protection Centre registration/licensing and formal DPO appointment are
   live obligations today.

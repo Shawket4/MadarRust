@@ -1,7 +1,7 @@
 ---
 title: Employee Privacy Notice (Dawam staff app)
-version: 1.1
-effective: 2026-09-03
+version: 1.2
+effective: 2026-09-14
 ---
 
 # Employee Privacy Notice
@@ -53,6 +53,13 @@ employer uploads to your file.
 
 Requests you submit — leave, advances, punch corrections — including their text and
 outcome.
+
+### Actions on the till
+
+Some till actions are recorded against the staff member who performed them, with the
+time: for example, **removing a table bill's service charge** is stamped with who waived
+it and when. Permission to do this is granted **per role and per user** by your employer,
+who decides who may waive a service charge.
 
 ## Why
 

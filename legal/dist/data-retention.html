@@ -96,7 +96,7 @@ footer a{color:var(--muted)}
 </div></div>
 <div class="shell">
   <nav class="side"><h4>Documents</h4><a href="/privacy-policy.html">Privacy Policy</a><a href="/terms-of-service.html">Terms of Service</a><a href="/dpa.html">Data Processing Agreement</a><a href="/subprocessors.html">Sub-processors</a><a href="/employee-privacy-notice.html">Employee Privacy Notice</a><a href="/data-retention.html" aria-current="page">Data Retention</a><a href="/delete-account.html">Delete Your Account</a><a href="/security.html">Security</a><div class="toc"><h4>On this page</h4><a href="#customer-and-order-data">Customer and order data</a><a href="#employee-data">Employee data</a><a href="#account-and-technical-data">Account and technical data</a><a href="#requests">Requests</a></div></nav>
-  <article><div class="meta"><span>Version 1.3</span><span>Effective 2026-09-10</span></div><h1>Data Retention Schedule</h1>
+  <article><div class="meta"><span>Version 1.4</span><span>Effective 2026-09-14</span></div><h1>Data Retention Schedule</h1>
 <p>Periods run from the trigger in the third column.</p>
 <h2 id="customer-and-order-data">Customer and order data</h2>
 <div class="table-wrap"><table><thead><tr><th>Data</th><th>Kept for</th><th>From</th></tr></thead><tbody>
@@ -132,8 +132,10 @@ footer a{color:var(--muted)}
 <div class="table-wrap"><table><thead><tr><th>Data</th><th>Kept for</th><th>From</th></tr></thead><tbody>
 <tr><td>User accounts</td><td>life of the account</td><td>deletion request</td></tr>
 <tr><td>Error and diagnostic reports</td><td>30 days, deleted automatically</td><td>event</td></tr>
+<tr><td>Device and app-version records — device identifier, app name and version, organisation and branch, first/last seen, older API features last used</td><td>kept while the organisation's account is active, deleted with the account</td><td>account deletion</td></tr>
 <tr><td>Database backups</td><td>rolling cycle — 4 full and 7 differential backups</td><td>backup</td></tr>
 </tbody></table></div>
+<p><strong>On device and app-version records.</strong> No automatic deletion period exists for these yet beyond account deletion; the README lists setting one as an open item.</p>
 <p><strong>Backups are an honest exception.</strong> Data deleted from the live system persists in backups until those backups age out on the normal cycle. We do not surgically edit backups: doing so would destroy their integrity as recovery points, which is the entire reason they exist. Deleted data therefore disappears from backups within the backup cycle and is never restored to live systems except as part of a whole-system recovery.</p>
 <h2 id="requests">Requests</h2>
 <p>See <strong><a href="/delete-account.html">Delete your account</a></strong>. Where a record must be kept for a statutory period, we keep it for that period and no longer.</p>

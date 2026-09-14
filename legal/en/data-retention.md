@@ -1,7 +1,7 @@
 ---
 title: Data Retention Schedule
-version: 1.3
-effective: 2026-09-10
+version: 1.4
+effective: 2026-09-14
 ---
 
 # Data Retention Schedule
@@ -72,7 +72,11 @@ the membership continues until the restaurant deletes it.
 |---|---|---|
 | User accounts | life of the account | deletion request |
 | Error and diagnostic reports | 30 days, deleted automatically | event |
+| Device and app-version records — device identifier, app name and version, organisation and branch, first/last seen, older API features last used | kept while the organisation's account is active, deleted with the account | account deletion |
 | Database backups | rolling cycle — 4 full and 7 differential backups | backup |
+
+**On device and app-version records.** No automatic deletion period exists for these yet
+beyond account deletion; the README lists setting one as an open item.
 
 **Backups are an honest exception.** Data deleted from the live system persists in backups
 until those backups age out on the normal cycle. We do not surgically edit backups: doing so
