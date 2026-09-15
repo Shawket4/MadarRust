@@ -26,7 +26,8 @@
 //! asks (`ReplayOp::required_permissions`), so a grant made in the dashboard works
 //! offline and a revocation stops a queued op the same as a live one. The only
 //! thing replay decides on its own is ATTRIBUTION — whether the embedded actor is
-//! a real, active till user of the bearer's org at all ([`can_sign_in_at_a_till`]).
+//! a real, active member of the bearer's org who may sign in at a till, which
+//! architecture E asks as the `pos.sign_in` capability at the branch.
 //! There used to be a third answer, a hard-coded role → op table in the replay
 //! path; it is gone, because three answers to one question is how a per-user
 //! grant came to work online and be ignored offline.
@@ -43,24 +44,6 @@ use uuid::Uuid;
 use crate::auth::jwt::Claims;
 use crate::errors::AppError;
 use crate::models::UserRole;
-
-/// The roles that sign in at a till and so can be the ORIGINAL author of a
-/// queued op. This is attribution, not authorization: it says whose name may
-/// go on a replayed write, and nothing about what that write may be — the
-/// permission table answers that, per op, in `ReplayOp::required_permissions`.
-///
-/// Mirrors the role filter on PIN login (`auth::handlers::login`): a queued op
-/// can only have been made by someone who could unlock the device. Tellers,
-/// waiters and kitchen screens always could; the BRANCH MANAGER is here because
-/// the owner ruled that a manager may work the till — PIN login, drawer, sales,
-/// and a force-close — with no approval flow. Admins are not: they never PIN in,
-/// and a super admin has no org to be attributed within.
-pub fn can_sign_in_at_a_till(role: &UserRole) -> bool {
-    matches!(
-        role,
-        UserRole::Teller | UserRole::Waiter | UserRole::Kitchen | UserRole::BranchManager
-    )
-}
 
 /// Who a write is attributed to, and whether the live ownership/state guards
 /// apply. The live route builds this from the caller's JWT; replay builds it from

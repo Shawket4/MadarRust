@@ -118,7 +118,7 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         // teller's shift — with no approval flow, because there is nobody above
         // them on the floor to approve. So this block holds every grant the
         // teller's does, plus the manager's own. The replay path admits the
-        // role for attribution (`sync::can_sign_in_at_a_till`); these rows are
+        // role for attribution (`pos.sign_in` at the branch); these rows are
         // what let the ops through once it does.
         ("branch_manager", "branches", "read", true),
         ("branch_manager", "users", "create", true),

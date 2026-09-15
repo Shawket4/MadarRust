@@ -257,7 +257,7 @@ impl ReplayOp {
     /// the queued bump thrown out. Since the POS drains EVERY write through
     /// `/sync/replay`, "stricter than live" here never meant "safer"; it meant
     /// the feature did not work offline. The role's part is now attribution
-    /// only — see `can_sign_in_at_a_till` — and this list decides the rest.
+    /// only — the embedded actor must hold `pos.sign_in` — and this list decides the rest.
     ///
     /// Kept in lock-step with the per-endpoint `check_permission` calls:
     ///   open=shifts/create; close+cash=shifts/update;
@@ -352,7 +352,7 @@ pub fn replay_names_shift_id(body: &serde_json::Value) -> bool {
 ///
 ///   * ATTRIBUTION — may this write carry this actor's name? The bearer must be
 ///     a member of an org, and the op's embedded actor must be an ACTIVE TILL
-///     USER OF THAT SAME ORG (`can_sign_in_at_a_till`). So any teller (or, later,
+///     USER OF THAT SAME ORG WHO HOLDS `pos.sign_in`. So any teller (or, later,
 ///     a device principal) may flush the whole device backlog — A's ops and B's
 ///     ops — each landing under its true author.
 ///   * PERMISSION — may this actor do this thing? Answered by the permission
