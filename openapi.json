@@ -6534,6 +6534,104 @@
         ]
       }
     },
+    "/categories/order": {
+      "put": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "reorder_categories",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReorderCategoriesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Categories reordered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Category"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/categories/{id}": {
       "delete": {
         "tags": [
@@ -50094,6 +50192,7 @@
           "name",
           "name_translations",
           "is_active",
+          "display_order",
           "created_at",
           "updated_at"
         ],
@@ -50108,6 +50207,11 @@
               "null"
             ],
             "format": "date-time"
+          },
+          "display_order": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Drag-and-drop position (lower first); ties break on name. Set via\n`PUT /categories/order`."
           },
           "id": {
             "type": "string",
@@ -64306,6 +64410,27 @@
         "properties": {
           "title": {
             "type": "string"
+          }
+        }
+      },
+      "ReorderCategoriesRequest": {
+        "type": "object",
+        "required": [
+          "org_id",
+          "ordered_ids"
+        ],
+        "properties": {
+          "ordered_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Category IDs in the desired display order (first = top)."
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },
