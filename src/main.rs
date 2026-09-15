@@ -114,6 +114,12 @@ async fn run() -> std::io::Result<()> {
         .await
         .expect("Failed to seed default role permissions");
 
+    // The capability catalogue follows the compiled registry; a reused id stops boot.
+    if let Err(e) = madar_rust::authz::sync_catalogue(&pool).await {
+        panic!("permission registry drift: {e}");
+    }
+    tracing::info!(mode = ?*madar_rust::authz::shadow::MODE, "permissions model");
+
     let pool = web::Data::new(pool);
     // Read pool handed to the /reports scope only (see configure call below).
     let read_pool = web::Data::new(read_pool);

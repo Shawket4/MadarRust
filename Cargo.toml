@@ -177,3 +177,7 @@ path = "src/bin/seed_staff_demo.rs"
 [lib]
 name = "madar_rust"
 path = "src/lib.rs"
+
+[[bin]]
+name = "authz-parity"
+path = "src/bin/authz_parity.rs"

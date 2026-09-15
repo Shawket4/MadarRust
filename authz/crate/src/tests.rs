@@ -236,7 +236,10 @@ fn owners_hold_everything_and_protected_caps_cannot_be_denied() {
     let e = resolve(&p, Scope::Anywhere, NOW, &OrgPolicy::default());
     assert!(e.can(Cap::StaffPermissionsEdit));
     assert!(!e.can(Cap::OrdersVoid));
-    assert_eq!(e.caps.len(), CAPS.len() - 1);
+    assert_eq!(
+        e.caps,
+        owner_set().minus(&[Cap::OrdersVoid].into_iter().collect())
+    );
 }
 
 #[test]

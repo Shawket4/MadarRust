@@ -300,6 +300,14 @@ pub fn core_set(kind: RoleKind) -> CapSet {
         .collect()
 }
 
+/// What an owner holds regardless of role grants: every non-legacy capability.
+pub fn owner_set() -> CapSet {
+    CAPS.iter()
+        .filter(|m| m.tier != Tier::Legacy)
+        .map(|m| m.cap)
+        .collect()
+}
+
 /// Is `cap` core for any of `kinds`?
 pub fn is_core_for(cap: Cap, kinds: Kinds) -> bool {
     kinds.0 & cap.meta().core.0 != 0
@@ -522,9 +530,12 @@ pub fn resolve(p: &Principal, scope: Scope<'_>, now: i64, policy: &OrgPolicy) ->
     // Unlimited-by-some-role, per capability, while combining.
     let mut unlimited = CapSet::EMPTY;
     if p.is_owner {
+        // Every capability that means something today; legacy-tier cells (dead
+        // `resource:action` pairs kept for old tablets) come only from the
+        // owner's role, so the grid an old tablet reads is unchanged.
         eff.owner = true;
         eff.kinds.insert(RoleKind::OrgAdmin);
-        eff.caps = CapSet::all();
+        eff.caps = owner_set();
         unlimited = CapSet::all();
     }
     for a in &p.assignments {

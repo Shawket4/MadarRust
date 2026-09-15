@@ -104,6 +104,33 @@ async fn check_on(
         }
     }
 
+    let legacy = legacy_decision(conn, user_id, role, resource, action).await;
+    crate::authz::shadow::observe(conn, user_id, resource, action, legacy).await
+}
+
+/// Today's resolution as a boolean, for the side-by-side comparison.
+pub async fn check_permission_for_legacy(
+    conn: &mut sqlx::PgConnection,
+    user_id: uuid::Uuid,
+    role: &UserRole,
+    resource: &str,
+    action: &str,
+) -> Result<bool, AppError> {
+    match legacy_decision(conn, user_id, role, resource, action).await {
+        Ok(()) => Ok(true),
+        Err(AppError::Forbidden(_)) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Today's resolution: per-user override, then the global role default, then deny.
+async fn legacy_decision(
+    conn: &mut sqlx::PgConnection,
+    user_id: uuid::Uuid,
+    role: &UserRole,
+    resource: &str,
+    action: &str,
+) -> Result<(), AppError> {
     // 1. Check per-user override (cached; invalidated on `permissions` writes)
     let c = &mut *conn;
     let user_override: Option<bool> =
