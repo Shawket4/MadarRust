@@ -11,6 +11,7 @@ pub mod ai;
 pub mod analytics;
 pub mod assets;
 pub mod auth;
+pub mod authz;
 pub mod bookings;
 pub mod boot_config;
 pub mod branches;
