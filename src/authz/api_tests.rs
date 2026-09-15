@@ -507,3 +507,79 @@ async fn ask_a_manager_is_the_owners_choice_per_capability(pool: PgPool) {
     );
     assert!(!has(&me, "till.cash_spot_check"));
 }
+
+/// The owner's review queue for offline acts that were accepted despite
+/// failing the permission re-check (PERMISSIONS_ARCHITECTURE §4.4.5).
+///
+/// It is gated on `approvals.review`, which the teller who caused the flag
+/// does not hold — a person cannot quietly close their own notice.
+#[sqlx::test]
+async fn flagged_offline_acts_are_the_owners_queue(pool: PgPool) {
+    seed(&pool).await;
+    let app = app!(pool);
+    let o = org(&pool).await;
+    let b = branch(&pool, o).await;
+    let owner = user(&pool, o, "org_admin", "Owner", None).await;
+    let teller = user(&pool, o, "teller", "Sara", None).await;
+    assign(&pool, teller, b).await;
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO authz_replay_flags
+             (org_id, branch_id, op, author_id, capability, reason, occurred_at)
+         VALUES ($1, $2, 'RefundOrder', $3, 'refunds:create', 'stale_snapshot', now())
+         RETURNING id",
+    )
+    .bind(o)
+    .bind(b)
+    .bind(teller)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // The teller who caused it may not review it.
+    let (s, _) = call(
+        &app,
+        test::TestRequest::get().uri("/authz/flags"),
+        &token(teller, o, UserRole::Teller),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "not the teller's queue");
+
+    let ot = token(owner, o, UserRole::OrgAdmin);
+    let (s, list) = call(&app, test::TestRequest::get().uri("/authz/flags"), &ot).await;
+    assert_eq!(s, StatusCode::OK);
+    let rows = list.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["op"], "RefundOrder");
+    assert_eq!(rows[0]["capability"], "refunds:create");
+    assert_eq!(rows[0]["reason"], "stale_snapshot");
+    assert_eq!(rows[0]["author_name"], "Sara", "the owner sees who, by name");
+
+    // Acknowledging it takes it off the queue, and only once.
+    let (s, _) = call(
+        &app,
+        test::TestRequest::post().uri(&format!("/authz/flags/{id}/review")),
+        &ot,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, list) = call(&app, test::TestRequest::get().uri("/authz/flags"), &ot).await;
+    assert!(list.as_array().unwrap().is_empty(), "reviewed, so off the queue");
+    let (s, _) = call(
+        &app,
+        test::TestRequest::post().uri(&format!("/authz/flags/{id}/review")),
+        &ot,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "no double review");
+
+    // It is still on the record.
+    let (_, all) = call(
+        &app,
+        test::TestRequest::get().uri("/authz/flags?include_reviewed=true"),
+        &ot,
+    )
+    .await;
+    let rows = all.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["reviewed_by"], json!(owner));
+}

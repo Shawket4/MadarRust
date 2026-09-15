@@ -11,6 +11,8 @@
 //! - `PUT  /authz/users/{id}/assignments`    which roles, where
 //! - `GET  /authz/explain`                   why a person can or cannot
 //! - `GET|PUT /authz/policy`                 "ask a manager" per capability
+//! - `GET  /authz/flags`                     offline acts accepted and flagged
+//! - `POST /authz/flags/{id}/review`         acknowledge one
 //!
 //! Every write goes through `madar_authz::guard`: no self-edit, dominate the
 //! target, hold what you grant, owners protected, core grants kept.
@@ -247,6 +249,38 @@ pub struct Explanation {
 pub struct PolicyEntry {
     pub capability: String,
     pub ask_manager: bool,
+}
+
+/// One offline act that was accepted despite failing the permission re-check
+/// (PERMISSIONS_ARCHITECTURE §4.4.5). The money already moved; this is the
+/// owner's notice, not a rollback.
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ReplayFlag {
+    pub id: i64,
+    pub branch_id: Option<Uuid>,
+    /// The replayed op, e.g. `CashMovement`.
+    pub op: String,
+    pub author_id: Uuid,
+    pub author_name: Option<String>,
+    /// The `resource:action` cell the author did not hold.
+    pub capability: String,
+    /// `stale_snapshot` — they held it when they acted and the device had not
+    /// heard the revocation yet. `unauthorized_offline` — nothing explains it.
+    pub reason: String,
+    /// When the act happened on the device.
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+    /// When it reached us. The gap is the offline window.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub reviewed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub reviewed_by: Option<Uuid>,
+}
+
+#[derive(Deserialize, IntoParams)]
+pub struct FlagQuery {
+    /// Include flags already reviewed. Default false: the queue is what is left
+    /// to look at.
+    #[serde(default)]
+    pub include_reviewed: bool,
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -1295,6 +1329,95 @@ pub async fn set_policy(
     get_policy(req, pool).await
 }
 
+#[utoipa::path(get, path = "/authz/flags", tag = "authz", params(FlagQuery),
+    responses((status = 200, description = "Flagged offline actions", body = Vec<ReplayFlag>), AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn list_flags(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    q: web::Query<FlagQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_of(&req)?;
+    let org = org_of(&req, &claims)?;
+    super::require::require(pool.get_ref(), &claims, Cap::ApprovalsReview, None).await?;
+    let rows: Vec<ReplayFlag> = sqlx::query_as::<_, (
+        i64,
+        Option<Uuid>,
+        String,
+        Uuid,
+        Option<String>,
+        String,
+        String,
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<Uuid>,
+    )>(
+        "SELECT f.id, f.branch_id, f.op, f.author_id, u.name, f.capability, f.reason,
+                f.occurred_at, f.created_at, f.reviewed_at, f.reviewed_by
+           FROM authz_replay_flags f
+           LEFT JOIN users u ON u.id = f.author_id
+          WHERE f.org_id = $1 AND ($2 OR f.reviewed_at IS NULL)
+          ORDER BY f.created_at DESC
+          LIMIT 500",
+    )
+    .bind(org)
+    .bind(q.include_reviewed)
+    .fetch_all(pool.get_ref())
+    .await?
+    .into_iter()
+    .map(
+        |(id, branch_id, op, author_id, author_name, capability, reason, occurred_at, created_at, reviewed_at, reviewed_by)| {
+            ReplayFlag {
+                id,
+                branch_id,
+                op,
+                author_id,
+                author_name,
+                capability,
+                reason,
+                occurred_at,
+                created_at,
+                reviewed_at,
+                reviewed_by,
+            }
+        },
+    )
+    .collect();
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+/// Mark one flag as looked at. It is an acknowledgement, not an approval: the
+/// act is already on the books either way, so there is nothing here to undo or
+/// let through.
+#[utoipa::path(post, path = "/authz/flags/{id}/review", tag = "authz",
+    responses((status = 200, description = "Flag reviewed", body = ReplayFlag), AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn review_flag(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    path: web::Path<i64>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_of(&req)?;
+    let org = org_of(&req, &claims)?;
+    super::require::require(pool.get_ref(), &claims, Cap::ApprovalsReview, None).await?;
+    let me = claims.user_id();
+    let updated = sqlx::query(
+        "UPDATE authz_replay_flags
+            SET reviewed_at = now(), reviewed_by = $3
+          WHERE id = $1 AND org_id = $2 AND reviewed_at IS NULL",
+    )
+    .bind(path.into_inner())
+    .bind(org)
+    .bind(me)
+    .execute(pool.get_ref())
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Err(AppError::NotFound("No such open flag".into()));
+    }
+    Ok(HttpResponse::Ok().json(serde_json::json!({ "reviewed": true })))
+}
+
 pub fn configure(cfg: &mut web::ServiceConfig) {
     use crate::auth::middleware::JwtMiddleware;
     cfg.service(
@@ -1311,6 +1434,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/users/{id}/assignments", web::put().to(set_assignments))
             .route("/explain", web::get().to(explain))
             .route("/policy", web::get().to(get_policy))
-            .route("/policy", web::put().to(set_policy)),
+            .route("/policy", web::put().to(set_policy))
+            .route("/flags", web::get().to(list_flags))
+            .route("/flags/{id}/review", web::post().to(review_flag)),
     );
 }
