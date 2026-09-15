@@ -48468,6 +48468,13 @@
             ],
             "description": "Convenience field — populated from the parent org's `logo_url`."
           },
+          "org_receipt_footer": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Convenience field — the parent org's receipt footer text (dashboard\norg settings). `None` → the POS prints its default footer."
+          },
           "phone": {
             "type": [
               "string",
