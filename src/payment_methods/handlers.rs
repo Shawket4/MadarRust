@@ -71,7 +71,7 @@ pub async fn list_payment_methods(
     check_permission(pool.get_ref(), &claims, "payment_methods", "read").await?;
 
     let org_id = claims
-        .org_id()
+        .scope_org(crate::auth::middleware::header_org_id(&req))
         .ok_or_else(|| AppError::Forbidden("No org id".into()))?;
 
     let rows = sqlx::query_as::<_, OrgPaymentMethod>(
@@ -106,7 +106,7 @@ pub async fn create_payment_method(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "payment_methods", "create").await?;
     let org_id = claims
-        .org_id()
+        .scope_org(crate::auth::middleware::header_org_id(&req))
         .ok_or_else(|| AppError::Forbidden("No org id".into()))?;
 
     ensure_translations(&mut body.label_translations)
@@ -166,7 +166,7 @@ pub async fn update_payment_method(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "payment_methods", "update").await?;
     let org_id = claims
-        .org_id()
+        .scope_org(crate::auth::middleware::header_org_id(&req))
         .ok_or_else(|| AppError::Forbidden("No org id".into()))?;
 
     // Verify ownership. The current name comes back too: historical rows
@@ -299,7 +299,7 @@ pub async fn activate_payment_method(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "payment_methods", "update").await?;
     let org_id = claims
-        .org_id()
+        .scope_org(crate::auth::middleware::header_org_id(&req))
         .ok_or_else(|| AppError::Forbidden("No org id".into()))?;
 
     let method = sqlx::query_as::<_, OrgPaymentMethod>(
@@ -332,7 +332,7 @@ pub async fn deactivate_payment_method(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "payment_methods", "update").await?;
     let org_id = claims
-        .org_id()
+        .scope_org(crate::auth::middleware::header_org_id(&req))
         .ok_or_else(|| AppError::Forbidden("No org id".into()))?;
 
     let method = sqlx::query_as::<_, OrgPaymentMethod>(

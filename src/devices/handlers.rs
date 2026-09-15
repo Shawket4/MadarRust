@@ -117,6 +117,24 @@ pub async fn register_device(
         .org_id()
         .ok_or_else(|| AppError::BadRequest("Token has no organization".into()))?;
     require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
+    // S6: registering is not for any signed-in user. A POS is registered by
+    // someone who works a till or manages the branch; a KDS or waiter screen
+    // may also be registered by the kitchen or waiter account it runs.
+    let may_register = check_permission(pool.get_ref(), &claims, "tills", "create")
+        .await
+        .is_ok()
+        || check_permission(pool.get_ref(), &claims, "branches", "update")
+            .await
+            .is_ok()
+        || matches!(
+            (body.kind.as_str(), &claims.role),
+            ("kds", crate::models::UserRole::Kitchen) | ("waiter", crate::models::UserRole::Waiter)
+        );
+    if !may_register {
+        return Err(AppError::Forbidden(
+            "You are not allowed to register devices".into(),
+        ));
+    }
     let code = body.code.trim().to_ascii_uppercase();
     if !valid_code(&code) {
         return Err(AppError::BadRequest(
@@ -134,7 +152,8 @@ pub async fn register_device(
          ON CONFLICT (id) DO UPDATE SET branch_id = EXCLUDED.branch_id, \
              platform = COALESCE(EXCLUDED.platform, devices.platform), \
              app_version = COALESCE(EXCLUDED.app_version, devices.app_version), \
-             last_seen_at = now()",
+             last_seen_at = now() \
+         WHERE devices.org_id = EXCLUDED.org_id",
     )
     .bind(body.id)
     .bind(org)
@@ -146,7 +165,14 @@ pub async fn register_device(
     .bind(&body.app_version)
     .execute(pool.get_ref())
     .await?;
-    Ok(HttpResponse::Ok().json(fetch_device(pool.get_ref(), body.id).await?))
+    // The upsert touches nothing when the id already belongs to another org.
+    let device = fetch_device(pool.get_ref(), body.id).await?;
+    if device.org_id != org {
+        return Err(AppError::Forbidden(
+            "This device belongs to another organization".into(),
+        ));
+    }
+    Ok(HttpResponse::Ok().json(device))
 }
 
 #[utoipa::path(get, path = "/devices", tag = "devices", params(ListDevicesQuery),

@@ -261,6 +261,10 @@ async fn test_offline_auth_bundle_returns_org_tellers(pool: PgPool) {
     sqlx::query("INSERT INTO users (id, org_id, name, email, password_hash, role) VALUES ($1,$2,'Mgr',$3,'h','org_admin'::user_role)")
         .bind(Uuid::new_v4()).bind(org_id).bind(format!("m-{org_id}@t.com")).execute(&pool).await.unwrap();
 
+    // The caller works a till (S3): the legacy path with no device header.
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
     let token = generate_org_admin_token(org_id);
     let resp = test::call_service(
         &app,

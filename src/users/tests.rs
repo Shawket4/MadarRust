@@ -270,7 +270,7 @@ async fn test_delete_user(pool: PgPool) {
     grant_permission(&pool, "org_admin", "users", "delete").await;
 
     let user_id = Uuid::new_v4();
-    sqlx::query!("INSERT INTO users (id, org_id, name, role, email, password_hash) VALUES ($1, $2, 'Delete Me', 'org_admin'::user_role, 'del@t.com', 'h')", user_id, org_id)
+    sqlx::query!("INSERT INTO users (id, org_id, name, role, email, password_hash) VALUES ($1, $2, 'Delete Me', 'branch_manager'::user_role, 'del@t.com', 'h')", user_id, org_id)
         .execute(&pool).await.unwrap();
 
     let token = generate_org_admin_token(Uuid::new_v4(), org_id);

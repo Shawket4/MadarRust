@@ -338,7 +338,7 @@ pub async fn project(
             by_sql(
                 conn,
                 "SELECT u.id, json_build_object('id', u.id, 'user_id', u.id, 'name', u.name, 'role', u.role::text, \
-                        'is_active', u.is_active, 'offline_pin_hash', u.offline_pin_hash, \
+                        'is_active', u.is_active, \
                         'permissions', COALESCE((SELECT json_agg(g.p ORDER BY g.p) FROM ( \
                             SELECT rp.resource::text || ':' || rp.action::text AS p \
                               FROM role_permissions rp \
