@@ -20,7 +20,6 @@ use crate::permissions::checker::check_permission;
 use crate::realtime::event::{BranchEvent, Topic};
 use crate::realtime::hub::BranchEventHub;
 use crate::sync::ActingContext;
-use crate::tills::handlers::branch_has_open_till;
 
 // ── Requests ──────────────────────────────────────────────────
 

@@ -15,7 +15,6 @@ use crate::{
     auth::jwt::Claims,
     devices::DeviceHeader,
     errors::{AppError, AppErrorResponse},
-    models::UserRole,
     permissions::checker::check_permission,
     realtime::{
         event::{BranchEvent, Topic},

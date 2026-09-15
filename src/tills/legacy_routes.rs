@@ -17,7 +17,6 @@ use crate::{
     auth::middleware::JwtMiddleware,
     devices::ClientHeader,
     errors::{AppError, AppErrorResponse},
-    models::UserRole,
     permissions::checker::check_permission,
     realtime::hub::BranchEventHub,
     sync::ActingContext,
