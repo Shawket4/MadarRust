@@ -241,6 +241,7 @@ paths(
         crate::bundles::handlers::list_bundles,
         crate::bundles::handlers::create_bundle,
         crate::bundles::handlers::available_bundles,
+        crate::bundles::handlers::suggested_components,
         crate::bundles::handlers::get_bundle,
         crate::bundles::handlers::update_bundle,
         crate::bundles::handlers::delete_bundle,
