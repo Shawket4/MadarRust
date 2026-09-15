@@ -257,9 +257,16 @@ async fn test_offline_auth_bundle_returns_org_tellers(pool: PgPool) {
     let kitchen_hash = crate::auth::offline::hash_offline_pin("3456").unwrap();
     sqlx::query("INSERT INTO users (id, org_id, name, role, pin_hash, offline_pin_hash) VALUES ($1,$2,'Kds1','kitchen'::user_role,'h',$3)")
         .bind(Uuid::new_v4()).bind(org_id).bind(&kitchen_hash).execute(&pool).await.unwrap();
-    // A non-PIN role in the org must NOT appear in the bundle.
+    // An account with NO PIN must NOT appear: the bundle is for people who
+    // have a PIN to type, whatever their role.
     sqlx::query("INSERT INTO users (id, org_id, name, email, password_hash, role) VALUES ($1,$2,'Mgr',$3,'h','org_admin'::user_role)")
         .bind(Uuid::new_v4()).bind(org_id).bind(format!("m-{org_id}@t.com")).execute(&pool).await.unwrap();
+    // A branch manager WITH a PIN and no verifier yet MUST appear, with a null
+    // hash: owners and managers work a till now (architecture E `pos.sign_in`),
+    // and being listed is what gets them "connect once to enable offline
+    // unlock" from the POS instead of "no active user named …".
+    sqlx::query("INSERT INTO users (id, org_id, name, role, pin_hash) VALUES ($1,$2,'Maya','branch_manager'::user_role,'h')")
+        .bind(Uuid::new_v4()).bind(org_id).execute(&pool).await.unwrap();
 
     // The caller works a till (S3): the legacy path with no device header.
     crate::permissions::seeder::seed_role_permissions(&pool)
@@ -277,7 +284,11 @@ async fn test_offline_auth_bundle_returns_org_tellers(pool: PgPool) {
     assert!(resp.status().is_success(), "got {:?}", resp.status());
     let body: serde_json::Value = test::read_body_json(resp).await;
     let tellers = body["tellers"].as_array().unwrap();
-    assert_eq!(tellers.len(), 4, "teller + waiter + kitchen, no org_admin");
+    assert_eq!(
+        tellers.len(),
+        5,
+        "teller + waiter + kitchen + branch manager, no PIN-less account"
+    );
     let alice = tellers.iter().find(|t| t["name"] == "Alice").unwrap();
     assert_eq!(alice["offline_pin_hash"].as_str().unwrap(), off_hash);
     let bob = tellers.iter().find(|t| t["name"] == "Bob").unwrap();
@@ -291,9 +302,15 @@ async fn test_offline_auth_bundle_returns_org_tellers(pool: PgPool) {
     let kds = tellers.iter().find(|t| t["name"] == "Kds1").unwrap();
     assert_eq!(kds["role"], "kitchen");
     assert_eq!(kds["offline_pin_hash"].as_str().unwrap(), kitchen_hash);
+    let maya = tellers.iter().find(|t| t["name"] == "Maya").unwrap();
+    assert_eq!(maya["role"], "branch_manager");
+    assert!(
+        maya["offline_pin_hash"].is_null(),
+        "Maya never logged in online → listed with a null verifier"
+    );
     assert!(
         tellers.iter().all(|t| t["name"] != "Mgr"),
-        "org_admin excluded"
+        "an account with no PIN is excluded"
     );
 
     // The bundle ships the org's stable LAN secret (32 bytes → 64 hex chars).

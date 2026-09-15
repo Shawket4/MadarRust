@@ -562,9 +562,12 @@ pub async fn offline_auth_bundle(
         SELECT u.id AS user_id, u.name, u.role::text AS role, u.is_active, u.offline_pin_hash
         FROM users u
         WHERE u.org_id = $1
-          AND u.role <> 'super_admin' 
+          AND u.role <> 'super_admin'
           AND u.deleted_at IS NULL
           AND NOT u.is_guest_principal
+          -- A PIN bundle is for people who have a PIN to type. Someone with no
+          -- PIN at all (a back-office account) is not an offline sign-in.
+          AND u.pin_hash IS NOT NULL
           AND ($2::uuid IS NULL
                OR EXISTS (SELECT 1 FROM user_branch_assignments a
                            WHERE a.user_id = u.id AND a.branch_id = $2)
@@ -578,16 +581,23 @@ pub async fn offline_auth_bundle(
     .bind(device_branch)
     .fetch_all(pool.get_ref())
     .await?;
-    // Only people who may sign in at a till here (architecture E `pos.sign_in`),
-    // and only those with a PIN verifier or a floor role (older tablets list
-    // floor staff who have not signed in online yet).
+    // Only people who may sign in at a till here (architecture E `pos.sign_in`).
+    //
+    // Someone who holds it but has no verifier yet is listed WITHOUT one: the
+    // verifier is derived on an online PIN login, so a person who has never had
+    // one is a normal state, and the POS turns a listed-but-verifierless row
+    // into "…hasn't signed in online on this device yet — connect once", where
+    // dropping the row gets them the misleading "no active user named …".
+    // This used to be spelled `role IN (teller, waiter, kitchen) OR has a
+    // verifier`, which gave that precise message to floor staff and the
+    // misleading one to the managers and owners who may now work a till. The
+    // "has a PIN at all" half of it is now the SQL `pin_hash IS NOT NULL`.
     let mut tellers_here = Vec::with_capacity(tellers.len());
     for t in tellers {
         let may = crate::authz::require::effective(pool.get_ref(), t.user_id, device_branch)
             .await?
             .can(crate::authz::Cap::PosSignIn);
-        let floor = matches!(t.role.as_str(), "teller" | "waiter" | "kitchen");
-        if may && (floor || t.offline_pin_hash.is_some()) {
+        if may {
             tellers_here.push(t);
         }
     }
