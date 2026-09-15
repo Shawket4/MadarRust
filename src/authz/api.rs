@@ -214,7 +214,7 @@ pub struct ExplainQuery {
     pub branch_id: Option<Uuid>,
 }
 
-#[derive(Serialize, Deserialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema, Default)]
 pub struct ExplainStep {
     /// owner | inactive | assignment | core | override_allow | override_deny |
     /// protected | not_held | limit | ask_manager
@@ -222,6 +222,15 @@ pub struct ExplainStep {
     pub role_name: Option<String>,
     pub branch_id: Option<Uuid>,
     pub detail: Option<String>,
+    /// For an assignment step: does the assignment cover the branch asked about?
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applies_here: Option<bool>,
+    /// For an assignment step: does the role grant the capability?
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grants: Option<bool>,
+    /// The role's Arabic name, beside `role_name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_name_ar: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -1104,10 +1113,10 @@ pub async fn explain(
     target_row(pool.get_ref(), org, q.user_id).await?;
     let cap = Cap::from_key(&q.capability)
         .ok_or_else(|| AppError::BadRequest("Unknown capability".into()))?;
-    let names: BTreeMap<String, String> = load_roles(pool.get_ref(), org)
+    let names: BTreeMap<String, (String, String)> = load_roles(pool.get_ref(), org)
         .await?
         .into_iter()
-        .map(|r| (r.id.to_string(), r.name_en))
+        .map(|r| (r.id.to_string(), (r.name_en, r.name_ar)))
         .collect();
     let mut conn = pool.acquire().await?;
     let loaded = super::load::load(&mut conn, q.user_id)
@@ -1126,6 +1135,7 @@ pub async fn explain(
             role_name: None,
             branch_id: None,
             detail: None,
+            ..Default::default()
         });
     }
     if p.is_owner {
@@ -1134,6 +1144,7 @@ pub async fn explain(
             role_name: None,
             branch_id: None,
             detail: None,
+            ..Default::default()
         });
     }
     for a in &p.assignments {
@@ -1145,7 +1156,10 @@ pub async fn explain(
         let core = is_core_for(cap, Kinds(a.role.kind.bit()));
         steps.push(ExplainStep {
             kind: if core { "core" } else { "assignment" }.into(),
-            role_name: names.get(&a.role.id).cloned(),
+            role_name: names.get(&a.role.id).map(|n| n.0.clone()),
+            role_name_ar: names.get(&a.role.id).map(|n| n.1.clone()),
+            applies_here: Some(covers),
+            grants: Some(grants || core),
             branch_id: None,
             detail: Some(format!(
                 "{}{}",
@@ -1173,6 +1187,7 @@ pub async fn explain(
             role_name: None,
             branch_id: o.branch.as_deref().and_then(|x| Uuid::parse_str(x).ok()),
             detail: None,
+            ..Default::default()
         });
     }
     if eff.owner && cap.meta().protected {
@@ -1181,6 +1196,7 @@ pub async fn explain(
             role_name: None,
             branch_id: None,
             detail: None,
+            ..Default::default()
         });
     }
     if let Some(l) = eff.limits.get(&cap.id()) {
@@ -1189,6 +1205,7 @@ pub async fn explain(
             role_name: None,
             branch_id: None,
             detail: serde_json::to_string(l).ok(),
+            ..Default::default()
         });
     }
     let ask = !eff.can(cap) && eff.ask_manager.contains(cap);
@@ -1198,6 +1215,7 @@ pub async fn explain(
             role_name: None,
             branch_id: None,
             detail: None,
+            ..Default::default()
         });
     }
     if !eff.can(cap) {
@@ -1206,6 +1224,7 @@ pub async fn explain(
             role_name: None,
             branch_id: None,
             detail: None,
+            ..Default::default()
         });
     }
     Ok(HttpResponse::Ok().json(Explanation {

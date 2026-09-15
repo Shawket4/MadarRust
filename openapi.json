@@ -56308,6 +56308,13 @@
           "kind"
         ],
         "properties": {
+          "applies_here": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "For an assignment step: does the assignment cover the branch asked about?"
+          },
           "branch_id": {
             "type": [
               "string",
@@ -56321,6 +56328,13 @@
               "null"
             ]
           },
+          "grants": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "For an assignment step: does the role grant the capability?"
+          },
           "kind": {
             "type": "string",
             "description": "owner | inactive | assignment | core | override_allow | override_deny |\nprotected | not_held | limit | ask_manager"
@@ -56330,6 +56344,13 @@
               "string",
               "null"
             ]
+          },
+          "role_name_ar": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The role's Arabic name, beside `role_name`."
           }
         }
       },
