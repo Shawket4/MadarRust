@@ -158,9 +158,8 @@ pub struct Order {
     pub payment_method: String,
     /// What was ACTUALLY tendered, one entry per `order_payments` row — the same
     /// rows every money report buckets by. A single-tender order has one leg; a
-    /// split order has one per leg (e.g. card 285.00 + cash 255.00). Empty on the
-    /// response to order creation, where the legs are written just after the row
-    /// this statement returns; every read hydrates it.
+    /// split order has one per leg (e.g. card 285.00 + cash 255.00). Every
+    /// response carries them, the one to order creation included.
     #[sqlx(json)]
     pub payment_legs: Vec<PaymentLeg>,
     pub subtotal: i32,
@@ -1933,9 +1932,33 @@ pub(crate) async fn create_order_inner(
             )));
         }
     }
-    let change_given = body
-        .change_given
-        .or_else(|| body.amount_tendered.map(|t| (t - total_amount).max(0)));
+    // A split has no single tender. What the customer handed over in notes
+    // covers its CASH legs, so the change is what it exceeds those by, never
+    // the whole bill (which read 0 change on every split). A split that names
+    // no usable tender — every till sends 0 for one — records none, rather
+    // than a "Cash 0.00" that each receipt and reprint then printed.
+    let (amount_tendered, change_given) =
+        match body.payment_splits.as_ref().filter(|s| !s.is_empty()) {
+            Some(splits) => {
+                let cash_legs: i32 = splits
+                    .iter()
+                    .filter(|s| is_cash_of(&s.method))
+                    .map(|s| s.amount)
+                    .sum();
+                match body
+                    .amount_tendered
+                    .filter(|t| cash_legs > 0 && *t >= cash_legs)
+                {
+                    Some(t) => (Some(t), Some(t - cash_legs)),
+                    None => (None, None),
+                }
+            }
+            None => (
+                body.amount_tendered,
+                body.change_given
+                    .or_else(|| body.amount_tendered.map(|t| (t - total_amount).max(0))),
+            ),
+        };
 
     // Split payments must reconcile to the order total. They are the SOLE source
     // of drawer cash in compute_system_cash, so a mismatch (POS bug / spoof) would
@@ -2165,8 +2188,8 @@ pub(crate) async fn create_order_inner(
             (SELECT name FROM users WHERE id = $3) AS teller_name,
             waiter_id, (SELECT name FROM users WHERE id = $25) AS waiter_name,
             order_number, order_ref, status::text, payment_method::text,
-            -- The payment rows are inserted just after this statement, so there is
-            -- nothing to aggregate yet. Reads hydrate the real legs.
+            -- The payment rows are inserted just after this statement; the
+            -- response is hydrated with them before the commit.
             '[]'::json AS payment_legs,
             subtotal, discount_type::text, discount_value,
             discount_amount, tax_amount, service_charge_amount, total_amount,
@@ -2195,10 +2218,18 @@ pub(crate) async fn create_order_inner(
     .bind(discount_amount)
     .bind(tax_amount)
     .bind(total_amount)
-    .bind(body.amount_tendered)
+    .bind(amount_tendered)
     .bind(change_given)
     .bind(body.tip_amount.unwrap_or(0))
-    .bind(body.tip_payment_method.as_deref())
+    // The tip's method, resolved now like its cash flag: absent, it is the
+    // order's own. A split's `payment_method` becomes 'mixed' once its legs are
+    // written, so a tip left without a method would reconcile under a method
+    // no drawer holds.
+    .bind(
+        body.tip_payment_method
+            .as_deref()
+            .or((body.tip_amount.unwrap_or(0) > 0).then_some(body.payment_method.as_str())),
+    )
     .bind(body.discount_id)
     .bind(&body.customer_name)
     .bind(&body.notes)
@@ -2747,6 +2778,21 @@ pub(crate) async fn create_order_inner(
         tracing::warn!(order_id = %order.id, reason = %why, "replayed reward recorded without points");
         warnings.push(format!("Reward not paid for with points: {why}"));
     }
+    // The legs just written, and the label the payments trigger settled on
+    // ('mixed' for a split). The INSERT above returned before either existed,
+    // so a split sale's answer used to carry no tenders at all: a client that
+    // read it saw a paid order worth nothing.
+    let (label, legs): (String, sqlx::types::Json<Vec<PaymentLeg>>) = sqlx::query_as(
+        "SELECT o.payment_method::text,
+                COALESCE((SELECT json_agg(json_build_object('method', op.method, 'amount', op.amount, 'is_cash', op.is_cash) ORDER BY op.id)
+                          FROM order_payments op WHERE op.order_id = o.id), '[]'::json)
+           FROM orders o WHERE o.id = $1",
+    )
+    .bind(order.id)
+    .fetch_one(&mut *tx)
+    .await?;
+    order.payment_method = label;
+    order.payment_legs = legs.0;
 
     tx.commit().await?;
     // The balance on the customer's phone must not outlive the sale that spent

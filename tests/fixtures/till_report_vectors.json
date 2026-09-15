@@ -388,6 +388,306 @@
       }
     },
     {
+      "branch_id": "58d70707-2f25-5cb1-bce7-aaa0fd3e1448",
+      "expected": {
+        "eaf7cfec-ade9-53f7-9dd9-28a1ca7ef50b": {
+          "cash_adjustments": 0,
+          "cash_in_refunded_sales": 0,
+          "cash_movement_ids": [],
+          "cash_movements_in": 0,
+          "cash_movements_net": 0,
+          "cash_movements_out": 0,
+          "cash_tips": 400,
+          "close_methods": [
+            {
+              "is_cash": true,
+              "method": "Cash",
+              "order_count": 2,
+              "payment_method_id": "2589021f-2d85-58d6-8443-93eecfee436d",
+              "system_total": 7400
+            },
+            {
+              "is_cash": false,
+              "method": "Card",
+              "order_count": 2,
+              "payment_method_id": "ba0e9aab-c26d-5cf3-87a1-6f2a666a8f01",
+              "system_total": 7560
+            },
+            {
+              "is_cash": false,
+              "method": "Wallet",
+              "order_count": 1,
+              "payment_method_id": null,
+              "system_total": 1260
+            }
+          ],
+          "expected_cash": 7400,
+          "net_payments": 15960,
+          "non_cash_tips": 0,
+          "payment_summary": [
+            {
+              "is_cash": false,
+              "order_count": 2,
+              "payment_method": "Card",
+              "total": 8700
+            },
+            {
+              "is_cash": true,
+              "order_count": 2,
+              "payment_method": "Cash",
+              "total": 6000
+            },
+            {
+              "is_cash": false,
+              "order_count": 1,
+              "payment_method": "Wallet",
+              "total": 1260
+            }
+          ],
+          "refunds_issued_amount": 1140,
+          "refunds_issued_cash": 0,
+          "refunds_issued_count": 1,
+          "refunds_issued_service_charge": 0,
+          "refunds_issued_tax": 140,
+          "safe_drops": 0,
+          "service_charge_waived_amount": 900,
+          "service_charge_waived_count": 1,
+          "system_cash": 7400,
+          "total_payments": 15960,
+          "total_service_charge": 0,
+          "total_tax": 1820,
+          "total_tips": 400,
+          "voided_amount": 0
+        }
+      },
+      "name": "three_leg_splits_with_discount_waiver_tip_and_refund",
+      "rows": {
+        "cash_movement": [],
+        "order": [
+          {
+            "amount_tendered": null,
+            "branch_id": "58d70707-2f25-5cb1-bce7-aaa0fd3e1448",
+            "change_given": null,
+            "created_at": "2026-09-14T09:10:00+00:00",
+            "customer_name": null,
+            "delivery_fee": 0,
+            "delivery_order_id": null,
+            "device_code": null,
+            "device_id": null,
+            "discount_amount": 0,
+            "discount_id": null,
+            "discount_rate": 0.0,
+            "discount_type": null,
+            "discount_value": 0,
+            "display_number": "2",
+            "id": "234c1c53-b7a1-5a42-9caa-86b2f24e4fc3",
+            "idempotency_key": null,
+            "items": [],
+            "loyalty_customer_id": null,
+            "loyalty_member_name": null,
+            "notes": null,
+            "open_ticket_id": null,
+            "order_number": 2,
+            "order_ref": "V-SB",
+            "order_type": "takeaway",
+            "payment_legs": [
+              {
+                "amount": 3700,
+                "is_cash": false,
+                "method": "Card"
+              },
+              {
+                "amount": 2000,
+                "is_cash": true,
+                "method": "Cash"
+              }
+            ],
+            "payment_method": "mixed",
+            "price_flagged": false,
+            "service_charge_amount": 0,
+            "service_charge_rate_applied": null,
+            "service_charge_taxable_applied": null,
+            "service_charge_waived_amount": 0,
+            "service_charge_waived_at": null,
+            "service_charge_waived_by": null,
+            "service_charge_waived_by_name": null,
+            "shift_id": "eaf7cfec-ade9-53f7-9dd9-28a1ca7ef50b",
+            "status": "pending",
+            "subtotal": 5000,
+            "table_id": null,
+            "tax_amount": 700,
+            "tax_inclusive": false,
+            "tax_rate_applied": null,
+            "teller_id": "b3b0fe10-57b3-5b73-a8e7-2b99f97e30aa",
+            "teller_name": "Sara",
+            "till_id": "eaf7cfec-ade9-53f7-9dd9-28a1ca7ef50b",
+            "timezone": "Africa/Cairo",
+            "tip_amount": 0,
+            "tip_is_cash": null,
+            "tip_payment_method": null,
+            "total_amount": 5700,
+            "verification": null,
+            "void_note": null,
+            "void_reason": null,
+            "voided_at": null,
+            "voided_by": null,
+            "waiter_id": null,
+            "waiter_name": null
+          },
+          {
+            "amount_tendered": null,
+            "branch_id": "58d70707-2f25-5cb1-bce7-aaa0fd3e1448",
+            "change_given": null,
+            "created_at": "2026-09-14T09:00:00+00:00",
+            "customer_name": null,
+            "delivery_fee": 0,
+            "delivery_order_id": null,
+            "device_code": null,
+            "device_id": null,
+            "discount_amount": 1000,
+            "discount_id": null,
+            "discount_rate": 10.0,
+            "discount_type": "percentage",
+            "discount_value": 10,
+            "display_number": "1",
+            "id": "6f21d88e-8188-5b15-a45c-c9a79acc57cd",
+            "idempotency_key": null,
+            "items": [],
+            "loyalty_customer_id": null,
+            "loyalty_member_name": null,
+            "notes": null,
+            "open_ticket_id": null,
+            "order_number": 1,
+            "order_ref": "V-SA",
+            "order_type": "dine_in",
+            "payment_legs": [
+              {
+                "amount": 5000,
+                "is_cash": false,
+                "method": "Card"
+              },
+              {
+                "amount": 4000,
+                "is_cash": true,
+                "method": "Cash"
+              },
+              {
+                "amount": 1260,
+                "is_cash": false,
+                "method": "Wallet"
+              }
+            ],
+            "payment_method": "mixed",
+            "price_flagged": false,
+            "service_charge_amount": 0,
+            "service_charge_rate_applied": 0.1,
+            "service_charge_taxable_applied": true,
+            "service_charge_waived_amount": 900,
+            "service_charge_waived_at": "2026-09-14T09:00:00+00:00",
+            "service_charge_waived_by": "b3b0fe10-57b3-5b73-a8e7-2b99f97e30aa",
+            "service_charge_waived_by_name": "Sara",
+            "shift_id": "eaf7cfec-ade9-53f7-9dd9-28a1ca7ef50b",
+            "status": "pending",
+            "subtotal": 10000,
+            "table_id": null,
+            "tax_amount": 1260,
+            "tax_inclusive": false,
+            "tax_rate_applied": 0.14,
+            "teller_id": "b3b0fe10-57b3-5b73-a8e7-2b99f97e30aa",
+            "teller_name": "Sara",
+            "till_id": "eaf7cfec-ade9-53f7-9dd9-28a1ca7ef50b",
+            "timezone": "Africa/Cairo",
+            "tip_amount": 400,
+            "tip_is_cash": true,
+            "tip_payment_method": "Cash",
+            "total_amount": 10260,
+            "verification": null,
+            "void_note": null,
+            "void_reason": null,
+            "voided_at": null,
+            "voided_by": null,
+            "waiter_id": null,
+            "waiter_name": null
+          }
+        ],
+        "payment_method": [
+          {
+            "color": "#000",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "icon": "cash",
+            "id": "2589021f-2d85-58d6-8443-93eecfee436d",
+            "is_active": true,
+            "is_cash": true,
+            "label_translations": {},
+            "name": "Cash"
+          },
+          {
+            "color": "#00f",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "icon": "card",
+            "id": "ba0e9aab-c26d-5cf3-87a1-6f2a666a8f01",
+            "is_active": true,
+            "is_cash": false,
+            "label_translations": {},
+            "name": "Card"
+          }
+        ],
+        "refund": [
+          {
+            "amount": 1140,
+            "branch_id": "58d70707-2f25-5cb1-bce7-aaa0fd3e1448",
+            "client_ref": null,
+            "created_at": "2026-09-14T09:20:00+00:00",
+            "id": "0f29b7a3-e551-587b-8d96-6ed9a82d304a",
+            "is_cash": false,
+            "issued_at": "2026-09-14T09:20:00+00:00",
+            "issued_by": "b3b0fe10-57b3-5b73-a8e7-2b99f97e30aa",
+            "issued_by_name": "Sara",
+            "lines": [],
+            "method": "Card",
+            "note": null,
+            "order_id": "234c1c53-b7a1-5a42-9caa-86b2f24e4fc3",
+            "reason": "quality_issue",
+            "service_charge_amount": 0,
+            "shift_id": "eaf7cfec-ade9-53f7-9dd9-28a1ca7ef50b",
+            "tax_amount": 140,
+            "till_id": "eaf7cfec-ade9-53f7-9dd9-28a1ca7ef50b"
+          }
+        ],
+        "till": [
+          {
+            "branch_id": "58d70707-2f25-5cb1-bce7-aaa0fd3e1448",
+            "cash_discrepancy": null,
+            "closed_at": null,
+            "closing_cash_declared": null,
+            "closing_cash_system": null,
+            "device_code": null,
+            "device_id": null,
+            "device_label": null,
+            "disagreement_count": 0,
+            "force_closed_at": null,
+            "id": "eaf7cfec-ade9-53f7-9dd9-28a1ca7ef50b",
+            "old_bills_at_close": null,
+            "open_bills_at_close": null,
+            "opened_at": "2026-09-14T08:00:00Z",
+            "opened_while_another_open": false,
+            "opening_cash": 1000,
+            "opening_cash_edit_reason": null,
+            "opening_cash_original": null,
+            "opening_cash_was_edited": false,
+            "other_till_id": null,
+            "reconciliation": [],
+            "reconciliation_status": null,
+            "status": "open",
+            "teller_id": "b3b0fe10-57b3-5b73-a8e7-2b99f97e30aa",
+            "teller_name": "Sara",
+            "timezone": "Africa/Cairo",
+            "verification": "server"
+          }
+        ]
+      }
+    },
+    {
       "branch_id": "11f68b55-13c9-53fc-a67e-7835297ae00a",
       "expected": {
         "72cfd97c-5053-5b3b-93af-e6240b2d8477": {

@@ -25,6 +25,7 @@
     "updated_at",
     "voided_at"
   ],
+  "filled_payment_leg_keys": ["payment_legs"],
   "dated_ref_keys": [
     "delivery_ref",
     "order_ref",

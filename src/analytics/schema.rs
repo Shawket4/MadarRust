@@ -2101,7 +2101,9 @@ pub const DATASETS: &[Dataset] = &[
                discounts, tips, voids, service charge, and anything counted per order. \
                Revenue here is net of refunds against each sale. Do NOT use for \
                per-product questions — use order_items — or for refunds by the day they \
-               were issued — use refunds.",
+               were issued — use refunds. Its payment_method is the order's nominal label: a \
+               split tender reads 'mixed' with the whole total, so for payment-method mix \
+               or cash versus card use payments.",
         from: "orders o",
         branch_col: "o.branch_id",
         time_col: "o.created_at",

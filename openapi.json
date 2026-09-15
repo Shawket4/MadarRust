@@ -59037,7 +59037,7 @@
             "items": {
               "$ref": "#/components/schemas/PaymentLeg"
             },
-            "description": "What was ACTUALLY tendered, one entry per `order_payments` row — the same\nrows every money report buckets by. A single-tender order has one leg; a\nsplit order has one per leg (e.g. card 285.00 + cash 255.00). Empty on the\nresponse to order creation, where the legs are written just after the row\nthis statement returns; every read hydrates it."
+            "description": "What was ACTUALLY tendered, one entry per `order_payments` row — the same\nrows every money report buckets by. A single-tender order has one leg; a\nsplit order has one per leg (e.g. card 285.00 + cash 255.00). Every\nresponse carries them, the one to order creation included."
           },
           "payment_method": {
             "type": "string",

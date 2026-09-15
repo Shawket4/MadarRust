@@ -65,6 +65,26 @@ INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ('{id:d}',
 "#,
     },
     Scenario {
+        name: "three_leg_splits_with_discount_waiver_tip_and_refund",
+        tills: &["t1"],
+        sql: r#"
+INSERT INTO tills (id, branch_id, teller_id, status, opening_cash, opened_at) VALUES ('{id:t1}', '{branch}', '{sara}', 'open', 1000, '2026-09-14 08:00+00');
+-- a table's bill, 10% off, service charge waived, 14% tax: 3 legs, a cash tip
+INSERT INTO orders (id, branch_id, till_id, teller_id, order_number, payment_method, order_ref, subtotal, discount_type, discount_value, discount_amount,
+                    service_charge_amount, service_charge_waived_by, service_charge_waived_at, service_charge_waived_amount, tax_amount, total_amount, tip_amount, tip_payment_method, tip_is_cash,
+                    tax_rate_applied, service_charge_rate_applied, tax_inclusive, service_charge_taxable_applied, order_type, created_at)
+     VALUES ('{id:a}', '{branch}', '{id:t1}', '{sara}', 1, 'Cash', 'V-SA', 10000, 'percentage', 10, 1000, 0, '{sara}', '2026-09-14 09:00+00', 900, 1260, 10260, 400, 'Cash', true,
+             0.14, 0.10, false, true, 'dine_in', '2026-09-14 09:00+00');
+INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ('{id:a}', 'Cash', 4000, true), ('{id:a}', 'Card', 5000, false), ('{id:a}', 'Wallet', 1260, false);
+-- a takeaway split in two, part of it refunded to the card
+INSERT INTO orders (id, branch_id, till_id, teller_id, order_number, payment_method, order_ref, subtotal, tax_amount, total_amount, order_type, created_at)
+     VALUES ('{id:b}', '{branch}', '{id:t1}', '{sara}', 2, 'Card', 'V-SB', 5000, 700, 5700, 'takeaway', '2026-09-14 09:10+00');
+INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ('{id:b}', 'Card', 3700, false), ('{id:b}', 'Cash', 2000, true);
+INSERT INTO order_refunds (id, org_id, branch_id, order_id, till_id, amount, method, is_cash, reason, issued_by, issued_at, created_at)
+     VALUES ('{id:r1}', '{org}', '{branch}', '{id:b}', '{id:t1}', 1140, 'Card', false, 'quality_issue', '{sara}', '2026-09-14 09:20+00', '2026-09-14 09:20+00');
+"#,
+    },
+    Scenario {
         name: "voids_and_refunds",
         tills: &["t1"],
         sql: r#"

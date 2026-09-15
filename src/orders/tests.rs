@@ -1687,6 +1687,93 @@ async fn test_split_payment_must_sum_to_total(pool: PgPool) {
     );
 }
 
+/// A split sale's answer carries its legs, and no tender of 0.00: the create
+/// response used to return `payment_legs: []`, a till sending 0 tendered stored
+/// a "Cash 0.00", and change was measured against the whole bill. A tip with no
+/// method of its own keeps the order's method, not the 'mixed' label.
+#[sqlx::test]
+async fn split_sale_answers_with_its_legs_and_no_zero_tender(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await; // seeds cash + card
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await; // 570
+
+    let legs = |cash: i32, card: i32| {
+        Some(vec![
+            PaymentSplitInput {
+                method: "cash".into(),
+                amount: cash,
+                reference: None,
+            },
+            PaymentSplitInput {
+                method: "card".into(),
+                amount: card,
+                reference: None,
+            },
+        ])
+    };
+    let post = |body: CreateOrderRequest| {
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(body)
+            .to_request()
+    };
+
+    // Two legs, the till's "0 tendered", and a tip with no method.
+    let mut body = simple_order(branch_id, shift_id, menu_item_id);
+    body.payment_splits = legs(300, 270);
+    body.amount_tendered = Some(0);
+    body.tip_amount = Some(50);
+    let resp = test::call_service(&app, post(body)).await;
+    assert!(resp.status().is_success(), "{:?}", resp.status());
+    let full: OrderFull = test::read_body_json(resp).await;
+    let mut got: Vec<(String, i32)> = full
+        .order
+        .payment_legs
+        .iter()
+        .map(|l| (l.method.clone(), l.amount))
+        .collect();
+    got.sort();
+    assert_eq!(got, vec![("card".into(), 270), ("cash".into(), 300)]);
+    assert_eq!(full.order.payment_method, "mixed");
+    assert_eq!(
+        (full.order.amount_tendered, full.order.change_given),
+        (None, None)
+    );
+    assert_eq!(full.order.tip_payment_method.as_deref(), Some("cash"));
+    let lines = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/orders/{}", full.order.id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request(),
+    )
+    .await;
+    let read: OrderFull = test::read_body_json(lines).await;
+    assert_eq!(
+        read.order.payment_legs.len(),
+        2,
+        "the read agrees with the answer"
+    );
+
+    // Notes handed over for the cash leg: the change is against that leg.
+    let mut body = simple_order(branch_id, shift_id, menu_item_id);
+    body.payment_splits = legs(300, 270);
+    body.amount_tendered = Some(500);
+    let full: OrderFull = test::read_body_json(test::call_service(&app, post(body)).await).await;
+    assert_eq!(
+        (full.order.amount_tendered, full.order.change_given),
+        (Some(500), Some(200))
+    );
+}
+
 /// V6: voiding is idempotent — a second void does not double-restock inventory.
 #[sqlx::test]
 async fn test_void_is_idempotent_no_double_restock(pool: PgPool) {

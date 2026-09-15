@@ -10,6 +10,10 @@
 //! values not compared are the explicit lists in `manifest.json`
 //! (`volatile_timestamp_keys`, `dated_ref_keys`) and server-minted UUIDs, which
 //! must map one-to-one between golden and actual across the whole scenario.
+//! One more explicit list, `filled_payment_leg_keys`: an order answer the old
+//! backend returned with NO payment legs (the create answer, before the legs it
+//! had just written were read back) may now carry them — each a `{method,
+//! amount}` the old `PaymentLeg` model decodes, summing to the order's total.
 use std::collections::{HashMap, HashSet};
 
 use actix_web::{App, test, web};
@@ -81,6 +85,7 @@ fn normalise_ref_date(s: &str) -> String {
 
 struct Ids {
     known: HashSet<String>,
+    filled_legs: HashSet<String>,
     fwd: HashMap<String, String>,
     back: HashMap<String, String>,
 }
@@ -91,6 +96,21 @@ fn compare(path: &str, golden: &Value, actual: &Value, ids: &mut Ids, diffs: &mu
             for (k, gv) in g {
                 match a.get(k) {
                     None => diffs.push(format!("{path}.{k}: missing (golden {gv})")),
+                    Some(Value::Array(legs))
+                        if ids.filled_legs.contains(k)
+                            && gv.as_array().is_some_and(|x| x.is_empty())
+                            && !legs.is_empty() =>
+                    {
+                        let decodes = legs
+                            .iter()
+                            .all(|l| l["method"].is_string() && l["amount"].is_i64());
+                        let sum: i64 = legs.iter().filter_map(|l| l["amount"].as_i64()).sum();
+                        if !decodes || Some(sum) != a.get("total_amount").and_then(Value::as_i64) {
+                            diffs.push(format!(
+                                "{path}.{k}: filled legs do not state the total: {legs:?}"
+                            ));
+                        }
+                    }
                     Some(av) => compare(&format!("{path}.{k}"), gv, av, ids, diffs),
                 }
             }
@@ -222,6 +242,7 @@ async fn legacy_goldens_match_value_for_value(pool: PgPool) {
             .values()
             .filter_map(|v| v.as_str().map(str::to_string))
             .collect(),
+        filled_legs: keys("filled_payment_leg_keys"),
         fwd: HashMap::new(),
         back: HashMap::new(),
     };
