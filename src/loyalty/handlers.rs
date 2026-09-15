@@ -480,7 +480,13 @@ pub async fn adjust(
     // usual AND the actor must be an admin. `permission_action` has no rung
     // above `update`, so the role check is what separates this from a redeem.
     check_permission(pool.get_ref(), &claims, "loyalty", "update").await?;
-    crate::authz::require::require(pool.get_ref(), &claims, crate::authz::Cap::LoyaltyPointsAdjust, None).await?;
+    crate::authz::require::require(
+        pool.get_ref(),
+        &claims,
+        crate::authz::Cap::LoyaltyPointsAdjust,
+        None,
+    )
+    .await?;
     // A number typed by a person with no reason beside it is the one ledger row
     // nobody can later explain. Refused before anything moves.
     let note = body
@@ -563,7 +569,13 @@ pub async fn list_members(
     // and what the dashboard turns into a spreadsheet. The till never calls
     // this one: it calls `lookup`, which answers about the person in front of
     // it and nobody else.
-    crate::authz::require::require(pool.get_ref(), &claims, crate::authz::Cap::LoyaltyMembersList, None).await?;
+    crate::authz::require::require(
+        pool.get_ref(),
+        &claims,
+        crate::authz::Cap::LoyaltyMembersList,
+        None,
+    )
+    .await?;
 
     let scope = match query.branch_id {
         Some(b) => {
@@ -653,7 +665,13 @@ pub async fn delete_member(
     check_permission(pool.get_ref(), &claims, "loyalty", "update").await?;
     // Above the till, like `adjust`: a teller identifies the person in front of
     // them, and does not erase people.
-    crate::authz::require::require(pool.get_ref(), &claims, crate::authz::Cap::LoyaltyMembersDelete, None).await?;
+    crate::authz::require::require(
+        pool.get_ref(),
+        &claims,
+        crate::authz::Cap::LoyaltyMembersDelete,
+        None,
+    )
+    .await?;
     let Some(member) = model::find_by_id(pool.get_ref(), *id).await? else {
         return Ok(HttpResponse::NoContent().finish());
     };
@@ -805,7 +823,13 @@ pub async fn analytics(
         super::settings::scope_org(pool.get_ref(), &req, query.branch_id).await?;
     check_permission(pool.get_ref(), &claims, "loyalty", "read").await?;
     // Same line as the member list: a till reads a card, not the books.
-    crate::authz::require::require(pool.get_ref(), &claims, crate::authz::Cap::LoyaltyMembersList, None).await?;
+    crate::authz::require::require(
+        pool.get_ref(),
+        &claims,
+        crate::authz::Cap::LoyaltyMembersList,
+        None,
+    )
+    .await?;
     if let Some(b) = query.branch_id {
         require_branch_access(pool.get_ref(), &claims, b).await?;
     }

@@ -470,7 +470,13 @@ pub async fn create_credential(
 )]
 pub async fn list_credentials(req: HttpRequest, db: Db) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    crate::authz::require::require(db.get_ref(), &claims, crate::authz::Cap::IntegrationsRead, None).await?;
+    crate::authz::require::require(
+        db.get_ref(),
+        &claims,
+        crate::authz::Cap::IntegrationsRead,
+        None,
+    )
+    .await?;
     let org_id = scope_org(&req, &claims)?;
 
     let rows: Vec<CredentialSummary> = sqlx::query_as(
