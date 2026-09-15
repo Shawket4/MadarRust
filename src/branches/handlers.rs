@@ -246,9 +246,12 @@ pub async fn list_branches(
     check_permission(pool.get_ref(), &claims, "branches", "read").await?;
     require_same_org(&claims, Some(query.org_id))?;
 
-    let branches = if claims.role == crate::models::UserRole::BranchManager
-        || claims.role == crate::models::UserRole::Teller
-    {
+    // Architecture E: the picker shows the branches this person actually works
+    // at, from their live role assignments — not the branches their role name
+    // used to imply (managers and tellers by assignment, everyone else the whole
+    // org, which quietly showed waiters and kitchen users every branch).
+    let scope = crate::authz::scope::branch_scope(pool.get_ref(), &claims).await?;
+    let branches = if let crate::authz::scope::BranchScope::Only(ids) = &scope {
         sqlx::query_as::<_, Branch>(
             r#"
             SELECT b.id, b.org_id, b.code, b.name, b.address, b.phone,
@@ -259,13 +262,12 @@ pub async fn list_branches(
                    b.created_at, b.updated_at
             FROM branches b
             JOIN organizations o ON o.id = b.org_id
-            JOIN user_branch_assignments uba ON uba.branch_id = b.id
-            WHERE b.org_id = $1 AND uba.user_id = $2 AND b.deleted_at IS NULL
+            WHERE b.org_id = $1 AND b.id = ANY($2) AND b.deleted_at IS NULL
             ORDER BY b.name
             "#,
         )
         .bind(query.org_id)
-        .bind(claims.user_id())
+        .bind(ids)
         .fetch_all(pool.get_ref())
         .await?
     } else {

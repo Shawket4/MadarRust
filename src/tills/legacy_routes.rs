@@ -71,10 +71,16 @@ pub async fn get_current_shift(
     check_permission(pool.get_ref(), &claims, "tills", "read").await?;
     h::require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
     let pre = h::current_till(pool.get_ref(), *branch_id, claims.user_id(), None).await?;
-    // Managers used to see the branch's open shift when they held none.
+    // Whoever may see the branch's tills sees its open one when they hold none
+    // themselves. Before architecture E this was "anyone but a teller", which
+    // was the same set by accident, and hid it from an owner on a tablet.
+    let sees_branch_tills =
+        crate::authz::require::effective_for_claims(pool.get_ref(), &claims, Some(*branch_id))
+            .await?
+            .can(crate::authz::Cap::TillReadBranch);
     let open = match pre.open_till {
         Some(t) => Some(t),
-        None if claims.role != UserRole::Teller => sqlx::query_as::<_, h::Till>(&format!(
+        None if sees_branch_tills => sqlx::query_as::<_, h::Till>(&format!(
             "SELECT {} {} WHERE s.branch_id = $1 AND s.status = 'open' ORDER BY s.opened_at DESC LIMIT 1",
             h::TILL_COLUMNS,
             h::TILL_FROM
