@@ -92,6 +92,10 @@ pub fn configure(cfg: &mut web::ServiceConfig, read_pool: web::Data<PgPool>) {
                 web::get().to(handlers::org_branch_comparison),
             )
             .route(
+                "/orgs/{org_id}/tax",
+                web::get().to(handlers::org_tax_report),
+            )
+            .route(
                 "/orgs/{org_id}/inventory-valuation",
                 web::get().to(handlers::org_inventory_valuation),
             )
