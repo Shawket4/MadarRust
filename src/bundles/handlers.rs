@@ -192,11 +192,34 @@ pub struct PerformanceQuery {
     pub end_date: Option<DateTime<Utc>>,
 }
 
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct SuggestedComponentsQuery {
+    pub org_id: Uuid,
+    /// Comma-separated menu item IDs already added to the in-progress bundle.
+    pub item_ids: String,
+    pub start_date: Option<DateTime<Utc>>,
+    pub end_date: Option<DateTime<Utc>>,
+    /// Max suggestions to return. Default 10.
+    pub limit: Option<i64>,
+    /// Minimum number of orders an item must co-occur with the anchor set in
+    /// to be suggested. Default 3.
+    pub min_count: Option<i64>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct ComponentPopularity {
     pub item_id: Uuid,
     pub item_name: String,
     pub quantity_sold: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
+pub struct SuggestedComponent {
+    pub item_id: Uuid,
+    pub item_name: String,
+    /// Number of orders (across the anchor items' order set) this item appeared in.
+    pub co_occurrence_count: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
@@ -1401,4 +1424,84 @@ pub async fn bundle_performance(
         net_profit,
         component_popularity,
     }))
+}
+
+// ── Suggested Components (frequently ordered together) ─────────
+
+/// Suggest menu items frequently ordered alongside the given item set, to help
+/// a manager pick the next component while building a bundle. Anchors on
+/// whichever items are already added: an item is suggested if it co-occurred,
+/// on the same order, with at least one anchor item at least `min_count`
+/// times across the org's branches in the given window.
+#[utoipa::path(
+    get,
+    path = "/bundles/suggested-components",
+    tag = "bundles",
+    params(SuggestedComponentsQuery),
+    responses((status = 200, description = "Frequently ordered together items", body = Vec<SuggestedComponent>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn suggested_components(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    query: web::Query<SuggestedComponentsQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
+    require_same_org(&claims, Some(query.org_id))?;
+
+    let anchor_ids: Vec<Uuid> = query
+        .item_ids
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<Uuid>())
+        .collect::<Result<_, _>>()
+        .map_err(|_| {
+            AppError::BadRequest("item_ids must be a comma-separated list of UUIDs".into())
+        })?;
+
+    if anchor_ids.is_empty() {
+        return Ok(HttpResponse::Ok().json(Vec::<SuggestedComponent>::new()));
+    }
+
+    let limit = query.limit.unwrap_or(10).clamp(1, 50);
+    let min_count = query.min_count.unwrap_or(3).max(1);
+
+    let suggestions = sqlx::query_as::<_, SuggestedComponent>(
+        r#"
+        WITH anchor_orders AS (
+            SELECT DISTINCT oi.order_id
+            FROM order_items oi
+            JOIN orders o ON o.id = oi.order_id
+            JOIN branches br ON br.id = o.branch_id
+            WHERE oi.menu_item_id = ANY($1)
+              AND br.org_id = $2
+              AND o.status NOT IN ('voided', 'refunded')
+              AND ($3::timestamptz IS NULL OR o.created_at >= $3)
+              AND ($4::timestamptz IS NULL OR o.created_at <= $4)
+        )
+        SELECT oi.menu_item_id AS item_id, mi.name AS item_name,
+               COUNT(DISTINCT oi.order_id) AS co_occurrence_count
+        FROM order_items oi
+        JOIN anchor_orders ao ON ao.order_id = oi.order_id
+        JOIN menu_items mi ON mi.id = oi.menu_item_id
+        WHERE oi.menu_item_id IS NOT NULL
+          AND oi.menu_item_id <> ALL($1)
+        GROUP BY oi.menu_item_id, mi.name
+        HAVING COUNT(DISTINCT oi.order_id) >= $5
+        ORDER BY co_occurrence_count DESC
+        LIMIT $6
+        "#,
+    )
+    .bind(&anchor_ids)
+    .bind(query.org_id)
+    .bind(query.start_date)
+    .bind(query.end_date)
+    .bind(min_count)
+    .bind(limit)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(suggestions))
 }

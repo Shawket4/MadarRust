@@ -5481,6 +5481,153 @@
         ]
       }
     },
+    "/bundles/suggested-components": {
+      "get": {
+        "tags": [
+          "bundles"
+        ],
+        "summary": "Suggest menu items frequently ordered alongside the given item set, to help\na manager pick the next component while building a bundle. Anchors on\nwhichever items are already added: an item is suggested if it co-occurred,\non the same order, with at least one anchor item at least `min_count`\ntimes across the org's branches in the given window.",
+        "operationId": "suggested_components",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "item_ids",
+            "in": "query",
+            "description": "Comma-separated menu item IDs already added to the in-progress bundle.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "start_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max suggestions to return. Default 10.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "min_count",
+            "in": "query",
+            "description": "Minimum number of orders an item must co-occur with the anchor set in\nto be suggested. Default 3.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Frequently ordered together items",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SuggestedComponent"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/bundles/{id}": {
       "get": {
         "tags": [
@@ -66632,6 +66779,28 @@
             "items": {
               "$ref": "#/components/schemas/UsedInBundleOut"
             }
+          }
+        }
+      },
+      "SuggestedComponent": {
+        "type": "object",
+        "required": [
+          "item_id",
+          "item_name",
+          "co_occurrence_count"
+        ],
+        "properties": {
+          "co_occurrence_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of orders (across the anchor items' order set) this item appeared in."
+          },
+          "item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "item_name": {
+            "type": "string"
           }
         }
       },

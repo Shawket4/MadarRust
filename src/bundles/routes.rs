@@ -8,6 +8,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("", web::get().to(list_bundles))
             .route("", web::post().to(create_bundle))
             .route("/available", web::get().to(available_bundles))
+            .route("/suggested-components", web::get().to(suggested_components))
             .route("/{id}", web::get().to(get_bundle))
             .route("/{id}", web::patch().to(update_bundle))
             .route("/{id}", web::delete().to(delete_bundle))
