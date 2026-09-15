@@ -2064,6 +2064,46 @@ defaults = "o"
 en = "Review flagged offline actions and approvals"
 ar = "مراجعة الإجراءات والموافقات المعلّمة"
 
+[[cap]]
+id = 215
+key = "loyalty.members.list"
+group = "customers"
+tier = "configurable"
+risk = "pii"
+defaults = "om"
+en = "See the loyalty member list and report"
+ar = "عرض قائمة أعضاء الولاء وتقريرها"
+
+[[cap]]
+id = 216
+key = "loyalty.points.adjust"
+group = "customers"
+tier = "advanced"
+risk = "money"
+defaults = "o"
+en = "Add or remove a member's points by hand"
+ar = "إضافة نقاط العضو أو خصمها يدويًا"
+
+[[cap]]
+id = 217
+key = "loyalty.members.delete"
+group = "customers"
+tier = "advanced"
+risk = "pii"
+defaults = "o"
+en = "Delete loyalty members"
+ar = "حذف أعضاء الولاء"
+
+[[cap]]
+id = 218
+key = "integrations.read"
+group = "settings"
+tier = "advanced"
+risk = "admin"
+defaults = "o"
+en = "See integrations and their API credentials"
+ar = "عرض التكاملات وبيانات اعتماد الواجهة البرمجية"
+
 # ============================================================================
 # Role templates (Phase 7). `defaults` above IS the restaurant template for the
 # five system roles; a template may add or remove on top.

@@ -16,7 +16,7 @@ use sqlx::PgPool;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use crate::auth::guards::{require_org_admin, require_super_admin};
+use crate::auth::guards::require_super_admin;
 use crate::auth::jwt::Claims;
 use crate::db::Db;
 use crate::errors::AppError;
@@ -470,7 +470,7 @@ pub async fn create_credential(
 )]
 pub async fn list_credentials(req: HttpRequest, db: Db) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    require_org_admin(&claims)?;
+    crate::authz::require::require(db.get_ref(), &claims, crate::authz::Cap::IntegrationsRead, None).await?;
     let org_id = scope_org(&req, &claims)?;
 
     let rows: Vec<CredentialSummary> = sqlx::query_as(

@@ -4,7 +4,7 @@
 use crate::{CapMeta, GroupMeta, Kinds, LimitKey, Risk, RoleKind, TemplateMeta, Tier};
 
 pub const SPEC_VERSION: u32 = 2;
-pub const SPEC_HASH: &str = "bf546dcbd642f5cc";
+pub const SPEC_HASH: &str = "9340fc08b9f8fe19";
 pub const WORDS: usize = 4;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -182,6 +182,10 @@ pub enum Cap {
     StaffRolesManage = 212,
     StaffOwnersManage = 213,
     ApprovalsReview = 214,
+    LoyaltyMembersList = 215,
+    LoyaltyPointsAdjust = 216,
+    LoyaltyMembersDelete = 217,
+    IntegrationsRead = 218,
 }
 
 pub static CAPS: &[CapMeta] = &[
@@ -357,6 +361,10 @@ pub static CAPS: &[CapMeta] = &[
     CapMeta { cap: Cap::StaffRolesManage, key: "staff.roles.manage", legacy: None, group: "staff", tier: Tier::Configurable, risk: Risk::Admin, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: true, en: "Create and edit roles", ar: "إنشاء الأدوار وتعديلها", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::StaffOwnersManage, key: "staff.owners.manage", legacy: None, group: "staff", tier: Tier::Advanced, risk: Risk::Admin, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: true, en: "Add or remove owners", ar: "إضافة ملاك أو إزالتهم", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::ApprovalsReview, key: "approvals.review", legacy: None, group: "reports", tier: Tier::Configurable, risk: Risk::Money, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Review flagged offline actions and approvals", ar: "مراجعة الإجراءات والموافقات المعل\u{651}مة", hint_en: None, hint_ar: None },
+    CapMeta { cap: Cap::LoyaltyMembersList, key: "loyalty.members.list", legacy: None, group: "customers", tier: Tier::Configurable, risk: Risk::Pii, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "See the loyalty member list and report", ar: "عرض قائمة أعضاء الولاء وتقريرها", hint_en: None, hint_ar: None },
+    CapMeta { cap: Cap::LoyaltyPointsAdjust, key: "loyalty.points.adjust", legacy: None, group: "customers", tier: Tier::Advanced, risk: Risk::Money, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Add or remove a member's points by hand", ar: "إضافة نقاط العضو أو خصمها يدوي\u{64b}ا", hint_en: None, hint_ar: None },
+    CapMeta { cap: Cap::LoyaltyMembersDelete, key: "loyalty.members.delete", legacy: None, group: "customers", tier: Tier::Advanced, risk: Risk::Pii, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Delete loyalty members", ar: "حذف أعضاء الولاء", hint_en: None, hint_ar: None },
+    CapMeta { cap: Cap::IntegrationsRead, key: "integrations.read", legacy: None, group: "settings", tier: Tier::Advanced, risk: Risk::Admin, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "See integrations and their API credentials", ar: "عرض التكاملات وبيانات اعتماد الواجهة البرمجية", hint_en: None, hint_ar: None },
 ];
 
 pub static GROUPS: &[GroupMeta] = &[
