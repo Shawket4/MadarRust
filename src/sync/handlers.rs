@@ -241,6 +241,69 @@ impl ReplayOp {
         }
     }
 
+    /// The variant's name, for a flag row the owner reads.
+    fn variant_name(&self) -> &'static str {
+        match self {
+            ReplayOp::OpenTill { .. } => "OpenTill",
+            ReplayOp::CloseTill { .. } => "CloseTill",
+            ReplayOp::CashMovement { .. } => "CashMovement",
+            ReplayOp::CreateOrder { .. } => "CreateOrder",
+            ReplayOp::VoidOrder { .. } => "VoidOrder",
+            ReplayOp::RefundOrder { .. } => "RefundOrder",
+            ReplayOp::FireOpenTicket { .. } => "FireOpenTicket",
+            ReplayOp::AddTicketRound { .. } => "AddTicketRound",
+            ReplayOp::SettleOpenTicket { .. } => "SettleOpenTicket",
+            ReplayOp::VoidOpenTicket { .. } => "VoidOpenTicket",
+            ReplayOp::VoidTicketLine { .. } => "VoidTicketLine",
+            ReplayOp::BumpKitchenItem { .. } => "BumpKitchenItem",
+            ReplayOp::UnbumpKitchenItem { .. } => "UnbumpKitchenItem",
+            ReplayOp::SwapTables { .. } => "SwapTables",
+            ReplayOp::CreateTableTransfer { .. } => "CreateTableTransfer",
+            ReplayOp::CancelTableTransfer { .. } => "CancelTableTransfer",
+            ReplayOp::FulfillTableTransfer { .. } => "FulfillTableTransfer",
+            ReplayOp::ClearTable { .. } => "ClearTable",
+            ReplayOp::HoldTable { .. } => "HoldTable",
+            ReplayOp::ReleaseTable { .. } => "ReleaseTable",
+            ReplayOp::SeatBooking { .. } => "SeatBooking",
+            ReplayOp::NoShowBooking { .. } => "NoShowBooking",
+            ReplayOp::AwardLoyaltyPoints { .. } => "AwardLoyaltyPoints",
+        }
+    }
+
+    /// Did real value change hands, so that refusing the op would lose a fact
+    /// rather than prevent one? This is the accept-and-flag test (§4.4.5).
+    ///
+    /// The question is NOT "is this op important" — it is "did something
+    /// already happen in the shop that the books must now agree with". Cash
+    /// crossing the counter, a drawer opened or counted, a sale rung, taken off
+    /// the books, or paid back: all of those are facts by the time they reach
+    /// us, and points are value the customer was already promised.
+    ///
+    /// Everything else is a request about state we still control — a bump, a
+    /// table move, a booking, tearing up an unpaid ticket. Nothing is lost by
+    /// refusing those, so an actor who lacks the capability is refused, exactly
+    /// as they would be live.
+    ///
+    /// **A void is deliberately NOT here.** `required_permissions` above defines
+    /// it as "taking a sale off the books BEFORE any money moved" — that is the
+    /// whole reason it sits on its own rung apart from `refunds`. Nothing has
+    /// changed hands, so a revoked void stays refused, and
+    /// `a_revoked_void_does_not_get_through_by_being_queued` still holds. A
+    /// refund, where the money really did go back, is a different op and is
+    /// flagged.
+    fn money_moved(&self) -> bool {
+        matches!(
+            self,
+            ReplayOp::OpenTill { .. }
+                | ReplayOp::CloseTill { .. }
+                | ReplayOp::CashMovement { .. }
+                | ReplayOp::CreateOrder { .. }
+                | ReplayOp::RefundOrder { .. }
+                | ReplayOp::SettleOpenTicket { .. }
+                | ReplayOp::AwardLoyaltyPoints { .. }
+        )
+    }
+
     /// The `(resource, action)` permission(s) the LIVE endpoint enforces for this
     /// op. Replay checks the SAME ones against the op's embedded actor, through
     /// the same resolver the live route uses (super_admin → per-user override →
@@ -389,7 +452,9 @@ pub async fn replay(
         .ok_or_else(|| AppError::Unauthorized("Token has no organization".into()))?;
 
     let header_device = crate::devices::DeviceHeader::from_request_headers(&req);
-    let op: ReplayOp = serde_json::from_value(body.into_inner())
+    let body = body.into_inner();
+    let occurred_at = replay_occurred_at(&body);
+    let op: ReplayOp = serde_json::from_value(body)
         .map_err(|e| AppError::BadRequest(format!("Json deserialize error: {e}")))?;
     let teller_id = op.teller_id();
 
@@ -428,15 +493,29 @@ pub async fn replay(
     // one place "may they" is answered for a replayed op: a teller whose void
     // was revoked in the dashboard cannot get it through by queueing it, and a
     // waiter the dashboard granted a bump to gets the bump through offline.
+    //
+    // ACCEPT AND FLAG (§4.4.5, and the owner's binding decision). A failure
+    // here rejects a NON-money op — nothing irreversible happened, so refusing
+    // it is honest. A MONEY op is accepted anyway and recorded in
+    // `authz_replay_flags` for the owner, because the sale already happened:
+    // the customer paid and left while the shop was offline. Dropping the op
+    // does not un-take the money, it only loses the record and leaves the
+    // drawer short at close.
+    let mut flags: Vec<(&'static str, &'static str)> = Vec::new();
     for &(resource, action) in op.required_permissions() {
-        crate::permissions::checker::check_permission_for(
+        match crate::permissions::checker::check_permission_for(
             pool.get_ref(),
             teller_id,
             &actor_role,
             resource,
             action,
         )
-        .await?;
+        .await
+        {
+            Ok(()) => {}
+            Err(AppError::Forbidden(_)) if op.money_moved() => flags.push((resource, action)),
+            Err(e) => return Err(e),
+        }
     }
 
     // The target must belong to the bearer's org — block any cross-org replay.
@@ -450,8 +529,108 @@ pub async fn replay(
         (None, ReplayOp::CreateOrder { request, .. }) => Some(request.branch_id),
         _ => None,
     };
+    let op_name = op.variant_name();
     let result = replay_dispatch(&req, &pool, &hub, op, actor, legacy_op, header_device).await;
+    // Only once the op has really committed: a flag for an op that never
+    // applied would send the owner looking for money that never moved.
+    if result.is_ok() && !flags.is_empty() {
+        record_replay_flags(
+            pool.get_ref(),
+            token_org,
+            op_branch,
+            op_name,
+            teller_id,
+            &flags,
+            occurred_at,
+        )
+        .await;
+    }
     stamp_sync_seq(pool.get_ref(), op_branch, result).await
+}
+
+/// When the act happened ON THE DEVICE, for the accept-and-flag reason (§4.4.5)
+/// and the offline window a flag row shows.
+///
+/// Every field here is one clients ALREADY send, so no release in the field has
+/// to change to be classified correctly: a refund names `issued_at`, a cash
+/// movement and an order name `created_at`. A new top-level `occurred_at` is
+/// read first so later clients can be explicit for ops that carry neither.
+///
+/// It matters because it decides which of the two reasons the owner sees. Read
+/// as "now", a revocation made an hour ago always looks NEWER than the act, and
+/// every routine stale-snapshot case would be reported as a tampered client.
+fn replay_occurred_at(body: &serde_json::Value) -> chrono::DateTime<chrono::Utc> {
+    let parse = |v: Option<&serde_json::Value>| {
+        v.and_then(|v| v.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| d.with_timezone(&chrono::Utc))
+    };
+    let req = body.get("request");
+    parse(body.get("occurred_at"))
+        .or_else(|| parse(req.and_then(|r| r.get("issued_at"))))
+        .or_else(|| parse(req.and_then(|r| r.get("created_at"))))
+        .unwrap_or_else(chrono::Utc::now)
+}
+
+/// Record the accept-and-flag rows for one replayed op (§4.4.5).
+///
+/// Never fails the request: the op has already committed, and losing the
+/// owner's notice is far better than 500-ing a sale that is now on the books
+/// and making the tablet retry a write it has already applied.
+async fn record_replay_flags(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Option<Uuid>,
+    op: &'static str,
+    author_id: Uuid,
+    flags: &[(&'static str, &'static str)],
+    occurred_at: chrono::DateTime<chrono::Utc>,
+) {
+    // Was this a revocation the device had not heard about yet? If anything
+    // touching this person's grants was written AFTER the act, the device was
+    // working from a snapshot that was true when it acted — routine, and a
+    // different thing from a client that never had the grant at all.
+    let revoked_after: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM authz_grant_events e
+              WHERE e.occurred_at > $2
+                AND (e.before->>'user_id' = $1::text OR e.after->>'user_id' = $1::text)
+         )",
+    )
+    .bind(author_id)
+    .bind(occurred_at)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+    let reason = if revoked_after {
+        "stale_snapshot"
+    } else {
+        "unauthorized_offline"
+    };
+
+    for (resource, action) in flags {
+        let cap = format!("{resource}:{action}");
+        if let Err(e) = sqlx::query(
+            "INSERT INTO authz_replay_flags
+                 (org_id, branch_id, op, author_id, capability, reason, occurred_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(org_id)
+        .bind(branch_id)
+        .bind(op)
+        .bind(author_id)
+        .bind(&cap)
+        .bind(reason)
+        .bind(occurred_at)
+        .execute(pool)
+        .await
+        {
+            tracing::error!(
+                error = %e, %org_id, %author_id, op, cap,
+                "could not record an authz replay flag; the op itself committed"
+            );
+        }
+    }
 }
 
 /// `X-Madar-Sync-Seq` on a replay answer (OFFLINE_B_DESIGN §4): the branch

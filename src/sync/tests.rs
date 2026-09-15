@@ -331,6 +331,92 @@ async fn a_revoked_void_does_not_get_through_by_being_queued(pool: PgPool) {
     assert_eq!(r.status(), 403, "orders:update does not void");
 }
 
+/// Accept and flag (PERMISSIONS_ARCHITECTURE §4.4.5, and the owner's binding
+/// decision that offline acts failing the server re-check are accepted and
+/// flagged, never rejected).
+///
+/// Cash left the drawer while the shop was offline. By the time the op reaches
+/// us the money is gone and the note is written, so refusing the op cannot
+/// un-take it — it only loses the record and leaves the drawer short at close.
+/// The op is applied and a row goes to the owner's queue instead.
+#[sqlx::test]
+async fn a_revoked_money_op_is_accepted_and_flagged(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let till = open_shift_row(&pool, branch, teller).await;
+    // The role may move cash; THIS teller has had it taken away since.
+    grant(&pool, "teller", "tills", "update").await;
+    override_for(&pool, teller, "tills", "update", false).await;
+    let bearer = token(teller, org, UserRole::Teller);
+
+    let op = serde_json::json!({
+        "op": "cash_movement",
+        "teller_id": teller,
+        "till_id": till,
+        "request": { "amount": -500, "note": "milk run", "client_ref": Uuid::new_v4() }
+    });
+    let r = replay(&app, &bearer, &op).await;
+    assert!(
+        r.status().is_success(),
+        "the cash already left the drawer: got {:?}",
+        r.status()
+    );
+
+    let (flag_op, cap, reason, author): (String, String, String, Uuid) = sqlx::query_as(
+        "SELECT op, capability, reason, author_id FROM authz_replay_flags WHERE org_id = $1",
+    )
+    .bind(org)
+    .fetch_one(&pool)
+    .await
+    .expect("exactly one flag row for the owner");
+    assert_eq!(flag_op, "CashMovement");
+    assert_eq!(cap, "tills:update");
+    assert_eq!(author, teller);
+    // The override was written after the op's (absent, so "now") timestamp,
+    // so nothing explains the device's belief: it is not a stale snapshot.
+    assert_eq!(reason, "unauthorized_offline");
+
+    // And the money really moved — a flag is a notice, not a rollback.
+    let moved: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM till_cash_movements WHERE till_id = $1")
+            .bind(till)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(moved, 1, "the op applied");
+}
+
+/// The other half of accept-and-flag: a NON-money op is still refused. Nothing
+/// irreversible happened, so refusing a bump the actor may not make loses
+/// nothing and keeps the server's answer the same online and offline.
+#[sqlx::test]
+async fn a_revoked_non_money_op_is_still_rejected(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let _till = open_shift_row(&pool, branch, teller).await;
+    grant(&pool, "teller", "kitchen_orders", "update").await;
+    override_for(&pool, teller, "kitchen_orders", "update", false).await;
+    let bearer = token(teller, org, UserRole::Teller);
+
+    let op = serde_json::json!({
+        "op": "bump_kitchen_item",
+        "teller_id": teller,
+        "item_id": Uuid::new_v4(),
+    });
+    let r = replay(&app, &bearer, &op).await;
+    assert_eq!(r.status(), 403, "a bump is not money");
+    let flags: i64 = sqlx::query_scalar("SELECT count(*) FROM authz_replay_flags WHERE org_id = $1")
+        .bind(org)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(flags, 0, "a refusal is not a flag");
+}
+
 /// Attribution: whose name may go on a replayed write. Anyone who may sign in at
 /// a till (`pos.sign_in`) — owners included, by the owner's decision that owners
 /// and managers work a till with a PIN — but never a till user of another org,
@@ -451,17 +537,34 @@ async fn a_queued_refund_lands_once_under_its_author(pool: PgPool) {
     .unwrap();
     assert_eq!((count, total), (1, 100));
 
-    // The table is the authority offline too: revoke the grant per user and
-    // the same op is turned away.
+    // Revoke the grant per user and queue another refund. Phase 3 turned this
+    // away with a 403. Phase 4 does not: a refund is money that ALREADY went
+    // back across the counter while the shop was offline, and per the owner's
+    // binding decision (PERMISSIONS_ARCHITECTURE §4.4.5) the act is accepted
+    // and flagged for review rather than rejected. Rejecting it never
+    // un-refunded the customer; it only lost the record and left the drawer
+    // short. A void, where no money has moved, is still refused — see
+    // `a_revoked_void_does_not_get_through_by_being_queued`.
     override_for(&pool, manager, "refunds", "create", false).await;
     let mut second = refund.clone();
     second["request"]["client_ref"] = serde_json::json!(Uuid::new_v4());
     let r = replay(&app, &bearer, &second).await;
     assert_eq!(
         r.status(),
-        403,
-        "a per-user revocation of refunds:create holds offline"
+        201,
+        "the money already went back: accepted, not rejected"
     );
+    let (cap, reason): (String, String) = sqlx::query_as(
+        "SELECT capability, reason FROM authz_replay_flags WHERE author_id = $1",
+    )
+    .bind(manager)
+    .fetch_one(&pool)
+    .await
+    .expect("the owner gets a flag for it");
+    assert_eq!(cap, "refunds:create");
+    // The revocation was written after the act's `issued_at` (an hour ago), so
+    // the device WAS right when it acted and had simply not heard yet.
+    assert_eq!(reason, "stale_snapshot");
 }
 
 /// A sale that ALREADY HAPPENED keeps the price the customer was charged.

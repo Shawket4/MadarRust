@@ -801,7 +801,16 @@ async fn replay_rejects_wrong_actor_role_or_org(pool: PgPool) {
     .await;
     assert_eq!(r.status(), 403, "a kitchen device may not open a tab");
 
-    // A WAITER cannot be the actor of a settle (settling is teller-only).
+    // A WAITER still does not hold the settle grants — but as of phase 4 a
+    // settle is a MONEY op, so failing the re-check no longer rejects it: per
+    // the owner's binding decision (PERMISSIONS_ARCHITECTURE §4.4.5) the bill
+    // was paid offline and the act is accepted and flagged for review instead.
+    // So this no longer stops at the permission gate; it gets through it and
+    // fails at the ticket lookup, because the id below is invented. The
+    // accept-and-flag behaviour itself is covered by
+    // `sync::tests::a_revoked_money_op_is_accepted_and_flagged`, and the
+    // non-money half — where a refusal IS still a refusal — by the kitchen
+    // fire above and `a_revoked_non_money_op_is_still_rejected`.
     let settle_by_waiter = serde_json::json!({
         "op": "settle_open_ticket",
         "teller_id": waiter,
@@ -817,7 +826,11 @@ async fn replay_rejects_wrong_actor_role_or_org(pool: PgPool) {
             .to_request(),
     )
     .await;
-    assert_eq!(r.status(), 403, "waiter may not settle");
+    assert_eq!(
+        r.status(),
+        404,
+        "past the gate (money already moved), stopped by the invented ticket id"
+    );
 
     // An actor from a DIFFERENT org is rejected before any dispatch.
     let other_org = seed_org(&pool).await;
