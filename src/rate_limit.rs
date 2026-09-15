@@ -116,9 +116,21 @@ static BUCKETS: std::sync::LazyLock<
 
 /// The ceiling for one ADDRESS across every account behind it. The person
 /// bucket is what an honest till spends; this one stops a single address from
-/// multiplying the allowance by holding many accounts (N x 200). Ten tills'
-/// worth by default — a busy shop behind one router stays well inside it.
-const PER_ADDRESS_PER_MINUTE: f64 = 2000.0;
+/// multiplying the allowance by holding many accounts (N x 200).
+///
+/// **Fifty tills' worth** (locked owner decision, 2026-09-15). It was ten, on
+/// the assumption that a shop behind one router is a shop with a few tills.
+/// That is wrong for the customers this is being built for: fifty tablets on
+/// one NAT is a real deployment, and they all leave through a single public
+/// address. At ten tills' worth the fortieth tablet started getting 429s during
+/// the morning rush — not because anything was runaway, but because the ceiling
+/// was counting a whole branch as one client.
+///
+/// The PER-PERSON bucket is deliberately unchanged. That is the one that
+/// actually catches a runaway client, and it is per account, so raising the
+/// address ceiling does not loosen it: fifty honest tills each stay inside
+/// their own 200, and one broken tablet is still stopped on its own.
+const PER_ADDRESS_PER_MINUTE: f64 = 10_000.0;
 
 fn per_address_per_minute() -> f64 {
     std::env::var("MADAR_RATE_LIMIT_PER_ADDRESS_PER_MINUTE")
