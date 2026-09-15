@@ -1986,7 +1986,8 @@ async fn a_line_comes_off_the_bill_and_off_the_board(pool: PgPool) {
     let org = seed_org(&pool).await;
     let branch = seed_branch(&pool, org).await;
     let item = seed_menu_item(&pool, org, 2500).await;
-    let waiter = seed_user(&pool, org, "waiter").await;
+    // A teller account: the model reads the person's role, not the token's.
+    let waiter = seed_user(&pool, org, "teller").await;
     let _shift = open_shift_row(&pool, branch, waiter).await;
     let table = seed_table(&pool, org, branch, "T7").await;
     grant(&pool, "teller", "open_tickets", "create").await;

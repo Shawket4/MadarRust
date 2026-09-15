@@ -1223,8 +1223,14 @@ async fn test_inventory_reports_require_inventory_read(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
-    // Has reports/read but NOT inventory/read.
+    // Has reports/read but NOT inventory/read. An owner holds everything, so
+    // the absence is a per-person deny (a non-protected capability).
     grant_permission(&pool, "org_admin", "reports", "read").await;
+    sqlx::query("INSERT INTO permissions (user_id, resource, action, granted) VALUES ($1, 'inventory', 'read', false)")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let token = generate_org_admin_token(user_id, org_id);
     let auth = ("Authorization", format!("Bearer {token}"));
     let url = format!("/reports/branches/{branch_id}/inventory-valuation");
@@ -1243,8 +1249,12 @@ async fn test_inventory_reports_require_inventory_read(pool: PgPool) {
         "inventory reports must require inventory/read"
     );
 
-    // Granting inventory/read unlocks it.
-    grant_permission(&pool, "org_admin", "inventory", "read").await;
+    // Lifting the deny unlocks it.
+    sqlx::query("DELETE FROM permissions WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let resp = test::call_service(
         &app,
         test::TestRequest::get()

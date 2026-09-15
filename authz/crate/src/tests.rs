@@ -158,7 +158,8 @@ fn a_role_gives_its_grants_plus_core() {
     );
     let e = resolve(&p, Scope::Anywhere, NOW, &OrgPolicy::default());
     assert!(e.can(Cap::OrdersVoid));
-    assert!(e.can(Cap::OrdersCreate), "core for a teller");
+    assert!(e.can(Cap::MenuItemsRead), "core for a teller");
+    assert!(!e.can(Cap::OrdersCreate), "selling is a grant, not core");
     assert!(!e.can(Cap::TillForceClose));
 }
 
@@ -177,7 +178,7 @@ fn manager_at_one_branch_cashier_at_another() {
     let pol = OrgPolicy::default();
     assert!(resolve(&p, Scope::Branch("b1"), NOW, &pol).can(Cap::TillForceClose));
     assert!(!resolve(&p, Scope::Branch("b2"), NOW, &pol).can(Cap::TillForceClose));
-    assert!(!resolve(&p, Scope::Branch("b3"), NOW, &pol).can(Cap::OrdersCreate));
+    assert!(!resolve(&p, Scope::Branch("b3"), NOW, &pol).can(Cap::MenuItemsRead));
 }
 
 #[test]
@@ -191,7 +192,7 @@ fn deny_removes_but_never_core() {
     );
     let e = resolve(&p, Scope::Anywhere, NOW, &OrgPolicy::default());
     assert!(!e.can(Cap::OrdersVoid));
-    assert!(e.can(Cap::OrdersCreate), "core survives a deny");
+    assert!(e.can(Cap::MenuItemsRead), "core survives a deny");
 }
 
 #[test]
@@ -450,7 +451,7 @@ fn guard_rules() {
             &teller,
             "t",
             kinds,
-            Cap::OrdersCreate,
+            Cap::BranchesRead,
             false,
             None
         ),

@@ -562,7 +562,7 @@ pub async fn offline_auth_bundle(
         SELECT u.id AS user_id, u.name, u.role::text AS role, u.is_active, u.offline_pin_hash
         FROM users u
         WHERE u.org_id = $1
-          AND u.role IN ('teller', 'waiter', 'kitchen', 'branch_manager')
+          AND u.role <> 'super_admin' 
           AND u.deleted_at IS NULL
           AND NOT u.is_guest_principal
           AND ($2::uuid IS NULL
@@ -578,6 +578,20 @@ pub async fn offline_auth_bundle(
     .bind(device_branch)
     .fetch_all(pool.get_ref())
     .await?;
+    // Only people who may sign in at a till here (architecture E `pos.sign_in`),
+    // and only those with a PIN verifier or a floor role (older tablets list
+    // floor staff who have not signed in online yet).
+    let mut tellers_here = Vec::with_capacity(tellers.len());
+    for t in tellers {
+        let may = crate::authz::require::effective(pool.get_ref(), t.user_id, device_branch)
+            .await?
+            .can(crate::authz::Cap::PosSignIn);
+        let floor = matches!(t.role.as_str(), "teller" | "waiter" | "kitchen");
+        if may && (floor || t.offline_pin_hash.is_some()) {
+            tellers_here.push(t);
+        }
+    }
+    let tellers = tellers_here;
 
     // The org's stable LAN secret, hex-encoded in SQL (no Rust encoding dep).
     let lan_secret: String =

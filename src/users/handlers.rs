@@ -162,6 +162,12 @@ pub async fn create_user(
             }
         }
         _ => {
+            // A manager or owner may also work a till: an optional PIN.
+            if let Some(pin) = body.pin.as_deref()
+                && (pin.len() < 4 || pin.len() > 6 || !pin.chars().all(|c| c.is_ascii_digit()))
+            {
+                return Err(AppError::BadRequest("PIN must be 4–6 digits".into()));
+            }
             if body.password.is_none() {
                 return Err(AppError::BadRequest(
                     "Admins and managers require a password".into(),

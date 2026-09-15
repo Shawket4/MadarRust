@@ -284,6 +284,7 @@ async fn run() -> std::io::Result<()> {
             .configure(orgs::routes::configure)
             .configure(users::routes::configure)
             .configure(permissions::routes::configure)
+            .configure(madar_rust::authz::api::configure)
             .configure(branches::routes::configure)
             .configure(menu::routes::configure)
             .configure(inventory::routes::configure)

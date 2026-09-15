@@ -1,7 +1,6 @@
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use std::collections::HashMap;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -156,13 +155,6 @@ pub struct AuthPermissionsResponse {
     pub permissions: Vec<UserPermissionItem>,
 }
 
-#[derive(sqlx::FromRow)]
-struct DbPermission {
-    pub resource: String,
-    pub action: String,
-    pub granted: bool,
-}
-
 // ── POST /auth/login ─────────────────────────────────────────
 
 #[utoipa::path(
@@ -249,7 +241,11 @@ pub async fn login(
                 WHERE LOWER(u.name) = LOWER($1)
                   AND u.org_id      = $2
                   AND u.pin_hash    IS NOT NULL
-                  AND u.role        IN ('teller', 'waiter', 'kitchen')
+                  -- Anyone who works a till signs in with a PIN (owners and
+                  -- managers too); whether they may at THIS branch is the
+                  -- `pos.sign_in` check below.
+                  AND u.role        <> 'super_admin'
+                  AND NOT u.is_guest_principal
                   AND u.is_active   = TRUE
                   AND u.deleted_at  IS NULL
                 "#,
@@ -269,6 +265,18 @@ pub async fn login(
                 // No teller in this org matches name+PIN (includes a real teller
                 // from a DIFFERENT org) → generic invalid credentials.
                 .ok_or_else(|| AppError::Unauthorized("Invalid credentials".into()))?;
+
+            // Architecture E: signing in at a till is the `pos.sign_in` capability
+            // at this branch (tellers and waiters always hold it; owners hold it;
+            // a manager at the branches they are assigned to).
+            if !crate::authz::require::effective(pool.get_ref(), matched.id, Some(branch_id))
+                .await?
+                .can(crate::authz::Cap::PosSignIn)
+            {
+                return Err(AppError::Forbidden(
+                    "You can't sign in at a till in this branch".into(),
+                ));
+            }
 
             // D13: tellers are ORG-scoped, not branch-scoped. The teller was
             // resolved within the branch's own org above (that's the boundary),
@@ -353,23 +361,19 @@ pub async fn login(
 
     // Tellers, waiters AND kitchen users are device-bound (PIN) and branch-bound;
     // waiters/kitchen just never hold a shift. All get the short device TTL.
-    let token_branch_id = if matches!(
-        user.role,
-        UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
-    ) {
+    // A PIN sign-in is a till session whatever the role: branch-bound, short.
+    let via_pin = body.pin.is_some() && body.email.is_none();
+    let token_branch_id = if via_pin
+        || matches!(
+            user.role,
+            UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
+        ) {
         body.branch_id
     } else {
         None
     };
 
-    let hours = if matches!(
-        user.role,
-        UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
-    ) {
-        12
-    } else {
-        24
-    };
+    let hours = if token_branch_id.is_some() { 12 } else { 24 };
 
     let token = create_token(
         &secret,
@@ -388,10 +392,7 @@ pub async fn login(
 
     // For tellers/waiters, branch_id is the device branch (from body.branch_id).
     // For other roles, fall back to looking up the first assignment.
-    let branch_id_for_response: Option<Uuid> = if matches!(
-        user.role,
-        UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
-    ) {
+    let branch_id_for_response: Option<Uuid> = if token_branch_id.is_some() {
         body.branch_id
     } else {
         sqlx::query_scalar(
@@ -594,60 +595,29 @@ pub async fn permissions(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRe
         .cloned()
         .ok_or_else(|| AppError::Unauthorized("Missing claims".into()))?;
 
-    let role: String =
-        sqlx::query_scalar("SELECT role::text FROM users WHERE id = $1 AND deleted_at IS NULL")
-            .bind(claims.user_id())
-            .fetch_optional(pool.get_ref())
-            .await?
-            .ok_or_else(|| AppError::NotFound("User not found".into()))?;
-
-    let role_defaults = sqlx::query_as::<_, DbPermission>(
-        "SELECT resource::text as resource, action::text as action, granted
-         FROM role_permissions WHERE role = $1::user_role",
-    )
-    .bind(&role)
-    .fetch_all(pool.get_ref())
-    .await?;
-
-    let user_overrides = sqlx::query_as::<_, DbPermission>(
-        "SELECT resource::text as resource, action::text as action, granted
-         FROM permissions WHERE user_id = $1",
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND deleted_at IS NULL)",
     )
     .bind(claims.user_id())
-    .fetch_all(pool.get_ref())
+    .fetch_one(pool.get_ref())
     .await?;
+    if !exists {
+        return Err(AppError::NotFound("User not found".into()));
+    }
 
-    let cells = crate::permissions::RESOURCES.len() * crate::permissions::ACTIONS.len()
-        + crate::permissions::EXTRA_PERMISSIONS.len();
-
-    // Build O(1) lookup maps so the nested loop is O(n) not O(n²)
-    let role_map: HashMap<(&str, &str), bool> = role_defaults
-        .iter()
-        .map(|r| ((r.resource.as_str(), r.action.as_str()), r.granted))
-        .collect();
-    let override_map: HashMap<(&str, &str), bool> = user_overrides
-        .iter()
-        .map(|p| ((p.resource.as_str(), p.action.as_str()), p.granted))
-        .collect();
-
-    let mut permissions = Vec::with_capacity(cells);
-
-    for (resource, action) in crate::permissions::permission_cells() {
-        let role_default = role_map.get(&(resource, action)).copied();
-        let user_override = override_map.get(&(resource, action)).copied();
-
-        let effective = if role == "super_admin" {
-            true
-        } else {
-            user_override.or(role_default).unwrap_or(false)
-        };
-
-        permissions.push(UserPermissionItem {
+    // Architecture E: the grid is the person's effective capabilities at the
+    // token's branch, projected onto the legacy cells (one capability per cell),
+    // in the same order as before.
+    let eff =
+        crate::authz::require::effective_for_claims(pool.get_ref(), &claims, claims.branch_id())
+            .await?;
+    let mut permissions: Vec<UserPermissionItem> = crate::permissions::permission_cells()
+        .map(|(resource, action)| UserPermissionItem {
             resource: resource.to_string(),
             action: action.to_string(),
-            granted: effective,
-        });
-    }
+            granted: crate::authz::legacy::granted(&eff, resource, action),
+        })
+        .collect();
 
     // POS v0.5.1 / v0.6.0 gate on `has_permission("shifts", …)`: mirror every
     // `tills:<action>` as `shifts:<action>` while those builds are in the field.

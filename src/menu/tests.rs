@@ -1348,6 +1348,12 @@ async fn test_branch_override_permissions_enforced(pool: PgPool) {
     let branch = seed_branch(&pool, org).await;
     let admin = seed_user(&pool, org, "org_admin").await;
     grant_permission(&pool, "org_admin", "menu_items", "read").await; // read only, no update
+    // An owner holds everything: the missing update is a per-person deny.
+    sqlx::query("INSERT INTO permissions (user_id, resource, action, granted) VALUES ($1, 'menu_items', 'update', false)")
+        .bind(admin)
+        .execute(&pool)
+        .await
+        .unwrap();
     let cat = seed_category(&pool, org, "Coffee").await;
     let item = seed_menu_item(&pool, org, cat, "Latte", 5000).await;
     let token = generate_org_admin_token(admin, org);
@@ -1392,8 +1398,9 @@ async fn test_branch_override_permissions_enforced(pool: PgPool) {
     .await;
     assert_eq!(resp.status(), 403, "delete needs menu_items/update");
 
-    // A teller with no grants cannot even read.
-    let teller = seed_user(&pool, org, "teller").await;
+    // A kitchen account (no menu grants, and menu reads are not core for it)
+    // cannot even read.
+    let teller = seed_user(&pool, org, "kitchen").await;
     let ttok = generate_teller_token(teller, org);
     let resp = test::call_service(
         &app,

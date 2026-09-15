@@ -331,10 +331,10 @@ async fn a_revoked_void_does_not_get_through_by_being_queued(pool: PgPool) {
     assert_eq!(r.status(), 403, "orders:update does not void");
 }
 
-/// Attribution is the one thing the role still decides: whose name may go on
-/// a replayed write. An org admin holds every grant there is and is still
-/// refused — they never PIN in at a till, so no queued op can be theirs — and
-/// so is a till user of another org, whatever they hold there.
+/// Attribution: whose name may go on a replayed write. Anyone who may sign in at
+/// a till (`pos.sign_in`) — owners included, by the owner's decision that owners
+/// and managers work a till with a PIN — but never a till user of another org,
+/// whatever they hold there, and never a disabled account.
 #[sqlx::test]
 async fn only_a_till_user_of_this_org_can_be_the_author(pool: PgPool) {
     let app = app!(pool);
@@ -352,7 +352,11 @@ async fn only_a_till_user_of_this_org_can_be_the_author(pool: PgPool) {
     let bearer = token(teller, org, UserRole::Teller);
 
     let r = fire_by_replay(&app, &bearer, admin, branch, item).await;
-    assert_eq!(r.status(), 403, "an admin is not a till user");
+    assert!(
+        r.status().is_success(),
+        "an owner works a till: {}",
+        r.status()
+    );
     let r = fire_by_replay(&app, &bearer, stranger, branch, item).await;
     assert_eq!(r.status(), 403, "a teller of another org is not ours");
 

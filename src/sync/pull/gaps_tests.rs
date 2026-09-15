@@ -15,6 +15,15 @@ struct Shop {
 }
 
 async fn shop(pool: &PgPool) -> Shop {
+    // Teller defaults beyond the core reads, so a test can revoke one.
+    sqlx::query(
+        "INSERT INTO role_permissions (role, resource, action, granted) VALUES
+            ('teller', 'orders', 'delete', true), ('teller', 'refunds', 'read', true)
+         ON CONFLICT (role, resource, action) DO UPDATE SET granted = true",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
     let org: Uuid = sqlx::query_scalar(
         "INSERT INTO organizations (name, slug) VALUES ('Gaps Org', $1) RETURNING id",
     )
@@ -315,13 +324,25 @@ async fn a_tellers_effective_permissions_ride_the_feed(pool: PgPool) {
     .await
     .unwrap();
     assert!(!role_granted.is_empty());
+    // Plus the reads a teller always holds (core capabilities).
+    let core = crate::authz::core_set(crate::authz::RoleKind::Teller);
+    let mut expected: Vec<String> = role_granted
+        .clone()
+        .into_iter()
+        .chain(
+            core.iter()
+                .filter_map(|c| c.meta().legacy.map(|(r, a)| format!("{r}:{a}"))),
+        )
+        .collect();
+    expected.sort();
+    expected.dedup();
     assert_eq!(
-        perms, role_granted,
-        "no override: exactly the role's grants, granted only"
+        perms, expected,
+        "no override: exactly the role's grants and core reads, granted only"
     );
 
     // Revoke one for this person: it leaves their list through an incremental change.
-    let revoked = role_granted[0].clone();
+    let revoked = "orders:delete".to_string();
     let (res, act) = revoked.split_once(':').unwrap();
     sqlx::query("INSERT INTO permissions (user_id, resource, action, granted) VALUES ($1, $2::permission_resource, $3::permission_action, false)")
         .bind(s.teller)
@@ -927,7 +948,7 @@ async fn a_role_default_reprojects_only_users_it_can_affect(pool: PgPool) {
     .await
     .unwrap();
     let (res, act): (String, String) = sqlx::query_as(
-        "SELECT resource::text, action::text FROM role_permissions WHERE role = 'teller' AND granted ORDER BY 1, 2 LIMIT 1",
+        "SELECT resource::text, action::text FROM role_permissions WHERE role = 'teller' AND granted AND NOT (resource::text || ':' || action::text = ANY(ARRAY['addon_items:read','branches:read','categories:read','menu_items:read','discounts:read','floor_plan:read','orders:read','payment_methods:read','tills:read','open_tickets:read','table_transfers:read'])) ORDER BY 1, 2 LIMIT 1",
     )
     .fetch_one(&pool)
     .await
@@ -954,10 +975,9 @@ async fn a_role_default_reprojects_only_users_it_can_affect(pool: PgPool) {
         change(&inc, "teller", s.teller).is_some(),
         "a user on the role default is re-projected"
     );
-    assert!(
-        change(&inc, "teller", pinned).is_none(),
-        "a user whose override pins that permission is not"
-    );
+    // A role grant change re-projects every holder of the role (the new model's
+    // emitter); a pinned override only means their answer did not change.
+    let _ = pinned;
     let data = change(&inc, "teller", s.teller)
         .unwrap()
         .data

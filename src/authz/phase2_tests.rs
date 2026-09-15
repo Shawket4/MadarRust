@@ -196,7 +196,7 @@ async fn a_core_deny_is_the_one_explained_difference_and_enforce_serves_the_new_
     seed(&pool).await;
     let o = org(&pool).await;
     let teller = user(&pool, o, "teller").await;
-    sqlx::query("INSERT INTO permissions (user_id, resource, action, granted) VALUES ($1, 'orders', 'create', false)")
+    sqlx::query("INSERT INTO permissions (user_id, resource, action, granted) VALUES ($1, 'menu_items', 'read', false)")
         .bind(teller)
         .execute(&pool)
         .await
@@ -208,15 +208,29 @@ async fn a_core_deny_is_the_one_explained_difference_and_enforce_serves_the_new_
     let mut conn = pool.acquire().await.unwrap();
     let legacy = Err(AppError::Forbidden("denied".into()));
     assert!(
-        observe_in(Mode::Shadow, &mut conn, teller, "orders", "create", legacy)
-            .await
-            .is_err()
+        observe_in(
+            Mode::Shadow,
+            &mut conn,
+            teller,
+            "menu_items",
+            "read",
+            legacy
+        )
+        .await
+        .is_err()
     );
     let legacy = Err(AppError::Forbidden("denied".into()));
     assert!(
-        observe_in(Mode::Enforce, &mut conn, teller, "orders", "create", legacy)
-            .await
-            .is_ok()
+        observe_in(
+            Mode::Enforce,
+            &mut conn,
+            teller,
+            "menu_items",
+            "read",
+            legacy
+        )
+        .await
+        .is_ok()
     );
     assert!(
         observe_in(Mode::Enforce, &mut conn, teller, "payroll", "read", Ok(()))

@@ -413,7 +413,10 @@ pub async fn replay(
             ));
         }
     };
-    if actor_org != token_org || !is_active || !crate::sync::can_sign_in_at_a_till(&actor_role) {
+    let signs_in = crate::authz::require::effective(pool.get_ref(), teller_id, None)
+        .await?
+        .can(crate::authz::Cap::PosSignIn);
+    if actor_org != token_org || !is_active || !signs_in {
         return Err(AppError::Forbidden(
             "Replay actor may not perform this operation for this organization".into(),
         ));

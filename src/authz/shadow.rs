@@ -1,9 +1,9 @@
 //! Running the old and new permission models side by side.
 //!
 //! `MADAR_AUTHZ_MODE`:
-//! - `shadow` (Phase 2 default): serve the LEGACY decision; compute the new one
+//! - `shadow` (Phase 2): serve the LEGACY decision; compute the new one
 //!   and log any divergence (`madar.authz.shadow`).
-//! - `enforce` (Phase 3): serve the NEW decision; log divergence the same way.
+//! - `enforce` (Phase 3, the default): serve the NEW decision; log divergence the same way.
 //! - `legacy`: legacy only, no second computation (emergency switch).
 //!
 //! A failure to compute the new decision never fails a request in `shadow`.
@@ -27,8 +27,8 @@ pub enum Mode {
 pub static MODE: LazyLock<Mode> =
     LazyLock::new(|| match std::env::var("MADAR_AUTHZ_MODE").as_deref() {
         Ok("legacy") => Mode::Legacy,
-        Ok("enforce") => Mode::Enforce,
-        _ => Mode::Shadow,
+        Ok("shadow") => Mode::Shadow,
+        _ => Mode::Enforce,
     });
 
 /// Divergences seen since start (exported for observability).
