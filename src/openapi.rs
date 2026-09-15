@@ -496,6 +496,7 @@ paths(
         crate::reports::handlers::branch_waiter_stats,
         crate::reports::handlers::branch_addon_sales,
         crate::reports::handlers::org_branch_comparison,
+        crate::reports::handlers::org_tax_report,
         crate::reports::handlers::branch_delivery_sales,
         crate::reports::handlers::branch_bundle_sales,
         crate::reports::handlers::branch_combined_item_sales,

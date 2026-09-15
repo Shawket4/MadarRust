@@ -34315,6 +34315,129 @@
         ]
       }
     },
+    "/reports/orgs/{org_id}/tax": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "operationId": "org_tax_report",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Org-wide VAT/tax report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaxReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/reports/orgs/{org_id}/waste-report": {
       "get": {
         "tags": [
@@ -67535,6 +67658,84 @@
             "format": "double",
             "description": "Fraction, NOT a percentage: `0.14` is 14%.",
             "example": 0.14
+          }
+        }
+      },
+      "TaxReport": {
+        "type": "object",
+        "required": [
+          "org_tax_rate",
+          "order_count",
+          "voided_orders",
+          "subtotal",
+          "discount_amount",
+          "service_charge_amount",
+          "tax_collected",
+          "refunded_tax",
+          "net_tax_due",
+          "net_revenue"
+        ],
+        "properties": {
+          "discount_amount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "net_revenue": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`total_amount`, net of refunds, across every branch."
+          },
+          "net_tax_due": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`tax_collected - refunded_tax` — what is actually owed for the period."
+          },
+          "order_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "org_tax_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "The org's current tax rate, as a decimal fraction. Informational only —\nindividual orders carry the rate that was actually applied at sale\ntime (`tax_rate_applied`), which may differ if the rate changed since.",
+            "example": 0.14
+          },
+          "refunded_tax": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "service_charge_amount": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Net of refunded service charge."
+          },
+          "subtotal": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sum of `orders.subtotal` across every branch, before discount or tax."
+          },
+          "tax_collected": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Tax collected at sale time, before refunds."
+          },
+          "to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "voided_orders": {
+            "type": "integer",
+            "format": "int64"
           }
         }
       },
