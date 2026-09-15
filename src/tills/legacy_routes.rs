@@ -117,7 +117,7 @@ pub async fn open_shift(
         hub.as_ref().map(|h| h.get_ref()),
         *branch_id,
         body.into_inner().into(),
-        ActingContext::live(&claims)?,
+        ActingContext::live(&claims)?.scoped(pool.get_ref()).await?,
         h::OpenMeta::default(),
     )
     .await;
@@ -262,7 +262,7 @@ pub async fn add_cash_movement(
         hub.as_ref().map(|h| h.get_ref()),
         *id,
         body.into_inner(),
-        ActingContext::live(&claims)?,
+        ActingContext::live(&claims)?.scoped(pool.get_ref()).await?,
     )
     .await
     .map_err(legacy_error)
@@ -309,7 +309,7 @@ pub async fn close_shift(
         hub.as_ref().map(|h| h.get_ref()),
         *id,
         body,
-        ActingContext::live(&claims)?,
+        ActingContext::live(&claims)?.scoped(pool.get_ref()).await?,
     )
     .await?;
     Ok(HttpResponse::Ok().json(CloseShiftResponse {

@@ -2840,6 +2840,7 @@ async fn waiving_the_service_charge_needs_the_permission(pool: PgPool) {
             org_id: org,
             role: UserRole::BranchManager,
             replay: true,
+            own_till_only: false,
         },
         None,
     )

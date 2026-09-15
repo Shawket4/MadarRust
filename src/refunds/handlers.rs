@@ -8,7 +8,6 @@ use crate::{
     auth::jwt::Claims,
     delivery::require_branch_access,
     errors::{AppError, AppErrorResponse},
-    models::UserRole,
     permissions::checker::check_permission,
     refunds::RefundReason,
     sync::ActingContext,
@@ -200,7 +199,12 @@ pub async fn create_refund(
     if let Some(till) = body.till_id {
         crate::tills::handlers::guard_till_device(pool.get_ref(), till, device.0).await?;
     }
-    create_refund_inner(pool.clone(), web::Json(body), ActingContext::live(&claims)?).await
+    create_refund_inner(
+        pool.clone(),
+        web::Json(body),
+        ActingContext::live(&claims)?.scoped(pool.get_ref()).await?,
+    )
+    .await
 }
 
 /// The slice of an order a refund needs to know.
@@ -481,7 +485,7 @@ async fn resolve_refund_till(
         // A teller refunds out of their OWN drawer — the refund changes that
         // drawer's expected cash, so it must belong to the right person.
         // Replay bypasses this: a different teller may be flushing the device.
-        if !actor.replay && actor.role == UserRole::Teller && shift_teller != actor.teller_id {
+        if !actor.replay && actor.own_till_only && shift_teller != actor.teller_id {
             return Err(AppError::Forbidden(
                 "You can only issue refunds from your own till".into(),
             ));

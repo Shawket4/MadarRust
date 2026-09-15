@@ -732,7 +732,7 @@ pub async fn open_till(
         hub.as_ref().map(|h| h.get_ref()),
         branch_id.into_inner(),
         body.into_inner(),
-        ActingContext::live(&claims)?,
+        ActingContext::live(&claims)?.scoped(pool.get_ref()).await?,
         OpenMeta {
             device_id: device.0,
             device_code: None,
@@ -1277,7 +1277,7 @@ pub async fn add_cash_movement(
         hub.as_ref().map(|h| h.get_ref()),
         till_id.into_inner(),
         body,
-        ActingContext::live(&claims)?,
+        ActingContext::live(&claims)?.scoped(pool.get_ref()).await?,
     )
     .await
 }
@@ -1549,7 +1549,7 @@ pub async fn close_till(
         hub.as_ref().map(|h| h.get_ref()),
         till_id.into_inner(),
         body,
-        ActingContext::live(&claims)?,
+        ActingContext::live(&claims)?.scoped(pool.get_ref()).await?,
     )
     .await?;
     Ok(HttpResponse::Ok().json(out))

@@ -9,7 +9,6 @@ use uuid::Uuid;
 use crate::{
     auth::jwt::Claims,
     errors::{AppError, AppErrorResponse},
-    models::UserRole,
     orders::SOLD,
     permissions::checker::check_permission,
     sync::ActingContext,
@@ -1449,7 +1448,7 @@ pub async fn create_order(
     }
     // A till bound to another device refuses live sales from this one.
     crate::tills::handlers::guard_till_device(pool.get_ref(), body.till_id, header_device).await?;
-    let actor = ActingContext::live(&claims)?;
+    let actor = ActingContext::live(&claims)?.scoped(pool.get_ref()).await?;
     // Live only: the method must be in the effective set for branch ∩ person ∩
     // device (replay never rejects on availability — the sale happened).
     // Only an owner with an allow-list restricts; an unrestricted shop keeps
@@ -1593,7 +1592,7 @@ pub(crate) async fn create_order_inner(
     // closed that shift (the cross-device close race). The embedded shift_id —
     // stamped by the core when the shift was open on that device — is the proof
     // of attribution; the closed shift's cash total is reconciled after insert.
-    let teller_match = if !actor.replay && actor.role == UserRole::Teller {
+    let teller_match = if !actor.replay && actor.own_till_only {
         Some(actor.teller_id)
     } else {
         None
@@ -2064,7 +2063,7 @@ pub(crate) async fn create_order_inner(
     // Live only: a teller's order must target their OWN shift. Replay bypasses
     // this — the order is attributed to its embedded teller, which may differ
     // from whoever is flushing the device backlog.
-    if !actor.replay && actor.role == UserRole::Teller && shift_teller_id != actor.teller_id {
+    if !actor.replay && actor.own_till_only && shift_teller_id != actor.teller_id {
         return Err(AppError::Forbidden(
             "This shift belongs to another teller".into(),
         ));
@@ -3129,7 +3128,7 @@ pub async fn void_order(
         pool.clone(),
         order_id.into_inner(),
         body,
-        ActingContext::live(&claims)?,
+        ActingContext::live(&claims)?.scoped(pool.get_ref()).await?,
     )
     .await
 }
@@ -3154,7 +3153,7 @@ pub(crate) async fn void_order_inner(
     // is a correction that belongs to a manager. (The closing snapshot is frozen,
     // so a manager's void does not silently move a closed shift's recorded drawer
     // figure.) Replay bypasses this — the void happened while the shift was open.
-    if !actor.replay && actor.role == UserRole::Teller {
+    if !actor.replay && actor.own_till_only {
         let shift_open: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM tills WHERE id = $1 AND status = 'open')",
         )
@@ -3913,51 +3912,9 @@ async fn require_branch_access(
     claims: &Claims,
     branch_id: Uuid,
 ) -> Result<(), AppError> {
-    if claims.role == UserRole::SuperAdmin {
-        return Ok(());
-    }
-
-    let branch_org: Option<Uuid> =
-        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
-            .bind(branch_id)
-            .fetch_optional(pool)
-            .await?
-            .flatten();
-
-    let branch_org = branch_org.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
-
-    if claims.org_id() != Some(branch_org) {
-        return Err(AppError::Forbidden(
-            "Branch belongs to a different org".into(),
-        ));
-    }
-    if claims.role == UserRole::OrgAdmin {
-        return Ok(());
-    }
-
-    // D13: tellers are ORG-scoped, not branch-scoped — any active teller in the
-    // branch's org may ring up here (the org check above is the boundary). The
-    // order still records this device's branch, so revenue stays attributed
-    // correctly.
-    if claims.role == UserRole::Teller {
-        return Ok(());
-    }
-
-    // Branch managers stay branch-scoped via their explicit assignments.
-    let assigned: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM user_branch_assignments \
-         WHERE user_id = $1 AND branch_id = $2)",
-    )
-    .bind(claims.user_id())
-    .bind(branch_id)
-    .fetch_one(pool)
-    .await?;
-
-    if !assigned {
-        return Err(AppError::Forbidden("Not assigned to this branch".into()));
-    }
-
-    Ok(())
+    // Architecture E: the branches a person may act on come from their live
+    // role assignments, not from their role name (see `authz::scope`).
+    crate::authz::scope::require_branch_access(pool, claims, branch_id).await
 }
 
 async fn validate_payment_method<'e, E>(pool: E, org_id: Uuid, method: &str) -> Result<(), AppError>

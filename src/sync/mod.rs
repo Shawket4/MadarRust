@@ -77,6 +77,15 @@ pub struct ActingContext {
     /// `true` when replaying a historical queued op: ownership / drawer-owner /
     /// one-open-per-branch precheck / cash-continuity guards are skipped.
     pub replay: bool,
+    /// Live staff who may act only on their OWN till.
+    ///
+    /// Architecture E replaced "is this a teller?" with a capability: anyone
+    /// who can see the branch's tills (`till.read.branch`) may ring up on, or
+    /// correct, another person's shift. `live()` starts restricted and
+    /// [`ActingContext::scoped`] lifts it after the capability lookup, so a
+    /// call site that forgets the lookup fails closed. Guests and replays are
+    /// unrestricted, exactly as before.
+    pub own_till_only: bool,
 }
 
 impl ActingContext {
@@ -90,6 +99,7 @@ impl ActingContext {
                 .ok_or_else(|| AppError::BadRequest("Token has no organization".into()))?,
             role: claims.role.clone(),
             replay: false,
+            own_till_only: true,
         })
     }
 
@@ -110,6 +120,7 @@ impl ActingContext {
             org_id,
             role: UserRole::Waiter,
             replay: false,
+            own_till_only: false,
         }
     }
 
@@ -129,6 +140,20 @@ impl ActingContext {
             org_id,
             role,
             replay: true,
+            own_till_only: false,
         }
+    }
+
+    /// Resolve the till scope from the actor's capabilities. Call this on every
+    /// live action guarded by "your own till".
+    pub async fn scoped(mut self, pool: &sqlx::PgPool) -> Result<Self, AppError> {
+        if self.own_till_only
+            && crate::authz::require::effective(pool, self.teller_id, None)
+                .await?
+                .can(crate::authz::Cap::TillReadBranch)
+        {
+            self.own_till_only = false;
+        }
+        Ok(self)
     }
 }
