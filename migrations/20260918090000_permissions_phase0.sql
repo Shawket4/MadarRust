@@ -60,3 +60,10 @@ CREATE TRIGGER authz_grant_event AFTER INSERT OR UPDATE OR DELETE ON role_permis
 
 -- The app role reads nothing here; writes go through the SECURITY DEFINER trigger.
 REVOKE ALL ON authz_grant_events FROM PUBLIC;
+
+-- Tenant isolation like every public table: the app role sees only its org's
+-- history (rows written by the trigger for super-admin edits carry no org).
+ALTER TABLE authz_grant_events ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS authz_grant_events_tenant ON authz_grant_events;
+CREATE POLICY authz_grant_events_tenant ON authz_grant_events
+    USING (org_id = NULLIF(current_setting('app.org_id', true), '')::uuid);
