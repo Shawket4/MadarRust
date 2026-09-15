@@ -7,6 +7,7 @@
 pub mod api;
 pub mod load;
 pub mod require;
+pub mod scope;
 pub mod shadow;
 
 #[cfg(test)]
