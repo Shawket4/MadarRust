@@ -334,7 +334,12 @@ pub async fn create_org(
                 .into(),
         ));
     }
-    let tax_rate = fields.tax_rate.unwrap_or(0.14);
+    // Locked owner decision (2026-09-15): a new org starts at 0% tax, not
+    // Egypt's 14%. A shop that owes tax sets its rate once during setup and
+    // knows it did; a shop that does not owe it had no way to discover that the
+    // number it never chose was quietly adding 14% to every receipt. Guessing
+    // wrong in the direction of charging money is the worse failure.
+    let tax_rate = fields.tax_rate.unwrap_or(0.0);
     if !(0.0..=1.0).contains(&tax_rate) {
         return Err(AppError::BadRequest(
             "tax_rate is a fraction between 0 and 1, not a percentage — 0.14 means 14%".into(),
@@ -378,15 +383,25 @@ pub async fn create_org(
     .fetch_one(&mut *tx)
     .await?;
 
+    // The tenders every shop has. Locked owner decision (2026-09-15): the
+    // `talabat_*` methods are NOT seeded any more — they belong to a shop that
+    // actually has the Talabat integration switched on, and a cafe that has
+    // never heard of Talabat should not find two dead tenders on its till, nor
+    // two columns of zeroes on every Z report for ever.
+    //
+    // When the Talabat integration lands it creates them on activation, and
+    // `talabat_cash` MUST be created with `is_cash = false` (it was seeded
+    // `true` here). The money never reaches this shop's drawer — Talabat's
+    // rider collects it and settles later — so counting it as cash made the
+    // expected drawer total wrong by exactly the day's Talabat cash, and every
+    // close came up short.
     sqlx::query(
         r#"
         INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash)
         VALUES
             ($1, 'cash', '{"en": "Cash", "ar": "نقدي"}', '#10B981', 'money', true),
             ($1, 'card', '{"en": "Card", "ar": "بطاقة"}', '#3B82F6', 'credit_card', false),
-            ($1, 'digital_wallet', '{"en": "Digital Wallet", "ar": "محفظة رقمية"}', '#8B5CF6', 'wallet', false),
-            ($1, 'talabat_online', '{"en": "Talabat Online", "ar": "طلبات أونلاين"}', '#EF4444', 'delivery', false),
-            ($1, 'talabat_cash', '{"en": "Talabat Cash", "ar": "طلبات كاش"}', '#F97316', 'delivery', true)
+            ($1, 'digital_wallet', '{"en": "Digital Wallet", "ar": "محفظة رقمية"}', '#8B5CF6', 'wallet', false)
         "#
     )
     .bind(org.id)

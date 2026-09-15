@@ -1020,3 +1020,79 @@ async fn a_branded_shop_with_no_address_can_still_be_given_one(pool: PgPool) {
     let resp = test::call_service(&app, patch("rue-coffee")).await;
     assert_eq!(resp.status().as_u16(), 409, "a real name is load-bearing");
 }
+
+/// Locked owner decisions (2026-09-15) about what a brand-new org starts with.
+///
+/// **Tax 0%.** The default used to be Egypt's 0.14. A shop that owes tax sets
+/// its rate during setup and knows it did; a shop that does not owe it had no
+/// way to discover that a number it never chose was adding 14% to every
+/// receipt. Guessing wrong in the direction of charging money is the worse
+/// failure.
+///
+/// **No Talabat tenders.** They belong to a shop that has the integration
+/// switched on. A cafe that has never heard of Talabat should not find two dead
+/// tenders on its till and two columns of zeroes on every Z report for ever.
+#[sqlx::test]
+async fn a_new_org_starts_at_zero_tax_with_no_talabat_tenders(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let token = generate_super_admin_token();
+    // No `tax_rate` field at all: this is the default, not a choice.
+    let body = multipart_body(&[
+        ("name", "Plain Cafe"),
+        ("slug", "plain-cafe"),
+        ("currency_code", "EGP"),
+    ]);
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orgs")
+            .insert_header(("Content-Type", "multipart/form-data; boundary=boundary"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_payload(body)
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success(), "got {:?}", resp.status());
+    let org: Org = test::read_body_json(resp).await;
+
+    let rate: sqlx::types::BigDecimal =
+        sqlx::query_scalar("SELECT tax_rate FROM organizations WHERE id = $1")
+            .bind(org.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        rate,
+        sqlx::types::BigDecimal::from(0),
+        "a shop that never chose a rate is not charging 14%"
+    );
+
+    let methods: Vec<(String, bool)> =
+        sqlx::query_as("SELECT name, is_cash FROM org_payment_methods WHERE org_id = $1 ORDER BY name")
+            .bind(org.id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let names: Vec<&str> = methods.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, vec!["card", "cash", "digital_wallet"]);
+    assert!(
+        !names.iter().any(|n| n.starts_with("talabat")),
+        "Talabat tenders come with the integration, not with every org"
+    );
+    // `mixed` stayed dropped (phase 0).
+    assert!(!names.contains(&"mixed"));
+    // Exactly one tender counts toward the drawer.
+    let cash: Vec<&str> = methods
+        .iter()
+        .filter(|(_, c)| *c)
+        .map(|(n, _)| n.as_str())
+        .collect();
+    assert_eq!(cash, vec!["cash"]);
+}
