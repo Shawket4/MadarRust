@@ -18,10 +18,10 @@
 //! - **The last owner (G6).** The last active owner of an org cannot be
 //!   deactivated, demoted or deleted.
 
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
-use crate::{errors::AppError, models::UserRole};
+use crate::{auth::jwt::Claims, errors::AppError, models::UserRole};
 
 /// Interim privilege rank. Replaced by capability dominance in Phase 3.
 pub fn rank(r: &UserRole) -> u8 {
@@ -120,6 +120,136 @@ pub async fn share_a_branch(conn: &mut PgConnection, a: Uuid, b: Uuid) -> Result
     .bind(b)
     .fetch_one(&mut *conn)
     .await?)
+}
+
+// ── Phase 3: capability dominance ───────────────────────────────────────────
+//
+// The rank rules above were the phase 0 stopgap: they read `users.role`, so a
+// person's real access — role grants, per-branch assignments and overrides —
+// never entered the decision. These replace them on the legacy `/users` and
+// `/permissions` endpoints with the same G4/G5/G6 checks the `/authz` API uses,
+// so both surfaces answer identically. The rank helpers stay only for the
+// legacy `users.role` label they still maintain.
+
+use madar_authz::{CapSet, RoleKind, guard as g};
+
+use crate::authz::{CAPS, Cap, core_set};
+
+/// The capabilities a fresh account of this role kind would hold: the spec
+/// defaults for the kind, plus the grants that kind can never lose.
+fn default_caps(kind: RoleKind) -> CapSet {
+    CAPS.iter()
+        .filter(|m| m.defaults.contains(kind))
+        .map(|m| m.cap)
+        .collect::<CapSet>()
+        .union(&core_set(kind))
+}
+
+fn kind_of(role: &UserRole) -> RoleKind {
+    match role {
+        UserRole::SuperAdmin | UserRole::OrgAdmin => RoleKind::OrgAdmin,
+        UserRole::BranchManager => RoleKind::BranchManager,
+        UserRole::Teller => RoleKind::Teller,
+        UserRole::Waiter => RoleKind::Waiter,
+        UserRole::Kitchen => RoleKind::Kitchen,
+    }
+}
+
+pub fn guard_error(e: g::GuardError) -> AppError {
+    AppError::Forbidden(match e {
+        g::GuardError::SelfEdit => "You cannot change your own access".into(),
+        g::GuardError::OwnerProtected => "Only an owner can change an owner's access".into(),
+        g::GuardError::NotDominant { caps } => format!(
+            "This person can do things you can't ({}), so you can't change their access",
+            caps.join(", ")
+        ),
+        g::GuardError::MissingAuthority { cap } => {
+            format!("You don't have permission to change access ({cap})")
+        }
+        g::GuardError::NotHeld { cap } => {
+            format!("You can only grant what you hold yourself ({cap})")
+        }
+        g::GuardError::LimitAbove { cap } => {
+            format!("You can't set a limit above your own ({cap})")
+        }
+        g::GuardError::CoreRemoval { cap } => {
+            format!("{cap} is always on for this role and can't be removed")
+        }
+    })
+}
+
+/// G4 + G5 + G6 on an existing person: the actor holds `authority`, is not the
+/// target, is an owner if the target is, and holds everything the target holds.
+pub async fn require_dominance(
+    pool: &PgPool,
+    claims: &Claims,
+    target_id: Uuid,
+    authority: Cap,
+) -> Result<(), AppError> {
+    if claims.role == UserRole::SuperAdmin {
+        return Ok(());
+    }
+    let actor = crate::authz::require::effective_for_claims(pool, claims, None).await?;
+    if !actor.can(authority) {
+        return Err(guard_error(g::GuardError::MissingAuthority {
+            cap: authority.key().to_string(),
+        }));
+    }
+    let target = crate::authz::require::effective(pool, target_id, None).await?;
+    g::may_touch(
+        &actor,
+        &claims.user_id().to_string(),
+        &target,
+        &target_id.to_string(),
+    )
+    .map_err(guard_error)
+}
+
+/// G2 on an account that does not exist yet: the actor must already hold
+/// everything the new account's role would give it, and only an owner creates
+/// an owner.
+pub async fn require_can_create(
+    pool: &PgPool,
+    claims: &Claims,
+    role: &UserRole,
+) -> Result<(), AppError> {
+    if claims.role == UserRole::SuperAdmin {
+        return Ok(());
+    }
+    if *role == UserRole::SuperAdmin {
+        return Err(AppError::Forbidden(
+            "You cannot manage a user with this role".into(),
+        ));
+    }
+    let actor = crate::authz::require::effective_for_claims(pool, claims, None).await?;
+    let kind = kind_of(role);
+    if kind == RoleKind::OrgAdmin && !actor.owner {
+        return Err(guard_error(g::GuardError::OwnerProtected));
+    }
+    let wanted = if kind == RoleKind::OrgAdmin {
+        madar_authz::owner_set()
+    } else {
+        default_caps(kind)
+    };
+    let missing = wanted.minus(&actor.caps);
+    if !missing.is_empty() {
+        return Err(guard_error(g::GuardError::NotDominant {
+            caps: missing.iter().map(|c| c.key().to_string()).collect(),
+        }));
+    }
+    Ok(())
+}
+
+/// The same for a role CHANGE: dominate the person as they are now, and be able
+/// to create the role they are becoming.
+pub async fn require_can_change_role(
+    pool: &PgPool,
+    claims: &Claims,
+    target_id: Uuid,
+    new_role: &UserRole,
+) -> Result<(), AppError> {
+    require_dominance(pool, claims, target_id, Cap::StaffUsersEdit).await?;
+    require_can_create(pool, claims, new_role).await
 }
 
 #[cfg(test)]

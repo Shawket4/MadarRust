@@ -110,34 +110,44 @@ fn create_body(org: Uuid, role: &str) -> serde_json::Value {
 
 // ── S1 ──────────────────────────────────────────────────────────────────
 
+/// Architecture E replaced the phase-0 rank rule ("strictly downward") with G2:
+/// you can only create an account whose role gives it nothing you do not
+/// already hold. A stray `users:create` on a teller therefore still creates
+/// nobody *above* them — the S4 hole — but it does let them create their own
+/// kind, which is not an escalation and which the owner asked for by granting
+/// the capability in the first place.
 #[sqlx::test]
-async fn s1_a_teller_holding_users_create_creates_nobody(pool: PgPool) {
+async fn s1_a_teller_holding_users_create_creates_nobody_above_them(pool: PgPool) {
     seed(&pool).await;
     let app = app!(pool);
     let o = org(&pool).await;
     let teller = user(&pool, Some(o), "teller").await;
     override_grant(&pool, teller, "users", "create").await;
     let t = token(teller, Some(o), UserRole::Teller);
-    for role in ["org_admin", "branch_manager", "teller"] {
-        let resp = test::call_service(
-            &app,
-            test::TestRequest::post()
-                .uri("/users")
-                .insert_header(("Authorization", format!("Bearer {t}")))
-                .set_json(create_body(o, role))
-                .to_request(),
-        )
-        .await;
+    let call = |role: &'static str| {
+        test::TestRequest::post()
+            .uri("/users")
+            .insert_header(("Authorization", format!("Bearer {t}")))
+            .set_json(create_body(o, role))
+            .to_request()
+    };
+    for role in ["org_admin", "branch_manager"] {
+        let resp = test::call_service(&app, call(role)).await;
         assert_eq!(
             resp.status(),
             StatusCode::FORBIDDEN,
             "teller created {role}"
         );
     }
+    assert_eq!(
+        test::call_service(&app, call("teller")).await.status(),
+        StatusCode::CREATED,
+        "a teller may create their own kind"
+    );
 }
 
 #[sqlx::test]
-async fn s1_a_manager_creates_floor_staff_only(pool: PgPool) {
+async fn s1_a_manager_creates_nobody_above_themselves(pool: PgPool) {
     seed(&pool).await;
     let app = app!(pool);
     let o = org(&pool).await;
@@ -154,11 +164,13 @@ async fn s1_a_manager_creates_floor_staff_only(pool: PgPool) {
         test::call_service(&app, call("org_admin")).await.status(),
         StatusCode::FORBIDDEN
     );
+    // A peer manager is allowed under G2: the role gives nothing the creator
+    // does not already hold. Only an owner role stays out of reach.
     assert_eq!(
         test::call_service(&app, call("branch_manager"))
             .await
             .status(),
-        StatusCode::FORBIDDEN
+        StatusCode::CREATED
     );
     assert_eq!(
         test::call_service(&app, call("teller")).await.status(),
@@ -200,7 +212,7 @@ async fn s8_a_foreign_branch_writes_no_user(pool: PgPool) {
 // ── S5 / owners ─────────────────────────────────────────────────────────
 
 #[sqlx::test]
-async fn s5_peers_and_self_cannot_be_escalated_or_disabled(pool: PgPool) {
+async fn s5_nobody_escalates_a_peer_or_themselves(pool: PgPool) {
     seed(&pool).await;
     let app = app!(pool);
     let o = org(&pool).await;
@@ -217,28 +229,35 @@ async fn s5_peers_and_self_cannot_be_escalated_or_disabled(pool: PgPool) {
             .set_json(body)
             .to_request()
     };
-    // A peer manager's password.
+    // Promote a peer to owner: G2 refuses, the manager is no owner.
     assert_eq!(
-        test::call_service(&app, patch(m2, json!({"password": "x-new-pass"})))
+        test::call_service(&app, patch(m2, json!({"role": "org_admin"})))
             .await
             .status(),
         StatusCode::FORBIDDEN
     );
-    // Promote yourself.
+    // Promote yourself: G5, whatever you hold.
     assert_eq!(
         test::call_service(&app, patch(m1, json!({"role": "org_admin"})))
             .await
             .status(),
         StatusCode::FORBIDDEN
     );
-    // Delete a peer.
-    let del = test::TestRequest::delete()
-        .uri(&format!("/users/{m2}"))
-        .insert_header(("Authorization", format!("Bearer {t1}")))
-        .to_request();
+    // Deactivate yourself out of the way of your own guards: also G5.
     assert_eq!(
-        test::call_service(&app, del).await.status(),
+        test::call_service(&app, patch(m1, json!({"is_active": false})))
+            .await
+            .status(),
         StatusCode::FORBIDDEN
+    );
+    // A peer's password, on the other hand, IS within reach under G4
+    // (`E(target) ⊆ E(actor)`) — the same rule that lets one owner reset
+    // another owner's. It grants the actor nothing they did not already hold.
+    assert_eq!(
+        test::call_service(&app, patch(m2, json!({"password": "x-new-pass"})))
+            .await
+            .status(),
+        StatusCode::OK
     );
 }
 

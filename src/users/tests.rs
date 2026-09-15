@@ -60,6 +60,29 @@ async fn grant_permission(pool: &PgPool, role: &str, resource: &str, action: &st
     .unwrap();
 }
 
+/// A real org-admin row in `org`, with the full role-permission seed behind it,
+/// plus its token. Architecture E resolves the caller's access from their own
+/// row — role assignment, grants and overrides — so a token minted for an id
+/// with no `users` row now holds nothing at all, and a hand-granted single cell
+/// is no longer enough to dominate the person being written (G2/G4).
+async fn seed_admin(pool: &PgPool, org_id: Uuid) -> (Uuid, String) {
+    crate::permissions::seeder::seed_role_permissions(pool)
+        .await
+        .unwrap();
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO users (id, org_id, name, role, email, password_hash) \
+         VALUES ($1, $2, 'Seeded Admin', 'org_admin'::user_role, $3, 'h')",
+    )
+    .bind(id)
+    .bind(org_id)
+    .bind(format!("{id}@seed.test"))
+    .execute(pool)
+    .await
+    .unwrap();
+    (id, generate_org_admin_token(id, org_id))
+}
+
 #[sqlx::test]
 async fn test_create_user_success(pool: PgPool) {
     let app = test::init_service(
@@ -73,9 +96,7 @@ async fn test_create_user_success(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     grant_permission(&pool, "org_admin", "users", "create").await;
 
-    let admin_id = Uuid::new_v4();
-    sqlx::query!("INSERT INTO users (id, org_id, name, role, email, password_hash) VALUES ($1, $2, 'Admin', 'org_admin'::user_role, 'admin@t.com', 'h')", admin_id, org_id).execute(&pool).await.unwrap();
-    let token = generate_org_admin_token(admin_id, org_id);
+    let (_admin_id, token) = seed_admin(&pool, org_id).await;
 
     let branch_id = seed_branch(&pool, org_id).await;
 
@@ -143,7 +164,7 @@ async fn test_create_user_teller_requires_pin(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     grant_permission(&pool, "org_admin", "users", "create").await;
 
-    let token = generate_org_admin_token(Uuid::new_v4(), org_id);
+    let (_admin_id, token) = seed_admin(&pool, org_id).await;
 
     let req = test::TestRequest::post()
         .uri("/users")
@@ -239,7 +260,7 @@ async fn test_update_user(pool: PgPool) {
     sqlx::query!("INSERT INTO users (id, org_id, name, role, email, password_hash) VALUES ($1, $2, 'Update Me', 'org_admin'::user_role, 'u@t.com', 'h')", user_id, org_id)
         .execute(&pool).await.unwrap();
 
-    let token = generate_org_admin_token(Uuid::new_v4(), org_id);
+    let (_admin_id, token) = seed_admin(&pool, org_id).await;
 
     let req = test::TestRequest::patch()
         .uri(&format!("/users/{}", user_id))
@@ -273,7 +294,7 @@ async fn test_delete_user(pool: PgPool) {
     sqlx::query!("INSERT INTO users (id, org_id, name, role, email, password_hash) VALUES ($1, $2, 'Delete Me', 'branch_manager'::user_role, 'del@t.com', 'h')", user_id, org_id)
         .execute(&pool).await.unwrap();
 
-    let token = generate_org_admin_token(Uuid::new_v4(), org_id);
+    let (_admin_id, token) = seed_admin(&pool, org_id).await;
 
     let req = test::TestRequest::delete()
         .uri(&format!("/users/{}", user_id))

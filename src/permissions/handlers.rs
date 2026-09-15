@@ -371,13 +371,22 @@ async fn guard_override_write(
             "Unknown permission: {resource}:{action}"
         )));
     }
-    let target_role: UserRole =
-        sqlx::query_scalar("SELECT role FROM users WHERE id = $1 AND deleted_at IS NULL")
-            .bind(target_id)
-            .fetch_optional(pool)
-            .await?
-            .ok_or_else(|| AppError::NotFound("User not found".into()))?;
-    guard::require_edit_access(claims.user_id(), &claims.role, target_id, &target_role)?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND deleted_at IS NULL)",
+    )
+    .bind(target_id)
+    .fetch_one(pool)
+    .await?;
+    if !exists {
+        return Err(AppError::NotFound("User not found".into()));
+    }
+    guard::require_dominance(
+        pool,
+        claims,
+        target_id,
+        crate::authz::Cap::StaffPermissionsEdit,
+    )
+    .await?;
     if claims.role == UserRole::BranchManager {
         let mut conn = pool.acquire().await?;
         if !guard::share_a_branch(&mut conn, target_id, claims.user_id()).await? {

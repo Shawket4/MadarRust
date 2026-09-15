@@ -104,9 +104,10 @@ pub async fn create_user(
     check_permission(pool.get_ref(), &claims, "users", "create").await?;
     require_same_org(&claims, Some(body.org_id))?;
 
-    // S1: holding `users:create` is necessary, never sufficient — the caller must
-    // dominate the role being created (see permissions::guard).
-    guard::require_manage_role(&claims.role, &body.role)?;
+    // Holding `users:create` is necessary, never sufficient: the caller must
+    // already hold everything the new account's role would give it (G2), and
+    // only an owner creates an owner (see permissions::guard).
+    guard::require_can_create(pool.get_ref(), &claims, &body.role).await?;
 
     if claims.role == UserRole::BranchManager
         && let Some(branch_ids) = &body.branch_ids
@@ -483,9 +484,15 @@ pub async fn update_user(
             ));
         }
     } else {
-        guard::require_manage_role(&claims.role, &existing.role)?;
+        guard::require_dominance(
+            pool.get_ref(),
+            &claims,
+            *user_id,
+            crate::authz::Cap::StaffUsersEdit,
+        )
+        .await?;
         if let Some(new_role) = &body.role {
-            guard::require_manage_role(&claims.role, new_role)?;
+            guard::require_can_create(pool.get_ref(), &claims, new_role).await?;
         }
     }
 
@@ -599,7 +606,13 @@ pub async fn delete_user(
     if user.id == claims.user_id() {
         return Err(AppError::Forbidden("You cannot delete yourself".into()));
     }
-    guard::require_manage_role(&claims.role, &user.role)?;
+    guard::require_dominance(
+        pool.get_ref(),
+        &claims,
+        *user_id,
+        crate::authz::Cap::StaffUsersDelete,
+    )
+    .await?;
 
     let mut conn = pool.acquire().await?;
     if claims.role == UserRole::BranchManager
@@ -651,7 +664,7 @@ pub async fn assign_branch(
 
     // Org-scope the assignment (V3): both the target user and the branch must be
     // in the caller's org. require_same_org early-returns Ok for super_admin.
-    let (target_org, target_role): (Option<Uuid>, UserRole) =
+    let (target_org, _target_role): (Option<Uuid>, UserRole) =
         sqlx::query_as("SELECT org_id, role FROM users WHERE id = $1 AND deleted_at IS NULL")
             .bind(*user_id)
             .fetch_optional(pool.get_ref())
@@ -667,8 +680,15 @@ pub async fn assign_branch(
             .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
     require_same_org(&claims, Some(branch_org))?;
 
-    // Branch assignments are access: never your own, only strictly downward.
-    guard::require_edit_access(claims.user_id(), &claims.role, *user_id, &target_role)?;
+    // Branch assignments are access: never your own, and only on someone whose
+    // access you already dominate.
+    guard::require_dominance(
+        pool.get_ref(),
+        &claims,
+        *user_id,
+        crate::authz::Cap::StaffPermissionsEdit,
+    )
+    .await?;
 
     if claims.role == UserRole::BranchManager {
         let is_assigned: bool = sqlx::query_scalar(
@@ -728,14 +748,20 @@ pub async fn unassign_branch(
     let (user_id, branch_id) = path.into_inner();
 
     // Org-scope (V3): the target user and branch must both be in the caller's org.
-    let (target_org, target_role): (Option<Uuid>, UserRole) =
+    let (target_org, _target_role): (Option<Uuid>, UserRole) =
         sqlx::query_as("SELECT org_id, role FROM users WHERE id = $1 AND deleted_at IS NULL")
             .bind(user_id)
             .fetch_optional(pool.get_ref())
             .await?
             .ok_or_else(|| AppError::NotFound("User not found".into()))?;
     require_same_org(&claims, target_org)?;
-    guard::require_edit_access(claims.user_id(), &claims.role, user_id, &target_role)?;
+    guard::require_dominance(
+        pool.get_ref(),
+        &claims,
+        user_id,
+        crate::authz::Cap::StaffPermissionsEdit,
+    )
+    .await?;
 
     let branch_org: Uuid =
         sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
