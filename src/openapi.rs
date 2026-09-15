@@ -155,6 +155,7 @@ paths(
         crate::menu::handlers::create_category,
         crate::menu::handlers::update_category,
         crate::menu::handlers::delete_category,
+        crate::menu::handlers::reorder_categories,
         crate::menu::handlers::list_menu_items,
         crate::menu::handlers::list_menu_catalog,
         crate::menu::handlers::create_menu_item,

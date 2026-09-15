@@ -1,0 +1,14 @@
+/Users/shawket/Desktop/Madar/wt-perm-api/authz/gen/target/debug/deps/serde-7f0c8f9dcfba1cbb.d: /Users/shawket/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /Users/shawket/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /Users/shawket/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /Users/shawket/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /Users/shawket/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /Users/shawket/Desktop/Madar/wt-perm-api/authz/gen/target/debug/build/serde-2c05ee523120dbcc/out/private.rs
+
+/Users/shawket/Desktop/Madar/wt-perm-api/authz/gen/target/debug/deps/libserde-7f0c8f9dcfba1cbb.rlib: /Users/shawket/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /Users/shawket/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /Users/shawket/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /Users/shawket/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /Users/shawket/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /Users/shawket/Desktop/Madar/wt-perm-api/authz/gen/target/debug/build/serde-2c05ee523120dbcc/out/private.rs
+
+/Users/shawket/Desktop/Madar/wt-perm-api/authz/gen/target/debug/deps/libserde-7f0c8f9dcfba1cbb.rmeta: /Users/shawket/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /Users/shawket/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /Users/shawket/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /Users/shawket/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /Users/shawket/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /Users/shawket/Desktop/Madar/wt-perm-api/authz/gen/target/debug/build/serde-2c05ee523120dbcc/out/private.rs
+
+/Users/shawket/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs:
+/Users/shawket/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs:
+/Users/shawket/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs:
+/Users/shawket/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs:
+/Users/shawket/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs:
+/Users/shawket/Desktop/Madar/wt-perm-api/authz/gen/target/debug/build/serde-2c05ee523120dbcc/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/shawket/Desktop/Madar/wt-perm-api/authz/gen/target/debug/build/serde-2c05ee523120dbcc/out

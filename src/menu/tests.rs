@@ -276,6 +276,93 @@ async fn test_delete_category_success(pool: PgPool) {
     assert!(resp.status().is_success());
 }
 
+#[sqlx::test]
+async fn test_reorder_categories_success(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "categories", "read").await;
+    grant_permission(&pool, "org_admin", "categories", "update").await;
+
+    let a = seed_category(&pool, org_id, "Alpha").await;
+    let b = seed_category(&pool, org_id, "Beta").await;
+    let c = seed_category(&pool, org_id, "Gamma").await;
+
+    let token = generate_org_admin_token(user_id, org_id);
+
+    // Put Gamma first, then Alpha, then Beta.
+    let req_body = ReorderCategoriesRequest {
+        org_id,
+        ordered_ids: vec![c, a, b],
+    };
+    let req = test::TestRequest::put()
+        .uri("/categories/order")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&req_body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success(), "status: {}", resp.status());
+
+    let reordered: Vec<Category> = test::read_body_json(resp).await;
+    assert_eq!(
+        reordered.iter().map(|c| c.id).collect::<Vec<_>>(),
+        vec![c, a, b]
+    );
+
+    // The saved order is also reflected on a plain list fetch.
+    let req = test::TestRequest::get()
+        .uri(&format!("/categories?org_id={}", org_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let listed: Vec<Category> = test::read_body_json(resp).await;
+    assert_eq!(
+        listed.iter().map(|c| c.id).collect::<Vec<_>>(),
+        vec![c, a, b]
+    );
+}
+
+#[sqlx::test]
+async fn test_reorder_categories_rejects_mismatched_set(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "categories", "update").await;
+
+    let a = seed_category(&pool, org_id, "Alpha").await;
+    let _b = seed_category(&pool, org_id, "Beta").await;
+
+    let token = generate_org_admin_token(user_id, org_id);
+
+    // Missing "Beta" from the ordered set — must be rejected, not silently
+    // applied (would otherwise let a stale client drop a category's slot).
+    let req_body = ReorderCategoriesRequest {
+        org_id,
+        ordered_ids: vec![a],
+    };
+    let req = test::TestRequest::put()
+        .uri("/categories/order")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&req_body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 400);
+}
+
 // ──────────────────────────────────────────────────────────────
 // ── Menu Items Tests
 // ──────────────────────────────────────────────────────────────

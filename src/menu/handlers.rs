@@ -112,9 +112,19 @@ pub struct Category {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<crate::assets::refs::AssetGroupRef>,
     pub is_active: bool,
+    /// Drag-and-drop position (lower first); ties break on name. Set via
+    /// `PUT /categories/order`.
+    pub display_order: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReorderCategoriesRequest {
+    pub org_id: Uuid,
+    /// Category IDs in the desired display order (first = top).
+    pub ordered_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
@@ -560,11 +570,11 @@ pub async fn list_categories(
     require_same_org(&claims, Some(query.org_id))?;
 
     let rows = sqlx::query_as::<_, Category>(
-        "SELECT id, org_id, name, name_translations, image_url, is_active,
+        "SELECT id, org_id, name, name_translations, image_url, is_active, display_order,
                 created_at, updated_at, deleted_at
          FROM categories
          WHERE org_id = $1 AND deleted_at IS NULL
-         ORDER BY name ASC",
+         ORDER BY display_order ASC, name ASC",
     )
     .bind(query.org_id)
     .fetch_all(pool.get_ref())
@@ -601,9 +611,11 @@ pub async fn create_category(
         .map_err(|_| AppError::Internal)?;
 
     let row = sqlx::query_as::<_, Category>(
-        "INSERT INTO categories (org_id, name, name_translations, image_url)
-         VALUES ($1, $2, $3, $4)
-         RETURNING id, org_id, name, name_translations, image_url, is_active,
+        "INSERT INTO categories (org_id, name, name_translations, image_url, display_order)
+         VALUES ($1, $2, $3, $4,
+                 COALESCE((SELECT max(display_order) + 1 FROM categories
+                           WHERE org_id = $1 AND deleted_at IS NULL), 0))
+         RETURNING id, org_id, name, name_translations, image_url, is_active, display_order,
                    created_at, updated_at, deleted_at",
     )
     .bind(mut_body.org_id)
@@ -675,7 +687,7 @@ pub async fn update_category(
              image_url         = CASE WHEN $6 THEN $4 ELSE image_url END,
              is_active         = COALESCE($5, is_active)
          WHERE id = $1 AND deleted_at IS NULL
-         RETURNING id, org_id, name, name_translations, image_url, is_active,
+         RETURNING id, org_id, name, name_translations, image_url, is_active, display_order,
                    created_at, updated_at, deleted_at",
     )
     .bind(*id)
@@ -737,6 +749,75 @@ pub async fn delete_category(
         .await?;
 
     Ok(HttpResponse::NoContent().finish())
+}
+
+#[utoipa::path(
+    put,
+    path = "/categories/order",
+    tag = "menu",
+    request_body = ReorderCategoriesRequest,
+    responses((status = 200, description = "Categories reordered", body = Vec<Category>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn reorder_categories(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    body: web::Json<ReorderCategoriesRequest>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "categories", "update").await?;
+    require_same_org(&claims, Some(body.org_id))?;
+
+    let body = body.into_inner();
+    let mut tx = pool.get_ref().begin().await?;
+
+    // Lock and validate: every id must exist, belong to this org, and not be
+    // deleted — and every live category for the org must be present exactly
+    // once, so a stale client can't silently drop or duplicate one.
+    let live_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM categories WHERE org_id = $1 AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(body.org_id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let mut requested: Vec<Uuid> = body.ordered_ids.clone();
+    requested.sort();
+    let mut expected = live_ids.clone();
+    expected.sort();
+    if requested != expected {
+        return Err(AppError::BadRequest(
+            "ordered_ids must contain exactly the org's live categories".into(),
+        ));
+    }
+
+    for (idx, cat_id) in body.ordered_ids.iter().enumerate() {
+        sqlx::query(
+            "UPDATE categories SET display_order = $2 WHERE id = $1 AND org_id = $3 AND deleted_at IS NULL",
+        )
+        .bind(cat_id)
+        .bind(idx as i32)
+        .bind(body.org_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    let rows = sqlx::query_as::<_, Category>(
+        "SELECT id, org_id, name, name_translations, image_url, is_active, display_order,
+                created_at, updated_at, deleted_at
+         FROM categories
+         WHERE org_id = $1 AND deleted_at IS NULL
+         ORDER BY display_order ASC, name ASC",
+    )
+    .bind(body.org_id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    let mut rows = rows;
+    attach_category_refs(pool.get_ref(), body.org_id, &mut rows).await?;
+    Ok(HttpResponse::Ok().json(rows))
 }
 
 // ── Menu Items ────────────────────────────────────────────────
@@ -3007,7 +3088,7 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 
 async fn fetch_category(pool: &PgPool, id: Uuid) -> Result<Category, AppError> {
     sqlx::query_as::<_, Category>(
-        "SELECT id, org_id, name, name_translations, image_url, is_active,
+        "SELECT id, org_id, name, name_translations, image_url, is_active, display_order,
                 created_at, updated_at, deleted_at
          FROM categories
          WHERE id = $1 AND deleted_at IS NULL",

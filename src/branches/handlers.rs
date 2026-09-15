@@ -67,6 +67,9 @@ pub struct Branch {
     pub is_active: bool,
     /// Convenience field — populated from the parent org's `logo_url`.
     pub org_logo_url: Option<String>,
+    /// Convenience field — the parent org's receipt footer text (dashboard
+    /// org settings). `None` → the POS prints its default footer.
+    pub org_receipt_footer: Option<String>,
     /// WGS-84 latitude for geofenced branch resolution.
     pub latitude: Option<f64>,
     /// WGS-84 longitude for geofenced branch resolution.
@@ -251,7 +254,7 @@ pub async fn list_branches(
             SELECT b.id, b.org_id, b.code, b.name, b.address, b.phone,
                    COALESCE(b.timezone, o.timezone)::text AS timezone,
                    b.printer_brand, b.printer_ip::text, b.printer_port,
-                   b.is_active, o.logo_url as org_logo_url,
+                   b.is_active, o.logo_url as org_logo_url, o.receipt_footer as org_receipt_footer,
                    b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable, b.require_table_for_orders, b.old_bill_hours, b.standard_float,
                    b.created_at, b.updated_at
             FROM branches b
@@ -271,7 +274,7 @@ pub async fn list_branches(
             SELECT b.id, b.org_id, b.code, b.name, b.address, b.phone,
                    COALESCE(b.timezone, o.timezone)::text AS timezone,
                    b.printer_brand, b.printer_ip::text, b.printer_port,
-                   b.is_active, o.logo_url as org_logo_url,
+                   b.is_active, o.logo_url as org_logo_url, o.receipt_footer as org_receipt_footer,
                    b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable, b.require_table_for_orders, b.old_bill_hours, b.standard_float,
                    b.created_at, b.updated_at
             FROM branches b
@@ -352,7 +355,7 @@ pub async fn create_branch(
         SELECT i.id, i.org_id, i.code, i.name, i.address, i.phone,
                COALESCE(i.timezone, o.timezone)::text AS timezone,
                i.printer_brand, i.printer_ip::text, i.printer_port,
-               i.is_active, o.logo_url as org_logo_url,
+               i.is_active, o.logo_url as org_logo_url, o.receipt_footer as org_receipt_footer,
                i.latitude, i.longitude, i.geo_radius_meters, i.tax_rate, i.tax_inclusive, i.service_charge_rate, i.service_charge_taxable, i.require_table_for_orders, i.old_bill_hours, i.standard_float,
                i.created_at, i.updated_at
         FROM inserted i
@@ -536,7 +539,7 @@ pub async fn update_branch(
         SELECT u.id, u.org_id, u.code, u.name, u.address, u.phone,
                COALESCE(u.timezone, o.timezone)::text AS timezone,
                u.printer_brand, u.printer_ip::text, u.printer_port,
-               u.is_active, o.logo_url as org_logo_url,
+               u.is_active, o.logo_url as org_logo_url, o.receipt_footer as org_receipt_footer,
                u.latitude, u.longitude, u.geo_radius_meters, u.tax_rate, u.tax_inclusive, u.service_charge_rate, u.service_charge_taxable, u.require_table_for_orders, u.old_bill_hours, u.standard_float,
                u.created_at, u.updated_at
         FROM updated u
@@ -744,7 +747,7 @@ async fn fetch_branch(pool: &PgPool, id: Uuid) -> Result<Branch, AppError> {
         SELECT b.id, b.org_id, b.code, b.name, b.address, b.phone,
                COALESCE(b.timezone, o.timezone)::text AS timezone,
                b.printer_brand, b.printer_ip::text, b.printer_port,
-               b.is_active, o.logo_url as org_logo_url,
+               b.is_active, o.logo_url as org_logo_url, o.receipt_footer as org_receipt_footer,
                b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable, b.require_table_for_orders, b.old_bill_hours, b.standard_float,
                b.created_at, b.updated_at
         FROM branches b

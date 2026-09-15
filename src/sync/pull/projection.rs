@@ -205,7 +205,7 @@ pub async fn project(
         "category" => {
             let sql = format!(
                 "SELECT c.id, json_build_object('id', c.id, 'name', c.name, 'name_translations', c.name_translations, \
-                        'is_active', c.is_active, 'image_hash', {}) \
+                        'is_active', c.is_active, 'display_order', c.display_order, 'image_hash', {}) \
                    FROM categories c WHERE c.id = ANY($1) AND c.deleted_at IS NULL AND c.is_active",
                 tile_hash("c.image_group_id")
             );

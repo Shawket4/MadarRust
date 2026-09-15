@@ -12,6 +12,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .wrap(JwtMiddleware)
                 .route("", web::get().to(list_categories))
                 .route("", web::post().to(create_category))
+                .route("/order", web::put().to(reorder_categories))
                 .route("/{id}", web::patch().to(update_category))
                 .route("/{id}", web::delete().to(delete_category)),
         )
