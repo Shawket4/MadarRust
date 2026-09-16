@@ -42,6 +42,13 @@ pub struct LimitsView {
     pub max_percent: Option<i64>,
     /// Stock value, minor units.
     pub max_value: Option<i64>,
+    /// How old the thing acted on may be, in minutes.
+    #[serde(default)]
+    pub max_age_minutes: Option<i64>,
+    /// Only the person's own work. Absent means unrestricted, so a dashboard
+    /// that predates the field keeps meaning what it always meant.
+    #[serde(default)]
+    pub own: Option<bool>,
 }
 
 impl From<Limits> for LimitsView {
@@ -50,6 +57,8 @@ impl From<Limits> for LimitsView {
             max_amount: l.max_amount,
             max_percent: l.max_percent,
             max_value: l.max_value,
+            max_age_minutes: l.max_age_minutes,
+            own: l.own.then_some(true),
         }
     }
 }
@@ -60,6 +69,8 @@ impl From<LimitsView> for Limits {
             max_amount: l.max_amount,
             max_percent: l.max_percent,
             max_value: l.max_value,
+            max_age_minutes: l.max_age_minutes,
+            own: l.own.unwrap_or(false),
         }
     }
 }
@@ -1340,19 +1351,22 @@ pub async fn list_flags(
     let claims = claims_of(&req)?;
     let org = org_of(&req, &claims)?;
     super::require::require(pool.get_ref(), &claims, Cap::ApprovalsReview, None).await?;
-    let rows: Vec<ReplayFlag> = sqlx::query_as::<_, (
-        i64,
-        Option<Uuid>,
-        String,
-        Uuid,
-        Option<String>,
-        String,
-        String,
-        chrono::DateTime<chrono::Utc>,
-        chrono::DateTime<chrono::Utc>,
-        Option<chrono::DateTime<chrono::Utc>>,
-        Option<Uuid>,
-    )>(
+    let rows: Vec<ReplayFlag> = sqlx::query_as::<
+        _,
+        (
+            i64,
+            Option<Uuid>,
+            String,
+            Uuid,
+            Option<String>,
+            String,
+            String,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<Uuid>,
+        ),
+    >(
         "SELECT f.id, f.branch_id, f.op, f.author_id, u.name, f.capability, f.reason,
                 f.occurred_at, f.created_at, f.reviewed_at, f.reviewed_by
            FROM authz_replay_flags f
@@ -1367,7 +1381,19 @@ pub async fn list_flags(
     .await?
     .into_iter()
     .map(
-        |(id, branch_id, op, author_id, author_name, capability, reason, occurred_at, created_at, reviewed_at, reviewed_by)| {
+        |(
+            id,
+            branch_id,
+            op,
+            author_id,
+            author_name,
+            capability,
+            reason,
+            occurred_at,
+            created_at,
+            reviewed_at,
+            reviewed_by,
+        )| {
             ReplayFlag {
                 id,
                 branch_id,

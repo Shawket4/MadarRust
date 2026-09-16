@@ -123,6 +123,12 @@ pub enum LimitKey {
     MaxPercent,
     /// Stock value in minor units.
     MaxValue,
+    /// How old the thing acted on may be, in minutes. "A teller may void their
+    /// own sale within 10 minutes" is this plus [`LimitKey::Own`].
+    MaxAgeMinutes,
+    /// Only what this person did themselves. Not a ceiling but a scope, so it
+    /// is a flag rather than a number: see [`Limits::own`].
+    Own,
 }
 
 #[derive(Debug)]
@@ -346,6 +352,13 @@ pub struct Limits {
     pub max_percent: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_value: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age_minutes: Option<i64>,
+    /// Only the person's own work. `false` (the default, and what every stored
+    /// row without the field means) is unrestricted, so an old snapshot or an
+    /// old grant row keeps meaning exactly what it meant before.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub own: bool,
 }
 
 impl Limits {
@@ -353,6 +366,8 @@ impl Limits {
         max_amount: None,
         max_percent: None,
         max_value: None,
+        max_age_minutes: None,
+        own: false,
     };
 
     pub fn is_unlimited(&self) -> bool {
@@ -364,6 +379,9 @@ impl Limits {
             LimitKey::MaxAmount => self.max_amount,
             LimitKey::MaxPercent => self.max_percent,
             LimitKey::MaxValue => self.max_value,
+            LimitKey::MaxAgeMinutes => self.max_age_minutes,
+            // Not a number. Read it with `.own`; `decide` checks it separately.
+            LimitKey::Own => None,
         }
     }
 
@@ -379,6 +397,9 @@ impl Limits {
             max_amount: m(a.max_amount, b.max_amount),
             max_percent: m(a.max_percent, b.max_percent),
             max_value: m(a.max_value, b.max_value),
+            max_age_minutes: m(a.max_age_minutes, b.max_age_minutes),
+            // One role that may act on anyone's work is the generous one.
+            own: a.own && b.own,
         }
     }
 
@@ -394,6 +415,9 @@ impl Limits {
         w(self.max_amount, other.max_amount)
             && w(self.max_percent, other.max_percent)
             && w(self.max_value, other.max_value)
+            && w(self.max_age_minutes, other.max_age_minutes)
+            // Restricted to your own is within unrestricted, never the reverse.
+            && (self.own || !other.own)
     }
 
     /// Only the keys the capability accepts.
@@ -403,6 +427,8 @@ impl Limits {
             max_amount: keep(LimitKey::MaxAmount, self.max_amount),
             max_percent: keep(LimitKey::MaxPercent, self.max_percent),
             max_value: keep(LimitKey::MaxValue, self.max_value),
+            max_age_minutes: keep(LimitKey::MaxAgeMinutes, self.max_age_minutes),
+            own: keys.contains(&LimitKey::Own) && self.own,
         }
     }
 }
@@ -635,6 +661,14 @@ pub struct Request {
     pub percent: Option<i64>,
     #[serde(default)]
     pub value: Option<i64>,
+    /// How old the thing acted on is, in minutes.
+    #[serde(default)]
+    pub age_minutes: Option<i64>,
+    /// Did this person do the thing they are acting on? `None` means the caller
+    /// did not say, and an `own` limit then can't be satisfied — a caller that
+    /// never learned to answer must not silently pass the check.
+    #[serde(default)]
+    pub own: Option<bool>,
 }
 
 impl Request {
@@ -656,6 +690,15 @@ impl Request {
         self.value = Some(minor);
         self
     }
+    pub fn age_minutes(mut self, minutes: i64) -> Request {
+        self.age_minutes = Some(minutes);
+        self
+    }
+    /// Whether the actor is the author of the thing being acted on.
+    pub fn own(mut self, own: bool) -> Request {
+        self.own = Some(own);
+        self
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -669,6 +712,9 @@ pub enum Why {
     },
     UnknownCapability,
     SamePerson,
+    /// Held, but only over the person's own work, and this isn't theirs (or the
+    /// caller did not say whose it is).
+    NotYours,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -707,10 +753,20 @@ pub fn decide(eff: &EffectiveSet, req: &Request) -> Decision {
         };
     }
     let limits = eff.limits_of(cap);
+    // Scope before ceilings: "not your sale" is the truer answer than "over the
+    // amount" when both are true, and it is the one a manager is asked about.
+    if limits.own && req.own != Some(true) {
+        return if meta.approval {
+            Decision::NeedsApproval(Why::NotYours)
+        } else {
+            Decision::Deny(Why::NotYours)
+        };
+    }
     for (key, asked) in [
         (LimitKey::MaxAmount, req.amount),
         (LimitKey::MaxPercent, req.percent),
         (LimitKey::MaxValue, req.value),
+        (LimitKey::MaxAgeMinutes, req.age_minutes),
     ] {
         if let (Some(limit), Some(asked)) = (limits.get(key), asked) {
             if asked > limit {

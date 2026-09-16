@@ -58574,6 +58574,14 @@
       "LimitsView": {
         "type": "object",
         "properties": {
+          "max_age_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How old the thing acted on may be, in minutes."
+          },
           "max_amount": {
             "type": [
               "integer",
@@ -58597,6 +58605,13 @@
             ],
             "format": "int64",
             "description": "Stock value, minor units."
+          },
+          "own": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Only the person's own work. Absent means unrestricted, so a dashboard\nthat predates the field keeps meaning what it always meant."
           }
         }
       },

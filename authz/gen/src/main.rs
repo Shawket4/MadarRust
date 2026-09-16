@@ -199,7 +199,9 @@ fn validate(spec: &Spec) -> Result<(), String> {
             ));
         }
         for l in &c.limits {
-            if !["max_amount", "max_percent", "max_value"].contains(&l.as_str()) {
+            if !["max_amount", "max_percent", "max_value", "max_age_minutes", "own"]
+                .contains(&l.as_str())
+            {
                 return Err(format!("{}: bad limit {l}", c.key));
             }
         }
@@ -275,7 +277,9 @@ fn gen_rust(spec: &Spec, spec_hash: &str) -> Result<String, String> {
     let limit = |l: &str| match l {
         "max_amount" => "LimitKey::MaxAmount",
         "max_percent" => "LimitKey::MaxPercent",
-        _ => "LimitKey::MaxValue",
+        "max_value" => "LimitKey::MaxValue",
+        "max_age_minutes" => "LimitKey::MaxAgeMinutes",
+        _ => "LimitKey::Own",
     };
     writeln!(o, "pub static CAPS: &[CapMeta] = &[").unwrap();
     for c in &caps {
@@ -424,7 +428,7 @@ fn gen_ts(spec: &Spec, spec_hash: &str) -> String {
     .unwrap();
     writeln!(
         o,
-        "export type LimitKey = 'max_amount' | 'max_percent' | 'max_value';\n"
+        "export type LimitKey =\n  | 'max_amount'\n  | 'max_percent'\n  | 'max_value'\n  | 'max_age_minutes'\n  | 'own';\n"
     )
     .unwrap();
     writeln!(o, "export type Capability =").unwrap();

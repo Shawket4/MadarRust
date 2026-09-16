@@ -356,6 +356,97 @@ fn over_a_limit_needs_approval() {
     );
 }
 
+/// The locked decision, as the crate sees it: a teller voids their own sale
+/// within ten minutes, and everything else is a manager's call rather than a
+/// flat refusal — which is what `approval = true` on the capability buys.
+#[test]
+fn own_and_max_age_route_a_void_to_a_manager() {
+    let mut r = role(RoleKind::Teller, &[Cap::OrdersVoid]);
+    r.limits.insert(
+        Cap::OrdersVoid.id(),
+        Limits {
+            own: true,
+            max_age_minutes: Some(10),
+            ..Default::default()
+        },
+    );
+    let e = resolve(
+        &person(vec![assigned(r, &[])], vec![]),
+        Scope::Anywhere,
+        NOW,
+        &OrgPolicy::default(),
+    );
+    let mine = |min: i64| Request::of(Cap::OrdersVoid).own(true).age_minutes(min);
+    assert_eq!(decide(&e, &mine(9)), Decision::Allow);
+    assert_eq!(decide(&e, &mine(10)), Decision::Allow, "the boundary is in");
+    assert_eq!(
+        decide(&e, &mine(11)),
+        Decision::NeedsApproval(Why::OverLimit {
+            key: LimitKey::MaxAgeMinutes,
+            limit: 10,
+            asked: 11
+        })
+    );
+    // Someone else's sale, however fresh. "Not yours" is the answer even when
+    // the age is over too — it is the one the manager is actually asked about.
+    assert_eq!(
+        decide(&e, &Request::of(Cap::OrdersVoid).own(false).age_minutes(1)),
+        Decision::NeedsApproval(Why::NotYours)
+    );
+    assert_eq!(
+        decide(&e, &Request::of(Cap::OrdersVoid).own(false).age_minutes(99)),
+        Decision::NeedsApproval(Why::NotYours)
+    );
+    // A caller that never learned to say whose sale it is does not get a free
+    // pass: unknown authorship is not "mine".
+    assert_eq!(
+        decide(&e, &Request::of(Cap::OrdersVoid)),
+        Decision::NeedsApproval(Why::NotYours)
+    );
+}
+
+/// A manager holds the same capability unlimited, so they can approve.
+#[test]
+fn an_unlimited_holder_may_approve_a_capped_void() {
+    let mgr = resolve(
+        &person(
+            vec![assigned(
+                role(RoleKind::BranchManager, &[Cap::OrdersVoid]),
+                &[],
+            )],
+            vec![],
+        ),
+        Scope::Anywhere,
+        NOW,
+        &OrgPolicy::default(),
+    );
+    let req = Request::of(Cap::OrdersVoid).own(false).age_minutes(120);
+    assert_eq!(decide(&mgr, &req), Decision::Allow);
+    assert_eq!(can_approve(&mgr, "mgr", "teller", &req), Ok(()));
+    assert_eq!(
+        can_approve(&mgr, "mgr", "mgr", &req),
+        Err(Why::SamePerson),
+        "nobody approves their own"
+    );
+}
+
+/// `own` is a scope, so it combines and compares the opposite way round to a
+/// ceiling: unrestricted is the generous side.
+#[test]
+fn own_combines_as_the_generous_side_being_unrestricted() {
+    let restricted = Limits {
+        own: true,
+        max_age_minutes: Some(10),
+        ..Default::default()
+    };
+    let free = Limits::UNLIMITED;
+    assert_eq!(Limits::most_generous(&restricted, &free), free);
+    assert!(restricted.within(&free));
+    assert!(!free.within(&restricted));
+    // And a capability that does not accept the key never carries it.
+    assert!(!restricted.restricted_to(&[LimitKey::MaxAmount]).own);
+}
+
 #[test]
 fn an_approver_must_be_someone_else_allowed_outright() {
     let mgr = resolve(

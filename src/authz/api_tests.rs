@@ -552,7 +552,10 @@ async fn flagged_offline_acts_are_the_owners_queue(pool: PgPool) {
     assert_eq!(rows[0]["op"], "RefundOrder");
     assert_eq!(rows[0]["capability"], "refunds:create");
     assert_eq!(rows[0]["reason"], "stale_snapshot");
-    assert_eq!(rows[0]["author_name"], "Sara", "the owner sees who, by name");
+    assert_eq!(
+        rows[0]["author_name"], "Sara",
+        "the owner sees who, by name"
+    );
 
     // Acknowledging it takes it off the queue, and only once.
     let (s, _) = call(
@@ -563,7 +566,10 @@ async fn flagged_offline_acts_are_the_owners_queue(pool: PgPool) {
     .await;
     assert_eq!(s, StatusCode::OK);
     let (_, list) = call(&app, test::TestRequest::get().uri("/authz/flags"), &ot).await;
-    assert!(list.as_array().unwrap().is_empty(), "reviewed, so off the queue");
+    assert!(
+        list.as_array().unwrap().is_empty(),
+        "reviewed, so off the queue"
+    );
     let (s, _) = call(
         &app,
         test::TestRequest::post().uri(&format!("/authz/flags/{id}/review")),

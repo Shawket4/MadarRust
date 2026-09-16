@@ -1074,12 +1074,13 @@ async fn a_new_org_starts_at_zero_tax_with_no_talabat_tenders(pool: PgPool) {
         "a shop that never chose a rate is not charging 14%"
     );
 
-    let methods: Vec<(String, bool)> =
-        sqlx::query_as("SELECT name, is_cash FROM org_payment_methods WHERE org_id = $1 ORDER BY name")
-            .bind(org.id)
-            .fetch_all(&pool)
-            .await
-            .unwrap();
+    let methods: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT name, is_cash FROM org_payment_methods WHERE org_id = $1 ORDER BY name",
+    )
+    .bind(org.id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
     let names: Vec<&str> = methods.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(names, vec!["card", "cash", "digital_wallet"]);
     assert!(

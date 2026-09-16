@@ -4,7 +4,7 @@
 use crate::{CapMeta, GroupMeta, Kinds, LimitKey, Risk, RoleKind, TemplateMeta, Tier};
 
 pub const SPEC_VERSION: u32 = 2;
-pub const SPEC_HASH: &str = "9340fc08b9f8fe19";
+pub const SPEC_HASH: &str = "0175f6125fe5d002";
 pub const WORDS: usize = 4;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -252,7 +252,7 @@ pub static CAPS: &[CapMeta] = &[
     CapMeta { cap: Cap::OrdersCreate, key: "orders.create", legacy: Some(("orders", "create")), group: "selling", tier: Tier::Configurable, risk: Risk::Money, defaults: Kinds(7), core: Kinds(0), approval: false, limits: &[], pos: true, protected: false, en: "Ring up sales", ar: "تسجيل المبيعات", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::OrdersRead, key: "orders.read", legacy: Some(("orders", "read")), group: "selling", tier: Tier::Core, risk: Risk::Normal, defaults: Kinds(7), core: Kinds(6), approval: false, limits: &[], pos: true, protected: false, en: "See orders", ar: "عرض الطلبات", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::LegacyOrdersUpdate, key: "legacy.orders.update", legacy: Some(("orders", "update")), group: "selling", tier: Tier::Legacy, risk: Risk::Normal, defaults: Kinds(7), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Orders: update (legacy)", ar: "الطلبات: تعديل (قديم)", hint_en: None, hint_ar: None },
-    CapMeta { cap: Cap::OrdersVoid, key: "orders.void", legacy: Some(("orders", "delete")), group: "selling", tier: Tier::Configurable, risk: Risk::Money, defaults: Kinds(7), core: Kinds(0), approval: true, limits: &[], pos: true, protected: false, en: "Void orders", ar: "إلغاء الطلبات", hint_en: None, hint_ar: None },
+    CapMeta { cap: Cap::OrdersVoid, key: "orders.void", legacy: Some(("orders", "delete")), group: "selling", tier: Tier::Configurable, risk: Risk::Money, defaults: Kinds(7), core: Kinds(0), approval: true, limits: &[LimitKey::Own, LimitKey::MaxAgeMinutes], pos: true, protected: false, en: "Void orders", ar: "إلغاء الطلبات", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::LegacyOrderItemsCreate, key: "legacy.order_items.create", legacy: Some(("order_items", "create")), group: "selling", tier: Tier::Legacy, risk: Risk::Normal, defaults: Kinds(7), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Order items: create (legacy)", ar: "عناصر الطلب: إنشاء (قديم)", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::LegacyOrderItemsRead, key: "legacy.order_items.read", legacy: Some(("order_items", "read")), group: "selling", tier: Tier::Legacy, risk: Risk::Normal, defaults: Kinds(7), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Order items: read (legacy)", ar: "عناصر الطلب: عرض (قديم)", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::LegacyOrderItemsUpdate, key: "legacy.order_items.update", legacy: Some(("order_items", "update")), group: "selling", tier: Tier::Legacy, risk: Risk::Normal, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Order items: update (legacy)", ar: "عناصر الطلب: تعديل (قديم)", hint_en: None, hint_ar: None },

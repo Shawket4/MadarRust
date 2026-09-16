@@ -409,11 +409,12 @@ async fn a_revoked_non_money_op_is_still_rejected(pool: PgPool) {
     });
     let r = replay(&app, &bearer, &op).await;
     assert_eq!(r.status(), 403, "a bump is not money");
-    let flags: i64 = sqlx::query_scalar("SELECT count(*) FROM authz_replay_flags WHERE org_id = $1")
-        .bind(org)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let flags: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM authz_replay_flags WHERE org_id = $1")
+            .bind(org)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(flags, 0, "a refusal is not a flag");
 }
 
@@ -554,13 +555,12 @@ async fn a_queued_refund_lands_once_under_its_author(pool: PgPool) {
         201,
         "the money already went back: accepted, not rejected"
     );
-    let (cap, reason): (String, String) = sqlx::query_as(
-        "SELECT capability, reason FROM authz_replay_flags WHERE author_id = $1",
-    )
-    .bind(manager)
-    .fetch_one(&pool)
-    .await
-    .expect("the owner gets a flag for it");
+    let (cap, reason): (String, String) =
+        sqlx::query_as("SELECT capability, reason FROM authz_replay_flags WHERE author_id = $1")
+            .bind(manager)
+            .fetch_one(&pool)
+            .await
+            .expect("the owner gets a flag for it");
     assert_eq!(cap, "refunds:create");
     // The revocation was written after the act's `issued_at` (an hour ago), so
     // the device WAS right when it acted and had simply not heard yet.

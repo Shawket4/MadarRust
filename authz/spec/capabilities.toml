@@ -33,7 +33,8 @@
 #               o=org_admin (owner) m=branch_manager t=teller w=waiter k=kitchen
 #   core      role kinds for which it is core (subset of defaults)
 #   approval  true when an owner may set "ask a manager" instead of "hidden"
-#   limits    limit keys it accepts (max_amount, max_percent, max_value)
+#   limits    limit keys it accepts (max_amount, max_percent, max_value,
+#             max_age_minutes, own)
 #   pos       true when the POS gates a screen or action on it
 #   protected true when it can never be denied to an owner
 # ============================================================================
@@ -795,6 +796,10 @@ tier = "configurable"
 risk = "money"
 defaults = "omt"
 approval = true
+# The locked decision: a teller voids their OWN sale within 10 minutes; anything
+# else goes to a manager. Both halves are limits on the grant, so an owner can
+# widen or tighten them per role without a code change.
+limits = ["own", "max_age_minutes"]
 pos = true
 en = "Void orders"
 ar = "إلغاء الطلبات"
