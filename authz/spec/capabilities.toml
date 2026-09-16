@@ -2119,6 +2119,17 @@ defaults = "o"
 en = "Erase a customer's personal data (PDPL)"
 ar = "محو البيانات الشخصية للعميل"
 
+[[cap]]
+id = 220
+key = "menu.packaging_rules.apply"
+group = "menu"
+tier = "advanced"
+risk = "normal"
+defaults = "o"
+en = "Re-apply packaging rules to every menu item"
+# AR draft (2026-09-16), pending owner review.
+ar = "إعادة تطبيق قواعد التغليف على جميع أصناف القائمة"
+
 # ============================================================================
 # Role templates (Phase 7). `defaults` above IS the restaurant template for the
 # five system roles; a template may add or remove on top.
