@@ -1,0 +1,16 @@
+{
+  "body": {
+    "code": "OWNER_PIN_NEEDS_UPDATE",
+    "error": "Owners sign in on this tablet after updating the Madar app."
+  },
+  "request": {
+    "body": {
+      "branch_id": "<branch>",
+      "name": "Owner",
+      "pin": "******"
+    },
+    "method": "POST",
+    "path": "/auth/login"
+  },
+  "status": 403
+}

@@ -189,7 +189,7 @@ pub struct UserAccess {
     pub branch_id: Option<Uuid>,
     /// Can the caller edit this person's access at all?
     pub can_edit: bool,
-    /// Why not, when not (self | owner | not_dominant | missing_authority).
+    /// Why not, when not (self | owner | not_dominant | not_above | missing_authority).
     pub locked_reason: Option<String>,
     pub assignments: Vec<AssignmentView>,
     pub capabilities: Vec<CapabilityAccess>,
@@ -340,6 +340,9 @@ fn guard_err(e: GuardError) -> AppError {
             format!("{cap} is always on for this role and can't be removed")
         }
         GuardError::OwnerProtected => "Only an owner can change an owner's access".to_string(),
+        GuardError::NotAbove => {
+            "You can only change people whose role is below yours".to_string()
+        }
     };
     AppError::Forbidden(msg)
 }
@@ -818,6 +821,7 @@ pub async fn user_access(
         g::may_touch(&actor, &actor_id(&claims), &eff, &id.to_string()).map_err(|e| match e {
             GuardError::OwnerProtected => "owner",
             GuardError::NotDominant { .. } => "not_dominant",
+            GuardError::NotAbove => "not_above",
             _ => "missing_authority",
         })
     }
@@ -1062,9 +1066,7 @@ pub async fn set_assignments(
             .find(|r| r.id == a.role_id)
             .ok_or_else(|| AppError::BadRequest("Unknown role".into()))?;
         let kind = RoleKind::parse(&role.kind).ok_or(AppError::Internal)?;
-        if kind == RoleKind::OrgAdmin && !actor.owner {
-            return Err(guard_err(GuardError::OwnerProtected));
-        }
+        g::may_give_kind(&actor, kind).map_err(guard_err)?;
         let caps = if kind == RoleKind::OrgAdmin {
             super::owner_set()
         } else {

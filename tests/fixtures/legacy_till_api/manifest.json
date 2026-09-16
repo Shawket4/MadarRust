@@ -413,6 +413,17 @@
       "clients": [
         "v0.6.1"
       ]
+    },
+    {
+      "file": "auth_login_owner_pin_pre08_refused.json",
+      "pinned_by": "auth::tests::an_owner_pin_on_a_pre_0_8_tablet_is_refused",
+      "status": 403,
+      "model": "ErrorEnvelope",
+      "clients": [
+        "v0.5.1",
+        "v0.6.0",
+        "v0.6.1"
+      ]
     }
   ]
 }

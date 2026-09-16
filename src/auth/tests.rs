@@ -1744,3 +1744,79 @@ async fn one_address_gets_sixty_login_attempts_a_minute(pool: PgPool) {
     }
     assert!(refused > 0, "activation stays at ten a minute");
 }
+
+/// Owner decision 2026-09-16: an owner's PIN on a pre-0.8 tablet (no
+/// `X-Madar-Device-Id` on login) is refused with `OWNER_PIN_NEEDS_UPDATE`, in the
+/// `{ "error": … }` envelope every old build shows. The same owner on a 0.8+
+/// tablet signs in, and a teller on the old tablet is unaffected.
+#[sqlx::test(migrations = "./migrations")]
+async fn an_owner_pin_on_a_pre_0_8_tablet_is_refused(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    for (name, role, owner, pin) in [
+        ("Owner", "org_admin", true, "314159"),
+        ("Teller", "teller", false, "271828"),
+    ] {
+        sqlx::query(
+            "INSERT INTO users (id, org_id, name, role, pin_hash, is_owner)
+             VALUES ($1, $2, $3, $4::user_role, $5, $6)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(org_id)
+        .bind(name)
+        .bind(role)
+        .bind(bcrypt::hash(pin, 4).unwrap())
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let login = |name: &str, pin: &str, device: Option<&str>| {
+        let mut r = test::TestRequest::post()
+            .uri("/auth/login")
+            .set_json(&json!({"name": name, "pin": pin, "branch_id": branch_id}));
+        if let Some(d) = device {
+            r = r.insert_header((crate::tickets::DEVICE_ID_HEADER, d.to_string()));
+        }
+        r.to_request()
+    };
+
+    let resp = test::call_service(&app, login("Owner", "314159", None)).await;
+    assert_eq!(resp.status(), 403);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["code"], "OWNER_PIN_NEEDS_UPDATE");
+    // Pinned for the old-client check (madar/tool/old_client_api_check.sh):
+    // every pre-0.8 build must still read the `error` sentence out of it.
+    let golden = format!(
+        "{}/tests/fixtures/legacy_till_api/auth_login_owner_pin_pre08_refused.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let captured = json!({
+        "request": {"method": "POST", "path": "/auth/login", "body": {"name": "Owner", "pin": "******", "branch_id": "<branch>"}},
+        "status": 403,
+        "body": body,
+    });
+    if std::env::var_os("MADAR_WRITE_LEGACY_GOLDEN").is_some() {
+        std::fs::write(&golden, serde_json::to_string_pretty(&captured).unwrap() + "\n").unwrap();
+    }
+    let pinned: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&golden).expect("golden present")).unwrap();
+    assert_eq!(pinned["body"], captured["body"], "the refusal changed: rerun with MADAR_WRITE_LEGACY_GOLDEN=1");
+    assert!(
+        body["error"].as_str().is_some_and(|e| e.contains("updating")),
+        "old builds show `error`: {body}"
+    );
+
+    let resp = test::call_service(&app, login("Owner", "314159", Some("dev-new"))).await;
+    assert_eq!(resp.status(), 200, "an owner on 0.8+ signs in");
+
+    let resp = test::call_service(&app, login("Teller", "271828", None)).await;
+    assert_eq!(resp.status(), 200, "a teller on an old tablet is unaffected");
+}

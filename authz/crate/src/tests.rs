@@ -753,3 +753,52 @@ fn template_limits_sit_on_grants_the_role_holds() {
         assert!(!template_grants(t.key, RoleKind::Waiter).unwrap().contains(Cap::RefundsCreate));
     }
 }
+
+/// Owner decisions 2026-09-16: no peer writes for non-owners, and a
+/// permissions editor revokes only what they hold.
+#[test]
+fn a_non_owner_touches_only_people_strictly_below_them() {
+    let mut mgr_caps: Vec<Cap> = core_set(RoleKind::Teller).iter().collect();
+    mgr_caps.extend([Cap::StaffPermissionsEdit, Cap::StaffUsersEdit, Cap::RefundsCreate]);
+    let mgr = eff_of(RoleKind::BranchManager, &mgr_caps);
+    // A peer holding LESS than the actor is still refused: rank, not caps.
+    let peer = eff_of(RoleKind::BranchManager, &[]);
+    assert_eq!(may_touch(&mgr, "m1", &peer, "m2"), Err(GuardError::NotAbove));
+    assert_eq!(
+        may_set_override(&mgr, "m1", &peer, "m2", peer.kinds, Cap::RefundsCreate, true, None),
+        Err(GuardError::NotAbove)
+    );
+    assert_eq!(
+        may_assign(&mgr, "m1", &peer, "m2", &CapSet::default()),
+        Err(GuardError::NotAbove)
+    );
+    assert_eq!(may_give_kind(&mgr, RoleKind::BranchManager), Err(GuardError::NotAbove));
+    assert_eq!(may_give_kind(&mgr, RoleKind::OrgAdmin), Err(GuardError::OwnerProtected));
+    assert_eq!(may_give_kind(&mgr, RoleKind::Teller), Ok(()));
+
+    // Revoking needs the capability too.
+    let teller = eff_of(RoleKind::Teller, &[Cap::HrPayrollRead]);
+    let t_kinds = teller.kinds;
+    let mut odd_mgr = mgr.clone();
+    odd_mgr.caps = odd_mgr.caps.union(&[Cap::HrPayrollRead].into_iter().collect());
+    assert_eq!(
+        may_set_override(&odd_mgr, "m", &teller, "t", t_kinds, Cap::TillForceClose, false, None),
+        Err(GuardError::NotHeld { cap: Cap::TillForceClose.key().into() })
+    );
+    // ...and granting the editing power onward needs holding it (it does here),
+    // while granting role management it lacks is refused.
+    assert_eq!(
+        may_set_override(&odd_mgr, "m", &teller, "t", t_kinds, Cap::StaffRolesManage, true, None),
+        Err(GuardError::NotHeld { cap: Cap::StaffRolesManage.key().into() })
+    );
+    assert_eq!(
+        may_set_override(&odd_mgr, "m", &teller, "t", t_kinds, Cap::StaffOwnersManage, true, None),
+        Err(GuardError::NotHeld { cap: Cap::StaffOwnersManage.key().into() })
+    );
+
+    // Owners are unchanged: an owner touches another owner's non-protected access.
+    let mut owner = EffectiveSet { caps: CapSet::all(), owner: true, ..Default::default() };
+    owner.kinds.insert(RoleKind::OrgAdmin);
+    assert_eq!(may_touch(&owner, "o1", &owner.clone(), "o2"), Ok(()));
+    assert_eq!(may_give_kind(&owner, RoleKind::OrgAdmin), Ok(()));
+}

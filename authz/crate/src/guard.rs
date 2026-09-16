@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{is_core_for, Cap, CapSet, EffectiveSet, Kinds, Limits};
+use crate::{is_core_for, Cap, CapSet, EffectiveSet, Kinds, Limits, RoleKind};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "rule", rename_all = "snake_case")]
@@ -32,6 +32,43 @@ pub enum GuardError {
     CoreRemoval { cap: String },
     /// G6.
     OwnerProtected,
+    /// Owner decision 2026-09-16 ("no peer writes"): a non-owner changes,
+    /// creates or removes only people whose most senior role is STRICTLY
+    /// below their own. A branch manager never touches another branch manager.
+    NotAbove,
+}
+
+/// Seniority of one role kind: org admin 3, branch manager 2, the floor 1.
+pub fn kind_rank(k: RoleKind) -> u8 {
+    match k {
+        RoleKind::OrgAdmin => 3,
+        RoleKind::BranchManager => 2,
+        RoleKind::Teller | RoleKind::Waiter | RoleKind::Kitchen => 1,
+    }
+}
+
+/// A person's seniority: an owner is above everyone (4), otherwise their most
+/// senior role kind, and 0 with no role at all.
+pub fn rank(e: &EffectiveSet) -> u8 {
+    if e.owner {
+        return 4;
+    }
+    e.kinds.iter().map(kind_rank).max().unwrap_or(0)
+}
+
+/// A non-owner may give a role kind only when it is strictly below their own
+/// seniority (creating an account, or assigning a role).
+pub fn may_give_kind(actor: &EffectiveSet, kind: RoleKind) -> Result<(), GuardError> {
+    if actor.owner {
+        return Ok(());
+    }
+    if kind == RoleKind::OrgAdmin {
+        return Err(GuardError::OwnerProtected);
+    }
+    if rank(actor) <= kind_rank(kind) {
+        return Err(GuardError::NotAbove);
+    }
+    Ok(())
 }
 
 fn key(c: Cap) -> String {
@@ -50,6 +87,9 @@ pub fn may_touch(
     }
     if target.owner && !actor.owner {
         return Err(GuardError::OwnerProtected);
+    }
+    if !actor.owner && rank(actor) <= rank(target) {
+        return Err(GuardError::NotAbove);
     }
     let above = target.caps.minus(&actor.caps);
     if !above.is_empty() {
@@ -86,6 +126,10 @@ pub fn may_set_override(
             return Err(GuardError::LimitAbove { cap: key(cap) });
         }
     } else {
+        // Revoking is as sensitive as granting: only what the editor holds.
+        if !actor.can(cap) {
+            return Err(GuardError::NotHeld { cap: key(cap) });
+        }
         if target.owner && cap.meta().protected {
             return Err(GuardError::OwnerProtected);
         }
