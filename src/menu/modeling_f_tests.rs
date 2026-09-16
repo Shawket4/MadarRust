@@ -607,6 +607,21 @@ async fn the_resolver_prefers_the_sized_option_amount_and_the_shim_hides_it(pool
     assert_eq!(r.as_array().unwrap().len(), 2);
     assert_eq!(r[1]["size_label"], "Can");
 
+    // The studio's option cost is the generic amount only (25 g × 1), not 25 + 40.
+    let attach = sqlx::query(
+        "INSERT INTO menu_item_modifier_groups (menu_item_id, group_id, legacy_origin) VALUES ($1, $2, 'slot')",
+    )
+    .bind(it)
+    .bind(group)
+    .execute(&pool)
+    .await;
+    attach.unwrap();
+    let (st, agg) = call!(pool, o.token, get, format!("/menu-items/{it}/studio"));
+    assert_eq!(st, 200, "{agg}");
+    let opt_out = &agg["modifier_groups"][0]["options"][0];
+    assert_eq!(opt_out["recipe"].as_array().unwrap().len(), 2);
+    assert_eq!(opt_out["cost_piastres"], 25, "{opt_out}");
+
     let legacy_rows: i64 =
         sqlx::query_scalar("SELECT count(*) FROM addon_item_ingredients WHERE addon_item_id = $1")
             .bind(opt)

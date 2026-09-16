@@ -442,16 +442,24 @@ pub(crate) fn rollup_recipe(lines: &[RawRecipeLine]) -> (Vec<RecipeLineOut>, Opt
     let mut incomplete = false;
 
     for l in lines {
+        // A per-size option line (size_label set) is shown with its own cost but is
+        // not added to the rollup: the rollup is the generic (NULL-size) amount, so a
+        // Cup and a Can line for the same ingredient are never counted together.
+        let counts = l.size_label.is_none();
         let line_cost = match l.cost_per_unit {
             Some(cpu) => {
                 let c = round_piastres(l.quantity * cpu);
-                sum += l.quantity * cpu;
-                any_priced = true;
+                if counts {
+                    sum += l.quantity * cpu;
+                    any_priced = true;
+                }
                 Some(c)
             }
             None => {
                 // Unlinked/uncosted ingredient → unknown line cost; flags the rollup.
-                incomplete = true;
+                if counts {
+                    incomplete = true;
+                }
                 None
             }
         };

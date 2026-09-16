@@ -209,7 +209,11 @@ async fn the_dashboard_lists_edits_and_refuses_a_second_holder_of_a_phone(pool: 
         &token(manager, org, UserRole::BranchManager),
     )
     .await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "a manager may not erase a customer");
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "a manager may not erase a customer"
+    );
 
     let (s, _) = call(
         &app,
