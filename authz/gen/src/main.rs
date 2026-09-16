@@ -69,6 +69,57 @@ struct TemplateSpec {
     add: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     remove: BTreeMap<String, Vec<String>>,
+    /// role -> capability -> default limits on a provisioned org's grant.
+    #[serde(default)]
+    limits: BTreeMap<String, BTreeMap<String, LimitSpec>>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct LimitSpec {
+    max_amount: Option<i64>,
+    max_percent: Option<i64>,
+    max_value: Option<i64>,
+    max_age_minutes: Option<i64>,
+    #[serde(default)]
+    own: bool,
+}
+
+impl LimitSpec {
+    fn keys(&self) -> Vec<&'static str> {
+        let mut v = vec![];
+        if self.max_amount.is_some() {
+            v.push("max_amount");
+        }
+        if self.max_percent.is_some() {
+            v.push("max_percent");
+        }
+        if self.max_value.is_some() {
+            v.push("max_value");
+        }
+        if self.max_age_minutes.is_some() {
+            v.push("max_age_minutes");
+        }
+        if self.own {
+            v.push("own");
+        }
+        v
+    }
+
+    fn rust(&self) -> String {
+        let o = |x: Option<i64>| match x {
+            Some(n) => format!("Some({n})"),
+            None => "None".into(),
+        };
+        format!(
+            "Limits {{ max_amount: {}, max_percent: {}, max_value: {}, max_age_minutes: {}, own: {} }}",
+            o(self.max_amount),
+            o(self.max_percent),
+            o(self.max_value),
+            o(self.max_age_minutes),
+            self.own
+        )
+    }
 }
 
 const WORDS: usize = 4;
@@ -221,6 +272,24 @@ fn validate(spec: &Spec) -> Result<(), String> {
                 }
             }
         }
+        for (r, caps) in &t.limits {
+            kind_variant(r)?;
+            for (key, l) in caps {
+                let Some(c) = spec.cap.iter().find(|x| &x.key == key) else {
+                    return Err(format!("template {name}: unknown capability {key}"));
+                };
+                if l.keys().is_empty() {
+                    return Err(format!("template {name}: empty limits on {key}"));
+                }
+                for k in l.keys() {
+                    if !c.limits.iter().any(|x| x == k) {
+                        return Err(format!(
+                            "template {name}: {key} does not declare limit {k}"
+                        ));
+                    }
+                }
+            }
+        }
         for (r, caps) in &t.add {
             for key in caps {
                 let c = spec.cap.iter().find(|x| &x.key == key).unwrap();
@@ -245,7 +314,7 @@ fn gen_rust(spec: &Spec, spec_hash: &str) -> Result<String, String> {
     writeln!(o, "#![allow(clippy::all)]\n").unwrap();
     writeln!(
         o,
-        "use crate::{{CapMeta, GroupMeta, Kinds, LimitKey, Risk, RoleKind, TemplateMeta, Tier}};\n"
+        "use crate::{{CapMeta, GroupMeta, Kinds, LimitKey, Limits, Risk, RoleKind, TemplateMeta, Tier}};\n"
     )
     .unwrap();
     writeln!(o, "pub const SPEC_VERSION: u32 = {};", spec.spec_version).unwrap();
@@ -364,16 +433,28 @@ fn gen_rust(spec: &Spec, spec_hash: &str) -> Result<String, String> {
             }
             Ok(v.join(", "))
         };
+        let mut limits = vec![];
+        for (r, caps) in &t.limits {
+            for (c, l) in caps {
+                limits.push(format!(
+                    "(RoleKind::{}, Cap::{}, {})",
+                    kind_variant(r)?,
+                    variant(c),
+                    l.rust()
+                ));
+            }
+        }
         writeln!(
             o,
-            "    TemplateMeta {{ key: {}, version: {}, en: {}, ar: {}, roles: &[{}], add: &[{}], remove: &[{}] }},",
+            "    TemplateMeta {{ key: {}, version: {}, en: {}, ar: {}, roles: &[{}], add: &[{}], remove: &[{}], limits: &[{}] }},",
             rs_str(k),
             t.version,
             rs_str(&t.en),
             rs_str(&t.ar),
             roles?.join(", "),
             pairs(&t.add)?,
-            pairs(&t.remove)?
+            pairs(&t.remove)?,
+            limits.join(", ")
         )
         .unwrap();
     }

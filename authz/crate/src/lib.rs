@@ -165,6 +165,8 @@ pub struct TemplateMeta {
     pub roles: &'static [RoleKind],
     pub add: &'static [(RoleKind, Cap)],
     pub remove: &'static [(RoleKind, Cap)],
+    /// Default limits on a provisioned org's grants, per role kind.
+    pub limits: &'static [(RoleKind, Cap, Limits)],
 }
 
 impl Cap {
@@ -339,6 +341,18 @@ pub fn template_grants(template: &str, kind: RoleKind) -> Option<CapSet> {
         }
     }
     Some(s.union(&core_set(kind)))
+}
+
+/// A template's default limits for one role kind, on grants the kind holds.
+pub fn template_limits(template: &str, kind: RoleKind) -> Vec<(Cap, Limits)> {
+    let Some(t) = TEMPLATES.iter().find(|t| t.key == template) else {
+        return Vec::new();
+    };
+    t.limits
+        .iter()
+        .filter(|(k, _, _)| *k == kind)
+        .map(|(_, c, l)| (*c, *l))
+        .collect()
 }
 
 // ── Limits ──────────────────────────────────────────────────────────────────

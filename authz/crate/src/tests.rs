@@ -733,3 +733,23 @@ fn crate_hash_matches_its_files() {
         "madar-authz was edited without regenerating: edit MadarRust/authz, run authz-gen"
     );
 }
+
+#[test]
+fn template_limits_sit_on_grants_the_role_holds() {
+    for t in TEMPLATES {
+        for (k, c, l) in t.limits {
+            let g = template_grants(t.key, *k).unwrap();
+            assert!(g.contains(*c), "{}: {k:?} limit on {} it does not hold", t.key, c.key());
+            assert_ne!(*l, Limits::UNLIMITED, "{}: empty limit on {}", t.key, c.key());
+        }
+        // The locked decision: a teller voids their own sale within ten minutes,
+        // and any refund goes to a manager.
+        let teller = template_limits(t.key, RoleKind::Teller);
+        let void = teller.iter().find(|(c, _)| *c == Cap::OrdersVoid).unwrap().1;
+        assert!(void.own);
+        assert_eq!(void.max_age_minutes, Some(10));
+        let refund = teller.iter().find(|(c, _)| *c == Cap::RefundsCreate).unwrap().1;
+        assert_eq!(refund.max_amount, Some(0));
+        assert!(!template_grants(t.key, RoleKind::Waiter).unwrap().contains(Cap::RefundsCreate));
+    }
+}

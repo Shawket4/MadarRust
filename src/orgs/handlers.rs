@@ -98,6 +98,8 @@ struct CreateOrgFields {
     require_table_for_orders: Option<bool>,
     receipt_footer: Option<String>,
     timezone: Option<String>,
+    /// Role template (`restaurant` default, or `cafe`).
+    template: Option<String>,
 }
 
 /// A multipart checkbox: absent is None, and anything a form posts for "on"
@@ -191,6 +193,10 @@ pub struct CreateOrgMultipart {
 
     #[schema(example = "Africa/Cairo")]
     pub timezone: Option<String>,
+
+    /// Role template the org starts from: `restaurant` (default) or `cafe`.
+    #[schema(example = "cafe")]
+    pub template: Option<String>,
 
     /// Logo image file. PNG, JPEG, or WebP. Optional — omit the field
     /// entirely to create the org without a logo.
@@ -290,6 +296,7 @@ pub async fn create_org(
             }
             "receipt_footer" => fields.receipt_footer = text_field(&mut field).await?,
             "timezone" => fields.timezone = text_field(&mut field).await?,
+            "template" => fields.template = text_field(&mut field).await?,
             _ => {
                 drain_field(&mut field).await?;
             }
@@ -383,30 +390,10 @@ pub async fn create_org(
     .fetch_one(&mut *tx)
     .await?;
 
-    // `mixed` stays dropped (phase 0, B3). Merged with main (2026-09-16):
-    // main's newer, deployed rule seeds the Talabat tenders INACTIVE rather than
-    // not at all, and keeps `talabat_cash` as cash (see the SQL comment). That
-    // supersedes this branch's earlier "do not seed Talabat" change.
-    sqlx::query(
-        r#"
-        -- The Talabat tenders are seeded INACTIVE: a shop with no Talabat
-        -- integration would otherwise carry two tenders nobody can use and two
-        -- always-zero columns on every Z report. The dashboard's payment-method
-        -- switch turns them on when that branch actually sells on Talabat.
-        -- `talabat_cash` is cash (the rider collects it and it reaches the
-        -- drawer); `talabat_online` is not.
-        INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash, is_active)
-        VALUES
-            ($1, 'cash', '{"en": "Cash", "ar": "نقدي"}', '#10B981', 'money', true, true),
-            ($1, 'card', '{"en": "Card", "ar": "بطاقة"}', '#3B82F6', 'credit_card', false, true),
-            ($1, 'digital_wallet', '{"en": "Digital Wallet", "ar": "محفظة رقمية"}', '#8B5CF6', 'wallet', false, true),
-            ($1, 'talabat_online', '{"en": "Talabat Online", "ar": "طلبات أونلاين"}', '#EF4444', 'delivery', false, false),
-            ($1, 'talabat_cash', '{"en": "Talabat Cash", "ar": "طلبات كاش"}', '#F97316', 'delivery', true, false)
-        "#
-    )
-    .bind(org.id)
-    .execute(&mut *tx)
-    .await?;
+    // Tenders, roles from the template (with the new-org default limits) and
+    // the milk / coffee_bean categories. See `orgs::provision`.
+    let template = fields.template.as_deref().unwrap_or("restaurant");
+    super::provision::provision_org_defaults(&mut tx, org.id, template).await?;
 
     tx.commit().await?;
 
@@ -1075,3 +1062,35 @@ async fn text_field(field: &mut actix_multipart::Field) -> Result<Option<String>
 }
 
 // ── GET /public/orgs  (Unauthenticated) ──────────────────────
+
+/// A new org's tenders.
+pub(crate) async fn seed_payment_methods(
+    conn: &mut sqlx::PgConnection,
+    org: Uuid,
+) -> Result<(), AppError> {
+    // `mixed` stays dropped (phase 0, B3). Merged with main (2026-09-16):
+    // main's newer, deployed rule seeds the Talabat tenders INACTIVE rather than
+    // not at all, and keeps `talabat_cash` as cash (see the SQL comment). That
+    // supersedes this branch's earlier "do not seed Talabat" change.
+    sqlx::query(
+        r#"
+        -- The Talabat tenders are seeded INACTIVE: a shop with no Talabat
+        -- integration would otherwise carry two tenders nobody can use and two
+        -- always-zero columns on every Z report. The dashboard's payment-method
+        -- switch turns them on when that branch actually sells on Talabat.
+        -- `talabat_cash` is cash (the rider collects it and it reaches the
+        -- drawer); `talabat_online` is not.
+        INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash, is_active)
+        VALUES
+            ($1, 'cash', '{"en": "Cash", "ar": "نقدي"}', '#10B981', 'money', true, true),
+            ($1, 'card', '{"en": "Card", "ar": "بطاقة"}', '#3B82F6', 'credit_card', false, true),
+            ($1, 'digital_wallet', '{"en": "Digital Wallet", "ar": "محفظة رقمية"}', '#8B5CF6', 'wallet', false, true),
+            ($1, 'talabat_online', '{"en": "Talabat Online", "ar": "طلبات أونلاين"}', '#EF4444', 'delivery', false, false),
+            ($1, 'talabat_cash', '{"en": "Talabat Cash", "ar": "طلبات كاش"}', '#F97316', 'delivery', true, false)
+        "#
+    )
+    .bind(org)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}

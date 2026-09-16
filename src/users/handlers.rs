@@ -20,7 +20,7 @@ use crate::{
 /// this.
 pub const NEW_PIN_LEN: usize = 6;
 
-fn check_new_pin(pin: &str) -> Result<(), AppError> {
+pub(crate) fn check_new_pin(pin: &str) -> Result<(), AppError> {
     if pin.len() == NEW_PIN_LEN && pin.chars().all(|c| c.is_ascii_digit()) {
         Ok(())
     } else {

@@ -118,6 +118,8 @@ paths(
         crate::orgs::handlers::list_orgs,
         crate::orgs::handlers::get_org,
         crate::orgs::handlers::offline_auth_bundle,
+        crate::orgs::provision::provision_org,
+        crate::orgs::provision::list_templates,
         crate::orgs::handlers::create_org,
         crate::orgs::handlers::update_org,
         crate::orgs::handlers::upload_org_logo,

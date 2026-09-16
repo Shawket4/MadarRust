@@ -2120,6 +2120,14 @@ en = "Restaurant"
 ar = "مطعم"
 roles = ["org_admin", "branch_manager", "teller", "waiter", "kitchen"]
 
+# Default limits on a new org's grants (locked decisions 2026-09-15, round 2).
+# Applied when an org is PROVISIONED from the template, never to existing orgs.
+# A teller voids their own sale within 10 minutes; a refund of any amount goes
+# to a manager (max_amount 0 + approval); a waiter holds no refund at all.
+[templates.restaurant.limits.teller]
+"orders.void" = { own = true, max_age_minutes = 10 }
+"refunds.create" = { max_amount = 0 }
+
 [templates.cafe]
 version = 1
 en = "Café"
@@ -2128,6 +2136,14 @@ roles = ["org_admin", "branch_manager", "teller", "kitchen"]
 # A café's barista-cashier works bills and marks items ready; no bookings.
 add = { teller = ["kitchen.bump"] }
 remove = { teller = ["bookings.read", "bookings.edit"], branch_manager = ["bookings.create", "bookings.read", "bookings.edit"] }
+
+# Default limits on a new org's grants (locked decisions 2026-09-15, round 2).
+# Applied when an org is PROVISIONED from the template, never to existing orgs.
+# A teller voids their own sale within 10 minutes; a refund of any amount goes
+# to a manager (max_amount 0 + approval); a waiter holds no refund at all.
+[templates.cafe.limits.teller]
+"orders.void" = { own = true, max_age_minutes = 10 }
+"refunds.create" = { max_amount = 0 }
 
 [roles]
 org_admin      = { en = "Owner", ar = "المالك" }
