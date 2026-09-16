@@ -350,3 +350,58 @@ async fn lint_restored_db() {
     let out = std::env::var("LINT_OUT").unwrap_or_else(|_| "lint_out.json".into());
     std::fs::write(&out, serde_json::to_string_pretty(&issues).unwrap()).unwrap();
 }
+
+/// A person with an ORG role (`org_id`, `role`) and optional per-person deny of
+/// `menu_items read` (the legacy `permissions` row, synced into `user_overrides`).
+async fn staff_token(pool: &PgPool, org: Uuid, role: &str, kind: UserRole, deny_read: bool) -> String {
+    let user: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (org_id, name, email, password_hash, role) \
+         VALUES ($1, $2, $3, 'h', $2::user_role) RETURNING id",
+    )
+    .bind(org)
+    .bind(role)
+    .bind(format!("{}@lint.test", Uuid::new_v4()))
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    if deny_read {
+        sqlx::query(
+            "INSERT INTO permissions (user_id, resource, action, granted) \
+             VALUES ($1, 'menu_items'::permission_resource, 'read'::permission_action, false)",
+        )
+        .bind(user)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    crate::auth::jwt::create_token(&JwtSecret("secret".into()), user, Some(org), kind, None, 24)
+        .unwrap()
+}
+
+/// `GET /menu/lint` is `menu.items.read`: refused to a person denied it, served to
+/// a teller (core `omtw`).
+#[sqlx::test]
+async fn lint_is_refused_without_menu_read_and_served_to_a_teller(pool: PgPool) {
+    let org = org(&pool).await;
+    clean_latte(&pool, org).await;
+    let denied = staff_token(&pool, org, "org_admin", UserRole::OrgAdmin, true).await;
+    let teller = staff_token(&pool, org, "teller", UserRole::Teller, false).await;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(JwtSecret("secret".to_string())))
+            .configure(crate::menu::routes::configure),
+    )
+    .await;
+    for (who, token, want) in [("denied", &denied, 403), ("teller", &teller, 200)] {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!("/menu/lint?org_id={org}"))
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), want, "{who}");
+    }
+}

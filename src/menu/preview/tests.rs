@@ -420,3 +420,66 @@ async fn preview_endpoint_is_org_scoped(pool: PgPool) {
     assert_eq!(body["price"]["total"], 225);
     assert!(body["deductions"].is_array() && body["defaults"].is_object());
 }
+
+/// `POST /menu-items/{id}/preview` is `menu.items.read`: refused to a person with a
+/// per-person deny row, served to a teller (core `omtw`).
+#[sqlx::test]
+async fn preview_is_refused_without_menu_read_and_served_to_a_teller(pool: PgPool) {
+    let fx = fixture(&pool).await;
+    let mut tokens = Vec::new();
+    for (role, kind, deny) in [
+        ("org_admin", UserRole::OrgAdmin, true),
+        ("teller", UserRole::Teller, false),
+    ] {
+        let user: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (org_id, name, email, password_hash, role) \
+             VALUES ($1, $2, $3, 'h', $2::user_role) RETURNING id",
+        )
+        .bind(fx.org)
+        .bind(role)
+        .bind(format!("{}@prev.test", Uuid::new_v4()))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if deny {
+            sqlx::query(
+                "INSERT INTO permissions (user_id, resource, action, granted) \
+                 VALUES ($1, 'menu_items'::permission_resource, 'read'::permission_action, false)",
+            )
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        tokens.push(
+            crate::auth::jwt::create_token(
+                &JwtSecret("secret".into()),
+                user,
+                Some(fx.org),
+                kind,
+                None,
+                24,
+            )
+            .unwrap(),
+        );
+    }
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(JwtSecret("secret".to_string())))
+            .configure(crate::menu::routes::configure),
+    )
+    .await;
+    for (who, token, want) in [("denied", &tokens[0], 403), ("teller", &tokens[1], 200)] {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri(&format!("/menu-items/{}/preview", fx.item))
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .set_json(serde_json::json!({ "size_label": "Can", "option_ids": [fx.opt_oat] }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), want, "{who}");
+    }
+}
