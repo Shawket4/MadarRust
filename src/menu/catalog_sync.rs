@@ -148,6 +148,13 @@ pub struct SyncIngredient {
     pub id: Uuid,
     pub name: String,
     pub unit: String,
+    /// The ingredient's category (additive, B12), so the POS can mirror the
+    /// resolver's "extras follow the drink's choice" pass by slug.
+    #[serde(default)]
+    pub category_id: Option<Uuid>,
+    /// Slug of [`Self::category_id`] (`milk`, `coffee_bean`, `packaging`, …).
+    #[serde(default)]
+    pub category_slug: Option<String>,
 }
 
 /// The full catalog snapshot for a POS device.
@@ -677,17 +684,26 @@ async fn load_referenced_ingredients(
     if ingredient_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
-        "SELECT id, name, unit::text FROM org_ingredients \
-         WHERE id = ANY($1) AND is_active = true AND deleted_at IS NULL \
-         ORDER BY name",
+    let rows: Vec<(Uuid, String, String, Option<Uuid>, Option<String>)> = sqlx::query_as(
+        "SELECT oi.id, oi.name, oi.unit::text, ic.id, ic.slug FROM org_ingredients oi \
+         LEFT JOIN ingredient_categories ic ON ic.id = oi.category_id \
+         WHERE oi.id = ANY($1) AND oi.is_active = true AND oi.deleted_at IS NULL \
+         ORDER BY oi.name",
     )
     .bind(ingredient_ids)
     .fetch_all(&mut *conn)
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, name, unit)| SyncIngredient { id, name, unit })
+        .map(
+            |(id, name, unit, category_id, category_slug)| SyncIngredient {
+                id,
+                name,
+                unit,
+                category_id,
+                category_slug,
+            },
+        )
         .collect())
 }
 

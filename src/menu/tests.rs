@@ -2450,3 +2450,53 @@ async fn addon_items_optional_pagination(pool: PgPool) {
     assert_eq!(v.as_array().unwrap().len(), 1);
     assert_eq!(v[0]["name"], "Oat");
 }
+
+// ── B12: addon ingredients carry their category ───────────────
+
+#[sqlx::test]
+async fn test_addon_item_ingredients_emit_category_slug(pool: PgPool) {
+    let app = override_app(pool.clone()).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let user = seed_user(&pool, org, "org_admin").await;
+    grant_permission(&pool, "org_admin", "menu_items", "read").await;
+    let addon = seed_addon_item(&pool, org, "Extra shot", "extra", 1000).await;
+    let ing = seed_ingredient(&pool, org, "House beans", "g").await;
+    sqlx::query(
+        "INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) \
+         VALUES ($1, $2, 18, 'House beans', 'g')",
+    )
+    .bind(addon)
+    .bind(ing)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let token = generate_org_admin_token(user, org);
+
+    for uri in [
+        format!("/addon-items?org_id={org}"),
+        format!("/addon-items?org_id={org}&branch_id={branch}"),
+    ] {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&uri)
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .to_request(),
+        )
+        .await;
+        assert!(resp.status().is_success(), "{uri}: {}", resp.status());
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        let row = body
+            .as_array()
+            .expect("addon list")
+            .iter()
+            .find(|a| a["id"] == addon.to_string())
+            .cloned()
+            .unwrap();
+        let first = &row["ingredients"][0];
+        assert_eq!(first["org_ingredient_id"], ing.to_string(), "{uri}");
+        assert_eq!(first["category_slug"], "veggies", "{uri}: slug emitted");
+        assert!(first["category_id"].is_string(), "{uri}: id emitted");
+    }
+}

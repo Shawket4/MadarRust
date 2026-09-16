@@ -238,6 +238,13 @@ pub struct AddonItemIngredient {
     pub quantity_used: sqlx::types::BigDecimal,
     pub ingredient_name: String,
     pub ingredient_unit: String,
+    /// The ingredient's category (additive, B12): lets the POS know an extra
+    /// shot is a `coffee_bean` and follows the drink's chosen bean.
+    #[serde(default)]
+    pub category_id: Option<Uuid>,
+    /// Slug of [`Self::category_id`] (`milk`, `coffee_bean`, `packaging`, …).
+    #[serde(default)]
+    pub category_slug: Option<String>,
 }
 
 // ── MenuItemFull — slots embedded instead of option_groups ────
@@ -3267,10 +3274,30 @@ pub(crate) async fn addon_items_by_ids(
     .collect();
     let mut ingredients: std::collections::HashMap<Uuid, Vec<AddonItemIngredient>> =
         std::collections::HashMap::new();
-    type IngRow = (Uuid, Option<Uuid>, sqlx::types::BigDecimal, String, String);
-    for (addon, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) in sqlx::query_as::<_, IngRow>(
-        "SELECT addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit \
-           FROM addon_item_ingredients WHERE addon_item_id = ANY($1) ORDER BY addon_item_id, ingredient_name",
+    type IngRow = (
+        Uuid,
+        Option<Uuid>,
+        sqlx::types::BigDecimal,
+        String,
+        String,
+        Option<Uuid>,
+        Option<String>,
+    );
+    for (
+        addon,
+        org_ingredient_id,
+        quantity_used,
+        ingredient_name,
+        ingredient_unit,
+        category_id,
+        category_slug,
+    ) in sqlx::query_as::<_, IngRow>(
+        "SELECT aii.addon_item_id, aii.org_ingredient_id, aii.quantity_used, aii.ingredient_name, \
+                aii.ingredient_unit, ic.id, ic.slug \
+           FROM addon_item_ingredients aii \
+           LEFT JOIN org_ingredients oi ON oi.id = aii.org_ingredient_id \
+           LEFT JOIN ingredient_categories ic ON ic.id = oi.category_id \
+          WHERE aii.addon_item_id = ANY($1) ORDER BY aii.addon_item_id, aii.ingredient_name",
     )
     .bind(ids)
     .fetch_all(&mut *conn)
@@ -3281,6 +3308,8 @@ pub(crate) async fn addon_items_by_ids(
             quantity_used,
             ingredient_name,
             ingredient_unit,
+            category_id,
+            category_slug,
         });
     }
     let mut out = std::collections::HashMap::new();
@@ -3305,10 +3334,13 @@ async fn fetch_addon_ingredients(
     addon_item_id: Uuid,
 ) -> Result<Vec<AddonItemIngredient>, AppError> {
     Ok(sqlx::query_as::<_, AddonItemIngredient>(
-        "SELECT org_ingredient_id, quantity_used, ingredient_name, ingredient_unit
-         FROM   addon_item_ingredients
-         WHERE  addon_item_id = $1
-         ORDER BY ingredient_name, org_ingredient_id",
+        "SELECT aii.org_ingredient_id, aii.quantity_used, aii.ingredient_name, aii.ingredient_unit,
+                ic.id AS category_id, ic.slug AS category_slug
+         FROM   addon_item_ingredients aii
+         LEFT JOIN org_ingredients oi ON oi.id = aii.org_ingredient_id
+         LEFT JOIN ingredient_categories ic ON ic.id = oi.category_id
+         WHERE  aii.addon_item_id = $1
+         ORDER BY aii.ingredient_name, aii.org_ingredient_id",
     )
     .bind(addon_item_id)
     .fetch_all(pool)
