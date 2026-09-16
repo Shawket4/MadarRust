@@ -123,10 +123,16 @@ async fn stream_requires_auth(pool: PgPool) {
 
 #[sqlx::test]
 async fn stream_forbids_when_no_topic_is_readable(pool: PgPool) {
-    // perms NOT seeded → nothing readable → 403 (the client treats it as terminal).
+    // A disabled account reads nothing → 403 (the client treats it as terminal).
+    // (An active teller always reads the menu and branches: core grants.)
     let org = seed_org(&pool).await;
     let branch = seed_branch(&pool, org).await;
     let teller = seed_user(&pool, org, "teller").await;
+    sqlx::query("UPDATE users SET is_active = false WHERE id = $1")
+        .bind(teller)
+        .execute(&pool)
+        .await
+        .unwrap();
     let hub = BranchEventHub::new();
     let app = app!(pool, hub);
     let t = token(teller, org, UserRole::Teller, Some(branch));

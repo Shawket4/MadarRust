@@ -38,6 +38,10 @@ INVENTORY_OVERHAUL_FRONTEND_SYNC.md
 /full_dump.sql
 /*_dump*.sql
 
+# Rust build output of the authz tooling crates (committed by mistake once)
+/authz/gen/target/
+/authz/crate/target/
+
 # PGP / integration secrets — never in git.
 # The Talabat private key lives OUTSIDE any repo, in ~/.talabat-pgp (see
 # Madar/TALABAT_INTEGRATION.md). These patterns are the second lock.

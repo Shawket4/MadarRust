@@ -20,7 +20,16 @@ pub(crate) fn secret() -> JwtSecret {
 }
 
 pub(crate) fn org_admin_token(org: Uuid) -> String {
-    org_admin_token_for(org, Uuid::new_v4())
+    org_admin_token_for(org, admin_id_for(org))
+}
+
+/// The org admin [`seed`] creates, derived from the org id so a token can be
+/// minted without threading the user id through every test. Architecture E
+/// resolves access from the user's own role assignments, so a token for an id
+/// with no `users` row now holds nothing — it used to be believed on its role
+/// claim alone.
+pub(crate) fn admin_id_for(org: Uuid) -> Uuid {
+    Uuid::from_u128(org.as_u128() ^ 0xad_1a_ad_1a_ad_1a_ad_1a_ad_1a_ad_1a_ad_1a_ad_1a)
 }
 
 /// A token for a SPECIFIC user id. Needed wherever a handler writes a row that
@@ -51,7 +60,6 @@ pub(crate) struct Seeded {
 /// Deliberately small but *broad*: it touches every dataset the registry
 /// exposes joins for, so a broken join surfaces here rather than in production.
 pub(crate) async fn seed(pool: &PgPool, label: &str) -> Seeded {
-    let (admin, other_admin) = (Uuid::new_v4(), Uuid::new_v4());
     let (org, teller, branch, _till, shift) = (
         Uuid::new_v4(),
         Uuid::new_v4(),
@@ -59,6 +67,7 @@ pub(crate) async fn seed(pool: &PgPool, label: &str) -> Seeded {
         Uuid::new_v4(),
         Uuid::new_v4(),
     );
+    let (admin, other_admin) = (admin_id_for(org), Uuid::new_v4());
     let (category, latte, mocha) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
     let (ingredient, inv) = (Uuid::new_v4(), Uuid::new_v4());
 

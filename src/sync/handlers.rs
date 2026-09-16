@@ -210,6 +210,20 @@ pub enum ReplayOp {
         teller_id: Uuid,
         booking_id: Uuid,
     },
+    // A customer added at the till (phase 6). The id is client-minted, so a
+    // re-flush is idempotent; a phone another live customer already holds is
+    // stored merged into that one rather than refused.
+    CreateCustomer {
+        teller_id: Uuid,
+        request: crate::customers::handlers::CreateCustomerRequest,
+    },
+    // Attach (or with no `customer_id`, detach) a customer on a rung sale.
+    AttachCustomer {
+        teller_id: Uuid,
+        order_id: Uuid,
+        #[serde(default)]
+        customer_id: Option<Uuid>,
+    },
 }
 
 impl ReplayOp {
@@ -237,8 +251,75 @@ impl ReplayOp {
             | ReplayOp::ReleaseTable { teller_id, .. }
             | ReplayOp::SeatBooking { teller_id, .. }
             | ReplayOp::NoShowBooking { teller_id, .. }
-            | ReplayOp::AwardLoyaltyPoints { teller_id, .. } => *teller_id,
+            | ReplayOp::AwardLoyaltyPoints { teller_id, .. }
+            | ReplayOp::CreateCustomer { teller_id, .. }
+            | ReplayOp::AttachCustomer { teller_id, .. } => *teller_id,
         }
+    }
+
+    /// The variant's name, for a flag row the owner reads.
+    fn variant_name(&self) -> &'static str {
+        match self {
+            ReplayOp::OpenTill { .. } => "OpenTill",
+            ReplayOp::CloseTill { .. } => "CloseTill",
+            ReplayOp::CashMovement { .. } => "CashMovement",
+            ReplayOp::CreateOrder { .. } => "CreateOrder",
+            ReplayOp::VoidOrder { .. } => "VoidOrder",
+            ReplayOp::RefundOrder { .. } => "RefundOrder",
+            ReplayOp::FireOpenTicket { .. } => "FireOpenTicket",
+            ReplayOp::AddTicketRound { .. } => "AddTicketRound",
+            ReplayOp::SettleOpenTicket { .. } => "SettleOpenTicket",
+            ReplayOp::VoidOpenTicket { .. } => "VoidOpenTicket",
+            ReplayOp::VoidTicketLine { .. } => "VoidTicketLine",
+            ReplayOp::BumpKitchenItem { .. } => "BumpKitchenItem",
+            ReplayOp::UnbumpKitchenItem { .. } => "UnbumpKitchenItem",
+            ReplayOp::SwapTables { .. } => "SwapTables",
+            ReplayOp::CreateTableTransfer { .. } => "CreateTableTransfer",
+            ReplayOp::CancelTableTransfer { .. } => "CancelTableTransfer",
+            ReplayOp::FulfillTableTransfer { .. } => "FulfillTableTransfer",
+            ReplayOp::ClearTable { .. } => "ClearTable",
+            ReplayOp::HoldTable { .. } => "HoldTable",
+            ReplayOp::ReleaseTable { .. } => "ReleaseTable",
+            ReplayOp::SeatBooking { .. } => "SeatBooking",
+            ReplayOp::NoShowBooking { .. } => "NoShowBooking",
+            ReplayOp::AwardLoyaltyPoints { .. } => "AwardLoyaltyPoints",
+            ReplayOp::CreateCustomer { .. } => "CreateCustomer",
+            ReplayOp::AttachCustomer { .. } => "AttachCustomer",
+        }
+    }
+
+    /// Did real value change hands, so that refusing the op would lose a fact
+    /// rather than prevent one? This is the accept-and-flag test (§4.4.5).
+    ///
+    /// The question is NOT "is this op important" — it is "did something
+    /// already happen in the shop that the books must now agree with". Cash
+    /// crossing the counter, a drawer opened or counted, a sale rung, taken off
+    /// the books, or paid back: all of those are facts by the time they reach
+    /// us, and points are value the customer was already promised.
+    ///
+    /// Everything else is a request about state we still control — a bump, a
+    /// table move, a booking, tearing up an unpaid ticket. Nothing is lost by
+    /// refusing those, so an actor who lacks the capability is refused, exactly
+    /// as they would be live.
+    ///
+    /// **A void is deliberately NOT here.** `required_permissions` above defines
+    /// it as "taking a sale off the books BEFORE any money moved" — that is the
+    /// whole reason it sits on its own rung apart from `refunds`. Nothing has
+    /// changed hands, so a revoked void stays refused, and
+    /// `a_revoked_void_does_not_get_through_by_being_queued` still holds. A
+    /// refund, where the money really did go back, is a different op and is
+    /// flagged.
+    fn money_moved(&self) -> bool {
+        matches!(
+            self,
+            ReplayOp::OpenTill { .. }
+                | ReplayOp::CloseTill { .. }
+                | ReplayOp::CashMovement { .. }
+                | ReplayOp::CreateOrder { .. }
+                | ReplayOp::RefundOrder { .. }
+                | ReplayOp::SettleOpenTicket { .. }
+                | ReplayOp::AwardLoyaltyPoints { .. }
+        )
     }
 
     /// The `(resource, action)` permission(s) the LIVE endpoint enforces for this
@@ -257,7 +338,7 @@ impl ReplayOp {
     /// the queued bump thrown out. Since the POS drains EVERY write through
     /// `/sync/replay`, "stricter than live" here never meant "safer"; it meant
     /// the feature did not work offline. The role's part is now attribution
-    /// only — see `can_sign_in_at_a_till` — and this list decides the rest.
+    /// only — the embedded actor must hold `pos.sign_in` — and this list decides the rest.
     ///
     /// Kept in lock-step with the per-endpoint `check_permission` calls:
     ///   open=shifts/create; close+cash=shifts/update;
@@ -324,6 +405,18 @@ impl ReplayOp {
             // whose loyalty grant was revoked cannot get an award through by
             // having queued it offline.
             ReplayOp::AwardLoyaltyPoints { .. } => &[("loyalty", "update")],
+            // Architecture E capabilities with no legacy cell: see `required_caps`.
+            ReplayOp::CreateCustomer { .. } | ReplayOp::AttachCustomer { .. } => &[],
+        }
+    }
+
+    /// Capabilities that have no legacy `(resource, action)` cell. Same rule as
+    /// the cells: these ops move no money, so a missing grant refuses the op.
+    fn required_caps(&self) -> &'static [crate::authz::Cap] {
+        match self {
+            ReplayOp::CreateCustomer { .. } => &[crate::authz::Cap::CustomersCreate],
+            ReplayOp::AttachCustomer { .. } => &[crate::authz::Cap::CustomersAttach],
+            _ => &[],
         }
     }
 }
@@ -352,7 +445,7 @@ pub fn replay_names_shift_id(body: &serde_json::Value) -> bool {
 ///
 ///   * ATTRIBUTION — may this write carry this actor's name? The bearer must be
 ///     a member of an org, and the op's embedded actor must be an ACTIVE TILL
-///     USER OF THAT SAME ORG (`can_sign_in_at_a_till`). So any teller (or, later,
+///     USER OF THAT SAME ORG WHO HOLDS `pos.sign_in`. So any teller (or, later,
 ///     a device principal) may flush the whole device backlog — A's ops and B's
 ///     ops — each landing under its true author.
 ///   * PERMISSION — may this actor do this thing? Answered by the permission
@@ -389,7 +482,14 @@ pub async fn replay(
         .ok_or_else(|| AppError::Unauthorized("Token has no organization".into()))?;
 
     let header_device = crate::devices::DeviceHeader::from_request_headers(&req);
-    let op: ReplayOp = serde_json::from_value(body.into_inner())
+    let body = body.into_inner();
+    let occurred_at = replay_occurred_at(&body);
+    // A manager's approval the till minted offline (phase 5), additive.
+    let approval: Option<ReplayApproval> = body
+        .get("approval")
+        .cloned()
+        .and_then(|a| serde_json::from_value(a).ok());
+    let op: ReplayOp = serde_json::from_value(body)
         .map_err(|e| AppError::BadRequest(format!("Json deserialize error: {e}")))?;
     let teller_id = op.teller_id();
 
@@ -413,7 +513,10 @@ pub async fn replay(
             ));
         }
     };
-    if actor_org != token_org || !is_active || !crate::sync::can_sign_in_at_a_till(&actor_role) {
+    let signs_in = crate::authz::require::effective(pool.get_ref(), teller_id, None)
+        .await?
+        .can(crate::authz::Cap::PosSignIn);
+    if actor_org != token_org || !is_active || !signs_in {
         return Err(AppError::Forbidden(
             "Replay actor may not perform this operation for this organization".into(),
         ));
@@ -425,15 +528,48 @@ pub async fn replay(
     // one place "may they" is answered for a replayed op: a teller whose void
     // was revoked in the dashboard cannot get it through by queueing it, and a
     // waiter the dashboard granted a bump to gets the bump through offline.
+    //
+    // ACCEPT AND FLAG (§4.4.5, and the owner's binding decision). A failure
+    // here rejects a NON-money op — nothing irreversible happened, so refusing
+    // it is honest. A MONEY op is accepted anyway and recorded in
+    // `authz_replay_flags` for the owner, because the sale already happened:
+    // the customer paid and left while the shop was offline. Dropping the op
+    // does not un-take the money, it only loses the record and leaves the
+    // drawer short at close.
+    let approved = match &approval {
+        Some(a) => verify_approval(pool.get_ref(), a, teller_id, token_org).await,
+        None => Err("none".into()),
+    };
+    let mut flags: Vec<(&'static str, &'static str)> = Vec::new();
     for &(resource, action) in op.required_permissions() {
-        crate::permissions::checker::check_permission_for(
+        match crate::permissions::checker::check_permission_for(
             pool.get_ref(),
             teller_id,
             &actor_role,
             resource,
             action,
         )
-        .await?;
+        .await
+        {
+            Ok(()) => {}
+            // A manager who holds the act approved it on the till: not a
+            // flag, and a non-money op goes through as the manager allowed.
+            Err(AppError::Forbidden(_))
+                if approved
+                    .as_ref()
+                    .is_ok_and(|cap| cap.meta().legacy == Some((resource, action))) => {}
+            Err(AppError::Forbidden(_)) if op.money_moved() => flags.push((resource, action)),
+            Err(e) => return Err(e),
+        }
+    }
+
+    for &cap in op.required_caps() {
+        let held = crate::authz::require::effective(pool.get_ref(), teller_id, None)
+            .await?
+            .can(cap);
+        if !held && !approved.as_ref().is_ok_and(|c| *c == cap) {
+            return Err(crate::authz::require::denied(cap));
+        }
     }
 
     // The target must belong to the bearer's org — block any cross-org replay.
@@ -447,8 +583,206 @@ pub async fn replay(
         (None, ReplayOp::CreateOrder { request, .. }) => Some(request.branch_id),
         _ => None,
     };
+    let op_name = op.variant_name();
     let result = replay_dispatch(&req, &pool, &hub, op, actor, legacy_op, header_device).await;
+    if result.is_ok()
+        && let Some(a) = &approval
+    {
+        record_approval(
+            pool.get_ref(),
+            a,
+            token_org,
+            op_branch,
+            header_device,
+            teller_id,
+            op_name,
+            occurred_at,
+            &approved,
+        )
+        .await;
+    }
+    // Only once the op has really committed: a flag for an op that never
+    // applied would send the owner looking for money that never moved.
+    if result.is_ok() && !flags.is_empty() {
+        record_replay_flags(
+            pool.get_ref(),
+            token_org,
+            op_branch,
+            op_name,
+            teller_id,
+            &flags,
+            occurred_at,
+        )
+        .await;
+    }
     stamp_sync_seq(pool.get_ref(), op_branch, result).await
+}
+
+/// A manager's approval carried by a queued op (PERMISSIONS_ARCHITECTURE §4.2).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ReplayApproval {
+    pub id: Uuid,
+    /// Capability key, e.g. `orders.void`.
+    pub capability: String,
+    pub approver_id: Uuid,
+    #[serde(default)]
+    pub amount_minor: Option<i64>,
+}
+
+/// The approver is an active person of the org, not the author, and holds the
+/// act now. Returns the capability, or why not.
+async fn verify_approval(
+    pool: &sqlx::PgPool,
+    a: &ReplayApproval,
+    author: Uuid,
+    org: Uuid,
+) -> Result<crate::authz::Cap, String> {
+    let cap = crate::authz::Cap::from_key(&a.capability).ok_or("unknown capability")?;
+    if a.approver_id == author {
+        return Err("the approver is the author".into());
+    }
+    let ok: Option<bool> = sqlx::query_scalar(
+        "SELECT is_active AND deleted_at IS NULL FROM users WHERE id = $1 AND org_id = $2",
+    )
+    .bind(a.approver_id)
+    .bind(org)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    if ok != Some(true) {
+        return Err("the approver is not an active person of this org".into());
+    }
+    let eff = crate::authz::require::effective(pool, a.approver_id, None)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut req = madar_authz::Request::of(cap);
+    req.amount = a.amount_minor;
+    match madar_authz::decide(&eff, &req) {
+        madar_authz::Decision::Allow => Ok(cap),
+        _ => Err("the approver does not hold this act".into()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_approval(
+    pool: &sqlx::PgPool,
+    a: &ReplayApproval,
+    org: Uuid,
+    branch: Option<Uuid>,
+    device: Option<Uuid>,
+    subject: Uuid,
+    op: &str,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+    verified: &Result<crate::authz::Cap, String>,
+) {
+    if let Err(e) = sqlx::query(
+        "INSERT INTO approvals (id, org_id, branch_id, device_id, capability, subject_user_id,
+                                approver_user_id, amount_minor, op, occurred_at, verified, verification_error)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(a.id)
+    .bind(org)
+    .bind(branch)
+    .bind(device)
+    .bind(&a.capability)
+    .bind(subject)
+    .bind(a.approver_id)
+    .bind(a.amount_minor)
+    .bind(op)
+    .bind(occurred_at)
+    .bind(verified.is_ok())
+    .bind(verified.as_ref().err())
+    .execute(pool)
+    .await
+    {
+        tracing::error!(error = %e, approval = %a.id, "could not record an approval; the op itself committed");
+    }
+}
+
+/// When the act happened ON THE DEVICE, for the accept-and-flag reason (§4.4.5)
+/// and the offline window a flag row shows.
+///
+/// Every field here is one clients ALREADY send, so no release in the field has
+/// to change to be classified correctly: a refund names `issued_at`, a cash
+/// movement and an order name `created_at`. A new top-level `occurred_at` is
+/// read first so later clients can be explicit for ops that carry neither.
+///
+/// It matters because it decides which of the two reasons the owner sees. Read
+/// as "now", a revocation made an hour ago always looks NEWER than the act, and
+/// every routine stale-snapshot case would be reported as a tampered client.
+fn replay_occurred_at(body: &serde_json::Value) -> chrono::DateTime<chrono::Utc> {
+    let parse = |v: Option<&serde_json::Value>| {
+        v.and_then(|v| v.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| d.with_timezone(&chrono::Utc))
+    };
+    let req = body.get("request");
+    parse(body.get("occurred_at"))
+        .or_else(|| parse(req.and_then(|r| r.get("issued_at"))))
+        .or_else(|| parse(req.and_then(|r| r.get("created_at"))))
+        .unwrap_or_else(chrono::Utc::now)
+}
+
+/// Record the accept-and-flag rows for one replayed op (§4.4.5).
+///
+/// Never fails the request: the op has already committed, and losing the
+/// owner's notice is far better than 500-ing a sale that is now on the books
+/// and making the tablet retry a write it has already applied.
+async fn record_replay_flags(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Option<Uuid>,
+    op: &'static str,
+    author_id: Uuid,
+    flags: &[(&'static str, &'static str)],
+    occurred_at: chrono::DateTime<chrono::Utc>,
+) {
+    // Was this a revocation the device had not heard about yet? If anything
+    // touching this person's grants was written AFTER the act, the device was
+    // working from a snapshot that was true when it acted — routine, and a
+    // different thing from a client that never had the grant at all.
+    let revoked_after: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM authz_grant_events e
+              WHERE e.occurred_at > $2
+                AND (e.before->>'user_id' = $1::text OR e.after->>'user_id' = $1::text)
+         )",
+    )
+    .bind(author_id)
+    .bind(occurred_at)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+    let reason = if revoked_after {
+        "stale_snapshot"
+    } else {
+        "unauthorized_offline"
+    };
+
+    for (resource, action) in flags {
+        let cap = format!("{resource}:{action}");
+        if let Err(e) = sqlx::query(
+            "INSERT INTO authz_replay_flags
+                 (org_id, branch_id, op, author_id, capability, reason, occurred_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(org_id)
+        .bind(branch_id)
+        .bind(op)
+        .bind(author_id)
+        .bind(&cap)
+        .bind(reason)
+        .bind(occurred_at)
+        .execute(pool)
+        .await
+        {
+            tracing::error!(
+                error = %e, %org_id, %author_id, op, cap,
+                "could not record an authz replay flag; the op itself committed"
+            );
+        }
+    }
 }
 
 /// `X-Madar-Sync-Seq` on a replay answer (OFFLINE_B_DESIGN §4): the branch
@@ -833,6 +1167,37 @@ async fn replay_dispatch(
                 .await;
             Ok(resp)
         }
+        ReplayOp::CreateCustomer { request, .. } => {
+            use crate::customers::handlers::{Created, insert_customer};
+            let mut conn = pool.get_ref().acquire().await?;
+            let out =
+                match insert_customer(&mut conn, actor.org_id, actor.teller_id, &request, true)
+                    .await?
+                {
+                    Created::New(id) => serde_json::json!({"id": id, "status": "created"}),
+                    Created::Existing(id) => serde_json::json!({"id": id, "status": "existing"}),
+                    Created::MergedInto { id, into } => {
+                        serde_json::json!({"id": id, "status": "merged", "merged_into": into})
+                    }
+                };
+            Ok(HttpResponse::Ok().json(out))
+        }
+        ReplayOp::AttachCustomer {
+            order_id,
+            customer_id,
+            ..
+        } => {
+            let mut conn = pool.get_ref().acquire().await?;
+            let resolved = crate::customers::handlers::attach_to_order(
+                &mut conn,
+                actor.org_id,
+                order_id,
+                customer_id,
+            )
+            .await?;
+            Ok(HttpResponse::Ok()
+                .json(serde_json::json!({"order_id": order_id, "customer_id": resolved})))
+        }
     }
 }
 
@@ -955,6 +1320,23 @@ async fn op_branch_must_be_in_org(
                 .bind(booking_id)
                 .fetch_optional(pool)
                 .await?
+        }
+        ReplayOp::CreateCustomer { request, .. } => match request.branch_id {
+            Some(b) => {
+                sqlx::query_as::<_, (Uuid, Uuid)>("SELECT id, org_id FROM branches WHERE id = $1")
+                    .bind(b)
+                    .fetch_optional(pool)
+                    .await?
+            }
+            None => None,
+        },
+        ReplayOp::AttachCustomer { order_id, .. } => {
+            sqlx::query_as::<_, (Uuid, Uuid)>(
+                "SELECT b.id, b.org_id FROM orders o JOIN branches b ON b.id = o.branch_id WHERE o.id = $1",
+            )
+            .bind(order_id)
+            .fetch_optional(pool)
+            .await?
         }
     };
     match branch_org {

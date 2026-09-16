@@ -48,6 +48,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # fmt + clippy are advisory for now (the tree predates them); promote to
       # blocking once clean by removing continue-on-error.
+      - name: permission registry is generated and current
+        run: |
+          cargo run --manifest-path authz/gen/Cargo.toml -- --check
+          cargo test --manifest-path authz/crate/Cargo.toml
+
       - name: rustfmt
         run: cargo fmt --all --check
         continue-on-error: true

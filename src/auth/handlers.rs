@@ -1,7 +1,6 @@
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use std::collections::HashMap;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -34,7 +33,9 @@ pub struct LoginRequest {
         example = "1234"
     )]
     pub pin: Option<String>,
-    /// Teller's display name (required for PIN login, unused otherwise).
+    /// The person's display name. Optional for PIN login: without it the PIN
+    /// alone identifies the person (PIN-only sign-in, org-wide unique PINs).
+    /// Old tablets send it and keep the name-narrowed lookup.
     #[schema(example = "Mariam")]
     pub name: Option<String>,
     /// Required for PIN login. The org is derived from this branch server-side.
@@ -156,14 +157,90 @@ pub struct AuthPermissionsResponse {
     pub permissions: Vec<UserPermissionItem>,
 }
 
-#[derive(sqlx::FromRow)]
-struct DbPermission {
-    pub resource: String,
-    pub action: String,
-    pub granted: bool,
+// ── POST /auth/login ─────────────────────────────────────────
+
+/// Columns of `User`, for the PIN look-ups below.
+const PIN_USER_COLUMNS: &str = "u.id, u.org_id, u.name, u.email, u.phone, \
+     u.password_hash, u.pin_hash, u.role, u.is_active, u.last_login_at, \
+     u.created_at, u.updated_at, u.deleted_at";
+
+/// Who may type a PIN at all: anyone who works a till (owners and managers
+/// too); whether they may at THIS branch is the `pos.sign_in` check.
+const PIN_HOLDER_FILTER: &str = "u.org_id = $1 \
+     AND u.pin_hash IS NOT NULL \
+     AND u.role <> 'super_admin' \
+     AND NOT u.is_guest_principal \
+     AND u.is_active = TRUE \
+     AND u.deleted_at IS NULL";
+
+fn pin_verifies(u: &User, pin: &str) -> bool {
+    u.pin_hash
+        .as_deref()
+        .is_some_and(|h| bcrypt::verify(pin, h).unwrap_or(false))
 }
 
-// ── POST /auth/login ─────────────────────────────────────────
+/// The name-narrowed path old tablets use: names are unique per org.
+async fn find_pin_holder_by_name(
+    pool: &PgPool,
+    org: Uuid,
+    name: &str,
+    pin: &str,
+) -> Result<Option<User>, AppError> {
+    let rows = sqlx::query_as::<_, User>(&format!(
+        "SELECT {PIN_USER_COLUMNS} FROM users u \
+          WHERE {PIN_HOLDER_FILTER} AND LOWER(u.name) = LOWER($2)"
+    ))
+    .bind(org)
+    .bind(name)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().find(|u| pin_verifies(u, pin)))
+}
+
+/// PIN-only (§2, §6): FIND the holder by the keyed fingerprint — one indexed
+/// row, one slow verify — and only if that finds nobody, scan the holders who
+/// have no fingerprint yet (the backfill happens at their next sign-in).
+/// `Some(Err(()))` when the scan finds the PIN on more than one person.
+async fn find_pin_holder_by_pin(
+    pool: &PgPool,
+    org: Uuid,
+    pin: &str,
+) -> Result<Option<Result<User, ()>>, AppError> {
+    let fingerprints = crate::auth::pin_fingerprint::lookup_fingerprints(org, pin);
+    let by_fingerprint = sqlx::query_as::<_, User>(&format!(
+        "SELECT {PIN_USER_COLUMNS} FROM users u \
+          WHERE {PIN_HOLDER_FILTER} AND u.pin_fingerprint = ANY($2)"
+    ))
+    .bind(org)
+    .bind(&fingerprints)
+    .fetch_all(pool)
+    .await?;
+    if let Some(u) = by_fingerprint.into_iter().find(|u| pin_verifies(u, pin)) {
+        return Ok(Some(Ok(u)));
+    }
+    let unstamped = sqlx::query_as::<_, User>(&format!(
+        "SELECT {PIN_USER_COLUMNS} FROM users u \
+          WHERE {PIN_HOLDER_FILTER} AND u.pin_fingerprint IS NULL"
+    ))
+    .bind(org)
+    .fetch_all(pool)
+    .await?;
+    let mut hits = unstamped.into_iter().filter(|u| pin_verifies(u, pin));
+    Ok(match (hits.next(), hits.next()) {
+        (Some(u), None) => Some(Ok(u)),
+        (Some(first), Some(second)) => {
+            tracing::warn!(
+                target: "madar.authz",
+                %org,
+                first = %first.id,
+                second = %second.id,
+                "PIN-only sign-in matched more than one person"
+            );
+            Some(Err(()))
+        }
+        _ => None,
+    })
+}
 
 #[utoipa::path(
     post,
@@ -176,7 +253,7 @@ struct DbPermission {
     )
 )]
 pub async fn login(
-    _req: HttpRequest,
+    http_req: HttpRequest,
     pool: web::Data<PgPool>,
     secret: web::Data<JwtSecret>,
     body: web::Json<LoginRequest>,
@@ -216,10 +293,14 @@ pub async fn login(
         }
 
         (None, Some(pin)) => {
+            // PIN-only sign-in (POS_SIGNIN_OVERHAUL.md §2, §8.5): `name` is
+            // optional on the wire. Old tablets keep sending it and keep the
+            // name-narrowed path exactly as it was.
             let name = body
                 .name
                 .as_deref()
-                .ok_or_else(|| AppError::BadRequest("name is required for PIN login".into()))?;
+                .map(str::trim)
+                .filter(|n| !n.is_empty());
 
             let branch_id = body.branch_id.ok_or_else(|| {
                 AppError::BadRequest("branch_id is required for PIN login".into())
@@ -234,46 +315,132 @@ pub async fn login(
             .await?
             .ok_or_else(|| AppError::Unauthorized("Invalid branch".into()))?;
 
-            // ORG-scoped lookup: teller names are unique per org, so resolve the
-            // teller from (name, pin) within the branch's org FIRST. Branch
-            // assignment is checked separately below — that lets us distinguish
-            // "wrong name/pin (or wrong org)" → 401 from "valid teller, but no
-            // access to THIS branch" → 403, instead of conflating both.
-            let tellers = sqlx::query_as::<_, User>(
-                r#"
-                SELECT u.id, u.org_id, u.name, u.email, u.phone,
-                       u.password_hash, u.pin_hash, u.role,
-                       u.is_active, u.last_login_at,
-                       u.created_at, u.updated_at, u.deleted_at
-                FROM users u
-                WHERE LOWER(u.name) = LOWER($1)
-                  AND u.org_id      = $2
-                  AND u.pin_hash    IS NOT NULL
-                  AND u.role        IN ('teller', 'waiter', 'kitchen')
-                  AND u.is_active   = TRUE
-                  AND u.deleted_at  IS NULL
-                "#,
+            // A growing delay on wrong PINs, counted against the device and the
+            // branch (POS_SIGNIN_OVERHAUL.md §3.4). Checked BEFORE any lookup,
+            // so a grinder gets no work out of us and no timing signal either.
+            let device_id = http_req
+                .headers()
+                .get(crate::tickets::DEVICE_ID_HEADER)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            // Old tablets (v0.5–v0.7) send a name and no device id on login;
+            // they are left exactly as they were. The delay applies to a client
+            // that identifies its device, and to any attempt without a name
+            // (PIN-only, §8.5) — the widened haystack it exists for.
+            let throttled = device_id.is_some() || body.name.is_none();
+            if throttled {
+                crate::auth::pin_throttle::check(pool.get_ref(), device_id.as_deref(), branch_id)
+                    .await?;
+            }
+
+            // ORG-scoped lookup: resolve the person within the branch's org
+            // FIRST. Branch access is checked separately below — that lets us
+            // distinguish "wrong PIN (or wrong org)" → 401 from "valid person,
+            // but no access to THIS branch" → 403, instead of conflating both.
+            let found = match name {
+                Some(name) => find_pin_holder_by_name(pool.get_ref(), branch_org_id, name, pin)
+                    .await?
+                    .map(Ok),
+                None => find_pin_holder_by_pin(pool.get_ref(), branch_org_id, pin).await?,
+            };
+            let matched = match found {
+                Some(Ok(u)) => u,
+                // Two people hold this PIN and nothing names which one is
+                // typing. Not a wrong PIN, so not counted against the delay.
+                Some(Err(())) => {
+                    return Err(AppError::Refused {
+                        code: "PIN_NOT_UNIQUE",
+                        reason:
+                            "This PIN belongs to more than one person. Ask a manager for a new PIN."
+                                .into(),
+                    });
+                }
+                // Nobody in this org matches (includes a real person from a
+                // DIFFERENT org) → generic invalid credentials, and one more
+                // against the delay.
+                None => {
+                    if throttled {
+                        crate::auth::pin_throttle::record_failure(
+                            pool.get_ref(),
+                            device_id.as_deref(),
+                            branch_id,
+                        )
+                        .await;
+                    }
+                    return Err(AppError::Unauthorized("Invalid credentials".into()));
+                }
+            };
+
+            // Architecture E: signing in at a till is the `pos.sign_in` capability
+            // at this branch (tellers and waiters always hold it; owners hold it;
+            // a manager at the branches they are assigned to).
+            if !crate::authz::require::effective(pool.get_ref(), matched.id, Some(branch_id))
+                .await?
+                .can(crate::authz::Cap::PosSignIn)
+            {
+                // The ONE case with an identity behind it (§3.4): a CORRECT PIN
+                // typed at a branch its holder does not work at. Someone else's
+                // PIN turning up in the wrong shop is a real signal, so it is
+                // logged against the person rather than the place, and it does
+                // not feed the anonymous delay — that would let a wrong shop
+                // slow down the right one.
+                tracing::warn!(
+                    target: "madar.authz",
+                    user_id = %matched.id,
+                    branch_id = %branch_id,
+                    device_id = device_id.as_deref().unwrap_or("-"),
+                    "correct PIN at a branch this person is not allowed at"
+                );
+                crate::auth::pin_throttle::record_wrong_branch(
+                    pool.get_ref(),
+                    branch_org_id,
+                    matched.id,
+                    branch_id,
+                    device_id.as_deref(),
+                )
+                .await;
+                return Err(AppError::Forbidden(
+                    "You can't sign in at a till in this branch".into(),
+                ));
+            }
+
+            // A correct PIN ends the run of failures for this device and shop.
+            if throttled {
+                crate::auth::pin_throttle::clear(pool.get_ref(), device_id.as_deref(), branch_id)
+                    .await;
+            }
+
+            // Decision D13 ("tellers are ORG-scoped, no per-branch gate at the
+            // till") is SUPERSEDED by the owner decision of 2026-09-16
+            // (POS_SIGNIN_OVERHAUL.md §5.2, "A + B"). The branch allow-list now
+            // gates PIN sign-in, and it does so through the check above: a role
+            // assignment that does not cover THIS branch contributes no role
+            // kind, so the person holds no `pos.sign_in` here and gets the 403.
+            // The allow-list itself lives in the role assignment; a person with
+            // no explicit branches is org-wide (§5.3), so nobody who works today
+            // is locked out by the change.
+
+            // Backfill the keyed PIN fingerprint (POS_SIGNIN_OVERHAUL.md §2,
+            // §6). Salted hashes cannot be fingerprinted in a migration — the
+            // plaintext is only ever in hand here, at a successful sign-in — so
+            // the column fills in as people work. It is written under the
+            // CURRENT key, which is also how a key rotation completes itself.
+            // Best-effort: a duplicate or a write failure must never block a
+            // valid login. A duplicate means two people share a PIN, which is
+            // logged and otherwise ignored: every PIN is being re-issued at
+            // rollout, so there is no backlog to manage (§6).
+            let fp = crate::auth::pin_fingerprint::fingerprint(branch_org_id, pin);
+            if let Err(e) = sqlx::query(
+                "UPDATE users SET pin_fingerprint = $1 WHERE id = $2
+                   AND (pin_fingerprint IS NULL OR pin_fingerprint <> $1)",
             )
-            .bind(name)
-            .bind(branch_org_id)
-            .fetch_all(pool.get_ref())
-            .await?;
-
-            let matched = tellers
-                .into_iter()
-                .find(|u| {
-                    u.pin_hash
-                        .as_deref()
-                        .is_some_and(|h| bcrypt::verify(pin, h).unwrap_or(false))
-                })
-                // No teller in this org matches name+PIN (includes a real teller
-                // from a DIFFERENT org) → generic invalid credentials.
-                .ok_or_else(|| AppError::Unauthorized("Invalid credentials".into()))?;
-
-            // D13: tellers are ORG-scoped, not branch-scoped. The teller was
-            // resolved within the branch's own org above (that's the boundary),
-            // so any active org teller may sign in at this branch's device — no
-            // per-branch `user_branch_assignments` gate.
+            .bind(&fp)
+            .bind(matched.id)
+            .execute(pool.get_ref())
+            .await
+            {
+                tracing::warn!(user_id = %matched.id, "pin fingerprint not stored: {e}");
+            }
 
             // Layer 3: silently (re)derive the teller's OFFLINE PIN verifier
             // (argon2id, distinct from the bcrypt login hash) so the org's
@@ -353,23 +520,19 @@ pub async fn login(
 
     // Tellers, waiters AND kitchen users are device-bound (PIN) and branch-bound;
     // waiters/kitchen just never hold a shift. All get the short device TTL.
-    let token_branch_id = if matches!(
-        user.role,
-        UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
-    ) {
+    // A PIN sign-in is a till session whatever the role: branch-bound, short.
+    let via_pin = body.pin.is_some() && body.email.is_none();
+    let token_branch_id = if via_pin
+        || matches!(
+            user.role,
+            UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
+        ) {
         body.branch_id
     } else {
         None
     };
 
-    let hours = if matches!(
-        user.role,
-        UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
-    ) {
-        12
-    } else {
-        24
-    };
+    let hours = if token_branch_id.is_some() { 12 } else { 24 };
 
     let token = create_token(
         &secret,
@@ -388,10 +551,7 @@ pub async fn login(
 
     // For tellers/waiters, branch_id is the device branch (from body.branch_id).
     // For other roles, fall back to looking up the first assignment.
-    let branch_id_for_response: Option<Uuid> = if matches!(
-        user.role,
-        UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
-    ) {
+    let branch_id_for_response: Option<Uuid> = if token_branch_id.is_some() {
         body.branch_id
     } else {
         sqlx::query_scalar(
@@ -594,60 +754,29 @@ pub async fn permissions(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRe
         .cloned()
         .ok_or_else(|| AppError::Unauthorized("Missing claims".into()))?;
 
-    let role: String =
-        sqlx::query_scalar("SELECT role::text FROM users WHERE id = $1 AND deleted_at IS NULL")
-            .bind(claims.user_id())
-            .fetch_optional(pool.get_ref())
-            .await?
-            .ok_or_else(|| AppError::NotFound("User not found".into()))?;
-
-    let role_defaults = sqlx::query_as::<_, DbPermission>(
-        "SELECT resource::text as resource, action::text as action, granted
-         FROM role_permissions WHERE role = $1::user_role",
-    )
-    .bind(&role)
-    .fetch_all(pool.get_ref())
-    .await?;
-
-    let user_overrides = sqlx::query_as::<_, DbPermission>(
-        "SELECT resource::text as resource, action::text as action, granted
-         FROM permissions WHERE user_id = $1",
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND deleted_at IS NULL)",
     )
     .bind(claims.user_id())
-    .fetch_all(pool.get_ref())
+    .fetch_one(pool.get_ref())
     .await?;
+    if !exists {
+        return Err(AppError::NotFound("User not found".into()));
+    }
 
-    let cells = crate::permissions::RESOURCES.len() * crate::permissions::ACTIONS.len()
-        + crate::permissions::EXTRA_PERMISSIONS.len();
-
-    // Build O(1) lookup maps so the nested loop is O(n) not O(n²)
-    let role_map: HashMap<(&str, &str), bool> = role_defaults
-        .iter()
-        .map(|r| ((r.resource.as_str(), r.action.as_str()), r.granted))
-        .collect();
-    let override_map: HashMap<(&str, &str), bool> = user_overrides
-        .iter()
-        .map(|p| ((p.resource.as_str(), p.action.as_str()), p.granted))
-        .collect();
-
-    let mut permissions = Vec::with_capacity(cells);
-
-    for (resource, action) in crate::permissions::permission_cells() {
-        let role_default = role_map.get(&(resource, action)).copied();
-        let user_override = override_map.get(&(resource, action)).copied();
-
-        let effective = if role == "super_admin" {
-            true
-        } else {
-            user_override.or(role_default).unwrap_or(false)
-        };
-
-        permissions.push(UserPermissionItem {
+    // Architecture E: the grid is the person's effective capabilities at the
+    // token's branch, projected onto the legacy cells (one capability per cell),
+    // in the same order as before.
+    let eff =
+        crate::authz::require::effective_for_claims(pool.get_ref(), &claims, claims.branch_id())
+            .await?;
+    let mut permissions: Vec<UserPermissionItem> = crate::permissions::permission_cells()
+        .map(|(resource, action)| UserPermissionItem {
             resource: resource.to_string(),
             action: action.to_string(),
-            granted: effective,
-        });
-    }
+            granted: crate::authz::legacy::granted(&eff, resource, action),
+        })
+        .collect();
 
     // POS v0.5.1 / v0.6.0 gate on `has_permission("shifts", …)`: mirror every
     // `tills:<action>` as `shifts:<action>` while those builds are in the field.

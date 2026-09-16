@@ -20,7 +20,7 @@ use serde::Serialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::{auth::jwt::Claims, db::Db, errors::AppError, models::UserRole};
+use crate::{auth::jwt::Claims, db::Db, errors::AppError};
 
 /// A branch the caller may query.
 #[derive(Debug, Clone, PartialEq)]
@@ -85,48 +85,42 @@ pub async fn org_clock(db: &Db) -> Result<OrgClock, AppError> {
 /// The set of branches this caller may see analytics for — not every branch in
 /// the org, and not just one:
 ///
-///   * `org_admin` → every branch in the org;
-///   * `branch_manager` / `waiter` / `kitchen` → their assignments;
-///   * `teller` → the branch their token is bound to, falling back to
-///     assignments.
+///   * a branch-bound session (a PIN session on a tablet) → that branch;
+///   * an owner, or an org-wide role assignment → every branch in the org;
+///   * anyone else → the branches their live role assignments name.
 ///
 /// Runs on the RLS-scoped tenant pool, so it is already fenced to the caller's
 /// organization before this function adds the branch dimension.
 pub async fn accessible_branches(db: &Db, claims: &Claims) -> Result<Vec<BranchRef>, AppError> {
-    let rows: Vec<(Uuid, String)> = match claims.role {
-        UserRole::OrgAdmin | UserRole::SuperAdmin => {
-            sqlx::query_as("SELECT id, name FROM branches WHERE deleted_at IS NULL ORDER BY name")
+    // A branch-bound session (a PIN session on a tablet) reports on its own
+    // branch and nothing else, whoever holds it. Everyone else gets the
+    // branches their live role assignments cover.
+    let rows: Vec<(Uuid, String)> = if let Some(b) = claims.branch_id() {
+        sqlx::query_as("SELECT id, name FROM branches WHERE id = $1 AND deleted_at IS NULL")
+            .bind(b)
+            .fetch_all(db.get_ref())
+            .await?
+    } else {
+        match crate::authz::scope::branch_scope(db.get_ref(), claims).await? {
+            crate::authz::scope::BranchScope::All => {
+                sqlx::query_as(
+                    "SELECT id, name FROM branches WHERE deleted_at IS NULL ORDER BY name",
+                )
                 .fetch_all(db.get_ref())
                 .await?
-        }
-        UserRole::Teller => match claims.branch_id() {
-            Some(b) => {
-                sqlx::query_as("SELECT id, name FROM branches WHERE id = $1 AND deleted_at IS NULL")
-                    .bind(b)
-                    .fetch_all(db.get_ref())
-                    .await?
             }
-            None => assigned(db, claims.user_id()).await?,
-        },
-        UserRole::BranchManager | UserRole::Waiter | UserRole::Kitchen => {
-            assigned(db, claims.user_id()).await?
+            crate::authz::scope::BranchScope::Only(ids) => sqlx::query_as(
+                "SELECT id, name FROM branches WHERE id = ANY($1) AND deleted_at IS NULL ORDER BY name",
+            )
+            .bind(&ids)
+            .fetch_all(db.get_ref())
+            .await?,
         }
     };
     Ok(rows
         .into_iter()
         .map(|(id, name)| BranchRef { id, name })
         .collect())
-}
-
-async fn assigned(db: &Db, user_id: Uuid) -> Result<Vec<(Uuid, String)>, AppError> {
-    Ok(sqlx::query_as(
-        "SELECT b.id, b.name FROM user_branch_assignments uba \
-         JOIN branches b ON b.id = uba.branch_id AND b.deleted_at IS NULL \
-         WHERE uba.user_id = $1 ORDER BY b.name",
-    )
-    .bind(user_id)
-    .fetch_all(db.get_ref())
-    .await?)
 }
 
 /// Resolve the branch set a request should cover, in priority order:

@@ -32,6 +32,35 @@ async fn by_sql(
     Ok(rows.into_iter().collect())
 }
 
+/// A teller row's grants from the new model: `permissions` (legacy cells, for
+/// older tablets), `capabilities`, `limits`, `ask_manager`, `is_owner`,
+/// `authz_epoch`. Additive fields; old tablets ignore them.
+async fn add_capabilities(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+    branch_id: Uuid,
+    v: &mut Value,
+) -> Result<(), AppError> {
+    let eff = crate::authz::require::effective_on(conn, user_id, Some(branch_id)).await?;
+    let epoch = crate::authz::load::epoch_of(conn, user_id).await?;
+    let mine = crate::authz::api::my_authz(user_id, Some(branch_id), epoch, &eff, false);
+    let mut cells: Vec<String> = crate::permissions::permission_cells()
+        .filter(|(r, a)| crate::authz::legacy::granted(&eff, r, a))
+        .map(|(r, a)| format!("{r}:{a}"))
+        .collect();
+    cells.sort();
+    if let Value::Object(m) = v {
+        m.insert("permissions".into(), serde_json::json!(cells));
+        m.insert("capabilities".into(), serde_json::json!(mine.capabilities));
+        m.insert("limits".into(), serde_json::json!(mine.limits));
+        m.insert("ask_manager".into(), serde_json::json!(mine.ask_manager));
+        m.insert("is_owner".into(), serde_json::json!(mine.owner));
+        m.insert("role_kinds".into(), serde_json::json!(mine.role_kinds));
+        m.insert("authz_epoch".into(), serde_json::json!(epoch));
+    }
+    Ok(())
+}
+
 fn strip(v: &mut Value, keys: &[&str]) {
     if let Value::Object(m) = v {
         for k in keys {
@@ -132,6 +161,9 @@ pub fn projects_sql(ty: &str) -> Option<&'static str> {
         "addon_item" => {
             "EXISTS (SELECT 1 FROM addon_items x WHERE x.id = $ID AND sync_live_addon_item(x.id))"
         }
+        "customer" => {
+            "EXISTS (SELECT 1 FROM customers x WHERE x.id = $ID AND sync_live_customer(x))"
+        }
         _ => return None,
     })
 }
@@ -219,6 +251,19 @@ pub async fn project(
             out
         }
         "addon_item" => crate::menu::handlers::addon_items_by_ids(&mut *conn, org_id, branch_id, ids).await?,
+        // A till searches by name or phone offline. Notes stay in the
+        // dashboard; the phone is shown only to `customers.view` holders.
+        "customer" => {
+            by_sql(
+                conn,
+                "SELECT c.id, json_build_object('id', c.id, 'name', c.name, 'phone', c.phone, \
+                        'phone_key', c.phone_key, 'loyalty_customer_id', c.loyalty_customer_id, \
+                        'updated_at', c.updated_at) \
+                   FROM customers c WHERE c.id = ANY($1)",
+                ids,
+            )
+            .await?
+        }
         "bundle" => {
             let mut out = keyed(
                 crate::bundles::handlers::fetch_bundles_full(&mut *conn, ids).await?,
@@ -331,6 +376,7 @@ pub async fn project(
             .await?
         }
         "teller" => {
+            let mut rows =
             // `permissions`: the person's EFFECTIVE granted `resource:action` pairs
             // (user override → role default), granted only, the same resolution as
             // `GET /auth/permissions` — so a grant or a revocation reaches a till
@@ -338,7 +384,7 @@ pub async fn project(
             by_sql(
                 conn,
                 "SELECT u.id, json_build_object('id', u.id, 'user_id', u.id, 'name', u.name, 'role', u.role::text, \
-                        'is_active', u.is_active, 'offline_pin_hash', u.offline_pin_hash, \
+                        'is_active', u.is_active, \
                         'permissions', COALESCE((SELECT json_agg(g.p ORDER BY g.p) FROM ( \
                             SELECT rp.resource::text || ':' || rp.action::text AS p \
                               FROM role_permissions rp \
@@ -351,7 +397,13 @@ pub async fn project(
                    FROM users u WHERE u.id = ANY($1) AND u.deleted_at IS NULL",
                 ids,
             )
-            .await?
+            .await?;
+            // Architecture E: overwrite with the person's effective grants AT THIS
+            // BRANCH, and add the capability view newer tills gate on.
+            for (id, v) in rows.iter_mut() {
+                add_capabilities(conn, *id, branch_id, v).await?;
+            }
+            rows
         }
         "floor_section" => {
             by_sql(

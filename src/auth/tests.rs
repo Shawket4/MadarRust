@@ -342,7 +342,7 @@ async fn test_login_pin_invalid_branch_returns_401(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn test_login_pin_unassigned_org_teller_allowed(pool: PgPool) {
+async fn test_login_pin_teller_refused_at_a_branch_they_are_not_allowed_at(pool: PgPool) {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
@@ -380,14 +380,339 @@ async fn test_login_pin_unassigned_org_teller_allowed(pool: PgPool) {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    // D13: tellers are ORG-scoped — a valid teller in the branch's org may sign
-    // in at ANY branch in that org, even one they're not explicitly assigned to.
+    // D13 ("tellers are org-scoped, no per-branch gate at the till") is
+    // SUPERSEDED: POS_SIGNIN_OVERHAUL.md §5.2 "A + B". A person who HAS an
+    // explicit branch allow-list is held to it at the till, so the dashboard's
+    // per-branch toggles finally bite. 403, not 401: the name and PIN were
+    // right, the branch was not.
     assert_eq!(
         resp.status(),
-        200,
-        "org teller should be allowed at any org branch"
+        403,
+        "a teller listed only at branch A must not sign in at branch B"
     );
+
+    // The one failed sign-in with an identity (§3.4): counted per person in the
+    // owner's review queue. A second try is the same item, attempts = 2.
+    let req = test::TestRequest::post()
+        .uri("/auth/login")
+        .set_json(&json!({"name": "Teller One", "pin": "1234", "branch_id": branch_b}))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 403);
+    let (n, attempts): (i64, Option<i32>) = sqlx::query_as(
+        "SELECT count(*), max((details->>'attempts')::int) FROM authz_replay_flags
+          WHERE author_id = $1 AND branch_id = $2 AND reason = 'pin_wrong_branch'",
+    )
+    .bind(user_id)
+    .bind(branch_b)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((n, attempts), (1, Some(2)), "one owner item, two attempts");
+
+    // ...and at the branch they ARE allowed at, they sign in normally.
+    let req = test::TestRequest::post()
+        .uri("/auth/login")
+        .set_json(&json!({
+            "name": "Teller One",
+            "pin": "1234",
+            "branch_id": branch_a
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200, "allowed branch should sign in");
+}
+
+/// Wrong PINs earn a GROWING DELAY, never a lock (POS_SIGNIN_OVERHAUL.md §3.4).
+/// A wrong PIN matches nobody, so there is no account to lock; and the tablet is
+/// shared, so a lock would stop the shop. The refusal carries the remaining wait
+/// so the PIN pad can count down instead of guessing.
+#[sqlx::test(migrations = "./migrations")]
+async fn wrong_pins_earn_a_growing_delay_and_a_correct_one_clears_it(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let hash = bcrypt::hash("135790", bcrypt::DEFAULT_COST).unwrap();
+    sqlx::query!(
+        "INSERT INTO users (org_id, name, role, pin_hash)
+         VALUES ($1, 'Patient One', 'teller'::user_role, $2)",
+        org_id,
+        hash
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let attempt = |pin: &str| {
+        test::TestRequest::post()
+            .uri("/auth/login")
+            .insert_header((crate::tickets::DEVICE_ID_HEADER, "tablet-1"))
+            .set_json(&json!({"name": "Patient One", "pin": pin, "branch_id": branch_id}))
+            .to_request()
+    };
+
+    // The free misses: an ordinary mistype costs nothing. The miss that trips
+    // the delay is itself still a plain refusal — the wait is checked BEFORE the
+    // lookup, so it lands on the NEXT attempt.
+    for i in 0..=crate::auth::pin_throttle::FREE_ATTEMPTS {
+        let resp = test::call_service(&app, attempt("000000")).await;
+        assert_eq!(resp.status(), 401, "miss {i} should be a plain refusal");
+    }
+
+    // One more, and the wait bites.
+    let resp = test::call_service(&app, attempt("000000")).await;
+    assert_eq!(resp.status(), 429, "the delay has begun");
+    let retry_after = resp
+        .headers()
+        .get("Retry-After")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<i64>().ok())
+        .expect("Retry-After names the wait");
+    assert!((1..=5).contains(&retry_after), "{retry_after}");
     let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["code"], "PIN_THROTTLED");
+    assert_eq!(
+        body["retry_after_seconds"], retry_after,
+        "the POS counts down from this"
+    );
+
+    // Even the RIGHT PIN waits: the delay is on the place, not the person.
+    let resp = test::call_service(&app, attempt("135790")).await;
+    assert_eq!(resp.status(), 429);
+
+    // Once the wait is over, the correct PIN works and clears the run.
+    sqlx::query("UPDATE pin_attempts SET blocked_until = now() - interval '1 second'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let resp = test::call_service(&app, attempt("135790")).await;
+    assert_eq!(resp.status(), 200);
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM pin_attempts")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "a correct PIN forgets the run");
+}
+
+/// PIN-only sign-in (POS_SIGNIN_OVERHAUL.md §2, §8.5): no name on the wire.
+/// A stamped PIN is FOUND by its fingerprint; an unstamped one by the scan,
+/// which stamps it; a PIN two people share is refused as ambiguous rather than
+/// guessed; an unknown PIN is a 401 that counts toward the delay.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_pin_alone_signs_the_right_person_in(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let add = |name: &'static str, pin: &'static str| {
+        let pool = pool.clone();
+        async move {
+            let id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO users (id, org_id, name, role, pin_hash)
+                 VALUES ($1, $2, $3, 'teller'::user_role, $4)",
+            )
+            .bind(id)
+            .bind(org_id)
+            .bind(name)
+            .bind(bcrypt::hash(pin, 4).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+            id
+        }
+    };
+    let sara = add("Sara", "246810").await;
+    let attempt = |pin: &str| {
+        test::TestRequest::post()
+            .uri("/auth/login")
+            .set_json(&json!({"pin": pin, "branch_id": branch_id}))
+            .to_request()
+    };
+
+    // Unstamped: found by the scan, and stamped on the way through.
+    let resp = test::call_service(&app, attempt("246810")).await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["user"]["id"], sara.to_string());
+    let stamped: bool =
+        sqlx::query_scalar("SELECT pin_fingerprint IS NOT NULL FROM users WHERE id = $1")
+            .bind(sara)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(stamped);
+
+    // Stamped: found by the fingerprint. Another unstamped holder with a
+    // different PIN does not get in the way.
+    add("Omar", "135791").await;
+    let resp = test::call_service(&app, attempt("246810")).await;
+    assert_eq!(resp.status(), 200);
+
+    // Unknown PIN: 401, and the attempt is counted (no name = PIN-only).
+    let resp = test::call_service(&app, attempt("999999")).await;
+    assert_eq!(resp.status(), 401);
+    let counted: i64 =
+        sqlx::query_scalar("SELECT COALESCE(max(fails), 0)::bigint FROM pin_attempts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(counted, 1);
+
+    // Two unstamped people share a PIN (pre-rollout data): refused, not guessed.
+    add("Dup One", "112233").await;
+    add("Dup Two", "112233").await;
+    let resp = test::call_service(&app, attempt("112233")).await;
+    assert_eq!(resp.status(), 409);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["code"], "PIN_NOT_UNIQUE");
+}
+
+/// Old tablets (v0.5–v0.7) send a name and no device id: the new place-delay
+/// never touches them, however many misses (§3.4, "leave them alone").
+#[sqlx::test(migrations = "./migrations")]
+async fn old_tablets_without_a_device_id_are_never_delayed(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    // Ten: the per-address governor on /auth/login allows a burst of ten, and
+    // "no pin_attempts row at all" below proves neither bucket was touched.
+    for _ in 0..10 {
+        let req = test::TestRequest::post()
+            .uri("/auth/login")
+            .set_json(&json!({"name": "Nobody", "pin": "000000", "branch_id": branch_id}))
+            .to_request();
+        assert_eq!(test::call_service(&app, req).await.status(), 401);
+    }
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM pin_attempts")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+}
+
+/// The keyed PIN fingerprint (POS_SIGNIN_OVERHAUL.md §2, §6). Salted hashes
+/// cannot be fingerprinted by a migration, so the column fills in at the one
+/// moment the plaintext exists: a successful sign-in.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_successful_pin_login_backfills_the_fingerprint(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = Uuid::new_v4();
+    let hash = bcrypt::hash("1234", bcrypt::DEFAULT_COST).unwrap();
+    sqlx::query!(
+        "INSERT INTO users (id, org_id, name, role, pin_hash)
+         VALUES ($1, $2, 'Fingerprint Me', 'teller'::user_role, $3)",
+        user_id,
+        org_id,
+        hash
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let before: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT pin_fingerprint FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(before.is_none(), "nothing to fingerprint before a sign-in");
+
+    let req = test::TestRequest::post()
+        .uri("/auth/login")
+        .set_json(&json!({"name": "Fingerprint Me", "pin": "1234", "branch_id": branch_id}))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 200);
+
+    let after: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT pin_fingerprint FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        after,
+        Some(crate::auth::pin_fingerprint::fingerprint(org_id, "1234")),
+        "the fingerprint is HMAC(key, org || pin) under the current key"
+    );
+    // It is a LOOKUP key, never something a client sees.
+    assert!(!after.unwrap().is_empty());
+}
+
+/// The migration rule (POS_SIGNIN_OVERHAUL.md §5.3): a person with NO explicit
+/// branches keeps working everywhere in their org. Ten PIN holders in prod have
+/// no allow-list row; reading "listed nowhere" as "allowed nowhere" would lock
+/// them all out overnight.
+#[sqlx::test(migrations = "./migrations")]
+async fn test_login_pin_teller_with_no_branch_list_works_anywhere(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let _branch_a = seed_branch(&pool, org_id).await;
+    let branch_b = seed_branch(&pool, org_id).await;
+    let user_id = Uuid::new_v4();
+    let hash = bcrypt::hash("1234", bcrypt::DEFAULT_COST).unwrap();
+    sqlx::query!(
+        "INSERT INTO users (id, org_id, name, role, pin_hash)
+         VALUES ($1, $2, 'Teller Free', 'teller'::user_role, $3)",
+        user_id,
+        org_id,
+        hash
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Deliberately NO user_branch_assignments row.
+
+    let req = test::TestRequest::post()
+        .uri("/auth/login")
+        .set_json(&json!({
+            "name": "Teller Free",
+            "pin": "1234",
+            "branch_id": branch_b
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status();
+    let raw = test::read_body(resp).await;
+    let text = String::from_utf8_lossy(&raw).to_string();
+    assert_eq!(
+        status, 200,
+        "a teller with no explicit branches works everywhere in their org, got {text}"
+    );
+    let body: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert!(
         body["token"]
             .as_str()
@@ -1359,4 +1684,63 @@ async fn test_org_status_unknown_org_not_allowed(pool: PgPool) {
         !cache.is_allowed(&pool, Uuid::new_v4()).await.unwrap(),
         "an unknown org id must not be allowed"
     );
+}
+
+/// Fifty tablets behind one shop router sign in at shift change (owner
+/// decision 2026-09-16): one address gets 60 login attempts a minute, and the
+/// per-address ceiling still exists beyond that. PIN guessing is held back by
+/// the per-device and per-branch delay, not by this.
+#[sqlx::test(migrations = "./migrations")]
+async fn one_address_gets_sixty_login_attempts_a_minute(pool: PgPool) {
+    if !crate::rate_limit::rate_limiting_enabled() {
+        return;
+    }
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    // An empty body is refused by the handler at once, so the calls run far
+    // faster than the bucket refills (one a second).
+    let attempt = || {
+        test::TestRequest::post()
+            .uri("/auth/login")
+            .set_json(json!({}))
+            .to_request()
+    };
+    for i in 0..routes::LOGIN_PER_MINUTE {
+        let resp = test::call_service(&app, attempt()).await;
+        assert_ne!(
+            resp.status(),
+            429,
+            "attempt {i} is within the address allowance"
+        );
+    }
+    let mut limited = false;
+    for _ in 0..5 {
+        if test::call_service(&app, attempt()).await.status() == 429 {
+            limited = true;
+            break;
+        }
+    }
+    assert!(limited, "past sixty the address is still limited");
+
+    // Activation codes keep their own tighter bucket.
+    let mut refused = 0;
+    for _ in 0..12 {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/auth/activate-device")
+                .set_json(json!({}))
+                .to_request(),
+        )
+        .await;
+        if resp.status() == 429 {
+            refused += 1;
+        }
+    }
+    assert!(refused > 0, "activation stays at ten a minute");
 }

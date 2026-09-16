@@ -8,9 +8,12 @@
 //! because the device was not known yet. Codes are NOT unique: two devices
 //! sharing a code offline is reported (`code_conflict`), never refused.
 
+pub mod activation;
 pub mod handlers;
 pub mod routes;
 
+#[cfg(test)]
+mod activation_tests;
 #[cfg(test)]
 mod tests;
 

@@ -246,7 +246,7 @@ async fn set_bump(
     };
     require_branch_access(pool.get_ref(), &claims, branch_id).await?;
 
-    let actor = ActingContext::live(&claims)?;
+    let actor = ActingContext::live(&claims)?.scoped(pool.get_ref()).await?;
     set_bump_inner(pool.get_ref(), Some(hub.get_ref()), &actor, item_id, bumped).await
 }
 

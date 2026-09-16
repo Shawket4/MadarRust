@@ -13,6 +13,22 @@ fn org_admin(uid: Uuid, org: Uuid) -> String {
     create_token(&secret(), uid, Some(org), UserRole::OrgAdmin, None, 24).unwrap()
 }
 
+/// A real org-admin row plus its token. Architecture E resolves access from the
+/// person's own role assignments, so a token minted for an id with no `users`
+/// row now holds nothing; it used to be believed on its role claim alone.
+async fn seed_org_admin(pool: &PgPool, org: Uuid) -> String {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO users (id, name, role, org_id, password_hash) VALUES ($1,'Admin','org_admin',$2,'x')",
+    )
+    .bind(id)
+    .bind(org)
+    .execute(pool)
+    .await
+    .unwrap();
+    org_admin(id, org)
+}
+
 async fn seed_org(pool: &PgPool) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1,'Org',$2)")
@@ -122,7 +138,7 @@ async fn station_crud_and_single_default(pool: PgPool) {
     let branch = seed_branch(&pool, org).await;
     grant(&pool, "org_admin", "create").await;
     grant(&pool, "org_admin", "read").await;
-    let t = org_admin(Uuid::new_v4(), org);
+    let t = seed_org_admin(&pool, org).await;
 
     for (name, def) in [("Grill", true), ("Bar", true)] {
         let resp = test::call_service(

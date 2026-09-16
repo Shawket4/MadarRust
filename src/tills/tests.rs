@@ -2263,6 +2263,7 @@ async fn replay_open_till_duplicate_flags_and_both_are_visible(pool: PgPool) {
         org_id,
         role: UserRole::OrgAdmin,
         replay,
+        own_till_only: false,
     };
 
     let (first, created) = open_till_inner(

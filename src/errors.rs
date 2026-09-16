@@ -62,6 +62,13 @@ pub enum AppError {
     #[error("{0}")]
     TooManyRequests(String),
 
+    /// Too many wrong PINs at this till. Carries the remaining wait in seconds
+    /// so the POS can show a live countdown instead of guessing
+    /// (POS_SIGNIN_OVERHAUL.md §3.4). A wrong PIN matches nobody, so there is
+    /// no account to lock — and a shared counter tablet must never be locked.
+    #[error("Too many wrong PINs. Try again in {seconds} seconds.")]
+    PinThrottled { seconds: i64 },
+
     #[error("Internal error")]
     Internal,
 }
@@ -84,6 +91,11 @@ pub struct ErrorBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<Object>)]
     pub till: Option<serde_json::Value>,
+    /// How long to wait before trying again, in seconds. Present on a
+    /// `PIN_THROTTLED` refusal, absent everywhere else, so the PIN pad can run
+    /// a countdown rather than inventing one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_seconds: Option<i64>,
 }
 
 /// Convert sqlx errors into `AppError`. `RowNotFound` — what `fetch_one` /
@@ -122,6 +134,7 @@ impl AppError {
             // The dashboard branches on this to say "wait a moment" rather
             // than showing a raw error for something that is not a fault.
             AppError::TooManyRequests(_) => Some("EXPORT_RATE_LIMITED".to_string()),
+            AppError::PinThrottled { .. } => Some("PIN_THROTTLED".to_string()),
             AppError::Refused { code, .. }
             | AppError::RefusedWith { code, .. }
             | AppError::Coded { code, .. } => Some((*code).to_string()),
@@ -194,6 +207,10 @@ impl actix_web::ResponseError for AppError {
                 AppError::RefusedWith { till, .. } => Some(till.clone()),
                 _ => None,
             },
+            retry_after_seconds: match self {
+                AppError::PinThrottled { seconds } => Some(*seconds),
+                _ => None,
+            },
         };
         match self {
             AppError::Unauthorized(_) => HttpResponse::Unauthorized().json(body),
@@ -212,6 +229,11 @@ impl actix_web::ResponseError for AppError {
             AppError::Db(e) => HttpResponse::build(Self::db_status(e)).json(body),
             AppError::ServiceUnavailable(_) => HttpResponse::ServiceUnavailable().json(body),
             AppError::TooManyRequests(_) => HttpResponse::TooManyRequests().json(body),
+            // Retry-After as well as the body field: the header is the standard
+            // any HTTP client already understands.
+            AppError::PinThrottled { seconds } => HttpResponse::TooManyRequests()
+                .insert_header(("Retry-After", seconds.to_string()))
+                .json(body),
             AppError::Internal => HttpResponse::InternalServerError().json(body),
         }
     }

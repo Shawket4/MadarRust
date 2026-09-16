@@ -1377,52 +1377,7 @@ async fn require_branch_access(
     claims: &Claims,
     branch_id: Uuid,
 ) -> Result<(), AppError> {
-    if claims.role == UserRole::SuperAdmin {
-        return Ok(());
-    }
-
-    let branch_org: Option<Uuid> =
-        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
-            .bind(branch_id)
-            .fetch_optional(pool)
-            .await?
-            .flatten();
-
-    let branch_org = branch_org.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
-
-    if claims.org_id() != Some(branch_org) {
-        return Err(AppError::Forbidden(
-            "Branch belongs to a different org".into(),
-        ));
-    }
-
-    if claims.role == UserRole::OrgAdmin {
-        return Ok(());
-    }
-
-    let assigned: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)"
-    )
-    .bind(claims.user_id())
-    .bind(branch_id)
-    .fetch_one(pool)
-    .await?;
-
-    if !assigned {
-        return Err(AppError::Forbidden("Not assigned to this branch".into()));
-    }
-
-    // A teller token is bound to the branch it authenticated for: a token minted
-    // for one branch must not act on another, even when the teller is assigned to
-    // both. The None guard keeps legacy/non-teller tokens working (V26).
-    if claims.role == UserRole::Teller
-        && let Some(token_branch) = claims.branch_id()
-        && token_branch != branch_id
-    {
-        return Err(AppError::Forbidden(
-            "This device is signed in to a different branch.".into(),
-        ));
-    }
-
-    Ok(())
+    // Architecture E: the branches a person may act on come from their live
+    // role assignments, not from their role name (see `authz::scope`).
+    crate::authz::scope::require_branch_access_bound(pool, claims, branch_id).await
 }

@@ -4,14 +4,109 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::{
-    auth::{
-        guards::{require_org_admin, require_same_org, require_super_admin},
-        jwt::Claims,
-    },
+    auth::{guards::require_same_org, jwt::Claims},
     errors::{AppError, AppErrorResponse},
     models::{User, UserPublic, UserRole},
-    permissions::checker::check_permission,
+    permissions::{checker::check_permission, guard},
 };
+
+// ── PINs ──────────────────────────────────────────────────────
+
+/// How long a NEWLY ISSUED PIN is (POS_SIGNIN_OVERHAUL.md §3.2, owner decision
+/// 2026-09-16): six digits, one rule for every org. Four was thin once PINs are
+/// unique across a whole company — a 30-branch chain shares 10,000 of them, so
+/// "PIN taken" becomes routine and a colleague can guess. PINs already in use
+/// keep working at whatever length they have; only setting a new one is held to
+/// this.
+pub const NEW_PIN_LEN: usize = 6;
+
+pub(crate) fn check_new_pin(pin: &str) -> Result<(), AppError> {
+    if pin.len() == NEW_PIN_LEN && pin.chars().all(|c| c.is_ascii_digit()) {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(format!(
+            "A new PIN must be {NEW_PIN_LEN} digits"
+        )))
+    }
+}
+
+/// Org-wide uniqueness (§3.1): a PIN must identify ONE person wherever the
+/// device stands. Branch-scoped uniqueness would make the same PIN two people
+/// at two branches, and would collide someone allowed at both with themselves.
+///
+/// The check is a single indexed lookup on the fingerprint — the same tool that
+/// makes sign-in a lookup — so no plaintext is stored or compared. It cannot see
+/// a PIN that has no fingerprint yet (§6); the partial unique index is the
+/// backstop, and every PIN is re-issued at rollout.
+async fn pin_is_free(
+    pool: &sqlx::PgPool,
+    org: Uuid,
+    pin: &str,
+    except: Option<Uuid>,
+) -> Result<bool, AppError> {
+    let fp = crate::auth::pin_fingerprint::fingerprint(org, pin);
+    let taken: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM users
+                        WHERE org_id = $1 AND pin_fingerprint = $2
+                          AND deleted_at IS NULL AND ($3::uuid IS NULL OR id <> $3))",
+    )
+    .bind(org)
+    .bind(&fp)
+    .bind(except)
+    .fetch_one(pool)
+    .await?;
+    Ok(!taken)
+}
+
+fn pin_taken() -> AppError {
+    AppError::Conflict("Someone in this organization already uses that PIN".into())
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct PinSuggestion {
+    /// Shown to the admin ONCE. Nothing stores it until it is set on a person.
+    #[schema(example = "402913")]
+    pub pin: String,
+}
+
+/// A free PIN for this org.
+///
+/// The owner's question was how the server can suggest a PIN when it stores no
+/// plaintext. The fingerprint answers it: pick a candidate, fingerprint it, one
+/// indexed lookup says taken or free. A handful of tries at most, and
+/// uniqueness stays a database property rather than something the application
+/// hopes it got right.
+#[utoipa::path(
+    get,
+    path = "/users/pin-suggestion",
+    tag = "users",
+    responses(
+        (status = 200, description = "A PIN nobody in this org is using", body = PinSuggestion),
+        AppErrorResponse,
+    ),
+    security(("bearer_jwt" = []))
+)]
+pub async fn suggest_pin(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "users", "create").await?;
+    let org = claims
+        .org_id()
+        .ok_or_else(|| AppError::BadRequest("Choose an organization first".into()))?;
+
+    for _ in 0..40 {
+        // OS randomness without a new dependency, the same way the offline PIN
+        // salt is minted (auth::offline): a v4 uuid is 122 random bits.
+        let bytes = *Uuid::new_v4().as_bytes();
+        let n: [u8; 8] = bytes[8..16].try_into().expect("8 of 16 bytes");
+        let value = u64::from_le_bytes(n) % 10u64.pow(NEW_PIN_LEN as u32);
+        let pin = format!("{value:0width$}", width = NEW_PIN_LEN);
+        if pin_is_free(pool.get_ref(), org, &pin, None).await? {
+            return Ok(HttpResponse::Ok().json(PinSuggestion { pin }));
+        }
+    }
+    // A million combinations and forty misses means something is very wrong.
+    Err(AppError::Internal)
+}
 
 // ── Request types ─────────────────────────────────────────────
 
@@ -29,12 +124,14 @@ pub struct CreateUserRequest {
     /// Required when `role` is anything other than `teller`. Plain text;
     /// hashed server-side with bcrypt before storage.
     pub password: Option<String>,
-    /// Required when `role = teller`. 4–6 ASCII digits.
+    /// Required when `role = teller`. A NEW PIN is exactly 6 ASCII digits
+    /// (owner decision, 2026-09-16); PINs already in use keep working at their
+    /// old length. Ask `GET /users/pin-suggestion` for a free one.
     #[schema(
-        pattern = "^[0-9]{4,6}$",
-        min_length = 4,
+        pattern = "^[0-9]{6}$",
+        min_length = 6,
         max_length = 6,
-        example = "1234"
+        example = "402913"
     )]
     pub pin: Option<String>,
     /// Branches to assign the new user to immediately. Branch managers
@@ -69,7 +166,9 @@ pub struct UpdateUserRequest {
     pub phone: Option<String>,
     /// Plain-text new password. Server-side bcrypt-hashed.
     pub password: Option<String>,
-    #[schema(pattern = "^[0-9]{4,6}$", min_length = 4, max_length = 6)]
+    /// A NEW PIN is exactly 6 digits; an existing shorter one keeps working
+    /// until it is changed.
+    #[schema(pattern = "^[0-9]{6}$", min_length = 6, max_length = 6)]
     pub pin: Option<String>,
     /// Only org-admins and above can change roles. Promoting to
     /// `super_admin` requires the caller to be a super-admin.
@@ -107,39 +206,50 @@ pub async fn create_user(
     check_permission(pool.get_ref(), &claims, "users", "create").await?;
     require_same_org(&claims, Some(body.org_id))?;
 
-    if claims.role == UserRole::BranchManager {
-        if !matches!(
-            body.role,
-            UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
-        ) {
-            return Err(AppError::Forbidden(
-                "Branch managers can only create teller, waiter and kitchen accounts".into(),
-            ));
-        }
+    // Holding `users:create` is necessary, never sufficient: the caller must
+    // already hold everything the new account's role would give it (G2), and
+    // only an owner creates an owner (see permissions::guard).
+    guard::require_can_create(pool.get_ref(), &claims, &body.role).await?;
 
-        if let Some(branch_ids) = &body.branch_ids {
-            for bid in branch_ids {
-                let is_assigned: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)"
-                )
-                .bind(claims.user_id())
-                .bind(bid)
-                .fetch_one(pool.get_ref())
-                .await?;
-                if !is_assigned {
-                    return Err(AppError::Forbidden(format!(
-                        "You cannot assign a user to branch {} because it is not assigned to you",
-                        bid
-                    )));
-                }
+    if claims.role == UserRole::BranchManager
+        && let Some(branch_ids) = &body.branch_ids
+    {
+        for bid in branch_ids {
+            let is_assigned: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)"
+            )
+            .bind(claims.user_id())
+            .bind(bid)
+            .fetch_one(pool.get_ref())
+            .await?;
+            if !is_assigned {
+                return Err(AppError::Forbidden(format!(
+                    "You cannot assign a user to branch {} because it is not assigned to you",
+                    bid
+                )));
             }
         }
     }
 
-    if claims.role == UserRole::OrgAdmin && body.role == UserRole::SuperAdmin {
-        return Err(AppError::Forbidden(
-            "Only super admins can create super admin accounts".into(),
-        ));
+    // S8: every branch must belong to the new user's org, checked in code before
+    // anything is written (RLS used to catch it only after the user row existed).
+    if let Some(branch_ids) = &body.branch_ids
+        && !branch_ids.is_empty()
+    {
+        let foreign: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM unnest($1::uuid[]) AS b(id)
+              WHERE NOT EXISTS (SELECT 1 FROM branches br
+                                 WHERE br.id = b.id AND br.org_id = $2 AND br.deleted_at IS NULL)",
+        )
+        .bind(branch_ids)
+        .bind(body.org_id)
+        .fetch_one(pool.get_ref())
+        .await?;
+        if foreign > 0 {
+            return Err(AppError::BadRequest(
+                "Every branch must belong to the user's organization".into(),
+            ));
+        }
     }
 
     match body.role {
@@ -150,11 +260,19 @@ pub async fn create_user(
                 ));
             }
             let pin = body.pin.as_deref().unwrap();
-            if pin.len() < 4 || pin.len() > 6 || !pin.chars().all(|c| c.is_ascii_digit()) {
-                return Err(AppError::BadRequest("PIN must be 4–6 digits".into()));
+            check_new_pin(pin)?;
+            if !pin_is_free(pool.get_ref(), body.org_id, pin, None).await? {
+                return Err(pin_taken());
             }
         }
         _ => {
+            // A manager or owner may also work a till: an optional PIN.
+            if let Some(pin) = body.pin.as_deref() {
+                check_new_pin(pin)?;
+                if !pin_is_free(pool.get_ref(), body.org_id, pin, None).await? {
+                    return Err(pin_taken());
+                }
+            }
             if body.password.is_none() {
                 return Err(AppError::BadRequest(
                     "Admins and managers require a password".into(),
@@ -218,10 +336,12 @@ pub async fn create_user(
         .transpose()
         .map_err(|_| AppError::Internal)?;
 
+    let mut tx = pool.begin().await?;
     let user = sqlx::query_as::<_, User>(
         r#"
-        INSERT INTO users (org_id, name, email, phone, role, password_hash, pin_hash)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO users (org_id, name, email, phone, role, password_hash, pin_hash,
+                           pin_fingerprint)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         RETURNING id, org_id, name, email, phone,
                   password_hash, pin_hash, role,
                   is_active, last_login_at,
@@ -235,7 +355,15 @@ pub async fn create_user(
     .bind(&body.role)
     .bind(password_hash)
     .bind(pin_hash)
-    .fetch_one(pool.get_ref())
+    // The keyed fingerprint (POS_SIGNIN_OVERHAUL.md §2): stamped here because
+    // this is one of the two moments the plaintext PIN exists — the other is a
+    // successful sign-in. Lookup only; the salted hash still verifies.
+    .bind(
+        body.pin
+            .as_deref()
+            .map(|p| crate::auth::pin_fingerprint::fingerprint(body.org_id, p)),
+    )
+    .fetch_one(&mut *tx)
     .await?;
 
     if let Some(branch_ids) = &body.branch_ids {
@@ -250,10 +378,11 @@ pub async fn create_user(
             .bind(user.id)
             .bind(bid)
             .bind(claims.user_id())
-            .execute(pool.get_ref())
+            .execute(&mut *tx)
             .await?;
         }
     }
+    tx.commit().await?;
 
     Ok(HttpResponse::Created().json(CreateUserResponse { user: user.into() }))
 }
@@ -456,56 +585,59 @@ pub async fn update_user(
 
     require_same_org(&claims, existing.org_id)?;
 
-    // Vertical-privilege guard (V4): a caller may only reset credentials / toggle
-    // status / change the role of a STRICTLY lower-privileged user. This stops a
-    // branch_manager from taking over an org_admin (even on a shared branch), or
-    // an org_admin from resetting a super_admin's credentials.
-    let rank = |r: &UserRole| match r {
-        UserRole::SuperAdmin => 3u8,
-        UserRole::OrgAdmin => 2,
-        UserRole::BranchManager => 1,
-        UserRole::Teller => 0,
-        UserRole::Waiter => 0,
-        UserRole::Kitchen => 0,
-    };
-    let sensitive = body.password.is_some()
-        || body.pin.is_some()
-        || body.is_active.is_some()
-        || body.role.is_some();
-    if sensitive && *user_id != claims.user_id() && rank(&existing.role) > rank(&claims.role) {
-        return Err(AppError::Forbidden(
-            "You cannot modify a user with higher privileges".into(),
-        ));
+    // S5 / G4-G6 (permissions::guard). Editing someone else requires dominating
+    // their role now and the role they would get; nobody changes their own role
+    // or active flag; the last active owner cannot be demoted or deactivated.
+    let is_self = *user_id == claims.user_id();
+    if is_self {
+        if body.role.as_ref().is_some_and(|r| *r != existing.role) || body.is_active == Some(false)
+        {
+            return Err(AppError::Forbidden(
+                "You cannot change your own role or deactivate yourself".into(),
+            ));
+        }
+    } else {
+        guard::require_dominance(
+            pool.get_ref(),
+            &claims,
+            *user_id,
+            crate::authz::Cap::StaffUsersEdit,
+        )
+        .await?;
+        if let Some(new_role) = &body.role {
+            guard::require_can_create(pool.get_ref(), &claims, new_role).await?;
+        }
     }
 
-    if claims.role == UserRole::BranchManager && claims.user_id() != *user_id {
-        let same_branch: bool = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS(
-                SELECT 1 FROM user_branch_assignments uba1
-                JOIN user_branch_assignments uba2 ON uba2.branch_id = uba1.branch_id
-                WHERE uba1.user_id = $1 AND uba2.user_id = $2
-            )
-            "#,
-        )
-        .bind(*user_id)
-        .bind(claims.user_id())
-        .fetch_one(pool.get_ref())
-        .await?;
-
-        if !same_branch {
+    if claims.role == UserRole::BranchManager && !is_self {
+        let mut conn = pool.acquire().await?;
+        if !guard::share_a_branch(&mut conn, *user_id, claims.user_id()).await? {
             return Err(AppError::Forbidden(
                 "You do not have access to this user".into(),
             ));
         }
     }
 
-    if body.role.is_some() {
-        require_org_admin(&claims)?;
+    let demotes_owner = existing.role == UserRole::OrgAdmin
+        && existing.is_active
+        && (body.role.as_ref().is_some_and(|r| *r != UserRole::OrgAdmin)
+            || body.is_active == Some(false));
+    if demotes_owner && let Some(org) = existing.org_id {
+        let mut conn = pool.acquire().await?;
+        if guard::is_last_active_owner(&mut conn, org, existing.id).await? {
+            return Err(guard::last_owner_error());
+        }
     }
 
-    if body.role == Some(UserRole::SuperAdmin) {
-        require_super_admin(&claims)?;
+    // A new PIN is held to the current length rule and to org-wide uniqueness,
+    // which the update path never checked at all.
+    if let Some(pin) = body.pin.as_deref() {
+        check_new_pin(pin)?;
+        if let Some(org) = existing.org_id
+            && !pin_is_free(pool.get_ref(), org, pin, Some(existing.id)).await?
+        {
+            return Err(pin_taken());
+        }
     }
 
     let password_hash = body
@@ -532,6 +664,9 @@ pub async fn update_user(
             is_active     = COALESCE($6, is_active),
             password_hash = COALESCE($7, password_hash),
             pin_hash      = COALESCE($8, pin_hash),
+            pin_fingerprint = COALESCE($10, pin_fingerprint),
+            -- A password, role or active-flag change ends every web session.
+            sessions_valid_after = CASE WHEN $9 THEN NOW() ELSE sessions_valid_after END,
             updated_at    = NOW()
         WHERE id = $1 AND deleted_at IS NULL
         RETURNING id, org_id, name, email, phone,
@@ -548,6 +683,20 @@ pub async fn update_user(
     .bind(body.is_active)
     .bind(password_hash)
     .bind(pin_hash)
+    .bind(
+        body.password.is_some()
+            || body.role.as_ref().is_some_and(|r| *r != existing.role)
+            || body.is_active == Some(false),
+    )
+    // A new PIN gets a new fingerprint in the same statement, so the two can
+    // never disagree. Without an org (a platform account) there is nothing to
+    // scope it by and nothing that signs in at a till.
+    .bind(
+        body.pin
+            .as_deref()
+            .zip(existing.org_id)
+            .map(|(p, org)| crate::auth::pin_fingerprint::fingerprint(org, p)),
+    )
     .fetch_optional(pool.get_ref())
     .await?
     .ok_or_else(|| AppError::NotFound("User not found".into()))?;
@@ -588,33 +737,35 @@ pub async fn delete_user(
 
     require_same_org(&claims, user.org_id)?;
 
-    if user.role == UserRole::SuperAdmin {
-        require_super_admin(&claims)?;
+    if user.id == claims.user_id() {
+        return Err(AppError::Forbidden("You cannot delete yourself".into()));
     }
+    guard::require_dominance(
+        pool.get_ref(),
+        &claims,
+        *user_id,
+        crate::authz::Cap::StaffUsersDelete,
+    )
+    .await?;
 
-    if claims.role == UserRole::BranchManager {
-        let same_branch: bool = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS(
-                SELECT 1 FROM user_branch_assignments uba1
-                JOIN user_branch_assignments uba2 ON uba2.branch_id = uba1.branch_id
-                WHERE uba1.user_id = $1 AND uba2.user_id = $2
-            )
-            "#,
-        )
-        .bind(*user_id)
-        .bind(claims.user_id())
-        .fetch_one(pool.get_ref())
-        .await?;
-
-        if !same_branch {
-            return Err(AppError::Forbidden(
-                "You can only delete users assigned to your branches".into(),
-            ));
-        }
+    let mut conn = pool.acquire().await?;
+    if claims.role == UserRole::BranchManager
+        && !guard::share_a_branch(&mut conn, *user_id, claims.user_id()).await?
+    {
+        return Err(AppError::Forbidden(
+            "You can only delete users assigned to your branches".into(),
+        ));
     }
+    if user.role == UserRole::OrgAdmin
+        && user.is_active
+        && let Some(org) = user.org_id
+        && guard::is_last_active_owner(&mut conn, org, user.id).await?
+    {
+        return Err(guard::last_owner_error());
+    }
+    drop(conn);
 
-    sqlx::query("UPDATE users SET deleted_at = NOW() WHERE id = $1")
+    sqlx::query("UPDATE users SET deleted_at = NOW(), sessions_valid_after = NOW() WHERE id = $1")
         .bind(*user_id)
         .execute(pool.get_ref())
         .await?;
@@ -647,7 +798,7 @@ pub async fn assign_branch(
 
     // Org-scope the assignment (V3): both the target user and the branch must be
     // in the caller's org. require_same_org early-returns Ok for super_admin.
-    let (target_org, target_role): (Option<Uuid>, UserRole) =
+    let (target_org, _target_role): (Option<Uuid>, UserRole) =
         sqlx::query_as("SELECT org_id, role FROM users WHERE id = $1 AND deleted_at IS NULL")
             .bind(*user_id)
             .fetch_optional(pool.get_ref())
@@ -663,14 +814,17 @@ pub async fn assign_branch(
             .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
     require_same_org(&claims, Some(branch_org))?;
 
+    // Branch assignments are access: never your own, and only on someone whose
+    // access you already dominate.
+    guard::require_dominance(
+        pool.get_ref(),
+        &claims,
+        *user_id,
+        crate::authz::Cap::StaffPermissionsEdit,
+    )
+    .await?;
+
     if claims.role == UserRole::BranchManager {
-        // A branch_manager must not attach an admin to a branch — that step opens
-        // the shared-branch gate that would let them reset the admin's creds (V4).
-        if matches!(target_role, UserRole::OrgAdmin | UserRole::SuperAdmin) {
-            return Err(AppError::Forbidden(
-                "You cannot assign an admin user to a branch".into(),
-            ));
-        }
         let is_assigned: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)"
         )
@@ -728,13 +882,20 @@ pub async fn unassign_branch(
     let (user_id, branch_id) = path.into_inner();
 
     // Org-scope (V3): the target user and branch must both be in the caller's org.
-    let target_org: Option<Uuid> =
-        sqlx::query_scalar("SELECT org_id FROM users WHERE id = $1 AND deleted_at IS NULL")
+    let (target_org, _target_role): (Option<Uuid>, UserRole) =
+        sqlx::query_as("SELECT org_id, role FROM users WHERE id = $1 AND deleted_at IS NULL")
             .bind(user_id)
             .fetch_optional(pool.get_ref())
             .await?
             .ok_or_else(|| AppError::NotFound("User not found".into()))?;
     require_same_org(&claims, target_org)?;
+    guard::require_dominance(
+        pool.get_ref(),
+        &claims,
+        user_id,
+        crate::authz::Cap::StaffPermissionsEdit,
+    )
+    .await?;
 
     let branch_org: Uuid =
         sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")

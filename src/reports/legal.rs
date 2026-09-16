@@ -58,23 +58,28 @@ pub(crate) async fn guard(
     if claims.role != UserRole::SuperAdmin && claims.org_id() != Some(org_id) {
         return Err(AppError::Forbidden("Not your org".into()));
     }
-    if matches!(claims.role, UserRole::SuperAdmin | UserRole::OrgAdmin) {
-        return Ok(None);
-    }
+    // Where the caller works comes from the architecture E model (owner or an
+    // org-wide assignment = the whole org), not from role names.
+    let scope = crate::authz::scope::branch_scope(pool, &claims).await?;
+    // A branch-bound till token only ever sees its own branch.
     let token_branch = if claims.role == UserRole::Teller {
         claims.branch_id()
     } else {
         None
     };
+    let ids: Vec<Uuid> = match (scope, token_branch) {
+        (crate::authz::scope::BranchScope::All, None) => return Ok(None),
+        (crate::authz::scope::BranchScope::All, Some(b)) => vec![b],
+        (crate::authz::scope::BranchScope::Only(v), tb) => {
+            v.into_iter().filter(|b| tb.is_none_or(|t| t == *b)).collect()
+        }
+    };
+    // Only branches of this org.
     let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT a.branch_id FROM user_branch_assignments a \
-           JOIN branches b ON b.id = a.branch_id \
-          WHERE a.user_id = $1 AND b.org_id = $2 \
-            AND ($3::uuid IS NULL OR a.branch_id = $3)",
+        "SELECT id FROM branches WHERE org_id = $1 AND id = ANY($2)",
     )
-    .bind(claims.user_id())
     .bind(org_id)
-    .bind(token_branch)
+    .bind(&ids)
     .fetch_all(pool)
     .await?;
     Ok(Some(ids))
