@@ -2,6 +2,8 @@
 //! schema), the swap defaults read the unified ones, so the fixture writes both, the
 //! way the orders resolver tests do.
 
+#![allow(clippy::too_many_arguments)]
+
 use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -29,7 +31,14 @@ struct Fx {
     opt_shot: Uuid,
 }
 
-async fn ingredient(pool: &PgPool, org: Uuid, name: &str, unit: &str, slug: &str, cost: i32) -> Uuid {
+async fn ingredient(
+    pool: &PgPool,
+    org: Uuid,
+    name: &str,
+    unit: &str,
+    slug: &str,
+    cost: i32,
+) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) \
@@ -90,8 +99,13 @@ async fn fixture(pool: &PgPool) -> Fx {
         .execute(pool)
         .await
         .unwrap();
-    let cat: Uuid = sqlx::query_scalar("INSERT INTO categories (org_id, name) VALUES ($1, 'Coffee') RETURNING id")
-        .bind(org).fetch_one(pool).await.unwrap();
+    let cat: Uuid = sqlx::query_scalar(
+        "INSERT INTO categories (org_id, name) VALUES ($1, 'Coffee') RETURNING id",
+    )
+    .bind(org)
+    .fetch_one(pool)
+    .await
+    .unwrap();
     let item: Uuid = sqlx::query_scalar("INSERT INTO menu_items (org_id, category_id, name, base_price) VALUES ($1, $2, 'Iced latte', 100) RETURNING id")
         .bind(org).bind(cat).fetch_one(pool).await.unwrap();
 
@@ -105,13 +119,25 @@ async fn fixture(pool: &PgPool) -> Fx {
 
     // Sizes: Cup (sort 0) and Can (sort 1, the one we preview).
     for (label, price) in [("Can", 170), ("Cup", 150)] {
-        sqlx::query("INSERT INTO item_sizes (menu_item_id, label, price_override) VALUES ($1, $2, $3)")
-            .bind(item).bind(label).bind(price).execute(pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO item_sizes (menu_item_id, label, price_override) VALUES ($1, $2, $3)",
+        )
+        .bind(item)
+        .bind(label)
+        .bind(price)
+        .execute(pool)
+        .await
+        .unwrap();
     }
     let can_size: Uuid = sqlx::query_scalar("INSERT INTO menu_item_sizes (menu_item_id, label, price, sort) VALUES ($1, 'Can', 170, 1) RETURNING id")
         .bind(item).fetch_one(pool).await.unwrap();
-    sqlx::query("INSERT INTO menu_item_sizes (menu_item_id, label, price, sort) VALUES ($1, 'Cup', 150, 0)")
-        .bind(item).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO menu_item_sizes (menu_item_id, label, price, sort) VALUES ($1, 'Cup', 150, 0)",
+    )
+    .bind(item)
+    .execute(pool)
+    .await
+    .unwrap();
     for (ing, name, qty, unit) in [
         (full_cream, "Full cream milk", 250.0, "g"),
         (house, "House beans", 18.0, "g"),
@@ -127,12 +153,72 @@ async fn fixture(pool: &PgPool) -> Fx {
     let milk_group = group(pool, org, "Milk", "milk_type").await;
     let bean_group = group(pool, org, "Beans", "coffee_type").await;
     let extras = group(pool, org, "Extras", "extra").await;
-    let opt_full = option(pool, org, milk_group, "Full cream", "milk_type", 0, 0, (full_cream, "Full cream milk", 1.0, "g")).await;
-    let opt_oat = option(pool, org, milk_group, "Oat", "milk_type", 55, 1, (oat, "Oat milk", 1.0, "g")).await;
-    let opt_almond = option(pool, org, milk_group, "Almond", "milk_type", 55, 2, (almond, "Almond milk", 1.0, "ml")).await;
-    let opt_house = option(pool, org, bean_group, "House", "coffee_type", 0, 0, (house, "House beans", 1.0, "g")).await;
-    let opt_decaf = option(pool, org, bean_group, "Decaf", "coffee_type", 30, 1, (decaf, "Decaf beans", 1.0, "g")).await;
-    let opt_shot = option(pool, org, extras, "Extra Shot", "extra", 40, 0, (house, "House beans", 18.0, "g")).await;
+    let opt_full = option(
+        pool,
+        org,
+        milk_group,
+        "Full cream",
+        "milk_type",
+        0,
+        0,
+        (full_cream, "Full cream milk", 1.0, "g"),
+    )
+    .await;
+    let opt_oat = option(
+        pool,
+        org,
+        milk_group,
+        "Oat",
+        "milk_type",
+        55,
+        1,
+        (oat, "Oat milk", 1.0, "g"),
+    )
+    .await;
+    let opt_almond = option(
+        pool,
+        org,
+        milk_group,
+        "Almond",
+        "milk_type",
+        55,
+        2,
+        (almond, "Almond milk", 1.0, "ml"),
+    )
+    .await;
+    let opt_house = option(
+        pool,
+        org,
+        bean_group,
+        "House",
+        "coffee_type",
+        0,
+        0,
+        (house, "House beans", 1.0, "g"),
+    )
+    .await;
+    let opt_decaf = option(
+        pool,
+        org,
+        bean_group,
+        "Decaf",
+        "coffee_type",
+        30,
+        1,
+        (decaf, "Decaf beans", 1.0, "g"),
+    )
+    .await;
+    let opt_shot = option(
+        pool,
+        org,
+        extras,
+        "Extra Shot",
+        "extra",
+        40,
+        0,
+        (house, "House beans", 18.0, "g"),
+    )
+    .await;
     for (g, sort) in [(milk_group, 0), (bean_group, 1), (extras, 2)] {
         sqlx::query("INSERT INTO menu_item_modifier_groups (menu_item_id, group_id, sort) VALUES ($1, $2, $3)")
             .bind(item).bind(g).bind(sort).execute(pool).await.unwrap();
@@ -209,14 +295,22 @@ async fn preview_iced_latte_can_oat_decaf_extra_shot(pool: PgPool) {
     let oat = find(&r, fx.oat, "swap");
     assert_eq!((oat.quantity, oat.category_slug.as_str()), (250.0, "milk"));
     assert_eq!(oat.note.as_deref(), Some("swapped from Full cream milk"));
-    assert!(!r.deductions.iter().any(|d| d.ingredient_id == Some(fx.full_cream)));
+    assert!(
+        !r.deductions
+            .iter()
+            .any(|d| d.ingredient_id == Some(fx.full_cream))
+    );
     let decaf = find(&r, fx.decaf, "swap");
     assert_eq!(decaf.quantity, 18.0);
     // The extra shot follows the chosen bean.
     let shot = find(&r, fx.decaf, "option");
     assert_eq!(shot.quantity, 18.0);
     assert_eq!(shot.note.as_deref(), Some("follows the chosen Decaf beans"));
-    assert!(!r.deductions.iter().any(|d| d.ingredient_id == Some(fx.house)));
+    assert!(
+        !r.deductions
+            .iter()
+            .any(|d| d.ingredient_id == Some(fx.house))
+    );
     let can = find(&r, fx.can, "packaging");
     assert!(!can.skipped && can.note.is_none());
 
@@ -250,9 +344,14 @@ async fn preview_dine_in_skips_packaging(pool: PgPool) {
 #[sqlx::test]
 async fn preview_swap_with_unit_conversion_failure_warns_and_does_not_deduct(pool: PgPool) {
     let fx = fixture(&pool).await;
-    let r = preview(&pool, fx.org, fx.item, &req(vec![fx.opt_almond], "takeaway"))
-        .await
-        .unwrap();
+    let r = preview(
+        &pool,
+        fx.org,
+        fx.item,
+        &req(vec![fx.opt_almond], "takeaway"),
+    )
+    .await
+    .unwrap();
     assert!(
         r.warnings.iter().any(|w| w.rule == "unit_conversion"),
         "warnings: {:?}",

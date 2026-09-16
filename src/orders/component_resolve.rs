@@ -398,19 +398,21 @@ pub async fn resolve_menu_item_configuration(
 
             // The replacement: an explicit swap group names it on the option
             // (`replaces_ingredient_id`); otherwise the option's first recipe line.
-            let replacement: Option<(Option<Uuid>, String, String)> =
-                match (target.category_id, explicit_replacement(pool, addon_input.addon_item_id).await?) {
-                    (Some(_), Some(ing)) => Some(
-                        addon_rows
-                            .iter()
-                            .find(|(id, _, _, _)| *id == Some(ing.0))
-                            .map(|(id, _, n, u)| (*id, n.clone(), u.clone()))
-                            .unwrap_or((Some(ing.0), ing.1, ing.2)),
-                    ),
-                    _ => addon_rows
-                        .first()
-                        .map(|(id, _, n, u)| (*id, n.clone(), u.clone())),
-                };
+            let replacement: Option<(Option<Uuid>, String, String)> = match (
+                target.category_id,
+                explicit_replacement(pool, addon_input.addon_item_id).await?,
+            ) {
+                (Some(_), Some(ing)) => Some(
+                    addon_rows
+                        .iter()
+                        .find(|(id, _, _, _)| *id == Some(ing.0))
+                        .map(|(id, _, n, u)| (*id, n.clone(), u.clone()))
+                        .unwrap_or((Some(ing.0), ing.1, ing.2)),
+                ),
+                _ => addon_rows
+                    .first()
+                    .map(|(id, _, n, u)| (*id, n.clone(), u.clone())),
+            };
             let addon_ing_id = replacement.as_ref().and_then(|r| r.0);
 
             let is_base =

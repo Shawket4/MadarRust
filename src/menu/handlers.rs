@@ -3303,14 +3303,17 @@ pub(crate) async fn addon_items_by_ids(
     .fetch_all(&mut *conn)
     .await?
     {
-        ingredients.entry(addon).or_default().push(AddonItemIngredient {
-            org_ingredient_id,
-            quantity_used,
-            ingredient_name,
-            ingredient_unit,
-            category_id,
-            category_slug,
-        });
+        ingredients
+            .entry(addon)
+            .or_default()
+            .push(AddonItemIngredient {
+                org_ingredient_id,
+                quantity_used,
+                ingredient_name,
+                ingredient_unit,
+                category_id,
+                category_slug,
+            });
     }
     let mut out = std::collections::HashMap::new();
     for mut a in rows.drain(..) {

@@ -150,12 +150,13 @@ pub async fn preview_menu_item(
             .ok_or_else(|| AppError::NotFound(format!("Menu item {item_id} not found")))?;
     require_same_org(&claims, Some(org_id))?;
     if let Some(b) = body.branch_id {
-        let ok: bool =
-            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM branches WHERE id = $1 AND org_id = $2)")
-                .bind(b)
-                .bind(org_id)
-                .fetch_one(pool.get_ref())
-                .await?;
+        let ok: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM branches WHERE id = $1 AND org_id = $2)",
+        )
+        .bind(b)
+        .bind(org_id)
+        .fetch_one(pool.get_ref())
+        .await?;
         if !ok {
             return Err(AppError::NotFound(format!("Branch {b} not found")));
         }
@@ -258,7 +259,9 @@ pub async fn preview(
         .filter(|d| !d.undeducted)
         .map(|d| {
             let is_pack = d.category == "packaging";
-            let skipped = d.org_ingredient_id.is_some_and(|id| packaging.contains(&id));
+            let skipped = d
+                .org_ingredient_id
+                .is_some_and(|id| packaging.contains(&id));
             let source = if d.source.starts_with("addon_swap:") {
                 "swap"
             } else if d.source == "drink_recipe" {
@@ -307,24 +310,29 @@ pub async fn preview(
         }
     }
     let cost_total = cost_total.round() as i64;
-    let margin_pct = (!cost_missing && total > 0)
-        .then(|| (total as i64 - cost_total) as f64 / total as f64);
+    let margin_pct =
+        (!cost_missing && total > 0).then(|| (total as i64 - cost_total) as f64 / total as f64);
 
     // ── resolved size, defaults, lint ──
     let size_label: Option<String> = match &body.size_label {
         Some(s) => Some(s.clone()),
-        None => sqlx::query_scalar(
-            "SELECT label FROM menu_item_sizes WHERE menu_item_id = $1 \
+        None => {
+            sqlx::query_scalar(
+                "SELECT label FROM menu_item_sizes WHERE menu_item_id = $1 \
              ORDER BY is_active IS NOT TRUE, sort NULLS LAST, label LIMIT 1",
-        )
-        .bind(item_id)
-        .fetch_optional(pool)
-        .await?,
+            )
+            .bind(item_id)
+            .fetch_optional(pool)
+            .await?
+        }
     };
     let defaults = swap_defaults(pool, item_id, size_label.as_deref()).await?;
 
     let chosen: HashSet<Uuid> = body.option_ids.iter().copied().collect();
-    let deducted: HashSet<Uuid> = out_deductions.iter().filter_map(|d| d.ingredient_id).collect();
+    let deducted: HashSet<Uuid> = out_deductions
+        .iter()
+        .filter_map(|d| d.ingredient_id)
+        .collect();
     for issue in lint_org(pool, org_id).await? {
         if !PREVIEW_RULES.contains(&issue.rule.as_str()) {
             continue;

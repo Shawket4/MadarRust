@@ -684,7 +684,8 @@ async fn load_referenced_ingredients(
     if ingredient_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let rows: Vec<(Uuid, String, String, Option<Uuid>, Option<String>)> = sqlx::query_as(
+    type IngredientRow = (Uuid, String, String, Option<Uuid>, Option<String>);
+    let rows: Vec<IngredientRow> = sqlx::query_as(
         "SELECT oi.id, oi.name, oi.unit::text, ic.id, ic.slug FROM org_ingredients oi \
          LEFT JOIN ingredient_categories ic ON ic.id = oi.category_id \
          WHERE oi.id = ANY($1) AND oi.is_active = true AND oi.deleted_at IS NULL \
