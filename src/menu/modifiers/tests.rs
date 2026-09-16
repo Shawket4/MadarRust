@@ -965,3 +965,190 @@ async fn test_modifier_group_cross_org_forbidden(pool: PgPool) {
     .await;
     assert_eq!(resp.status(), 403, "cross-org group list must be forbidden");
 }
+
+// ════════════════════════════════════════════════════════════════════
+// B1: every attachment carries legacy_origin + a materialized option list
+// ════════════════════════════════════════════════════════════════════
+
+async fn provenance(pool: &PgPool, item: Uuid, group: Uuid) -> (Option<String>, Option<Vec<Uuid>>) {
+    sqlx::query_as(
+        "SELECT legacy_origin, included_option_ids FROM menu_item_modifier_groups \
+         WHERE menu_item_id = $1 AND group_id = $2",
+    )
+    .bind(item)
+    .bind(group)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test]
+async fn attach_writes_origin_and_full_option_list(pool: PgPool) {
+    let app = app(pool.clone()).await;
+    let org = seed_org(&pool).await;
+    let user = seed_user(&pool, org).await;
+    grant(&pool, "menu_items", "read").await;
+    grant(&pool, "menu_items", "update").await;
+    let cat = seed_category(&pool, org).await;
+    let item = seed_item(&pool, org, cat, "Latte", 5000).await;
+    let token = org_admin_token(user, org);
+
+    let milk = seed_group(
+        &pool,
+        org,
+        "Milk",
+        Some("milk_type"),
+        "single",
+        0,
+        Some(1),
+        false,
+    )
+    .await;
+    let full = seed_option(&pool, milk, "Full Cream", 0, "addon").await;
+    let oat = seed_option(&pool, milk, "Oat", 5500, "addon").await;
+    let extras = seed_group(&pool, org, "Extras", Some("extra"), "multi", 0, None, false).await;
+    let shot = seed_option(&pool, extras, "Shot", 400, "addon").await;
+    let _syrup = seed_option(&pool, extras, "Syrup", 300, "addon").await;
+    let bread = seed_group(
+        &pool,
+        org,
+        "Bread",
+        Some("bread"),
+        "single",
+        1,
+        Some(1),
+        true,
+    )
+    .await;
+    let _white = seed_option(&pool, bread, "White", 0, "addon").await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::put()
+            .uri(&format!("/menu-items/{item}/modifier-groups"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(json!({ "groups": [
+                { "group_id": milk, "sort": 0, "is_required_override": true, "included_option_ids": null },
+                { "group_id": extras, "sort": 1, "included_option_ids": [shot] },
+                { "group_id": bread, "sort": 2 }
+            ]}))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    let (o, ids) = provenance(&pool, item, milk).await;
+    assert_eq!(o.as_deref(), Some("slot"), "required override → slot");
+    assert_eq!(
+        ids,
+        Some(vec![full, oat]),
+        "null list materialized as the whole group"
+    );
+    let (o, ids) = provenance(&pool, item, extras).await;
+    assert_eq!(o.as_deref(), Some("allowlist"));
+    assert_eq!(ids, Some(vec![shot]), "an explicit list is kept");
+    let (o, _) = provenance(&pool, item, bread).await;
+    assert_eq!(o.as_deref(), Some("slot"), "group is_required → slot");
+
+    // A new option joins every attachment that offered the whole group, and only those.
+    let almond = seed_option(&pool, milk, "Almond", 5500, "addon").await;
+    let honey = seed_option(&pool, extras, "Honey", 300, "addon").await;
+    assert_eq!(
+        provenance(&pool, item, milk).await.1,
+        Some(vec![full, oat, almond])
+    );
+    assert_eq!(provenance(&pool, item, extras).await.1, Some(vec![shot]));
+    let _ = honey;
+
+    // Deleting an option removes it from the lists; deleting a group cascades cleanly.
+    sqlx::query("DELETE FROM modifier_options WHERE id = $1")
+        .bind(oat)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        provenance(&pool, item, milk).await.1,
+        Some(vec![full, almond])
+    );
+    sqlx::query("DELETE FROM modifier_groups WHERE id = $1")
+        .bind(milk)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Duplicate copies provenance.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/menu-items/{item}/duplicate"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let nulls: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM menu_item_modifier_groups \
+         WHERE legacy_origin IS NULL OR included_option_ids IS NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(nulls, 0);
+    let copies: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM menu_item_modifier_groups WHERE menu_item_id <> $1 AND group_id = $2 \
+           AND legacy_origin = 'allowlist' AND included_option_ids = ARRAY[$3]::uuid[]",
+    )
+    .bind(item)
+    .bind(extras)
+    .bind(shot)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(copies, 1);
+}
+
+#[sqlx::test]
+async fn item_options_and_raw_sql_attachments_get_provenance(pool: PgPool) {
+    let app = app(pool.clone()).await;
+    let org = seed_org(&pool).await;
+    let user = seed_user(&pool, org).await;
+    grant(&pool, "menu_items", "read").await;
+    grant(&pool, "menu_items", "update").await;
+    let cat = seed_category(&pool, org).await;
+    let item = seed_item(&pool, org, cat, "Toast", 3000).await;
+    let token = org_admin_token(user, org);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::put()
+            .uri(&format!("/menu-items/{item}/options"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(json!({ "options": [
+                { "name": "Brown bread", "price": 2500, "recipe": null },
+                { "name": "Cheese", "price": 1000, "recipe": null }
+            ]}))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let (origin, ids): (Option<String>, Option<Vec<Uuid>>) = sqlx::query_as(
+        "SELECT mimg.legacy_origin, mimg.included_option_ids FROM menu_item_modifier_groups mimg \
+         JOIN modifier_groups mg ON mg.id = mimg.group_id \
+         WHERE mimg.menu_item_id = $1 AND mg.legacy_addon_type IS NULL",
+    )
+    .bind(item)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(origin.as_deref(), Some("options"));
+    assert_eq!(ids.map(|v| v.len()), Some(2), "both new options listed");
+
+    // Raw SQL leaving both columns NULL is filled by the trigger.
+    let g = seed_group(&pool, org, "Sauce", Some("sauce"), "multi", 0, None, false).await;
+    let o = seed_option(&pool, g, "Ketchup", 0, "addon").await;
+    attach_group(&pool, item, g, 3).await;
+    assert_eq!(
+        provenance(&pool, item, g).await,
+        (Some("allowlist".to_string()), Some(vec![o]))
+    );
+}
