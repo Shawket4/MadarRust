@@ -1,4 +1,7 @@
-use crate::{auth::middleware::JwtMiddleware, reports::handlers};
+use crate::{
+    auth::middleware::JwtMiddleware,
+    reports::{handlers, legal},
+};
 use actix_web::web;
 use sqlx::PgPool;
 
@@ -94,6 +97,26 @@ pub fn configure(cfg: &mut web::ServiceConfig, read_pool: web::Data<PgPool>) {
             .route(
                 "/orgs/{org_id}/tax",
                 web::get().to(handlers::org_tax_report),
+            )
+            .route(
+                "/orgs/{org_id}/refunds-audit",
+                web::get().to(legal::refunds_audit),
+            )
+            .route(
+                "/orgs/{org_id}/voids-audit",
+                web::get().to(legal::voids_audit),
+            )
+            .route(
+                "/orgs/{org_id}/discounts-audit",
+                web::get().to(legal::discounts_audit),
+            )
+            .route(
+                "/orgs/{org_id}/waivers-audit",
+                web::get().to(legal::waivers_audit),
+            )
+            .route(
+                "/orgs/{org_id}/price-overrides",
+                web::get().to(legal::price_overrides),
             )
             .route(
                 "/orgs/{org_id}/inventory-valuation",
