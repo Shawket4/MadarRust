@@ -951,3 +951,159 @@ pub async fn analytics(
         },
     }))
 }
+
+// ── Behavior report (percentages) ───────────────────────────────
+
+/// Behavioral rates over the range — how much of the member base actually
+/// uses the programme, not just what it's worth. `total_members` and
+/// `members_ever_redeemed` are org-wide and lifetime (a balance/history isn't
+/// branch-scoped); every other figure narrows to `branch_id` and the range,
+/// same as [`LoyaltyAnalytics`].
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LoyaltyBehavior {
+    pub from: chrono::DateTime<chrono::Utc>,
+    pub to: chrono::DateTime<chrono::Utc>,
+    /// Enrolled, not deleted, as of now. Org-wide.
+    pub total_members: i64,
+    /// Distinct members with any loyalty transaction in the range.
+    pub active_members: i64,
+    /// `active_members / total_members`. `0.0` when there are no members.
+    pub active_member_rate: f64,
+    /// Distinct members who have ever redeemed a reward. Org-wide, lifetime.
+    pub members_ever_redeemed: i64,
+    /// `members_ever_redeemed / total_members`.
+    pub redemption_rate: f64,
+    /// `redeemed_points_period / earned_points_period` — the share of what
+    /// was earned in the range that got spent in it. Points earned before the
+    /// range and redeemed inside it are not the numerator's earn, so this can
+    /// exceed 1.0 on a range with heavy redemption of an older balance.
+    pub redemption_ratio: f64,
+    /// Members with 2+ earning visits in the range.
+    pub repeat_members: i64,
+    /// Members with exactly 1 earning visit in the range.
+    pub one_time_members: i64,
+    /// `repeat_members / (repeat_members + one_time_members)`. `0.0` when
+    /// nobody earned in the range.
+    pub repeat_visit_rate: f64,
+    /// Active members who enrolled during the range.
+    pub new_members_active: i64,
+    /// Active members who enrolled before the range started.
+    pub returning_members_active: i64,
+    /// `new_members_active / active_members`.
+    pub new_member_share: f64,
+}
+
+fn safe_ratio(num: i64, den: i64) -> f64 {
+    if den == 0 {
+        0.0
+    } else {
+        num as f64 / den as f64
+    }
+}
+
+#[utoipa::path(get, path = "/loyalty/behavior", tag = "loyalty",
+    operation_id = "get_loyalty_behavior", params(AnalyticsQuery),
+    responses((status = 200, body = LoyaltyBehavior), AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn behavior(
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
+    query: web::Query<AnalyticsQuery>,
+) -> Result<HttpResponse, AppError> {
+    let (org_id, claims) =
+        super::settings::scope_org(pool.get_ref(), &req, query.branch_id).await?;
+    check_permission(pool.get_ref(), &claims, "loyalty", "read").await?;
+    if !matches!(
+        claims.role,
+        UserRole::OrgAdmin | UserRole::SuperAdmin | UserRole::BranchManager
+    ) {
+        return Err(AppError::Forbidden(
+            "The loyalty report is for managers".into(),
+        ));
+    }
+    if let Some(b) = query.branch_id {
+        require_branch_access(pool.get_ref(), &claims, b).await?;
+    }
+    let to = query.to.unwrap_or_else(chrono::Utc::now);
+    let from = query.from.unwrap_or(to - chrono::Duration::days(30));
+    if from >= to {
+        return Err(AppError::BadRequest("`from` must be before `to`".into()));
+    }
+    let pool = pool.get_ref();
+
+    let total_members: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM loyalty_customers WHERE org_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(org_id)
+    .fetch_one(pool)
+    .await?;
+
+    let members_ever_redeemed: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT customer_id) FROM loyalty_transactions \
+          WHERE org_id = $1 AND kind = 'redeem'",
+    )
+    .bind(org_id)
+    .fetch_one(pool)
+    .await?;
+
+    let (earned_points_period, redeemed_points_period): (i64, i64) = sqlx::query_as(
+        "SELECT COALESCE(SUM(points) FILTER (WHERE kind IN ('earn','reverse_earn')), 0)::bigint, \
+                COALESCE(-SUM(points) FILTER (WHERE kind IN ('redeem','reverse_redeem')), 0)::bigint \
+           FROM loyalty_transactions \
+          WHERE org_id = $1 AND ($2::uuid IS NULL OR branch_id = $2) \
+            AND created_at >= $3 AND created_at < $4",
+    )
+    .bind(org_id)
+    .bind(query.branch_id)
+    .bind(from)
+    .bind(to)
+    .fetch_one(pool)
+    .await?;
+
+    let (
+        active_members,
+        repeat_members,
+        one_time_members,
+        new_members_active,
+        returning_members_active,
+    ): (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "WITH activity AS ( \
+            SELECT t.customer_id, c.enrolled_at, \
+                   COUNT(*) FILTER (WHERE t.kind = 'earn') AS earn_visits \
+              FROM loyalty_transactions t \
+              JOIN loyalty_customers c ON c.id = t.customer_id \
+             WHERE t.org_id = $1 AND ($2::uuid IS NULL OR t.branch_id = $2) \
+               AND t.created_at >= $3 AND t.created_at < $4 \
+             GROUP BY t.customer_id, c.enrolled_at \
+         ) \
+         SELECT COUNT(*)::bigint, \
+                COUNT(*) FILTER (WHERE earn_visits >= 2)::bigint, \
+                COUNT(*) FILTER (WHERE earn_visits = 1)::bigint, \
+                COUNT(*) FILTER (WHERE enrolled_at >= $3)::bigint, \
+                COUNT(*) FILTER (WHERE enrolled_at < $3)::bigint \
+           FROM activity",
+    )
+    .bind(org_id)
+    .bind(query.branch_id)
+    .bind(from)
+    .bind(to)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(HttpResponse::Ok().json(LoyaltyBehavior {
+        from,
+        to,
+        total_members,
+        active_members,
+        active_member_rate: safe_ratio(active_members, total_members),
+        members_ever_redeemed,
+        redemption_rate: safe_ratio(members_ever_redeemed, total_members),
+        redemption_ratio: safe_ratio(redeemed_points_period, earned_points_period),
+        repeat_members,
+        one_time_members,
+        repeat_visit_rate: safe_ratio(repeat_members, repeat_members + one_time_members),
+        new_members_active,
+        returning_members_active,
+        new_member_share: safe_ratio(new_members_active, active_members),
+    }))
+}

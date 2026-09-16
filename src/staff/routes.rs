@@ -14,7 +14,7 @@
 use actix_web::web;
 
 use crate::auth::middleware::JwtMiddleware;
-use crate::staff::{attendance, directory, payroll, requests, schedules};
+use crate::staff::{attendance, directory, discipline, payroll, requests, schedules};
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
@@ -114,6 +114,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route(
                 "/attendance/summary",
                 web::get().to(attendance::attendance_summary),
+            )
+            .route(
+                "/discipline-report",
+                web::get().to(discipline::discipline_report),
             )
             .route("/team/presence", web::get().to(attendance::team_presence))
             .route("/attendance", web::get().to(attendance::list_attendance))

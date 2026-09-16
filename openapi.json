@@ -16393,6 +16393,132 @@
         ]
       }
     },
+    "/loyalty/behavior": {
+      "get": {
+        "tags": [
+          "loyalty"
+        ],
+        "operationId": "get_loyalty_behavior",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "query",
+            "description": "Omit for the whole organisation; supply a branch to narrow the\nredemption figures to it (the liability is org-wide either way — a\nbalance can be spent at any branch).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Inclusive start of the range. Defaults to 30 days before `to`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Exclusive end of the range. Defaults to now.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoyaltyBehavior"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/loyalty/birthday-preview": {
       "post": {
         "tags": [
@@ -36924,6 +37050,121 @@
         ]
       }
     },
+    "/staff/discipline-report": {
+      "get": {
+        "tags": [
+          "staff"
+        ],
+        "operationId": "discipline_report",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "branch_id",
+            "in": "query",
+            "description": "Omit for every branch in the org.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Staff ranked by attendance discipline, per department",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DisciplineReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/staff/documents/{id}": {
       "delete": {
         "tags": [
@@ -54828,6 +55069,86 @@
           "desc"
         ]
       },
+      "DisciplineReport": {
+        "type": "object",
+        "required": [
+          "from",
+          "to",
+          "rows"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "date"
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DisciplineRow"
+            }
+          },
+          "to": {
+            "type": "string",
+            "format": "date"
+          }
+        }
+      },
+      "DisciplineRow": {
+        "type": "object",
+        "required": [
+          "user_id",
+          "user_name",
+          "present_days",
+          "late_days",
+          "absent_days",
+          "total_late_minutes",
+          "rank_in_department"
+        ],
+        "properties": {
+          "absent_days": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "department_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "`None` for a person with no department set — grouped as \"Unassigned\"."
+          },
+          "department_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "late_days": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "present_days": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "rank_in_department": {
+            "type": "integer",
+            "format": "int64",
+            "description": "1 = best in this department: fewest absences, then fewest lates, then\nleast total late time. Ties share a rank (SQL `RANK()`), so a\ndepartment where everyone has a clean record is all `1`s."
+          },
+          "total_late_minutes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "user_name": {
+            "type": "string"
+          }
+        }
+      },
       "Discount": {
         "type": "object",
         "required": [
@@ -57318,6 +57639,96 @@
             "items": {
               "$ref": "#/components/schemas/TopReward"
             }
+          }
+        }
+      },
+      "LoyaltyBehavior": {
+        "type": "object",
+        "description": "Behavioral rates over the range — how much of the member base actually\nuses the programme, not just what it's worth. `total_members` and\n`members_ever_redeemed` are org-wide and lifetime (a balance/history isn't\nbranch-scoped); every other figure narrows to `branch_id` and the range,\nsame as [`LoyaltyAnalytics`].",
+        "required": [
+          "from",
+          "to",
+          "total_members",
+          "active_members",
+          "active_member_rate",
+          "members_ever_redeemed",
+          "redemption_rate",
+          "redemption_ratio",
+          "repeat_members",
+          "one_time_members",
+          "repeat_visit_rate",
+          "new_members_active",
+          "returning_members_active",
+          "new_member_share"
+        ],
+        "properties": {
+          "active_member_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "`active_members / total_members`. `0.0` when there are no members."
+          },
+          "active_members": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Distinct members with any loyalty transaction in the range."
+          },
+          "from": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "members_ever_redeemed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Distinct members who have ever redeemed a reward. Org-wide, lifetime."
+          },
+          "new_member_share": {
+            "type": "number",
+            "format": "double",
+            "description": "`new_members_active / active_members`."
+          },
+          "new_members_active": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Active members who enrolled during the range."
+          },
+          "one_time_members": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Members with exactly 1 earning visit in the range."
+          },
+          "redemption_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "`members_ever_redeemed / total_members`."
+          },
+          "redemption_ratio": {
+            "type": "number",
+            "format": "double",
+            "description": "`redeemed_points_period / earned_points_period` — the share of what\nwas earned in the range that got spent in it. Points earned before the\nrange and redeemed inside it are not the numerator's earn, so this can\nexceed 1.0 on a range with heavy redemption of an older balance."
+          },
+          "repeat_members": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Members with 2+ earning visits in the range."
+          },
+          "repeat_visit_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "`repeat_members / (repeat_members + one_time_members)`. `0.0` when\nnobody earned in the range."
+          },
+          "returning_members_active": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Active members who enrolled before the range started."
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "total_members": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Enrolled, not deleted, as of now. Org-wide."
           }
         }
       },
