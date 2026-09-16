@@ -205,6 +205,7 @@ paths(
         // ── menu studio: modifiers + pricing (Wave 2, new tables) ───
         crate::menu::modifiers::list_groups,
         crate::menu::lint::get_menu_lint,
+        crate::menu::preview::preview_menu_item,
         crate::menu::modifiers::create_group,
         crate::menu::modifiers::patch_group,
         crate::menu::modifiers::delete_group,

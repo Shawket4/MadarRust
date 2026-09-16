@@ -1229,63 +1229,9 @@ pub(crate) async fn resolve_order_line(
         // replace the price (price_override, piastres) and/or disable the item at
         // this branch. A disabled item is flagged (price_flagged) but NOT rejected
         // — an offline/stale POS may legitimately still be selling it.
-        let (item_name, name_translations, base_price, branch_price_override, branch_disabled): (
-            String,
-            serde_json::Value,
-            i32,
-            Option<i32>,
-            bool,
-        ) = sqlx::query_as(
-            "SELECT mi.name, mi.name_translations, mi.base_price,
-                    bmo.price_override,
-                    COALESCE(bmo.is_available, true) = false AS branch_disabled
-             FROM menu_items mi
-             LEFT JOIN branch_menu_overrides bmo
-                    ON bmo.menu_item_id = mi.id AND bmo.branch_id = $2
-             WHERE mi.id = $1 AND mi.deleted_at IS NULL",
-        )
-        .bind(m_item_id)
-        .bind(branch_id)
-        .fetch_optional(pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("Menu item {} not found", m_item_id)))?;
-
-        // Branch-effective base: the override price replaces the catalog base_price.
-        let base_price = branch_price_override.unwrap_or(base_price);
-
-        let unit_price: i32 = match &item_input.size_label {
-            Some(size) => {
-                // A per-(branch, item, size) override wins for that size; otherwise the
-                // catalog size price; otherwise the branch-effective base. (A branch base
-                // override never silently changes an explicitly-priced size.)
-                let branch_size: Option<i32> = sqlx::query_scalar(
-                    "SELECT price_override FROM branch_menu_size_overrides \
-                     WHERE branch_id = $1 AND menu_item_id = $2 AND size_label = $3",
-                )
-                .bind(branch_id)
-                .bind(m_item_id)
-                .bind(size)
-                .fetch_optional(pool)
+        let (item_name, name_translations, unit_price, branch_disabled) =
+            catalog_unit_price(pool, m_item_id, item_input.size_label.as_deref(), branch_id)
                 .await?;
-
-                match branch_size {
-                    Some(bs) => bs,
-                    None => {
-                        let p: Option<i32> = sqlx::query_scalar(
-                            "SELECT price_override FROM item_sizes \
-                             WHERE menu_item_id = $1 AND label = $2 AND is_active = true",
-                        )
-                        .bind(m_item_id)
-                        .bind(size)
-                        .fetch_optional(pool)
-                        .await?
-                        .flatten();
-                        p.unwrap_or(base_price)
-                    }
-                }
-            }
-            None => base_price,
-        };
 
         // Resolve recipe + addons (incl. milk/coffee swaps) + optionals via the
         // SHARED resolver that bundle components also use, so the deduction +
@@ -1406,6 +1352,92 @@ pub(crate) async fn resolve_order_line(
         bundle_components,
         component_surcharge,
     })
+}
+
+/// The catalogue unit price of a menu-item line at a branch (item name,
+/// translations, price in piastres, branch-disabled flag). Shared by order
+/// creation and the dry-run preview (`POST /menu-items/{id}/preview`).
+pub(crate) async fn catalog_unit_price(
+    pool: &PgPool,
+    m_item_id: Uuid,
+    size_label: Option<&str>,
+    branch_id: Uuid,
+) -> Result<(String, serde_json::Value, i32, bool), AppError> {
+    let (item_name, name_translations, base_price, branch_price_override, branch_disabled): (
+        String,
+        serde_json::Value,
+        i32,
+        Option<i32>,
+        bool,
+    ) = sqlx::query_as(
+        "SELECT mi.name, mi.name_translations, mi.base_price,
+                bmo.price_override,
+                COALESCE(bmo.is_available, true) = false AS branch_disabled
+         FROM menu_items mi
+         LEFT JOIN branch_menu_overrides bmo
+                ON bmo.menu_item_id = mi.id AND bmo.branch_id = $2
+         WHERE mi.id = $1 AND mi.deleted_at IS NULL",
+    )
+    .bind(m_item_id)
+    .bind(branch_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound(format!("Menu item {} not found", m_item_id)))?;
+
+    // Branch-effective base: the override price replaces the catalog base_price.
+    let base_price = branch_price_override.unwrap_or(base_price);
+
+    let unit_price: i32 = match size_label {
+        Some(size) => {
+            // A per-(branch, item, size) override wins for that size; otherwise the
+            // catalog size price; otherwise the branch-effective base. (A branch base
+            // override never silently changes an explicitly-priced size.)
+            let branch_size: Option<i32> = sqlx::query_scalar(
+                "SELECT price_override FROM branch_menu_size_overrides \
+                 WHERE branch_id = $1 AND menu_item_id = $2 AND size_label = $3",
+            )
+            .bind(branch_id)
+            .bind(m_item_id)
+            .bind(size)
+            .fetch_optional(pool)
+            .await?;
+
+            match branch_size {
+                Some(bs) => bs,
+                None => {
+                    let p: Option<i32> = sqlx::query_scalar(
+                        "SELECT price_override FROM item_sizes \
+                         WHERE menu_item_id = $1 AND label = $2 AND is_active = true",
+                    )
+                    .bind(m_item_id)
+                    .bind(size)
+                    .fetch_optional(pool)
+                    .await?
+                    .flatten();
+                    p.unwrap_or(base_price)
+                }
+            }
+        }
+        None => base_price,
+    };
+    Ok((item_name, name_translations, unit_price, branch_disabled))
+}
+
+/// Ingredients in the org's `packaging` category: not deducted on a dine-in sale.
+pub(crate) async fn packaging_ingredient_ids(
+    pool: &PgPool,
+    org_id: Uuid,
+) -> Result<std::collections::HashSet<Uuid>, AppError> {
+    Ok(sqlx::query_scalar(
+        "SELECT i.id FROM org_ingredients i \
+         JOIN ingredient_categories c ON c.id = i.category_id \
+         WHERE i.org_id = $1 AND c.slug = 'packaging'",
+    )
+    .bind(org_id)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect())
 }
 
 // ── POST /orders ──────────────────────────────────────────────
@@ -2029,16 +2061,7 @@ pub(crate) async fn create_order_inner(
     // `packaging` category comes off stock. Filtering here, by CATEGORY, means
     // no recipe is written twice and a new cup needs no rule change.
     if body.service_mode.as_deref() == Some("dine_in") {
-        let packaging: std::collections::HashSet<Uuid> = sqlx::query_scalar(
-            "SELECT i.id FROM org_ingredients i \
-             JOIN ingredient_categories c ON c.id = i.category_id \
-             WHERE i.org_id = $1 AND c.slug = 'packaging'",
-        )
-        .bind(org_id)
-        .fetch_all(pool.get_ref())
-        .await?
-        .into_iter()
-        .collect::<std::collections::HashSet<Uuid>>();
+        let packaging = packaging_ingredient_ids(pool.get_ref(), org_id).await?;
         for ri in &mut resolved_items {
             ri.deductions.retain(|d| {
                 !d.org_ingredient_id

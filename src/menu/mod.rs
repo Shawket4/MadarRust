@@ -3,6 +3,7 @@ pub mod catalog_sync;
 pub mod handlers;
 pub mod lint;
 pub mod modifiers;
+pub mod preview;
 pub mod routes;
 pub mod studio;
 

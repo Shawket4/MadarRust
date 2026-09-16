@@ -47,6 +47,21 @@ pub struct InventoryDeduction {
     pub addon_item_id: Option<Uuid>,
     /// Set for optional-field deductions.
     pub optional_field_id: Option<Uuid>,
+    /// Why this line differs from what was authored ("swapped from X",
+    /// "follows the chosen X"). Read by the dry-run preview; orders ignore it.
+    pub note: Option<String>,
+    /// The resolver could not deduct this line (e.g. incompatible units): its
+    /// `org_ingredient_id` is `None`, so inventory skips it.
+    pub undeducted: bool,
+}
+
+/// A resolution problem that the order path only logs; the preview returns it.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct ResolveWarning {
+    /// `unit_conversion` | `swap_failed` | `optional_not_found` | `optional_size_mismatch`,
+    /// or a lint rule id (`F4`…`F10`) when added by the preview.
+    pub rule: String,
+    pub message: String,
 }
 
 #[derive(Clone)]
@@ -61,6 +76,9 @@ pub struct ResolvedAddon {
     pub is_swap: bool,
     /// An additive addon that has its own ingredient rows (so it carries cost).
     pub has_ingredients: bool,
+    /// For a charged swap: the name of the default option the price is the
+    /// difference over.
+    pub swap_over: Option<String>,
 }
 
 #[derive(Clone)]
@@ -81,6 +99,7 @@ pub struct MenuItemResolution {
     pub optionals: Vec<ResolvedOptional>,
     pub addon_line: i32,
     pub optional_line: i32,
+    pub warnings: Vec<ResolveWarning>,
 }
 
 /// How one addon choice relates to the drink's recipe.
@@ -257,6 +276,7 @@ pub async fn resolve_menu_item_configuration(
     let mut resolved_optionals: Vec<ResolvedOptional> = Vec::new();
     // Ingredient categories swapped by an explicit choice on this line.
     let mut swap_slugs: Vec<String> = Vec::new();
+    let mut warnings: Vec<ResolveWarning> = Vec::new();
 
     // Base drink recipe
     let recipe_rows: Vec<(Option<Uuid>, f64, String, String, String)> = if let Some(ref size) =
@@ -308,6 +328,8 @@ pub async fn resolve_menu_item_configuration(
             category,
             addon_item_id: None,
             optional_field_id: None,
+            note: None,
+            undeducted: false,
         });
     }
 
@@ -345,6 +367,7 @@ pub async fn resolve_menu_item_configuration(
             quantity: addon_input.quantity.max(1),
             is_swap: false,
             has_ingredients: false,
+            swap_over: None,
         });
 
         let addon_rows: Vec<(Option<Uuid>, f64, String, String)> = sqlx::query_as(
@@ -399,8 +422,8 @@ pub async fn resolve_menu_item_configuration(
                     last.is_swap = true;
                 }
             } else if let Some((repl_id, repl_name, repl_unit)) = replacement {
-                let base_addon_price: i32 = if let Some(base_id) = base_ing_id {
-                    sqlx::query_scalar(
+                let base_addon: Option<(Option<i32>, String)> = if let Some(base_id) = base_ing_id {
+                    sqlx::query_as(
                         // The swap is charged above the DEFAULT option: the one carrying
                         // the recipe's ingredient, preferring the chosen option's own
                         // group, then in the group's display order (sort, name, id) —
@@ -408,7 +431,7 @@ pub async fn resolve_menu_item_configuration(
                         // with the till whenever two options shared the base ingredient.
                         // Candidates share the family: the explicit swap category when
                         // the chosen group has one, else the legacy type.
-                        "SELECT COALESCE(bao.price_override, a.default_price)
+                        "SELECT COALESCE(bao.price_override, a.default_price), a.name
                          FROM addon_items a
                          LEFT JOIN modifier_options mo ON mo.id = a.id
                          LEFT JOIN modifier_groups mg ON mg.id = mo.group_id
@@ -431,21 +454,22 @@ pub async fn resolve_menu_item_configuration(
                     .bind(target.category_id)
                     .fetch_optional(pool)
                     .await?
-                    .flatten()
-                    .unwrap_or(0)
                 } else {
-                    0
+                    None
                 };
+                let base_addon_price = base_addon.as_ref().and_then(|b| b.0).unwrap_or(0);
 
                 let new_price = (default_price - base_addon_price).max(0);
                 if let Some(last) = resolved_addons.last_mut() {
                     last.unit_price = new_price;
                     last.is_swap = true;
+                    last.swap_over = base_addon.map(|b| b.1);
                 }
 
                 let mut swapped = false;
                 for ded in deductions.iter_mut() {
                     if ded.source == "drink_recipe" && ded.category == cat {
+                        ded.note = Some(format!("swapped from {}", ded.ingredient_name));
                         // Convert the recipe quantity into the replacement ingredient's
                         // base unit (g↔kg / ml↔l) BEFORE swapping the unit — otherwise
                         // the raw quantity is mis-deducted by up to 1000× and COGS is
@@ -461,6 +485,14 @@ pub async fn resolve_menu_item_configuration(
                                     "addon swap across incompatible unit families; inventory not deducted"
                                 );
                                 ded.org_ingredient_id = None;
+                                ded.undeducted = true;
+                                warnings.push(ResolveWarning {
+                                    rule: "unit_conversion".into(),
+                                    message: format!(
+                                        "\"{addon_name}\" swaps {} ({}) for {repl_name} ({repl_unit}): incompatible units, nothing is deducted",
+                                        ded.ingredient_name, ded.unit
+                                    ),
+                                });
                             }
                         }
                         ded.ingredient_name = repl_name.clone();
@@ -471,6 +503,12 @@ pub async fn resolve_menu_item_configuration(
                 }
                 if !swapped {
                     tracing::warn!(addon_name = %addon_name, cat = %cat, "Addon swap failed");
+                    warnings.push(ResolveWarning {
+                        rule: "swap_failed".into(),
+                        message: format!(
+                            "\"{addon_name}\" swaps the drink's {cat} but the recipe has no {cat} line: nothing is swapped"
+                        ),
+                    });
                 }
             }
             continue;
@@ -504,6 +542,8 @@ pub async fn resolve_menu_item_configuration(
                 category,
                 addon_item_id: Some(addon_input.addon_item_id),
                 optional_field_id: None,
+                note: None,
+                undeducted: false,
             });
         }
     }
@@ -547,11 +587,21 @@ pub async fn resolve_menu_item_configuration(
                         d.org_ingredient_id = id;
                         d.ingredient_name = name.clone();
                         d.unit = unit.clone();
+                        d.note = Some(format!("follows the chosen {name}"));
                     }
-                    Err(_) => tracing::warn!(
-                        from_unit = %d.unit, to_unit = %unit, addon = %d.ingredient_name,
-                        "addon follow-the-drink across incompatible units; left as authored"
-                    ),
+                    Err(_) => {
+                        tracing::warn!(
+                            from_unit = %d.unit, to_unit = %unit, addon = %d.ingredient_name,
+                            "addon follow-the-drink across incompatible units; left as authored"
+                        );
+                        warnings.push(ResolveWarning {
+                            rule: "unit_conversion".into(),
+                            message: format!(
+                                "{} ({}) should follow {name} ({unit}): incompatible units, deducted as authored",
+                                d.ingredient_name, d.unit
+                            ),
+                        });
+                    }
                 }
             }
         }
@@ -594,6 +644,10 @@ pub async fn resolve_menu_item_configuration(
         )) = row_result
         else {
             tracing::warn!(field_id = %field_id, "Optional field not found — skipping");
+            warnings.push(ResolveWarning {
+                rule: "optional_not_found".into(),
+                message: format!("Optional field {field_id} is not an active option of this item: not charged nor deducted"),
+            });
             continue;
         };
 
@@ -601,6 +655,10 @@ pub async fn resolve_menu_item_configuration(
             && size_label.as_deref() != Some(fs.as_str())
         {
             tracing::warn!(field_id = %field_id, "Optional field size mismatch — skipping");
+            warnings.push(ResolveWarning {
+                rule: "optional_size_mismatch".into(),
+                message: format!("\"{fname}\" is only offered on size {fs}: skipped"),
+            });
             continue;
         }
 
@@ -616,6 +674,8 @@ pub async fn resolve_menu_item_configuration(
                 category: "general".into(),
                 addon_item_id: None,
                 optional_field_id: Some(field_id),
+                note: None,
+                undeducted: false,
             });
         }
 
@@ -643,6 +703,7 @@ pub async fn resolve_menu_item_configuration(
         optionals: resolved_optionals,
         addon_line,
         optional_line,
+        warnings,
     })
 }
 
