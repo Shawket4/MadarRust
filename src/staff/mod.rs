@@ -26,6 +26,7 @@
 
 pub mod attendance;
 pub mod directory;
+pub mod discipline;
 pub mod jobs;
 pub mod payroll;
 pub mod penalties;

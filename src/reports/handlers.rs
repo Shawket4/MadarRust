@@ -2415,3 +2415,115 @@ pub async fn branch_combined_item_sales(
 
     Ok(HttpResponse::Ok().json(rows))
 }
+
+// ── Tax report ───────────────────────────────────────────────
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TaxReport {
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    /// The org's current tax rate, as a decimal fraction. Informational only —
+    /// individual orders carry the rate that was actually applied at sale
+    /// time (`tax_rate_applied`), which may differ if the rate changed since.
+    #[schema(value_type = f64, example = 0.14)]
+    #[serde(serialize_with = "crate::decimals::serialize")]
+    pub org_tax_rate: sqlx::types::BigDecimal,
+    pub order_count: i64,
+    pub voided_orders: i64,
+    /// Sum of `orders.subtotal` across every branch, before discount or tax.
+    pub subtotal: i64,
+    pub discount_amount: i64,
+    /// Net of refunded service charge.
+    pub service_charge_amount: i64,
+    /// Tax collected at sale time, before refunds.
+    pub tax_collected: i64,
+    pub refunded_tax: i64,
+    /// `tax_collected - refunded_tax` — what is actually owed for the period.
+    pub net_tax_due: i64,
+    /// `total_amount`, net of refunds, across every branch.
+    pub net_revenue: i64,
+}
+
+// GET /reports/orgs/:id/tax
+#[utoipa::path(
+    get,
+    path = "/reports/orgs/{org_id}/tax",
+    tag = "reports",
+    params(("org_id" = Uuid, Path, description = "Organization ID")),
+    params(DateRangeQuery),
+    responses((status = 200, description = "Org-wide VAT/tax report", body = TaxReport), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+#[tracing::instrument(skip_all, fields(org_id = %*org_id, from = ?query.from, to = ?query.to))]
+pub async fn org_tax_report(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    org_id: web::Path<Uuid>,
+    query: web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "orders", "read").await?;
+
+    if claims.role != UserRole::SuperAdmin && claims.org_id() != Some(*org_id) {
+        return Err(AppError::Forbidden("Not your org".into()));
+    }
+
+    let org_tax_rate: sqlx::types::BigDecimal =
+        sqlx::query_scalar("SELECT tax_rate FROM organizations WHERE id = $1")
+            .bind(*org_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .ok_or_else(|| AppError::NotFound("Organization not found".into()))?;
+
+    #[derive(sqlx::FromRow)]
+    struct Totals {
+        order_count: i64,
+        voided_orders: i64,
+        subtotal: i64,
+        discount_amount: i64,
+        service_charge_amount: i64,
+        tax_collected: i64,
+        refunded_tax: i64,
+        net_revenue: i64,
+    }
+
+    let totals = sqlx::query_as::<_, Totals>(
+        r#"
+        SELECT
+            COUNT(*) FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint AS order_count,
+            COUNT(*) FILTER (WHERE o.status = 'voided')::bigint AS voided_orders,
+            COALESCE(SUM(o.subtotal) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS subtotal,
+            COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS discount_amount,
+            COALESCE(SUM(o.service_charge_amount - COALESCE(rf.refunded_service_charge, 0)) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS service_charge_amount,
+            COALESCE(SUM(o.tax_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS tax_collected,
+            COALESCE(SUM(rf.refunded_tax) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS refunded_tax,
+            COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0)) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS net_revenue
+        FROM orders o
+        JOIN branches br ON br.id = o.branch_id
+        LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
+        WHERE br.org_id = $1
+          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
+          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+        "#,
+    )
+    .bind(*org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_one(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(TaxReport {
+        from: query.from,
+        to: query.to,
+        org_tax_rate,
+        order_count: totals.order_count,
+        voided_orders: totals.voided_orders,
+        subtotal: totals.subtotal,
+        discount_amount: totals.discount_amount,
+        service_charge_amount: totals.service_charge_amount,
+        tax_collected: totals.tax_collected,
+        refunded_tax: totals.refunded_tax,
+        net_tax_due: totals.tax_collected - totals.refunded_tax,
+        net_revenue: totals.net_revenue,
+    }))
+}
