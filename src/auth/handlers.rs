@@ -33,7 +33,9 @@ pub struct LoginRequest {
         example = "1234"
     )]
     pub pin: Option<String>,
-    /// Teller's display name (required for PIN login, unused otherwise).
+    /// The person's display name. Optional for PIN login: without it the PIN
+    /// alone identifies the person (PIN-only sign-in, org-wide unique PINs).
+    /// Old tablets send it and keep the name-narrowed lookup.
     #[schema(example = "Mariam")]
     pub name: Option<String>,
     /// Required for PIN login. The org is derived from this branch server-side.
@@ -157,6 +159,89 @@ pub struct AuthPermissionsResponse {
 
 // ── POST /auth/login ─────────────────────────────────────────
 
+/// Columns of `User`, for the PIN look-ups below.
+const PIN_USER_COLUMNS: &str = "u.id, u.org_id, u.name, u.email, u.phone, \
+     u.password_hash, u.pin_hash, u.role, u.is_active, u.last_login_at, \
+     u.created_at, u.updated_at, u.deleted_at";
+
+/// Who may type a PIN at all: anyone who works a till (owners and managers
+/// too); whether they may at THIS branch is the `pos.sign_in` check.
+const PIN_HOLDER_FILTER: &str = "u.org_id = $1 \
+     AND u.pin_hash IS NOT NULL \
+     AND u.role <> 'super_admin' \
+     AND NOT u.is_guest_principal \
+     AND u.is_active = TRUE \
+     AND u.deleted_at IS NULL";
+
+fn pin_verifies(u: &User, pin: &str) -> bool {
+    u.pin_hash
+        .as_deref()
+        .is_some_and(|h| bcrypt::verify(pin, h).unwrap_or(false))
+}
+
+/// The name-narrowed path old tablets use: names are unique per org.
+async fn find_pin_holder_by_name(
+    pool: &PgPool,
+    org: Uuid,
+    name: &str,
+    pin: &str,
+) -> Result<Option<User>, AppError> {
+    let rows = sqlx::query_as::<_, User>(&format!(
+        "SELECT {PIN_USER_COLUMNS} FROM users u \
+          WHERE {PIN_HOLDER_FILTER} AND LOWER(u.name) = LOWER($2)"
+    ))
+    .bind(org)
+    .bind(name)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().find(|u| pin_verifies(u, pin)))
+}
+
+/// PIN-only (§2, §6): FIND the holder by the keyed fingerprint — one indexed
+/// row, one slow verify — and only if that finds nobody, scan the holders who
+/// have no fingerprint yet (the backfill happens at their next sign-in).
+/// `Some(Err(()))` when the scan finds the PIN on more than one person.
+async fn find_pin_holder_by_pin(
+    pool: &PgPool,
+    org: Uuid,
+    pin: &str,
+) -> Result<Option<Result<User, ()>>, AppError> {
+    let fingerprints = crate::auth::pin_fingerprint::lookup_fingerprints(org, pin);
+    let by_fingerprint = sqlx::query_as::<_, User>(&format!(
+        "SELECT {PIN_USER_COLUMNS} FROM users u \
+          WHERE {PIN_HOLDER_FILTER} AND u.pin_fingerprint = ANY($2)"
+    ))
+    .bind(org)
+    .bind(&fingerprints)
+    .fetch_all(pool)
+    .await?;
+    if let Some(u) = by_fingerprint.into_iter().find(|u| pin_verifies(u, pin)) {
+        return Ok(Some(Ok(u)));
+    }
+    let unstamped = sqlx::query_as::<_, User>(&format!(
+        "SELECT {PIN_USER_COLUMNS} FROM users u \
+          WHERE {PIN_HOLDER_FILTER} AND u.pin_fingerprint IS NULL"
+    ))
+    .bind(org)
+    .fetch_all(pool)
+    .await?;
+    let mut hits = unstamped.into_iter().filter(|u| pin_verifies(u, pin));
+    Ok(match (hits.next(), hits.next()) {
+        (Some(u), None) => Some(Ok(u)),
+        (Some(first), Some(second)) => {
+            tracing::warn!(
+                target: "madar.authz",
+                %org,
+                first = %first.id,
+                second = %second.id,
+                "PIN-only sign-in matched more than one person"
+            );
+            Some(Err(()))
+        }
+        _ => None,
+    })
+}
+
 #[utoipa::path(
     post,
     path = "/auth/login",
@@ -208,10 +293,14 @@ pub async fn login(
         }
 
         (None, Some(pin)) => {
+            // PIN-only sign-in (POS_SIGNIN_OVERHAUL.md §2, §8.5): `name` is
+            // optional on the wire. Old tablets keep sending it and keep the
+            // name-narrowed path exactly as it was.
             let name = body
                 .name
                 .as_deref()
-                .ok_or_else(|| AppError::BadRequest("name is required for PIN login".into()))?;
+                .map(str::trim)
+                .filter(|n| !n.is_empty());
 
             let branch_id = body.branch_id.ok_or_else(|| {
                 AppError::BadRequest("branch_id is required for PIN login".into())
@@ -244,44 +333,31 @@ pub async fn login(
                     .await?;
             }
 
-            // ORG-scoped lookup: teller names are unique per org, so resolve the
-            // teller from (name, pin) within the branch's org FIRST. Branch
-            // assignment is checked separately below — that lets us distinguish
-            // "wrong name/pin (or wrong org)" → 401 from "valid teller, but no
-            // access to THIS branch" → 403, instead of conflating both.
-            let tellers = sqlx::query_as::<_, User>(
-                r#"
-                SELECT u.id, u.org_id, u.name, u.email, u.phone,
-                       u.password_hash, u.pin_hash, u.role,
-                       u.is_active, u.last_login_at,
-                       u.created_at, u.updated_at, u.deleted_at
-                FROM users u
-                WHERE LOWER(u.name) = LOWER($1)
-                  AND u.org_id      = $2
-                  AND u.pin_hash    IS NOT NULL
-                  -- Anyone who works a till signs in with a PIN (owners and
-                  -- managers too); whether they may at THIS branch is the
-                  -- `pos.sign_in` check below.
-                  AND u.role        <> 'super_admin'
-                  AND NOT u.is_guest_principal
-                  AND u.is_active   = TRUE
-                  AND u.deleted_at  IS NULL
-                "#,
-            )
-            .bind(name)
-            .bind(branch_org_id)
-            .fetch_all(pool.get_ref())
-            .await?;
-
-            let matched = match tellers.into_iter().find(|u| {
-                u.pin_hash
-                    .as_deref()
-                    .is_some_and(|h| bcrypt::verify(pin, h).unwrap_or(false))
-            }) {
-                Some(u) => u,
-                // No teller in this org matches name+PIN (includes a real teller
-                // from a DIFFERENT org) → generic invalid credentials, and one
-                // more against the delay.
+            // ORG-scoped lookup: resolve the person within the branch's org
+            // FIRST. Branch access is checked separately below — that lets us
+            // distinguish "wrong PIN (or wrong org)" → 401 from "valid person,
+            // but no access to THIS branch" → 403, instead of conflating both.
+            let found = match name {
+                Some(name) => find_pin_holder_by_name(pool.get_ref(), branch_org_id, name, pin)
+                    .await?
+                    .map(Ok),
+                None => find_pin_holder_by_pin(pool.get_ref(), branch_org_id, pin).await?,
+            };
+            let matched = match found {
+                Some(Ok(u)) => u,
+                // Two people hold this PIN and nothing names which one is
+                // typing. Not a wrong PIN, so not counted against the delay.
+                Some(Err(())) => {
+                    return Err(AppError::Refused {
+                        code: "PIN_NOT_UNIQUE",
+                        reason:
+                            "This PIN belongs to more than one person. Ask a manager for a new PIN."
+                                .into(),
+                    });
+                }
+                // Nobody in this org matches (includes a real person from a
+                // DIFFERENT org) → generic invalid credentials, and one more
+                // against the delay.
                 None => {
                     if throttled {
                         crate::auth::pin_throttle::record_failure(

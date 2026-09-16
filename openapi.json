@@ -59308,7 +59308,7 @@
               "string",
               "null"
             ],
-            "description": "Teller's display name (required for PIN login, unused otherwise).",
+            "description": "The person's display name. Optional for PIN login: without it the PIN\nalone identifies the person (PIN-only sign-in, org-wide unique PINs).\nOld tablets send it and keep the name-narrowed lookup.",
             "example": "Mariam"
           },
           "org_id": {

@@ -18,7 +18,9 @@ CREATE TABLE IF NOT EXISTS device_activation_codes (
     created_at      timestamptz NOT NULL DEFAULT now(),
     expires_at      timestamptz NOT NULL DEFAULT now() + interval '24 hours',
     used_at         timestamptz NULL,
-    used_by_device  uuid NULL REFERENCES devices(id) ON DELETE SET NULL,
+    -- No foreign key on purpose: a code's history outlives the device row, and
+    -- the tills rework's down script must still be able to drop `devices`.
+    used_by_device  uuid NULL,
     revoked_at      timestamptz NULL
 );
 

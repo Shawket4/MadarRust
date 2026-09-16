@@ -500,6 +500,85 @@ async fn wrong_pins_earn_a_growing_delay_and_a_correct_one_clears_it(pool: PgPoo
     assert_eq!(left, 0, "a correct PIN forgets the run");
 }
 
+/// PIN-only sign-in (POS_SIGNIN_OVERHAUL.md §2, §8.5): no name on the wire.
+/// A stamped PIN is FOUND by its fingerprint; an unstamped one by the scan,
+/// which stamps it; a PIN two people share is refused as ambiguous rather than
+/// guessed; an unknown PIN is a 401 that counts toward the delay.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_pin_alone_signs_the_right_person_in(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let add = |name: &'static str, pin: &'static str| {
+        let pool = pool.clone();
+        async move {
+            let id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO users (id, org_id, name, role, pin_hash)
+                 VALUES ($1, $2, $3, 'teller'::user_role, $4)",
+            )
+            .bind(id)
+            .bind(org_id)
+            .bind(name)
+            .bind(bcrypt::hash(pin, 4).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+            id
+        }
+    };
+    let sara = add("Sara", "246810").await;
+    let attempt = |pin: &str| {
+        test::TestRequest::post()
+            .uri("/auth/login")
+            .set_json(&json!({"pin": pin, "branch_id": branch_id}))
+            .to_request()
+    };
+
+    // Unstamped: found by the scan, and stamped on the way through.
+    let resp = test::call_service(&app, attempt("246810")).await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["user"]["id"], sara.to_string());
+    let stamped: bool =
+        sqlx::query_scalar("SELECT pin_fingerprint IS NOT NULL FROM users WHERE id = $1")
+            .bind(sara)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(stamped);
+
+    // Stamped: found by the fingerprint. Another unstamped holder with a
+    // different PIN does not get in the way.
+    add("Omar", "135791").await;
+    let resp = test::call_service(&app, attempt("246810")).await;
+    assert_eq!(resp.status(), 200);
+
+    // Unknown PIN: 401, and the attempt is counted (no name = PIN-only).
+    let resp = test::call_service(&app, attempt("999999")).await;
+    assert_eq!(resp.status(), 401);
+    let counted: i64 =
+        sqlx::query_scalar("SELECT COALESCE(max(fails), 0)::bigint FROM pin_attempts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(counted, 1);
+
+    // Two unstamped people share a PIN (pre-rollout data): refused, not guessed.
+    add("Dup One", "112233").await;
+    add("Dup Two", "112233").await;
+    let resp = test::call_service(&app, attempt("112233")).await;
+    assert_eq!(resp.status(), 409);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["code"], "PIN_NOT_UNIQUE");
+}
+
 /// Old tablets (v0.5–v0.7) send a name and no device id: the new place-delay
 /// never touches them, however many misses (§3.4, "leave them alone").
 #[sqlx::test(migrations = "./migrations")]
