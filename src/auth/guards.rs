@@ -10,23 +10,6 @@ pub fn require_super_admin(claims: &Claims) -> Result<(), AppError> {
     }
 }
 
-/// Ensure the caller is at least org_admin (org_admin or super_admin)
-pub fn require_org_admin(claims: &Claims) -> Result<(), AppError> {
-    match claims.role {
-        UserRole::SuperAdmin | UserRole::OrgAdmin => Ok(()),
-        _ => Err(AppError::Forbidden("Org admin access required".into())),
-    }
-}
-
-/// Ensure the caller is at least branch_manager
-#[allow(dead_code)]
-pub fn require_manager(claims: &Claims) -> Result<(), AppError> {
-    match claims.role {
-        UserRole::SuperAdmin | UserRole::OrgAdmin | UserRole::BranchManager => Ok(()),
-        _ => Err(AppError::Forbidden("Manager access required".into())),
-    }
-}
-
 /// Ensure the caller belongs to the org they're trying to manage
 pub fn require_same_org(claims: &Claims, org_id: Option<uuid::Uuid>) -> Result<(), AppError> {
     if claims.role == UserRole::SuperAdmin {

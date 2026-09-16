@@ -12,7 +12,7 @@ use crate::{
     },
     errors::{AppError, AppErrorResponse},
     models::UserRole,
-    permissions::checker::check_permission,
+    permissions::{checker::check_permission, guard},
 };
 
 // ── Models ────────────────────────────────────────────────────
@@ -205,6 +205,14 @@ pub async fn upsert_user_permission(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "permissions", "update").await?;
     require_same_org_as_target(pool.get_ref(), &claims, *user_id).await?;
+    guard_override_write(
+        pool.get_ref(),
+        &claims,
+        *user_id,
+        &body.resource,
+        &body.action,
+    )
+    .await?;
 
     let perm = sqlx::query_as::<_, Permission>(
         r#"
@@ -253,6 +261,7 @@ pub async fn delete_user_permission(
     check_permission(pool.get_ref(), &claims, "permissions", "delete").await?;
     let (user_id, resource, action) = path.into_inner();
     require_same_org_as_target(pool.get_ref(), &claims, user_id).await?;
+    guard_override_write(pool.get_ref(), &claims, user_id, &resource, &action).await?;
 
     sqlx::query(
         "DELETE FROM permissions WHERE user_id = $1
@@ -342,6 +351,58 @@ pub async fn upsert_role_permission(
 }
 
 // ── Helpers ───────────────────────────────────────────────────
+
+/// S2 / S10 (permissions::guard): an override write is refused unless
+/// - the cell is one the matrix knows (no `menu_items:waive_service`);
+/// - the target is not the caller, and ranks strictly below them (an owner's
+///   access is edited by the platform only, so nobody can lock an owner out);
+/// - a branch manager shares a branch with the target;
+/// - the caller holds the cell themselves. This applies to removing an override
+///   too, because removing a deny re-exposes the role default.
+async fn guard_override_write(
+    pool: &PgPool,
+    claims: &Claims,
+    target_id: Uuid,
+    resource: &str,
+    action: &str,
+) -> Result<(), AppError> {
+    if !crate::permissions::permission_cells().any(|(r, a)| r == resource && a == action) {
+        return Err(AppError::BadRequest(format!(
+            "Unknown permission: {resource}:{action}"
+        )));
+    }
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND deleted_at IS NULL)",
+    )
+    .bind(target_id)
+    .fetch_one(pool)
+    .await?;
+    if !exists {
+        return Err(AppError::NotFound("User not found".into()));
+    }
+    guard::require_dominance(
+        pool,
+        claims,
+        target_id,
+        crate::authz::Cap::StaffPermissionsEdit,
+    )
+    .await?;
+    if claims.role == UserRole::BranchManager {
+        let mut conn = pool.acquire().await?;
+        if !guard::share_a_branch(&mut conn, target_id, claims.user_id()).await? {
+            return Err(AppError::Forbidden(
+                "You do not have access to this user".into(),
+            ));
+        }
+    }
+    check_permission(pool, claims, resource, action)
+        .await
+        .map_err(|_| {
+            AppError::Forbidden(format!(
+                "You cannot grant {resource}:{action} because you do not hold it"
+            ))
+        })
+}
 
 fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
     req.extensions()

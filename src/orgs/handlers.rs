@@ -98,6 +98,8 @@ struct CreateOrgFields {
     require_table_for_orders: Option<bool>,
     receipt_footer: Option<String>,
     timezone: Option<String>,
+    /// Role template (`restaurant` default, or `cafe`).
+    template: Option<String>,
 }
 
 /// A multipart checkbox: absent is None, and anything a form posts for "on"
@@ -191,6 +193,10 @@ pub struct CreateOrgMultipart {
 
     #[schema(example = "Africa/Cairo")]
     pub timezone: Option<String>,
+
+    /// Role template the org starts from: `restaurant` (default) or `cafe`.
+    #[schema(example = "cafe")]
+    pub template: Option<String>,
 
     /// Logo image file. PNG, JPEG, or WebP. Optional — omit the field
     /// entirely to create the org without a logo.
@@ -290,6 +296,7 @@ pub async fn create_org(
             }
             "receipt_footer" => fields.receipt_footer = text_field(&mut field).await?,
             "timezone" => fields.timezone = text_field(&mut field).await?,
+            "template" => fields.template = text_field(&mut field).await?,
             _ => {
                 drain_field(&mut field).await?;
             }
@@ -334,7 +341,12 @@ pub async fn create_org(
                 .into(),
         ));
     }
-    let tax_rate = fields.tax_rate.unwrap_or(0.14);
+    // Locked owner decision (2026-09-15): a new org starts at 0% tax, not
+    // Egypt's 14%. A shop that owes tax sets its rate once during setup and
+    // knows it did; a shop that does not owe it had no way to discover that the
+    // number it never chose was quietly adding 14% to every receipt. Guessing
+    // wrong in the direction of charging money is the worse failure.
+    let tax_rate = fields.tax_rate.unwrap_or(0.0);
     if !(0.0..=1.0).contains(&tax_rate) {
         return Err(AppError::BadRequest(
             "tax_rate is a fraction between 0 and 1, not a percentage — 0.14 means 14%".into(),
@@ -378,27 +390,10 @@ pub async fn create_org(
     .fetch_one(&mut *tx)
     .await?;
 
-    sqlx::query(
-        r#"
-        -- The Talabat tenders are seeded INACTIVE: a shop with no Talabat
-        -- integration would otherwise carry two tenders nobody can use and two
-        -- always-zero columns on every Z report. The dashboard's payment-method
-        -- switch turns them on when that branch actually sells on Talabat.
-        -- `talabat_cash` is cash (the rider collects it and it reaches the
-        -- drawer); `talabat_online` is not.
-        INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash, is_active)
-        VALUES
-            ($1, 'cash', '{"en": "Cash", "ar": "نقدي"}', '#10B981', 'money', true, true),
-            ($1, 'card', '{"en": "Card", "ar": "بطاقة"}', '#3B82F6', 'credit_card', false, true),
-            ($1, 'digital_wallet', '{"en": "Digital Wallet", "ar": "محفظة رقمية"}', '#8B5CF6', 'wallet', false, true),
-            ($1, 'mixed', '{"en": "Mixed", "ar": "مختلط"}', '#F59E0B', 'pie_chart', false, true),
-            ($1, 'talabat_online', '{"en": "Talabat Online", "ar": "طلبات أونلاين"}', '#EF4444', 'delivery', false, false),
-            ($1, 'talabat_cash', '{"en": "Talabat Cash", "ar": "طلبات كاش"}', '#F97316', 'delivery', true, false)
-        "#
-    )
-    .bind(org.id)
-    .execute(&mut *tx)
-    .await?;
+    // Tenders, roles from the template (with the new-org default limits) and
+    // the milk / coffee_bean categories. See `orgs::provision`.
+    let template = fields.template.as_deref().unwrap_or("restaurant");
+    super::provision::provision_org_defaults(&mut tx, org.id, template).await?;
 
     tx.commit().await?;
 
@@ -531,25 +526,84 @@ pub async fn offline_auth_bundle(
     org_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    // Authorization: the caller's token MUST belong to this org. The bundle is
-    // fetched by the device's signed-in user to enable offline unlock for the
-    // whole org — no extra role gate, but never across orgs.
+    // Authorization (S3). The bundle carries PIN verifiers and the LAN secret, so
+    // it is never served to "any org user":
+    // - the caller's token belongs to this org, and
+    // - the request comes from a registered, unretired device of this org (the
+    //   `X-Madar-Device` header), or the caller works a till (`tills:create`),
+    //   which is how v0.5–v0.7 tablets that send no device header fetch it.
+    // A registered device receives only the people who can sign in at ITS branch.
     require_same_org(&claims, Some(*org_id))?;
+    let device_id = crate::devices::DeviceHeader::from_request_headers(&req);
+    let device_branch: Option<Uuid> = match device_id {
+        Some(id) => sqlx::query_scalar(
+            "SELECT branch_id FROM devices WHERE id = $1 AND org_id = $2 AND retired_at IS NULL",
+        )
+        .bind(id)
+        .bind(*org_id)
+        .fetch_optional(pool.get_ref())
+        .await?
+        .flatten(),
+        None => None,
+    };
+    let works_a_till = check_permission(pool.get_ref(), &claims, "tills", "create")
+        .await
+        .is_ok();
+    if device_branch.is_none() && !works_a_till {
+        return Err(AppError::Forbidden(
+            "Offline sign-in data is only served to a registered device of this organization"
+                .into(),
+        ));
+    }
 
-    // All PIN-login roles ship in the bundle so a waiter or kitchen device can
-    // unlock offline, not just tellers. The role rides along so the device can
-    // route the offline session (waiter → tickets, kitchen → KDS).
+    // PIN-login roles only (a manager may work a till). With a known device, only
+    // people assigned to its branch, plus floor staff with no assignment at all
+    // (they are org-wide today).
     let tellers = sqlx::query_as::<_, OfflineTellerCredential>(
         r#"
-        SELECT id AS user_id, name, role::text AS role, is_active, offline_pin_hash
-        FROM users
-        WHERE org_id = $1 AND role IN ('teller', 'waiter', 'kitchen') AND deleted_at IS NULL
-        ORDER BY name
+        SELECT u.id AS user_id, u.name, u.role::text AS role, u.is_active, u.offline_pin_hash
+        FROM users u
+        WHERE u.org_id = $1
+          AND u.role <> 'super_admin'
+          AND u.deleted_at IS NULL
+          AND NOT u.is_guest_principal
+          -- A PIN bundle is for people who have a PIN to type. Someone with no
+          -- PIN at all (a back-office account) is not an offline sign-in.
+          AND u.pin_hash IS NOT NULL
+          AND ($2::uuid IS NULL
+               OR EXISTS (SELECT 1 FROM user_branch_assignments a
+                           WHERE a.user_id = u.id AND a.branch_id = $2)
+               OR (u.role IN ('teller', 'waiter', 'kitchen')
+                   AND NOT EXISTS (SELECT 1 FROM user_branch_assignments a
+                                    WHERE a.user_id = u.id)))
+        ORDER BY u.name
         "#,
     )
     .bind(*org_id)
+    .bind(device_branch)
     .fetch_all(pool.get_ref())
     .await?;
+    // Only people who may sign in at a till here (architecture E `pos.sign_in`).
+    //
+    // Someone who holds it but has no verifier yet is listed WITHOUT one: the
+    // verifier is derived on an online PIN login, so a person who has never had
+    // one is a normal state, and the POS turns a listed-but-verifierless row
+    // into "…hasn't signed in online on this device yet — connect once", where
+    // dropping the row gets them the misleading "no active user named …".
+    // This used to be spelled `role IN (teller, waiter, kitchen) OR has a
+    // verifier`, which gave that precise message to floor staff and the
+    // misleading one to the managers and owners who may now work a till. The
+    // "has a PIN at all" half of it is now the SQL `pin_hash IS NOT NULL`.
+    let mut tellers_here = Vec::with_capacity(tellers.len());
+    for t in tellers {
+        let may = crate::authz::require::effective(pool.get_ref(), t.user_id, device_branch)
+            .await?
+            .can(crate::authz::Cap::PosSignIn);
+        if may {
+            tellers_here.push(t);
+        }
+    }
+    let tellers = tellers_here;
 
     // The org's stable LAN secret, hex-encoded in SQL (no Rust encoding dep).
     let lan_secret: String =
@@ -1008,3 +1062,35 @@ async fn text_field(field: &mut actix_multipart::Field) -> Result<Option<String>
 }
 
 // ── GET /public/orgs  (Unauthenticated) ──────────────────────
+
+/// A new org's tenders.
+pub(crate) async fn seed_payment_methods(
+    conn: &mut sqlx::PgConnection,
+    org: Uuid,
+) -> Result<(), AppError> {
+    // `mixed` stays dropped (phase 0, B3). Merged with main (2026-09-16):
+    // main's newer, deployed rule seeds the Talabat tenders INACTIVE rather than
+    // not at all, and keeps `talabat_cash` as cash (see the SQL comment). That
+    // supersedes this branch's earlier "do not seed Talabat" change.
+    sqlx::query(
+        r#"
+        -- The Talabat tenders are seeded INACTIVE: a shop with no Talabat
+        -- integration would otherwise carry two tenders nobody can use and two
+        -- always-zero columns on every Z report. The dashboard's payment-method
+        -- switch turns them on when that branch actually sells on Talabat.
+        -- `talabat_cash` is cash (the rider collects it and it reaches the
+        -- drawer); `talabat_online` is not.
+        INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash, is_active)
+        VALUES
+            ($1, 'cash', '{"en": "Cash", "ar": "نقدي"}', '#10B981', 'money', true, true),
+            ($1, 'card', '{"en": "Card", "ar": "بطاقة"}', '#3B82F6', 'credit_card', false, true),
+            ($1, 'digital_wallet', '{"en": "Digital Wallet", "ar": "محفظة رقمية"}', '#8B5CF6', 'wallet', false, true),
+            ($1, 'talabat_online', '{"en": "Talabat Online", "ar": "طلبات أونلاين"}', '#EF4444', 'delivery', false, false),
+            ($1, 'talabat_cash', '{"en": "Talabat Cash", "ar": "طلبات كاش"}', '#F97316', 'delivery', true, false)
+        "#
+    )
+    .bind(org)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}

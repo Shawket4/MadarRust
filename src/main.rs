@@ -15,10 +15,10 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 use madar_rust::openapi::ApiDoc;
 use madar_rust::{
-    ai, analytics, auth, bookings, branches, bundles, costing, delivery, demo, devices, discounts,
-    insights, integrations, inventory, kitchen, loyalty, menu, orders, orgs, payment_methods,
-    permissions, purchasing, qr_card, realtime, recipes, refunds, reports, reservations, staff,
-    stocktakes, sync, tickets, tills, uploads, users,
+    ai, analytics, auth, bookings, branches, bundles, costing, customers, delivery, demo, devices,
+    discounts, insights, integrations, inventory, kitchen, loyalty, menu, orders, orgs,
+    payment_methods, permissions, purchasing, qr_card, realtime, recipes, refunds, reports,
+    reservations, staff, stocktakes, sync, tickets, tills, uploads, users,
 };
 
 use utoipa::OpenApi;
@@ -113,6 +113,12 @@ async fn run() -> std::io::Result<()> {
     permissions::seeder::seed_role_permissions(&pool)
         .await
         .expect("Failed to seed default role permissions");
+
+    // The capability catalogue follows the compiled registry; a reused id stops boot.
+    if let Err(e) = madar_rust::authz::sync_catalogue(&pool).await {
+        panic!("permission registry drift: {e}");
+    }
+    tracing::info!(mode = ?*madar_rust::authz::shadow::MODE, "permissions model");
 
     let pool = web::Data::new(pool);
     // Read pool handed to the /reports scope only (see configure call below).
@@ -278,6 +284,7 @@ async fn run() -> std::io::Result<()> {
             .configure(orgs::routes::configure)
             .configure(users::routes::configure)
             .configure(permissions::routes::configure)
+            .configure(madar_rust::authz::api::configure)
             .configure(branches::routes::configure)
             .configure(menu::routes::configure)
             .configure(inventory::routes::configure)
@@ -301,6 +308,7 @@ async fn run() -> std::io::Result<()> {
             .configure(orders::routes::configure)
             .configure(refunds::routes::configure)
             .configure(discounts::routes::configure)
+            .configure(customers::routes::configure)
             .configure(|cfg| reports::routes::configure(cfg, read_pool.clone()))
             // Metrics share the read replica with reports: both are read-only
             // and both are dashboard-driven bursts.

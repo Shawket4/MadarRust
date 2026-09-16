@@ -418,6 +418,7 @@ pub async fn top_up(
             error: format!("At most {MAX_TOPUP_HASHES} hashes per request"),
             code: Some("TOO_MANY_HASHES".into()),
             till: None,
+            retry_after_seconds: None,
         }));
     }
     let pool = base_pool(&req)?;

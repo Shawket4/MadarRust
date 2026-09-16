@@ -155,9 +155,9 @@ fn claims_of(req: &HttpRequest) -> Result<Claims, AppError> {
         .ok_or_else(|| AppError::Unauthorized("Missing claims".into()))
 }
 
-fn org_of(claims: &Claims) -> Result<Uuid, AppError> {
+fn org_of(req: &HttpRequest, claims: &Claims) -> Result<Uuid, AppError> {
     claims
-        .org_id()
+        .scope_org(crate::auth::middleware::header_org_id(req))
         .ok_or_else(|| AppError::Forbidden("No org id".into()))
 }
 
@@ -244,7 +244,7 @@ pub async fn get_availability(
 ) -> Result<HttpResponse, AppError> {
     let claims = claims_of(&req)?;
     check_permission(pool.get_ref(), &claims, "payment_methods", "read").await?;
-    let org_id = org_of(&claims)?;
+    let org_id = org_of(&req, &claims)?;
     Ok(HttpResponse::Ok().json(load_availability(pool.get_ref(), org_id, q.branch_id).await?))
 }
 
@@ -313,7 +313,7 @@ async fn put_list(
 ) -> Result<HttpResponse, AppError> {
     let claims = claims_of(&req)?;
     check_permission(pool.get_ref(), &claims, "payment_methods", "update").await?;
-    let org_id = org_of(&claims)?;
+    let org_id = org_of(&req, &claims)?;
     let stored = replace_list(pool.get_ref(), org_id, owner, owner_id, &body).await?;
 
     // Realtime after commit (§0.6). A user's list applies at every branch.
@@ -507,7 +507,7 @@ pub async fn get_effective(
 ) -> Result<HttpResponse, AppError> {
     let claims = claims_of(&req)?;
     check_permission(pool.get_ref(), &claims, "payment_methods", "read").await?;
-    let org_id = org_of(&claims)?;
+    let org_id = org_of(&req, &claims)?;
     ensure_branch_in_org(pool.get_ref(), org_id, q.branch_id).await?;
     let rows =
         effective_methods(pool.get_ref(), org_id, q.branch_id, q.user_id, q.device_id).await?;

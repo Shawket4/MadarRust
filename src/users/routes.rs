@@ -7,6 +7,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .wrap(JwtMiddleware)
             .route("", web::post().to(handlers::create_user))
             .route("", web::get().to(handlers::list_users))
+            // Before "/{id}": a literal segment must not be eaten by the
+            // parameterised route.
+            .route("/pin-suggestion", web::get().to(handlers::suggest_pin))
             .route("/{id}", web::get().to(handlers::get_user))
             .route("/{id}", web::delete().to(handlers::delete_user))
             .route("/{id}/branches", web::post().to(handlers::assign_branch))

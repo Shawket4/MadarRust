@@ -25,6 +25,15 @@ pub fn problems(lookup: impl Fn(&str) -> Option<String>, release: bool) -> Vec<S
             "ASSET_URL_SECRET must be set to at least 32 bytes (generate with: openssl rand -hex 32)".into(),
         );
     }
+    // The PIN fingerprint key (src/auth/pin_fingerprint.rs). Debug builds fall
+    // back to a key derived from JWT_SECRET; a release build without a real one
+    // would fingerprint every PIN under a key printed in this repository, which
+    // is the same as not keying them at all.
+    if release && set("MADAR_PIN_FINGERPRINT_KEY").is_none_or(|s| s.len() < 32) {
+        out.push(
+            "MADAR_PIN_FINGERPRINT_KEY must be set to at least 32 bytes (generate with: openssl rand -hex 32). It must NOT be stored in the database.".into(),
+        );
+    }
     // TLS: once either file is named, both must be readable — never a silent
     // fall back to plain HTTP.
     if let (Some(cert), Some(key)) = (set("SSL_CERT_FILE"), set("SSL_KEY_FILE")) {
@@ -66,19 +75,21 @@ mod tests {
         move |k| m.get(k).cloned()
     }
 
+    const KEY32: &str = "0123456789abcdef0123456789abcdef";
+
     #[test]
     fn boot_config_release_requires_asset_url_secret() {
-        let base = [("DATABASE_URL", "postgres://x"), ("JWT_SECRET", "j")];
+        let base = [
+            ("DATABASE_URL", "postgres://x"),
+            ("JWT_SECRET", "j"),
+            ("MADAR_PIN_FINGERPRINT_KEY", KEY32),
+        ];
         let p = problems(env(&base), true);
         assert_eq!(p.len(), 1, "{p:?}");
         assert!(p[0].contains("ASSET_URL_SECRET"));
-        let short = [base[0], base[1], ("ASSET_URL_SECRET", "too-short")];
+        let short = [base[0], base[1], base[2], ("ASSET_URL_SECRET", "too-short")];
         assert!(problems(env(&short), true)[0].contains("ASSET_URL_SECRET"));
-        let good = [
-            base[0],
-            base[1],
-            ("ASSET_URL_SECRET", "0123456789abcdef0123456789abcdef"),
-        ];
+        let good = [base[0], base[1], base[2], ("ASSET_URL_SECRET", KEY32)];
         assert!(problems(env(&good), true).is_empty());
         assert!(
             problems(env(&base), false).is_empty(),
@@ -86,10 +97,35 @@ mod tests {
         );
     }
 
+    /// The PIN fingerprint key is a release requirement of its own: without it
+    /// every PIN would be fingerprinted under a key that is in this repository.
+    #[test]
+    fn boot_config_release_requires_the_pin_fingerprint_key() {
+        let base = [
+            ("DATABASE_URL", "postgres://x"),
+            ("JWT_SECRET", "j"),
+            ("ASSET_URL_SECRET", KEY32),
+        ];
+        let p = problems(env(&base), true);
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(p[0].contains("MADAR_PIN_FINGERPRINT_KEY"));
+        let short = [
+            base[0],
+            base[1],
+            base[2],
+            ("MADAR_PIN_FINGERPRINT_KEY", "too-short"),
+        ];
+        assert!(problems(env(&short), true)[0].contains("MADAR_PIN_FINGERPRINT_KEY"));
+        assert!(
+            problems(env(&base), false).is_empty(),
+            "debug uses a dev key"
+        );
+    }
+
     #[test]
     fn boot_config_lists_every_missing_required_var() {
         let p = problems(env(&[]), true);
-        assert_eq!(p.len(), 3, "{p:?}");
+        assert_eq!(p.len(), 4, "{p:?}");
         let tls = [
             ("DATABASE_URL", "postgres://x"),
             ("JWT_SECRET", "j"),

@@ -1,8 +1,11 @@
 pub mod checker;
+pub mod guard;
 pub mod handlers;
 pub mod routes;
 pub mod seeder;
 
+#[cfg(test)]
+mod phase0_tests;
 #[cfg(test)]
 mod tests;
 

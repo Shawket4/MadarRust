@@ -15,7 +15,6 @@ use crate::{
     auth::jwt::Claims,
     devices::DeviceHeader,
     errors::{AppError, AppErrorResponse},
-    models::UserRole,
     permissions::checker::check_permission,
     realtime::{
         event::{BranchEvent, Topic},
@@ -663,8 +662,16 @@ pub async fn get_current_till(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "tills", "read").await?;
     require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
-    let person = match (claims.role == UserRole::Teller, query.teller_id) {
-        (false, Some(t)) => t,
+    // Someone else's till only for people who may see every till at the branch.
+    let sees_all = crate::authz::require::can(
+        pool.get_ref(),
+        &claims,
+        crate::authz::Cap::TillReadBranch,
+        Some(*branch_id),
+    )
+    .await?;
+    let person = match (sees_all, query.teller_id) {
+        (true, Some(t)) => t,
         _ => claims.user_id(),
     };
     Ok(HttpResponse::Ok().json(current_till(pool.get_ref(), *branch_id, person, device.0).await?))
@@ -739,7 +746,7 @@ pub async fn open_till(
         hub.as_ref().map(|h| h.get_ref()),
         branch_id.into_inner(),
         body.into_inner(),
-        ActingContext::live(&claims)?,
+        ActingContext::live(&claims)?.scoped(pool.get_ref()).await?,
         OpenMeta {
             device_id: device.0,
             device_code: None,
@@ -775,10 +782,14 @@ pub(crate) async fn open_till_inner(
     actor: ActingContext,
     meta: OpenMeta,
 ) -> Result<(Till, bool), AppError> {
-    if !actor.replay && matches!(actor.role, UserRole::Waiter | UserRole::Kitchen) {
-        return Err(AppError::Forbidden(
-            "Waiters and kitchen screens do not open tills".into(),
-        ));
+    if !actor.replay {
+        crate::authz::require::require_for(
+            pool,
+            actor.teller_id,
+            crate::authz::Cap::TillOpen,
+            Some(branch_id),
+        )
+        .await?;
     }
     if let Some(id) = body.id
         && let Some(existing) = fetch_till(pool, id).await?
@@ -1287,7 +1298,7 @@ pub async fn add_cash_movement(
         hub.as_ref().map(|h| h.get_ref()),
         till_id.into_inner(),
         body,
-        ActingContext::live(&claims)?,
+        ActingContext::live(&claims)?.scoped(pool.get_ref()).await?,
     )
     .await
 }
@@ -1315,7 +1326,12 @@ pub(crate) async fn add_cash_movement_inner(
     actor: ActingContext,
 ) -> Result<HttpResponse, AppError> {
     let till = fetch_till_or_404(pool, till_id).await?;
-    if !actor.replay && actor.role == UserRole::Teller && till.teller_id != actor.teller_id {
+    if !actor.replay
+        && till.teller_id != actor.teller_id
+        && !crate::authz::require::effective(pool, actor.teller_id, Some(till.branch_id))
+            .await?
+            .can(crate::authz::Cap::TillForceClose)
+    {
         return Err(AppError::Forbidden(
             "You can only add cash movements to your own till".into(),
         ));
@@ -1554,7 +1570,7 @@ pub async fn close_till(
         hub.as_ref().map(|h| h.get_ref()),
         till_id.into_inner(),
         body,
-        ActingContext::live(&claims)?,
+        ActingContext::live(&claims)?.scoped(pool.get_ref()).await?,
     )
     .await?;
     Ok(HttpResponse::Ok().json(out))
@@ -1568,7 +1584,12 @@ pub(crate) async fn close_till_inner(
     actor: ActingContext,
 ) -> Result<CloseTillResponse, AppError> {
     let till = fetch_till_or_404(pool, till_id).await?;
-    if !actor.replay && actor.role == UserRole::Teller && till.teller_id != actor.teller_id {
+    if !actor.replay
+        && till.teller_id != actor.teller_id
+        && !crate::authz::require::effective(pool, actor.teller_id, Some(till.branch_id))
+            .await?
+            .can(crate::authz::Cap::TillForceClose)
+    {
         return Err(AppError::Forbidden(
             "You can only close your own till".into(),
         ));
@@ -1690,14 +1711,13 @@ pub async fn force_close_till(
     check_permission(pool.get_ref(), &claims, "tills", "update").await?;
     let till = fetch_till_or_404(pool.get_ref(), *till_id).await?;
     require_branch_access(pool.get_ref(), &claims, till.branch_id).await?;
-    if matches!(
-        claims.role,
-        UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
-    ) {
-        return Err(AppError::Forbidden(
-            "Only managers can force close a till".into(),
-        ));
-    }
+    crate::authz::require::require(
+        pool.get_ref(),
+        &claims,
+        crate::authz::Cap::TillForceClose,
+        Some(till.branch_id),
+    )
+    .await?;
     if till.status != "open" {
         return Ok(HttpResponse::Ok().json(till));
     }
@@ -1780,11 +1800,8 @@ pub async fn delete_till(
     till_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    if claims.role != UserRole::OrgAdmin && claims.role != UserRole::SuperAdmin {
-        return Err(AppError::Forbidden(
-            "Only organization administrators can delete tills".into(),
-        ));
-    }
+    crate::authz::require::require(pool.get_ref(), &claims, crate::authz::Cap::TillDelete, None)
+        .await?;
     let till = fetch_till_or_404(pool.get_ref(), *till_id).await?;
     require_branch_access(pool.get_ref(), &claims, till.branch_id).await?;
     if till.status == "open" {
@@ -1834,36 +1851,7 @@ pub(crate) async fn require_branch_access(
     claims: &Claims,
     branch_id: Uuid,
 ) -> Result<(), AppError> {
-    if claims.role == UserRole::SuperAdmin {
-        return Ok(());
-    }
-    let branch_org: Option<Uuid> =
-        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
-            .bind(branch_id)
-            .fetch_optional(pool)
-            .await?
-            .flatten();
-    let branch_org = branch_org.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
-    if claims.org_id() != Some(branch_org) {
-        return Err(AppError::Forbidden(
-            "Branch belongs to a different org".into(),
-        ));
-    }
-    if matches!(
-        claims.role,
-        UserRole::OrgAdmin | UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
-    ) {
-        return Ok(());
-    }
-    let assigned: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)",
-    )
-    .bind(claims.user_id())
-    .bind(branch_id)
-    .fetch_one(pool)
-    .await?;
-    if !assigned {
-        return Err(AppError::Forbidden("Not assigned to this branch".into()));
-    }
-    Ok(())
+    // Architecture E: the branches a person may work a till at come from their
+    // live role assignments, not from their role name (see `authz::scope`).
+    crate::authz::scope::require_branch_access(pool, claims, branch_id).await
 }
