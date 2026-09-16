@@ -304,14 +304,20 @@ async fn fetch_item_basics(pool: &PgPool, id: Uuid) -> Result<Option<ItemBasics>
 }
 
 /// Bump the org's catalog revision (monotonic; seeds at 1 on first write).
+///
+/// Marks the bump with this transaction's id so the deferred `catalog_revision_bump`
+/// triggers skip it at commit: the revision returned here is the one that commits.
+/// Call it after the transaction's catalog writes.
 pub(crate) async fn bump_catalog_revision(
     conn: &mut sqlx::PgConnection,
     org_id: Uuid,
 ) -> Result<i64, AppError> {
     let rev: i64 = sqlx::query_scalar(
-        "INSERT INTO catalog_revision (org_id, revision) VALUES ($1, 1) \
+        "INSERT INTO catalog_revision (org_id, revision, bumped_xid) \
+         VALUES ($1, 1, pg_current_xact_id()) \
          ON CONFLICT (org_id) DO UPDATE \
-             SET revision = catalog_revision.revision + 1, updated_at = now() \
+             SET revision = catalog_revision.revision + 1, updated_at = now(), \
+                 bumped_xid = pg_current_xact_id() \
          RETURNING revision",
     )
     .bind(org_id)

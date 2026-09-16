@@ -1152,3 +1152,35 @@ async fn item_options_and_raw_sql_attachments_get_provenance(pool: PgPool) {
         (Some("allowlist".to_string()), Some(vec![o]))
     );
 }
+
+/// The revision a Studio write returns is the committed one (the deferred DB trigger
+/// does not bump again), and an open catalog transaction doesn't block other writers.
+#[sqlx::test]
+async fn handler_revision_is_the_committed_revision(pool: PgPool) {
+    let org = seed_org(&pool).await;
+    let cat = seed_category(&pool, org).await;
+    let before = catalog_revision(&pool, org).await;
+
+    let mut open = pool.begin().await.unwrap();
+    sqlx::query("UPDATE categories SET name = 'Open' WHERE id = $1")
+        .bind(cat)
+        .execute(&mut *open)
+        .await
+        .unwrap();
+    // Another writer of the same org commits while `open` is still in flight.
+    let mut tx = pool.begin().await.unwrap();
+    seed_item(&pool, org, cat, "Other", 100).await;
+    sqlx::query("UPDATE menu_items SET base_price = 200 WHERE org_id = $1")
+        .bind(org)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let returned = crate::menu::studio::bump_catalog_revision(&mut tx, org)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(catalog_revision(&pool, org).await, returned);
+    open.commit().await.unwrap();
+    assert!(catalog_revision(&pool, org).await > returned);
+    assert!(returned > before);
+}
