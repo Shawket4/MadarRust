@@ -97,6 +97,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("", web::post().to(modifiers::create_group))
                 .route("/{gid}", web::patch().to(modifiers::patch_group))
                 .route("/{gid}", web::delete().to(modifiers::delete_group))
+                .route("/{gid}/usage", web::get().to(modifiers::get_group_usage))
                 .route("/{gid}/options", web::post().to(modifiers::create_option)),
         )
         // ── Reusable modifier options (new unified tables) ────────────────────

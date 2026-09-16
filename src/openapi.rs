@@ -208,6 +208,7 @@ paths(
         crate::menu::modifiers::create_group,
         crate::menu::modifiers::patch_group,
         crate::menu::modifiers::delete_group,
+        crate::menu::modifiers::get_group_usage,
         crate::menu::modifiers::create_option,
         crate::menu::modifiers::patch_option,
         crate::menu::modifiers::delete_option,
