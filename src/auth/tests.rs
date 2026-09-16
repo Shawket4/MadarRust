@@ -342,7 +342,7 @@ async fn test_login_pin_invalid_branch_returns_401(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn test_login_pin_unassigned_org_teller_allowed(pool: PgPool) {
+async fn test_login_pin_teller_refused_at_a_branch_they_are_not_allowed_at(pool: PgPool) {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
@@ -380,14 +380,78 @@ async fn test_login_pin_unassigned_org_teller_allowed(pool: PgPool) {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    // D13: tellers are ORG-scoped — a valid teller in the branch's org may sign
-    // in at ANY branch in that org, even one they're not explicitly assigned to.
+    // D13 ("tellers are org-scoped, no per-branch gate at the till") is
+    // SUPERSEDED: POS_SIGNIN_OVERHAUL.md §5.2 "A + B". A person who HAS an
+    // explicit branch allow-list is held to it at the till, so the dashboard's
+    // per-branch toggles finally bite. 403, not 401: the name and PIN were
+    // right, the branch was not.
     assert_eq!(
         resp.status(),
-        200,
-        "org teller should be allowed at any org branch"
+        403,
+        "a teller listed only at branch A must not sign in at branch B"
     );
-    let body: serde_json::Value = test::read_body_json(resp).await;
+
+    // ...and at the branch they ARE allowed at, they sign in normally.
+    let req = test::TestRequest::post()
+        .uri("/auth/login")
+        .set_json(&json!({
+            "name": "Teller One",
+            "pin": "1234",
+            "branch_id": branch_a
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200, "allowed branch should sign in");
+}
+
+/// The migration rule (POS_SIGNIN_OVERHAUL.md §5.3): a person with NO explicit
+/// branches keeps working everywhere in their org. Ten PIN holders in prod have
+/// no allow-list row; reading "listed nowhere" as "allowed nowhere" would lock
+/// them all out overnight.
+#[sqlx::test(migrations = "./migrations")]
+async fn test_login_pin_teller_with_no_branch_list_works_anywhere(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let _branch_a = seed_branch(&pool, org_id).await;
+    let branch_b = seed_branch(&pool, org_id).await;
+    let user_id = Uuid::new_v4();
+    let hash = bcrypt::hash("1234", bcrypt::DEFAULT_COST).unwrap();
+    sqlx::query!(
+        "INSERT INTO users (id, org_id, name, role, pin_hash)
+         VALUES ($1, $2, 'Teller Free', 'teller'::user_role, $3)",
+        user_id,
+        org_id,
+        hash
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Deliberately NO user_branch_assignments row.
+
+    let req = test::TestRequest::post()
+        .uri("/auth/login")
+        .set_json(&json!({
+            "name": "Teller Free",
+            "pin": "1234",
+            "branch_id": branch_b
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status();
+    let raw = test::read_body(resp).await;
+    let text = String::from_utf8_lossy(&raw).to_string();
+    assert_eq!(
+        status, 200,
+        "a teller with no explicit branches works everywhere in their org, got {text}"
+    );
+    let body: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert!(
         body["token"]
             .as_str()

@@ -278,10 +278,15 @@ pub async fn login(
                 ));
             }
 
-            // D13: tellers are ORG-scoped, not branch-scoped. The teller was
-            // resolved within the branch's own org above (that's the boundary),
-            // so any active org teller may sign in at this branch's device — no
-            // per-branch `user_branch_assignments` gate.
+            // Decision D13 ("tellers are ORG-scoped, no per-branch gate at the
+            // till") is SUPERSEDED by the owner decision of 2026-09-16
+            // (POS_SIGNIN_OVERHAUL.md §5.2, "A + B"). The branch allow-list now
+            // gates PIN sign-in, and it does so through the check above: a role
+            // assignment that does not cover THIS branch contributes no role
+            // kind, so the person holds no `pos.sign_in` here and gets the 403.
+            // The allow-list itself lives in the role assignment; a person with
+            // no explicit branches is org-wide (§5.3), so nobody who works today
+            // is locked out by the change.
 
             // Layer 3: silently (re)derive the teller's OFFLINE PIN verifier
             // (argon2id, distinct from the bcrypt login hash) so the org's

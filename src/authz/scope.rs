@@ -114,8 +114,11 @@ pub async fn require_branch_access(
 
 /// The same, plus the token-branch binding some modules enforce (purchasing,
 /// stocktakes, reports). Kept separate because orders, delivery and inventory
-/// deliberately do NOT bind: D13 lets any org POS worker act on any branch of
-/// the org, and the order still records the device's own branch.
+/// deliberately do NOT bind the token to one branch: a POS worker may act on
+/// any branch they are ALLOWED at (`require_branch_access` above still decides
+/// that — D13's "any branch of the org" no longer applies, see
+/// POS_SIGNIN_OVERHAUL.md §5.2), and the order still records the device's own
+/// branch.
 pub async fn require_branch_access_bound(
     pool: &PgPool,
     claims: &Claims,

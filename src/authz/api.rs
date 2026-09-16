@@ -1120,6 +1120,44 @@ pub async fn set_assignments(
             }
         }
     }
+    // Project the branch allow-list back onto `user_branch_assignments`, which
+    // is now only that: a projection for pre-0.8 readers (the offline bundle,
+    // schedules, attendance). Role assignments are the truth
+    // (POS_SIGNIN_OVERHAUL.md §5.2 "A"). The legacy table's own convention is
+    // that no rows means org-wide for a till worker, so an `all_branches`
+    // assignment projects to no rows — which is exactly how it reads back in.
+    let projected: Vec<Uuid> = if body.assignments.iter().any(|a| a.all_branches) {
+        vec![]
+    } else {
+        let mut v: Vec<Uuid> = vec![];
+        for a in &body.assignments {
+            for b in &a.branch_ids {
+                if !v.contains(b) {
+                    v.push(*b);
+                }
+            }
+        }
+        v
+    };
+    sqlx::query(
+        "DELETE FROM user_branch_assignments WHERE user_id = $1 AND NOT (branch_id = ANY($2))",
+    )
+    .bind(*id)
+    .bind(&projected)
+    .execute(&mut *tx)
+    .await?;
+    for b in &projected {
+        sqlx::query(
+            "INSERT INTO user_branch_assignments (user_id, branch_id, assigned_by)
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        )
+        .bind(*id)
+        .bind(*b)
+        .bind(claims.user_id())
+        .execute(&mut *tx)
+        .await?;
+    }
+
     // The label older tablets and the JWT read: the most senior kind held.
     let primary = [
         RoleKind::OrgAdmin,

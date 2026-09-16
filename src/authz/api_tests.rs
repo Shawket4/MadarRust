@@ -394,6 +394,48 @@ async fn a_manager_at_one_branch_and_a_cashier_at_another(pool: PgPool) {
             resp.status()
         );
     }
+
+    // The legacy allow-list is now a PROJECTION of the assignments, so pre-0.8
+    // readers (offline bundle, schedules, attendance) see the same answer.
+    let projected: Vec<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT branch_id FROM user_branch_assignments WHERE user_id = $1 ORDER BY branch_id",
+    )
+    .bind(p)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let mut want = vec![b1, b2];
+    want.sort();
+    assert_eq!(projected, want, "allow-list projected back for old readers");
+
+    // Widen to org-wide: the legacy table's way of saying that is no rows.
+    let (s, body) = call(
+        &app,
+        test::TestRequest::put()
+            .uri(&format!("/authz/users/{p}/assignments"))
+            .set_json(json!({"assignments": [
+                {"role_id": id_of("teller"), "all_branches": true},
+            ]})),
+        &ot,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let n: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM user_branch_assignments WHERE user_id = $1")
+            .bind(p)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(n, 0, "org-wide projects to no rows");
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/auth/login")
+            .set_json(json!({"name": "Hana", "pin": "4321", "branch_id": b3}))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success(), "org-wide signs in anywhere");
 }
 
 #[sqlx::test]
