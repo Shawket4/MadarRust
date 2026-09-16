@@ -1397,6 +1397,29 @@
         }
       }
     },
+    "/auth/authz-keys": {
+      "get": {
+        "tags": [
+          "authz"
+        ],
+        "operationId": "authz_keys",
+        "responses": {
+          "200": {
+            "description": "Public keys that sign permission snapshots, current first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AuthzPublicKey"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/auth/login": {
       "post": {
         "tags": [
@@ -11303,6 +11326,109 @@
             "bearer_jwt": []
           }
         ]
+      }
+    },
+    "/devices/me/authz-snapshot": {
+      "get": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "device_snapshot",
+        "parameters": [
+          {
+            "name": "X-Madar-Device",
+            "in": "header",
+            "description": "The device id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Madar-Device-Token",
+            "in": "header",
+            "description": "The credential issued at activation",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The signed snapshot for the device's branch (madar_authz::snapshot::SignedSnapshot)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no signing key configured"
+          }
+        }
       }
     },
     "/devices/register": {
@@ -49973,6 +50099,23 @@
             "items": {
               "$ref": "#/components/schemas/UserPermissionItem"
             }
+          }
+        }
+      },
+      "AuthzPublicKey": {
+        "type": "object",
+        "description": "A public key a device verifies snapshots with.",
+        "required": [
+          "kid",
+          "public_key"
+        ],
+        "properties": {
+          "kid": {
+            "type": "string"
+          },
+          "public_key": {
+            "type": "string",
+            "description": "Hex-encoded 32-byte Ed25519 public key."
           }
         }
       },

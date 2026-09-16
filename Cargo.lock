@@ -2679,6 +2679,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "dotenvy",
+ "ed25519-dalek",
  "futures",
  "hmac",
  "image",

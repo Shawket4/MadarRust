@@ -5,10 +5,12 @@
 //! crate to actix handlers.
 
 pub mod api;
+pub mod keys;
 pub mod load;
 pub mod require;
 pub mod scope;
 pub mod shadow;
+pub mod snapshot;
 
 #[cfg(test)]
 mod api_tests;

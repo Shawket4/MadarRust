@@ -3,6 +3,12 @@ use actix_web::web;
 use crate::{auth::middleware::JwtMiddleware, devices::handlers};
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
+    // Device-authenticated (its own credential), so outside the JWT scope and
+    // registered before it.
+    cfg.service(
+        web::resource("/devices/me/authz-snapshot")
+            .route(web::get().to(crate::authz::snapshot::device_snapshot)),
+    );
     cfg.service(
         web::scope("/devices")
             .wrap(JwtMiddleware)

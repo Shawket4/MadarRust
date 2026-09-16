@@ -287,6 +287,8 @@ paths(
         crate::devices::activation::list_codes,
         crate::devices::activation::revoke_code,
         crate::devices::activation::activate,
+        crate::authz::snapshot::authz_keys,
+        crate::authz::snapshot::device_snapshot,
         crate::client_seen::handlers::list_client_versions,
         crate::devices::handlers::update_device,
         // ── legacy /shifts + /tills entity adapters (until cutover) ──
@@ -660,6 +662,7 @@ paths(
         crate::devices::handlers::Device,
         crate::devices::handlers::DeviceKind,
         crate::devices::activation::ActivationCode,
+        crate::authz::keys::AuthzPublicKey,
         crate::devices::activation::ActivationCodeState,
         crate::devices::activation::CreateActivationCodeRequest,
         crate::devices::activation::ActivateDeviceRequest,

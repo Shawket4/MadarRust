@@ -36,6 +36,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     .route(web::post().to(crate::devices::activation::activate)),
             )
             .service(
+                web::resource("/authz-keys")
+                    .route(web::get().to(crate::authz::snapshot::authz_keys)),
+            )
+            .service(
                 web::resource("/resolve-branch")
                     .wrap(Condition::new(limited, Governor::new(&gov)))
                     .route(web::post().to(handlers::resolve_branch)),

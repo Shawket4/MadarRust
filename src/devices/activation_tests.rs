@@ -329,3 +329,96 @@ async fn a_teller_cannot_issue_codes_and_a_code_never_rehomes_another_orgs_devic
         "the refused claim rolled back; the code stays free"
     );
 }
+
+/// Phase 4 (PERMISSIONS_ARCHITECTURE §4.4): an activated device fetches a
+/// snapshot of its branch signed by a key the server publishes; it lists the
+/// people who may sign in there, and nothing without the device credential.
+#[sqlx::test]
+async fn an_activated_device_gets_a_signed_snapshot_of_its_branch(pool: PgPool) {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    seed(&pool).await;
+    let app = app!(pool);
+    let o = org(&pool, "Rue").await;
+    let b = branch(&pool, o, "Maadi").await;
+    let owner = user(&pool, o, "org_admin").await;
+    let teller = user(&pool, o, "teller").await;
+    sqlx::query("UPDATE users SET pin_hash = 'x' WHERE id = $1")
+        .bind(teller)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let bearer = token(owner, o, UserRole::OrgAdmin);
+    let (_, code) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/devices/activation-codes")
+            .set_json(json!({"branch_id": b})),
+        Some(&bearer),
+    )
+    .await;
+    let device = Uuid::new_v4();
+    let (_, act) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/auth/activate-device")
+            .set_json(json!({"code": code["code"], "device_id": device})),
+        None,
+    )
+    .await;
+    let dev_token = act["device_token"].as_str().unwrap().to_string();
+
+    let (st, _) = call(
+        &app,
+        test::TestRequest::get()
+            .uri("/devices/me/authz-snapshot")
+            .insert_header(("X-Madar-Device", device.to_string())),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED, "no credential, no snapshot");
+
+    let (st, snap) = call(
+        &app,
+        test::TestRequest::get()
+            .uri("/devices/me/authz-snapshot")
+            .insert_header(("X-Madar-Device", device.to_string()))
+            .insert_header(("X-Madar-Device-Token", dev_token)),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{snap}");
+    let signed: madar_authz::snapshot::SignedSnapshot = serde_json::from_value(snap).unwrap();
+    assert_eq!(signed.body.branch_id, b.to_string());
+    assert_eq!(signed.body.device_id, device.to_string());
+    assert_eq!(
+        signed.body.expires_at,
+        i64::MAX,
+        "no expiry (locked decision)"
+    );
+    assert!(
+        signed.body.user(&teller.to_string()).is_some(),
+        "the teller signs in here"
+    );
+
+    let (_, keys) = call(&app, test::TestRequest::get().uri("/auth/authz-keys"), None).await;
+    let key = keys
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["kid"] == signed.kid.as_str())
+        .expect("the signing key is published");
+    let unhex = |s: &str| -> Vec<u8> {
+        s.as_bytes()
+            .chunks(2)
+            .map(|c| u8::from_str_radix(std::str::from_utf8(c).unwrap(), 16).unwrap())
+            .collect()
+    };
+    let pk: [u8; 32] = unhex(key["public_key"].as_str().unwrap())
+        .try_into()
+        .unwrap();
+    let sig: [u8; 64] = unhex(&signed.sig).try_into().unwrap();
+    VerifyingKey::from_bytes(&pk)
+        .unwrap()
+        .verify(&signed.body.signing_bytes(), &Signature::from_bytes(&sig))
+        .expect("the signature verifies");
+}
