@@ -381,9 +381,7 @@ async fn category_slug_in_org(
         .bind(org_id)
         .fetch_optional(pool)
         .await?
-        .ok_or_else(|| {
-            AppError::BadRequest("Swap category not found in this organization".into())
-        })
+        .ok_or_else(|| AppError::BadRequest("Swap category not found in this organization".into()))
 }
 
 const VALID_CHANNELS: [&str; 4] = ["in_mall", "outside", "umbrella", "pickup"];
@@ -754,13 +752,12 @@ pub async fn patch_group(
         ));
     }
 
-    let (cur_type, cur_effect, cur_cat): (Option<String>, String, Option<Uuid>) =
-        sqlx::query_as(
-            "SELECT legacy_addon_type, effect, swap_category_id FROM modifier_groups WHERE id = $1",
-        )
-        .bind(*gid)
-        .fetch_one(pool.get_ref())
-        .await?;
+    let (cur_type, cur_effect, cur_cat): (Option<String>, String, Option<Uuid>) = sqlx::query_as(
+        "SELECT legacy_addon_type, effect, swap_category_id FROM modifier_groups WHERE id = $1",
+    )
+    .bind(*gid)
+    .fetch_one(pool.get_ref())
+    .await?;
 
     // Effect / swap target / legacy type move together (B2/B3).
     let touches_effect =
@@ -1364,12 +1361,12 @@ pub(crate) async fn group_usage(
         Option<Uuid>,
         Option<String>,
     ) = sqlx::query_as(
-            "SELECT g.effect, g.legacy_addon_type, g.swap_category_id, c.slug FROM modifier_groups g \
+        "SELECT g.effect, g.legacy_addon_type, g.swap_category_id, c.slug FROM modifier_groups g \
              LEFT JOIN ingredient_categories c ON c.id = g.swap_category_id WHERE g.id = $1",
-        )
-        .bind(gid)
-        .fetch_one(pool)
-        .await?;
+    )
+    .bind(gid)
+    .fetch_one(pool)
+    .await?;
     let swap_slug = crate::orders::component_resolve::swap_target(
         legacy_type.as_deref(),
         Some(effect.as_str()),
