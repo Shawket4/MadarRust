@@ -650,6 +650,7 @@ async fn load_group_options(
             "SELECT owner_id, ingredient_id, quantity, unit \
              FROM recipe_lines \
              WHERE owner_type = 'modifier_option' AND owner_id = ANY($1) \
+               AND size_label IS NULL \
              ORDER BY owner_id, ingredient_id",
         )
         .bind(&option_ids)

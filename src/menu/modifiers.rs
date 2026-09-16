@@ -224,6 +224,11 @@ pub struct OptionRecipeLineInput {
     pub ingredient_id: Uuid,
     pub quantity: f64,
     pub unit: String,
+    /// Size this amount is for (`Cup`, `Can`); `null`/absent = every size. At order
+    /// time a line for the ordered size's exact label replaces the `null` line for the
+    /// same ingredient. Legacy tills only ever see the `null` lines.
+    #[serde(default)]
+    pub size_label: Option<String>,
 }
 
 // ── Endpoint-B (item options) payload ────────────────────────────────
@@ -1128,10 +1133,15 @@ pub async fn put_option_recipe(
 
     let lines = body.into_inner();
 
-    // Reject duplicate ingredient ids (UNIQUE(owner_type,owner_id,ingredient_id)).
+    // Reject duplicate (ingredient, size) pairs (UNIQUE(owner_type,owner_id,ingredient_id,size_label)).
     let mut seen = std::collections::HashSet::new();
     for l in &lines {
-        if !seen.insert(l.ingredient_id) {
+        let label = l
+            .size_label
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if !seen.insert((l.ingredient_id, label)) {
             return Err(AppError::BadRequest(
                 "Duplicate ingredient in option recipe".into(),
             ));
@@ -1141,7 +1151,7 @@ pub async fn put_option_recipe(
     // Normalize each line to the ingredient base unit BEFORE opening the tx. A
     // quantity of 0 (swap marker) is allowed and passes through as 0. The helper
     // also enforces that the ingredient belongs to this org.
-    let mut normalized: Vec<(Uuid, f64, String)> = Vec::with_capacity(lines.len());
+    let mut normalized: Vec<(Uuid, f64, String, Option<String>)> = Vec::with_capacity(lines.len());
     for l in &lines {
         let (base_unit, qty) = crate::recipes::handlers::normalize_recipe_unit(
             pool.get_ref(),
@@ -1151,7 +1161,13 @@ pub async fn put_option_recipe(
             l.quantity,
         )
         .await?;
-        normalized.push((l.ingredient_id, qty, base_unit));
+        let label = l
+            .size_label
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        normalized.push((l.ingredient_id, qty, base_unit, label));
     }
 
     let mut tx = pool.begin().await?;
@@ -1159,15 +1175,16 @@ pub async fn put_option_recipe(
         .bind(*oid)
         .execute(&mut *tx)
         .await?;
-    for (ingredient_id, qty, base_unit) in &normalized {
+    for (ingredient_id, qty, base_unit, label) in &normalized {
         sqlx::query(
-            "INSERT INTO recipe_lines (owner_type, owner_id, ingredient_id, quantity, unit) \
-             VALUES ('modifier_option', $1, $2, $3, $4)",
+            "INSERT INTO recipe_lines (owner_type, owner_id, ingredient_id, quantity, unit, size_label) \
+             VALUES ('modifier_option', $1, $2, $3, $4, $5)",
         )
         .bind(*oid)
         .bind(ingredient_id)
         .bind(Decimal::try_from(*qty).unwrap_or(Decimal::ZERO))
         .bind(base_unit)
+        .bind(label)
         .execute(&mut *tx)
         .await?;
     }
@@ -1224,20 +1241,24 @@ async fn load_option_recipe(
     pool: &PgPool,
     oid: Uuid,
 ) -> Result<Vec<OptionRecipeLineInput>, AppError> {
-    let rows: Vec<(Uuid, Decimal, String)> = sqlx::query_as(
-        "SELECT ingredient_id, quantity, unit FROM recipe_lines \
-         WHERE owner_type = 'modifier_option' AND owner_id = $1 ORDER BY ingredient_id",
+    let rows: Vec<(Uuid, Decimal, String, Option<String>)> = sqlx::query_as(
+        "SELECT ingredient_id, quantity, unit, size_label FROM recipe_lines \
+         WHERE owner_type = 'modifier_option' AND owner_id = $1 \
+         ORDER BY size_label NULLS FIRST, ingredient_id",
     )
     .bind(oid)
     .fetch_all(pool)
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(ingredient_id, quantity, unit)| OptionRecipeLineInput {
-            ingredient_id,
-            quantity: quantity.to_string().parse::<f64>().unwrap_or(0.0),
-            unit,
-        })
+        .map(
+            |(ingredient_id, quantity, unit, size_label)| OptionRecipeLineInput {
+                ingredient_id,
+                quantity: quantity.to_string().parse::<f64>().unwrap_or(0.0),
+                unit,
+                size_label,
+            },
+        )
         .collect())
 }
 

@@ -70,18 +70,18 @@ pub(crate) async fn guard(
     let ids: Vec<Uuid> = match (scope, token_branch) {
         (crate::authz::scope::BranchScope::All, None) => return Ok(None),
         (crate::authz::scope::BranchScope::All, Some(b)) => vec![b],
-        (crate::authz::scope::BranchScope::Only(v), tb) => {
-            v.into_iter().filter(|b| tb.is_none_or(|t| t == *b)).collect()
-        }
+        (crate::authz::scope::BranchScope::Only(v), tb) => v
+            .into_iter()
+            .filter(|b| tb.is_none_or(|t| t == *b))
+            .collect(),
     };
     // Only branches of this org.
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM branches WHERE org_id = $1 AND id = ANY($2)",
-    )
-    .bind(org_id)
-    .bind(&ids)
-    .fetch_all(pool)
-    .await?;
+    let ids: Vec<Uuid> =
+        sqlx::query_scalar("SELECT id FROM branches WHERE org_id = $1 AND id = ANY($2)")
+            .bind(org_id)
+            .bind(&ids)
+            .fetch_all(pool)
+            .await?;
     Ok(Some(ids))
 }
 

@@ -193,7 +193,7 @@ pub async fn backfill_menu_unification(
          JOIN menu_item_sizes ms ON ms.menu_item_id=r.menu_item_id AND ms.label=r.size_label \
          LEFT JOIN org_ingredients oi ON oi.org_id=$1 AND oi.name=r.ingredient_name AND oi.deleted_at IS NULL \
          WHERE COALESCE(r.org_ingredient_id, oi.id) IS NOT NULL AND r.quantity_used >= 0 \
-         ON CONFLICT (owner_type, owner_id, ingredient_id) DO NOTHING",
+         ON CONFLICT DO NOTHING",
     )
     .bind(org)
     .execute(&mut *tx)
@@ -208,7 +208,7 @@ pub async fn backfill_menu_unification(
          JOIN addon_items a ON a.id=ai.addon_item_id AND a.org_id=$1 \
          LEFT JOIN org_ingredients oi ON oi.org_id=$1 AND oi.name=ai.ingredient_name AND oi.deleted_at IS NULL \
          WHERE COALESCE(ai.org_ingredient_id, oi.id) IS NOT NULL AND ai.quantity_used >= 0 \
-         ON CONFLICT (owner_type, owner_id, ingredient_id) DO NOTHING",
+         ON CONFLICT DO NOTHING",
     )
     .bind(org)
     .execute(&mut *tx)
@@ -225,7 +225,7 @@ pub async fn backfill_menu_unification(
          LEFT JOIN org_ingredients oi ON oi.org_id=$1 AND oi.name=f.ingredient_name AND oi.deleted_at IS NULL \
          WHERE f.ingredient_name IS NOT NULL AND f.quantity_used IS NOT NULL AND f.quantity_used >= 0 \
            AND COALESCE(f.org_ingredient_id, oi.id) IS NOT NULL \
-         ON CONFLICT (owner_type, owner_id, ingredient_id) DO NOTHING",
+         ON CONFLICT DO NOTHING",
     )
     .bind(org)
     .execute(&mut *tx)

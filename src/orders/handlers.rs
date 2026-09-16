@@ -2057,8 +2057,8 @@ pub(crate) async fn create_order_inner(
     // Resolve point-in-time ingredient costs once for the whole order and
     // stamp them onto the deduction entries; per-line / per-addon /
     // per-optional rollups happen at insert time.
-    // A dine-in sale is served in the shop's own cup, so nothing from the
-    // `packaging` category comes off stock. Filtering here, by CATEGORY, means
+    // A dine-in sale is served in the shop's own cup, so nothing from a
+    // packaging category (`is_packaging`, or the legacy slug `packaging`) comes off stock. Filtering here, by CATEGORY, means
     // no recipe is written twice and a new cup needs no rule change.
     if body.service_mode.as_deref() == Some("dine_in") {
         let packaging = packaging_ingredient_ids(pool.get_ref(), org_id).await?;
@@ -4348,6 +4348,24 @@ pub async fn export_orders(
         summary,
         ingredient_costs,
     }))
+}
+
+/// Ingredients a dine-in sale does not deduct: every ingredient whose category is
+/// flagged `is_packaging`, or (legacy fallback) has the slug `packaging`.
+pub(crate) async fn packaging_ingredient_ids(
+    pool: &sqlx::PgPool,
+    org_id: Uuid,
+) -> Result<std::collections::HashSet<Uuid>, AppError> {
+    Ok(sqlx::query_scalar(
+        "SELECT i.id FROM org_ingredients i \
+         JOIN ingredient_categories c ON c.id = i.category_id \
+         WHERE i.org_id = $1 AND (c.is_packaging OR c.slug = 'packaging')",
+    )
+    .bind(org_id)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect())
 }
 
 #[cfg(test)]
