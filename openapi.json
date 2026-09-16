@@ -52512,6 +52512,13 @@
               "$ref": "#/components/schemas/PaymentSplitInput"
             }
           },
+          "service_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the drink is going: `\"takeaway\"` (default) or `\"dine_in\"`. NOT\n`order_type`: that is derived from whether a waiter's ticket was settled\nand decides the service charge. This says only whether the customer is\ndrinking in — so a counter shop with no floor can say it — and its only\neffect is that packaging (cups, lids, straws) is not deducted from\nstock. Absent ⇒ takeaway, which is what every client before this did."
+          },
           "subtotal": {
             "type": [
               "integer",
@@ -63956,6 +63963,19 @@
           "kind": {
             "type": "string",
             "description": "`preset` | `custom`."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What THIS item does at this step (\"40ml condensed milk, mixed with the\nshot first\"). Valid on a preset step too, where it replaces the\nlibrary's generic note without giving up the animation."
+          },
+          "note_ar": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "preset_slug": {
             "type": [
