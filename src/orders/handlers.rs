@@ -4318,6 +4318,24 @@ pub async fn export_orders(
     }))
 }
 
+/// Ingredients a dine-in sale does not deduct: every ingredient whose category is
+/// flagged `is_packaging`, or (legacy fallback) has the slug `packaging`.
+pub(crate) async fn packaging_ingredient_ids(
+    pool: &sqlx::PgPool,
+    org_id: Uuid,
+) -> Result<std::collections::HashSet<Uuid>, AppError> {
+    Ok(sqlx::query_scalar(
+        "SELECT i.id FROM org_ingredients i \
+         JOIN ingredient_categories c ON c.id = i.category_id \
+         WHERE i.org_id = $1 AND (c.is_packaging OR c.slug = 'packaging')",
+    )
+    .bind(org_id)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect())
+}
+
 #[cfg(test)]
 mod wire_tests {
     use super::*;
@@ -4394,22 +4412,4 @@ async fn require_table_if_the_shop_says_so(
          floor, add their items, then settle."
             .into(),
     ))
-}
-
-/// Ingredients a dine-in sale does not deduct: every ingredient whose category is
-/// flagged `is_packaging`, or (legacy fallback) has the slug `packaging`.
-pub(crate) async fn packaging_ingredient_ids(
-    pool: &sqlx::PgPool,
-    org_id: Uuid,
-) -> Result<std::collections::HashSet<Uuid>, AppError> {
-    Ok(sqlx::query_scalar(
-        "SELECT i.id FROM org_ingredients i \
-         JOIN ingredient_categories c ON c.id = i.category_id \
-         WHERE i.org_id = $1 AND (c.is_packaging OR c.slug = 'packaging')",
-    )
-    .bind(org_id)
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .collect())
 }

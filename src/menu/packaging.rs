@@ -1,5 +1,5 @@
-//! Packaging rules (menu modeling B8): "every Iced coffee Cup takes a 16oz cup + lid
-//! + straw; every Can takes a straw". A rule matches item sizes by menu item, menu
+//! Packaging rules (menu modeling B8): "every Iced coffee Cup takes a 16oz cup, a lid
+//! and a straw; every Can takes a straw". A rule matches item sizes by menu item, menu
 //! category and/or size label; the most specific active match for a size contributes
 //! its lines as `recipe_lines` with source='rule' (ranking in
 //! [`crate::menu::recipe_expand::best_rule_for`]). An own line for the same ingredient

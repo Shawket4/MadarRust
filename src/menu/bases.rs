@@ -171,6 +171,7 @@ async fn load_base(pool: &PgPool, id: Uuid) -> Result<RecipeBaseOut, AppError> {
     let (id, org_id, name, name_ar, is_active, created_at, updated_at, size_count, item_count) =
         row.ok_or_else(|| AppError::NotFound("Recipe base not found".into()))?;
 
+    #[allow(clippy::type_complexity)]
     let lines: Vec<(Uuid, Option<String>, Uuid, String, Decimal, String, i32)> = sqlx::query_as(
         "SELECT bl.id, bl.size_label, bl.ingredient_id, oi.name, bl.quantity, bl.unit, bl.sort \
          FROM recipe_base_lines bl JOIN org_ingredients oi ON oi.id = bl.ingredient_id \

@@ -158,7 +158,7 @@ macro_rules! call {
         )
         .await;
         let mut r = test::TestRequest::$method()
-            .uri(&$uri)
+            .uri(&String::from($uri))
             .insert_header(("Authorization", format!("Bearer {}", $token)));
         let b: Value = $body;
         if !b.is_null() {
