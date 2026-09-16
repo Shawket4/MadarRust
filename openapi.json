@@ -20352,6 +20352,113 @@
         ]
       }
     },
+    "/menu-item-sizes/{size_id}/base": {
+      "put": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "put_size_base",
+        "parameters": [
+          {
+            "name": "size_id",
+            "in": "path",
+            "description": "menu_item_sizes ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutSizeBaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Base set (or cleared) and the size re-expanded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SizeBaseResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/menu-item-sizes/{size_id}/recipe": {
       "put": {
         "tags": [
@@ -21696,6 +21803,113 @@
         ]
       }
     },
+    "/menu-items/{id}/linked-copy": {
+      "post": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "create_linked_copy",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Source menu item ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateLinkedCopyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Copy created with a recipe that follows the source",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkedCopyResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/menu-items/{id}/modifier-groups": {
       "put": {
         "tags": [
@@ -22569,6 +22783,198 @@
         "responses": {
           "204": {
             "description": "Addon override deleted"
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/menu-items/{id}/recipe-link": {
+      "get": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "get_recipe_link",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Menu item ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recipe link state of the item",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecipeLinkInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "delete_recipe_link",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Linked copy menu item ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Unlinked; the copied lines are now the item's own",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecipeLinkInfo"
+                }
+              }
+            }
           },
           "400": {
             "description": "Bad request — validation failed or malformed input",
@@ -27422,6 +27828,467 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/QrResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/packaging-rules": {
+      "get": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "list_rules",
+        "responses": {
+          "200": {
+            "description": "The org's packaging rules",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PackagingRuleOut"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "create_rule",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePackagingRuleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Rule created (not yet applied; see POST /packaging-rules/apply)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PackagingRuleOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/packaging-rules/apply": {
+      "post": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "apply_rules",
+        "responses": {
+          "200": {
+            "description": "Every item size in the org re-expanded against the current rules and bases",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplyPackagingRulesResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/packaging-rules/{id}": {
+      "delete": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "delete_rule",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Packaging rule ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Rule deleted (its expanded lines stay until the next apply)"
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "patch_rule",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Packaging rule ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchPackagingRuleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Rule updated (not yet applied)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PackagingRuleOut"
                 }
               }
             }
@@ -33492,6 +34359,681 @@
             "description": "SSE stream. Each event is `event: <type>` (e.g. delivery.updated, ticket.fired, kitchen.item_bumped, booking.created) followed by a `data:` JSON line and an `id:` for `Last-Event-ID` resume. `: ping` keep-alive comments arrive ~every 20s. A resume the server cannot fully replay opens with `event: resync` — re-seed from the list endpoints, then keep reading. On ANY error/close, re-seed and reconnect.",
             "content": {
               "text/event-stream": {}
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/recipe-bases": {
+      "get": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "list_bases",
+        "responses": {
+          "200": {
+            "description": "The org's recipe bases with their lines",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RecipeBaseOut"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "create_base",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRecipeBaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Recipe base created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecipeBaseOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/recipe-bases/{id}": {
+      "get": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "get_base",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Recipe base ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recipe base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecipeBaseOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "delete_base",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Recipe base ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Base soft-deleted; sizes detached and their base lines removed"
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "patch_base",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Recipe base ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchRecipeBaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Recipe base updated; sizes re-expanded when is_active changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecipeBaseSaveResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/recipe-bases/{id}/lines": {
+      "put": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "put_base_lines",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Recipe base ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutRecipeBaseLinesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Lines replaced and expanded into every size using the base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecipeBaseSaveResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/recipe-bases/{id}/usage": {
+      "get": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "get_base_usage",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Recipe base ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Item sizes using the base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecipeBaseUsage"
+                }
+              }
             }
           },
           "400": {
@@ -51287,6 +52829,42 @@
           }
         }
       },
+      "ApplyPackagingRulesResult": {
+        "type": "object",
+        "required": [
+          "sizes_seen",
+          "sizes_changed",
+          "sizes_with_rule",
+          "sizes_with_manual_packaging",
+          "catalog_revision"
+        ],
+        "properties": {
+          "catalog_revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sizes_changed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sizes (incl. linked copies) whose stored lines changed."
+          },
+          "sizes_seen": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sizes examined (every size of every live item in the org)."
+          },
+          "sizes_with_manual_packaging": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sizes that still have an OWN line in a packaging category: typed by hand, they\nare kept (and win over a rule for the same ingredient) — review them."
+          },
+          "sizes_with_rule": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sizes that now carry at least one rule line."
+          }
+        }
+      },
       "AssetBundleRef": {
         "type": "object",
         "required": [
@@ -56297,6 +57875,13 @@
           "name"
         ],
         "properties": {
+          "is_packaging": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Defaults to `true` for slug `packaging`, else `false`."
+          },
           "name": {
             "type": "string"
           },
@@ -56313,6 +57898,31 @@
               "null"
             ],
             "format": "int32"
+          }
+        }
+      },
+      "CreateLinkedCopyRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "price"
+        ],
+        "properties": {
+          "category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Menu category of the copy; `null` keeps the source's category."
+          },
+          "name": {
+            "type": "string"
+          },
+          "price": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Price in piastres for every size of the copy (0 for a staff drink)."
           }
         }
       },
@@ -56864,6 +58474,57 @@
           }
         }
       },
+      "CreatePackagingRuleRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "lines"
+        ],
+        "properties": {
+          "is_active": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PackagingRuleLineInput"
+            }
+          },
+          "match_category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "match_item_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "match_size_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "sort": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        }
+      },
       "CreatePaymentMethodRequest": {
         "type": "object",
         "required": [
@@ -56968,6 +58629,39 @@
               "null"
             ],
             "format": "uuid"
+          }
+        }
+      },
+      "CreateRecipeBaseRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "is_active": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "lines": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/RecipeBaseLineInput"
+            },
+            "description": "Optional initial lines (same as `PUT /recipe-bases/{id}/lines`)."
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_ar": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -60414,6 +62108,7 @@
           "slug",
           "name",
           "sort_order",
+          "is_packaging",
           "ingredient_count",
           "created_at",
           "updated_at"
@@ -60431,6 +62126,10 @@
             "type": "integer",
             "format": "int64",
             "description": "Live (non-deleted) ingredients in this category."
+          },
+          "is_packaging": {
+            "type": "boolean",
+            "description": "Cups, lids, straws: a dine-in sale skips every ingredient in a packaging\ncategory. The slug `packaging` is treated as packaging too."
           },
           "name": {
             "type": "string"
@@ -61554,6 +63253,27 @@
               "null"
             ],
             "description": "Only the person's own work. Absent means unrestricted, so a dashboard\nthat predates the field keeps meaning what it always meant."
+          }
+        }
+      },
+      "LinkedCopyResult": {
+        "type": "object",
+        "required": [
+          "menu_item_id",
+          "link",
+          "catalog_revision"
+        ],
+        "properties": {
+          "catalog_revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "link": {
+            "$ref": "#/components/schemas/RecipeLinkInfo"
+          },
+          "menu_item_id": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },
@@ -63825,6 +65545,13 @@
             "type": "number",
             "format": "double"
           },
+          "size_label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Size this amount is for (`Cup`, `Can`); `null`/absent = every size. At order\ntime a line for the ordered size's exact label replaces the `null` line for the\nsame ingredient. Legacy tills only ever see the `null` lines."
+          },
           "unit": {
             "type": "string"
           }
@@ -65698,6 +67425,127 @@
           }
         }
       },
+      "PackagingRuleLineInput": {
+        "type": "object",
+        "required": [
+          "ingredient_id",
+          "quantity",
+          "unit"
+        ],
+        "properties": {
+          "ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "quantity": {
+            "type": "number",
+            "format": "double"
+          },
+          "unit": {
+            "type": "string"
+          }
+        }
+      },
+      "PackagingRuleLineOut": {
+        "type": "object",
+        "required": [
+          "ingredient_id",
+          "ingredient_name",
+          "quantity",
+          "unit",
+          "sort"
+        ],
+        "properties": {
+          "ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ingredient_name": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "string",
+            "description": "Base-unit quantity as a string."
+          },
+          "sort": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "unit": {
+            "type": "string"
+          }
+        }
+      },
+      "PackagingRuleOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "org_id",
+          "name",
+          "sort",
+          "is_active",
+          "lines",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "is_active": {
+            "type": "boolean"
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PackagingRuleLineOut"
+            }
+          },
+          "match_category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Menu category (`categories.id`) the rule matches, or `null` = any."
+          },
+          "match_item_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "One menu item the rule matches, or `null` = any."
+          },
+          "match_size_label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Exact size label the rule matches (`Cup`, `Can`), or `null` = any."
+          },
+          "name": {
+            "type": "string"
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sort": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "PaginatedAddonItems": {
         "type": "object",
         "required": [
@@ -66105,6 +67953,85 @@
               "null"
             ],
             "format": "uuid"
+          }
+        }
+      },
+      "PatchPackagingRuleRequest": {
+        "type": "object",
+        "description": "Partial update. A match field is replaced only when its key is present\n(`null` clears it); `lines`, when present, replaces the whole set.",
+        "properties": {
+          "is_active": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "lines": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/PackagingRuleLineInput"
+            }
+          },
+          "match_category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "match_item_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "match_size_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sort": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "PatchRecipeBaseRequest": {
+        "type": "object",
+        "properties": {
+          "is_active": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Deactivating a base removes its expanded lines from every size using it\n(the pointer stays); reactivating restores them."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name_ar": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`\"\"` clears the Arabic name."
           }
         }
       },
@@ -68484,6 +70411,20 @@
           }
         }
       },
+      "PutRecipeBaseLinesRequest": {
+        "type": "object",
+        "required": [
+          "lines"
+        ],
+        "properties": {
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecipeBaseLineInput"
+            }
+          }
+        }
+      },
       "PutRecipeRequest": {
         "type": "object",
         "required": [
@@ -68532,6 +70473,19 @@
               "$ref": "#/components/schemas/RewardItemInput"
             },
             "description": "The complete list for this scope, in order. An empty list clears the\nscope — for a branch that means going back to inheriting the org's."
+          }
+        }
+      },
+      "PutSizeBaseRequest": {
+        "type": "object",
+        "properties": {
+          "base_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "`null` detaches the size from its base (its base lines are removed)."
           }
         }
       },
@@ -68815,6 +70769,221 @@
           }
         }
       },
+      "RecipeBaseLineInput": {
+        "type": "object",
+        "description": "A line as submitted: quantity in `unit`, normalized to the ingredient's base unit\n(and grossed up by yield) exactly like a size recipe line.",
+        "required": [
+          "ingredient_id",
+          "quantity",
+          "unit"
+        ],
+        "properties": {
+          "ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "quantity": {
+            "type": "number",
+            "format": "double"
+          },
+          "size_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sort": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "unit": {
+            "type": "string"
+          }
+        }
+      },
+      "RecipeBaseLineOut": {
+        "type": "object",
+        "description": "One line of a base, stored in the ingredient's base unit.",
+        "required": [
+          "id",
+          "ingredient_id",
+          "ingredient_name",
+          "quantity",
+          "unit",
+          "sort"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ingredient_name": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "string",
+            "description": "Base-unit quantity as a string (numeric fidelity)."
+          },
+          "size_label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`null` = applies to every size; else only to sizes with this exact label (and\nwins over a `null` line for the same ingredient)."
+          },
+          "sort": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "unit": {
+            "type": "string"
+          }
+        }
+      },
+      "RecipeBaseOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "org_id",
+          "name",
+          "is_active",
+          "created_at",
+          "updated_at",
+          "lines",
+          "size_count",
+          "item_count"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "is_active": {
+            "type": "boolean"
+          },
+          "item_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Distinct menu items those sizes belong to."
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecipeBaseLineOut"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_ar": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "size_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Item sizes currently pointing at this base."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "RecipeBaseSaveResult": {
+        "type": "object",
+        "description": "Result of any write that re-expanded recipes.",
+        "required": [
+          "base",
+          "sizes_changed",
+          "catalog_revision"
+        ],
+        "properties": {
+          "base": {
+            "$ref": "#/components/schemas/RecipeBaseOut"
+          },
+          "catalog_revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sizes_changed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sizes (incl. linked copies) whose stored lines changed."
+          }
+        }
+      },
+      "RecipeBaseUsage": {
+        "type": "object",
+        "required": [
+          "base_id",
+          "item_count",
+          "size_count",
+          "sizes"
+        ],
+        "properties": {
+          "base_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "item_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "size_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sizes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecipeBaseUsageSize"
+            }
+          }
+        }
+      },
+      "RecipeBaseUsageSize": {
+        "type": "object",
+        "required": [
+          "size_id",
+          "size_label",
+          "menu_item_id",
+          "menu_item_name"
+        ],
+        "properties": {
+          "menu_item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "menu_item_name": {
+            "type": "string"
+          },
+          "size_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "size_label": {
+            "type": "string"
+          }
+        }
+      },
       "RecipeCostResult": {
         "type": "object",
         "description": "Result of a recipe replace: the recomputed size cost.",
@@ -68907,8 +71076,65 @@
             "type": "string",
             "description": "Base-unit, yield-normalized quantity, serialized as a string (numeric fidelity)."
           },
+          "size_label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Option lines only: the size this amount is for (`null` = every size)."
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the line came from: `own` (typed on this size; also legacy NULL rows),\n`base` (recipe base), `rule` (packaging rule) or `linked` (copied from the\nitem this one follows). Only `own` lines are edited by\n`PUT /menu-item-sizes/{id}/recipe`."
+          },
           "unit": {
             "type": "string"
+          }
+        }
+      },
+      "RecipeLinkInfo": {
+        "type": "object",
+        "description": "Link state of an item, from either side.",
+        "required": [
+          "menu_item_id",
+          "linked_copy_ids"
+        ],
+        "properties": {
+          "in_sync": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "For a copy: `true` when its stored lines equal the source's for every size label\nthe copy has (lint F19, twin drift). `null` for an item that is not a copy."
+          },
+          "linked_copy_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Live items whose recipe follows this one."
+          },
+          "menu_item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "recipe_source_item_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The item this one's recipe follows, or `null`."
+          },
+          "recipe_source_item_name": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -71076,6 +73302,35 @@
           }
         }
       },
+      "SizeBaseResult": {
+        "type": "object",
+        "required": [
+          "size_id",
+          "sizes_changed",
+          "catalog_revision"
+        ],
+        "properties": {
+          "base_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "catalog_revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "size_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sizes_changed": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "SizeCostOut": {
         "type": "object",
         "description": "Live per-size cost of an item from the NEW tables.",
@@ -71141,6 +73396,14 @@
           "cost_incomplete"
         ],
         "properties": {
+          "base_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Recipe base this size expands (`PUT /menu-item-sizes/{id}/base`), or `null`."
+          },
           "cost_incomplete": {
             "type": "boolean",
             "description": "`true` when at least one recipe line is unlinked/uncosted (so `cost_piastres`, if\npresent, is a partial figure rather than the full COGS)."
@@ -72146,6 +74409,14 @@
           "is_active": {
             "type": "boolean"
           },
+          "linked_copy_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Live items whose recipe follows this one."
+          },
           "modifier_groups": {
             "type": "array",
             "items": {
@@ -72165,6 +74436,14 @@
           "org_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "recipe_source_item_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The item this one's recipe follows (linked copy), or `null`."
           },
           "recipe_steps": {
             "type": "array",
@@ -74601,6 +76880,12 @@
       "UpdateIngredientCategoryRequest": {
         "type": "object",
         "properties": {
+          "is_packaging": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "name": {
             "type": [
               "string",
