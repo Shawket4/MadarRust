@@ -594,6 +594,14 @@ pub struct CreateOrderRequest {
     /// nothing never names a member here.
     #[serde(default)]
     pub loyalty_customer_id: Option<Uuid>,
+    /// Where the drink is going: `"takeaway"` (default) or `"dine_in"`. NOT
+    /// `order_type`: that is derived from whether a waiter's ticket was settled
+    /// and decides the service charge. This says only whether the customer is
+    /// drinking in — so a counter shop with no floor can say it — and its only
+    /// effect is that packaging (cups, lids, straws) is not deducted from
+    /// stock. Absent ⇒ takeaway, which is what every client before this did.
+    #[serde(default)]
+    pub service_mode: Option<String>,
     /// Rewards covering lines of this cart. Each names a line by its index in
     /// `items` and how many of that line's units the reward pays for, so a
     /// mixed basket can have one free coffee among four paid ones.
@@ -1996,6 +2004,26 @@ pub(crate) async fn create_order_inner(
     // Resolve point-in-time ingredient costs once for the whole order and
     // stamp them onto the deduction entries; per-line / per-addon /
     // per-optional rollups happen at insert time.
+    // A dine-in sale is served in the shop's own cup, so nothing from the
+    // `packaging` category comes off stock. Filtering here, by CATEGORY, means
+    // no recipe is written twice and a new cup needs no rule change.
+    if body.service_mode.as_deref() == Some("dine_in") {
+        let packaging: std::collections::HashSet<Uuid> = sqlx::query_scalar(
+            "SELECT i.id FROM org_ingredients i \
+             JOIN ingredient_categories c ON c.id = i.category_id \
+             WHERE i.org_id = $1 AND c.slug = 'packaging'",
+        )
+        .bind(org_id)
+        .fetch_all(pool.get_ref())
+        .await?
+        .into_iter()
+        .collect::<std::collections::HashSet<Uuid>>();
+        for ri in &mut resolved_items {
+            ri.deductions
+                .retain(|d| !d.org_ingredient_id.is_some_and(|id| packaging.contains(&id)));
+        }
+    }
+
     {
         let ingredient_ids: Vec<Uuid> = resolved_items
             .iter()
@@ -2177,11 +2205,12 @@ pub(crate) async fn create_order_inner(
              service_charge_amount, tax_rate_applied, service_charge_rate_applied,
              tax_inclusive, service_charge_taxable_applied, order_type, open_ticket_id,
              device_id, device_code, verification,
-             service_charge_waived_by, service_charge_waived_at, service_charge_waived_amount)
+             service_charge_waived_by, service_charge_waived_at, service_charge_waived_amount,
+             service_mode)
         VALUES ($1, $2, $3, $4, $5, $6, $7::discount_type, $8,
                 $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'completed', $19, $20, $21, $22,
                 $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36,
-                $37, $38, $39)
+                $37, $38, $39, $40)
         RETURNING
             id, branch_id, till_id, till_id AS shift_id, teller_id,
             (SELECT name FROM users WHERE id = $3) AS teller_name,
@@ -2268,6 +2297,7 @@ pub(crate) async fn create_order_inner(
     .bind(service_waiver.map(|(by, _)| by))
     .bind(service_waiver.map(|(_, at)| at.unwrap_or(created_at)))
     .bind(service_charge_waived_amount)
+    .bind(body.service_mode.as_deref().unwrap_or("takeaway"))
     .fetch_one(&mut *tx)
     .await
     {

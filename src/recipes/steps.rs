@@ -320,6 +320,9 @@ struct StepRow {
     title_ar: Option<String>,
     preset_name: Option<String>,
     preset_name_ar: Option<String>,
+    /// The note typed on THIS step, which wins over the preset's.
+    step_note: Option<String>,
+    step_note_ar: Option<String>,
     note: Option<String>,
     note_ar: Option<String>,
     sha256: Option<String>,
@@ -356,8 +359,12 @@ impl From<StepRow> for RecipeStep {
             preset_slug: r.preset_slug,
             name,
             name_ar,
-            note: r.note,
-            note_ar: r.note_ar,
+            // The step's own note is the point: a preset's note describes the
+            // TECHNIQUE and reads the same everywhere, while the step's note
+            // says what this drink does with it. Falls back to the preset, so
+            // every step written before this reads exactly as it did.
+            note: r.step_note.or(r.note),
+            note_ar: r.step_note_ar.or(r.note_ar),
             animation_hash: if live { r.animation_hash } else { None },
             animation_is_global: true,
             animation_url: url,
@@ -375,6 +382,7 @@ where
 {
     let rows: Vec<StepRow> = sqlx::query_as(
         "SELECT s.position, s.kind, s.preset_slug, s.title, s.title_ar, \
+                s.note AS step_note, s.note_ar AS step_note_ar, \
                 p.name AS preset_name, p.name_ar AS preset_name_ar, p.note, p.note_ar, \
                 p.sha256, p.is_active, \
                 (SELECT a.hash FROM assets a WHERE a.group_id = p.animation_group_id AND a.variant = 'animation' LIMIT 1) AS animation_hash \
@@ -405,6 +413,7 @@ where
     }
     let rows: Vec<OrgStepRow> = sqlx::query_as(
         "SELECT s.menu_item_id, s.position, s.kind, s.preset_slug, s.title, s.title_ar, \
+                s.note AS step_note, s.note_ar AS step_note_ar, \
                 p.name AS preset_name, p.name_ar AS preset_name_ar, p.note, p.note_ar, \
                 p.sha256, p.is_active, \
                 (SELECT a.hash FROM assets a WHERE a.group_id = p.animation_group_id AND a.variant = 'animation' LIMIT 1) AS animation_hash \
@@ -437,6 +446,13 @@ pub struct RecipeStepInput {
     pub title: Option<String>,
     #[serde(default)]
     pub title_ar: Option<String>,
+    /// What THIS item does at this step ("40ml condensed milk, mixed with the
+    /// shot first"). Valid on a preset step too, where it replaces the
+    /// library's generic note without giving up the animation.
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub note_ar: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]
@@ -452,10 +468,29 @@ struct PendingStep {
     preset_slug: Option<String>,
     title: Option<String>,
     title_ar: Option<String>,
+    note: Option<String>,
+    note_ar: Option<String>,
 }
 
 const MAX_STEPS: usize = 40;
 const MAX_TITLE: usize = 120;
+const MAX_NOTE: usize = 280;
+
+/// A step's own note, trimmed and length-checked. Blank in both languages is
+/// no note at all, which is how a step goes back to the preset's wording.
+fn step_note(
+    note: &Option<String>,
+    note_ar: &Option<String>,
+    n: usize,
+) -> Result<(Option<String>, Option<String>), AppError> {
+    let (a, b) = (clean(note), clean(note_ar));
+    if a.as_ref().is_some_and(|t| t.chars().count() > MAX_NOTE)
+        || b.as_ref().is_some_and(|t| t.chars().count() > MAX_NOTE)
+    {
+        return Err(AppError::BadRequest(format!("Step {n}'s note is too long")));
+    }
+    Ok((a, b))
+}
 
 fn clean(s: &Option<String>) -> Option<String> {
     s.as_deref()
@@ -530,12 +565,15 @@ pub async fn put_recipe_steps(
                         "Step {n}: no such step '{slug}'"
                     )));
                 }
+                let (note, note_ar) = step_note(&s.note, &s.note_ar, n)?;
                 rows.push(PendingStep {
                     position: n as i16,
                     kind: "preset",
                     preset_slug: Some(slug),
                     title: None,
                     title_ar: None,
+                    note,
+                    note_ar,
                 });
             }
             "custom" => {
@@ -553,12 +591,15 @@ pub async fn put_recipe_steps(
                 {
                     return Err(AppError::BadRequest(format!("Step {n}'s name is too long")));
                 }
+                let (note, note_ar) = step_note(&s.note, &s.note_ar, n)?;
                 rows.push(PendingStep {
                     position: n as i16,
                     kind: "custom",
                     preset_slug: None,
                     title,
                     title_ar,
+                    note,
+                    note_ar,
                 });
             }
             other => {
@@ -577,8 +618,8 @@ pub async fn put_recipe_steps(
     for r in &rows {
         sqlx::query(
             "INSERT INTO menu_item_recipe_steps \
-                (org_id, menu_item_id, position, kind, preset_slug, title, title_ar) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                (org_id, menu_item_id, position, kind, preset_slug, title, title_ar, note, note_ar) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(org_id)
         .bind(*menu_item_id)
@@ -587,6 +628,8 @@ pub async fn put_recipe_steps(
         .bind(&r.preset_slug)
         .bind(&r.title)
         .bind(&r.title_ar)
+        .bind(&r.note)
+        .bind(&r.note_ar)
         .execute(&mut *tx)
         .await?;
     }

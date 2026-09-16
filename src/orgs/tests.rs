@@ -1029,11 +1029,11 @@ async fn a_branded_shop_with_no_address_can_still_be_given_one(pool: PgPool) {
 /// receipt. Guessing wrong in the direction of charging money is the worse
 /// failure.
 ///
-/// **No Talabat tenders.** They belong to a shop that has the integration
-/// switched on. A cafe that has never heard of Talabat should not find two dead
-/// tenders on its till and two columns of zeroes on every Z report for ever.
+/// **Talabat tenders start switched OFF** (main's rule, merged 2026-09-16). A
+/// cafe that has never heard of Talabat should not find two live tenders on its
+/// till; the dashboard switch turns them on for a branch that sells there.
 #[sqlx::test]
-async fn a_new_org_starts_at_zero_tax_with_no_talabat_tenders(pool: PgPool) {
+async fn a_new_org_starts_at_zero_tax_with_talabat_tenders_off(pool: PgPool) {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
@@ -1075,7 +1075,8 @@ async fn a_new_org_starts_at_zero_tax_with_no_talabat_tenders(pool: PgPool) {
     );
 
     let methods: Vec<(String, bool)> = sqlx::query_as(
-        "SELECT name, is_cash FROM org_payment_methods WHERE org_id = $1 ORDER BY name",
+        "SELECT name, is_cash FROM org_payment_methods
+          WHERE org_id = $1 AND is_active ORDER BY name",
     )
     .bind(org.id)
     .fetch_all(&pool)
@@ -1085,8 +1086,15 @@ async fn a_new_org_starts_at_zero_tax_with_no_talabat_tenders(pool: PgPool) {
     assert_eq!(names, vec!["card", "cash", "digital_wallet"]);
     assert!(
         !names.iter().any(|n| n.starts_with("talabat")),
-        "Talabat tenders come with the integration, not with every org"
+        "Talabat tenders are seeded switched off"
     );
+    let all: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM org_payment_methods WHERE org_id = $1")
+            .bind(org.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(all, 5, "cash, card, wallet + two inactive Talabat; no mixed");
     // `mixed` stayed dropped (phase 0).
     assert!(!names.contains(&"mixed"));
     // Exactly one tender counts toward the drawer.

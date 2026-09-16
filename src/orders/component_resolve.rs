@@ -342,16 +342,63 @@ pub async fn resolve_menu_item_configuration(
             last.has_ingredients = !addon_rows.is_empty();
         }
         for (ing_id, qty, name, unit) in addon_rows {
+            // The addon's OWN ingredient category, not "general": an extra shot
+            // is a coffee_bean and an extra milk is a milk, and the pass below
+            // needs to know that to make them follow the drink's choice.
+            let category: String = match ing_id {
+                Some(id) => sqlx::query_scalar(
+                    "SELECT c.slug FROM org_ingredients i \
+                     JOIN ingredient_categories c ON c.id = i.category_id WHERE i.id = $1",
+                )
+                .bind(id)
+                .fetch_optional(pool)
+                .await?
+                .unwrap_or_else(|| "general".to_string()),
+                None => "general".to_string(),
+            };
             deductions.push(InventoryDeduction {
                 org_ingredient_id: ing_id,
                 ingredient_name: name,
                 unit,
                 quantity: qty * line_quantity as f64 * addon_qty,
                 source: "addon".into(),
-                category: "general".into(),
+                category,
                 addon_item_id: Some(addon_input.addon_item_id),
                 optional_field_id: None,
             });
+        }
+    }
+
+    // An ADDITIVE addon in a swap family follows the drink's own choice: an
+    // extra shot on a decaf latte is a decaf shot, and extra milk on an oat
+    // latte is oat. Without this the addon keeps whatever bean the catalog
+    // happened to name, so the sale charges for one thing and deducts another.
+    //
+    // A second pass, because the swaps above are applied as the addons are
+    // walked — the line's final choice is only known once that loop is done.
+    for cat in ["milk", "coffee_bean"] {
+        let chosen = deductions
+            .iter()
+            .find(|d| d.category == cat && d.source != "addon")
+            .map(|d| (d.org_ingredient_id, d.ingredient_name.clone(), d.unit.clone()));
+        let Some((id, name, unit)) = chosen else { continue };
+        for d in deductions.iter_mut() {
+            if d.source == "addon" && d.category == cat && d.org_ingredient_id != id {
+                // Convert first: the addon's quantity is in ITS unit, and the
+                // chosen ingredient may be stocked in another (g vs ml).
+                match crate::units::convert(d.quantity, &d.unit, &unit) {
+                    Ok(q) => {
+                        d.quantity = q;
+                        d.org_ingredient_id = id;
+                        d.ingredient_name = name.clone();
+                        d.unit = unit.clone();
+                    }
+                    Err(_) => tracing::warn!(
+                        from_unit = %d.unit, to_unit = %unit, addon = %d.ingredient_name,
+                        "addon follow-the-drink across incompatible units; left as authored"
+                    ),
+                }
+            }
         }
     }
 

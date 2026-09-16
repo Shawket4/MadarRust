@@ -1312,6 +1312,8 @@ pub(crate) async fn settle_open_ticket_inner(
     // deductions/inventory/tax, refuses a total the till disagrees with, and
     // lands the sale in the cashier's drawer.
     let request = CreateOrderRequest {
+        // A settled ticket IS dine-in, and it is served in the shop's own cup.
+        service_mode: Some("dine_in".into()),
         branch_id,
         loyalty_customer_id: body.loyalty_customer_id,
         loyalty_redemptions: redemptions,

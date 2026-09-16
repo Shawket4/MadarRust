@@ -41,3 +41,21 @@ INVENTORY_OVERHAUL_FRONTEND_SYNC.md
 # Rust build output of the authz tooling crates (committed by mistake once)
 /authz/gen/target/
 /authz/crate/target/
+
+# PGP / integration secrets — never in git.
+# The Talabat private key lives OUTSIDE any repo, in ~/.talabat-pgp (see
+# Madar/TALABAT_INTEGRATION.md). These patterns are the second lock.
+*.asc
+*.gpg
+*.pgp
+*.key
+*.pem
+*.p12
+secring.*
+openpgp-revocs.d/
+.talabat-pgp/
+
+# Customer menu drops: real business data (menus, prices, stock levels) and
+# the cleaned imports built from them. Kept locally, never committed.
+/drops/
+/drops_clean/

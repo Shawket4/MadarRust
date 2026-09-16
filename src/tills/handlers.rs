@@ -395,6 +395,9 @@ pub struct OpenTillRequest {
     #[serde(default)]
     pub id: Option<Uuid>,
     pub opening_cash: i32,
+    /// Ignored. The server decides whether the opening was an edit, from its
+    /// own expected carryover — a stale device computes this against a figure
+    /// that has since moved on. Kept so older tablets keep parsing.
     #[serde(default)]
     pub opening_cash_edited: Option<bool>,
     #[serde(default)]
@@ -508,21 +511,33 @@ where
     .await
 }
 
-/// The person's most recent declared close at this branch — the carryover the
-/// next opening is compared with.
+/// The DRAWER's most recent declared close — the carryover the next opening is
+/// compared with, whoever closed it.
+///
+/// It used to be the person's own last close, which is not where the money is:
+/// cash stays in the drawer when a shift changes. Ahmed closing at 500 and Sara
+/// opening the same drawer means 500 is in front of her, but she was offered
+/// her OWN last close — possibly from last week — or the branch float.
+///
+/// A drawer is a physical box, so it is identified by DEVICE where one is
+/// known, falling back to the branch. Device-first keeps two tablets side by
+/// side at one branch from contaminating each other's carryover; the branch
+/// fallback matters because 926 of the 932 tills in production carry no
+/// device_id at all, and those branches each ran a single drawer.
 async fn last_close_declared<'e, E: sqlx::PgExecutor<'e>>(
     exec: E,
-    teller_id: Uuid,
     branch_id: Uuid,
+    device_id: Option<Uuid>,
 ) -> Result<Option<i32>, sqlx::Error> {
     sqlx::query_scalar::<_, Option<i32>>(
         "SELECT closing_cash_declared FROM tills \
-          WHERE teller_id = $1 AND branch_id = $2 AND status IN ('closed','force_closed') \
+          WHERE branch_id = $1 AND status IN ('closed','force_closed') \
             AND closing_cash_declared IS NOT NULL \
-          ORDER BY opened_at DESC LIMIT 1",
+          ORDER BY ($2::uuid IS NOT NULL AND device_id = $2) DESC, opened_at DESC \
+          LIMIT 1",
     )
-    .bind(teller_id)
     .bind(branch_id)
+    .bind(device_id)
     .fetch_optional(exec)
     .await
     .map(Option::flatten)
@@ -690,7 +705,7 @@ pub(crate) async fn current_till(
         .filter(|t| t.branch_id == branch_id)
         .map(TillBrief::from)
         .collect();
-    let last = last_close_declared(pool, person, branch_id).await?;
+    let last = last_close_declared(pool, branch_id, None).await?;
     let float: Option<i32> =
         sqlx::query_scalar("SELECT standard_float FROM branches WHERE id = $1")
             .bind(branch_id)
@@ -856,8 +871,15 @@ pub(crate) async fn open_till_inner(
     };
     let device_id = device_id.filter(|_| snapshot.is_some());
 
-    let expected_opening = last_close_declared(&mut *tx, actor.teller_id, branch_id).await?;
+    let expected_opening = last_close_declared(&mut *tx, branch_id, device_id).await?;
+    // The SERVER decides whether this was an edit, from its own expected figure
+    // — never from the client's `opening_cash_edited`, which a stale device
+    // computes against a carryover that has since moved on. And a till the
+    // server considers un-edited carries no reason: a reason stored against no
+    // discrepancy reads as tampering, and the reverse (flagged with a NULL
+    // reason, which is what a stale client produced) reads as a blank note.
     let was_edited = expected_opening.is_some_and(|exp| exp != body.opening_cash);
+    let edit_reason = body.edit_reason.as_deref().filter(|_| was_edited);
     if !actor.replay && was_edited && body.edit_reason.as_deref().unwrap_or("").trim().is_empty() {
         return Err(AppError::BadRequest(
             "Opening cash differs from your last declared closing cash; edit_reason is required."
