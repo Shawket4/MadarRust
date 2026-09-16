@@ -962,6 +962,17 @@ pub async fn list_menu_catalog(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
     require_same_org(&claims, Some(query.org_id))?;
+    // Filtering by whether an item has a recipe reads the recipes: it needs
+    // recipes.read on top of the menu read (architecture E).
+    if query.has_recipe.is_some() {
+        crate::authz::require::require(
+            pool.get_ref(),
+            &claims,
+            crate::authz::Cap::RecipesRead,
+            query.branch_id,
+        )
+        .await?;
+    }
 
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(50).clamp(1, 500);

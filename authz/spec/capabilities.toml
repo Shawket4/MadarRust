@@ -2119,6 +2119,18 @@ defaults = "o"
 en = "Erase a customer's personal data (PDPL)"
 ar = "محو البيانات الشخصية للعميل"
 
+[[cap]]
+id = 220
+key = "reports.legal"
+group = "reports"
+tier = "configurable"
+risk = "pii"
+defaults = "om"
+en = "See legal reports: tax, refunds, voids, discounts, waivers and price overrides"
+ar = "عرض التقارير القانونية: الضريبة والمرتجعات والإلغاءات والخصومات والإعفاءات وتعديلات الأسعار"
+hint_en = "They name the staff who gave money back. A manager sees only their own branches."
+hint_ar = "تُظهر أسماء الموظفين الذين أعادوا المال. يرى المدير فروعه فقط."
+
 # ============================================================================
 # Role templates (Phase 7). `defaults` above IS the restaurant template for the
 # five system roles; a template may add or remove on top.

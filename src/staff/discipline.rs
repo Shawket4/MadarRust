@@ -17,7 +17,6 @@ use uuid::Uuid;
 use crate::{
     errors::{AppError, AppErrorResponse},
     orgs::handlers::extract_claims,
-    permissions::checker::check_permission,
     staff::{scope_org, validate_range},
 };
 
@@ -70,8 +69,19 @@ pub async fn discipline_report(
     query: web::Query<DisciplineQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "attendance", "read").await?;
+    crate::authz::require::require(
+        pool.get_ref(),
+        &claims,
+        crate::authz::Cap::HrAttendanceRead,
+        query.branch_id,
+    )
+    .await?;
     let org_id = scope_org(&req, &claims)?;
+    // Only the branches the caller works at: a branch manager ranks their own
+    // branches' staff, never the whole org's.
+    let branches =
+        crate::authz::scope::org_read_branches(pool.get_ref(), &claims, org_id, query.branch_id)
+            .await?;
     validate_range(query.from, query.to, MAX_RANGE_DAYS)?;
 
     let rows = sqlx::query_as::<_, DisciplineRow>(
@@ -89,7 +99,7 @@ pub async fn discipline_report(
               LEFT JOIN departments d ON d.id = sp.department_id
              WHERE a.org_id = $1
                AND a.business_date BETWEEN $2 AND $3
-               AND ($4::uuid IS NULL OR a.branch_id = $4)
+               AND ($4::uuid[] IS NULL OR a.branch_id = ANY($4))
                AND (sp.employment_status IS NULL OR sp.employment_status = 'active')
              GROUP BY a.user_id, u.name, sp.department_id, d.name
         )
@@ -105,7 +115,7 @@ pub async fn discipline_report(
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
-    .bind(query.branch_id)
+    .bind(&branches)
     .fetch_all(pool.get_ref())
     .await?;
 

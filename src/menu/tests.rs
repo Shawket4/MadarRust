@@ -2450,3 +2450,47 @@ async fn addon_items_optional_pagination(pool: PgPool) {
     assert_eq!(v.as_array().unwrap().len(), 1);
     assert_eq!(v[0]["name"], "Oat");
 }
+
+/// Filtering the catalog by whether an item has a recipe reads the recipes, so
+/// it needs `recipes.read` on top of the menu read: a teller (who reads the
+/// menu) is refused the filter, not the plain list; an owner gets it.
+#[sqlx::test]
+async fn the_has_recipe_filter_needs_recipes_read(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+            .configure(crate::costing::routes::configure),
+    )
+    .await;
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
+    let org_id = seed_org(&pool).await;
+    let owner = seed_user(&pool, org_id, "org_admin").await;
+    let teller = seed_user(&pool, org_id, "teller").await;
+    let cat_id = seed_category(&pool, org_id, "Mains").await;
+    seed_menu_item(&pool, org_id, cat_id, "Burger", 1000).await;
+
+    let get = |token: String, uri: String| {
+        test::TestRequest::get()
+            .uri(&uri)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request()
+    };
+    let plain = format!("/costing/catalog?org_id={org_id}");
+    let filtered = format!("/costing/catalog?org_id={org_id}&has_recipe=false");
+
+    let t = generate_teller_token(teller, org_id);
+    assert_eq!(test::call_service(&app, get(t.clone(), plain)).await.status(), 200);
+    assert_eq!(
+        test::call_service(&app, get(t, filtered.clone())).await.status(),
+        403,
+        "a teller holds no recipes.read"
+    );
+    let resp = test::call_service(&app, get(generate_org_admin_token(owner, org_id), filtered)).await;
+    assert_eq!(resp.status(), 200);
+    let page: PaginatedMenuItems = test::read_body_json(resp).await;
+    assert_eq!(page.total, 1, "the burger has no recipe yet");
+}
