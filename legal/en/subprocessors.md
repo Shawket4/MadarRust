@@ -1,7 +1,7 @@
 ---
 title: Sub-processors
-version: 1.5
-effective: 2026-09-11
+version: 1.6
+effective: 2026-09-16
 ---
 
 # Sub-processors
@@ -63,8 +63,8 @@ purposes.
 These functions are commonly outsourced. We do not outsource them, so the data stays under
 our control:
 
-- **Error and crash monitoring** — self-hosted. Diagnostic data is not sent to any
-  monitoring vendor, is configured to exclude personal data, and is deleted after 30 days.
+- **Error and crash monitoring** — self-hosted on a server we operate in **Egypt**.
+  Diagnostic data is not sent to any monitoring vendor, is configured to exclude personal data, and is deleted after 30 days.
 - **Route and distance calculation** — self-hosted. Delivery addresses are **not** sent to a
   mapping company.
 - **Short links** — self-hosted.

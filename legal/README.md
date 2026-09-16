@@ -9,10 +9,9 @@ what data Madar collects and where it flows are accurate as of 2026-09-08. The *
 framing has not been reviewed by an Egyptian lawyer and must be before publication.
 
 Specifically needing counsel:
-- **Confirm and state the location of the self-hosted error-reporting server.** Reports are
-  received in Europe but processed and stored on a second server we operate that is not
-  part of that European hosting; the docs describe this without naming a country until the
-  owner confirms where it actually is.
+- **Error-reporting server location: confirmed as Egypt (owner, 2026-09-16)** and named in
+  the privacy policy (1.7), security (1.3) and sub-processors (1.6) pages. Counsel should
+  confirm the transfer basis for Europe → Egypt diagnostic data.
 - **Set an automatic retention period for device version records** (device identifier, app
   version, org/branch, first/last seen). Today they are kept only while the organisation's
   account is active and deleted with it; there is no automatic pruning before that.

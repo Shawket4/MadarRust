@@ -1,7 +1,7 @@
 ---
 title: Privacy Policy
-version: 1.6
-effective: 2026-09-14
+version: 1.7
+effective: 2026-09-16
 ---
 
 # Privacy Policy
@@ -261,8 +261,8 @@ control. Some providers listed under Sub-processors operate outside Egypt; that 
 identified there.
 
 Error and crash reports are an exception to "hosted in Europe": they are received by our
-server in Europe but are then processed and stored on a separate server we operate, which is
-not part of that European hosting. See **[Security](/security.html)**.
+server in Europe but are then processed and stored on a separate server we operate **in
+Egypt**, which is not part of that European hosting. See **[Security](/security.html)**.
 
 ### On the POS tablet itself
 
