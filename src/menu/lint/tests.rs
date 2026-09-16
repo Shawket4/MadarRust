@@ -334,3 +334,19 @@ async fn lint_endpoint_shape_and_auth(pool: PgPool) {
     .await;
     assert_eq!(resp.status(), 403, "cross-org lint is forbidden");
 }
+
+/// Operator run against a restored prod copy:
+/// `DATABASE_URL_DROPS=postgres://…/drops LINT_ORG=<uuid> cargo nextest run -E 'test(lint_restored_db)' --run-ignored only`
+#[tokio::test]
+#[ignore]
+async fn lint_restored_db() {
+    let url = std::env::var("DATABASE_URL_DROPS").expect("DATABASE_URL_DROPS");
+    let org: Uuid = std::env::var("LINT_ORG")
+        .expect("LINT_ORG")
+        .parse()
+        .unwrap();
+    let pool = PgPool::connect(&url).await.unwrap();
+    let issues = lint_org(&pool, org).await.unwrap();
+    let out = std::env::var("LINT_OUT").unwrap_or_else(|_| "lint_out.json".into());
+    std::fs::write(&out, serde_json::to_string_pretty(&issues).unwrap()).unwrap();
+}

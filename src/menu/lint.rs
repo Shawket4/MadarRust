@@ -291,7 +291,7 @@ const RULES: &[Rule] = &[
             ",
             fam(u, f) AS (VALUES ('g','mass'),('kg','mass'),('ml','volume'),('l','volume'),('pcs','count')),
             first_line AS (
-                SELECT DISTINCT ON (r.owner_id) r.owner_id, r.ing_name, r.unit
+                SELECT DISTINCT ON (r.owner_id) r.owner_id, r.ing_name, r.unit, r.ingredient_id
                   FROM ln r WHERE r.owner_type = 'modifier_option'
                  ORDER BY r.owner_id, r.ing_name, r.ingredient_id),
             -- swaps: base line unit vs the option's replacement line unit
@@ -306,7 +306,9 @@ const RULES: &[Rule] = &[
                   JOIN first_line fl ON fl.owner_id = o.id
                   LEFT JOIN fam fb ON fb.u = lower(b.unit)
                   LEFT JOIN fam fr ON fr.u = lower(fl.unit)
-                 WHERE fb.f IS DISTINCT FROM fr.f),
+                 WHERE fb.f IS DISTINCT FROM fr.f
+                   -- re-picking the recipe's own ingredient is not a swap
+                   AND fl.ingredient_id <> b.ingredient_id),
             -- follows: an additive option line in milk/coffee follows the drink's ingredient
             follows AS (
                 SELECT i.id AS item_id, i.name AS item_name, s.label AS size_label,
