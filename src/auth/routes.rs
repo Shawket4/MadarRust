@@ -28,6 +28,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     .wrap(Condition::new(limited, Governor::new(&gov)))
                     .route(web::post().to(handlers::login)),
             )
+            // Device activation codes (POS_SIGNIN_OVERHAUL §4): unauthenticated,
+            // so it shares the login governor.
+            .service(
+                web::resource("/activate-device")
+                    .wrap(Condition::new(limited, Governor::new(&gov)))
+                    .route(web::post().to(crate::devices::activation::activate)),
+            )
             .service(
                 web::resource("/resolve-branch")
                     .wrap(Condition::new(limited, Governor::new(&gov)))

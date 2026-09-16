@@ -283,6 +283,10 @@ paths(
         // ── devices ──────────────────────────────────────────────────
         crate::devices::handlers::register_device,
         crate::devices::handlers::list_devices,
+        crate::devices::activation::create_code,
+        crate::devices::activation::list_codes,
+        crate::devices::activation::revoke_code,
+        crate::devices::activation::activate,
         crate::client_seen::handlers::list_client_versions,
         crate::devices::handlers::update_device,
         // ── legacy /shifts + /tills entity adapters (until cutover) ──
@@ -655,6 +659,11 @@ paths(
         crate::tills::legacy::PaginatedShifts,
         crate::devices::handlers::Device,
         crate::devices::handlers::DeviceKind,
+        crate::devices::activation::ActivationCode,
+        crate::devices::activation::ActivationCodeState,
+        crate::devices::activation::CreateActivationCodeRequest,
+        crate::devices::activation::ActivateDeviceRequest,
+        crate::devices::activation::ActivateDeviceResponse,
         crate::client_seen::handlers::ClientSeen,
         // ── reservations + floor plan ─────────────────────────────────
         crate::reservations::floor::FloorSection,

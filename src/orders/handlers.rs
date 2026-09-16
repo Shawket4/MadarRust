@@ -2019,8 +2019,10 @@ pub(crate) async fn create_order_inner(
         .into_iter()
         .collect::<std::collections::HashSet<Uuid>>();
         for ri in &mut resolved_items {
-            ri.deductions
-                .retain(|d| !d.org_ingredient_id.is_some_and(|id| packaging.contains(&id)));
+            ri.deductions.retain(|d| {
+                !d.org_ingredient_id
+                    .is_some_and(|id| packaging.contains(&id))
+            });
         }
     }
 

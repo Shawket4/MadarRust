@@ -1088,13 +1088,15 @@ async fn a_new_org_starts_at_zero_tax_with_talabat_tenders_off(pool: PgPool) {
         !names.iter().any(|n| n.starts_with("talabat")),
         "Talabat tenders are seeded switched off"
     );
-    let all: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM org_payment_methods WHERE org_id = $1")
-            .bind(org.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(all, 5, "cash, card, wallet + two inactive Talabat; no mixed");
+    let all: i64 = sqlx::query_scalar("SELECT count(*) FROM org_payment_methods WHERE org_id = $1")
+        .bind(org.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        all, 5,
+        "cash, card, wallet + two inactive Talabat; no mixed"
+    );
     // `mixed` stayed dropped (phase 0).
     assert!(!names.contains(&"mixed"));
     // Exactly one tender counts toward the drawer.

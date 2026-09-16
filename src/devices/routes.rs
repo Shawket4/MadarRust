@@ -7,6 +7,18 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         web::scope("/devices")
             .wrap(JwtMiddleware)
             .route("/register", web::post().to(handlers::register_device))
+            .route(
+                "/activation-codes",
+                web::post().to(crate::devices::activation::create_code),
+            )
+            .route(
+                "/activation-codes",
+                web::get().to(crate::devices::activation::list_codes),
+            )
+            .route(
+                "/activation-codes/{id}/revoke",
+                web::post().to(crate::devices::activation::revoke_code),
+            )
             .route("", web::get().to(handlers::list_devices))
             .route(
                 "/client-versions",

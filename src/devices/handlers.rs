@@ -40,7 +40,7 @@ pub struct Device {
     pub code_conflict: bool,
 }
 
-const DEVICE_SELECT: &str = "SELECT d.id, d.org_id, d.branch_id, d.code, d.label, d.kind, d.platform, \
+pub(crate) const DEVICE_SELECT: &str = "SELECT d.id, d.org_id, d.branch_id, d.code, d.label, d.kind, d.platform, \
     d.app_version, d.first_seen_at, d.last_seen_at, d.retired_at, \
     EXISTS(SELECT 1 FROM devices d2 WHERE d2.branch_id = d.branch_id AND d2.code = d.code \
            AND d2.id <> d.id AND d2.retired_at IS NULL) AS code_conflict \
@@ -246,7 +246,8 @@ pub async fn update_device(
     };
     sqlx::query(
         "UPDATE devices SET code = $2, label = $3, branch_id = $4, \
-            retired_at = CASE WHEN $5::bool IS NULL THEN retired_at WHEN $5 THEN COALESCE(retired_at, now()) ELSE NULL END \
+            retired_at = CASE WHEN $5::bool IS NULL THEN retired_at WHEN $5 THEN COALESCE(retired_at, now()) ELSE NULL END, \
+            credential_hash = CASE WHEN $5::bool THEN NULL ELSE credential_hash END \
          WHERE id = $1",
     )
     .bind(*id)
