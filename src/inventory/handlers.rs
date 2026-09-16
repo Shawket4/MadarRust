@@ -33,6 +33,9 @@ pub struct IngredientCategory {
     pub slug: String,
     pub name: String,
     pub sort_order: i32,
+    /// Cups, lids, straws: a dine-in sale skips every ingredient in a packaging
+    /// category. The slug `packaging` is treated as packaging too.
+    pub is_packaging: bool,
     /// Live (non-deleted) ingredients in this category.
     pub ingredient_count: i64,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -172,12 +175,17 @@ pub struct CreateIngredientCategoryRequest {
     /// Optional explicit slug (`[a-z0-9_]`); derived from the name when omitted.
     pub slug: Option<String>,
     pub sort_order: Option<i32>,
+    /// Defaults to `true` for slug `packaging`, else `false`.
+    #[serde(default)]
+    pub is_packaging: Option<bool>,
 }
 
 #[derive(Deserialize, ToSchema)]
 pub struct UpdateIngredientCategoryRequest {
     pub name: Option<String>,
     pub sort_order: Option<i32>,
+    #[serde(default)]
+    pub is_packaging: Option<bool>,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -329,7 +337,7 @@ const ORG_INGREDIENT_SELECT: &str = r#"
 "#;
 
 const CATEGORY_SELECT: &str = r#"
-    SELECT c.id, c.org_id, c.slug, c.name, c.sort_order,
+    SELECT c.id, c.org_id, c.slug, c.name, c.sort_order, c.is_packaging,
            (SELECT count(*) FROM org_ingredients oi
              WHERE oi.category_id = c.id AND oi.deleted_at IS NULL) AS ingredient_count,
            c.created_at, c.updated_at
@@ -423,13 +431,14 @@ pub async fn create_ingredient_category(
     };
 
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO ingredient_categories (org_id, slug, name, sort_order) \
-         VALUES ($1, $2, $3, $4) RETURNING id",
+        "INSERT INTO ingredient_categories (org_id, slug, name, sort_order, is_packaging) \
+         VALUES ($1, $2, $3, $4, $5) RETURNING id",
     )
     .bind(*org_id)
     .bind(&slug)
     .bind(name)
     .bind(body.sort_order.unwrap_or(10))
+    .bind(body.is_packaging.unwrap_or(slug == "packaging"))
     .fetch_one(pool.get_ref())
     .await
     .map_err(|e| match &e {
@@ -477,13 +486,15 @@ pub async fn update_ingredient_category(
 
     let updated: Option<Uuid> = sqlx::query_scalar(
         "UPDATE ingredient_categories \
-         SET name = COALESCE($3, name), sort_order = COALESCE($4, sort_order) \
+         SET name = COALESCE($3, name), sort_order = COALESCE($4, sort_order), \
+             is_packaging = COALESCE($5, is_packaging) \
          WHERE id = $1 AND org_id = $2 RETURNING id",
     )
     .bind(id)
     .bind(org_id)
     .bind(name)
     .bind(body.sort_order)
+    .bind(body.is_packaging)
     .fetch_optional(pool.get_ref())
     .await?;
     let id = updated.ok_or_else(|| AppError::NotFound("Category not found".into()))?;

@@ -57,6 +57,15 @@ pub struct RecipeLineOut {
     /// Cost of this line in piastres. `null` = UNKNOWN (ingredient unlinked/uncosted),
     /// never shown as 0. A priced line with `quantity = 0` (swap marker) costs 0.
     pub line_cost_piastres: Option<i64>,
+    /// Where the line came from: `own` (typed on this size; also legacy NULL rows),
+    /// `base` (recipe base), `rule` (packaging rule) or `linked` (copied from the
+    /// item this one follows). Only `own` lines are edited by
+    /// `PUT /menu-item-sizes/{id}/recipe`.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Option lines only: the size this amount is for (`null` = every size).
+    #[serde(default)]
+    pub size_label: Option<String>,
 }
 
 /// A size (menu_item_sizes row) with its recipe and live cost.
@@ -67,6 +76,9 @@ pub struct SizeOut {
     pub price: i32,
     pub sort: i32,
     pub is_active: bool,
+    /// Recipe base this size expands (`PUT /menu-item-sizes/{id}/base`), or `null`.
+    #[serde(default)]
+    pub base_id: Option<Uuid>,
     pub recipe: Vec<RecipeLineOut>,
     /// Recipe cost rollup in piastres over the priced ingredients. `null` when there is
     /// no recipe or nothing is priced; a partial rollup returns the sum-so-far with
@@ -183,6 +195,12 @@ pub struct StudioAggregate {
     /// and saved by the studio alongside the recipe lines.
     pub recipe_steps: Vec<crate::recipes::steps::RecipeStep>,
     pub used_in_bundles: Vec<UsedInBundleOut>,
+    /// The item this one's recipe follows (linked copy), or `null`.
+    #[serde(default)]
+    pub recipe_source_item_id: Option<Uuid>,
+    /// Live items whose recipe follows this one.
+    #[serde(default)]
+    pub linked_copy_ids: Vec<Uuid>,
 }
 
 // ── Request payloads ─────────────────────────────────────────────────
@@ -340,6 +358,8 @@ pub(crate) struct RawRecipeLine {
     unit: String,
     /// The org-default per-unit cost in piastres, or `None` when uncosted/unlinked.
     cost_per_unit: Option<Decimal>,
+    source: Option<String>,
+    size_label: Option<String>,
 }
 
 /// Load all recipe_lines for a set of owners of one `owner_type`, joined to
@@ -359,8 +379,20 @@ pub(crate) async fn load_recipe_lines(
         return Ok(map);
     }
 
-    let rows: Vec<(Uuid, Uuid, Uuid, String, Decimal, String, Option<Decimal>)> = sqlx::query_as(
-        "SELECT rl.owner_id, rl.id, rl.ingredient_id, oi.name, rl.quantity, rl.unit, oi.cost_per_unit \
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(
+        Uuid,
+        Uuid,
+        Uuid,
+        String,
+        Decimal,
+        String,
+        Option<Decimal>,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT rl.owner_id, rl.id, rl.ingredient_id, oi.name, rl.quantity, rl.unit, oi.cost_per_unit, \
+                COALESCE(rl.source, 'own'), rl.size_label \
          FROM recipe_lines rl \
          JOIN org_ingredients oi ON oi.id = rl.ingredient_id \
          WHERE rl.owner_type = $1 AND rl.owner_id = ANY($2) \
@@ -371,7 +403,18 @@ pub(crate) async fn load_recipe_lines(
     .fetch_all(pool)
     .await?;
 
-    for (owner_id, id, ingredient_id, ingredient_name, quantity, unit, cost_per_unit) in rows {
+    for (
+        owner_id,
+        id,
+        ingredient_id,
+        ingredient_name,
+        quantity,
+        unit,
+        cost_per_unit,
+        source,
+        size_label,
+    ) in rows
+    {
         map.entry(owner_id).or_default().push(RawRecipeLine {
             id,
             ingredient_id,
@@ -379,6 +422,8 @@ pub(crate) async fn load_recipe_lines(
             quantity,
             unit,
             cost_per_unit,
+            source,
+            size_label,
         });
     }
     Ok(map)
@@ -417,6 +462,8 @@ pub(crate) fn rollup_recipe(lines: &[RawRecipeLine]) -> (Vec<RecipeLineOut>, Opt
             quantity: l.quantity.normalize().to_string(),
             unit: l.unit.clone(),
             line_cost_piastres: line_cost,
+            source: l.source.clone(),
+            size_label: l.size_label.clone(),
         });
     }
 
@@ -445,8 +492,8 @@ async fn build_studio_aggregate(
     // sizes still resolve through it; when a size has recipe_lines those take
     // precedence for the studio's live number (the engine can't see the new table
     // until the FLIP). Keyed by size label.
-    let size_rows: Vec<(Uuid, String, i32, i32, bool)> = sqlx::query_as(
-        "SELECT id, label, price, sort, is_active FROM menu_item_sizes \
+    let size_rows: Vec<(Uuid, String, i32, i32, bool, Option<Uuid>)> = sqlx::query_as(
+        "SELECT id, label, price, sort, is_active, base_id FROM menu_item_sizes \
          WHERE menu_item_id = $1 ORDER BY sort, label",
     )
     .bind(item_id)
@@ -465,7 +512,7 @@ async fn build_studio_aggregate(
         .collect();
 
     let mut sizes = Vec::with_capacity(size_rows.len());
-    for (id, label, price, sort, is_active) in size_rows {
+    for (id, label, price, sort, is_active, base_id) in size_rows {
         let lines = size_recipes.get(&id).map(|v| v.as_slice()).unwrap_or(&[]);
         let (recipe, cost, incomplete) = if lines.is_empty() {
             // No recipe_lines for this size → defer to the canonical engine's figure
@@ -484,6 +531,7 @@ async fn build_studio_aggregate(
             price,
             sort,
             is_active,
+            base_id,
             recipe,
             cost_piastres: cost,
             cost_incomplete: incomplete,
@@ -624,6 +672,7 @@ async fn build_studio_aggregate(
     .await?
     .remove(&item_id);
 
+    let link = crate::menu::linked::link_info(pool, item_id).await?;
     Ok(StudioAggregate {
         id: basics.id,
         org_id,
@@ -641,6 +690,8 @@ async fn build_studio_aggregate(
         availability,
         recipe_steps,
         used_in_bundles,
+        recipe_source_item_id: link.recipe_source_item_id,
+        linked_copy_ids: link.linked_copy_ids,
     })
 }
 
@@ -956,6 +1007,8 @@ pub async fn put_sizes(
         }
     }
 
+    // New/renamed sizes pick up packaging rules, a copy re-follows its source by label.
+    crate::menu::recipe_expand::rebuild_item(&mut tx, item_id).await?;
     bump_catalog_revision(&mut tx, basics.org_id).await?;
     tx.commit().await?;
 
@@ -984,16 +1037,22 @@ pub async fn put_size_recipe(
     check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
 
     // Resolve the size → its item → org (for auth + normalization scope).
-    let owner: Option<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT mi.id, mi.org_id FROM menu_item_sizes s \
+    let owner: Option<(Uuid, Uuid, Option<Uuid>)> = sqlx::query_as(
+        "SELECT mi.id, mi.org_id, mi.recipe_source_item_id FROM menu_item_sizes s \
          JOIN menu_items mi ON mi.id = s.menu_item_id \
          WHERE s.id = $1 AND mi.deleted_at IS NULL",
     )
     .bind(*size_id)
     .fetch_optional(pool.get_ref())
     .await?;
-    let (item_id, org_id) = owner.ok_or_else(|| AppError::NotFound("Size not found".into()))?;
+    let (item_id, org_id, linked_to) =
+        owner.ok_or_else(|| AppError::NotFound("Size not found".into()))?;
     require_same_org(&claims, Some(org_id))?;
+    if linked_to.is_some() {
+        return Err(AppError::Conflict(
+            "This item's recipe follows another item; unlink it first".into(),
+        ));
+    }
 
     let lines = body.into_inner().lines;
 
@@ -1024,11 +1083,18 @@ pub async fn put_size_recipe(
 
     let mut tx = pool.begin().await?;
 
-    // Replace the size's recipe lines.
-    sqlx::query("DELETE FROM recipe_lines WHERE owner_type = 'item_size' AND owner_id = $1")
-        .bind(*size_id)
-        .execute(&mut *tx)
-        .await?;
+    // Replace the size's OWN lines. Base/rule lines are the expansion's: they are kept,
+    // except where an own line now names the same ingredient (own wins), and are
+    // re-expanded below (an ingredient the owner stops typing falls back to the base).
+    let own_ids: Vec<Uuid> = normalized.iter().map(|n| n.0).collect();
+    sqlx::query(
+        "DELETE FROM recipe_lines WHERE owner_type = 'item_size' AND owner_id = $1 \
+           AND (source IS NULL OR source = 'own' OR ingredient_id = ANY($2))",
+    )
+    .bind(*size_id)
+    .bind(&own_ids)
+    .execute(&mut *tx)
+    .await?;
 
     for (ingredient_id, qty, base_unit) in &normalized {
         sqlx::query(
@@ -1043,6 +1109,8 @@ pub async fn put_size_recipe(
         .await?;
     }
 
+    // Base/rule lines for this item, then every linked copy re-follows.
+    crate::menu::recipe_expand::rebuild_item(&mut tx, item_id).await?;
     let revision = bump_catalog_revision(&mut tx, org_id).await?;
     tx.commit().await?;
 

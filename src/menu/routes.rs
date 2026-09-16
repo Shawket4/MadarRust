@@ -1,6 +1,10 @@
 use crate::{
-    auth::middleware::JwtMiddleware, menu::catalog_sync, menu::handlers::*, menu::modifiers,
+    auth::middleware::JwtMiddleware,
+    menu::catalog_sync,
+    menu::handlers::*,
+    menu::modifiers,
     menu::studio,
+    menu::{bases, linked, packaging},
 };
 use actix_web::web;
 
@@ -69,13 +73,46 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/{id}/duplicate", web::post().to(studio::duplicate_item))
                 // Priced optionals (item-private Options group) + live per-size cost
                 .route("/{id}/options", web::put().to(modifiers::put_item_options))
-                .route("/{id}/cost", web::get().to(modifiers::get_item_cost)),
+                .route("/{id}/cost", web::get().to(modifiers::get_item_cost))
+                // Linked copies (recipe follows a source item)
+                .route(
+                    "/{id}/linked-copy",
+                    web::post().to(linked::create_linked_copy),
+                )
+                .route("/{id}/recipe-link", web::get().to(linked::get_recipe_link))
+                .route(
+                    "/{id}/recipe-link",
+                    web::delete().to(linked::delete_recipe_link),
+                ),
         )
         // ── Menu Studio: per-size recipe (new unified tables) ─────────────────
         .service(
             web::scope("/menu-item-sizes")
                 .wrap(JwtMiddleware)
-                .route("/{size_id}/recipe", web::put().to(studio::put_size_recipe)),
+                .route("/{size_id}/recipe", web::put().to(studio::put_size_recipe))
+                .route("/{size_id}/base", web::put().to(bases::put_size_base)),
+        )
+        // ── Recipe bases (expanded into size recipe_lines) ────────────────────
+        .service(
+            web::scope("/recipe-bases")
+                .wrap(JwtMiddleware)
+                .route("", web::get().to(bases::list_bases))
+                .route("", web::post().to(bases::create_base))
+                .route("/{id}", web::get().to(bases::get_base))
+                .route("/{id}", web::patch().to(bases::patch_base))
+                .route("/{id}", web::delete().to(bases::delete_base))
+                .route("/{id}/lines", web::put().to(bases::put_base_lines))
+                .route("/{id}/usage", web::get().to(bases::get_base_usage)),
+        )
+        // ── Packaging rules (expanded into size recipe_lines) ─────────────────
+        .service(
+            web::scope("/packaging-rules")
+                .wrap(JwtMiddleware)
+                .route("", web::get().to(packaging::list_rules))
+                .route("", web::post().to(packaging::create_rule))
+                .route("/apply", web::post().to(packaging::apply_rules))
+                .route("/{id}", web::patch().to(packaging::patch_rule))
+                .route("/{id}", web::delete().to(packaging::delete_rule)),
         )
         // ── POS catalog sync (new unified tables) ─────────────────────────────
         .service(

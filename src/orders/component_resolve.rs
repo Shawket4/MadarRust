@@ -141,6 +141,57 @@ async fn one_choice_per_swap_family(
         .collect())
 }
 
+/// Per-size option amounts (menu modeling B9): an option line whose `size_label`
+/// equals the ordered size REPLACES the generic (NULL-size) line for the same
+/// ingredient, and a sized line for an ingredient with no generic line is added.
+/// The generic lines come from `addon_item_ingredients` (which only ever shows NULL-
+/// size rows), so with no sized lines — every old catalog — nothing changes.
+pub(crate) fn merge_sized_option_lines(
+    generic: Vec<(Option<Uuid>, f64, String, String)>,
+    sized: Vec<(Option<Uuid>, f64, String, String)>,
+) -> Vec<(Option<Uuid>, f64, String, String)> {
+    if sized.is_empty() {
+        return generic;
+    }
+    let mut out: Vec<_> = generic
+        .into_iter()
+        .map(
+            |g| match sized.iter().find(|s| s.0.is_some() && s.0 == g.0) {
+                Some(s) => s.clone(),
+                None => g,
+            },
+        )
+        .collect();
+    for s in sized {
+        if !out.iter().any(|o| o.0.is_some() && o.0 == s.0) {
+            out.push(s);
+        }
+    }
+    out
+}
+
+async fn prefer_sized_option_lines(
+    pool: &PgPool,
+    option_id: Uuid,
+    size_label: Option<&str>,
+    generic: Vec<(Option<Uuid>, f64, String, String)>,
+) -> Result<Vec<(Option<Uuid>, f64, String, String)>, AppError> {
+    let Some(label) = size_label else {
+        return Ok(generic);
+    };
+    let sized: Vec<(Option<Uuid>, f64, String, String)> = sqlx::query_as(
+        "SELECT rl.ingredient_id, rl.quantity::float8, oi.name, rl.unit
+         FROM recipe_lines rl JOIN org_ingredients oi ON oi.id = rl.ingredient_id
+         WHERE rl.owner_type = 'modifier_option' AND rl.owner_id = $1 AND rl.size_label = $2
+         ORDER BY rl.ingredient_id",
+    )
+    .bind(option_id)
+    .bind(label)
+    .fetch_all(pool)
+    .await?;
+    Ok(merge_sized_option_lines(generic, sized))
+}
+
 /// Resolve a menu item configuration (same rules as a standalone POS line).
 /// [line_quantity] is the total multiplier for inventory (e.g. bundle line qty × component qty per bundle).
 pub async fn resolve_menu_item_configuration(
@@ -253,6 +304,13 @@ pub async fn resolve_menu_item_configuration(
         )
         .bind(addon_input.addon_item_id)
         .fetch_all(pool)
+        .await?;
+        let addon_rows = prefer_sized_option_lines(
+            pool,
+            addon_input.addon_item_id,
+            size_label.as_deref(),
+            addon_rows,
+        )
         .await?;
 
         let target_category = match addon_type.as_str() {
@@ -380,8 +438,16 @@ pub async fn resolve_menu_item_configuration(
         let chosen = deductions
             .iter()
             .find(|d| d.category == cat && d.source != "addon")
-            .map(|d| (d.org_ingredient_id, d.ingredient_name.clone(), d.unit.clone()));
-        let Some((id, name, unit)) = chosen else { continue };
+            .map(|d| {
+                (
+                    d.org_ingredient_id,
+                    d.ingredient_name.clone(),
+                    d.unit.clone(),
+                )
+            });
+        let Some((id, name, unit)) = chosen else {
+            continue;
+        };
         for d in deductions.iter_mut() {
             if d.source == "addon" && d.category == cat && d.org_ingredient_id != id {
                 // Convert first: the addon's quantity is in ITS unit, and the
