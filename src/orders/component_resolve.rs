@@ -83,26 +83,98 @@ pub struct MenuItemResolution {
     pub optional_line: i32,
 }
 
+/// How one addon choice relates to the drink's recipe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SwapTarget {
+    /// Ingredient category slug of the recipe line the choice replaces.
+    pub slug: String,
+    /// The group's explicit swap category (B2); `None` = inferred from the type.
+    pub category_id: Option<Uuid>,
+    /// Family key: two choices with the same key cannot share a line.
+    pub family: String,
+}
+
+/// Explicit (`effect = 'swaps'` + `swap_category_id`) wins; otherwise today's
+/// inference from the legacy type (`milk_type` → `milk`, `coffee_type` →
+/// `coffee_bean`). The magic families keep their type as the key so an explicit
+/// milk group and an inferred milk group still collapse together.
+pub(crate) fn swap_target(
+    addon_type: Option<&str>,
+    effect: Option<&str>,
+    swap_category_id: Option<Uuid>,
+    swap_category_slug: Option<&str>,
+) -> Option<SwapTarget> {
+    let family_of = |slug: &str, fallback: String| match slug {
+        "milk" => "milk_type".to_string(),
+        "coffee_bean" => "coffee_type".to_string(),
+        _ => fallback,
+    };
+    if effect == Some("swaps")
+        && let (Some(cid), Some(slug)) = (swap_category_id, swap_category_slug)
+    {
+        return Some(SwapTarget {
+            slug: slug.to_string(),
+            category_id: Some(cid),
+            family: family_of(slug, format!("category:{cid}")),
+        });
+    }
+    let slug = match addon_type {
+        Some("milk_type") => "milk",
+        Some("coffee_type") => "coffee_bean",
+        _ => return None,
+    };
+    Some(SwapTarget {
+        slug: slug.to_string(),
+        category_id: None,
+        family: family_of(slug, String::new()),
+    })
+}
+
 /// A drink has ONE milk and ONE coffee: a swap-family addon (`milk_type` /
-/// `coffee_type`) REPLACES the recipe's ingredient, so two of one family on a
-/// line cannot be made, costed or deducted — the second swap silently
-/// overwrote the first while both were charged. Tills already in the field sent
-/// such lines (and replay them from their outbox), so the line is not refused —
-/// the LAST choice of each family wins, at quantity 1, which is what the till
-/// shows the customer after picking a second milk.
-pub(crate) fn collapse_swap_families(types: &[Option<String>]) -> Vec<bool> {
-    let mut keep = vec![true; types.len()];
-    for family in ["milk_type", "coffee_type"] {
-        let hits: Vec<usize> = (0..types.len())
-            .filter(|&i| types[i].as_deref() == Some(family))
-            .collect();
-        if let Some((_, earlier)) = hits.split_last() {
-            for &i in earlier {
-                keep[i] = false;
-            }
+/// `coffee_type`, or any explicit `swaps` group) REPLACES the recipe's ingredient,
+/// so two of one family on a line cannot be made, costed or deducted — the second
+/// swap silently overwrote the first while both were charged. Tills already in the
+/// field sent such lines (and replay them from their outbox), so the line is not
+/// refused — the LAST choice of each family wins, at quantity 1, which is what the
+/// till shows the customer after picking a second milk.
+pub(crate) fn collapse_families(families: &[Option<String>]) -> Vec<bool> {
+    let mut keep = vec![true; families.len()];
+    for i in 0..families.len() {
+        if let Some(f) = &families[i]
+            && families[i + 1..].iter().any(|g| g.as_ref() == Some(f))
+        {
+            keep[i] = false;
         }
     }
     keep
+}
+
+#[cfg(test)]
+pub(crate) fn collapse_swap_families(types: &[Option<String>]) -> Vec<bool> {
+    let families: Vec<Option<String>> = types
+        .iter()
+        .map(|t| swap_target(t.as_deref(), None, None, None).map(|s| s.family))
+        .collect();
+    collapse_families(&families)
+}
+
+/// Per addon id: its legacy type plus its group's explicit swap settings.
+#[allow(clippy::type_complexity)]
+async fn load_swap_rows(
+    pool: &PgPool,
+    ids: &[Uuid],
+) -> Result<Vec<(Uuid, String, Option<String>, Option<Uuid>, Option<String>)>, AppError> {
+    Ok(sqlx::query_as(
+        "SELECT a.id, a.type, g.effect, g.swap_category_id, c.slug
+           FROM addon_items a
+           LEFT JOIN modifier_options mo ON mo.id = a.id
+           LEFT JOIN modifier_groups g ON g.id = mo.group_id
+           LEFT JOIN ingredient_categories c ON c.id = g.swap_category_id
+          WHERE a.id = ANY($1)",
+    )
+    .bind(ids)
+    .fetch_all(pool)
+    .await?)
 }
 
 async fn one_choice_per_swap_family(
@@ -113,32 +185,52 @@ async fn one_choice_per_swap_family(
         return Ok(addons.to_vec());
     }
     let ids: Vec<Uuid> = addons.iter().map(|a| a.addon_item_id).collect();
-    let rows: Vec<(Uuid, String)> =
-        sqlx::query_as("SELECT id, type FROM addon_items WHERE id = ANY($1)")
-            .bind(&ids)
-            .fetch_all(pool)
-            .await?;
-    let types: Vec<Option<String>> = ids
+    let rows = load_swap_rows(pool, &ids).await?;
+    let families: Vec<Option<String>> = ids
         .iter()
-        .map(|id| rows.iter().find(|(r, _)| r == id).map(|(_, t)| t.clone()))
+        .map(|id| {
+            rows.iter()
+                .find(|r| r.0 == *id)
+                .and_then(|(_, t, e, cid, slug)| {
+                    swap_target(Some(t), e.as_deref(), *cid, slug.as_deref())
+                })
+                .map(|s| s.family)
+        })
         .collect();
-    let keep = collapse_swap_families(&types);
+    let keep = collapse_families(&families);
     if keep.iter().any(|k| !k) {
-        tracing::warn!("order line carried more than one milk/coffee swap; kept the last");
+        tracing::warn!("order line carried more than one choice of a swap family; kept the last");
     }
     Ok(addons
         .iter()
-        .zip(&types)
+        .zip(&families)
         .zip(keep)
         .filter(|(_, k)| *k)
-        .map(|((a, t), _)| {
+        .map(|((a, f), _)| {
             let mut a = a.clone();
-            if matches!(t.as_deref(), Some("milk_type" | "coffee_type")) {
+            if f.is_some() {
                 a.quantity = 1;
             }
             a
         })
         .collect())
+}
+
+/// An option's explicit replacement ingredient (`replaces_ingredient_id`) with its
+/// name and stock unit, when set.
+async fn explicit_replacement(
+    pool: &PgPool,
+    option_id: Uuid,
+) -> Result<Option<(Uuid, String, String)>, AppError> {
+    Ok(sqlx::query_as(
+        "SELECT oi.id, oi.name, oi.unit::text
+           FROM modifier_options mo
+           JOIN org_ingredients oi ON oi.id = mo.replaces_ingredient_id
+          WHERE mo.id = $1",
+    )
+    .bind(option_id)
+    .fetch_optional(pool)
+    .await?)
 }
 
 /// Resolve a menu item configuration (same rules as a standalone POS line).
@@ -163,6 +255,8 @@ pub async fn resolve_menu_item_configuration(
     let mut deductions: Vec<InventoryDeduction> = Vec::new();
     let mut resolved_addons: Vec<ResolvedAddon> = Vec::new();
     let mut resolved_optionals: Vec<ResolvedOptional> = Vec::new();
+    // Ingredient categories swapped by an explicit choice on this line.
+    let mut swap_slugs: Vec<String> = Vec::new();
 
     // Base drink recipe
     let recipe_rows: Vec<(Option<Uuid>, f64, String, String, String)> = if let Some(ref size) =
@@ -264,19 +358,37 @@ pub async fn resolve_menu_item_configuration(
         .fetch_all(pool)
         .await?;
 
-        let target_category = match addon_type.as_str() {
-            "milk_type" => Some("milk"),
-            "coffee_type" => Some("coffee_bean"),
-            _ => None,
-        };
+        let swap_row = load_swap_rows(pool, &[addon_input.addon_item_id]).await?;
+        let target = swap_row.first().and_then(|(_, t, eff, cid, slug)| {
+            swap_target(Some(t), eff.as_deref(), *cid, slug.as_deref())
+        });
 
-        if let Some(cat) = target_category {
+        if let Some(target) = target {
+            let cat = target.slug.as_str();
+            if !swap_slugs.iter().any(|s| s == cat) {
+                swap_slugs.push(cat.to_string());
+            }
             let base_ing_id = deductions
                 .iter()
                 .find(|d| d.source == "drink_recipe" && d.category == cat)
                 .and_then(|d| d.org_ingredient_id);
 
-            let addon_ing_id = addon_rows.first().and_then(|(id, _, _, _)| *id);
+            // The replacement: an explicit swap group names it on the option
+            // (`replaces_ingredient_id`); otherwise the option's first recipe line.
+            let replacement: Option<(Option<Uuid>, String, String)> =
+                match (target.category_id, explicit_replacement(pool, addon_input.addon_item_id).await?) {
+                    (Some(_), Some(ing)) => Some(
+                        addon_rows
+                            .iter()
+                            .find(|(id, _, _, _)| *id == Some(ing.0))
+                            .map(|(id, _, n, u)| (*id, n.clone(), u.clone()))
+                            .unwrap_or((Some(ing.0), ing.1, ing.2)),
+                    ),
+                    _ => addon_rows
+                        .first()
+                        .map(|(id, _, n, u)| (*id, n.clone(), u.clone())),
+                };
+            let addon_ing_id = replacement.as_ref().and_then(|r| r.0);
 
             let is_base =
                 base_ing_id.is_some() && addon_ing_id.is_some() && base_ing_id == addon_ing_id;
@@ -286,7 +398,7 @@ pub async fn resolve_menu_item_configuration(
                     last.unit_price = 0;
                     last.is_swap = true;
                 }
-            } else if let Some((repl_id, _, repl_name, repl_unit)) = addon_rows.first() {
+            } else if let Some((repl_id, repl_name, repl_unit)) = replacement {
                 let base_addon_price: i32 = if let Some(base_id) = base_ing_id {
                     sqlx::query_scalar(
                         // The swap is charged above the DEFAULT option: the one carrying
@@ -294,14 +406,20 @@ pub async fn resolve_menu_item_configuration(
                         // group, then in the group's display order (sort, name, id) —
                         // the POS's rule. Not MAX over every candidate, which disagreed
                         // with the till whenever two options shared the base ingredient.
+                        // Candidates share the family: the explicit swap category when
+                        // the chosen group has one, else the legacy type.
                         "SELECT COALESCE(bao.price_override, a.default_price)
                          FROM addon_items a
-                         JOIN addon_item_ingredients i ON i.addon_item_id = a.id
                          LEFT JOIN modifier_options mo ON mo.id = a.id
+                         LEFT JOIN modifier_groups mg ON mg.id = mo.group_id
                          LEFT JOIN modifier_options chosen ON chosen.id = $4
                          LEFT JOIN branch_addon_overrides bao
                                 ON bao.addon_item_id = a.id AND bao.branch_id = $3
-                         WHERE i.org_ingredient_id = $1 AND a.type = $2
+                         WHERE (EXISTS (SELECT 1 FROM addon_item_ingredients i
+                                         WHERE i.addon_item_id = a.id AND i.org_ingredient_id = $1)
+                                OR mo.replaces_ingredient_id = $1)
+                           AND CASE WHEN $5::uuid IS NULL THEN a.type = $2
+                                    ELSE mg.swap_category_id = $5 END
                          ORDER BY (mo.group_id IS NOT NULL AND mo.group_id = chosen.group_id) DESC,
                                   a.is_active DESC, mo.sort NULLS LAST, a.name, a.id
                          LIMIT 1",
@@ -310,6 +428,7 @@ pub async fn resolve_menu_item_configuration(
                     .bind(addon_type.as_str())
                     .bind(branch_id)
                     .bind(addon_input.addon_item_id)
+                    .bind(target.category_id)
                     .fetch_optional(pool)
                     .await?
                     .flatten()
@@ -331,10 +450,10 @@ pub async fn resolve_menu_item_configuration(
                         // base unit (g↔kg / ml↔l) BEFORE swapping the unit — otherwise
                         // the raw quantity is mis-deducted by up to 1000× and COGS is
                         // inflated. Mirrors the direct-item path in handlers.rs (V19).
-                        match crate::units::convert(ded.quantity, &ded.unit, repl_unit) {
+                        match crate::units::convert(ded.quantity, &ded.unit, &repl_unit) {
                             Ok(q) => {
                                 ded.quantity = q;
-                                ded.org_ingredient_id = *repl_id;
+                                ded.org_ingredient_id = repl_id;
                             }
                             Err(_) => {
                                 tracing::warn!(
@@ -393,10 +512,18 @@ pub async fn resolve_menu_item_configuration(
     // extra shot on a decaf latte is a decaf shot, and extra milk on an oat
     // latte is oat. Without this the addon keeps whatever bean the catalog
     // happened to name, so the sale charges for one thing and deducts another.
+    // Milk and coffee always follow (as before); an explicit custom swap family
+    // follows only on lines where one of its choices was made.
     //
     // A second pass, because the swaps above are applied as the addons are
     // walked — the line's final choice is only known once that loop is done.
-    for cat in ["milk", "coffee_bean"] {
+    let mut follow_slugs: Vec<String> = vec!["milk".into(), "coffee_bean".into()];
+    for s in swap_slugs {
+        if !follow_slugs.contains(&s) {
+            follow_slugs.push(s);
+        }
+    }
+    for cat in follow_slugs.iter().map(String::as_str) {
         let chosen = deductions
             .iter()
             .find(|d| d.category == cat && d.source != "addon")
