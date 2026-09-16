@@ -168,7 +168,7 @@ pub struct AuthPermissionsResponse {
     )
 )]
 pub async fn login(
-    _req: HttpRequest,
+    http_req: HttpRequest,
     pool: web::Data<PgPool>,
     secret: web::Data<JwtSecret>,
     body: web::Json<LoginRequest>,
@@ -226,6 +226,24 @@ pub async fn login(
             .await?
             .ok_or_else(|| AppError::Unauthorized("Invalid branch".into()))?;
 
+            // A growing delay on wrong PINs, counted against the device and the
+            // branch (POS_SIGNIN_OVERHAUL.md §3.4). Checked BEFORE any lookup,
+            // so a grinder gets no work out of us and no timing signal either.
+            let device_id = http_req
+                .headers()
+                .get(crate::tickets::DEVICE_ID_HEADER)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            // Old tablets (v0.5–v0.7) send a name and no device id on login;
+            // they are left exactly as they were. The delay applies to a client
+            // that identifies its device, and to any attempt without a name
+            // (PIN-only, §8.5) — the widened haystack it exists for.
+            let throttled = device_id.is_some() || body.name.is_none();
+            if throttled {
+                crate::auth::pin_throttle::check(pool.get_ref(), device_id.as_deref(), branch_id)
+                    .await?;
+            }
+
             // ORG-scoped lookup: teller names are unique per org, so resolve the
             // teller from (name, pin) within the branch's org FIRST. Branch
             // assignment is checked separately below — that lets us distinguish
@@ -255,16 +273,27 @@ pub async fn login(
             .fetch_all(pool.get_ref())
             .await?;
 
-            let matched = tellers
-                .into_iter()
-                .find(|u| {
-                    u.pin_hash
-                        .as_deref()
-                        .is_some_and(|h| bcrypt::verify(pin, h).unwrap_or(false))
-                })
+            let matched = match tellers.into_iter().find(|u| {
+                u.pin_hash
+                    .as_deref()
+                    .is_some_and(|h| bcrypt::verify(pin, h).unwrap_or(false))
+            }) {
+                Some(u) => u,
                 // No teller in this org matches name+PIN (includes a real teller
-                // from a DIFFERENT org) → generic invalid credentials.
-                .ok_or_else(|| AppError::Unauthorized("Invalid credentials".into()))?;
+                // from a DIFFERENT org) → generic invalid credentials, and one
+                // more against the delay.
+                None => {
+                    if throttled {
+                        crate::auth::pin_throttle::record_failure(
+                            pool.get_ref(),
+                            device_id.as_deref(),
+                            branch_id,
+                        )
+                        .await;
+                    }
+                    return Err(AppError::Unauthorized("Invalid credentials".into()));
+                }
+            };
 
             // Architecture E: signing in at a till is the `pos.sign_in` capability
             // at this branch (tellers and waiters always hold it; owners hold it;
@@ -273,9 +302,36 @@ pub async fn login(
                 .await?
                 .can(crate::authz::Cap::PosSignIn)
             {
+                // The ONE case with an identity behind it (§3.4): a CORRECT PIN
+                // typed at a branch its holder does not work at. Someone else's
+                // PIN turning up in the wrong shop is a real signal, so it is
+                // logged against the person rather than the place, and it does
+                // not feed the anonymous delay — that would let a wrong shop
+                // slow down the right one.
+                tracing::warn!(
+                    target: "madar.authz",
+                    user_id = %matched.id,
+                    branch_id = %branch_id,
+                    device_id = device_id.as_deref().unwrap_or("-"),
+                    "correct PIN at a branch this person is not allowed at"
+                );
+                crate::auth::pin_throttle::record_wrong_branch(
+                    pool.get_ref(),
+                    branch_org_id,
+                    matched.id,
+                    branch_id,
+                    device_id.as_deref(),
+                )
+                .await;
                 return Err(AppError::Forbidden(
                     "You can't sign in at a till in this branch".into(),
                 ));
+            }
+
+            // A correct PIN ends the run of failures for this device and shop.
+            if throttled {
+                crate::auth::pin_throttle::clear(pool.get_ref(), device_id.as_deref(), branch_id)
+                    .await;
             }
 
             // Decision D13 ("tellers are ORG-scoped, no per-branch gate at the

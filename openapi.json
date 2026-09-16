@@ -56576,6 +56576,14 @@
             "description": "Human-readable error message.",
             "example": "Something went wrong"
           },
+          "retry_after_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How long to wait before trying again, in seconds. Present on a\n`PIN_THROTTLED` refusal, absent everywhere else, so the PIN pad can run\na countdown rather than inventing one."
+          },
           "till": {
             "type": [
               "object",

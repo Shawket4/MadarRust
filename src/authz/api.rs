@@ -277,6 +277,8 @@ pub struct ReplayFlag {
     pub capability: String,
     /// `stale_snapshot` — they held it when they acted and the device had not
     /// heard the revocation yet. `unauthorized_offline` — nothing explains it.
+    /// `pin_wrong_branch` — their correct PIN was typed at a branch they may
+    /// not sign in at (`op` = `PinSignIn`, `details.attempts` counts the tries).
     pub reason: String,
     /// When the act happened on the device.
     pub occurred_at: chrono::DateTime<chrono::Utc>,
