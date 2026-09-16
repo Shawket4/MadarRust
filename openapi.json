@@ -20711,6 +20711,106 @@
         ]
       }
     },
+    "/menu/lint": {
+      "get": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "get_menu_lint",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "query",
+            "description": "Organization to lint.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Menu modeling findings for the org (empty = clean)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LintIssue"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/metrics/query": {
       "post": {
         "tags": [
@@ -58070,6 +58170,54 @@
             "format": "date-time"
           }
         }
+      },
+      "LintIssue": {
+        "type": "object",
+        "description": "One finding. `entity_type` is `attachment` | `item` | `option` | `ingredient`.",
+        "required": [
+          "rule",
+          "severity",
+          "entity_type",
+          "entity_id",
+          "entity_name",
+          "message"
+        ],
+        "properties": {
+          "entity_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "entity_name": {
+            "type": "string"
+          },
+          "entity_type": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "rule": {
+            "type": "string",
+            "description": "Audit rule id, e.g. `F4`."
+          },
+          "severity": {
+            "$ref": "#/components/schemas/LintSeverity"
+          },
+          "size_label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set when the finding is about one size of an item."
+          }
+        }
+      },
+      "LintSeverity": {
+        "type": "string",
+        "enum": [
+          "error",
+          "warn"
+        ]
       },
       "LoginRequest": {
         "type": "object",
