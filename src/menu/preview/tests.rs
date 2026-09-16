@@ -266,7 +266,7 @@ async fn preview_swap_with_unit_conversion_failure_warns_and_does_not_deduct(poo
 }
 
 #[sqlx::test]
-async fn preview_endpoint_requires_menu_items_read(pool: PgPool) {
+async fn preview_endpoint_is_org_scoped(pool: PgPool) {
     let fx = fixture(&pool).await;
     let user = Uuid::new_v4();
     sqlx::query("INSERT INTO users (id, org_id, name, email, password_hash, role) VALUES ($1, $2, 'U', $3, 'hash', 'org_admin'::user_role)")
@@ -289,13 +289,32 @@ async fn preview_endpoint_requires_menu_items_read(pool: PgPool) {
             .set_json(serde_json::json!({ "size_label": "Can", "option_ids": [fx.opt_oat] }))
             .to_request()
     };
-    sqlx::query("DELETE FROM role_permissions WHERE role = 'org_admin' AND resource = 'menu_items' AND action = 'read'")
-        .execute(&pool).await.unwrap();
-    let resp = test::call_service(&app, call()).await;
-    assert_eq!(resp.status(), 403);
-
     sqlx::query("INSERT INTO role_permissions (role, resource, action, granted) VALUES ('org_admin', 'menu_items', 'read', true) ON CONFLICT DO NOTHING")
         .execute(&pool).await.unwrap();
+    // Another org's admin cannot preview this item.
+    let other = crate::auth::jwt::create_token(
+        &JwtSecret("secret".to_string()),
+        user,
+        Some(Uuid::new_v4()),
+        UserRole::OrgAdmin,
+        None,
+        24,
+    )
+    .unwrap();
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/menu-items/{}/preview", fx.item))
+            .insert_header(("Authorization", format!("Bearer {other}")))
+            .set_json(serde_json::json!({}))
+            .to_request(),
+    )
+    .await;
+    assert!(
+        matches!(resp.status().as_u16(), 403 | 404),
+        "cross-org preview is refused: {}",
+        resp.status()
+    );
     let resp = test::call_service(&app, call()).await;
     assert!(resp.status().is_success(), "{}", resp.status());
     let body: serde_json::Value = test::read_body_json(resp).await;
