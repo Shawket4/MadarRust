@@ -264,6 +264,20 @@ JOIN map_item mi ON mi.sku = l.sku
 JOIN map_group mg ON mg.gkey = l.gkey
 ON CONFLICT (menu_item_id, group_id) DO NOTHING;
 
+-- Attach the way the dashboard does. The POS offers an item's options FROM
+-- this list (menu_item_allowed_addons), and knows a group must be answered
+-- only when it is a slot (menu_item_addon_slots). Left NULL, every option sat
+-- behind "show all" and required groups were not enforced.
+UPDATE menu_item_modifier_groups l
+SET included_option_ids = sub.opts,
+    legacy_origin = CASE WHEN g.is_required THEN 'slot' ELSE 'allowlist' END
+FROM modifier_groups g, map_item mi,
+     LATERAL (SELECT array_agg(o.id ORDER BY o.sort, o.name) AS opts
+              FROM modifier_options o
+              WHERE o.group_id = g.id AND o.is_active AND o.legacy_source = 'addon') sub
+WHERE g.id = l.group_id AND l.menu_item_id = mi.id
+  AND l.legacy_origin IS NULL AND g.legacy_addon_type IS NOT NULL AND sub.opts IS NOT NULL;
+
 -- ── Sizes from the `size` family ──────────────────────────────────────────
 -- Each linked item gets one row per size option, priced base + the option's
 -- price, replacing the single 'one_size' row seeded above.
