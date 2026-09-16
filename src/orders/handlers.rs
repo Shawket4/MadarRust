@@ -607,6 +607,11 @@ pub struct CreateOrderRequest {
     /// mixed basket can have one free coffee among four paid ones.
     #[serde(default)]
     pub loyalty_redemptions: Vec<LoyaltyRedemptionInput>,
+    /// A manual customer (phase 6), attached when the actor holds
+    /// `customers.attach`. A merged id resolves; an unknown one is ignored —
+    /// a sale is never refused over its customer.
+    #[serde(default)]
+    pub customer_id: Option<Uuid>,
 }
 
 /// One reward applied to one line of the cart.
@@ -1593,6 +1598,22 @@ pub(crate) async fn create_order_inner(
         ));
     }
 
+    // Asked before the order's transaction opens (one connection at a time).
+    let attach_customer = match body.customer_id {
+        Some(c)
+            if crate::authz::require::effective(
+                pool.get_ref(),
+                actor.teller_id,
+                Some(body.branch_id),
+            )
+            .await?
+            .can(crate::authz::Cap::CustomersAttach) =>
+        {
+            Some(c)
+        }
+        _ => None,
+    };
+
     // The order must attach to a shift at this branch — and, for a LIVE teller
     // action, an OPEN one that belongs to them. A REPLAY drops the teller filter
     // (recorded history) AND the open requirement: a sale queued offline is
@@ -2334,6 +2355,16 @@ pub(crate) async fn create_order_inner(
         }
         Err(e) => return Err(e.into()),
     };
+
+    if let Some(customer) = attach_customer {
+        crate::customers::handlers::attach_to_order(
+            &mut tx,
+            actor.org_id,
+            order.id,
+            Some(customer),
+        )
+        .await?;
+    }
 
     // The other side of the link, in the same transaction as the order row.
     //

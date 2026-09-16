@@ -20,6 +20,7 @@ pub mod cache;
 pub mod client_seen;
 pub mod clock;
 pub mod costing;
+pub mod customers;
 pub mod db;
 pub mod decimals;
 pub mod delivery;

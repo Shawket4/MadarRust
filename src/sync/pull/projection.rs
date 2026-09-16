@@ -161,6 +161,9 @@ pub fn projects_sql(ty: &str) -> Option<&'static str> {
         "addon_item" => {
             "EXISTS (SELECT 1 FROM addon_items x WHERE x.id = $ID AND sync_live_addon_item(x.id))"
         }
+        "customer" => {
+            "EXISTS (SELECT 1 FROM customers x WHERE x.id = $ID AND sync_live_customer(x))"
+        }
         _ => return None,
     })
 }
@@ -248,6 +251,19 @@ pub async fn project(
             out
         }
         "addon_item" => crate::menu::handlers::addon_items_by_ids(&mut *conn, org_id, branch_id, ids).await?,
+        // A till searches by name or phone offline. Notes stay in the
+        // dashboard; the phone is shown only to `customers.view` holders.
+        "customer" => {
+            by_sql(
+                conn,
+                "SELECT c.id, json_build_object('id', c.id, 'name', c.name, 'phone', c.phone, \
+                        'phone_key', c.phone_key, 'loyalty_customer_id', c.loyalty_customer_id, \
+                        'updated_at', c.updated_at) \
+                   FROM customers c WHERE c.id = ANY($1)",
+                ids,
+            )
+            .await?
+        }
         "bundle" => {
             let mut out = keyed(
                 crate::bundles::handlers::fetch_bundles_full(&mut *conn, ids).await?,

@@ -57,6 +57,7 @@ use utoipa::{
         (name = "floor_transfers", description = "The table-transfer waitlist: seated parties (or outside orders) queued to move to a section or a specific table."),
         (name = "stocktakes",   description = "Standalone physical-count sessions that reconcile branch stock and post variance movements."),
         (name = "purchasing",   description = "Suppliers, purchase orders, and receiving (weighted-average cost + purchase_in movements)."),
+        (name = "customers",    description = "Manual customers: list, history, create, edit, merge and PDPL erase."),
         (name = "discounts",    description = "Discount definitions and applicability rules."),
         (name = "bundles",      description = "Combo bundles and bundle pricing."),
         (name = "reports",      description = "Sales analytics and reporting."),
@@ -250,6 +251,13 @@ paths(
         crate::recipes::handlers::upsert_addon_ingredient,
         crate::recipes::handlers::delete_addon_ingredient,
         // ── discounts ─────────────────────────────────────────────────
+        // ── customers ─────────────────────────────────────────────────
+        crate::customers::handlers::list_customers,
+        crate::customers::handlers::get_customer,
+        crate::customers::handlers::create_customer,
+        crate::customers::handlers::update_customer,
+        crate::customers::handlers::merge_customer,
+        crate::customers::handlers::erase_customer,
         crate::discounts::handlers::list_discounts,
         crate::discounts::handlers::create_discount,
         crate::discounts::handlers::update_discount,

@@ -1317,6 +1317,7 @@ pub(crate) async fn settle_open_ticket_inner(
         branch_id,
         loyalty_customer_id: body.loyalty_customer_id,
         loyalty_redemptions: redemptions,
+        customer_id: None,
         till_id: body.till_id,
         device_id: None,
         device_code: None,

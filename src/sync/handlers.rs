@@ -210,6 +210,20 @@ pub enum ReplayOp {
         teller_id: Uuid,
         booking_id: Uuid,
     },
+    // A customer added at the till (phase 6). The id is client-minted, so a
+    // re-flush is idempotent; a phone another live customer already holds is
+    // stored merged into that one rather than refused.
+    CreateCustomer {
+        teller_id: Uuid,
+        request: crate::customers::handlers::CreateCustomerRequest,
+    },
+    // Attach (or with no `customer_id`, detach) a customer on a rung sale.
+    AttachCustomer {
+        teller_id: Uuid,
+        order_id: Uuid,
+        #[serde(default)]
+        customer_id: Option<Uuid>,
+    },
 }
 
 impl ReplayOp {
@@ -237,7 +251,9 @@ impl ReplayOp {
             | ReplayOp::ReleaseTable { teller_id, .. }
             | ReplayOp::SeatBooking { teller_id, .. }
             | ReplayOp::NoShowBooking { teller_id, .. }
-            | ReplayOp::AwardLoyaltyPoints { teller_id, .. } => *teller_id,
+            | ReplayOp::AwardLoyaltyPoints { teller_id, .. }
+            | ReplayOp::CreateCustomer { teller_id, .. }
+            | ReplayOp::AttachCustomer { teller_id, .. } => *teller_id,
         }
     }
 
@@ -267,6 +283,8 @@ impl ReplayOp {
             ReplayOp::SeatBooking { .. } => "SeatBooking",
             ReplayOp::NoShowBooking { .. } => "NoShowBooking",
             ReplayOp::AwardLoyaltyPoints { .. } => "AwardLoyaltyPoints",
+            ReplayOp::CreateCustomer { .. } => "CreateCustomer",
+            ReplayOp::AttachCustomer { .. } => "AttachCustomer",
         }
     }
 
@@ -387,6 +405,18 @@ impl ReplayOp {
             // whose loyalty grant was revoked cannot get an award through by
             // having queued it offline.
             ReplayOp::AwardLoyaltyPoints { .. } => &[("loyalty", "update")],
+            // Architecture E capabilities with no legacy cell: see `required_caps`.
+            ReplayOp::CreateCustomer { .. } | ReplayOp::AttachCustomer { .. } => &[],
+        }
+    }
+
+    /// Capabilities that have no legacy `(resource, action)` cell. Same rule as
+    /// the cells: these ops move no money, so a missing grant refuses the op.
+    fn required_caps(&self) -> &'static [crate::authz::Cap] {
+        match self {
+            ReplayOp::CreateCustomer { .. } => &[crate::authz::Cap::CustomersCreate],
+            ReplayOp::AttachCustomer { .. } => &[crate::authz::Cap::CustomersAttach],
+            _ => &[],
         }
     }
 }
@@ -530,6 +560,15 @@ pub async fn replay(
                     .is_ok_and(|cap| cap.meta().legacy == Some((resource, action))) => {}
             Err(AppError::Forbidden(_)) if op.money_moved() => flags.push((resource, action)),
             Err(e) => return Err(e),
+        }
+    }
+
+    for &cap in op.required_caps() {
+        let held = crate::authz::require::effective(pool.get_ref(), teller_id, None)
+            .await?
+            .can(cap);
+        if !held && !approved.as_ref().is_ok_and(|c| *c == cap) {
+            return Err(crate::authz::require::denied(cap));
         }
     }
 
@@ -1128,6 +1167,37 @@ async fn replay_dispatch(
                 .await;
             Ok(resp)
         }
+        ReplayOp::CreateCustomer { request, .. } => {
+            use crate::customers::handlers::{Created, insert_customer};
+            let mut conn = pool.get_ref().acquire().await?;
+            let out =
+                match insert_customer(&mut conn, actor.org_id, actor.teller_id, &request, true)
+                    .await?
+                {
+                    Created::New(id) => serde_json::json!({"id": id, "status": "created"}),
+                    Created::Existing(id) => serde_json::json!({"id": id, "status": "existing"}),
+                    Created::MergedInto { id, into } => {
+                        serde_json::json!({"id": id, "status": "merged", "merged_into": into})
+                    }
+                };
+            Ok(HttpResponse::Ok().json(out))
+        }
+        ReplayOp::AttachCustomer {
+            order_id,
+            customer_id,
+            ..
+        } => {
+            let mut conn = pool.get_ref().acquire().await?;
+            let resolved = crate::customers::handlers::attach_to_order(
+                &mut conn,
+                actor.org_id,
+                order_id,
+                customer_id,
+            )
+            .await?;
+            Ok(HttpResponse::Ok()
+                .json(serde_json::json!({"order_id": order_id, "customer_id": resolved})))
+        }
     }
 }
 
@@ -1250,6 +1320,23 @@ async fn op_branch_must_be_in_org(
                 .bind(booking_id)
                 .fetch_optional(pool)
                 .await?
+        }
+        ReplayOp::CreateCustomer { request, .. } => match request.branch_id {
+            Some(b) => {
+                sqlx::query_as::<_, (Uuid, Uuid)>("SELECT id, org_id FROM branches WHERE id = $1")
+                    .bind(b)
+                    .fetch_optional(pool)
+                    .await?
+            }
+            None => None,
+        },
+        ReplayOp::AttachCustomer { order_id, .. } => {
+            sqlx::query_as::<_, (Uuid, Uuid)>(
+                "SELECT b.id, b.org_id FROM orders o JOIN branches b ON b.id = o.branch_id WHERE o.id = $1",
+            )
+            .bind(order_id)
+            .fetch_optional(pool)
+            .await?
         }
     };
     match branch_org {
