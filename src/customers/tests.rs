@@ -200,6 +200,17 @@ async fn the_dashboard_lists_edits_and_refuses_a_second_holder_of_a_phone(pool: 
     assert!(c["customer"]["notes"].is_null(), "an empty note clears it");
     assert_eq!(c["customer"]["phone"], "+20 100 123 4567");
 
+    // Erasing is customers.erase: the owner's alone by default, never a
+    // manager's, even though a manager edits and merges.
+    let manager = seed_user(&pool, org, "branch_manager").await;
+    let (s, _) = call(
+        &app,
+        test::TestRequest::post().uri(&format!("/customers/{mona}/erase")),
+        &token(manager, org, UserRole::BranchManager),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "a manager may not erase a customer");
+
     let (s, _) = call(
         &app,
         test::TestRequest::post().uri(&format!("/customers/{mona}/erase")),

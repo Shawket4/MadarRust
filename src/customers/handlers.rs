@@ -654,7 +654,7 @@ pub async fn erase_customer(
 ) -> Result<HttpResponse, AppError> {
     let claims = claims_of(&req)?;
     let org = org_of(&req, &claims)?;
-    require(pool.get_ref(), &claims, Cap::CustomersEdit, None).await?;
+    require(pool.get_ref(), &claims, Cap::CustomersErase, None).await?;
     let id = path.into_inner();
     let done = sqlx::query(
         "UPDATE customers SET name = '', phone = NULL, phone_key = NULL, notes = NULL,

@@ -2109,6 +2109,16 @@ defaults = "o"
 en = "See integrations and their API credentials"
 ar = "عرض التكاملات وبيانات اعتماد الواجهة البرمجية"
 
+[[cap]]
+id = 219
+key = "customers.erase"
+group = "customers"
+tier = "advanced"
+risk = "pii"
+defaults = "o"
+en = "Erase a customer's personal data (PDPL)"
+ar = "محو البيانات الشخصية للعميل"
+
 # ============================================================================
 # Role templates (Phase 7). `defaults` above IS the restaurant template for the
 # five system roles; a template may add or remove on top.
