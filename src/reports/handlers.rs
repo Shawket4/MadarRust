@@ -2469,7 +2469,7 @@ pub async fn org_tax_report(
     }
 
     let org_tax_rate: sqlx::types::BigDecimal =
-        sqlx::query_scalar("SELECT tax_rate FROM orgs WHERE id = $1")
+        sqlx::query_scalar("SELECT tax_rate FROM organizations WHERE id = $1")
             .bind(*org_id)
             .fetch_optional(pool.get_ref())
             .await?
