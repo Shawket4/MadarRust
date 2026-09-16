@@ -647,10 +647,11 @@ async fn test_since_equal_current_returns_unchanged(pool: PgPool) {
     let token = org_admin_token(user, org);
     let branch = seed_branch(&pool, org).await;
 
-    // Seed a known revision (bump twice → revision 2).
-    bump_revision(&pool, org).await;
+    // Seed a known revision (the seed rows above already bumped it via the
+    // catalog_revision trigger; two explicit bumps add 2).
+    let first = bump_revision(&pool, org).await;
     let current = bump_revision(&pool, org).await;
-    assert_eq!(current, 2);
+    assert_eq!(current, first + 1);
 
     // since == current → changed:false, empty payload.
     let (status, body) = call_sync(&app, &token, branch, "outside", Some(current)).await;
