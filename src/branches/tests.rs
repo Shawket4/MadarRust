@@ -228,7 +228,19 @@ async fn test_list_branches_org_admin(pool: PgPool) {
     .await
     .unwrap();
 
-    let token = generate_org_admin_token(Uuid::new_v4(), org_id);
+    // Architecture E scopes the list to the branches the caller works at, read
+    // from their own row, so the caller must actually exist.
+    let admin_id = Uuid::new_v4();
+    sqlx::query!(
+        "INSERT INTO users (id, org_id, name, role, email, password_hash) \
+         VALUES ($1, $2, 'Admin', 'org_admin'::user_role, 'a@list.test', 'h')",
+        admin_id,
+        org_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let token = generate_org_admin_token(admin_id, org_id);
 
     let req = test::TestRequest::get()
         .uri(&format!("/branches?org_id={}", org_id))

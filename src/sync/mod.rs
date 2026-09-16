@@ -26,7 +26,8 @@
 //! asks (`ReplayOp::required_permissions`), so a grant made in the dashboard works
 //! offline and a revocation stops a queued op the same as a live one. The only
 //! thing replay decides on its own is ATTRIBUTION — whether the embedded actor is
-//! a real, active till user of the bearer's org at all ([`can_sign_in_at_a_till`]).
+//! a real, active member of the bearer's org who may sign in at a till, which
+//! architecture E asks as the `pos.sign_in` capability at the branch.
 //! There used to be a third answer, a hard-coded role → op table in the replay
 //! path; it is gone, because three answers to one question is how a per-user
 //! grant came to work online and be ignored offline.
@@ -44,24 +45,6 @@ use crate::auth::jwt::Claims;
 use crate::errors::AppError;
 use crate::models::UserRole;
 
-/// The roles that sign in at a till and so can be the ORIGINAL author of a
-/// queued op. This is attribution, not authorization: it says whose name may
-/// go on a replayed write, and nothing about what that write may be — the
-/// permission table answers that, per op, in `ReplayOp::required_permissions`.
-///
-/// Mirrors the role filter on PIN login (`auth::handlers::login`): a queued op
-/// can only have been made by someone who could unlock the device. Tellers,
-/// waiters and kitchen screens always could; the BRANCH MANAGER is here because
-/// the owner ruled that a manager may work the till — PIN login, drawer, sales,
-/// and a force-close — with no approval flow. Admins are not: they never PIN in,
-/// and a super admin has no org to be attributed within.
-pub fn can_sign_in_at_a_till(role: &UserRole) -> bool {
-    matches!(
-        role,
-        UserRole::Teller | UserRole::Waiter | UserRole::Kitchen | UserRole::BranchManager
-    )
-}
-
 /// Who a write is attributed to, and whether the live ownership/state guards
 /// apply. The live route builds this from the caller's JWT; replay builds it from
 /// each queued op's embedded `teller_id`.
@@ -77,6 +60,15 @@ pub struct ActingContext {
     /// `true` when replaying a historical queued op: ownership / drawer-owner /
     /// one-open-per-branch precheck / cash-continuity guards are skipped.
     pub replay: bool,
+    /// Live staff who may act only on their OWN till.
+    ///
+    /// Architecture E replaced "is this a teller?" with a capability: anyone
+    /// who can see the branch's tills (`till.read.branch`) may ring up on, or
+    /// correct, another person's shift. `live()` starts restricted and
+    /// [`ActingContext::scoped`] lifts it after the capability lookup, so a
+    /// call site that forgets the lookup fails closed. Guests and replays are
+    /// unrestricted, exactly as before.
+    pub own_till_only: bool,
 }
 
 impl ActingContext {
@@ -90,6 +82,7 @@ impl ActingContext {
                 .ok_or_else(|| AppError::BadRequest("Token has no organization".into()))?,
             role: claims.role.clone(),
             replay: false,
+            own_till_only: true,
         })
     }
 
@@ -110,6 +103,7 @@ impl ActingContext {
             org_id,
             role: UserRole::Waiter,
             replay: false,
+            own_till_only: false,
         }
     }
 
@@ -129,6 +123,20 @@ impl ActingContext {
             org_id,
             role,
             replay: true,
+            own_till_only: false,
         }
+    }
+
+    /// Resolve the till scope from the actor's capabilities. Call this on every
+    /// live action guarded by "your own till".
+    pub async fn scoped(mut self, pool: &sqlx::PgPool) -> Result<Self, AppError> {
+        if self.own_till_only
+            && crate::authz::require::effective(pool, self.teller_id, None)
+                .await?
+                .can(crate::authz::Cap::TillReadBranch)
+        {
+            self.own_till_only = false;
+        }
+        Ok(self)
     }
 }

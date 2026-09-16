@@ -20,7 +20,6 @@ use super::{resolve_branch_org, wallet};
 use crate::auth::guards::require_super_admin;
 use crate::delivery::{normalize_phone, require_branch_access};
 use crate::errors::{AppError, AppErrorResponse};
-use crate::models::UserRole;
 use crate::orgs::handlers::extract_claims;
 use crate::permissions::checker::check_permission;
 
@@ -481,11 +480,13 @@ pub async fn adjust(
     // usual AND the actor must be an admin. `permission_action` has no rung
     // above `update`, so the role check is what separates this from a redeem.
     check_permission(pool.get_ref(), &claims, "loyalty", "update").await?;
-    if !matches!(claims.role, UserRole::OrgAdmin | UserRole::SuperAdmin) {
-        return Err(AppError::Forbidden(
-            "Only an admin may adjust a member's points by hand".into(),
-        ));
-    }
+    crate::authz::require::require(
+        pool.get_ref(),
+        &claims,
+        crate::authz::Cap::LoyaltyPointsAdjust,
+        None,
+    )
+    .await?;
     // A number typed by a person with no reason beside it is the one ledger row
     // nobody can later explain. Refused before anything moves.
     let note = body
@@ -568,14 +569,13 @@ pub async fn list_members(
     // and what the dashboard turns into a spreadsheet. The till never calls
     // this one: it calls `lookup`, which answers about the person in front of
     // it and nobody else.
-    if !matches!(
-        claims.role,
-        UserRole::OrgAdmin | UserRole::SuperAdmin | UserRole::BranchManager
-    ) {
-        return Err(AppError::Forbidden(
-            "Listing members is for managers — scan or look up the customer in front of you".into(),
-        ));
-    }
+    crate::authz::require::require(
+        pool.get_ref(),
+        &claims,
+        crate::authz::Cap::LoyaltyMembersList,
+        None,
+    )
+    .await?;
 
     let scope = match query.branch_id {
         Some(b) => {
@@ -665,11 +665,13 @@ pub async fn delete_member(
     check_permission(pool.get_ref(), &claims, "loyalty", "update").await?;
     // Above the till, like `adjust`: a teller identifies the person in front of
     // them, and does not erase people.
-    if !matches!(claims.role, UserRole::OrgAdmin | UserRole::SuperAdmin) {
-        return Err(AppError::Forbidden(
-            "Only an admin may delete a member".into(),
-        ));
-    }
+    crate::authz::require::require(
+        pool.get_ref(),
+        &claims,
+        crate::authz::Cap::LoyaltyMembersDelete,
+        None,
+    )
+    .await?;
     let Some(member) = model::find_by_id(pool.get_ref(), *id).await? else {
         return Ok(HttpResponse::NoContent().finish());
     };
@@ -821,14 +823,13 @@ pub async fn analytics(
         super::settings::scope_org(pool.get_ref(), &req, query.branch_id).await?;
     check_permission(pool.get_ref(), &claims, "loyalty", "read").await?;
     // Same line as the member list: a till reads a card, not the books.
-    if !matches!(
-        claims.role,
-        UserRole::OrgAdmin | UserRole::SuperAdmin | UserRole::BranchManager
-    ) {
-        return Err(AppError::Forbidden(
-            "The loyalty report is for managers".into(),
-        ));
-    }
+    crate::authz::require::require(
+        pool.get_ref(),
+        &claims,
+        crate::authz::Cap::LoyaltyMembersList,
+        None,
+    )
+    .await?;
     if let Some(b) = query.branch_id {
         require_branch_access(pool.get_ref(), &claims, b).await?;
     }
@@ -1016,14 +1017,14 @@ pub async fn behavior(
     let (org_id, claims) =
         super::settings::scope_org(pool.get_ref(), &req, query.branch_id).await?;
     check_permission(pool.get_ref(), &claims, "loyalty", "read").await?;
-    if !matches!(
-        claims.role,
-        UserRole::OrgAdmin | UserRole::SuperAdmin | UserRole::BranchManager
-    ) {
-        return Err(AppError::Forbidden(
-            "The loyalty report is for managers".into(),
-        ));
-    }
+    // The behaviour report sits with the member list (was a manager role check).
+    crate::authz::require::require(
+        pool.get_ref(),
+        &claims,
+        crate::authz::Cap::LoyaltyMembersList,
+        query.branch_id,
+    )
+    .await?;
     if let Some(b) = query.branch_id {
         require_branch_access(pool.get_ref(), &claims, b).await?;
     }

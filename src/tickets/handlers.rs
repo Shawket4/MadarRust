@@ -20,7 +20,6 @@ use crate::permissions::checker::check_permission;
 use crate::realtime::event::{BranchEvent, Topic};
 use crate::realtime::hub::BranchEventHub;
 use crate::sync::ActingContext;
-use crate::tills::handlers::branch_has_open_till;
 
 // ── Requests ──────────────────────────────────────────────────
 
@@ -253,7 +252,7 @@ pub async fn create_open_ticket(
     create_open_ticket_inner(
         pool.clone(),
         body,
-        ActingContext::live(&claims)?,
+        ActingContext::live(&claims)?.scoped(pool.get_ref()).await?,
         Some(hub.get_ref()),
         super::device_id_from(&req),
     )
@@ -493,7 +492,7 @@ pub async fn add_round(
         pool.clone(),
         id.into_inner(),
         body,
-        ActingContext::live(&claims)?,
+        ActingContext::live(&claims)?.scoped(pool.get_ref()).await?,
         Some(hub.get_ref()),
         super::device_id_from(&req),
     )
@@ -669,7 +668,7 @@ pub async fn void_open_ticket(
         pool.clone(),
         id.into_inner(),
         body,
-        ActingContext::live(&claims)?,
+        ActingContext::live(&claims)?.scoped(pool.get_ref()).await?,
         Some(hub.get_ref()),
     )
     .await
@@ -832,7 +831,7 @@ pub async fn void_ticket_line(
         id,
         item_id,
         body,
-        ActingContext::live(&claims)?,
+        ActingContext::live(&claims)?.scoped(pool.get_ref()).await?,
         Some(hub.get_ref()),
     )
     .await
@@ -1114,7 +1113,7 @@ pub async fn settle_open_ticket(
         pool.clone(),
         id.into_inner(),
         body,
-        ActingContext::live(&claims)?,
+        ActingContext::live(&claims)?.scoped(pool.get_ref()).await?,
         Some(hub.get_ref()),
     )
     .await
@@ -1318,6 +1317,7 @@ pub(crate) async fn settle_open_ticket_inner(
         branch_id,
         loyalty_customer_id: body.loyalty_customer_id,
         loyalty_redemptions: redemptions,
+        customer_id: None,
         till_id: body.till_id,
         device_id: None,
         device_code: None,

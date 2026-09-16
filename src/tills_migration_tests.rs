@@ -1104,6 +1104,8 @@ async fn every_projection_source_table_has_emitter(pool: PgPool) {
         include_str!("../migrations/20260914090300_sync_changefeed.sql"),
         include_str!("../migrations/20260915090000_sync_feed_gaps.sql"),
         include_str!("../migrations/20260917090000_sync_feed_branch_reads.sql"),
+        include_str!("../migrations/20260918110000_authz_enforce.sql"),
+        include_str!("../migrations/20260918200000_customers.sql"),
     ]
     .iter()
     .flat_map(|sql| {

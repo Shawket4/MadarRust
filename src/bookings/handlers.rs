@@ -1035,7 +1035,7 @@ pub async fn seat_booking(
     check_permission(pool.get_ref(), &claims, "bookings", "update").await?;
     load_for_access(pool.get_ref(), &claims, *id).await?;
     let body = body.map(|b| b.into_inner()).unwrap_or_default();
-    let actor = ActingContext::live(&claims)?;
+    let actor = ActingContext::live(&claims)?.scoped(pool.get_ref()).await?;
     seat_booking_inner(pool.get_ref(), *id, &body, &actor, Some(hub.get_ref())).await
 }
 

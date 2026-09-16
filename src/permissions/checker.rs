@@ -13,7 +13,19 @@ pub async fn check_permission(
     resource: &str,
     action: &str,
 ) -> Result<(), AppError> {
-    check_permission_for(pool, claims.user_id(), &claims.role, resource, action).await
+    if claims.role == UserRole::SuperAdmin {
+        return Ok(());
+    }
+    let mut conn = pool.acquire().await?;
+    check_on(
+        &mut conn,
+        claims.user_id(),
+        &claims.role,
+        Some(claims.iat as i64),
+        resource,
+        action,
+    )
+    .await
 }
 
 /// Like [`check_permission`] but for an EXPLICIT principal (user id + role) instead
@@ -46,6 +58,21 @@ pub async fn check_permission_for_on(
     resource: &str,
     action: &str,
 ) -> Result<(), AppError> {
+    check_on(conn, user_id, role, None, resource, action).await
+}
+
+/// The one resolution. `issued_at` is the bearer token's `iat` when the check is
+/// for a live request: a token issued before the account's
+/// `sessions_valid_after` (bumped on a password, role or active-flag change, or a
+/// delete) is refused, which is how a web session is revoked.
+async fn check_on(
+    conn: &mut sqlx::PgConnection,
+    user_id: uuid::Uuid,
+    role: &UserRole,
+    issued_at: Option<i64>,
+    resource: &str,
+    action: &str,
+) -> Result<(), AppError> {
     // super_admin bypasses everything
     if *role == UserRole::SuperAdmin {
         return Ok(());
@@ -56,15 +83,54 @@ pub async fn check_permission_for_on(
     // Some(true) = active, Some(false) = disabled, None = no such row. We deny
     // only Some(false), so a missing row (service/integration tokens with no
     // corresponding stored user) still passes through.
-    let account_ok: Option<bool> =
-        sqlx::query_scalar("SELECT (is_active AND deleted_at IS NULL) FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(&mut *conn)
-            .await?;
-    if account_ok == Some(false) {
-        return Err(AppError::Forbidden("Account is disabled".into()));
+    let account: Option<(bool, Option<i64>)> = sqlx::query_as(
+        "SELECT (is_active AND deleted_at IS NULL), \
+                floor(extract(epoch FROM sessions_valid_after))::bigint \
+           FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some((ok, valid_after)) = account {
+        if !ok {
+            return Err(AppError::Forbidden("Account is disabled".into()));
+        }
+        if let (Some(iat), Some(after)) = (issued_at, valid_after)
+            && iat < after
+        {
+            return Err(AppError::Unauthorized(
+                "Your session has ended. Please sign in again.".into(),
+            ));
+        }
     }
 
+    let legacy = legacy_decision(conn, user_id, role, resource, action).await;
+    crate::authz::shadow::observe(conn, user_id, resource, action, legacy).await
+}
+
+/// Today's resolution as a boolean, for the side-by-side comparison.
+pub async fn check_permission_for_legacy(
+    conn: &mut sqlx::PgConnection,
+    user_id: uuid::Uuid,
+    role: &UserRole,
+    resource: &str,
+    action: &str,
+) -> Result<bool, AppError> {
+    match legacy_decision(conn, user_id, role, resource, action).await {
+        Ok(()) => Ok(true),
+        Err(AppError::Forbidden(_)) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Today's resolution: per-user override, then the global role default, then deny.
+async fn legacy_decision(
+    conn: &mut sqlx::PgConnection,
+    user_id: uuid::Uuid,
+    role: &UserRole,
+    resource: &str,
+    action: &str,
+) -> Result<(), AppError> {
     // 1. Check per-user override (cached; invalidated on `permissions` writes)
     let c = &mut *conn;
     let user_override: Option<bool> =

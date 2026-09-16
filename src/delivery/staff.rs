@@ -571,12 +571,17 @@ pub async fn finalize_delivery_order(
     .await?;
     let is_cash = is_cash.ok_or_else(|| AppError::BadRequest("Unknown payment method".into()))?;
 
-    // The finalizing teller's shift must be open at this branch (and theirs, if teller).
-    let teller_match = if claims.role == crate::models::UserRole::Teller {
-        Some(claims.user_id())
-    } else {
-        None
-    };
+    // The finalizing person's till must be open at this branch — and be their
+    // own, unless they may work the branch's tills (architecture E's
+    // `till.read.branch`, which used to be spelled "is not a teller").
+    let own_till_only = !crate::authz::require::effective_for_claims(
+        pool.get_ref(),
+        &claims,
+        Some(order.branch_id),
+    )
+    .await?
+    .can(crate::authz::Cap::TillReadBranch);
+    let teller_match = own_till_only.then(|| claims.user_id());
     let shift_ok: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM tills WHERE id = $1 AND branch_id = $2 AND status = 'open' \
          AND ($3::uuid IS NULL OR teller_id = $3))",

@@ -56,6 +56,7 @@ pub const ALL_TYPES: &[&str] = &[
     "order",
     "refund",
     "addon_item",
+    "customer",
 ];
 /// Ledger types: never checksummed; windowed in full snapshots.
 pub const LEDGER_TYPES: &[&str] = &["till", "cash_movement", "order", "refund"];

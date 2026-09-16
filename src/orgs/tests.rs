@@ -257,10 +257,21 @@ async fn test_offline_auth_bundle_returns_org_tellers(pool: PgPool) {
     let kitchen_hash = crate::auth::offline::hash_offline_pin("3456").unwrap();
     sqlx::query("INSERT INTO users (id, org_id, name, role, pin_hash, offline_pin_hash) VALUES ($1,$2,'Kds1','kitchen'::user_role,'h',$3)")
         .bind(Uuid::new_v4()).bind(org_id).bind(&kitchen_hash).execute(&pool).await.unwrap();
-    // A non-PIN role in the org must NOT appear in the bundle.
+    // An account with NO PIN must NOT appear: the bundle is for people who
+    // have a PIN to type, whatever their role.
     sqlx::query("INSERT INTO users (id, org_id, name, email, password_hash, role) VALUES ($1,$2,'Mgr',$3,'h','org_admin'::user_role)")
         .bind(Uuid::new_v4()).bind(org_id).bind(format!("m-{org_id}@t.com")).execute(&pool).await.unwrap();
+    // A branch manager WITH a PIN and no verifier yet MUST appear, with a null
+    // hash: owners and managers work a till now (architecture E `pos.sign_in`),
+    // and being listed is what gets them "connect once to enable offline
+    // unlock" from the POS instead of "no active user named …".
+    sqlx::query("INSERT INTO users (id, org_id, name, role, pin_hash) VALUES ($1,$2,'Maya','branch_manager'::user_role,'h')")
+        .bind(Uuid::new_v4()).bind(org_id).execute(&pool).await.unwrap();
 
+    // The caller works a till (S3): the legacy path with no device header.
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
     let token = generate_org_admin_token(org_id);
     let resp = test::call_service(
         &app,
@@ -273,7 +284,11 @@ async fn test_offline_auth_bundle_returns_org_tellers(pool: PgPool) {
     assert!(resp.status().is_success(), "got {:?}", resp.status());
     let body: serde_json::Value = test::read_body_json(resp).await;
     let tellers = body["tellers"].as_array().unwrap();
-    assert_eq!(tellers.len(), 4, "teller + waiter + kitchen, no org_admin");
+    assert_eq!(
+        tellers.len(),
+        5,
+        "teller + waiter + kitchen + branch manager, no PIN-less account"
+    );
     let alice = tellers.iter().find(|t| t["name"] == "Alice").unwrap();
     assert_eq!(alice["offline_pin_hash"].as_str().unwrap(), off_hash);
     let bob = tellers.iter().find(|t| t["name"] == "Bob").unwrap();
@@ -287,9 +302,15 @@ async fn test_offline_auth_bundle_returns_org_tellers(pool: PgPool) {
     let kds = tellers.iter().find(|t| t["name"] == "Kds1").unwrap();
     assert_eq!(kds["role"], "kitchen");
     assert_eq!(kds["offline_pin_hash"].as_str().unwrap(), kitchen_hash);
+    let maya = tellers.iter().find(|t| t["name"] == "Maya").unwrap();
+    assert_eq!(maya["role"], "branch_manager");
+    assert!(
+        maya["offline_pin_hash"].is_null(),
+        "Maya never logged in online → listed with a null verifier"
+    );
     assert!(
         tellers.iter().all(|t| t["name"] != "Mgr"),
-        "org_admin excluded"
+        "an account with no PIN is excluded"
     );
 
     // The bundle ships the org's stable LAN secret (32 bytes → 64 hex chars).
@@ -998,4 +1019,91 @@ async fn a_branded_shop_with_no_address_can_still_be_given_one(pool: PgPool) {
     // And now it is a hostname on a printed card.
     let resp = test::call_service(&app, patch("rue-coffee")).await;
     assert_eq!(resp.status().as_u16(), 409, "a real name is load-bearing");
+}
+
+/// Locked owner decisions (2026-09-15) about what a brand-new org starts with.
+///
+/// **Tax 0%.** The default used to be Egypt's 0.14. A shop that owes tax sets
+/// its rate during setup and knows it did; a shop that does not owe it had no
+/// way to discover that a number it never chose was adding 14% to every
+/// receipt. Guessing wrong in the direction of charging money is the worse
+/// failure.
+///
+/// **Talabat tenders start switched OFF** (main's rule, merged 2026-09-16). A
+/// cafe that has never heard of Talabat should not find two live tenders on its
+/// till; the dashboard switch turns them on for a branch that sells there.
+#[sqlx::test]
+async fn a_new_org_starts_at_zero_tax_with_talabat_tenders_off(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let token = generate_super_admin_token();
+    // No `tax_rate` field at all: this is the default, not a choice.
+    let body = multipart_body(&[
+        ("name", "Plain Cafe"),
+        ("slug", "plain-cafe"),
+        ("currency_code", "EGP"),
+    ]);
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orgs")
+            .insert_header(("Content-Type", "multipart/form-data; boundary=boundary"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_payload(body)
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success(), "got {:?}", resp.status());
+    let org: Org = test::read_body_json(resp).await;
+
+    let rate: sqlx::types::BigDecimal =
+        sqlx::query_scalar("SELECT tax_rate FROM organizations WHERE id = $1")
+            .bind(org.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        rate,
+        sqlx::types::BigDecimal::from(0),
+        "a shop that never chose a rate is not charging 14%"
+    );
+
+    let methods: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT name, is_cash FROM org_payment_methods
+          WHERE org_id = $1 AND is_active ORDER BY name",
+    )
+    .bind(org.id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let names: Vec<&str> = methods.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, vec!["card", "cash", "digital_wallet"]);
+    assert!(
+        !names.iter().any(|n| n.starts_with("talabat")),
+        "Talabat tenders are seeded switched off"
+    );
+    let all: i64 = sqlx::query_scalar("SELECT count(*) FROM org_payment_methods WHERE org_id = $1")
+        .bind(org.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        all, 5,
+        "cash, card, wallet + two inactive Talabat; no mixed"
+    );
+    // `mixed` stayed dropped (phase 0).
+    assert!(!names.contains(&"mixed"));
+    // Exactly one tender counts toward the drawer.
+    let cash: Vec<&str> = methods
+        .iter()
+        .filter(|(_, c)| *c)
+        .map(|(n, _)| n.as_str())
+        .collect();
+    assert_eq!(cash, vec!["cash"]);
 }

@@ -185,6 +185,27 @@ Publish **after** `tx.commit()`, never inside the transaction.
   opening snapshot. Ingredient categories are a table keyed by `slug`; `milk` and
   `coffee_bean` slugs drive the menu swap logic.
 
+### Permissions (architecture E — PERMISSIONS_ARCHITECTURE.md)
+- **One registry.** Every permission is a capability in `authz/spec/capabilities.toml`
+  (stable id, key, legacy cell, group, tier, risk, role defaults, core roles, EN/AR).
+  Generate with `cd authz/gen && cargo run -- --dashboard ../../../MadarDashboard --pos ../../../madar`;
+  CI runs `--check`. Never hand-edit `authz/crate/src/generated.rs`, the dashboard's
+  `src/generated/capabilities.ts`, or the POS's vendored `rust-core/crates/madar-authz`.
+- **One decision library.** `authz/crate` (`madar-authz`) resolves and decides for the
+  server AND the POS core (vendored byte-identical; `crate_hash_matches_its_files`).
+  No I/O in it. Never branch on a role name in new code; ask for a capability.
+- **Anti-escalation is not optional.** Any write that changes access (users, roles,
+  overrides, branch assignments) goes through `permissions::guard` / `madar_authz::guard`:
+  no self-edit, dominate the target, hold what you grant, owners protected, last owner kept.
+- **Core capabilities** (tier `core`) are always on for their role kinds and cannot be
+  removed by the UI or the server. Never add a toggle that can break the app.
+- **Old tablets.** Every `resource:action` cell of `GET /auth/permissions` maps to exactly
+  one capability (`legacy`); `registry_tests` fails otherwise.
+- **Offline-auth data** (PIN verifiers, LAN secret) only reaches a registered device of
+  the org or a till worker, scoped to the device's branch; PIN hashes never ride the feed.
+- Tests that need their own migrations use a private cluster when another worktree
+  shares `:5433` (a missing-version error means the shared template moved).
+
 ## Related Projects (Ecosystem)
 - **MadarDashboard**: `/Users/magd/MadarDashboard` — management dashboard. Consumes this
   API via orval-generated hooks; also ships the public ordering + landing bundles.

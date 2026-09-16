@@ -130,13 +130,8 @@ pub async fn swap_tables(
     // Per-occupant permissions are enforced in the core (it knows what sits on
     // each table); here only the branch boundary.
     require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
-    swap_tables_inner(
-        pool,
-        body,
-        ActingContext::live(&claims)?,
-        Some(hub.get_ref()),
-    )
-    .await
+    let actor = ActingContext::live(&claims)?.scoped(pool.get_ref()).await?;
+    swap_tables_inner(pool, body, actor, Some(hub.get_ref())).await
 }
 
 /// Swap core: exchange whatever sits on two tables in ONE transaction -- a
@@ -259,14 +254,8 @@ pub async fn clear_table(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "open_tickets", "update").await?;
     require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
-    clear_table_inner(
-        pool,
-        *id,
-        Some(body.branch_id),
-        ActingContext::live(&claims)?,
-        Some(hub.get_ref()),
-    )
-    .await
+    let actor = ActingContext::live(&claims)?.scoped(pool.get_ref()).await?;
+    clear_table_inner(pool, *id, Some(body.branch_id), actor, Some(hub.get_ref())).await
 }
 
 /// Clear core: the `dirty` -> `free` transition, shared by the live route and
@@ -410,13 +399,14 @@ pub async fn hold_table(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "open_tickets", "update").await?;
     require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
+    let actor = ActingContext::live(&claims)?.scoped(pool.get_ref()).await?;
     hold_table_inner(
         pool,
         *id,
         Some(body.branch_id),
         body.seated_at,
         body.party_size,
-        ActingContext::live(&claims)?,
+        actor,
         Some(hub.get_ref()),
     )
     .await
@@ -509,12 +499,13 @@ pub async fn release_table(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "open_tickets", "update").await?;
     require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
+    let actor = ActingContext::live(&claims)?.scoped(pool.get_ref()).await?;
     release_table_inner(
         pool,
         *id,
         Some(body.branch_id),
         body.bus,
-        ActingContext::live(&claims)?,
+        actor,
         Some(hub.get_ref()),
     )
     .await
@@ -612,13 +603,8 @@ pub async fn create_floor_transfer(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "table_transfers", "create").await?;
     require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
-    create_transfer_inner(
-        pool,
-        body,
-        ActingContext::live(&claims)?,
-        Some(hub.get_ref()),
-    )
-    .await
+    let actor = ActingContext::live(&claims)?.scoped(pool.get_ref()).await?;
+    create_transfer_inner(pool, body, actor, Some(hub.get_ref())).await
 }
 
 /// Create core. The occupant must be LIVE in this branch (a parked/resumed held
@@ -810,14 +796,8 @@ pub async fn fulfill_transfer(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "table_transfers", "update").await?;
     require_transfer_branch_access(pool.get_ref(), &claims, *id).await?;
-    fulfill_transfer_inner(
-        pool,
-        *id,
-        body,
-        ActingContext::live(&claims)?,
-        Some(hub.get_ref()),
-    )
-    .await
+    let actor = ActingContext::live(&claims)?.scoped(pool.get_ref()).await?;
+    fulfill_transfer_inner(pool, *id, body, actor, Some(hub.get_ref())).await
 }
 
 /// Fulfill core: seat the waiting party on `table_id` — which must satisfy the

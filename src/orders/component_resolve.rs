@@ -380,8 +380,16 @@ pub async fn resolve_menu_item_configuration(
         let chosen = deductions
             .iter()
             .find(|d| d.category == cat && d.source != "addon")
-            .map(|d| (d.org_ingredient_id, d.ingredient_name.clone(), d.unit.clone()));
-        let Some((id, name, unit)) = chosen else { continue };
+            .map(|d| {
+                (
+                    d.org_ingredient_id,
+                    d.ingredient_name.clone(),
+                    d.unit.clone(),
+                )
+            });
+        let Some((id, name, unit)) = chosen else {
+            continue;
+        };
         for d in deductions.iter_mut() {
             if d.source == "addon" && d.category == cat && d.org_ingredient_id != id {
                 // Convert first: the addon's quantity is in ITS unit, and the

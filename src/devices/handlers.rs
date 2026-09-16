@@ -40,7 +40,7 @@ pub struct Device {
     pub code_conflict: bool,
 }
 
-const DEVICE_SELECT: &str = "SELECT d.id, d.org_id, d.branch_id, d.code, d.label, d.kind, d.platform, \
+pub(crate) const DEVICE_SELECT: &str = "SELECT d.id, d.org_id, d.branch_id, d.code, d.label, d.kind, d.platform, \
     d.app_version, d.first_seen_at, d.last_seen_at, d.retired_at, \
     EXISTS(SELECT 1 FROM devices d2 WHERE d2.branch_id = d.branch_id AND d2.code = d.code \
            AND d2.id <> d.id AND d2.retired_at IS NULL) AS code_conflict \
@@ -117,6 +117,24 @@ pub async fn register_device(
         .org_id()
         .ok_or_else(|| AppError::BadRequest("Token has no organization".into()))?;
     require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
+    // S6: registering is not for any signed-in user. A POS is registered by
+    // someone who works a till or manages the branch; a KDS or waiter screen
+    // may also be registered by the kitchen or waiter account it runs.
+    let may_register = check_permission(pool.get_ref(), &claims, "tills", "create")
+        .await
+        .is_ok()
+        || check_permission(pool.get_ref(), &claims, "branches", "update")
+            .await
+            .is_ok()
+        || matches!(
+            (body.kind.as_str(), &claims.role),
+            ("kds", crate::models::UserRole::Kitchen) | ("waiter", crate::models::UserRole::Waiter)
+        );
+    if !may_register {
+        return Err(AppError::Forbidden(
+            "You are not allowed to register devices".into(),
+        ));
+    }
     let code = body.code.trim().to_ascii_uppercase();
     if !valid_code(&code) {
         return Err(AppError::BadRequest(
@@ -134,7 +152,8 @@ pub async fn register_device(
          ON CONFLICT (id) DO UPDATE SET branch_id = EXCLUDED.branch_id, \
              platform = COALESCE(EXCLUDED.platform, devices.platform), \
              app_version = COALESCE(EXCLUDED.app_version, devices.app_version), \
-             last_seen_at = now()",
+             last_seen_at = now() \
+         WHERE devices.org_id = EXCLUDED.org_id",
     )
     .bind(body.id)
     .bind(org)
@@ -146,7 +165,14 @@ pub async fn register_device(
     .bind(&body.app_version)
     .execute(pool.get_ref())
     .await?;
-    Ok(HttpResponse::Ok().json(fetch_device(pool.get_ref(), body.id).await?))
+    // The upsert touches nothing when the id already belongs to another org.
+    let device = fetch_device(pool.get_ref(), body.id).await?;
+    if device.org_id != org {
+        return Err(AppError::Forbidden(
+            "This device belongs to another organization".into(),
+        ));
+    }
+    Ok(HttpResponse::Ok().json(device))
 }
 
 #[utoipa::path(get, path = "/devices", tag = "devices", params(ListDevicesQuery),
@@ -220,7 +246,8 @@ pub async fn update_device(
     };
     sqlx::query(
         "UPDATE devices SET code = $2, label = $3, branch_id = $4, \
-            retired_at = CASE WHEN $5::bool IS NULL THEN retired_at WHEN $5 THEN COALESCE(retired_at, now()) ELSE NULL END \
+            retired_at = CASE WHEN $5::bool IS NULL THEN retired_at WHEN $5 THEN COALESCE(retired_at, now()) ELSE NULL END, \
+            credential_hash = CASE WHEN $5::bool THEN NULL ELSE credential_hash END \
          WHERE id = $1",
     )
     .bind(*id)
