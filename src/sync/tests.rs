@@ -854,3 +854,63 @@ async fn a_converted_discount_still_has_to_add_up(pool: PgPool) {
         "the totals disagree, so the sale is refused"
     );
 }
+
+/// Phase 5 (PERMISSIONS_ARCHITECTURE §4.2): a manager approved the act on the
+/// till with their PIN. The queued op carries the approval; the server checks
+/// the approver holds the act, lets it through, and keeps the record. An
+/// approval by the author themself is worth nothing.
+#[sqlx::test]
+async fn a_manager_approval_carries_a_void_the_teller_does_not_hold(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 500).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let manager = seed_user(&pool, org, "branch_manager").await;
+    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
+        .bind(manager)
+        .bind(branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let _shift = open_shift_row(&pool, branch, teller).await;
+    grant(&pool, "teller", "open_tickets", "create").await;
+    grant(&pool, "teller", "open_tickets", "update").await;
+    grant(&pool, "branch_manager", "open_tickets", "delete").await;
+    let bearer = token(teller, org, UserRole::Teller);
+
+    let r = fire_by_replay(&app, &bearer, teller, branch, item).await;
+    assert_eq!(r.status(), 201);
+    let ticket_id = test::read_body_json::<OpenTicketView, _>(r).await.id;
+    let cap = crate::authz::Cap::from_legacy("open_tickets", "delete")
+        .expect("a capability for the cell")
+        .key();
+    let void = |approver: Uuid| {
+        serde_json::json!({
+            "op": "void_open_ticket",
+            "teller_id": teller,
+            "ticket_id": ticket_id,
+            "request": { "reason": "customer_request" },
+            "approval": { "id": Uuid::new_v4(), "capability": cap, "approver_id": approver }
+        })
+    };
+
+    let r = replay(&app, &bearer, &void(teller)).await;
+    assert_eq!(r.status(), 403, "approving your own act approves nothing");
+
+    let r = replay(&app, &bearer, &void(manager)).await;
+    assert!(
+        r.status().is_success(),
+        "the manager's approval carries it: {}",
+        r.status()
+    );
+    let (verified, approver): (bool, Uuid) = sqlx::query_as(
+        "SELECT verified, approver_user_id FROM approvals WHERE subject_user_id = $1 AND op = 'VoidOpenTicket'",
+    )
+    .bind(teller)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(verified);
+    assert_eq!(approver, manager);
+}

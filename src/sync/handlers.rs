@@ -454,6 +454,11 @@ pub async fn replay(
     let header_device = crate::devices::DeviceHeader::from_request_headers(&req);
     let body = body.into_inner();
     let occurred_at = replay_occurred_at(&body);
+    // A manager's approval the till minted offline (phase 5), additive.
+    let approval: Option<ReplayApproval> = body
+        .get("approval")
+        .cloned()
+        .and_then(|a| serde_json::from_value(a).ok());
     let op: ReplayOp = serde_json::from_value(body)
         .map_err(|e| AppError::BadRequest(format!("Json deserialize error: {e}")))?;
     let teller_id = op.teller_id();
@@ -501,6 +506,10 @@ pub async fn replay(
     // the customer paid and left while the shop was offline. Dropping the op
     // does not un-take the money, it only loses the record and leaves the
     // drawer short at close.
+    let approved = match &approval {
+        Some(a) => verify_approval(pool.get_ref(), a, teller_id, token_org).await,
+        None => Err("none".into()),
+    };
     let mut flags: Vec<(&'static str, &'static str)> = Vec::new();
     for &(resource, action) in op.required_permissions() {
         match crate::permissions::checker::check_permission_for(
@@ -513,6 +522,12 @@ pub async fn replay(
         .await
         {
             Ok(()) => {}
+            // A manager who holds the act approved it on the till: not a
+            // flag, and a non-money op goes through as the manager allowed.
+            Err(AppError::Forbidden(_))
+                if approved
+                    .as_ref()
+                    .is_ok_and(|cap| cap.meta().legacy == Some((resource, action))) => {}
             Err(AppError::Forbidden(_)) if op.money_moved() => flags.push((resource, action)),
             Err(e) => return Err(e),
         }
@@ -531,6 +546,22 @@ pub async fn replay(
     };
     let op_name = op.variant_name();
     let result = replay_dispatch(&req, &pool, &hub, op, actor, legacy_op, header_device).await;
+    if result.is_ok()
+        && let Some(a) = &approval
+    {
+        record_approval(
+            pool.get_ref(),
+            a,
+            token_org,
+            op_branch,
+            header_device,
+            teller_id,
+            op_name,
+            occurred_at,
+            &approved,
+        )
+        .await;
+    }
     // Only once the op has really committed: a flag for an op that never
     // applied would send the owner looking for money that never moved.
     if result.is_ok() && !flags.is_empty() {
@@ -546,6 +577,88 @@ pub async fn replay(
         .await;
     }
     stamp_sync_seq(pool.get_ref(), op_branch, result).await
+}
+
+/// A manager's approval carried by a queued op (PERMISSIONS_ARCHITECTURE §4.2).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ReplayApproval {
+    pub id: Uuid,
+    /// Capability key, e.g. `orders.void`.
+    pub capability: String,
+    pub approver_id: Uuid,
+    #[serde(default)]
+    pub amount_minor: Option<i64>,
+}
+
+/// The approver is an active person of the org, not the author, and holds the
+/// act now. Returns the capability, or why not.
+async fn verify_approval(
+    pool: &sqlx::PgPool,
+    a: &ReplayApproval,
+    author: Uuid,
+    org: Uuid,
+) -> Result<crate::authz::Cap, String> {
+    let cap = crate::authz::Cap::from_key(&a.capability).ok_or("unknown capability")?;
+    if a.approver_id == author {
+        return Err("the approver is the author".into());
+    }
+    let ok: Option<bool> = sqlx::query_scalar(
+        "SELECT is_active AND deleted_at IS NULL FROM users WHERE id = $1 AND org_id = $2",
+    )
+    .bind(a.approver_id)
+    .bind(org)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    if ok != Some(true) {
+        return Err("the approver is not an active person of this org".into());
+    }
+    let eff = crate::authz::require::effective(pool, a.approver_id, None)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut req = madar_authz::Request::of(cap);
+    req.amount = a.amount_minor;
+    match madar_authz::decide(&eff, &req) {
+        madar_authz::Decision::Allow => Ok(cap),
+        _ => Err("the approver does not hold this act".into()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_approval(
+    pool: &sqlx::PgPool,
+    a: &ReplayApproval,
+    org: Uuid,
+    branch: Option<Uuid>,
+    device: Option<Uuid>,
+    subject: Uuid,
+    op: &str,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+    verified: &Result<crate::authz::Cap, String>,
+) {
+    if let Err(e) = sqlx::query(
+        "INSERT INTO approvals (id, org_id, branch_id, device_id, capability, subject_user_id,
+                                approver_user_id, amount_minor, op, occurred_at, verified, verification_error)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(a.id)
+    .bind(org)
+    .bind(branch)
+    .bind(device)
+    .bind(&a.capability)
+    .bind(subject)
+    .bind(a.approver_id)
+    .bind(a.amount_minor)
+    .bind(op)
+    .bind(occurred_at)
+    .bind(verified.is_ok())
+    .bind(verified.as_ref().err())
+    .execute(pool)
+    .await
+    {
+        tracing::error!(error = %e, approval = %a.id, "could not record an approval; the op itself committed");
+    }
 }
 
 /// When the act happened ON THE DEVICE, for the accept-and-flag reason (§4.4.5)
