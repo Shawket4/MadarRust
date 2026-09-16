@@ -149,9 +149,9 @@ AS_OPTIONALS = {
     "bread": [("Brown Bread", "خبز أسمر", 25)],
     "mojitos flavours": [("Passion Fruit", "باشن فروت", 0), ("Mixed Berries", "توت مشكل", 0),
                          ("Strawberry", "فراولة", 0), ("Mango", "مانجو", 0)],
-    "turkish coffee": [("Double", "دوبل", 30)],
-    "حبوب القهوة التركي": [("Spiced (Mehawag)", "محوج", 10)],
-    "french milk": [("With Milk", "بحليب", 30)],
+    # Turkish coffee is NOT optionals any more (owner, 2026-09-16): Single/Double
+    # are SIZES (4oz 10 g / 8oz 20 g), Mehaweg is a coffee_type swap against
+    # Turkish Coffee, and "With Milk" became its own item, French coffee.
 }
 
 
