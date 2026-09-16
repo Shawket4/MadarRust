@@ -2009,16 +2009,7 @@ pub(crate) async fn create_order_inner(
     // packaging category (`is_packaging`, or the legacy slug `packaging`) comes off stock. Filtering here, by CATEGORY, means
     // no recipe is written twice and a new cup needs no rule change.
     if body.service_mode.as_deref() == Some("dine_in") {
-        let packaging: std::collections::HashSet<Uuid> = sqlx::query_scalar(
-            "SELECT i.id FROM org_ingredients i \
-             JOIN ingredient_categories c ON c.id = i.category_id \
-             WHERE i.org_id = $1 AND (c.is_packaging OR c.slug = 'packaging')",
-        )
-        .bind(org_id)
-        .fetch_all(pool.get_ref())
-        .await?
-        .into_iter()
-        .collect::<std::collections::HashSet<Uuid>>();
+        let packaging = packaging_ingredient_ids(pool.get_ref(), org_id).await?;
         for ri in &mut resolved_items {
             ri.deductions.retain(|d| {
                 !d.org_ingredient_id
@@ -4415,4 +4406,22 @@ async fn require_table_if_the_shop_says_so(
          floor, add their items, then settle."
             .into(),
     ))
+}
+
+/// Ingredients a dine-in sale does not deduct: every ingredient whose category is
+/// flagged `is_packaging`, or (legacy fallback) has the slug `packaging`.
+pub(crate) async fn packaging_ingredient_ids(
+    pool: &sqlx::PgPool,
+    org_id: Uuid,
+) -> Result<std::collections::HashSet<Uuid>, AppError> {
+    Ok(sqlx::query_scalar(
+        "SELECT i.id FROM org_ingredients i \
+         JOIN ingredient_categories c ON c.id = i.category_id \
+         WHERE i.org_id = $1 AND (c.is_packaging OR c.slug = 'packaging')",
+    )
+    .bind(org_id)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect())
 }
