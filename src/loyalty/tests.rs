@@ -3831,6 +3831,18 @@ async fn a_reward_sale_reads_back_in_the_order_the_ledger_and_the_report(pool: P
     assert_eq!(report["liability"]["value_per_unit_minor"], 1000.0);
     assert_eq!(report["liability"]["valued_minor"], 2_000);
 
+    // The behavior rates read the same ledger: one member, who redeemed.
+    let req = test::TestRequest::get()
+        .uri("/loyalty/behavior")
+        .insert_header(("Authorization", format!("Bearer {admin_jwt}")))
+        .to_request();
+    let behavior: Value = test::call_and_read_body_json(&app, req).await;
+    assert_eq!(behavior["total_members"], 1);
+    assert_eq!(behavior["active_members"], 1);
+    assert_eq!(behavior["members_ever_redeemed"], 1);
+    assert_eq!(behavior["redemption_rate"], 1.0);
+    assert_eq!(behavior["active_member_rate"], 1.0);
+
     // A teller reads a card, not the books.
     let req = test::TestRequest::get()
         .uri("/loyalty/analytics")

@@ -2028,3 +2028,230 @@ async fn delivery_sales_report_every_channel_and_the_fee_apart(pool: PgPool) {
     assert_eq!(outside["goods_revenue"], 2000);
     assert_eq!(channels[3]["delivery_fees"], 0, "a pickup has no fee");
 }
+
+// ── Org tax + legal audit reports ─────────────────────────────
+
+/// A sale with explicit money columns. `status` is a real `order_status`.
+#[allow(clippy::too_many_arguments)]
+async fn seed_money_order(
+    pool: &PgPool,
+    branch_id: Uuid,
+    teller_id: Uuid,
+    till_id: Uuid,
+    order_number: i32,
+    subtotal: i32,
+    discount: i32,
+    tax: i32,
+    total: i32,
+) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, subtotal,
+             discount_amount, tax_amount, total_amount, status, order_number, payment_method, order_ref)
+         VALUES ($1, $2, $3, $4, gen_random_uuid(), $5, $6, $7, $8, 'completed', $9, 'cash',
+                 gen_random_uuid()::text)",
+    )
+    .bind(id)
+    .bind(branch_id)
+    .bind(teller_id)
+    .bind(till_id)
+    .bind(subtotal)
+    .bind(discount)
+    .bind(tax)
+    .bind(total)
+    .bind(order_number)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO order_payments (order_id, method, amount) VALUES ($1, 'cash', $2)")
+        .bind(id)
+        .bind(total)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
+async fn get_json(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    uri: &str,
+    token: &str,
+) -> serde_json::Value {
+    let req = test::TestRequest::get()
+        .uri(uri)
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    let status = resp.status();
+    let body = test::read_body(resp).await;
+    assert!(
+        status.is_success(),
+        "{uri} -> {status}: {}",
+        String::from_utf8_lossy(&body)
+    );
+    serde_json::from_slice(&body).unwrap()
+}
+
+/// The tax report's net figure agrees with the branch sales report, and the
+/// gross pair keeps a sale refunded in full instead of dropping it from both.
+/// The audits add up the same seeded events.
+#[sqlx::test]
+async fn org_tax_and_legal_audits_add_up_and_agree_with_branch_sales(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let admin = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(admin, org_id);
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    let till = seed_shift(&pool, branch_id, admin).await;
+
+    // A: 1000 + 14% tax, half refunded (tax share 70).
+    let a = seed_money_order(&pool, branch_id, admin, till, 1, 1000, 0, 140, 1140).await;
+    seed_refund(&pool, a, till, admin, 570, "cash").await;
+    // B: discounted, price flagged, service charge waived.
+    let b = seed_money_order(&pool, branch_id, admin, till, 2, 500, 50, 63, 513).await;
+    sqlx::query(
+        "UPDATE orders SET price_flagged = true, service_charge_waived_by = $2,
+             service_charge_waived_at = now(), service_charge_waived_amount = 60 WHERE id = $1",
+    )
+    .bind(b)
+    .bind(admin)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // C: voided.
+    let c = seed_money_order(&pool, branch_id, admin, till, 3, 500, 0, 70, 570).await;
+    sqlx::query(
+        "UPDATE orders SET status = 'voided', voided_at = now(), voided_by = $2,
+             void_reason = 'wrong_order' WHERE id = $1",
+    )
+    .bind(c)
+    .bind(admin)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // D: refunded in full.
+    let d = seed_money_order(&pool, branch_id, admin, till, 4, 500, 0, 70, 570).await;
+    seed_refund(&pool, d, till, admin, 570, "cash").await;
+
+    let tax = get_json(&app, &format!("/reports/orgs/{org_id}/tax"), &token).await;
+    assert_eq!(tax["tax_collected"], 140 + 63 + 70);
+    assert_eq!(tax["refunded_tax"], 70 + 70);
+    assert_eq!(tax["net_tax_due"], 133);
+    assert_eq!(tax["voided_orders"], 1);
+    assert_eq!(tax["discount_amount"], 50);
+    assert_eq!(tax["net_revenue"], 570 + 513);
+
+    let sales = get_json(
+        &app,
+        &format!("/reports/branches/{}/sales", Uuid::nil()),
+        &token,
+    )
+    .await;
+    assert_eq!(tax["net_tax_due"], sales["total_tax"]);
+    assert_eq!(tax["net_revenue"], sales["total_revenue"]);
+    assert_eq!(tax["order_count"], sales["total_orders"]);
+
+    let refunds = get_json(
+        &app,
+        &format!("/reports/orgs/{org_id}/refunds-audit"),
+        &token,
+    )
+    .await;
+    assert_eq!(refunds["total_count"], 2);
+    assert_eq!(refunds["total_amount_minor"], 1140);
+    assert_eq!(refunds["by_reason"][0]["label"], "customer_request");
+    assert_eq!(refunds["by_issuer"][0]["count"], 2);
+
+    let voids = get_json(&app, &format!("/reports/orgs/{org_id}/voids-audit"), &token).await;
+    assert_eq!(voids["total_count"], 1);
+    assert_eq!(voids["total_amount_minor"], 570);
+    assert_eq!(voids["by_reason"][0]["label"], "wrong_order");
+
+    let discounts = get_json(
+        &app,
+        &format!("/reports/orgs/{org_id}/discounts-audit"),
+        &token,
+    )
+    .await;
+    assert_eq!(discounts["total_count"], 1);
+    assert_eq!(discounts["total_amount_minor"], 50);
+
+    let waivers = get_json(
+        &app,
+        &format!("/reports/orgs/{org_id}/waivers-audit"),
+        &token,
+    )
+    .await;
+    assert_eq!(waivers["total_count"], 1);
+    assert_eq!(waivers["total_amount_minor"], 60);
+
+    let overrides = get_json(
+        &app,
+        &format!("/reports/orgs/{org_id}/price-overrides"),
+        &token,
+    )
+    .await;
+    assert_eq!(overrides["total_count"], 1);
+    assert_eq!(overrides["total_amount_minor"], 513);
+}
+
+/// An org report never shows a branch manager a branch they aren't assigned
+/// to, and another org's caller is refused outright.
+#[sqlx::test]
+async fn org_tax_and_audits_are_scoped_to_the_callers_branches(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let mine = seed_branch(&pool, org_id).await;
+    sqlx::query("UPDATE branches SET name = 'Mine' WHERE id = $1")
+        .bind(mine)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let other = seed_branch(&pool, org_id).await;
+    let admin = seed_user(&pool, org_id, "org_admin").await;
+    let manager = seed_user(&pool, org_id, "branch_manager").await;
+    assign_user_to_branch(&pool, manager, mine).await;
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    grant_permission(&pool, "branch_manager", "orders", "read").await;
+
+    let till_mine = seed_shift(&pool, mine, admin).await;
+    let till_other = seed_shift(&pool, other, manager).await;
+    seed_money_order(&pool, mine, admin, till_mine, 1, 1000, 0, 140, 1140).await;
+    let o = seed_money_order(&pool, other, manager, till_other, 2, 2000, 0, 280, 2280).await;
+    seed_refund(&pool, o, till_other, manager, 100, "cash").await;
+
+    let admin_token = generate_org_admin_token(admin, org_id);
+    let tax = get_json(&app, &format!("/reports/orgs/{org_id}/tax"), &admin_token).await;
+    assert_eq!(tax["order_count"], 2);
+
+    let manager_token = generate_token(manager, Some(org_id), UserRole::BranchManager);
+    let tax = get_json(&app, &format!("/reports/orgs/{org_id}/tax"), &manager_token).await;
+    assert_eq!(tax["order_count"], 1);
+    assert_eq!(tax["tax_collected"], 140);
+    let refunds = get_json(
+        &app,
+        &format!("/reports/orgs/{org_id}/refunds-audit"),
+        &manager_token,
+    )
+    .await;
+    assert_eq!(refunds["total_count"], 0);
+
+    let stranger_org = seed_org(&pool).await;
+    let stranger = seed_user(&pool, stranger_org, "org_admin").await;
+    let req = test::TestRequest::get()
+        .uri(&format!("/reports/orgs/{org_id}/voids-audit"))
+        .insert_header((
+            "Authorization",
+            format!(
+                "Bearer {}",
+                generate_org_admin_token(stranger, stranger_org)
+            ),
+        ))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 403);
+}

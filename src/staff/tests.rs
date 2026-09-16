@@ -2166,3 +2166,49 @@ async fn attendance_coordinates_are_purged_after_the_retention_window(pool: PgPo
         .await
         .expect("a second pass should be a harmless no-op");
 }
+
+/// Discipline ranks by absences, then lates, then late minutes — within a
+/// department, ties sharing a rank.
+#[sqlx::test]
+async fn discipline_report_ranks_absences_before_lates(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, "UTC").await;
+    let punctual_but_late = seed_user(&pool, f.org, "Late", UserRole::Teller).await;
+    for (user, day, status, late) in [
+        (f.employee, 1, "absent", 0),
+        (punctual_but_late, 1, "late", 10),
+        (punctual_but_late, 2, "late", 5),
+        (punctual_but_late, 3, "present", 0),
+    ] {
+        sqlx::query(
+            "INSERT INTO attendance_records (org_id, user_id, branch_id, business_date, status, late_minutes) \
+             VALUES ($1, $2, $3, make_date(2026, 9, $4), $5, $6)",
+        )
+        .bind(f.org)
+        .bind(user)
+        .bind(f.branch)
+        .bind(day)
+        .bind(status)
+        .bind(late)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let token = token_for(f.admin, f.org, UserRole::OrgAdmin);
+    let resp = auth_get!(
+        app,
+        "/staff/discipline-report?from=2026-09-01&to=2026-09-30",
+        token
+    );
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let rows = body["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["user_id"], serde_json::json!(punctual_but_late));
+    assert_eq!(rows[0]["rank_in_department"], 1);
+    assert_eq!(rows[0]["late_days"], 2);
+    assert_eq!(rows[0]["present_days"], 1);
+    assert_eq!(rows[0]["total_late_minutes"], 15);
+    assert_eq!(rows[1]["absent_days"], 1);
+    assert_eq!(rows[1]["rank_in_department"], 2);
+}
