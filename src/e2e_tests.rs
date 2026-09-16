@@ -211,7 +211,7 @@ async fn test_e2e_merchant_setup_and_operation_happy_path(pool: PgPool) {
             "org_id": org_id,
             "name": "Happy POS Teller",
             "role": "teller",
-            "pin": "1234",
+            "pin": "123456",
             "branch_ids": [branch_a_id]
         }))
         .to_request();

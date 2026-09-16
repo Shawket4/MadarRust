@@ -104,7 +104,10 @@ macro_rules! app {
 fn create_body(org: Uuid, role: &str) -> serde_json::Value {
     json!({
         "org_id": org, "name": format!("New {}", Uuid::new_v4()), "role": role,
-        "email": format!("{}@n.com", Uuid::new_v4()), "password": "secret-pass-1", "pin": "1234"
+        "email": format!("{}@n.com", Uuid::new_v4()), "password": "secret-pass-1",
+        // PINs are unique across an org and six digits when newly issued
+        // (POS_SIGNIN_OVERHAUL.md §3), so every fixture account needs its own.
+        "pin": format!("{:06}", Uuid::new_v4().as_u128() % 1_000_000)
     })
 }
 

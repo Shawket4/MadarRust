@@ -10,6 +10,104 @@ use crate::{
     permissions::{checker::check_permission, guard},
 };
 
+// ── PINs ──────────────────────────────────────────────────────
+
+/// How long a NEWLY ISSUED PIN is (POS_SIGNIN_OVERHAUL.md §3.2, owner decision
+/// 2026-09-16): six digits, one rule for every org. Four was thin once PINs are
+/// unique across a whole company — a 30-branch chain shares 10,000 of them, so
+/// "PIN taken" becomes routine and a colleague can guess. PINs already in use
+/// keep working at whatever length they have; only setting a new one is held to
+/// this.
+pub const NEW_PIN_LEN: usize = 6;
+
+fn check_new_pin(pin: &str) -> Result<(), AppError> {
+    if pin.len() == NEW_PIN_LEN && pin.chars().all(|c| c.is_ascii_digit()) {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(format!(
+            "A new PIN must be {NEW_PIN_LEN} digits"
+        )))
+    }
+}
+
+/// Org-wide uniqueness (§3.1): a PIN must identify ONE person wherever the
+/// device stands. Branch-scoped uniqueness would make the same PIN two people
+/// at two branches, and would collide someone allowed at both with themselves.
+///
+/// The check is a single indexed lookup on the fingerprint — the same tool that
+/// makes sign-in a lookup — so no plaintext is stored or compared. It cannot see
+/// a PIN that has no fingerprint yet (§6); the partial unique index is the
+/// backstop, and every PIN is re-issued at rollout.
+async fn pin_is_free(
+    pool: &sqlx::PgPool,
+    org: Uuid,
+    pin: &str,
+    except: Option<Uuid>,
+) -> Result<bool, AppError> {
+    let fp = crate::auth::pin_fingerprint::fingerprint(org, pin);
+    let taken: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM users
+                        WHERE org_id = $1 AND pin_fingerprint = $2
+                          AND deleted_at IS NULL AND ($3::uuid IS NULL OR id <> $3))",
+    )
+    .bind(org)
+    .bind(&fp)
+    .bind(except)
+    .fetch_one(pool)
+    .await?;
+    Ok(!taken)
+}
+
+fn pin_taken() -> AppError {
+    AppError::Conflict("Someone in this organization already uses that PIN".into())
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct PinSuggestion {
+    /// Shown to the admin ONCE. Nothing stores it until it is set on a person.
+    #[schema(example = "402913")]
+    pub pin: String,
+}
+
+/// A free PIN for this org.
+///
+/// The owner's question was how the server can suggest a PIN when it stores no
+/// plaintext. The fingerprint answers it: pick a candidate, fingerprint it, one
+/// indexed lookup says taken or free. A handful of tries at most, and
+/// uniqueness stays a database property rather than something the application
+/// hopes it got right.
+#[utoipa::path(
+    get,
+    path = "/users/pin-suggestion",
+    tag = "users",
+    responses(
+        (status = 200, description = "A PIN nobody in this org is using", body = PinSuggestion),
+        AppErrorResponse,
+    ),
+    security(("bearer_jwt" = []))
+)]
+pub async fn suggest_pin(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "users", "create").await?;
+    let org = claims
+        .org_id()
+        .ok_or_else(|| AppError::BadRequest("Choose an organization first".into()))?;
+
+    for _ in 0..40 {
+        // OS randomness without a new dependency, the same way the offline PIN
+        // salt is minted (auth::offline): a v4 uuid is 122 random bits.
+        let bytes = *Uuid::new_v4().as_bytes();
+        let n: [u8; 8] = bytes[8..16].try_into().expect("8 of 16 bytes");
+        let value = u64::from_le_bytes(n) % 10u64.pow(NEW_PIN_LEN as u32);
+        let pin = format!("{value:0width$}", width = NEW_PIN_LEN);
+        if pin_is_free(pool.get_ref(), org, &pin, None).await? {
+            return Ok(HttpResponse::Ok().json(PinSuggestion { pin }));
+        }
+    }
+    // A million combinations and forty misses means something is very wrong.
+    Err(AppError::Internal)
+}
+
 // ── Request types ─────────────────────────────────────────────
 
 #[derive(Deserialize, ToSchema)]
@@ -26,12 +124,14 @@ pub struct CreateUserRequest {
     /// Required when `role` is anything other than `teller`. Plain text;
     /// hashed server-side with bcrypt before storage.
     pub password: Option<String>,
-    /// Required when `role = teller`. 4–6 ASCII digits.
+    /// Required when `role = teller`. A NEW PIN is exactly 6 ASCII digits
+    /// (owner decision, 2026-09-16); PINs already in use keep working at their
+    /// old length. Ask `GET /users/pin-suggestion` for a free one.
     #[schema(
-        pattern = "^[0-9]{4,6}$",
-        min_length = 4,
+        pattern = "^[0-9]{6}$",
+        min_length = 6,
         max_length = 6,
-        example = "1234"
+        example = "402913"
     )]
     pub pin: Option<String>,
     /// Branches to assign the new user to immediately. Branch managers
@@ -66,7 +166,9 @@ pub struct UpdateUserRequest {
     pub phone: Option<String>,
     /// Plain-text new password. Server-side bcrypt-hashed.
     pub password: Option<String>,
-    #[schema(pattern = "^[0-9]{4,6}$", min_length = 4, max_length = 6)]
+    /// A NEW PIN is exactly 6 digits; an existing shorter one keeps working
+    /// until it is changed.
+    #[schema(pattern = "^[0-9]{6}$", min_length = 6, max_length = 6)]
     pub pin: Option<String>,
     /// Only org-admins and above can change roles. Promoting to
     /// `super_admin` requires the caller to be a super-admin.
@@ -158,16 +260,18 @@ pub async fn create_user(
                 ));
             }
             let pin = body.pin.as_deref().unwrap();
-            if pin.len() < 4 || pin.len() > 6 || !pin.chars().all(|c| c.is_ascii_digit()) {
-                return Err(AppError::BadRequest("PIN must be 4–6 digits".into()));
+            check_new_pin(pin)?;
+            if !pin_is_free(pool.get_ref(), body.org_id, pin, None).await? {
+                return Err(pin_taken());
             }
         }
         _ => {
             // A manager or owner may also work a till: an optional PIN.
-            if let Some(pin) = body.pin.as_deref()
-                && (pin.len() < 4 || pin.len() > 6 || !pin.chars().all(|c| c.is_ascii_digit()))
-            {
-                return Err(AppError::BadRequest("PIN must be 4–6 digits".into()));
+            if let Some(pin) = body.pin.as_deref() {
+                check_new_pin(pin)?;
+                if !pin_is_free(pool.get_ref(), body.org_id, pin, None).await? {
+                    return Err(pin_taken());
+                }
             }
             if body.password.is_none() {
                 return Err(AppError::BadRequest(
@@ -522,6 +626,17 @@ pub async fn update_user(
         let mut conn = pool.acquire().await?;
         if guard::is_last_active_owner(&mut conn, org, existing.id).await? {
             return Err(guard::last_owner_error());
+        }
+    }
+
+    // A new PIN is held to the current length rule and to org-wide uniqueness,
+    // which the update path never checked at all.
+    if let Some(pin) = body.pin.as_deref() {
+        check_new_pin(pin)?;
+        if let Some(org) = existing.org_id
+            && !pin_is_free(pool.get_ref(), org, pin, Some(existing.id)).await?
+        {
+            return Err(pin_taken());
         }
     }
 

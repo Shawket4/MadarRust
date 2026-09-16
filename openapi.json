@@ -47005,6 +47005,93 @@
         ]
       }
     },
+    "/users/pin-suggestion": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "A free PIN for this org.",
+        "description": "The owner's question was how the server can suggest a PIN when it stores no\nplaintext. The fingerprint answers it: pick a candidate, fingerprint it, one\nindexed lookup says taken or free. A handful of tries at most, and\nuniqueness stays a database property rather than something the application\nhopes it got right.",
+        "operationId": "suggest_pin",
+        "responses": {
+          "200": {
+            "description": "A PIN nobody in this org is using",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PinSuggestion"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/users/{id}": {
       "get": {
         "tags": [
@@ -54736,11 +54823,11 @@
               "string",
               "null"
             ],
-            "description": "Required when `role = teller`. 4–6 ASCII digits.",
-            "example": "1234",
+            "description": "Required when `role = teller`. A NEW PIN is exactly 6 ASCII digits\n(owner decision, 2026-09-16); PINs already in use keep working at their\nold length. Ask `GET /users/pin-suggestion` for a free one.",
+            "example": "402913",
             "maxLength": 6,
-            "minLength": 4,
-            "pattern": "^[0-9]{4,6}$"
+            "minLength": 6,
+            "pattern": "^[0-9]{6}$"
           },
           "role": {
             "$ref": "#/components/schemas/UserRole"
@@ -63658,6 +63745,19 @@
           }
         }
       },
+      "PinSuggestion": {
+        "type": "object",
+        "required": [
+          "pin"
+        ],
+        "properties": {
+          "pin": {
+            "type": "string",
+            "description": "Shown to the admin ONCE. Nothing stores it until it is set on a person.",
+            "example": "402913"
+          }
+        }
+      },
       "PointsLiability": {
         "type": "object",
         "description": "What the programme owes its members.",
@@ -71718,9 +71818,10 @@
               "string",
               "null"
             ],
+            "description": "A NEW PIN is exactly 6 digits; an existing shorter one keeps working\nuntil it is changed.",
             "maxLength": 6,
-            "minLength": 4,
-            "pattern": "^[0-9]{4,6}$"
+            "minLength": 6,
+            "pattern": "^[0-9]{6}$"
           },
           "role": {
             "oneOf": [

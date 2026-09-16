@@ -131,6 +131,7 @@ paths(
         crate::users::handlers::assign_branch,
         crate::users::handlers::unassign_branch,
         crate::users::handlers::list_user_branches,
+        crate::users::handlers::suggest_pin,
         // ── permissions ─────────────────────────────────────────────
         crate::authz::api::get_my_authz,
         crate::authz::api::list_roles,

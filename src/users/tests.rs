@@ -107,7 +107,7 @@ async fn test_create_user_success(pool: PgPool) {
             "org_id": org_id,
             "name": "New Teller",
             "role": "teller",
-            "pin": "1234",
+            "pin": "123456",
             "branch_ids": [branch_id]
         }))
         .to_request();
@@ -118,6 +118,66 @@ async fn test_create_user_success(pool: PgPool) {
     let body: CreateUserResponse = test::read_body_json(resp).await;
     assert_eq!(body.user.name, "New Teller");
     assert_eq!(body.user.role, UserRole::Teller);
+}
+
+/// POS_SIGNIN_OVERHAUL.md §3: a newly issued PIN is six digits, PINs are unique
+/// across the whole org, and the server can suggest a free one without ever
+/// holding plaintext — the fingerprint makes "is this taken" an indexed lookup.
+#[sqlx::test]
+async fn new_pins_are_six_digits_unique_per_org_and_suggestible(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    grant_permission(&pool, "org_admin", "users", "create").await;
+    let (_admin_id, token) = seed_admin(&pool, org_id).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+
+    let create = |pin: &str, name: &str| {
+        let body = serde_json::json!({
+            "org_id": org_id, "name": name, "role": "teller",
+            "pin": pin, "branch_ids": [branch_id],
+        });
+        test::TestRequest::post()
+            .uri("/users")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(&body)
+            .to_request()
+    };
+
+    // Four digits was the old rule; a NEW PIN must be six.
+    let resp = test::call_service(&app, create("1234", "Short")).await;
+    assert_eq!(resp.status(), 400, "a four-digit PIN is no longer issuable");
+
+    assert!(
+        test::call_service(&app, create("246813", "First"))
+            .await
+            .status()
+            .is_success()
+    );
+
+    // The same PIN again, for a different person in the same org.
+    let resp = test::call_service(&app, create("246813", "Second")).await;
+    assert_eq!(resp.status(), 409, "PINs are unique across the org");
+
+    // The generator never offers one that is taken.
+    for _ in 0..5 {
+        let req = test::TestRequest::get()
+            .uri("/users/pin-suggestion")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        let pin = body["pin"].as_str().unwrap().to_string();
+        assert_eq!(pin.len(), 6, "{pin}");
+        assert!(pin.chars().all(|c| c.is_ascii_digit()));
+        assert_ne!(pin, "246813", "the taken PIN is never suggested");
+    }
 }
 
 #[sqlx::test]
