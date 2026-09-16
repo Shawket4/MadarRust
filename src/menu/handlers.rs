@@ -304,6 +304,10 @@ pub struct MenuCatalogQuery {
     pub overridden: Option<bool>,
     /// `"overridden"` → overridden items first (needs `branch_id`); otherwise A–Z.
     pub sort: Option<String>,
+    /// `false` → only items with NO recipe on any size: the onboarding
+    /// worklist, everything that still deducts nothing and costs zero.
+    /// `true` → only items that have one. Absent → all.
+    pub has_recipe: Option<bool>,
 }
 
 // ── Branch menu overrides (per-branch price + availability layer) ─────────────
@@ -978,13 +982,18 @@ pub async fn list_menu_catalog(
          WHERE mi.org_id = $1 AND mi.deleted_at IS NULL
            AND ($2::uuid IS NULL OR mi.category_id = $2)
            AND ($3::text IS NULL OR mi.name ILIKE '%' || $3 || '%')
-           AND ($5::bool IS NULL OR (bmo.branch_id IS NOT NULL) = $5)",
+           AND ($5::bool IS NULL OR (bmo.branch_id IS NOT NULL) = $5)
+           AND ($6::bool IS NULL OR EXISTS (
+                 SELECT 1 FROM menu_item_sizes sz
+                 JOIN recipe_lines rl ON rl.owner_type = 'item_size' AND rl.owner_id = sz.id
+                 WHERE sz.menu_item_id = mi.id) = $6)",
     )
     .bind(query.org_id)
     .bind(query.category_id)
     .bind(search.as_deref())
     .bind(query.branch_id)
     .bind(query.overridden)
+    .bind(query.has_recipe)
     .fetch_one(pool.get_ref())
     .await?;
 
@@ -1012,6 +1021,10 @@ pub async fn list_menu_catalog(
            AND ($2::uuid IS NULL OR mi.category_id = $2)
            AND ($3::text IS NULL OR mi.name ILIKE '%' || $3 || '%')
            AND ($5::bool IS NULL OR (bmo.branch_id IS NOT NULL) = $5)
+           AND ($8::bool IS NULL OR EXISTS (
+                 SELECT 1 FROM menu_item_sizes sz
+                 JOIN recipe_lines rl ON rl.owner_type = 'item_size' AND rl.owner_id = sz.id
+                 WHERE sz.menu_item_id = mi.id) = $8)
          ORDER BY {order_by}
          LIMIT $6 OFFSET $7",
     ))
@@ -1022,6 +1035,7 @@ pub async fn list_menu_catalog(
     .bind(query.overridden)
     .bind(per_page)
     .bind(offset)
+    .bind(query.has_recipe)
     .fetch_all(pool.get_ref())
     .await?;
 

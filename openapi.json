@@ -8502,6 +8502,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "has_recipe",
+            "in": "query",
+            "description": "`false` → only items with NO recipe on any size: the onboarding\nworklist, everything that still deducts nothing and costs zero.\n`true` → only items that have one. Absent → all.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
