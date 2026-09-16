@@ -75,7 +75,9 @@ SELECT rl.id, rl.owner_id AS addon_item_id, rl.quantity AS quantity_used, rl.cre
 FROM recipe_lines rl
 JOIN modifier_options mo ON mo.id = rl.owner_id AND mo.legacy_source = 'addon'
 JOIN org_ingredients oi ON oi.id = rl.ingredient_id
-WHERE rl.owner_type = 'modifier_option';
+-- Per-size option amounts (recipe_lines.size_label, 20260920300000) are new-client
+-- only: a legacy till gets the generic (NULL-size) amount, never both.
+WHERE rl.owner_type = 'modifier_option' AND rl.size_label IS NULL;
 
 -- ── menu_item_addon_slots ← attachments whose provenance is a slot. ──
 -- (Allowlist-only attachments are NOT slots — they surface via menu_item_allowed_addons.)
@@ -101,7 +103,7 @@ SELECT mo.id, mimg.menu_item_id, mo.name, mo.price,
        NULL::text AS size_label, mo.is_active, mo.created_at, mo.updated_at, mo.name_translations
 FROM modifier_options mo
 JOIN menu_item_modifier_groups mimg ON mimg.group_id = mo.group_id AND mimg.legacy_origin = 'options'
-LEFT JOIN recipe_lines rl ON rl.owner_type = 'modifier_option' AND rl.owner_id = mo.id
+LEFT JOIN recipe_lines rl ON rl.owner_type = 'modifier_option' AND rl.owner_id = mo.id AND rl.size_label IS NULL
 LEFT JOIN org_ingredients oi ON oi.id = rl.ingredient_id
 WHERE mo.legacy_source = 'optional';
 
