@@ -4,7 +4,7 @@
 use crate::{CapMeta, GroupMeta, Kinds, LimitKey, Limits, Risk, RoleKind, TemplateMeta, Tier};
 
 pub const SPEC_VERSION: u32 = 2;
-pub const SPEC_HASH: &str = "8ab016267a4f2ce9";
+pub const SPEC_HASH: &str = "ad2d3780b952c67e";
 pub const WORDS: usize = 4;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -187,6 +187,7 @@ pub enum Cap {
     LoyaltyMembersDelete = 217,
     IntegrationsRead = 218,
     CustomersErase = 219,
+    MenuPackagingRulesApply = 220,
 }
 
 pub static CAPS: &[CapMeta] = &[
@@ -367,6 +368,7 @@ pub static CAPS: &[CapMeta] = &[
     CapMeta { cap: Cap::LoyaltyMembersDelete, key: "loyalty.members.delete", legacy: None, group: "customers", tier: Tier::Advanced, risk: Risk::Pii, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Delete loyalty members", ar: "حذف أعضاء الولاء", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::IntegrationsRead, key: "integrations.read", legacy: None, group: "settings", tier: Tier::Advanced, risk: Risk::Admin, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "See integrations and their API credentials", ar: "عرض التكاملات وبيانات اعتماد الواجهة البرمجية", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::CustomersErase, key: "customers.erase", legacy: None, group: "customers", tier: Tier::Advanced, risk: Risk::Pii, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Erase a customer's personal data (PDPL)", ar: "محو البيانات الشخصية للعميل", hint_en: None, hint_ar: None },
+    CapMeta { cap: Cap::MenuPackagingRulesApply, key: "menu.packaging_rules.apply", legacy: None, group: "menu", tier: Tier::Advanced, risk: Risk::Normal, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Re-apply packaging rules to every menu item", ar: "إعادة تطبيق قواعد التغليف على جميع أصناف القائمة", hint_en: None, hint_ar: None },
 ];
 
 pub static GROUPS: &[GroupMeta] = &[
