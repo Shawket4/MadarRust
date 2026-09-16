@@ -4,11 +4,22 @@ use actix_web::{middleware::Condition, web};
 use crate::auth::{handlers, middleware::JwtMiddleware};
 use crate::rate_limit::{PeerIpOrLocalhost, rate_limiting_enabled};
 
+/// Login attempts one address may make in a minute (and at once).
+pub const LOGIN_PER_MINUTE: u32 = 60;
+
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    // 10 req/min per IP, burst of 10.
-    // seconds_per_request(6) = 1 token every 6 s → 10/min sustained.
-    // In tests all requests share the 127.0.0.1 bucket; burst_size(10) means
-    // the first 10 pass immediately — plenty for any single test.
+    // Password/PIN login: 60 req/min per IP, burst of 60 (owner decision
+    // 2026-09-16). Fifty tablets behind one router sign in at shift change;
+    // PIN guessing is held back by the per-device and per-branch growing delay
+    // (`auth::pin_throttle`), not by this per-address ceiling.
+    let login_gov = GovernorConfigBuilder::default()
+        .key_extractor(PeerIpOrLocalhost)
+        .seconds_per_request(1)
+        .burst_size(LOGIN_PER_MINUTE)
+        .finish()
+        .expect("Invalid rate limiter configuration");
+    // Activation codes and branch resolution stay at 10 req/min per IP, burst
+    // 10: an activation code is 8 digits and has no delay of its own.
     let gov = GovernorConfigBuilder::default()
         .key_extractor(PeerIpOrLocalhost)
         .seconds_per_request(6)
@@ -25,7 +36,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             // cause the first scope to intercept all /auth/* requests).
             .service(
                 web::resource("/login")
-                    .wrap(Condition::new(limited, Governor::new(&gov)))
+                    .wrap(Condition::new(limited, Governor::new(&login_gov)))
                     .route(web::post().to(handlers::login)),
             )
             // Device activation codes (POS_SIGNIN_OVERHAUL §4): unauthenticated,

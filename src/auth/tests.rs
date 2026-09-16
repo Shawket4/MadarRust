@@ -1685,3 +1685,62 @@ async fn test_org_status_unknown_org_not_allowed(pool: PgPool) {
         "an unknown org id must not be allowed"
     );
 }
+
+/// Fifty tablets behind one shop router sign in at shift change (owner
+/// decision 2026-09-16): one address gets 60 login attempts a minute, and the
+/// per-address ceiling still exists beyond that. PIN guessing is held back by
+/// the per-device and per-branch delay, not by this.
+#[sqlx::test(migrations = "./migrations")]
+async fn one_address_gets_sixty_login_attempts_a_minute(pool: PgPool) {
+    if !crate::rate_limit::rate_limiting_enabled() {
+        return;
+    }
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    // An empty body is refused by the handler at once, so the calls run far
+    // faster than the bucket refills (one a second).
+    let attempt = || {
+        test::TestRequest::post()
+            .uri("/auth/login")
+            .set_json(json!({}))
+            .to_request()
+    };
+    for i in 0..routes::LOGIN_PER_MINUTE {
+        let resp = test::call_service(&app, attempt()).await;
+        assert_ne!(
+            resp.status(),
+            429,
+            "attempt {i} is within the address allowance"
+        );
+    }
+    let mut limited = false;
+    for _ in 0..5 {
+        if test::call_service(&app, attempt()).await.status() == 429 {
+            limited = true;
+            break;
+        }
+    }
+    assert!(limited, "past sixty the address is still limited");
+
+    // Activation codes keep their own tighter bucket.
+    let mut refused = 0;
+    for _ in 0..12 {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/auth/activate-device")
+                .set_json(json!({}))
+                .to_request(),
+        )
+        .await;
+        if resp.status() == 429 {
+            refused += 1;
+        }
+    }
+    assert!(refused > 0, "activation stays at ten a minute");
+}
