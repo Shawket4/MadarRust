@@ -879,6 +879,8 @@ pub async fn list_menu_items(
                     JOIN addon_items a ON a.id = ai.addon_item_id
                     WHERE r.menu_item_id = mi.id
                       AND a.type = 'milk_type'
+                    -- Deterministic: the group's display order (component_resolve agrees).
+                    ORDER BY (SELECT mo.sort FROM modifier_options mo WHERE mo.id = a.id) NULLS LAST, a.name, a.id
                     LIMIT 1
                 ) AS default_milk_addon_id
          FROM menu_items mi
@@ -1013,6 +1015,8 @@ pub async fn list_menu_catalog(
                     JOIN addon_items a ON a.id = ai.addon_item_id
                     WHERE r.menu_item_id = mi.id
                       AND a.type = 'milk_type'
+                    -- Deterministic: the group's display order (component_resolve agrees).
+                    ORDER BY (SELECT mo.sort FROM modifier_options mo WHERE mo.id = a.id) NULLS LAST, a.name, a.id
                     LIMIT 1
                 ) AS default_milk_addon_id
          FROM menu_items mi
@@ -1287,6 +1291,8 @@ pub async fn update_menu_item(
                        JOIN addon_items a ON a.id = ai.addon_item_id
                        WHERE r.menu_item_id = menu_items.id
                          AND a.type = 'milk_type'
+                       -- Deterministic: the group's display order (component_resolve agrees).
+                       ORDER BY (SELECT mo.sort FROM modifier_options mo WHERE mo.id = a.id) NULLS LAST, a.name, a.id
                        LIMIT 1
                    ) AS default_milk_addon_id",
     )
@@ -1576,7 +1582,7 @@ pub async fn list_addon_items(
         "SELECT a.id, a.org_id, a.name, a.name_translations, a.type as addon_type,
                 COALESCE(bao.price_override, a.default_price) AS default_price,
                 a.is_active, a.created_at, a.updated_at,
-                (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id LIMIT 1) as primary_ingredient_id
+                (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id ORDER BY ingredient_name, org_ingredient_id LIMIT 1) as primary_ingredient_id
          {FILTER}
          ORDER BY a.type ASC, a.created_at ASC
          LIMIT $5 OFFSET $6"
@@ -1695,7 +1701,7 @@ pub async fn list_addon_catalog(
     let data = sqlx::query_as::<_, AddonItem>(&format!(
         "SELECT a.id, a.org_id, a.name, a.name_translations, a.type as addon_type,
                 a.default_price, a.is_active, a.created_at, a.updated_at,
-                (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id LIMIT 1) as primary_ingredient_id
+                (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id ORDER BY ingredient_name, org_ingredient_id LIMIT 1) as primary_ingredient_id
          FROM addon_items a
          LEFT JOIN branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $4
          WHERE a.org_id = $1
@@ -1820,7 +1826,7 @@ pub async fn update_addon_item(
          WHERE id = $1
          RETURNING id, org_id, name, name_translations, type as addon_type, default_price,
                    is_active, created_at, updated_at,
-                   (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = addon_items.id LIMIT 1) as primary_ingredient_id",
+                   (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = addon_items.id ORDER BY ingredient_name, org_ingredient_id LIMIT 1) as primary_ingredient_id",
     )
     .bind(*id)
     .bind(&mut_body.name)
@@ -3125,6 +3131,8 @@ async fn fetch_menu_item(pool: &PgPool, id: Uuid) -> Result<MenuItem, AppError> 
                     JOIN addon_items a ON a.id = ai.addon_item_id
                     WHERE r.menu_item_id = menu_items.id
                       AND a.type = 'milk_type'
+                    -- Deterministic: the group's display order (component_resolve agrees).
+                    ORDER BY (SELECT mo.sort FROM modifier_options mo WHERE mo.id = a.id) NULLS LAST, a.name, a.id
                     LIMIT 1
                 ) AS default_milk_addon_id
          FROM menu_items
@@ -3143,6 +3151,7 @@ async fn fetch_addon_item(pool: &PgPool, id: Uuid) -> Result<AddonItem, AppError
                 (SELECT org_ingredient_id
                    FROM addon_item_ingredients
                   WHERE addon_item_id = addon_items.id
+                  ORDER BY ingredient_name, org_ingredient_id
                   LIMIT 1) AS primary_ingredient_id
          FROM addon_items
          WHERE id = $1",
@@ -3237,7 +3246,7 @@ pub(crate) async fn addon_items_by_ids(
         "SELECT a.id, a.org_id, a.name, a.name_translations, a.type as addon_type,
                 COALESCE(bao.price_override, a.default_price) AS default_price,
                 a.is_active, a.created_at, a.updated_at,
-                (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id LIMIT 1) as primary_ingredient_id
+                (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id ORDER BY ingredient_name, org_ingredient_id LIMIT 1) as primary_ingredient_id
          FROM addon_items a
          LEFT JOIN branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $2
          WHERE a.org_id = $1 AND a.id = ANY($3)",
@@ -3298,7 +3307,8 @@ async fn fetch_addon_ingredients(
     Ok(sqlx::query_as::<_, AddonItemIngredient>(
         "SELECT org_ingredient_id, quantity_used, ingredient_name, ingredient_unit
          FROM   addon_item_ingredients
-         WHERE  addon_item_id = $1",
+         WHERE  addon_item_id = $1
+         ORDER BY ingredient_name, org_ingredient_id",
     )
     .bind(addon_item_id)
     .fetch_all(pool)

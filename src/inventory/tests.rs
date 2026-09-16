@@ -1539,3 +1539,119 @@ async fn test_teller_token_org_scoped_on_inventory(pool: PgPool) {
         assert!(resp.status().is_success());
     }
 }
+
+// B11: catalog edits outside the Studio (legacy handlers, raw SQL) bump catalog_revision.
+async fn revision(pool: &PgPool, org_id: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT revision FROM catalog_revision WHERE org_id = $1")
+        .bind(org_id)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+        .unwrap_or(0)
+}
+
+#[sqlx::test]
+async fn legacy_ingredient_edit_bumps_catalog_revision(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let other_org = seed_org(&pool).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "inventory", "update").await;
+    let ing_id = seed_ingredient(&pool, org_id, "Tomato", "kg").await;
+    let token = generate_org_admin_token(user_id, org_id);
+
+    let before = revision(&pool, org_id).await;
+    let other_before = revision(&pool, other_org).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri(&format!("/inventory/orgs/{org_id}/catalog/{ing_id}"))
+            .insert_header(auth!(token))
+            .set_json(serde_json::json!({"name": "Super Tomato"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let after = revision(&pool, org_id).await;
+    assert!(after > before, "rename bumps: {before} -> {after}");
+    assert_eq!(
+        revision(&pool, other_org).await,
+        other_before,
+        "other orgs untouched"
+    );
+
+    // A cost-only change is not a catalog change.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri(&format!("/inventory/orgs/{org_id}/catalog/{ing_id}"))
+            .insert_header(auth!(token))
+            .set_json(serde_json::json!({"cost_per_unit": 3.75}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(revision(&pool, org_id).await, after);
+
+    // One transaction touching many rows is one bump; child tables resolve their org.
+    let mut tx = pool.begin().await.unwrap();
+    let cat: Uuid = sqlx::query_scalar(
+        "INSERT INTO categories (org_id, name) VALUES ($1, 'Drinks') RETURNING id",
+    )
+    .bind(org_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    let item: Uuid = sqlx::query_scalar("INSERT INTO menu_items (org_id, category_id, name, base_price) VALUES ($1, $2, 'Latte', 100) RETURNING id")
+        .bind(org_id).bind(cat).fetch_one(&mut *tx).await.unwrap();
+    let size: Uuid = sqlx::query_scalar("INSERT INTO menu_item_sizes (menu_item_id, label, price) VALUES ($1, 'Cup', 100) RETURNING id")
+        .bind(item).fetch_one(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO recipe_lines (owner_type, owner_id, ingredient_id, quantity, unit) VALUES ('item_size', $1, $2, 1, 'kg')")
+        .bind(size).bind(ing_id).execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(revision(&pool, org_id).await, after + 1);
+
+    sqlx::query("UPDATE recipe_lines SET quantity = 2 WHERE owner_id = $1")
+        .bind(size)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        revision(&pool, org_id).await,
+        after + 2,
+        "child row (recipe_lines) resolves its org"
+    );
+
+    // A cascading item delete (sizes, recipe lines) is still one bump.
+    sqlx::query("DELETE FROM menu_items WHERE id = $1")
+        .bind(item)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(revision(&pool, org_id).await, after + 3);
+
+    // Deleting a group cascades to its options and attachments (children whose parent
+    // is gone resolve no org) — still exactly one bump.
+    let item: Uuid = sqlx::query_scalar("INSERT INTO menu_items (org_id, category_id, name, base_price) VALUES ($1, $2, 'Tea', 100) RETURNING id")
+        .bind(org_id).bind(cat).fetch_one(&pool).await.unwrap();
+    let g: Uuid = sqlx::query_scalar("INSERT INTO modifier_groups (org_id, name, legacy_addon_type) VALUES ($1, 'Milk', 'milk_type') RETURNING id")
+        .bind(org_id).fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO modifier_options (group_id, name) VALUES ($1, 'Oat')")
+        .bind(g)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO menu_item_modifier_groups (menu_item_id, group_id) VALUES ($1, $2)")
+        .bind(item)
+        .bind(g)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before_delete = revision(&pool, org_id).await;
+    sqlx::query("DELETE FROM modifier_groups WHERE id = $1")
+        .bind(g)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(revision(&pool, org_id).await, before_delete + 1);
+}

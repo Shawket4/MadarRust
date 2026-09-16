@@ -703,7 +703,7 @@ async fn load_default_milk(
          JOIN addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id \
          JOIN addon_items a ON a.id = ai.addon_item_id AND a.type = 'milk_type' \
          WHERE r.menu_item_id = ANY($1) \
-         ORDER BY r.menu_item_id, a.id",
+         ORDER BY r.menu_item_id, (SELECT mo.sort FROM modifier_options mo WHERE mo.id = a.id) NULLS LAST, a.name, a.id",
     )
     .bind(item_ids)
     .fetch_all(pool)

@@ -189,7 +189,13 @@ pub async fn resolve_menu_item_configuration(
                    LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id
                    WHERE  r.menu_item_id = $1
                      AND  r.size_label = COALESCE(
-                         (SELECT size_label FROM menu_item_recipes WHERE menu_item_id = $1 ORDER BY size_label LIMIT 1),
+                         (SELECT rr.size_label FROM menu_item_recipes rr
+                          LEFT JOIN menu_item_sizes sz ON sz.menu_item_id = rr.menu_item_id AND sz.label = rr.size_label
+                          WHERE rr.menu_item_id = $1
+                          -- The item's FIRST size as listed (sort, then label), as the POS
+                          -- shows it — not the alphabetical first (Can < Cup).
+                          ORDER BY sz.is_active IS NOT TRUE, sz.sort NULLS LAST, rr.size_label
+                          LIMIT 1),
                          'one_size'
                      )"#,
             )
@@ -248,8 +254,11 @@ pub async fn resolve_menu_item_configuration(
         });
 
         let addon_rows: Vec<(Option<Uuid>, f64, String, String)> = sqlx::query_as(
+            // Ordered like the `/addon-items` payload the POS picks `.first()` from, so a
+            // swap option with several lines (lint F7) resolves the same on both sides.
             "SELECT org_ingredient_id, quantity_used::float8, ingredient_name, ingredient_unit
-             FROM addon_item_ingredients WHERE addon_item_id = $1",
+             FROM addon_item_ingredients WHERE addon_item_id = $1
+             ORDER BY ingredient_name, org_ingredient_id",
         )
         .bind(addon_input.addon_item_id)
         .fetch_all(pool)
@@ -280,16 +289,27 @@ pub async fn resolve_menu_item_configuration(
             } else if let Some((repl_id, _, repl_name, repl_unit)) = addon_rows.first() {
                 let base_addon_price: i32 = if let Some(base_id) = base_ing_id {
                     sqlx::query_scalar(
-                        "SELECT COALESCE(MAX(COALESCE(bao.price_override, a.default_price)), 0)
+                        // The swap is charged above the DEFAULT option: the one carrying
+                        // the recipe's ingredient, preferring the chosen option's own
+                        // group, then in the group's display order (sort, name, id) —
+                        // the POS's rule. Not MAX over every candidate, which disagreed
+                        // with the till whenever two options shared the base ingredient.
+                        "SELECT COALESCE(bao.price_override, a.default_price)
                          FROM addon_items a
                          JOIN addon_item_ingredients i ON i.addon_item_id = a.id
+                         LEFT JOIN modifier_options mo ON mo.id = a.id
+                         LEFT JOIN modifier_options chosen ON chosen.id = $4
                          LEFT JOIN branch_addon_overrides bao
                                 ON bao.addon_item_id = a.id AND bao.branch_id = $3
-                         WHERE i.org_ingredient_id = $1 AND a.type = $2",
+                         WHERE i.org_ingredient_id = $1 AND a.type = $2
+                         ORDER BY (mo.group_id IS NOT NULL AND mo.group_id = chosen.group_id) DESC,
+                                  a.is_active DESC, mo.sort NULLS LAST, a.name, a.id
+                         LIMIT 1",
                     )
                     .bind(base_id)
                     .bind(addon_type.as_str())
                     .bind(branch_id)
+                    .bind(addon_input.addon_item_id)
                     .fetch_optional(pool)
                     .await?
                     .flatten()

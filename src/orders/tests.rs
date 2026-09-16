@@ -4038,3 +4038,165 @@ async fn a_line_with_two_milks_keeps_the_last(pool: PgPool) {
             .unwrap();
     assert_eq!((sel.as_str(), max), ("single", Some(1)));
 }
+
+// ════════════════════════════════════════════════════════════════════
+// B4: deterministic picks (size fallback, swap replacement, swap base price)
+// ════════════════════════════════════════════════════════════════════
+
+async fn seed_cat_ingredient(pool: &PgPool, org_id: Uuid, name: &str, slug: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, $3, 'g'::inventory_unit, 1, ingredient_category_id($2, $4))")
+        .bind(id).bind(org_id).bind(name).bind(slug).execute(pool).await.unwrap();
+    id
+}
+
+async fn legacy_recipe_line(
+    pool: &PgPool,
+    item: Uuid,
+    size: &str,
+    ing: Uuid,
+    name: &str,
+    qty: f64,
+) {
+    sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1, $2, $3, $4, $5, 'g')")
+        .bind(item).bind(ing).bind(qty).bind(size).bind(name).execute(pool).await.unwrap();
+}
+
+async fn legacy_addon_line(pool: &PgPool, addon: Uuid, ing: Uuid, name: &str) {
+    sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1, $2, 1, $3, 'g')")
+        .bind(addon).bind(ing).bind(name).execute(pool).await.unwrap();
+}
+
+#[sqlx::test]
+async fn resolver_size_fallback_uses_display_order_not_label(pool: PgPool) {
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item = seed_menu_item(&pool, org_id, cat_id).await;
+    for (label, sort) in [("Cup", 0), ("Can", 1)] {
+        sqlx::query("INSERT INTO menu_item_sizes (menu_item_id, label, price, sort) VALUES ($1, $2, 100, $3)")
+            .bind(item).bind(label).bind(sort).execute(&pool).await.unwrap();
+    }
+    let cup_milk = seed_cat_ingredient(&pool, org_id, "Cup milk", "milk").await;
+    let can_milk = seed_cat_ingredient(&pool, org_id, "Can milk", "milk").await;
+    legacy_recipe_line(&pool, item, "Can", can_milk, "Can milk", 250.0).await;
+    legacy_recipe_line(&pool, item, "Cup", cup_milk, "Cup milk", 180.0).await;
+
+    let r = crate::orders::component_resolve::resolve_menu_item_configuration(
+        &pool,
+        item,
+        None,
+        1,
+        &[],
+        &[],
+        branch_id,
+    )
+    .await
+    .unwrap();
+    let ids: Vec<Option<Uuid>> = r.deductions.iter().map(|d| d.org_ingredient_id).collect();
+    assert_eq!(
+        ids,
+        vec![Some(cup_milk)],
+        "Cup (sort 0) wins over alphabetical Can"
+    );
+}
+
+#[sqlx::test]
+async fn resolver_swap_picks_are_deterministic(pool: PgPool) {
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item = seed_menu_item(&pool, org_id, cat_id).await;
+    let whole = seed_cat_ingredient(&pool, org_id, "Whole milk", "milk").await;
+    let oat_a = seed_cat_ingredient(&pool, org_id, "Alpha oat", "milk").await;
+    let oat_z = seed_cat_ingredient(&pool, org_id, "Zeta oat", "milk").await;
+    legacy_recipe_line(&pool, item, "one_size", whole, "Whole milk", 200.0).await;
+
+    // Two options carry the base milk: "Whole" (sort 0, free) and "Barista" (sort 1,
+    // +20). By name Barista is first and MAX picked 20; the default is Whole.
+    let whole_addon = seed_addon_item(&pool, org_id, "Whole", "milk_type", 0).await;
+    let barista = seed_addon_item(&pool, org_id, "Barista", "milk_type", 20).await;
+    let oat = seed_addon_item(&pool, org_id, "Oat", "milk_type", 55).await;
+    legacy_addon_line(&pool, whole_addon, whole, "Whole milk").await;
+    legacy_addon_line(&pool, barista, whole, "Whole milk").await;
+    // Oat has two lines (lint F7); inserted Zeta first — Alpha must still win.
+    legacy_addon_line(&pool, oat, oat_z, "Zeta oat").await;
+    legacy_addon_line(&pool, oat, oat_a, "Alpha oat").await;
+    let group: Uuid = sqlx::query_scalar("INSERT INTO modifier_groups (org_id, name, legacy_addon_type) VALUES ($1, 'Milk', 'milk_type') RETURNING id")
+        .bind(org_id).fetch_one(&pool).await.unwrap();
+    for (id, name, sort) in [
+        (whole_addon, "Whole", 0),
+        (barista, "Barista", 1),
+        (oat, "Oat", 2),
+    ] {
+        sqlx::query(
+            "INSERT INTO modifier_options (id, group_id, name, sort) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(id)
+        .bind(group)
+        .bind(name)
+        .bind(sort)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let addons = [crate::orders::component_resolve::AddonInput {
+        addon_item_id: oat,
+        quantity: 1,
+        unit_price: None,
+    }];
+    let r = crate::orders::component_resolve::resolve_menu_item_configuration(
+        &pool,
+        item,
+        None,
+        1,
+        &addons,
+        &[],
+        branch_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        r.addons[0].unit_price, 55,
+        "charged above the default (Whole, 0), not MAX (20)"
+    );
+    let swapped: Vec<Option<Uuid>> = r.deductions.iter().map(|d| d.org_ingredient_id).collect();
+    assert_eq!(
+        swapped,
+        vec![Some(oat_a)],
+        "replacement = first line by ingredient name"
+    );
+
+    // default_milk_addon_id (GET /menu-items) follows the same display order.
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "menu_items", "read").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(crate::menu::routes::configure),
+    )
+    .await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/menu-items?org_id={org_id}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let row = body
+        .as_array()
+        .or_else(|| body["data"].as_array())
+        .or_else(|| body["items"].as_array())
+        .expect("list body")
+        .iter()
+        .find(|m| m["id"] == item.to_string())
+        .cloned()
+        .unwrap();
+    assert_eq!(row["default_milk_addon_id"], whole_addon.to_string());
+}

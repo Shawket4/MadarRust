@@ -304,14 +304,20 @@ async fn fetch_item_basics(pool: &PgPool, id: Uuid) -> Result<Option<ItemBasics>
 }
 
 /// Bump the org's catalog revision (monotonic; seeds at 1 on first write).
+///
+/// Marks the bump with this transaction's id so the deferred `catalog_revision_bump`
+/// triggers skip it at commit: the revision returned here is the one that commits.
+/// Call it after the transaction's catalog writes.
 pub(crate) async fn bump_catalog_revision(
     conn: &mut sqlx::PgConnection,
     org_id: Uuid,
 ) -> Result<i64, AppError> {
     let rev: i64 = sqlx::query_scalar(
-        "INSERT INTO catalog_revision (org_id, revision) VALUES ($1, 1) \
+        "INSERT INTO catalog_revision (org_id, revision, bumped_xid) \
+         VALUES ($1, 1, pg_current_xact_id()) \
          ON CONFLICT (org_id) DO UPDATE \
-             SET revision = catalog_revision.revision + 1, updated_at = now() \
+             SET revision = catalog_revision.revision + 1, updated_at = now(), \
+                 bumped_xid = pg_current_xact_id() \
          RETURNING revision",
     )
     .bind(org_id)
@@ -1132,12 +1138,15 @@ pub async fn put_modifier_groups(
     .await?;
 
     for a in &attaches {
-        // legacy_origin stays NULL for new attaches (only the backfill sets provenance).
+        // Provenance is always written (old tills read only the shim views): `slot`
+        // when required, else `allowlist`; no option list from the client means the
+        // whole group, materialized so the legacy per-item allowlist stays complete.
         sqlx::query(
             "INSERT INTO menu_item_modifier_groups \
                  (menu_item_id, group_id, sort, min_override, max_override, \
-                  is_required_override, included_option_ids) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                  is_required_override, included_option_ids, legacy_origin) \
+             VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, mimg_all_option_ids($2)), \
+                     mimg_default_origin($2, $6))",
         )
         .bind(item_id)
         .bind(a.group_id)
@@ -1322,12 +1331,13 @@ pub async fn duplicate_item(
             .await?;
         }
 
-        // Attach the new Options group to the new item (legacy_origin NULL; included NULL
-        // = all options, matching a per-item option set).
+        // Attach the new Options group to the new item as an item-private `options`
+        // attachment offering every copied option.
         sqlx::query(
             "INSERT INTO menu_item_modifier_groups \
-                 (menu_item_id, group_id, sort, min_override, max_override, is_required_override) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
+                 (menu_item_id, group_id, sort, min_override, max_override, is_required_override, \
+                  included_option_ids, legacy_origin) \
+             VALUES ($1, $2, $3, $4, $5, $6, mimg_all_option_ids($2), 'options')",
         )
         .bind(new_item)
         .bind(new_group)
@@ -1343,13 +1353,16 @@ pub async fn duplicate_item(
     //    groups (org-scoped, not per-item), so we keep the same group_id but must
     //    re-map any included_option_ids that happen to point at copied option ids
     //    (typed groups reference shared options → their ids are unchanged, so the
-    //    allowlist copies verbatim). legacy_origin stays NULL for the copy.
+    //    allowlist copies verbatim). Provenance copies too (filled by rule if absent).
     sqlx::query(
         "INSERT INTO menu_item_modifier_groups \
              (menu_item_id, group_id, sort, min_override, max_override, \
-              is_required_override, included_option_ids) \
+              is_required_override, included_option_ids, legacy_origin) \
          SELECT $1, mimg.group_id, mimg.sort, mimg.min_override, mimg.max_override, \
-                mimg.is_required_override, mimg.included_option_ids \
+                mimg.is_required_override, \
+                COALESCE(mimg.included_option_ids, mimg_all_option_ids(mimg.group_id)), \
+                COALESCE(mimg.legacy_origin, \
+                         mimg_default_origin(mimg.group_id, mimg.is_required_override)) \
          FROM menu_item_modifier_groups mimg \
          JOIN modifier_groups mg ON mg.id = mimg.group_id \
          WHERE mimg.menu_item_id = $2 AND mg.legacy_addon_type IS NOT NULL",

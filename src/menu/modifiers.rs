@@ -1045,8 +1045,9 @@ pub async fn put_item_options(
 
     // Resolve (or create) the item-private `Options` group: the attached group with
     // legacy_addon_type IS NULL. If absent, create one and attach it via
-    // menu_item_modifier_groups (legacy_origin='options' would be a backfill marker;
-    // for a freshly-created group it stays NULL, matching the studio/attach convention).
+    // menu_item_modifier_groups as an item-private `options` attachment (old tills only
+    // charge/deduct optionals whose attachment says so) offering the whole group; options
+    // inserted below are appended to that list by the modifier_options trigger.
     let group_id: Option<Uuid> = sqlx::query_scalar(
         "SELECT mg.id FROM menu_item_modifier_groups mimg \
          JOIN modifier_groups mg ON mg.id = mimg.group_id \
@@ -1070,8 +1071,9 @@ pub async fn put_item_options(
             .fetch_one(&mut *tx)
             .await?;
             sqlx::query(
-                "INSERT INTO menu_item_modifier_groups (menu_item_id, group_id, sort) \
-                 VALUES ($1, $2, 0)",
+                "INSERT INTO menu_item_modifier_groups \
+                     (menu_item_id, group_id, sort, included_option_ids, legacy_origin) \
+                 VALUES ($1, $2, 0, mimg_all_option_ids($2), 'options')",
             )
             .bind(item_id)
             .bind(g)
