@@ -380,14 +380,20 @@ pub async fn create_org(
 
     sqlx::query(
         r#"
-        INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash)
+        -- The Talabat tenders are seeded INACTIVE: a shop with no Talabat
+        -- integration would otherwise carry two tenders nobody can use and two
+        -- always-zero columns on every Z report. The dashboard's payment-method
+        -- switch turns them on when that branch actually sells on Talabat.
+        -- `talabat_cash` is cash (the rider collects it and it reaches the
+        -- drawer); `talabat_online` is not.
+        INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash, is_active)
         VALUES
-            ($1, 'cash', '{"en": "Cash", "ar": "نقدي"}', '#10B981', 'money', true),
-            ($1, 'card', '{"en": "Card", "ar": "بطاقة"}', '#3B82F6', 'credit_card', false),
-            ($1, 'digital_wallet', '{"en": "Digital Wallet", "ar": "محفظة رقمية"}', '#8B5CF6', 'wallet', false),
-            ($1, 'mixed', '{"en": "Mixed", "ar": "مختلط"}', '#F59E0B', 'pie_chart', false),
-            ($1, 'talabat_online', '{"en": "Talabat Online", "ar": "طلبات أونلاين"}', '#EF4444', 'delivery', false),
-            ($1, 'talabat_cash', '{"en": "Talabat Cash", "ar": "طلبات كاش"}', '#F97316', 'delivery', true)
+            ($1, 'cash', '{"en": "Cash", "ar": "نقدي"}', '#10B981', 'money', true, true),
+            ($1, 'card', '{"en": "Card", "ar": "بطاقة"}', '#3B82F6', 'credit_card', false, true),
+            ($1, 'digital_wallet', '{"en": "Digital Wallet", "ar": "محفظة رقمية"}', '#8B5CF6', 'wallet', false, true),
+            ($1, 'mixed', '{"en": "Mixed", "ar": "مختلط"}', '#F59E0B', 'pie_chart', false, true),
+            ($1, 'talabat_online', '{"en": "Talabat Online", "ar": "طلبات أونلاين"}', '#EF4444', 'delivery', false, false),
+            ($1, 'talabat_cash', '{"en": "Talabat Cash", "ar": "طلبات كاش"}', '#F97316', 'delivery', true, false)
         "#
     )
     .bind(org.id)
