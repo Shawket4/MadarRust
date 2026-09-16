@@ -353,7 +353,13 @@ async fn lint_restored_db() {
 
 /// A person with an ORG role (`org_id`, `role`) and optional per-person deny of
 /// `menu_items read` (the legacy `permissions` row, synced into `user_overrides`).
-async fn staff_token(pool: &PgPool, org: Uuid, role: &str, kind: UserRole, deny_read: bool) -> String {
+async fn staff_token(
+    pool: &PgPool,
+    org: Uuid,
+    role: &str,
+    kind: UserRole,
+    deny_read: bool,
+) -> String {
     let user: Uuid = sqlx::query_scalar(
         "INSERT INTO users (org_id, name, email, password_hash, role) \
          VALUES ($1, $2, $3, 'h', $2::user_role) RETURNING id",
