@@ -58367,7 +58367,7 @@
           "active_members": {
             "type": "integer",
             "format": "int64",
-            "description": "Distinct members with any loyalty transaction in the range."
+            "description": "Distinct (not deleted) members with any loyalty transaction in the\nrange — deleted members are left out of every count so no rate over\n`total_members` can exceed 1."
           },
           "from": {
             "type": "string",
@@ -58376,7 +58376,7 @@
           "members_ever_redeemed": {
             "type": "integer",
             "format": "int64",
-            "description": "Distinct members who have ever redeemed a reward. Org-wide, lifetime."
+            "description": "Distinct (not deleted) members who have ever redeemed a reward.\nOrg-wide, lifetime."
           },
           "new_member_share": {
             "type": "number",
@@ -68846,7 +68846,7 @@
           "tax_collected": {
             "type": "integer",
             "format": "int64",
-            "description": "Tax collected at sale time, before refunds."
+            "description": "Tax on every non-voided sale in the range, before refunds (a sale later\nrefunded in full included)."
           },
           "to": {
             "type": [
