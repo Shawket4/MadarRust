@@ -29,6 +29,13 @@ CREATE INDEX IF NOT EXISTS pin_attempts_last_fail_idx ON pin_attempts (last_fail
 COMMENT ON TABLE pin_attempts IS
     'Failed PIN sign-in attempts per device and per branch. A growing delay, never a lock (POS_SIGNIN_OVERHAUL.md §3.4).';
 
+-- Not tenant data: keyed by a device id or a branch id, read and written only
+-- by the unauthenticated login handler before any org is known. Row security
+-- is on (every public table has it) with one open policy.
+ALTER TABLE pin_attempts ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS pin_attempts_login ON pin_attempts;
+CREATE POLICY pin_attempts_login ON pin_attempts USING (true) WITH CHECK (true);
+
 GRANT SELECT, INSERT, UPDATE, DELETE ON pin_attempts TO madar_app;
 
 -- The one failed sign-in WITH an identity: a correct PIN typed at a branch its

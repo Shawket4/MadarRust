@@ -513,7 +513,9 @@ async fn old_tablets_without_a_device_id_are_never_delayed(pool: PgPool) {
     .await;
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
-    for _ in 0..(crate::auth::pin_throttle::BRANCH_FREE_ATTEMPTS + 3) {
+    // Ten: the per-address governor on /auth/login allows a burst of ten, and
+    // "no pin_attempts row at all" below proves neither bucket was touched.
+    for _ in 0..10 {
         let req = test::TestRequest::post()
             .uri("/auth/login")
             .set_json(&json!({"name": "Nobody", "pin": "000000", "branch_id": branch_id}))

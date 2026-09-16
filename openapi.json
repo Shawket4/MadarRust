@@ -66516,7 +66516,7 @@
           },
           "reason": {
             "type": "string",
-            "description": "`stale_snapshot` — they held it when they acted and the device had not\nheard the revocation yet. `unauthorized_offline` — nothing explains it."
+            "description": "`stale_snapshot` — they held it when they acted and the device had not\nheard the revocation yet. `unauthorized_offline` — nothing explains it.\n`pin_wrong_branch` — their correct PIN was typed at a branch they may\nnot sign in at (`op` = `PinSignIn`, `details.attempts` counts the tries)."
           },
           "reviewed_at": {
             "type": [
