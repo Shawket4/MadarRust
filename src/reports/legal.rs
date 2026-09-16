@@ -18,6 +18,7 @@ use uuid::Uuid;
 use crate::{
     errors::{AppError, AppErrorResponse},
     models::UserRole,
+    orders::SOLD,
     orgs::handlers::extract_claims,
     permissions::checker::check_permission,
 };
@@ -41,13 +42,42 @@ pub struct AuditReport {
     pub by_issuer: Vec<AuditBreakdownEntry>,
 }
 
-async fn guard(req: &HttpRequest, pool: &PgPool, org_id: Uuid) -> Result<(), AppError> {
+/// Org match + `orders:read`, then the branches the caller may see.
+///
+/// `None` = the whole org (org admin / super admin). Anyone else with
+/// `orders:read` (a branch manager, a teller) gets only the branches they are
+/// assigned to — and a branch-bound teller token only its own branch — so an
+/// org-wide report never shows a branch the caller couldn't open on its own.
+pub(crate) async fn guard(
+    req: &HttpRequest,
+    pool: &PgPool,
+    org_id: Uuid,
+) -> Result<Option<Vec<Uuid>>, AppError> {
     let claims = extract_claims(req)?;
     check_permission(pool, &claims, "orders", "read").await?;
     if claims.role != UserRole::SuperAdmin && claims.org_id() != Some(org_id) {
         return Err(AppError::Forbidden("Not your org".into()));
     }
-    Ok(())
+    if matches!(claims.role, UserRole::SuperAdmin | UserRole::OrgAdmin) {
+        return Ok(None);
+    }
+    let token_branch = if claims.role == UserRole::Teller {
+        claims.branch_id()
+    } else {
+        None
+    };
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT a.branch_id FROM user_branch_assignments a \
+           JOIN branches b ON b.id = a.branch_id \
+          WHERE a.user_id = $1 AND b.org_id = $2 \
+            AND ($3::uuid IS NULL OR a.branch_id = $3)",
+    )
+    .bind(claims.user_id())
+    .bind(org_id)
+    .bind(token_branch)
+    .fetch_all(pool)
+    .await?;
+    Ok(Some(ids))
 }
 
 // ── Refunds audit ────────────────────────────────────────────
@@ -68,59 +98,62 @@ pub async fn refunds_audit(
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let org_id = org_id.into_inner();
-    guard(&req, pool.get_ref(), org_id).await?;
+    let scope = guard(&req, pool.get_ref(), org_id).await?;
 
-    let (total_count, total_amount_minor): (i64, i64) = sqlx::query_as(
+    let (total_count, total_amount_minor): (i64, i64) = sqlx::query_as(&format!(
         r#"
         SELECT COUNT(*)::bigint, COALESCE(SUM(r.amount), 0)::bigint
         FROM order_refunds r
         JOIN branches b ON b.id = r.branch_id
-        WHERE b.org_id = $1
+        WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4))
           AND ($2::timestamptz IS NULL OR r.issued_at >= $2)
           AND ($3::timestamptz IS NULL OR r.issued_at <= $3)
         "#,
-    )
+    ))
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
+    .bind(&scope)
     .fetch_one(pool.get_ref())
     .await?;
 
-    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(
+    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
         r#"
         SELECT r.reason AS label, COUNT(*)::bigint AS count, COALESCE(SUM(r.amount), 0)::bigint AS amount_minor
         FROM order_refunds r
         JOIN branches b ON b.id = r.branch_id
-        WHERE b.org_id = $1
+        WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4))
           AND ($2::timestamptz IS NULL OR r.issued_at >= $2)
           AND ($3::timestamptz IS NULL OR r.issued_at <= $3)
         GROUP BY r.reason
         ORDER BY count DESC
         "#,
-    )
+    ))
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
+    .bind(&scope)
     .fetch_all(pool.get_ref())
     .await?;
 
-    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(
+    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
         r#"
         SELECT u.name AS label, COUNT(*)::bigint AS count, COALESCE(SUM(r.amount), 0)::bigint AS amount_minor
         FROM order_refunds r
         JOIN branches b ON b.id = r.branch_id
         JOIN users u ON u.id = r.issued_by
-        WHERE b.org_id = $1
+        WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4))
           AND ($2::timestamptz IS NULL OR r.issued_at >= $2)
           AND ($3::timestamptz IS NULL OR r.issued_at <= $3)
-        GROUP BY u.name
+        GROUP BY u.id, u.name
         ORDER BY count DESC
         LIMIT 10
         "#,
-    )
+    ))
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
+    .bind(&scope)
     .fetch_all(pool.get_ref())
     .await?;
 
@@ -152,60 +185,63 @@ pub async fn voids_audit(
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let org_id = org_id.into_inner();
-    guard(&req, pool.get_ref(), org_id).await?;
+    let scope = guard(&req, pool.get_ref(), org_id).await?;
 
-    let (total_count, total_amount_minor): (i64, i64) = sqlx::query_as(
+    let (total_count, total_amount_minor): (i64, i64) = sqlx::query_as(&format!(
         r#"
         SELECT COUNT(*)::bigint, COALESCE(SUM(o.total_amount), 0)::bigint
         FROM orders o
         JOIN branches b ON b.id = o.branch_id
-        WHERE b.org_id = $1 AND o.status = 'voided'
+        WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4)) AND o.status = 'voided'
           AND ($2::timestamptz IS NULL OR o.voided_at >= $2)
           AND ($3::timestamptz IS NULL OR o.voided_at <= $3)
         "#,
-    )
+    ))
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
+    .bind(&scope)
     .fetch_one(pool.get_ref())
     .await?;
 
-    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(
+    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
         r#"
         SELECT COALESCE(o.void_reason::text, 'unspecified') AS label,
                COUNT(*)::bigint AS count, COALESCE(SUM(o.total_amount), 0)::bigint AS amount_minor
         FROM orders o
         JOIN branches b ON b.id = o.branch_id
-        WHERE b.org_id = $1 AND o.status = 'voided'
+        WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4)) AND o.status = 'voided'
           AND ($2::timestamptz IS NULL OR o.voided_at >= $2)
           AND ($3::timestamptz IS NULL OR o.voided_at <= $3)
         GROUP BY o.void_reason
         ORDER BY count DESC
         "#,
-    )
+    ))
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
+    .bind(&scope)
     .fetch_all(pool.get_ref())
     .await?;
 
-    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(
+    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
         r#"
         SELECT u.name AS label, COUNT(*)::bigint AS count, COALESCE(SUM(o.total_amount), 0)::bigint AS amount_minor
         FROM orders o
         JOIN branches b ON b.id = o.branch_id
         JOIN users u ON u.id = o.voided_by
-        WHERE b.org_id = $1 AND o.status = 'voided'
+        WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4)) AND o.status = 'voided'
           AND ($2::timestamptz IS NULL OR o.voided_at >= $2)
           AND ($3::timestamptz IS NULL OR o.voided_at <= $3)
-        GROUP BY u.name
+        GROUP BY u.id, u.name
         ORDER BY count DESC
         LIMIT 10
         "#,
-    )
+    ))
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
+    .bind(&scope)
     .fetch_all(pool.get_ref())
     .await?;
 
@@ -237,63 +273,66 @@ pub async fn discounts_audit(
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let org_id = org_id.into_inner();
-    guard(&req, pool.get_ref(), org_id).await?;
+    let scope = guard(&req, pool.get_ref(), org_id).await?;
 
-    let (total_count, total_amount_minor): (i64, i64) = sqlx::query_as(
+    let (total_count, total_amount_minor): (i64, i64) = sqlx::query_as(&format!(
         r#"
-        SELECT COUNT(*) FILTER (WHERE o.discount_amount > 0)::bigint,
+        SELECT COUNT(*)::bigint,
                COALESCE(SUM(o.discount_amount), 0)::bigint
         FROM orders o
         JOIN branches b ON b.id = o.branch_id
-        WHERE b.org_id = $1 AND o.status NOT IN ('voided', 'refunded') AND o.discount_amount > 0
+        WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4)) AND o.{SOLD} AND o.discount_amount > 0
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         "#,
-    )
+    ))
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
+    .bind(&scope)
     .fetch_one(pool.get_ref())
     .await?;
 
-    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(
+    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
         r#"
         SELECT COALESCE(d.name, o.discount_type::text, 'unspecified') AS label,
                COUNT(*)::bigint AS count, COALESCE(SUM(o.discount_amount), 0)::bigint AS amount_minor
         FROM orders o
         JOIN branches b ON b.id = o.branch_id
         LEFT JOIN discounts d ON d.id = o.discount_id
-        WHERE b.org_id = $1 AND o.status NOT IN ('voided', 'refunded') AND o.discount_amount > 0
+        WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4)) AND o.{SOLD} AND o.discount_amount > 0
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         GROUP BY COALESCE(d.name, o.discount_type::text, 'unspecified')
         ORDER BY count DESC
         LIMIT 10
         "#,
-    )
+    ))
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
+    .bind(&scope)
     .fetch_all(pool.get_ref())
     .await?;
 
-    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(
+    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
         r#"
         SELECT u.name AS label, COUNT(*)::bigint AS count, COALESCE(SUM(o.discount_amount), 0)::bigint AS amount_minor
         FROM orders o
         JOIN branches b ON b.id = o.branch_id
         JOIN users u ON u.id = o.teller_id
-        WHERE b.org_id = $1 AND o.status NOT IN ('voided', 'refunded') AND o.discount_amount > 0
+        WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4)) AND o.{SOLD} AND o.discount_amount > 0
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        GROUP BY u.name
+        GROUP BY u.id, u.name
         ORDER BY count DESC
         LIMIT 10
         "#,
-    )
+    ))
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
+    .bind(&scope)
     .fetch_all(pool.get_ref())
     .await?;
 
@@ -325,64 +364,67 @@ pub async fn waivers_audit(
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let org_id = org_id.into_inner();
-    guard(&req, pool.get_ref(), org_id).await?;
+    let scope = guard(&req, pool.get_ref(), org_id).await?;
 
-    let (total_count, total_amount_minor): (i64, i64) = sqlx::query_as(
+    let (total_count, total_amount_minor): (i64, i64) = sqlx::query_as(&format!(
         r#"
         SELECT COUNT(*)::bigint, COALESCE(SUM(o.service_charge_waived_amount), 0)::bigint
         FROM orders o
         JOIN branches b ON b.id = o.branch_id
-        WHERE b.org_id = $1 AND o.service_charge_waived_by IS NOT NULL
+        WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4)) AND o.service_charge_waived_by IS NOT NULL AND o.{SOLD}
           AND ($2::timestamptz IS NULL OR o.service_charge_waived_at >= $2)
           AND ($3::timestamptz IS NULL OR o.service_charge_waived_at <= $3)
         "#,
-    )
+    ))
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
+    .bind(&scope)
     .fetch_one(pool.get_ref())
     .await?;
 
     // No free-text reason is captured for a waiver, so the "reason" axis is
     // the branch it happened at instead — still useful to spot a branch that
     // waives far more than its peers.
-    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(
+    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
         r#"
         SELECT b.name AS label, COUNT(*)::bigint AS count,
                COALESCE(SUM(o.service_charge_waived_amount), 0)::bigint AS amount_minor
         FROM orders o
         JOIN branches b ON b.id = o.branch_id
-        WHERE b.org_id = $1 AND o.service_charge_waived_by IS NOT NULL
+        WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4)) AND o.service_charge_waived_by IS NOT NULL AND o.{SOLD}
           AND ($2::timestamptz IS NULL OR o.service_charge_waived_at >= $2)
           AND ($3::timestamptz IS NULL OR o.service_charge_waived_at <= $3)
         GROUP BY b.name
         ORDER BY count DESC
         "#,
-    )
+    ))
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
+    .bind(&scope)
     .fetch_all(pool.get_ref())
     .await?;
 
-    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(
+    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
         r#"
         SELECT u.name AS label, COUNT(*)::bigint AS count,
                COALESCE(SUM(o.service_charge_waived_amount), 0)::bigint AS amount_minor
         FROM orders o
         JOIN branches b ON b.id = o.branch_id
         JOIN users u ON u.id = o.service_charge_waived_by
-        WHERE b.org_id = $1 AND o.service_charge_waived_by IS NOT NULL
+        WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4)) AND o.service_charge_waived_by IS NOT NULL AND o.{SOLD}
           AND ($2::timestamptz IS NULL OR o.service_charge_waived_at >= $2)
           AND ($3::timestamptz IS NULL OR o.service_charge_waived_at <= $3)
-        GROUP BY u.name
+        GROUP BY u.id, u.name
         ORDER BY count DESC
         LIMIT 10
         "#,
-    )
+    ))
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
+    .bind(&scope)
     .fetch_all(pool.get_ref())
     .await?;
 
@@ -414,59 +456,62 @@ pub async fn price_overrides(
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let org_id = org_id.into_inner();
-    guard(&req, pool.get_ref(), org_id).await?;
+    let scope = guard(&req, pool.get_ref(), org_id).await?;
 
-    let (total_count, total_amount_minor): (i64, i64) = sqlx::query_as(
+    let (total_count, total_amount_minor): (i64, i64) = sqlx::query_as(&format!(
         r#"
         SELECT COUNT(*)::bigint, COALESCE(SUM(o.total_amount), 0)::bigint
         FROM orders o
         JOIN branches b ON b.id = o.branch_id
-        WHERE b.org_id = $1 AND o.price_flagged AND o.status NOT IN ('voided', 'refunded')
+        WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4)) AND o.price_flagged AND o.{SOLD}
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         "#,
-    )
+    ))
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
+    .bind(&scope)
     .fetch_one(pool.get_ref())
     .await?;
 
-    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(
+    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
         r#"
         SELECT b.name AS label, COUNT(*)::bigint AS count, COALESCE(SUM(o.total_amount), 0)::bigint AS amount_minor
         FROM orders o
         JOIN branches b ON b.id = o.branch_id
-        WHERE b.org_id = $1 AND o.price_flagged AND o.status NOT IN ('voided', 'refunded')
+        WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4)) AND o.price_flagged AND o.{SOLD}
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         GROUP BY b.name
         ORDER BY count DESC
         "#,
-    )
+    ))
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
+    .bind(&scope)
     .fetch_all(pool.get_ref())
     .await?;
 
-    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(
+    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
         r#"
         SELECT u.name AS label, COUNT(*)::bigint AS count, COALESCE(SUM(o.total_amount), 0)::bigint AS amount_minor
         FROM orders o
         JOIN branches b ON b.id = o.branch_id
         JOIN users u ON u.id = o.teller_id
-        WHERE b.org_id = $1 AND o.price_flagged AND o.status NOT IN ('voided', 'refunded')
+        WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4)) AND o.price_flagged AND o.{SOLD}
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        GROUP BY u.name
+        GROUP BY u.id, u.name
         ORDER BY count DESC
         LIMIT 10
         "#,
-    )
+    ))
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
+    .bind(&scope)
     .fetch_all(pool.get_ref())
     .await?;
 

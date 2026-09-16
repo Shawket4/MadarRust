@@ -2435,7 +2435,8 @@ pub struct TaxReport {
     pub discount_amount: i64,
     /// Net of refunded service charge.
     pub service_charge_amount: i64,
-    /// Tax collected at sale time, before refunds.
+    /// Tax on every non-voided sale in the range, before refunds (a sale later
+    /// refunded in full included).
     pub tax_collected: i64,
     pub refunded_tax: i64,
     /// `tax_collected - refunded_tax` — what is actually owed for the period.
@@ -2461,12 +2462,7 @@ pub async fn org_tax_report(
     org_id: web::Path<Uuid>,
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-
-    if claims.role != UserRole::SuperAdmin && claims.org_id() != Some(*org_id) {
-        return Err(AppError::Forbidden("Not your org".into()));
-    }
+    let scope = super::legal::guard(&req, pool.get_ref(), *org_id).await?;
 
     let org_tax_rate: sqlx::types::BigDecimal =
         sqlx::query_scalar("SELECT tax_rate FROM organizations WHERE id = $1")
@@ -2487,28 +2483,39 @@ pub async fn org_tax_report(
         net_revenue: i64,
     }
 
-    let totals = sqlx::query_as::<_, Totals>(
+    // `order_count`/`subtotal`/`discount_amount`/`service_charge_amount`/
+    // `net_revenue` scope on SOLD, exactly like `branch_sales`. The tax pair
+    // scopes on TENDERED instead: a sale refunded in full flips to `refunded`,
+    // and under SOLD both its tax and its refunded tax would silently vanish,
+    // understating "collected" and "refunded" alike. The difference is the
+    // same either way, so `net_tax_due` always equals `branch_sales.total_tax`
+    // summed over the same branches.
+    let totals = sqlx::query_as::<_, Totals>(&format!(
         r#"
         SELECT
-            COUNT(*) FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint AS order_count,
+            COUNT(*) FILTER (WHERE o.{SOLD})::bigint AS order_count,
             COUNT(*) FILTER (WHERE o.status = 'voided')::bigint AS voided_orders,
-            COALESCE(SUM(o.subtotal) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS subtotal,
-            COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS discount_amount,
-            COALESCE(SUM(o.service_charge_amount - COALESCE(rf.refunded_service_charge, 0)) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS service_charge_amount,
-            COALESCE(SUM(o.tax_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS tax_collected,
-            COALESCE(SUM(rf.refunded_tax) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS refunded_tax,
-            COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0)) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS net_revenue
+            COALESCE(SUM(o.subtotal) FILTER (WHERE o.{SOLD}), 0)::bigint AS subtotal,
+            COALESCE(SUM(o.discount_amount) FILTER (WHERE o.{SOLD}), 0)::bigint AS discount_amount,
+            COALESCE(SUM(o.service_charge_amount - COALESCE(rf.refunded_service_charge, 0)) FILTER (WHERE o.{SOLD}), 0)::bigint AS service_charge_amount,
+            COALESCE(SUM(o.tax_amount) FILTER (WHERE o.{TENDERED}), 0)::bigint AS tax_collected,
+            COALESCE(SUM(rf.refunded_tax) FILTER (WHERE o.{TENDERED}), 0)::bigint AS refunded_tax,
+            COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0)) FILTER (WHERE o.{SOLD}), 0)::bigint AS net_revenue
         FROM orders o
         JOIN branches br ON br.id = o.branch_id
         LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
         WHERE br.org_id = $1
+          AND ($4::uuid[] IS NULL OR br.id = ANY($4))
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         "#,
-    )
+        SOLD = crate::orders::SOLD,
+        TENDERED = crate::orders::TENDERED,
+    ))
     .bind(*org_id)
     .bind(query.from)
     .bind(query.to)
+    .bind(&scope)
     .fetch_one(pool.get_ref())
     .await?;
 

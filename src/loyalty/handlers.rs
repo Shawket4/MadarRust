@@ -965,11 +965,14 @@ pub struct LoyaltyBehavior {
     pub to: chrono::DateTime<chrono::Utc>,
     /// Enrolled, not deleted, as of now. Org-wide.
     pub total_members: i64,
-    /// Distinct members with any loyalty transaction in the range.
+    /// Distinct (not deleted) members with any loyalty transaction in the
+    /// range — deleted members are left out of every count so no rate over
+    /// `total_members` can exceed 1.
     pub active_members: i64,
     /// `active_members / total_members`. `0.0` when there are no members.
     pub active_member_rate: f64,
-    /// Distinct members who have ever redeemed a reward. Org-wide, lifetime.
+    /// Distinct (not deleted) members who have ever redeemed a reward.
+    /// Org-wide, lifetime.
     pub members_ever_redeemed: i64,
     /// `members_ever_redeemed / total_members`.
     pub redemption_rate: f64,
@@ -1039,8 +1042,9 @@ pub async fn behavior(
     .await?;
 
     let members_ever_redeemed: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT customer_id) FROM loyalty_transactions \
-          WHERE org_id = $1 AND kind = 'redeem'",
+        "SELECT COUNT(DISTINCT t.customer_id) FROM loyalty_transactions t \
+           JOIN loyalty_customers c ON c.id = t.customer_id AND c.deleted_at IS NULL \
+          WHERE t.org_id = $1 AND t.kind = 'redeem'",
     )
     .bind(org_id)
     .fetch_one(pool)
@@ -1073,6 +1077,7 @@ pub async fn behavior(
               FROM loyalty_transactions t \
               JOIN loyalty_customers c ON c.id = t.customer_id \
              WHERE t.org_id = $1 AND ($2::uuid IS NULL OR t.branch_id = $2) \
+               AND c.deleted_at IS NULL \
                AND t.created_at >= $3 AND t.created_at < $4 \
              GROUP BY t.customer_id, c.enrolled_at \
          ) \

@@ -1681,6 +1681,7 @@ fn status_predicates_are_unified() {
             "reports/handlers.rs",
             include_str!("../reports/handlers.rs"),
         ),
+        ("reports/legal.rs", include_str!("../reports/legal.rs")),
         ("orders/handlers.rs", include_str!("../orders/handlers.rs")),
         ("tills/handlers.rs", include_str!("../tills/handlers.rs")),
         (
