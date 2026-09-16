@@ -185,6 +185,7 @@ paths(
         crate::sync::pull::pull,
         // ── menu studio: modifiers + pricing (Wave 2, new tables) ───
         crate::menu::modifiers::list_groups,
+        crate::menu::lint::get_menu_lint,
         crate::menu::modifiers::create_group,
         crate::menu::modifiers::patch_group,
         crate::menu::modifiers::delete_group,

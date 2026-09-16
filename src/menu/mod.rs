@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod catalog_sync;
 pub mod handlers;
+pub mod lint;
 pub mod modifiers;
 pub mod routes;
 pub mod studio;

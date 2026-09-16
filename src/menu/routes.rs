@@ -1,6 +1,6 @@
 use crate::{
-    auth::middleware::JwtMiddleware, menu::catalog_sync, menu::handlers::*, menu::modifiers,
-    menu::studio,
+    auth::middleware::JwtMiddleware, menu::catalog_sync, menu::handlers::*, menu::lint,
+    menu::modifiers, menu::studio,
 };
 use actix_web::web;
 
@@ -82,6 +82,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             web::scope("/catalog")
                 .wrap(JwtMiddleware)
                 .route("/sync", web::get().to(catalog_sync::catalog_sync)),
+        )
+        // ── Menu modeling lint ───────────────────────────────────────────────
+        .service(
+            web::scope("/menu")
+                .wrap(JwtMiddleware)
+                .route("/lint", web::get().to(lint::get_menu_lint)),
         )
         // ── Reusable modifier groups (new unified tables) ─────────────────────
         .service(
