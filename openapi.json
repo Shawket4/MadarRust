@@ -22852,6 +22852,113 @@
         ]
       }
     },
+    "/menu-items/{id}/preview": {
+      "post": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "preview_menu_item",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Menu item id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Dry-run price, deductions, cost and warnings (nothing is written)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/menu-items/{id}/recipe-link": {
       "get": {
         "tags": [
@@ -23634,6 +23741,119 @@
         ]
       }
     },
+    "/menu/lint": {
+      "get": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "get_menu_lint",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "query",
+            "description": "Organization to lint.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "group_id",
+            "in": "query",
+            "description": "Only findings about this modifier group (for the group editor).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Menu modeling findings for the org (empty = clean)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LintIssue"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/metrics/query": {
       "post": {
         "tags": [
@@ -23829,6 +24049,15 @@
             "schema": {
               "type": "string",
               "format": "uuid"
+            }
+          },
+          {
+            "name": "include_inactive",
+            "in": "query",
+            "description": "Also list deactivated groups (default false)",
+            "required": false,
+            "schema": {
+              "type": "boolean"
             }
           }
         ],
@@ -24237,6 +24466,106 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/GroupOptionOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/modifier-groups/{gid}/usage": {
+      "get": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "get_group_usage",
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "description": "Modifier group ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Items the group is attached to, with per-item defaults and warnings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GroupUsageItem"
+                  }
                 }
               }
             }
@@ -52250,6 +52579,21 @@
           "ingredient_unit"
         ],
         "properties": {
+          "category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The ingredient's category (additive, B12): lets the POS know an extra\nshot is a `coffee_bean` and follows the drink's chosen bean."
+          },
+          "category_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Slug of [`Self::category_id`] (`milk`, `coffee_bean`, `packaging`, …)."
+          },
           "ingredient_name": {
             "type": "string"
           },
@@ -57834,6 +58178,13 @@
           "selection_type"
         ],
         "properties": {
+          "effect": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`none` | `adds` | `swaps` (default: derived — `swaps` for `milk_type` /\n`coffee_type`, else `adds`)."
+          },
           "is_required": {
             "type": "boolean"
           },
@@ -57866,6 +58217,14 @@
           "sort": {
             "type": "integer",
             "format": "int32"
+          },
+          "swap_category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Required meaning for `effect = swaps`: the ingredient category swapped."
           }
         }
       },
@@ -61876,6 +62235,13 @@
             "type": "integer",
             "format": "int32"
           },
+          "recipe": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GroupOptionRecipeLine"
+            },
+            "description": "The option's recipe lines (base unit), ordered by ingredient name."
+          },
           "replaces_ingredient_id": {
             "type": [
               "string",
@@ -61886,6 +62252,39 @@
           "sort": {
             "type": "integer",
             "format": "int32"
+          }
+        }
+      },
+      "GroupOptionRecipeLine": {
+        "type": "object",
+        "description": "One recipe line of a modifier option, as the group editor shows it.",
+        "required": [
+          "ingredient_id",
+          "ingredient_name",
+          "quantity",
+          "unit"
+        ],
+        "properties": {
+          "ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ingredient_name": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "number",
+            "format": "double"
+          },
+          "size_label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`null` = the generic line (every size); else the per-size amount for that\nsize label (menu modeling B9). The editor must round-trip it on save."
+          },
+          "unit": {
+            "type": "string"
           }
         }
       },
@@ -61902,9 +62301,14 @@
           "is_required",
           "sort",
           "is_active",
+          "effect",
           "options"
         ],
         "properties": {
+          "effect": {
+            "type": "string",
+            "description": "What choosing does: `none` | `adds` | `swaps`."
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -61952,6 +62356,111 @@
           "sort": {
             "type": "integer",
             "format": "int32"
+          },
+          "swap_category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "For `swaps`: the ingredient category whose recipe line each option replaces."
+          },
+          "swap_category_slug": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "GroupUsageItem": {
+        "type": "object",
+        "description": "One menu item a group is attached to, as the group editor lists it.",
+        "required": [
+          "item_id",
+          "item_name",
+          "item_is_active",
+          "is_required",
+          "min_selections",
+          "included_option_count",
+          "warnings"
+        ],
+        "properties": {
+          "category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "category_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "default_option_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Swap groups only: the option preselected on this item, i.e. the first offered\noption (sort, name) carrying the recipe's ingredient of the swap category, on\nthe item's first size that has one. `null` for non-swap groups or when the\nrecipe's ingredient is not offered (lint F4 / F5)."
+          },
+          "included_option_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Active options this item offers."
+          },
+          "included_option_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "`null` = the item offers every option of the group."
+          },
+          "is_required": {
+            "type": "boolean",
+            "description": "Effective for this item: attachment override, else the group default."
+          },
+          "item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "item_is_active": {
+            "type": "boolean"
+          },
+          "item_name": {
+            "type": "string"
+          },
+          "legacy_origin": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`slot` | `allowlist` | `options` (old-till provenance)."
+          },
+          "max_selections": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "min_selections": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LintIssue"
+            },
+            "description": "Lint findings F4–F10 about this item and this group."
           }
         }
       },
@@ -63276,6 +63785,70 @@
             "format": "uuid"
           }
         }
+      },
+      "LintIssue": {
+        "type": "object",
+        "description": "One finding. `entity_type` is `attachment` | `item` | `option` | `ingredient`.",
+        "required": [
+          "rule",
+          "severity",
+          "entity_type",
+          "entity_id",
+          "entity_name",
+          "message"
+        ],
+        "properties": {
+          "entity_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "entity_name": {
+            "type": "string"
+          },
+          "entity_type": {
+            "type": "string"
+          },
+          "group_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The modifier group the finding is about, when it is group-scoped."
+          },
+          "item_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The menu item the finding is about, when it is item-scoped."
+          },
+          "message": {
+            "type": "string"
+          },
+          "rule": {
+            "type": "string",
+            "description": "Audit rule id, e.g. `F4`."
+          },
+          "severity": {
+            "$ref": "#/components/schemas/LintSeverity"
+          },
+          "size_label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set when the finding is about one size of an item."
+          }
+        }
+      },
+      "LintSeverity": {
+        "type": "string",
+        "enum": [
+          "error",
+          "warn"
+        ]
       },
       "LoginRequest": {
         "type": "object",
@@ -67872,20 +68445,42 @@
       },
       "PatchGroupRequest": {
         "type": "object",
-        "description": "Every field optional — only present keys are updated. `Option<Option<T>>` (with\n`deserialize_with`) is avoided; nullable columns that must be clearable\n(`max_selections`) are handled by a dedicated presence flag pattern below.",
+        "description": "Every field optional — only present keys are updated. Nullable columns that must\nbe clearable (`max_selections`, `swap_category_id`, `legacy_addon_type`) use\npresence: key absent = keep, `null` = clear, value = set.",
         "properties": {
+          "effect": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`none` | `adds` | `swaps`. Changing it re-derives `legacy_addon_type` for old\ntills: swaps milk → `milk_type`, swaps coffee_bean → `coffee_type`; otherwise\nthe provided/existing type (a magic type on a non-swap group becomes `extra`)."
+          },
+          "is_active": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Reactivate (`true`) or deactivate (`false`) the group."
+          },
           "is_required": {
             "type": [
               "boolean",
               "null"
             ]
           },
+          "legacy_addon_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Absent = keep; `null` = clear (group invisible to old tills); a string = set."
+          },
           "max_selections": {
             "type": [
               "integer",
               "null"
             ],
-            "format": "int32"
+            "format": "int32",
+            "description": "Absent = keep; `null` = no upper bound; a number = set."
           },
           "min_selections": {
             "type": [
@@ -67913,6 +68508,14 @@
               "null"
             ],
             "format": "int32"
+          },
+          "swap_category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Absent = keep; `null` = clear; a category id of this org = set."
           }
         }
       },
@@ -67952,7 +68555,16 @@
               "string",
               "null"
             ],
-            "format": "uuid"
+            "format": "uuid",
+            "description": "Absent = keep; `null` = clear the swap link; an ingredient id = set."
+          },
+          "sort": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Display order inside the group."
           }
         }
       },
@@ -68875,6 +69487,80 @@
           }
         }
       },
+      "PreviewCost": {
+        "type": "object",
+        "required": [
+          "total",
+          "cost_missing"
+        ],
+        "properties": {
+          "cost_missing": {
+            "type": "boolean",
+            "description": "At least one deducted line has no cost: `total` is partial."
+          },
+          "margin_pct": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "`(price − cost) / price` (fraction, like `/costing`); null when the cost\nis partial or the price is 0."
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Piastres over the deducted lines with a known cost."
+          }
+        }
+      },
+      "PreviewDeduction": {
+        "type": "object",
+        "required": [
+          "name",
+          "category_slug",
+          "quantity",
+          "unit",
+          "source",
+          "skipped"
+        ],
+        "properties": {
+          "category_slug": {
+            "type": "string"
+          },
+          "ingredient_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`swapped from X` | `follows the chosen X` | `skipped on dine-in`."
+          },
+          "quantity": {
+            "type": "number",
+            "format": "double"
+          },
+          "skipped": {
+            "type": "boolean",
+            "description": "Shown but not deducted (dine-in packaging)."
+          },
+          "source": {
+            "type": "string",
+            "description": "`recipe` | `swap` | `option` | `packaging`."
+          },
+          "unit": {
+            "type": "string"
+          }
+        }
+      },
       "PreviewIngredient": {
         "type": "object",
         "required": [
@@ -68910,6 +69596,59 @@
           }
         }
       },
+      "PreviewOptionPrice": {
+        "type": "object",
+        "required": [
+          "option_id",
+          "name",
+          "price_delta",
+          "reason"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "option_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "price_delta": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Piastres added to one unit (swap = difference over the default)."
+          },
+          "reason": {
+            "type": "string",
+            "description": "`swap over <default>` | `adds` | `none`."
+          }
+        }
+      },
+      "PreviewPrice": {
+        "type": "object",
+        "required": [
+          "base",
+          "options",
+          "total"
+        ],
+        "properties": {
+          "base": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Unit price of the item/size, piastres."
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PreviewOptionPrice"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "(base + options) × quantity, piastres."
+          }
+        }
+      },
       "PreviewRecipeRequest": {
         "type": "object",
         "required": [
@@ -68940,6 +69679,98 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "PreviewRequest": {
+        "type": "object",
+        "properties": {
+          "branch_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Price and cost as at this branch; absent = catalogue / org-level cost."
+          },
+          "option_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Chosen modifier options, including item-private optional-field ids."
+          },
+          "quantity": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "service_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`takeaway` (default) | `dine_in`."
+          },
+          "size_label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Size to price and deduct; absent = the order path's default (base price,\nfirst size's recipe)."
+          }
+        }
+      },
+      "PreviewResponse": {
+        "type": "object",
+        "required": [
+          "quantity",
+          "price",
+          "deductions",
+          "cost",
+          "warnings",
+          "defaults"
+        ],
+        "properties": {
+          "cost": {
+            "$ref": "#/components/schemas/PreviewCost"
+          },
+          "deductions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PreviewDeduction"
+            }
+          },
+          "defaults": {
+            "type": "object",
+            "description": "Swap groups: group id → the option preselected by the recipe.",
+            "additionalProperties": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "price": {
+            "$ref": "#/components/schemas/PreviewPrice"
+          },
+          "quantity": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "size_label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The size the preview resolved (the request's, else the default size)."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResolveWarning"
+            }
           }
         }
       },
@@ -72043,6 +72874,23 @@
           }
         }
       },
+      "ResolveWarning": {
+        "type": "object",
+        "description": "A resolution problem that the order path only logs; the preview returns it.",
+        "required": [
+          "rule",
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "rule": {
+            "type": "string",
+            "description": "`unit_conversion` | `swap_failed` | `optional_not_found` | `optional_size_mismatch`,\nor a lint rule id (`F4`…`F10`) when added by the preview."
+          }
+        }
+      },
       "ResolvedShift": {
         "type": "object",
         "description": "A work shift resolved onto a concrete calendar date, with its window already\nconverted to UTC instants.",
@@ -74572,6 +75420,21 @@
           "unit"
         ],
         "properties": {
+          "category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The ingredient's category (additive, B12), so the POS can mirror the\nresolver's \"extras follow the drink's choice\" pass by slug."
+          },
+          "category_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Slug of [`Self::category_id`] (`milk`, `coffee_bean`, `packaging`, …)."
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -74637,6 +75500,10 @@
           "options"
         ],
         "properties": {
+          "effect": {
+            "type": "string",
+            "description": "What choosing does: `none` | `adds` | `swaps`."
+          },
           "group_id": {
             "type": "string",
             "format": "uuid"
@@ -74676,6 +75543,20 @@
           },
           "selection_type": {
             "type": "string"
+          },
+          "swap_category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "For `swaps`: the ingredient category whose recipe line each option replaces."
+          },
+          "swap_category_slug": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -74697,6 +75578,10 @@
           "is_available": {
             "type": "boolean",
             "description": "Effective availability (branch_channel → branch → channel → TRUE)."
+          },
+          "is_default": {
+            "type": "boolean",
+            "description": "Explicit preselect for non-swap groups (e.g. \"White bread\"). Swap groups\nderive their default from the drink's recipe; this is always `false` there."
           },
           "name": {
             "type": "string"
