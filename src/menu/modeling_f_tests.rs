@@ -820,3 +820,59 @@ async fn a_linked_copy_follows_its_source_until_unlinked(pool: PgPool) {
         "20"
     );
 }
+
+// ── Permissions coverage (stream P) ──────────────────────────────────
+
+async fn staff_token(pool: &PgPool, org: Uuid, role: &str, kind: UserRole) -> String {
+    let user: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (org_id, name, email, password_hash, role) \
+         VALUES ($1, $2, $3, 'x', $2::user_role) RETURNING id",
+    )
+    .bind(org)
+    .bind(role)
+    .bind(format!("{}@p.test", Uuid::new_v4()))
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    crate::auth::jwt::create_token(&JwtSecret("secret".into()), user, Some(org), kind, None, 24)
+        .unwrap()
+}
+
+/// Apply is `menu.packaging_rules.apply` (owner-only); base line edits are
+/// `menu.items.edit` and linked copies `menu.items.create` (both owner-only by
+/// default). A teller and a branch manager are refused all three; reading the
+/// rules is `menu.items.read`, core for tellers and managers.
+#[sqlx::test]
+async fn modeling_writes_are_refused_to_tellers_and_managers(pool: PgPool) {
+    let o = setup(&pool).await;
+    let (src, _) = item(&pool, o.org, o.cat, "Latte", &["Cup"]).await;
+    let base = Uuid::new_v4();
+    let teller = staff_token(&pool, o.org, "teller", UserRole::Teller).await;
+    let manager = staff_token(&pool, o.org, "branch_manager", UserRole::BranchManager).await;
+
+    for (who, t) in [("teller", &teller), ("manager", &manager)] {
+        let (st, r) = call!(pool, t, post, "/packaging-rules/apply".to_string());
+        assert_eq!(st, 403, "{who} apply: {r}");
+        let (st, r) = call!(
+            pool,
+            t,
+            put,
+            format!("/recipe-bases/{base}/lines"),
+            json!({"lines": []})
+        );
+        assert_eq!(st, 403, "{who} base lines: {r}");
+        let (st, r) = call!(
+            pool,
+            t,
+            post,
+            format!("/menu-items/{src}/linked-copy"),
+            json!({"name": "Copy", "price": 0, "category_id": o.cat})
+        );
+        assert_eq!(st, 403, "{who} linked copy: {r}");
+        let (st, r) = call!(pool, t, get, "/packaging-rules".to_string());
+        assert_eq!(st, 200, "{who} reads the rules: {r}");
+    }
+
+    let (st, r) = call!(pool, o.token, post, "/packaging-rules/apply".to_string());
+    assert_eq!(st, 200, "the owner applies: {r}");
+}

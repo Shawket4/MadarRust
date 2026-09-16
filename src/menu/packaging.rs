@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::guards::require_same_org,
+    authz::{Cap, require::require},
     errors::{AppError, AppErrorResponse},
     menu::{
         bases::{claims_org, extract_claims},
@@ -468,7 +469,8 @@ pub async fn delete_rule(
 )]
 pub async fn apply_rules(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
+    // Org-wide bulk re-expansion: its own capability, owner-only by default.
+    require(pool.get_ref(), &claims, Cap::MenuPackagingRulesApply, None).await?;
     let org = claims_org(&claims)?;
     let result = apply_for_org(pool.get_ref(), org).await?;
     Ok(HttpResponse::Ok().json(result))
