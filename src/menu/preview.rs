@@ -7,9 +7,8 @@
 //! [`ingredient_costs_at`] for cost — and writes nothing. Lint rules F4–F10 are
 //! added, scoped to this item, its size and the chosen options.
 //!
-//! Dine-in strips ingredients in slug `packaging` (the order path's rule on this
-//! branch; the sibling `is_packaging` flag lands with stream F through the shared
-//! helper).
+//! Dine-in strips ingredients whose category is `is_packaging` or has the legacy
+//! slug `packaging` (the order path's rule, through the shared helper).
 
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use serde::{Deserialize, Serialize};

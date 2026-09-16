@@ -83,6 +83,9 @@ pub struct GroupOptionRecipeLine {
     pub ingredient_name: String,
     pub quantity: f64,
     pub unit: String,
+    /// `null` = the generic line (every size); else the per-size amount for that
+    /// size label (menu modeling B9). The editor must round-trip it on save.
+    pub size_label: Option<String>,
 }
 
 /// A reusable modifier group with its options (org-scoped catalog view).
@@ -534,7 +537,8 @@ async fn load_groups(pool: &PgPool, group_ids: &[Uuid]) -> Result<Vec<GroupOut>,
         .collect())
 }
 
-/// Recipe lines (with ingredient names) of the given options, keyed by option id.
+/// Recipe lines (with ingredient names) of the given options, keyed by option id:
+/// generic (NULL-size) lines first, then per-size lines, each by ingredient name.
 async fn load_option_recipes(
     pool: &PgPool,
     option_ids: &[Uuid],
@@ -544,21 +548,22 @@ async fn load_option_recipes(
     if option_ids.is_empty() {
         return Ok(map);
     }
-    let rows: Vec<(Uuid, Uuid, String, Decimal, String)> = sqlx::query_as(
-        "SELECT rl.owner_id, rl.ingredient_id, oi.name, rl.quantity, rl.unit \
+    let rows: Vec<(Uuid, Uuid, String, Decimal, String, Option<String>)> = sqlx::query_as(
+        "SELECT rl.owner_id, rl.ingredient_id, oi.name, rl.quantity, rl.unit, rl.size_label \
          FROM recipe_lines rl JOIN org_ingredients oi ON oi.id = rl.ingredient_id \
          WHERE rl.owner_type = 'modifier_option' AND rl.owner_id = ANY($1) \
-         ORDER BY rl.owner_id, oi.name, rl.ingredient_id",
+         ORDER BY rl.owner_id, rl.size_label NULLS FIRST, oi.name, rl.ingredient_id",
     )
     .bind(option_ids)
     .fetch_all(pool)
     .await?;
-    for (owner, ingredient_id, ingredient_name, quantity, unit) in rows {
+    for (owner, ingredient_id, ingredient_name, quantity, unit, size_label) in rows {
         map.entry(owner).or_default().push(GroupOptionRecipeLine {
             ingredient_id,
             ingredient_name,
             quantity: quantity.to_string().parse::<f64>().unwrap_or(0.0),
             unit,
+            size_label,
         });
     }
     Ok(map)
