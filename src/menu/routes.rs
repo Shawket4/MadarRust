@@ -1,6 +1,6 @@
 use crate::{
     auth::middleware::JwtMiddleware, menu::catalog_sync, menu::handlers::*, menu::lint,
-    menu::modifiers, menu::studio,
+    menu::modifiers, menu::preview, menu::studio,
 };
 use actix_web::web;
 
@@ -69,7 +69,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/{id}/duplicate", web::post().to(studio::duplicate_item))
                 // Priced optionals (item-private Options group) + live per-size cost
                 .route("/{id}/options", web::put().to(modifiers::put_item_options))
-                .route("/{id}/cost", web::get().to(modifiers::get_item_cost)),
+                .route("/{id}/cost", web::get().to(modifiers::get_item_cost))
+                // Dry-run: price + deductions + warnings for one configuration (B5)
+                .route("/{id}/preview", web::post().to(preview::preview_menu_item)),
         )
         // ── Menu Studio: per-size recipe (new unified tables) ─────────────────
         .service(
@@ -97,6 +99,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("", web::post().to(modifiers::create_group))
                 .route("/{gid}", web::patch().to(modifiers::patch_group))
                 .route("/{gid}", web::delete().to(modifiers::delete_group))
+                .route("/{gid}/usage", web::get().to(modifiers::get_group_usage))
                 .route("/{gid}/options", web::post().to(modifiers::create_option)),
         )
         // ── Reusable modifier options (new unified tables) ────────────────────

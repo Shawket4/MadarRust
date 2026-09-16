@@ -94,6 +94,10 @@ pub struct SyncOption {
     pub is_available: bool,
     /// The org_ingredient this option swaps out, if it is a swap-style option.
     pub replaces_ingredient_id: Option<Uuid>,
+    /// Explicit preselect for non-swap groups (e.g. "White bread"). Swap groups
+    /// derive their default from the drink's recipe; this is always `false` there.
+    #[serde(default)]
+    pub is_default: bool,
     pub recipe: Vec<SyncRecipeLine>,
 }
 
@@ -112,7 +116,19 @@ pub struct SyncModifierGroup {
     pub max: Option<i32>,
     pub is_required: bool,
     pub legacy_addon_type: Option<String>,
+    /// What choosing does: `none` | `adds` | `swaps`.
+    #[serde(default = "default_effect")]
+    pub effect: String,
+    /// For `swaps`: the ingredient category whose recipe line each option replaces.
+    #[serde(default)]
+    pub swap_category_id: Option<Uuid>,
+    #[serde(default)]
+    pub swap_category_slug: Option<String>,
     pub options: Vec<SyncOption>,
+}
+
+fn default_effect() -> String {
+    "adds".into()
 }
 
 /// One menu item with its sizes and attached modifier groups.
@@ -132,6 +148,13 @@ pub struct SyncIngredient {
     pub id: Uuid,
     pub name: String,
     pub unit: String,
+    /// The ingredient's category (additive, B12), so the POS can mirror the
+    /// resolver's "extras follow the drink's choice" pass by slug.
+    #[serde(default)]
+    pub category_id: Option<Uuid>,
+    /// Slug of [`Self::category_id`] (`milk`, `coffee_bean`, `packaging`, …).
+    #[serde(default)]
+    pub category_slug: Option<String>,
 }
 
 /// The full catalog snapshot for a POS device.
@@ -379,6 +402,9 @@ struct RawGroupAttachment {
     is_required: bool,
     legacy_addon_type: Option<String>,
     included_option_ids: Option<Vec<Uuid>>,
+    effect: String,
+    swap_category_id: Option<Uuid>,
+    swap_category_slug: Option<String>,
 }
 
 /// Load attached modifier groups + their resolved options for the items, keyed by
@@ -424,14 +450,19 @@ async fn load_modifier_groups(
         Option<String>,
         Option<Vec<Uuid>>,
         i32,
+        String,
+        Option<Uuid>,
+        Option<String>,
     )> = sqlx::query_as(
         "SELECT mimg.menu_item_id, mg.id, mg.name, mg.name_translations, mg.selection_type, \
                 COALESCE(mimg.min_override, mg.min_selections) AS min, \
                 COALESCE(mimg.max_override, mg.max_selections) AS max, \
                 COALESCE(mimg.is_required_override, mg.is_required) AS is_required, \
-                mg.legacy_addon_type, mimg.included_option_ids, mimg.sort \
+                mg.legacy_addon_type, mimg.included_option_ids, mimg.sort, \
+                mg.effect, mg.swap_category_id, sc.slug \
          FROM menu_item_modifier_groups mimg \
          JOIN modifier_groups mg ON mg.id = mimg.group_id \
+         LEFT JOIN ingredient_categories sc ON sc.id = mg.swap_category_id \
          WHERE mimg.menu_item_id = ANY($1) AND mg.is_active = true \
          ORDER BY mimg.menu_item_id, mimg.sort, mg.name",
     )
@@ -454,6 +485,9 @@ async fn load_modifier_groups(
                 legacy_addon_type,
                 included_option_ids,
                 _sort,
+                effect,
+                swap_category_id,
+                swap_category_slug,
             )| RawGroupAttachment {
                 menu_item_id,
                 group_id,
@@ -465,6 +499,9 @@ async fn load_modifier_groups(
                 is_required,
                 legacy_addon_type,
                 included_option_ids,
+                effect,
+                swap_category_id,
+                swap_category_slug,
             },
         )
         .collect();
@@ -500,6 +537,7 @@ async fn load_modifier_groups(
                     price: o.price,
                     is_available: o.is_available,
                     replaces_ingredient_id: o.replaces_ingredient_id,
+                    is_default: o.is_default && a.effect != "swaps",
                     recipe,
                 });
             }
@@ -516,6 +554,9 @@ async fn load_modifier_groups(
                 max: a.max,
                 is_required: a.is_required,
                 legacy_addon_type: a.legacy_addon_type.clone(),
+                effect: a.effect.clone(),
+                swap_category_id: a.swap_category_id,
+                swap_category_slug: a.swap_category_slug.clone(),
                 options,
             });
     }
@@ -531,6 +572,7 @@ struct RawOption {
     price: i32,
     is_available: bool,
     replaces_ingredient_id: Option<Uuid>,
+    is_default: bool,
 }
 
 /// Load every active option of the given groups, resolving each option's
@@ -561,11 +603,11 @@ async fn load_group_options(
 
     // Options with price/availability resolved (same COALESCE shape as sizes, but
     // target_type='modifier_option' and default price = mo.price).
-    let opt_rows: Vec<(Uuid, Uuid, String, i32, bool, Option<Uuid>)> = sqlx::query_as(
+    let opt_rows: Vec<(Uuid, Uuid, String, i32, bool, Option<Uuid>, bool)> = sqlx::query_as(
         "SELECT mo.group_id, mo.id, mo.name, \
                 COALESCE(bc.price, b.price, c.price, mo.price) AS price, \
                 COALESCE(bc.is_available, b.is_available, c.is_available, TRUE) AS is_available, \
-                mo.replaces_ingredient_id \
+                mo.replaces_ingredient_id, mo.is_default \
          FROM modifier_options mo \
          LEFT JOIN menu_price_overrides bc \
                 ON bc.target_type = 'modifier_option' AND bc.target_id = mo.id \
@@ -587,7 +629,7 @@ async fn load_group_options(
     .await?;
 
     let mut option_ids = Vec::with_capacity(opt_rows.len());
-    for (group_id, id, name, price, is_available, replaces_ingredient_id) in opt_rows {
+    for (group_id, id, name, price, is_available, replaces_ingredient_id, is_default) in opt_rows {
         option_ids.push(id);
         by_group.entry(group_id).or_default().push(RawOption {
             id,
@@ -595,6 +637,7 @@ async fn load_group_options(
             price,
             is_available,
             replaces_ingredient_id,
+            is_default,
         });
     }
 
@@ -641,17 +684,27 @@ async fn load_referenced_ingredients(
     if ingredient_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
-        "SELECT id, name, unit::text FROM org_ingredients \
-         WHERE id = ANY($1) AND is_active = true AND deleted_at IS NULL \
-         ORDER BY name",
+    type IngredientRow = (Uuid, String, String, Option<Uuid>, Option<String>);
+    let rows: Vec<IngredientRow> = sqlx::query_as(
+        "SELECT oi.id, oi.name, oi.unit::text, ic.id, ic.slug FROM org_ingredients oi \
+         LEFT JOIN ingredient_categories ic ON ic.id = oi.category_id \
+         WHERE oi.id = ANY($1) AND oi.is_active = true AND oi.deleted_at IS NULL \
+         ORDER BY oi.name",
     )
     .bind(ingredient_ids)
     .fetch_all(&mut *conn)
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, name, unit)| SyncIngredient { id, name, unit })
+        .map(
+            |(id, name, unit, category_id, category_slug)| SyncIngredient {
+                id,
+                name,
+                unit,
+                category_id,
+                category_slug,
+            },
+        )
         .collect())
 }
 

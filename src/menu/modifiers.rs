@@ -29,6 +29,7 @@
 //!      POST   /modifier-groups
 //!      PATCH  /modifier-groups/{gid}
 //!      DELETE /modifier-groups/{gid}                 (soft if attached/order-referenced)
+//!      GET    /modifier-groups/{gid}/usage           (attached items, defaults, warnings)
 //!      POST   /modifier-groups/{gid}/options
 //!      PATCH  /modifier-options/{oid}
 //!      DELETE /modifier-options/{oid}                (soft if order-referenced)
@@ -70,6 +71,18 @@ pub struct GroupOptionOut {
     pub is_default: bool,
     pub is_active: bool,
     pub replaces_ingredient_id: Option<Uuid>,
+    /// The option's recipe lines (base unit), ordered by ingredient name.
+    #[serde(default)]
+    pub recipe: Vec<GroupOptionRecipeLine>,
+}
+
+/// One recipe line of a modifier option, as the group editor shows it.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct GroupOptionRecipeLine {
+    pub ingredient_id: Uuid,
+    pub ingredient_name: String,
+    pub quantity: f64,
+    pub unit: String,
 }
 
 /// A reusable modifier group with its options (org-scoped catalog view).
@@ -86,6 +99,11 @@ pub struct GroupOut {
     pub sort: i32,
     pub is_active: bool,
     pub legacy_addon_type: Option<String>,
+    /// What choosing does: `none` | `adds` | `swaps`.
+    pub effect: String,
+    /// For `swaps`: the ingredient category whose recipe line each option replaces.
+    pub swap_category_id: Option<Uuid>,
+    pub swap_category_slug: Option<String>,
     pub options: Vec<GroupOptionOut>,
 }
 
@@ -117,20 +135,53 @@ pub struct CreateGroupRequest {
     /// it whenever the pre-teardown fleet must see the group's options.
     #[serde(default)]
     pub legacy_addon_type: Option<String>,
+    /// `none` | `adds` | `swaps` (default: derived — `swaps` for `milk_type` /
+    /// `coffee_type`, else `adds`).
+    #[serde(default)]
+    pub effect: Option<String>,
+    /// Required meaning for `effect = swaps`: the ingredient category swapped.
+    #[serde(default)]
+    pub swap_category_id: Option<Uuid>,
 }
 
-/// Every field optional — only present keys are updated. `Option<Option<T>>` (with
-/// `deserialize_with`) is avoided; nullable columns that must be clearable
-/// (`max_selections`) are handled by a dedicated presence flag pattern below.
+/// Every field optional — only present keys are updated. Nullable columns that must
+/// be clearable (`max_selections`, `swap_category_id`, `legacy_addon_type`) use
+/// presence: key absent = keep, `null` = clear, value = set.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct PatchGroupRequest {
     pub name: Option<String>,
     pub name_translations: Option<serde_json::Value>,
     pub selection_type: Option<String>,
     pub min_selections: Option<i32>,
-    pub max_selections: Option<i32>,
+    /// Absent = keep; `null` = no upper bound; a number = set.
+    #[serde(
+        default,
+        deserialize_with = "crate::menu::handlers::deserialize_double_option"
+    )]
+    #[schema(value_type = Option<i32>)]
+    pub max_selections: Option<Option<i32>>,
     pub is_required: Option<bool>,
     pub sort: Option<i32>,
+    /// Reactivate (`true`) or deactivate (`false`) the group.
+    pub is_active: Option<bool>,
+    /// `none` | `adds` | `swaps`. Changing it re-derives `legacy_addon_type` for old
+    /// tills: swaps milk → `milk_type`, swaps coffee_bean → `coffee_type`; otherwise
+    /// the provided/existing type (a magic type on a non-swap group becomes `extra`).
+    pub effect: Option<String>,
+    /// Absent = keep; `null` = clear; a category id of this org = set.
+    #[serde(
+        default,
+        deserialize_with = "crate::menu::handlers::deserialize_double_option"
+    )]
+    #[schema(value_type = Option<Uuid>)]
+    pub swap_category_id: Option<Option<Uuid>>,
+    /// Absent = keep; `null` = clear (group invisible to old tills); a string = set.
+    #[serde(
+        default,
+        deserialize_with = "crate::menu::handlers::deserialize_double_option"
+    )]
+    #[schema(value_type = Option<String>)]
+    pub legacy_addon_type: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -155,7 +206,15 @@ pub struct PatchOptionRequest {
     pub price: Option<i32>,
     pub is_default: Option<bool>,
     pub is_active: Option<bool>,
-    pub replaces_ingredient_id: Option<Uuid>,
+    /// Absent = keep; `null` = clear the swap link; an ingredient id = set.
+    #[serde(
+        default,
+        deserialize_with = "crate::menu::handlers::deserialize_double_option"
+    )]
+    #[schema(value_type = Option<Uuid>)]
+    pub replaces_ingredient_id: Option<Option<Uuid>>,
+    /// Display order inside the group.
+    pub sort: Option<i32>,
 }
 
 /// One recipe line as submitted to the option-recipe replace endpoint. `quantity`
@@ -245,6 +304,86 @@ pub(crate) fn is_swap_family(legacy_addon_type: Option<&str>) -> bool {
     matches!(legacy_addon_type, Some("milk_type" | "coffee_type"))
 }
 
+const EFFECTS: [&str; 3] = ["none", "adds", "swaps"];
+
+fn validate_effect(effect: &str) -> Result<(), AppError> {
+    if EFFECTS.contains(&effect) {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(
+            "effect must be 'none', 'adds' or 'swaps'".into(),
+        ))
+    }
+}
+
+/// The `legacy_addon_type` old tills see for a group with this effect (B3).
+///
+/// * `swaps` of the `milk` / `coffee_bean` category → `milk_type` / `coffee_type`
+///   (the shim types old tills swap on);
+/// * `swaps` of another category → the requested type, else the current one unless it
+///   is a magic type (then `extra`), else `extra`;
+/// * `none` / `adds` → the requested type (a magic type is refused: those swap), else
+///   the current one unless magic (then `extra`), else the current (possibly NULL).
+pub(crate) fn derive_legacy_addon_type(
+    effect: &str,
+    swap_category_slug: Option<&str>,
+    requested: Option<Option<&str>>,
+    current: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    let magic = |t: Option<&str>| is_swap_family(t);
+    if effect == "swaps" {
+        let wanted = match swap_category_slug {
+            Some("milk") => Some("milk_type"),
+            Some("coffee_bean") => Some("coffee_type"),
+            _ => None,
+        };
+        if let Some(w) = wanted {
+            if let Some(Some(r)) = requested
+                && r != w
+            {
+                return Err(AppError::BadRequest(format!(
+                    "a group that swaps this category is presented to old tills as '{w}', not '{r}'"
+                )));
+            }
+            return Ok(Some(w.to_string()));
+        }
+        if let Some(Some(r)) = requested
+            && magic(Some(r))
+        {
+            return Err(AppError::BadRequest(format!(
+                "'{r}' swaps milk / coffee beans; pick that category as the swap target"
+            )));
+        }
+        return Ok(match requested {
+            Some(Some(r)) => Some(r.to_string()),
+            _ if magic(current) || current.is_none() => Some("extra".to_string()),
+            _ => current.map(str::to_string),
+        });
+    }
+    match requested {
+        Some(Some(r)) if magic(Some(r)) => Err(AppError::BadRequest(format!(
+            "'{r}' groups swap an ingredient; set effect to 'swaps'"
+        ))),
+        Some(r) => Ok(r.map(str::to_string)),
+        None if magic(current) => Ok(Some("extra".to_string())),
+        None => Ok(current.map(str::to_string)),
+    }
+}
+
+/// 400 unless the ingredient category belongs to `org_id`; returns its slug.
+async fn category_slug_in_org(
+    pool: &PgPool,
+    org_id: Uuid,
+    category_id: Uuid,
+) -> Result<String, AppError> {
+    sqlx::query_scalar("SELECT slug FROM ingredient_categories WHERE id = $1 AND org_id = $2")
+        .bind(category_id)
+        .bind(org_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::BadRequest("Swap category not found in this organization".into()))
+}
+
 const VALID_CHANNELS: [&str; 4] = ["in_mall", "outside", "umbrella", "pickup"];
 
 /// Load a group's `(org_id, is_active)` — the auth + soft/hard-delete gate.
@@ -288,14 +427,27 @@ async fn load_groups(pool: &PgPool, group_ids: &[Uuid]) -> Result<Vec<GroupOut>,
         i32,
         bool,
         Option<String>,
+        String,
+        Option<Uuid>,
+        Option<String>,
     )> = sqlx::query_as(
-        "SELECT id, org_id, name, name_translations, selection_type, min_selections, \
-                max_selections, is_required, sort, is_active, legacy_addon_type \
-         FROM modifier_groups WHERE id = ANY($1) ORDER BY sort, name",
+        "SELECT g.id, g.org_id, g.name, g.name_translations, g.selection_type, g.min_selections, \
+                g.max_selections, g.is_required, g.sort, g.is_active, g.legacy_addon_type, \
+                g.effect, g.swap_category_id, c.slug \
+         FROM modifier_groups g \
+         LEFT JOIN ingredient_categories c ON c.id = g.swap_category_id \
+         WHERE g.id = ANY($1) ORDER BY g.sort, g.name",
     )
     .bind(group_ids)
     .fetch_all(pool)
     .await?;
+
+    let opt_ids: Vec<Uuid> =
+        sqlx::query_scalar("SELECT id FROM modifier_options WHERE group_id = ANY($1)")
+            .bind(group_ids)
+            .fetch_all(pool)
+            .await?;
+    let mut recipes = load_option_recipes(pool, &opt_ids).await?;
 
     let opt_rows: Vec<(
         Uuid,
@@ -333,6 +485,7 @@ async fn load_groups(pool: &PgPool, group_ids: &[Uuid]) -> Result<Vec<GroupOut>,
                 is_default,
                 is_active,
                 replaces_ingredient_id: replaces,
+                recipe: recipes.remove(&id).unwrap_or_default(),
             });
     }
 
@@ -351,6 +504,9 @@ async fn load_groups(pool: &PgPool, group_ids: &[Uuid]) -> Result<Vec<GroupOut>,
                 sort,
                 is_active,
                 legacy_addon_type,
+                effect,
+                swap_category_id,
+                swap_category_slug,
             ) = r;
             GroupOut {
                 id,
@@ -364,10 +520,43 @@ async fn load_groups(pool: &PgPool, group_ids: &[Uuid]) -> Result<Vec<GroupOut>,
                 sort,
                 is_active,
                 legacy_addon_type,
+                effect,
+                swap_category_id,
+                swap_category_slug,
                 options: opts_by_group.remove(&id).unwrap_or_default(),
             }
         })
         .collect())
+}
+
+/// Recipe lines (with ingredient names) of the given options, keyed by option id.
+async fn load_option_recipes(
+    pool: &PgPool,
+    option_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, Vec<GroupOptionRecipeLine>>, AppError> {
+    let mut map: std::collections::HashMap<Uuid, Vec<GroupOptionRecipeLine>> =
+        std::collections::HashMap::new();
+    if option_ids.is_empty() {
+        return Ok(map);
+    }
+    let rows: Vec<(Uuid, Uuid, String, Decimal, String)> = sqlx::query_as(
+        "SELECT rl.owner_id, rl.ingredient_id, oi.name, rl.quantity, rl.unit \
+         FROM recipe_lines rl JOIN org_ingredients oi ON oi.id = rl.ingredient_id \
+         WHERE rl.owner_type = 'modifier_option' AND rl.owner_id = ANY($1) \
+         ORDER BY rl.owner_id, oi.name, rl.ingredient_id",
+    )
+    .bind(option_ids)
+    .fetch_all(pool)
+    .await?;
+    for (owner, ingredient_id, ingredient_name, quantity, unit) in rows {
+        map.entry(owner).or_default().push(GroupOptionRecipeLine {
+            ingredient_id,
+            ingredient_name,
+            quantity: quantity.to_string().parse::<f64>().unwrap_or(0.0),
+            unit,
+        });
+    }
+    Ok(map)
 }
 
 /// One group by id (or NotFound). Small convenience over `load_groups`.
@@ -387,6 +576,9 @@ async fn load_one_group(pool: &PgPool, gid: Uuid) -> Result<GroupOut, AppError> 
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct ListGroupsQuery {
     pub org_id: Uuid,
+    /// Also list deactivated (soft-deleted) groups, so the editor can restore one.
+    #[serde(default)]
+    pub include_inactive: bool,
 }
 
 // ── GET /modifier-groups?org_id={uuid} ───────────────────────────────
@@ -395,7 +587,10 @@ pub struct ListGroupsQuery {
     get,
     path = "/modifier-groups",
     tag = "menu",
-    params(("org_id" = Uuid, Query, description = "Organization whose reusable modifier groups to list")),
+    params(
+        ("org_id" = Uuid, Query, description = "Organization whose reusable modifier groups to list"),
+        ("include_inactive" = Option<bool>, Query, description = "Also list deactivated groups (default false)")
+    ),
     responses(
         (status = 200, description = "The org's active reusable modifier groups, each with its options", body = [GroupOut]),
         AppErrorResponse
@@ -414,9 +609,10 @@ pub async fn list_groups(
     // Only active groups (soft-deleted groups are omitted from the catalog list);
     // options are returned as-is (active + inactive) so the editor can re-enable one.
     let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM modifier_groups WHERE org_id = $1 AND is_active = true ORDER BY sort, name",
+        "SELECT id FROM modifier_groups WHERE org_id = $1 AND (is_active OR $2) ORDER BY sort, name",
     )
     .bind(query.org_id)
+    .bind(query.include_inactive)
     .fetch_all(pool.get_ref())
     .await?;
 
@@ -452,8 +648,36 @@ pub async fn create_group(
             "selection_type must be 'single' or 'multi'".into(),
         ));
     }
+    // Explicit effect (B2/B3): validate, then derive the type old tills see.
+    let swap_slug = match b.swap_category_id {
+        Some(cid) => Some(category_slug_in_org(pool.get_ref(), org_id, cid).await?),
+        None => None,
+    };
+    if let Some(effect) = b.effect.as_deref() {
+        validate_effect(effect)?;
+        if effect == "swaps" && b.swap_category_id.is_none() {
+            return Err(AppError::BadRequest(
+                "effect 'swaps' needs swap_category_id".into(),
+            ));
+        }
+        if effect != "swaps" && b.swap_category_id.is_some() {
+            return Err(AppError::BadRequest(
+                "swap_category_id is only valid with effect 'swaps'".into(),
+            ));
+        }
+        b.legacy_addon_type = derive_legacy_addon_type(
+            effect,
+            swap_slug.as_deref(),
+            Some(b.legacy_addon_type.as_deref()),
+            None,
+        )?;
+    } else if b.swap_category_id.is_some() {
+        return Err(AppError::BadRequest(
+            "swap_category_id is only valid with effect 'swaps'".into(),
+        ));
+    }
     // A swap family replaces the recipe's ingredient: one choice, at most.
-    if is_swap_family(b.legacy_addon_type.as_deref()) {
+    if is_swap_family(b.legacy_addon_type.as_deref()) || b.effect.as_deref() == Some("swaps") {
         b.selection_type = "single".into();
         b.max_selections = Some(1);
         b.min_selections = b.min_selections.clamp(0, 1);
@@ -467,8 +691,9 @@ pub async fn create_group(
     let gid: Uuid = sqlx::query_scalar(
         "INSERT INTO modifier_groups \
              (org_id, name, name_translations, selection_type, min_selections, \
-              max_selections, is_required, sort, legacy_addon_type) \
-         VALUES ($1, $2, COALESCE($3, '{}'::jsonb), $4, $5, $6, $7, $8, $9) \
+              max_selections, is_required, sort, legacy_addon_type, effect, swap_category_id) \
+         VALUES ($1, $2, COALESCE($3, '{}'::jsonb), $4, $5, $6, $7, $8, $9, \
+                 COALESCE($10, 'adds'), $11) \
          RETURNING id",
     )
     .bind(org_id)
@@ -480,6 +705,8 @@ pub async fn create_group(
     .bind(b.is_required)
     .bind(b.sort)
     .bind(&b.legacy_addon_type)
+    .bind(&b.effect)
+    .bind(b.swap_category_id)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -525,24 +752,69 @@ pub async fn patch_group(
         ));
     }
 
+    let (cur_type, cur_effect, cur_cat): (Option<String>, String, Option<Uuid>) = sqlx::query_as(
+        "SELECT legacy_addon_type, effect, swap_category_id FROM modifier_groups WHERE id = $1",
+    )
+    .bind(*gid)
+    .fetch_one(pool.get_ref())
+    .await?;
+
+    // Effect / swap target / legacy type move together (B2/B3).
+    let touches_effect =
+        b.effect.is_some() || b.swap_category_id.is_some() || b.legacy_addon_type.is_some();
+    let (new_effect, new_cat, new_type) = if touches_effect {
+        let effect = b.effect.clone().unwrap_or_else(|| cur_effect.clone());
+        validate_effect(&effect)?;
+        let cat = match b.swap_category_id {
+            Some(v) => v,
+            None if effect == "swaps" => cur_cat,
+            None => None,
+        };
+        if effect != "swaps" && cat.is_some() {
+            return Err(AppError::BadRequest(
+                "swap_category_id is only valid with effect 'swaps'".into(),
+            ));
+        }
+        let slug = match cat {
+            Some(cid) => Some(category_slug_in_org(pool.get_ref(), org_id, cid).await?),
+            None => None,
+        };
+        let requested = b.legacy_addon_type.as_ref().map(|t| t.as_deref());
+        let effective_type = requested.unwrap_or(cur_type.as_deref());
+        if effect == "swaps" && cat.is_none() && !is_swap_family(effective_type) {
+            return Err(AppError::BadRequest(
+                "effect 'swaps' needs swap_category_id".into(),
+            ));
+        }
+        let ty = if effect == "swaps" && cat.is_none() {
+            // Inferred swap family without a category in this org: keep the magic type.
+            effective_type.map(str::to_string)
+        } else {
+            derive_legacy_addon_type(&effect, slug.as_deref(), requested, cur_type.as_deref())?
+        };
+        (effect, cat, ty)
+    } else {
+        (cur_effect, cur_cat, cur_type)
+    };
+
     let mut tx = pool.begin().await?;
     // COALESCE keeps the current value where a field was omitted (NULL in the bind).
-    // `max_selections` is intentionally set-only here (a NULL bind keeps the existing
-    // value); clearing an upper bound is done by re-creating or via the studio flow —
-    // this matches the additive, non-destructive intent of a PATCH.
+    // `max_selections` uses presence ($9 = key present): `null` clears the bound.
+    // Swap groups are forced single / max 1 by the `modifier_groups_swap_family_single`
+    // trigger, whichever fields were sent.
     sqlx::query(
         "UPDATE modifier_groups SET \
              name = COALESCE($2, name), \
              name_translations = COALESCE($3, name_translations), \
-             selection_type = CASE WHEN legacy_addon_type IN ('milk_type','coffee_type') \
-                                   THEN 'single' ELSE COALESCE($4, selection_type) END, \
-             min_selections = CASE WHEN legacy_addon_type IN ('milk_type','coffee_type') \
-                                   THEN LEAST(COALESCE($5, min_selections), 1) \
-                                   ELSE COALESCE($5, min_selections) END, \
-             max_selections = CASE WHEN legacy_addon_type IN ('milk_type','coffee_type') \
-                                   THEN 1 ELSE COALESCE($6, max_selections) END, \
+             selection_type = COALESCE($4, selection_type), \
+             min_selections = COALESCE($5, min_selections), \
+             max_selections = CASE WHEN $9 THEN $6 ELSE max_selections END, \
              is_required = COALESCE($7, is_required), \
              sort = COALESCE($8, sort), \
+             is_active = COALESCE($10, is_active), \
+             effect = $11, \
+             swap_category_id = $12, \
+             legacy_addon_type = $13, \
              updated_at = now() \
          WHERE id = $1",
     )
@@ -551,9 +823,14 @@ pub async fn patch_group(
     .bind(b.name_translations)
     .bind(b.selection_type)
     .bind(b.min_selections)
-    .bind(b.max_selections)
+    .bind(b.max_selections.flatten())
     .bind(b.is_required)
     .bind(b.sort)
+    .bind(b.max_selections.is_some())
+    .bind(b.is_active)
+    .bind(&new_effect)
+    .bind(new_cat)
+    .bind(&new_type)
     .execute(&mut *tx)
     .await?;
 
@@ -722,14 +999,13 @@ pub async fn patch_option(
     require_same_org(&claims, Some(org_id))?;
 
     let b = body.into_inner();
-    if let Some(ing) = b.replaces_ingredient_id {
+    if let Some(Some(ing)) = b.replaces_ingredient_id {
         verify_ingredient_org(pool.get_ref(), org_id, ing).await?;
     }
 
     let mut tx = pool.begin().await?;
-    // COALESCE keeps current values for omitted fields. `replaces_ingredient_id` is
-    // set-only via this PATCH (a NULL bind keeps the existing link) — clearing a swap
-    // link is an explicit action handled through the studio option flow.
+    // COALESCE keeps current values for omitted fields. `replaces_ingredient_id` uses
+    // presence ($8 = key present): `null` clears the swap link.
     sqlx::query(
         "UPDATE modifier_options SET \
              name = COALESCE($2, name), \
@@ -737,7 +1013,8 @@ pub async fn patch_option(
              price = COALESCE($4, price), \
              is_default = COALESCE($5, is_default), \
              is_active = COALESCE($6, is_active), \
-             replaces_ingredient_id = COALESCE($7, replaces_ingredient_id), \
+             replaces_ingredient_id = CASE WHEN $8 THEN $7 ELSE replaces_ingredient_id END, \
+             sort = COALESCE($9, sort), \
              updated_at = now() \
          WHERE id = $1",
     )
@@ -747,7 +1024,9 @@ pub async fn patch_option(
     .bind(b.price)
     .bind(b.is_default)
     .bind(b.is_active)
-    .bind(b.replaces_ingredient_id)
+    .bind(b.replaces_ingredient_id.flatten())
+    .bind(b.replaces_ingredient_id.is_some())
+    .bind(b.sort)
     .execute(&mut *tx)
     .await?;
 
@@ -923,7 +1202,12 @@ async fn load_one_option(pool: &PgPool, oid: Uuid) -> Result<GroupOptionOut, App
     .await?;
     let (id, name, name_translations, price, sort, is_default, is_active, replaces) =
         row.ok_or_else(|| AppError::NotFound("Modifier option not found".into()))?;
+    let recipe = load_option_recipes(pool, &[id])
+        .await?
+        .remove(&id)
+        .unwrap_or_default();
     Ok(GroupOptionOut {
+        recipe,
         id,
         name,
         name_translations,
@@ -973,6 +1257,190 @@ async fn verify_ingredient_org(pool: &PgPool, org_id: Uuid, ing: Uuid) -> Result
         ));
     }
     Ok(())
+}
+
+// ── GET /modifier-groups/{gid}/usage ─────────────────────────────────
+
+/// One menu item a group is attached to, as the group editor lists it.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct GroupUsageItem {
+    pub item_id: Uuid,
+    pub item_name: String,
+    pub item_is_active: bool,
+    pub category_id: Option<Uuid>,
+    pub category_name: Option<String>,
+    /// Effective for this item: attachment override, else the group default.
+    pub is_required: bool,
+    pub min_selections: i32,
+    pub max_selections: Option<i32>,
+    /// `slot` | `allowlist` | `options` (old-till provenance).
+    pub legacy_origin: Option<String>,
+    /// `null` = the item offers every option of the group.
+    pub included_option_ids: Option<Vec<Uuid>>,
+    /// Active options this item offers.
+    pub included_option_count: i32,
+    /// Swap groups only: the option preselected on this item, i.e. the first offered
+    /// option (sort, name) carrying the recipe's ingredient of the swap category, on
+    /// the item's first size that has one. `null` for non-swap groups or when the
+    /// recipe's ingredient is not offered (lint F4 / F5).
+    pub default_option_id: Option<Uuid>,
+    /// Lint findings F4–F10 about this item and this group.
+    pub warnings: Vec<crate::menu::lint::LintIssue>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/modifier-groups/{gid}/usage",
+    tag = "menu",
+    params(("gid" = Uuid, Path, description = "Modifier group ID")),
+    responses(
+        (status = 200, description = "Items the group is attached to, with per-item defaults and warnings", body = [GroupUsageItem]),
+        AppErrorResponse
+    ),
+    security(("bearer_jwt" = []))
+)]
+pub async fn get_group_usage(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    gid: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
+
+    let org_id = fetch_group_org(pool.get_ref(), *gid)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Modifier group not found".into()))?;
+    require_same_org(&claims, Some(org_id))?;
+
+    let items = group_usage(pool.get_ref(), org_id, *gid).await?;
+    Ok(HttpResponse::Ok().json(items))
+}
+
+#[allow(clippy::type_complexity)]
+pub(crate) async fn group_usage(
+    pool: &PgPool,
+    org_id: Uuid,
+    gid: Uuid,
+) -> Result<Vec<GroupUsageItem>, AppError> {
+    let rows: Vec<(
+        Uuid,
+        String,
+        bool,
+        Option<Uuid>,
+        Option<String>,
+        bool,
+        i32,
+        Option<i32>,
+        Option<String>,
+        Option<Vec<Uuid>>,
+        i32,
+    )> = sqlx::query_as(
+        "SELECT i.id, i.name, i.is_active, i.category_id, c.name, \
+                COALESCE(m.is_required_override, g.is_required), \
+                COALESCE(m.min_override, g.min_selections), \
+                COALESCE(m.max_override, g.max_selections), \
+                m.legacy_origin, m.included_option_ids, \
+                (SELECT count(*) FROM modifier_options o \
+                  WHERE o.group_id = g.id AND o.is_active \
+                    AND (m.included_option_ids IS NULL OR o.id = ANY(m.included_option_ids)))::int \
+         FROM menu_item_modifier_groups m \
+         JOIN menu_items i ON i.id = m.menu_item_id AND i.deleted_at IS NULL \
+         JOIN modifier_groups g ON g.id = m.group_id \
+         LEFT JOIN categories c ON c.id = i.category_id \
+         WHERE m.group_id = $1 \
+         ORDER BY i.name, i.id",
+    )
+    .bind(gid)
+    .fetch_all(pool)
+    .await?;
+
+    // The swap slug, same rule as the resolver: explicit category, else the magic type.
+    let (effect, legacy_type, cat_id, cat_slug): (
+        String,
+        Option<String>,
+        Option<Uuid>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT g.effect, g.legacy_addon_type, g.swap_category_id, c.slug FROM modifier_groups g \
+             LEFT JOIN ingredient_categories c ON c.id = g.swap_category_id WHERE g.id = $1",
+    )
+    .bind(gid)
+    .fetch_one(pool)
+    .await?;
+    let swap_slug = crate::orders::component_resolve::swap_target(
+        legacy_type.as_deref(),
+        Some(effect.as_str()),
+        cat_id,
+        cat_slug.as_deref(),
+    )
+    .map(|t| t.slug);
+
+    let mut defaults: std::collections::HashMap<Uuid, Uuid> = std::collections::HashMap::new();
+    if let Some(slug) = &swap_slug {
+        let pairs: Vec<(Uuid, Uuid)> = sqlx::query_as(
+            "SELECT DISTINCT ON (s.menu_item_id) s.menu_item_id, o.id \
+             FROM menu_item_modifier_groups m \
+             JOIN menu_item_sizes s ON s.menu_item_id = m.menu_item_id AND s.is_active \
+             JOIN recipe_lines rl ON rl.owner_type = 'item_size' AND rl.owner_id = s.id \
+             JOIN org_ingredients oi ON oi.id = rl.ingredient_id \
+             JOIN ingredient_categories ic ON ic.id = oi.category_id AND ic.slug = $2 \
+             JOIN modifier_options o ON o.group_id = m.group_id AND o.is_active \
+                  AND (m.included_option_ids IS NULL OR o.id = ANY(m.included_option_ids)) \
+             WHERE m.group_id = $1 \
+               AND (o.replaces_ingredient_id = rl.ingredient_id \
+                    OR EXISTS (SELECT 1 FROM recipe_lines ol \
+                                WHERE ol.owner_type = 'modifier_option' AND ol.owner_id = o.id \
+                                  AND ol.ingredient_id = rl.ingredient_id)) \
+             ORDER BY s.menu_item_id, s.sort, s.label, o.sort, o.name, o.id",
+        )
+        .bind(gid)
+        .bind(slug)
+        .fetch_all(pool)
+        .await?;
+        defaults.extend(pairs);
+    }
+
+    let issues = crate::menu::lint::lint_org_group(pool, org_id, Some(gid)).await?;
+    const USAGE_RULES: [&str; 7] = ["F4", "F5", "F6", "F7", "F8", "F9", "F10"];
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                item_id,
+                item_name,
+                item_is_active,
+                category_id,
+                category_name,
+                is_required,
+                min_selections,
+                max_selections,
+                legacy_origin,
+                included_option_ids,
+                included_option_count,
+            )| GroupUsageItem {
+                warnings: issues
+                    .iter()
+                    .filter(|i| {
+                        i.item_id == Some(item_id) && USAGE_RULES.contains(&i.rule.as_str())
+                    })
+                    .cloned()
+                    .collect(),
+                default_option_id: defaults.get(&item_id).copied(),
+                item_id,
+                item_name,
+                item_is_active,
+                category_id,
+                category_name,
+                is_required,
+                min_selections,
+                max_selections,
+                legacy_origin,
+                included_option_ids,
+                included_option_count,
+            },
+        )
+        .collect())
 }
 
 // ════════════════════════════════════════════════════════════════════

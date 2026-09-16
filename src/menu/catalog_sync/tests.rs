@@ -631,6 +631,10 @@ async fn test_included_option_ids_filters_options(pool: PgPool) {
             .any(|i| i.id == milk && i.name == "Milk" && i.unit == "l"),
         "ingredients[] hydrates the referenced org ingredient"
     );
+    // B12: the ingredient carries its category (id + slug), additively.
+    let milk_out = body.ingredients.iter().find(|i| i.id == milk).unwrap();
+    assert_eq!(milk_out.category_slug.as_deref(), Some("veggies"));
+    assert!(milk_out.category_id.is_some());
 }
 
 // ── Test (d): since == current returns changed:false ─────────────────
