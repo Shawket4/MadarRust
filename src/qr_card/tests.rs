@@ -147,8 +147,11 @@ mod render {
             ..opts(SHORT)
         })
         .expect("render");
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/target/qr_card_golden.png");
-        std::fs::write(path, &png).expect("write golden");
+        // `<crate>/target` does not exist when builds use a shared CARGO_TARGET_DIR
+        // (e.g. a git worktree), so create it before writing the golden image.
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/target");
+        std::fs::create_dir_all(dir).expect("create target dir");
+        std::fs::write(format!("{dir}/qr_card_golden.png"), &png).expect("write golden");
     }
 
     // ── Marketing path validation (pure, no DB) ───────────────────────────────
