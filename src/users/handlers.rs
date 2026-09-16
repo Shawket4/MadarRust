@@ -235,8 +235,9 @@ pub async fn create_user(
     let mut tx = pool.begin().await?;
     let user = sqlx::query_as::<_, User>(
         r#"
-        INSERT INTO users (org_id, name, email, phone, role, password_hash, pin_hash)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO users (org_id, name, email, phone, role, password_hash, pin_hash,
+                           pin_fingerprint)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         RETURNING id, org_id, name, email, phone,
                   password_hash, pin_hash, role,
                   is_active, last_login_at,
@@ -250,6 +251,14 @@ pub async fn create_user(
     .bind(&body.role)
     .bind(password_hash)
     .bind(pin_hash)
+    // The keyed fingerprint (POS_SIGNIN_OVERHAUL.md §2): stamped here because
+    // this is one of the two moments the plaintext PIN exists — the other is a
+    // successful sign-in. Lookup only; the salted hash still verifies.
+    .bind(
+        body.pin
+            .as_deref()
+            .map(|p| crate::auth::pin_fingerprint::fingerprint(body.org_id, p)),
+    )
     .fetch_one(&mut *tx)
     .await?;
 
@@ -540,6 +549,7 @@ pub async fn update_user(
             is_active     = COALESCE($6, is_active),
             password_hash = COALESCE($7, password_hash),
             pin_hash      = COALESCE($8, pin_hash),
+            pin_fingerprint = COALESCE($10, pin_fingerprint),
             -- A password, role or active-flag change ends every web session.
             sessions_valid_after = CASE WHEN $9 THEN NOW() ELSE sessions_valid_after END,
             updated_at    = NOW()
@@ -562,6 +572,15 @@ pub async fn update_user(
         body.password.is_some()
             || body.role.as_ref().is_some_and(|r| *r != existing.role)
             || body.is_active == Some(false),
+    )
+    // A new PIN gets a new fingerprint in the same statement, so the two can
+    // never disagree. Without an org (a platform account) there is nothing to
+    // scope it by and nothing that signs in at a till.
+    .bind(
+        body.pin
+            .as_deref()
+            .zip(existing.org_id)
+            .map(|(p, org)| crate::auth::pin_fingerprint::fingerprint(org, p)),
     )
     .fetch_optional(pool.get_ref())
     .await?

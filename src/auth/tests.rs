@@ -404,6 +404,63 @@ async fn test_login_pin_teller_refused_at_a_branch_they_are_not_allowed_at(pool:
     assert_eq!(resp.status(), 200, "allowed branch should sign in");
 }
 
+/// The keyed PIN fingerprint (POS_SIGNIN_OVERHAUL.md §2, §6). Salted hashes
+/// cannot be fingerprinted by a migration, so the column fills in at the one
+/// moment the plaintext exists: a successful sign-in.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_successful_pin_login_backfills_the_fingerprint(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = Uuid::new_v4();
+    let hash = bcrypt::hash("1234", bcrypt::DEFAULT_COST).unwrap();
+    sqlx::query!(
+        "INSERT INTO users (id, org_id, name, role, pin_hash)
+         VALUES ($1, $2, 'Fingerprint Me', 'teller'::user_role, $3)",
+        user_id,
+        org_id,
+        hash
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let before: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT pin_fingerprint FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(before.is_none(), "nothing to fingerprint before a sign-in");
+
+    let req = test::TestRequest::post()
+        .uri("/auth/login")
+        .set_json(&json!({"name": "Fingerprint Me", "pin": "1234", "branch_id": branch_id}))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 200);
+
+    let after: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT pin_fingerprint FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        after,
+        Some(crate::auth::pin_fingerprint::fingerprint(org_id, "1234")),
+        "the fingerprint is HMAC(key, org || pin) under the current key"
+    );
+    // It is a LOOKUP key, never something a client sees.
+    assert!(!after.unwrap().is_empty());
+}
+
 /// The migration rule (POS_SIGNIN_OVERHAUL.md §5.3): a person with NO explicit
 /// branches keeps working everywhere in their org. Ten PIN holders in prod have
 /// no allow-list row; reading "listed nowhere" as "allowed nowhere" would lock

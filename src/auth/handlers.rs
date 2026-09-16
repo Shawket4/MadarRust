@@ -288,6 +288,28 @@ pub async fn login(
             // no explicit branches is org-wide (§5.3), so nobody who works today
             // is locked out by the change.
 
+            // Backfill the keyed PIN fingerprint (POS_SIGNIN_OVERHAUL.md §2,
+            // §6). Salted hashes cannot be fingerprinted in a migration — the
+            // plaintext is only ever in hand here, at a successful sign-in — so
+            // the column fills in as people work. It is written under the
+            // CURRENT key, which is also how a key rotation completes itself.
+            // Best-effort: a duplicate or a write failure must never block a
+            // valid login. A duplicate means two people share a PIN, which is
+            // logged and otherwise ignored: every PIN is being re-issued at
+            // rollout, so there is no backlog to manage (§6).
+            let fp = crate::auth::pin_fingerprint::fingerprint(branch_org_id, pin);
+            if let Err(e) = sqlx::query(
+                "UPDATE users SET pin_fingerprint = $1 WHERE id = $2
+                   AND (pin_fingerprint IS NULL OR pin_fingerprint <> $1)",
+            )
+            .bind(&fp)
+            .bind(matched.id)
+            .execute(pool.get_ref())
+            .await
+            {
+                tracing::warn!(user_id = %matched.id, "pin fingerprint not stored: {e}");
+            }
+
             // Layer 3: silently (re)derive the teller's OFFLINE PIN verifier
             // (argon2id, distinct from the bcrypt login hash) so the org's
             // offline-auth bundle can let them unlock offline later. Best-effort
