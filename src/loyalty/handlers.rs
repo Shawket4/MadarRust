@@ -1016,8 +1016,8 @@ pub async fn behavior(
 ) -> Result<HttpResponse, AppError> {
     let (org_id, claims) =
         super::settings::scope_org(pool.get_ref(), &req, query.branch_id).await?;
-    check_permission(pool.get_ref(), &claims, "loyalty", "read").await?;
-    // The behaviour report sits with the member list (was a manager role check).
+    // The behaviour report sits with the member list (it was a manager role
+    // check before architecture E).
     crate::authz::require::require(
         pool.get_ref(),
         &claims,
@@ -1025,9 +1025,13 @@ pub async fn behavior(
         query.branch_id,
     )
     .await?;
-    if let Some(b) = query.branch_id {
-        require_branch_access(pool.get_ref(), &claims, b).await?;
-    }
+    // Activity is counted only at the branches the caller works at: a branch
+    // manager no longer sees the whole org's behaviour. Membership totals stay
+    // programme-wide (a member belongs to the org, not a branch), exactly as a
+    // single-branch filter has always reported them.
+    let branches =
+        crate::authz::scope::org_read_branches(pool.get_ref(), &claims, org_id, query.branch_id)
+            .await?;
     let to = query.to.unwrap_or_else(chrono::Utc::now);
     let from = query.from.unwrap_or(to - chrono::Duration::days(30));
     if from >= to {
@@ -1055,11 +1059,11 @@ pub async fn behavior(
         "SELECT COALESCE(SUM(points) FILTER (WHERE kind IN ('earn','reverse_earn')), 0)::bigint, \
                 COALESCE(-SUM(points) FILTER (WHERE kind IN ('redeem','reverse_redeem')), 0)::bigint \
            FROM loyalty_transactions \
-          WHERE org_id = $1 AND ($2::uuid IS NULL OR branch_id = $2) \
+          WHERE org_id = $1 AND ($2::uuid[] IS NULL OR branch_id = ANY($2)) \
             AND created_at >= $3 AND created_at < $4",
     )
     .bind(org_id)
-    .bind(query.branch_id)
+    .bind(&branches)
     .bind(from)
     .bind(to)
     .fetch_one(pool)
@@ -1077,7 +1081,7 @@ pub async fn behavior(
                    COUNT(*) FILTER (WHERE t.kind = 'earn') AS earn_visits \
               FROM loyalty_transactions t \
               JOIN loyalty_customers c ON c.id = t.customer_id \
-             WHERE t.org_id = $1 AND ($2::uuid IS NULL OR t.branch_id = $2) \
+             WHERE t.org_id = $1 AND ($2::uuid[] IS NULL OR t.branch_id = ANY($2)) \
                AND c.deleted_at IS NULL \
                AND t.created_at >= $3 AND t.created_at < $4 \
              GROUP BY t.customer_id, c.enrolled_at \
@@ -1090,7 +1094,7 @@ pub async fn behavior(
            FROM activity",
     )
     .bind(org_id)
-    .bind(query.branch_id)
+    .bind(&branches)
     .bind(from)
     .bind(to)
     .fetch_one(pool)

@@ -96,7 +96,7 @@ footer a{color:var(--muted)}
 </div></div>
 <div class="shell">
   <nav class="side"><h4>Documents</h4><a href="/privacy-policy.html">Privacy Policy</a><a href="/terms-of-service.html">Terms of Service</a><a href="/dpa.html">Data Processing Agreement</a><a href="/subprocessors.html">Sub-processors</a><a href="/employee-privacy-notice.html">Employee Privacy Notice</a><a href="/data-retention.html">Data Retention</a><a href="/delete-account.html">Delete Your Account</a><a href="/security.html" aria-current="page">Security</a><div class="toc"><h4>On this page</h4><a href="#tenant-isolation">Tenant isolation</a><a href="#administrative-access">Administrative access</a><a href="#encryption">Encryption</a><a href="#access-to-servers">Access to servers</a><a href="#backups-and-recovery">Backups and recovery</a><a href="#monitoring">Monitoring</a><a href="#reporting-a-vulnerability">Reporting a vulnerability</a></div></nav>
-  <article><div class="meta"><span>Version 1.2</span><span>Effective 2026-09-14</span></div><h1>Security</h1>
+  <article><div class="meta"><span>Version 1.3</span><span>Effective 2026-09-16</span></div><h1>Security</h1>
 <p>How the Madar platform protects the data it holds.</p>
 <h2 id="tenant-isolation">Tenant isolation</h2>
 <p>Every organisation's data is separated at the <strong>database level</strong>, not merely in application code. PostgreSQL row-level security policies are attached to the tables themselves, and the role the application connects as carries no exemption from them. A query issued for one restaurant cannot return another restaurant's rows, and a bug in application code cannot widen that boundary — the database refuses it.</p>
@@ -113,7 +113,7 @@ footer a{color:var(--muted)}
 <p>Backups run on an automated schedule to infrastructure separate from the production server, with continuous transaction-log archiving so recovery is possible to a point in time rather than only to the last nightly copy.</p>
 <p>Backups are <strong>verified, not assumed</strong>. Every week an automated job restores the most recent backup into a disposable environment that matches production, checks that every database is present and queryable, and compares record counts against the previous run so that silent loss is detected. A failure raises an alert.</p>
 <h2 id="monitoring">Monitoring</h2>
-<p>Error and crash reporting runs on <strong>our own infrastructure</strong>; diagnostic data is not sent to a third-party monitoring vendor. Reports are received by our server in Europe, but are then processed and stored on a separate server we operate, which is not part of that European hosting. Reports are configured to exclude personal data and are deleted after 30 days.</p>
+<p>Error and crash reporting runs on <strong>our own infrastructure</strong>; diagnostic data is not sent to a third-party monitoring vendor. Reports are received by our server in Europe, but are then processed and stored on a separate server we operate <strong>in Egypt</strong>, which is not part of that European hosting. Reports are configured to exclude personal data and are deleted after 30 days.</p>
 <h2 id="reporting-a-vulnerability">Reporting a vulnerability</h2>
 <p>Email <strong><a href="mailto:privacy@madar-pos.cloud">privacy@madar-pos.cloud</a></strong>. Tell us what you found and how to reproduce it. We will acknowledge, investigate, and keep you informed. Please give us a reasonable opportunity to fix an issue before disclosing it publicly.</p></article>
 </div>

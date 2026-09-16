@@ -3893,3 +3893,78 @@ async fn a_till_refreshes_an_attached_member_by_id_with_the_cap(pool: PgPool) {
         StatusCode::NOT_FOUND
     );
 }
+
+/// Architecture E: the behaviour report is `loyalty.members.list`, and a branch
+/// manager counts activity only at the branches they work at. Membership
+/// totals stay programme-wide. A teller is refused, and so is a manager naming
+/// a branch they do not work at.
+#[sqlx::test]
+async fn loyalty_behavior_is_scoped_to_the_callers_branches(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let mine = seed_branch(&pool, org, "Mine").await;
+    let other = seed_branch(&pool, org, "Other").await;
+    let owner = seed_user(&pool, org, "org_admin").await;
+    let manager = seed_user(&pool, org, "branch_manager").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
+        .bind(manager)
+        .bind(mine)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (phone, branch) in [("01000000001", mine), ("01000000002", other)] {
+        let member: Uuid = sqlx::query_scalar(
+            "INSERT INTO loyalty_customers (org_id, phone, name, member_token) \
+             VALUES ($1, $2, 'Member', gen_random_uuid()::text) RETURNING id",
+        )
+        .bind(org)
+        .bind(phone)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO loyalty_transactions (org_id, customer_id, branch_id, kind, points, source) \
+             VALUES ($1, $2, $3, 'adjust', 10, 'manual')",
+        )
+        .bind(org)
+        .bind(member)
+        .bind(branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let get = |jwt: String, uri: String| {
+        test::TestRequest::get()
+            .uri(&uri)
+            .insert_header(("Authorization", format!("Bearer {jwt}")))
+            .to_request()
+    };
+
+    let resp = test::call_service(&app, get(token(owner, org, UserRole::OrgAdmin, None), "/loyalty/behavior".into())).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["active_members"], 2, "the owner sees every branch: {body}");
+
+    let mgr = token(manager, org, UserRole::BranchManager, None);
+    let resp = test::call_service(&app, get(mgr.clone(), "/loyalty/behavior".into())).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["active_members"], 1, "a manager counts only their branch: {body}");
+    assert_eq!(body["total_members"], 2, "membership is programme-wide");
+
+    let resp = test::call_service(&app, get(mgr, format!("/loyalty/behavior?branch_id={other}"))).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN, "a branch the manager does not work at");
+
+    let resp = test::call_service(&app, get(token(teller, org, UserRole::Teller, None), "/loyalty/behavior".into())).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN, "a teller holds no loyalty.members.list");
+}

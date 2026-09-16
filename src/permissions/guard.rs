@@ -175,6 +175,7 @@ pub fn guard_error(e: g::GuardError) -> AppError {
         g::GuardError::CoreRemoval { cap } => {
             format!("{cap} is always on for this role and can't be removed")
         }
+        g::GuardError::NotAbove => "You can only change people whose role is below yours".into(),
     })
 }
 
@@ -223,9 +224,8 @@ pub async fn require_can_create(
     }
     let actor = crate::authz::require::effective_for_claims(pool, claims, None).await?;
     let kind = kind_of(role);
-    if kind == RoleKind::OrgAdmin && !actor.owner {
-        return Err(guard_error(g::GuardError::OwnerProtected));
-    }
+    // Owners create anyone; everyone else only a role strictly below their own.
+    g::may_give_kind(&actor, kind).map_err(guard_error)?;
     let wanted = if kind == RoleKind::OrgAdmin {
         madar_authz::owner_set()
     } else {

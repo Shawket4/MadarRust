@@ -146,3 +146,61 @@ pub async fn require_branch_access_bound(
 
     Ok(())
 }
+
+/// The branches an org-level read (an org report, a behaviour or discipline
+/// report) covers for this caller.
+///
+/// - `asked = Some(b)`: that one branch, after [`require_branch_access_bound`]
+///   and a check that it belongs to `org_id`.
+/// - `asked = None`: `None` means every branch of the org (a super admin, an
+///   owner, or an org-wide assignment on a token bound to no branch). Otherwise
+///   it is `Some` of exactly the org's branches the caller works at, so a branch
+///   manager never rolls up a branch they could not open on its own. A token
+///   bound to a branch (a PIN session) covers only that branch.
+///
+/// The org boundary is checked here as well: another org's id is a 403.
+pub async fn org_read_branches(
+    pool: &PgPool,
+    claims: &Claims,
+    org_id: Uuid,
+    asked: Option<Uuid>,
+) -> Result<Option<Vec<Uuid>>, AppError> {
+    if claims.role != UserRole::SuperAdmin && claims.org_id() != Some(org_id) {
+        return Err(AppError::Forbidden("Not your org".into()));
+    }
+    if let Some(b) = asked {
+        require_branch_access_bound(pool, claims, b).await?;
+        let in_org: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM branches WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL)",
+        )
+        .bind(b)
+        .bind(org_id)
+        .fetch_one(pool)
+        .await?;
+        if !in_org {
+            return Err(AppError::Forbidden("Branch belongs to a different org".into()));
+        }
+        return Ok(Some(vec![b]));
+    }
+    let token_branch = if claims.role == UserRole::SuperAdmin {
+        None
+    } else {
+        claims.branch_id()
+    };
+    let ids: Vec<Uuid> = match (branch_scope(pool, claims).await?, token_branch) {
+        (BranchScope::All, None) => return Ok(None),
+        (BranchScope::All, Some(t)) => vec![t],
+        (BranchScope::Only(mine), t) => mine
+            .into_iter()
+            .filter(|b| t.is_none_or(|t| t == *b))
+            .collect(),
+    };
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM branches WHERE org_id = $1 AND id = ANY($2) AND deleted_at IS NULL",
+    )
+    .bind(org_id)
+    .bind(&ids)
+    .fetch_all(pool)
+    .await?;
+    Ok(Some(ids))
+}

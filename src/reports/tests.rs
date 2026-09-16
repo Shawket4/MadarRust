@@ -2251,6 +2251,47 @@ async fn org_tax_and_audits_are_scoped_to_the_callers_branches(pool: PgPool) {
     .await;
     assert_eq!(refunds["total_count"], 0);
 
+    // reports.legal: a teller holds none of it, and an owner can take it away
+    // from a manager.
+    let teller = seed_user(&pool, org_id, "teller").await;
+    let teller_token = generate_token(teller, Some(org_id), UserRole::Teller);
+    for path in [
+        "tax",
+        "refunds-audit",
+        "voids-audit",
+        "discounts-audit",
+        "waivers-audit",
+        "price-overrides",
+    ] {
+        let req = test::TestRequest::get()
+            .uri(&format!("/reports/orgs/{org_id}/{path}"))
+            .insert_header(("Authorization", format!("Bearer {teller_token}")))
+            .to_request();
+        assert_eq!(
+            test::call_service(&app, req).await.status(),
+            403,
+            "{path}: a teller holds no reports.legal"
+        );
+    }
+    sqlx::query(
+        "INSERT INTO user_overrides (org_id, user_id, capability_id, effect, reason) \
+         VALUES ($1, $2, 220, 'deny', 'test')",
+    )
+    .bind(org_id)
+    .bind(manager)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let req = test::TestRequest::get()
+        .uri(&format!("/reports/orgs/{org_id}/tax"))
+        .insert_header(("Authorization", format!("Bearer {manager_token}")))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        403,
+        "a manager whose reports.legal was denied"
+    );
+
     let stranger_org = seed_org(&pool).await;
     let stranger = seed_user(&pool, stranger_org, "org_admin").await;
     let req = test::TestRequest::get()

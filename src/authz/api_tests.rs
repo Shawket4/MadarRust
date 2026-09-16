@@ -491,8 +491,19 @@ async fn owners_are_protected_and_assign_owners_only_themselves(pool: PgPool) {
     .await;
     assert_eq!(s, StatusCode::FORBIDDEN);
 
-    // An owner signs in at a till with a PIN.
+    // An owner signs in at a till with a PIN on a 0.8+ tablet (which names its
+    // device on login); a pre-0.8 tablet is refused for an owner.
     let b = branch(&pool, o).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/auth/login")
+            .insert_header((crate::tickets::DEVICE_ID_HEADER, "tablet-08"))
+            .set_json(json!({"name": "Owner", "pin": "1111", "branch_id": b}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
     let resp = test::call_service(
         &app,
         test::TestRequest::post()
@@ -501,7 +512,7 @@ async fn owners_are_protected_and_assign_owners_only_themselves(pool: PgPool) {
             .to_request(),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
 #[sqlx::test]
@@ -630,4 +641,59 @@ async fn flagged_offline_acts_are_the_owners_queue(pool: PgPool) {
     let rows = all.as_array().unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["reviewed_by"], json!(owner));
+}
+
+/// Owner decisions 2026-09-16: `staff.permissions.edit` is off for managers by
+/// default, and even granted it stays anti-escalation gated. The editor grants
+/// or revokes only what they hold, never hands on role or owner management they
+/// lack, and edits only people strictly below them (no peer writes).
+#[sqlx::test]
+async fn a_permissions_editor_cannot_escalate(pool: PgPool) {
+    seed(&pool).await;
+    let app = app!(pool);
+    let o = org(&pool).await;
+    let b = branch(&pool, o).await;
+    let owner = user(&pool, o, "org_admin", "Owner", None).await;
+    let mgr = user(&pool, o, "branch_manager", "Mona", None).await;
+    let peer = user(&pool, o, "branch_manager", "Nour", None).await;
+    let teller = user(&pool, o, "teller", "Sara", None).await;
+    for u in [mgr, peer, teller] {
+        assign(&pool, u, b).await;
+    }
+    let mt = token(mgr, o, UserRole::BranchManager);
+    let ot = token(owner, o, UserRole::OrgAdmin);
+    let put = |id: Uuid| test::TestRequest::put().uri(&format!("/authz/users/{id}/overrides"));
+    let ask = |cap: &str, effect: &str| json!({"capability": cap, "effect": effect, "reason": "test"});
+
+    // Default: a manager holds no staff.permissions.edit.
+    let (s, me) = call(&app, test::TestRequest::get().uri("/authz/me"), &mt).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(!has(&me, "staff.permissions.edit"), "off for managers by default");
+    let (s, _) = call(&app, put(teller).set_json(ask("refunds.create", "deny")), &mt).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "no editing without the capability");
+
+    let (s, _) = call(&app, put(mgr).set_json(ask("staff.permissions.edit", "allow")), &ot).await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Granted: a held capability, to someone below, works.
+    let (s, body) = call(&app, put(teller).set_json(ask("refunds.create", "deny")), &mt).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    // Role and owner management it lacks cannot be handed on.
+    for cap in ["staff.roles.manage", "staff.owners.manage", "staff.permissions.reset"] {
+        let (s, _) = call(&app, put(teller).set_json(ask(cap, "allow")), &mt).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{cap} handed on");
+    }
+    // Revoking what the editor does not hold is refused too.
+    let (s, _) = call(&app, put(teller).set_json(ask("hr.payroll.read", "deny")), &mt).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "revoke of a capability not held");
+    // No peer writes: not another manager, even one holding less.
+    let (s, _) = call(&app, put(peer).set_json(ask("refunds.create", "deny")), &mt).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "a peer manager");
+    let (s, _) = call(&app, put(peer).set_json(ask("staff.permissions.edit", "allow")), &mt).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "editing power to a peer");
+    // Not themselves, not the owner.
+    let (s, _) = call(&app, put(mgr).set_json(ask("staff.roles.manage", "allow")), &mt).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "self");
+    let (s, _) = call(&app, put(owner).set_json(ask("refunds.create", "deny")), &mt).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "the owner");
 }

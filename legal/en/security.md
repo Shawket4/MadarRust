@@ -1,7 +1,7 @@
 ---
 title: Security
-version: 1.2
-effective: 2026-09-14
+version: 1.3
+effective: 2026-09-16
 ---
 
 # Security
@@ -76,8 +76,8 @@ loss is detected. A failure raises an alert.
 
 Error and crash reporting runs on **our own infrastructure**; diagnostic data is not sent to
 a third-party monitoring vendor. Reports are received by our server in Europe, but are then
-processed and stored on a separate server we operate, which is not part of that European
-hosting. Reports are configured to exclude personal data and are deleted after 30 days.
+processed and stored on a separate server we operate **in Egypt**, which is not part of that
+European hosting. Reports are configured to exclude personal data and are deleted after 30 days.
 
 ## Reporting a vulnerability
 

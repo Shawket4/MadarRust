@@ -323,9 +323,13 @@ async fn legacy_goldens_match_value_for_value(pool: PgPool) {
         }
     }
 
-    // Every golden on disk is exercised.
+    // Every golden on disk is exercised — here, or by the test it names in
+    // `pinned_by` (a golden outside the till scenario, e.g. a login refusal).
     for f in manifest["files"].as_array().unwrap() {
         let file = f["file"].as_str().unwrap();
+        if f["pinned_by"].is_string() {
+            continue;
+        }
         assert!(
             saved.contains(file),
             "golden {file} is not wired into scenario.json"

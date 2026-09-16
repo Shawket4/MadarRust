@@ -17,10 +17,8 @@ use uuid::Uuid;
 
 use crate::{
     errors::{AppError, AppErrorResponse},
-    models::UserRole,
     orders::SOLD,
     orgs::handlers::extract_claims,
-    permissions::checker::check_permission,
 };
 
 use super::handlers::DateRangeQuery;
@@ -42,47 +40,23 @@ pub struct AuditReport {
     pub by_issuer: Vec<AuditBreakdownEntry>,
 }
 
-/// Org match + `orders:read`, then the branches the caller may see.
+/// `reports.legal`, then the branches the caller may see
+/// ([`crate::authz::scope::org_read_branches`]).
 ///
-/// `None` = the whole org (org admin / super admin). Anyone else with
-/// `orders:read` (a branch manager, a teller) gets only the branches they are
-/// assigned to — and a branch-bound teller token only its own branch — so an
-/// org-wide report never shows a branch the caller couldn't open on its own.
+/// `None` = the whole org (owner, super admin, org-wide assignment). Anyone
+/// else holding `reports.legal` (a branch manager by default) gets only the
+/// branches they work at, and a branch-bound PIN token only its own branch, so
+/// an org-wide report never shows a branch the caller couldn't open on its own.
+/// These reports name staff and expose refunds, so they are their own
+/// capability rather than `orders.read`.
 pub(crate) async fn guard(
     req: &HttpRequest,
     pool: &PgPool,
     org_id: Uuid,
 ) -> Result<Option<Vec<Uuid>>, AppError> {
     let claims = extract_claims(req)?;
-    check_permission(pool, &claims, "orders", "read").await?;
-    if claims.role != UserRole::SuperAdmin && claims.org_id() != Some(org_id) {
-        return Err(AppError::Forbidden("Not your org".into()));
-    }
-    // Where the caller works comes from the architecture E model (owner or an
-    // org-wide assignment = the whole org), not from role names.
-    let scope = crate::authz::scope::branch_scope(pool, &claims).await?;
-    // A branch-bound till token only ever sees its own branch.
-    let token_branch = if claims.role == UserRole::Teller {
-        claims.branch_id()
-    } else {
-        None
-    };
-    let ids: Vec<Uuid> = match (scope, token_branch) {
-        (crate::authz::scope::BranchScope::All, None) => return Ok(None),
-        (crate::authz::scope::BranchScope::All, Some(b)) => vec![b],
-        (crate::authz::scope::BranchScope::Only(v), tb) => v
-            .into_iter()
-            .filter(|b| tb.is_none_or(|t| t == *b))
-            .collect(),
-    };
-    // Only branches of this org.
-    let ids: Vec<Uuid> =
-        sqlx::query_scalar("SELECT id FROM branches WHERE org_id = $1 AND id = ANY($2)")
-            .bind(org_id)
-            .bind(&ids)
-            .fetch_all(pool)
-            .await?;
-    Ok(Some(ids))
+    crate::authz::require::require(pool, &claims, crate::authz::Cap::ReportsLegal, None).await?;
+    crate::authz::scope::org_read_branches(pool, &claims, org_id, None).await
 }
 
 // ── Refunds audit ────────────────────────────────────────────

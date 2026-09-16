@@ -2212,3 +2212,68 @@ async fn discipline_report_ranks_absences_before_lates(pool: PgPool) {
     assert_eq!(rows[1]["absent_days"], 1);
     assert_eq!(rows[1]["rank_in_department"], 2);
 }
+
+/// Architecture E: the discipline report is `hr.attendance.read`, and a branch
+/// manager ranks only the branches they work at, never the whole org. A person
+/// without the capability is refused, and so is a manager naming a branch they
+/// do not work at.
+#[sqlx::test]
+async fn discipline_report_is_scoped_to_the_callers_branches(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, "UTC").await;
+    // Every role's default cells, as a real org has them.
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
+    let other = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO branches (id, org_id, name, timezone) VALUES ($1, $2, 'Other', 'UTC'::timezone_name)",
+    )
+    .bind(other)
+    .bind(f.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let manager = seed_user(&pool, f.org, "Manager", UserRole::BranchManager).await;
+    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
+        .bind(manager)
+        .bind(f.branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let elsewhere = seed_user(&pool, f.org, "Elsewhere", UserRole::Teller).await;
+    for (user, branch) in [(f.employee, f.branch), (elsewhere, other)] {
+        sqlx::query(
+            "INSERT INTO attendance_records (org_id, user_id, branch_id, business_date, status, late_minutes) \
+             VALUES ($1, $2, $3, make_date(2026, 9, 1), 'late', 5)",
+        )
+        .bind(f.org)
+        .bind(user)
+        .bind(branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let uri = "/staff/discipline-report?from=2026-09-01&to=2026-09-30";
+
+    let owner = token_for(f.admin, f.org, UserRole::OrgAdmin);
+    let resp = auth_get!(app, uri, owner);
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["rows"].as_array().unwrap().len(), 2, "the owner sees every branch");
+
+    let mgr = token_for(manager, f.org, UserRole::BranchManager);
+    let resp = auth_get!(app, uri, mgr);
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let rows = body["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "a manager sees only their branch: {rows:?}");
+    assert_eq!(rows[0]["user_id"], serde_json::json!(f.employee));
+
+    let resp = auth_get!(app, &format!("{uri}&branch_id={other}"), mgr);
+    assert_eq!(resp.status(), 403, "a branch the manager does not work at");
+
+    let teller = token_for(f.employee, f.org, UserRole::Teller);
+    let resp = auth_get!(app, uri, teller);
+    assert_eq!(resp.status(), 403, "a teller holds no hr.attendance.read");
+}

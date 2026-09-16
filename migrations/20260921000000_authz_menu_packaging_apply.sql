@@ -2,11 +2,11 @@
 -- item size in the org at once, so it is its own capability, granted by default
 -- to the owner (org_admin) only. Before this, apply rode on menu.items.edit.
 INSERT INTO capabilities (id, key, legacy_resource, legacy_action, tier, defaults, core, approval, protected) VALUES
-    (220, 'menu.packaging_rules.apply', NULL, NULL, 'advanced', 'o', '', false, false)
+    (221, 'menu.packaging_rules.apply', NULL, NULL, 'advanced', 'o', '', false, false)
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO org_role_grants (org_role_id, org_id, capability_id, source, template_version)
-SELECT r.id, r.org_id, 220, 'template', 0
+SELECT r.id, r.org_id, 221, 'template', 0
   FROM org_roles r
  WHERE r.is_system AND r.deleted_at IS NULL
    AND r.kind::text = 'org_admin'

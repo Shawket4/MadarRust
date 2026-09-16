@@ -78700,7 +78700,7 @@
               "string",
               "null"
             ],
-            "description": "Why not, when not (self | owner | not_dominant | missing_authority)."
+            "description": "Why not, when not (self | owner | not_dominant | not_above | missing_authority)."
           },
           "name": {
             "type": "string"

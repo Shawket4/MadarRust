@@ -374,10 +374,10 @@ pub async fn login(
             // Architecture E: signing in at a till is the `pos.sign_in` capability
             // at this branch (tellers and waiters always hold it; owners hold it;
             // a manager at the branches they are assigned to).
-            if !crate::authz::require::effective(pool.get_ref(), matched.id, Some(branch_id))
-                .await?
-                .can(crate::authz::Cap::PosSignIn)
-            {
+            let matched_eff =
+                crate::authz::require::effective(pool.get_ref(), matched.id, Some(branch_id))
+                    .await?;
+            if !matched_eff.can(crate::authz::Cap::PosSignIn) {
                 // The ONE case with an identity behind it (§3.4): a CORRECT PIN
                 // typed at a branch its holder does not work at. Someone else's
                 // PIN turning up in the wrong shop is a real signal, so it is
@@ -408,6 +408,28 @@ pub async fn login(
             if throttled {
                 crate::auth::pin_throttle::clear(pool.get_ref(), device_id.as_deref(), branch_id)
                     .await;
+            }
+
+            // Owner decision 2026-09-16: an owner never signs in with a PIN on a
+            // pre-0.8 tablet. Those builds cannot hold an owner's access safely
+            // (no capability snapshot, role-name gates), so the till would show
+            // the wrong things. A pre-0.8 client is one that sends no
+            // `X-Madar-Device-Id` on login — the same marker the PIN delay uses;
+            // every 0.8+ build sends it. Owners on 0.8+ are unaffected.
+            if device_id.is_none()
+                && (matched_eff.owner || matched.role == crate::models::UserRole::OrgAdmin)
+            {
+                tracing::warn!(
+                    target: "madar.authz",
+                    user_id = %matched.id,
+                    branch_id = %branch_id,
+                    "owner PIN sign-in refused on a pre-0.8 tablet"
+                );
+                return Err(AppError::Coded {
+                    status: 403,
+                    code: "OWNER_PIN_NEEDS_UPDATE",
+                    reason: "Owners sign in on this tablet after updating the Madar app.".into(),
+                });
             }
 
             // Decision D13 ("tellers are ORG-scoped, no per-branch gate at the

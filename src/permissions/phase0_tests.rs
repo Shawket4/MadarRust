@@ -142,10 +142,11 @@ async fn s1_a_teller_holding_users_create_creates_nobody_above_them(pool: PgPool
             "teller created {role}"
         );
     }
+    // Owner decision 2026-09-16, no peer writes: not even their own kind.
     assert_eq!(
         test::call_service(&app, call("teller")).await.status(),
-        StatusCode::CREATED,
-        "a teller may create their own kind"
+        StatusCode::FORBIDDEN,
+        "a teller creates no peer"
     );
 }
 
@@ -167,13 +168,13 @@ async fn s1_a_manager_creates_nobody_above_themselves(pool: PgPool) {
         test::call_service(&app, call("org_admin")).await.status(),
         StatusCode::FORBIDDEN
     );
-    // A peer manager is allowed under G2: the role gives nothing the creator
-    // does not already hold. Only an owner role stays out of reach.
+    // Owner decision 2026-09-16, no peer writes: a manager creates no other
+    // manager, even though the role gives nothing they don't already hold.
     assert_eq!(
         test::call_service(&app, call("branch_manager"))
             .await
             .status(),
-        StatusCode::CREATED
+        StatusCode::FORBIDDEN
     );
     assert_eq!(
         test::call_service(&app, call("teller")).await.status(),
@@ -253,11 +254,36 @@ async fn s5_nobody_escalates_a_peer_or_themselves(pool: PgPool) {
             .status(),
         StatusCode::FORBIDDEN
     );
-    // A peer's password, on the other hand, IS within reach under G4
-    // (`E(target) ⊆ E(actor)`) — the same rule that lets one owner reset
-    // another owner's. It grants the actor nothing they did not already hold.
+    // Owner decision 2026-09-16, no peer writes: on top of G4
+    // (`E(target) ⊆ E(actor)`) a non-owner must rank strictly above the
+    // target, so a manager resets, deactivates or deletes no other manager.
+    // (Owners are unchanged: one owner still resets another's password.)
     assert_eq!(
         test::call_service(&app, patch(m2, json!({"password": "x-new-pass"})))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        test::call_service(&app, patch(m2, json!({"is_active": false})))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri(&format!("/users/{m2}"))
+            .insert_header(("Authorization", format!("Bearer {t1}")))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    // A teller below them is still within reach.
+    let t = user(&pool, Some(o), "teller").await;
+    assign(&pool, t, b).await;
+    assert_eq!(
+        test::call_service(&app, patch(t, json!({"password": "x-new-pass"})))
             .await
             .status(),
         StatusCode::OK
