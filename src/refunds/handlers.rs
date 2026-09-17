@@ -437,6 +437,21 @@ pub(crate) async fn create_refund_inner(
         .await?;
     }
 
+    // A REFUND NEVER RESTORES STOCK (owner ruling, 2026-09): the item was made
+    // and served, so the sale's deduction stands and the refunded share of it
+    // is logged as WASTE with reason `refund`, linked to this refund.
+    let completes = i64::from(body.amount) == remaining;
+    post_refund_waste(
+        &mut tx,
+        order.id,
+        order.branch_id,
+        refund_id,
+        &body.lines,
+        completes,
+        actor.teller_id,
+    )
+    .await?;
+
     // A refunded REWARD gives its points back, in proportion to the reward
     // units returned (`loyalty::redeem::restore_on_refund` states the rule).
     // The earn clawback stays the trigger's; this writes only reverse_redeem.
@@ -462,6 +477,124 @@ pub(crate) async fn create_refund_inner(
 /// Which drawer the money leaves. Named by the request, or — live only — the
 /// actor's own open shift at the order's branch. The trigger refuses a shift
 /// at another branch; this says so before the insert, in words.
+/// The waste a refund leaves behind. Per refunded unit of a line, that share of
+/// the line's sale deductions (`deductions_snapshot`, which covers the whole
+/// line) is re-filed from `sale` to `waste`:
+///   * `refund_restock` (+q) nets the sale leg out — a refund NEVER puts goods
+///     back on the shelf, so this type only ever appears paired with…
+///   * `waste` (−q), reason `refund`.
+///
+/// Net stock is unchanged (the deduction stands); consumption reports, which
+/// net `sale`/`waste`/`*_restock`, read the same total; the waste log and the
+/// waste reports now show it. Both rows carry `source_type = 'refund'`,
+/// `source_id` = the refund.
+///
+/// Which units: the refund's LINES when it names them (partial refunds are
+/// proportional to quantity). A refund with no lines is money only (an
+/// overcharge, goodwill) and wastes nothing — UNLESS it returns the rest of
+/// the sale, in which case every unit not already refunded by a line is
+/// wasted (a whole-sale refund from a till that does not send lines).
+pub(crate) async fn post_refund_waste(
+    tx: &mut PgConnection,
+    order_id: Uuid,
+    branch_id: Uuid,
+    refund_id: Uuid,
+    lines: &[RefundLineInput],
+    completes: bool,
+    actor: Uuid,
+) -> Result<usize, AppError> {
+    let items: Vec<(Uuid, String, i32, serde_json::Value)> = sqlx::query_as(
+        "SELECT id, item_name, quantity, deductions_snapshot FROM order_items \
+         WHERE order_id = $1 ORDER BY id",
+    )
+    .bind(order_id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let mut units: Vec<(Uuid, i32)> = Vec::new();
+    if !lines.is_empty() {
+        for l in lines {
+            match units.iter_mut().find(|(id, _)| *id == l.order_item_id) {
+                Some(u) => u.1 += l.quantity,
+                None => units.push((l.order_item_id, l.quantity)),
+            }
+        }
+    } else if completes {
+        let prior: Vec<(Uuid, i64)> = sqlx::query_as(
+            "SELECT l.order_item_id, SUM(l.quantity)::bigint FROM order_refund_lines l \
+               JOIN order_refunds r ON r.id = l.refund_id \
+              WHERE r.order_id = $1 AND l.refund_id <> $2 GROUP BY l.order_item_id",
+        )
+        .bind(order_id)
+        .bind(refund_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        for (id, _, qty, _) in &items {
+            let done = prior
+                .iter()
+                .find(|(p, _)| p == id)
+                .map_or(0, |(_, q)| *q);
+            let left = i64::from(*qty) - done;
+            if left > 0 {
+                units.push((*id, left as i32));
+            }
+        }
+    }
+
+    let mut posted = 0;
+    for (item_id, n) in units {
+        let Some((_, name, sold, snapshot)) = items.iter().find(|(id, ..)| *id == item_id) else {
+            continue;
+        };
+        if *sold <= 0 || n <= 0 {
+            continue;
+        }
+        let share = (f64::from(n) / f64::from(*sold)).min(1.0);
+        let note = format!("Refund: {name} x{n}");
+        for d in snapshot.as_array().map(Vec::as_slice).unwrap_or_default() {
+            let (Some(qty), Some(ing)) = (
+                d.get("quantity").and_then(|v| v.as_f64()),
+                d.get("org_ingredient_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| Uuid::parse_str(s).ok()),
+            ) else {
+                continue;
+            };
+            let q = qty * share;
+            if !q.is_finite() || q.abs() < 1e-9 {
+                continue;
+            }
+            let unit_cost = d
+                .get("cost_per_unit")
+                .and_then(|v| v.as_f64())
+                .map(|c| c.round() as i64);
+            for (kind, signed, reason) in [
+                ("refund_restock", q, None),
+                ("waste", -q, Some("refund")),
+            ] {
+                crate::inventory::movements::record_movement(
+                    &mut *tx,
+                    crate::inventory::movements::MovementParams {
+                        branch_id,
+                        org_ingredient_id: ing,
+                        movement_type: kind,
+                        quantity: signed,
+                        unit_cost,
+                        reason,
+                        source_type: Some("refund"),
+                        source_id: Some(refund_id),
+                        note: Some(&note),
+                        created_by: Some(actor),
+                    },
+                )
+                .await?;
+            }
+            posted += 1;
+        }
+    }
+    Ok(posted)
+}
+
 async fn resolve_refund_till(
     pool: &PgPool,
     body: &CreateRefundRequest,
