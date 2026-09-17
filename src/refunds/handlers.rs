@@ -530,10 +530,7 @@ pub(crate) async fn post_refund_waste(
         .fetch_all(&mut *tx)
         .await?;
         for (id, _, qty, _) in &items {
-            let done = prior
-                .iter()
-                .find(|(p, _)| p == id)
-                .map_or(0, |(_, q)| *q);
+            let done = prior.iter().find(|(p, _)| p == id).map_or(0, |(_, q)| *q);
             let left = i64::from(*qty) - done;
             if left > 0 {
                 units.push((*id, left as i32));
@@ -568,10 +565,9 @@ pub(crate) async fn post_refund_waste(
                 .get("cost_per_unit")
                 .and_then(|v| v.as_f64())
                 .map(|c| c.round() as i64);
-            for (kind, signed, reason) in [
-                ("refund_restock", q, None),
-                ("waste", -q, Some("refund")),
-            ] {
+            for (kind, signed, reason) in
+                [("refund_restock", q, None), ("waste", -q, Some("refund"))]
+            {
                 crate::inventory::movements::record_movement(
                     &mut *tx,
                     crate::inventory::movements::MovementParams {

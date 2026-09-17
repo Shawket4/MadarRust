@@ -519,3 +519,58 @@ async fn a_queued_waste_over_the_limit_needs_a_valid_approval_to_be_clean(pool: 
     );
     assert_eq!(on_hand(&pool, branch, beans).await, -1050.0);
 }
+
+/// The log is ordered by when the waste HAPPENED, not when the server got it:
+/// a waste queued offline at 07:00 and posted after one made at 09:00 lists
+/// below it, and carries its receive time separately.
+#[sqlx::test]
+async fn the_log_orders_by_when_the_waste_happened(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let admin = seed_user(&pool, org, "org_admin").await;
+    let beans = seed_ingredient(&pool, org, "Beans", "g", 2.0).await;
+    stock_in(&pool, branch, beans, 2000.0).await;
+    let bearer = token(admin, org, UserRole::OrgAdmin);
+
+    let mut ids = Vec::new();
+    // Posted first, happened later.
+    for at in ["2026-09-17T09:00:00Z", "2026-09-17T07:00:00Z"] {
+        let id = Uuid::new_v4();
+        let mut body = waste_body(id, branch, "ingredient", beans, 10.0, None);
+        body["occurred_at"] = json!(at);
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/inventory/waste")
+                .insert_header(("Authorization", format!("Bearer {bearer}")))
+                .set_json(body)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), 201);
+        ids.push(id);
+    }
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/inventory/branches/{branch}/waste"))
+            .insert_header(("Authorization", format!("Bearer {bearer}")))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let log: Vec<StockMovement> = test::read_body_json(resp).await;
+    assert_eq!(log.len(), 2);
+    assert_eq!(log[0].source_id, Some(ids[0]), "09:00 first");
+    assert_eq!(
+        log[1].source_id,
+        Some(ids[1]),
+        "07:00 below it, though posted later"
+    );
+    assert_eq!(
+        log[1].occurred_at.unwrap().to_rfc3339(),
+        "2026-09-17T07:00:00+00:00"
+    );
+    assert!(log[1].received_at.unwrap() > log[1].occurred_at.unwrap());
+}

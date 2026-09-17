@@ -3388,7 +3388,6 @@ pub(crate) async fn void_order_inner(
                 },
             )
             .await?;
-
         }
     }
 

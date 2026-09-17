@@ -778,3 +778,167 @@ async fn the_refund_trigger_splits_tax_exactly_like_the_engine(pool: PgPool) {
         );
     }
 }
+
+// ── Stock: a refund keeps the deduction and logs it as waste ──────────────
+
+/// Give the seeded sale a recipe: 40 g of an ingredient across its 2 units
+/// (20 g each), deducted from 1000 g, as `create_order` would have.
+async fn with_recipe(pool: &PgPool, t: &Till) -> Uuid {
+    let ing = Uuid::new_v4();
+    let cat: Uuid = sqlx::query_scalar("SELECT ingredient_category_id($1, 'general')")
+        .bind(t.org_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO org_ingredients (id, org_id, name, unit, category_id) VALUES ($1, $2, 'Rice', 'g', $3)",
+    )
+    .bind(ing)
+    .bind(t.org_id)
+    .bind(cat)
+    .execute(pool)
+    .await
+    .unwrap();
+    for (kind, qty, src) in [("purchase_in", 1000.0, "seed"), ("sale", -40.0, "order")] {
+        sqlx::query(
+            "INSERT INTO inventory_movements (branch_id, org_ingredient_id, type, quantity, source_type, source_id) \
+             VALUES ($1, $2, $3::inventory_movement_type, $4, $5, $6)",
+        )
+        .bind(t.branch_id)
+        .bind(ing)
+        .bind(kind)
+        .bind(qty)
+        .bind(src)
+        .bind(t.order_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query("UPDATE order_items SET deductions_snapshot = $1 WHERE id = $2")
+        .bind(json!([{ "org_ingredient_id": ing, "quantity": 40.0, "cost_per_unit": 2.0 }]))
+        .bind(t.item_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    ing
+}
+
+async fn on_hand(pool: &PgPool, t: &Till, ing: Uuid) -> f64 {
+    sqlx::query_scalar(
+        "SELECT on_hand::float8 FROM branch_stock WHERE branch_id = $1 AND org_ingredient_id = $2",
+    )
+    .bind(t.branch_id)
+    .bind(ing)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// `(sum of waste qty, sum of refund_restock qty)` posted by refunds of this sale.
+async fn refund_ledger(pool: &PgPool, t: &Till) -> (f64, f64, i64) {
+    sqlx::query_as(
+        "SELECT COALESCE(SUM(m.quantity) FILTER (WHERE m.type = 'waste'), 0)::float8, \
+                COALESCE(SUM(m.quantity) FILTER (WHERE m.type = 'refund_restock'), 0)::float8, \
+                COUNT(*) FILTER (WHERE m.type = 'waste' AND m.reason = 'refund') \
+           FROM inventory_movements m JOIN order_refunds r ON r.id = m.source_id \
+          WHERE m.source_type = 'refund' AND r.order_id = $1",
+    )
+    .bind(t.order_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test]
+async fn a_line_refund_keeps_the_stock_deducted_and_logs_its_share_as_waste(pool: PgPool) {
+    let app = app!(pool);
+    let t = seed_till(&pool).await;
+    let ing = with_recipe(&pool, &t).await;
+    assert_eq!(on_hand(&pool, &t, ing).await, 960.0);
+
+    let mut body = refund_body(t.order_id, 100);
+    body["lines"] = json!([{ "order_item_id": t.item_id, "quantity": 1, "amount": 100 }]);
+    let issued = issued_with_status(post_refund(&app, &t.token, &body).await, 201).await;
+
+    assert_eq!(
+        on_hand(&pool, &t, ing).await,
+        960.0,
+        "a refund never restores stock"
+    );
+    let (waste, restock, rows) = refund_ledger(&pool, &t).await;
+    assert_eq!(waste, -20.0, "one of two units is waste");
+    assert_eq!(restock, 20.0, "re-filed from the sale, not put back");
+    assert_eq!(rows, 1);
+    let linked: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM inventory_movements WHERE type = 'waste' AND source_type = 'refund' AND source_id = $1",
+    )
+    .bind(issued.refund.refund.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(linked, 1, "the waste is linked to the refund");
+}
+
+#[sqlx::test]
+async fn a_money_only_refund_wastes_nothing_until_it_returns_the_rest(pool: PgPool) {
+    let app = app!(pool);
+    let t = seed_till(&pool).await;
+    let ing = with_recipe(&pool, &t).await;
+
+    // An overcharge: money, no items.
+    let mut body = refund_body(t.order_id, 50);
+    body["reason"] = json!("overcharged");
+    body_with_status(post_refund(&app, &t.token, &body).await, 201).await;
+    assert_eq!(refund_ledger(&pool, &t).await.0, 0.0);
+
+    // One unit sent back.
+    let mut body = refund_body(t.order_id, 50);
+    body["lines"] = json!([{ "order_item_id": t.item_id, "quantity": 1, "amount": 50 }]);
+    body_with_status(post_refund(&app, &t.token, &body).await, 201).await;
+    assert_eq!(refund_ledger(&pool, &t).await.0, -20.0);
+
+    // The rest of the sale, without lines (an older till): only the unit not
+    // already refunded is waste.
+    body_with_status(
+        post_refund(&app, &t.token, &refund_body(t.order_id, 100)).await,
+        201,
+    )
+    .await;
+    assert_eq!(order_status(&pool, t.order_id).await, "refunded");
+    let (waste, restock, _) = refund_ledger(&pool, &t).await;
+    assert_eq!(waste, -40.0);
+    assert_eq!(restock, 40.0);
+    assert_eq!(on_hand(&pool, &t, ing).await, 960.0);
+}
+
+#[sqlx::test]
+async fn a_replayed_refund_logs_its_waste_once(pool: PgPool) {
+    let t = seed_till(&pool).await;
+    let ing = with_recipe(&pool, &t).await;
+    let actor = crate::sync::ActingContext {
+        teller_id: t.teller_id,
+        org_id: t.org_id,
+        role: UserRole::Teller,
+        replay: true,
+        own_till_only: false,
+    };
+    let mut body = refund_body(t.order_id, 200);
+    body["till_id"] = json!(t.shift_id);
+    body["client_ref"] = json!(Uuid::new_v4());
+    body["issued_at"] = json!(chrono::Utc::now() - chrono::Duration::hours(2));
+    let req: crate::refunds::handlers::CreateRefundRequest = serde_json::from_value(body).unwrap();
+    for expected in [201, 200] {
+        let resp = crate::refunds::handlers::create_refund_inner(
+            crate::db::Db::bypass(&pool),
+            web::Json(req.clone()),
+            actor.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status().as_u16(), expected);
+    }
+    let (waste, _, rows) = refund_ledger(&pool, &t).await;
+    assert_eq!(waste, -40.0, "the whole sale, once");
+    assert_eq!(rows, 1);
+    assert_eq!(on_hand(&pool, &t, ing).await, 960.0);
+}
