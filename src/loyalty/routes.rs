@@ -49,6 +49,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 )
                 .route("/analytics", web::get().to(handlers::analytics))
                 .route("/behavior", web::get().to(handlers::behavior))
+                .route(
+                    "/campaign-effectiveness",
+                    web::get().to(handlers::campaign_effectiveness),
+                )
+                .route("/liability-trend", web::get().to(handlers::liability_trend))
                 // Makes live calls to Google, so it is asked for, never polled.
                 .route("/wallet-status", web::get().to(handlers::wallet_status))
                 .route("/members", web::get().to(handlers::list_members))

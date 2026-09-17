@@ -4,6 +4,7 @@
 
 use actix_web::http::StatusCode;
 use actix_web::{App, test, web};
+use chrono::TimeZone;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -82,6 +83,41 @@ async fn seed_menu_item(pool: &PgPool, org: Uuid, name: &str, price: i32) -> Uui
         .execute(pool)
         .await
         .unwrap();
+    id
+}
+
+/// A settled order, just enough of one to satisfy `loyalty_transactions`'
+/// "an earn/redeem names its order" constraint — the report tests don't care
+/// about the order's own numbers, only that it exists and belongs to the
+/// branch.
+async fn seed_order(pool: &PgPool, branch: Uuid, teller: Uuid, order_number: i32) -> Uuid {
+    let till_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO tills (id, branch_id, teller_id, status, opening_cash) \
+         VALUES ($1, $2, $3, 'open', 10000)",
+    )
+    .bind(till_id)
+    .bind(branch)
+    .bind(teller)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO orders \
+            (id, branch_id, teller_id, till_id, idempotency_key, customer_name, subtotal, \
+             discount_amount, tax_amount, total_amount, status, order_number, payment_method, order_ref) \
+         VALUES ($1, $2, $3, $4, gen_random_uuid(), 'Customer', 500, 0, 0, 500, 'completed', $5, 'cash', gen_random_uuid()::text)",
+    )
+    .bind(id)
+    .bind(branch)
+    .bind(teller)
+    .bind(till_id)
+    .bind(order_number)
+    .execute(pool)
+    .await
+    .unwrap();
     id
 }
 
@@ -3880,4 +3916,144 @@ async fn a_till_refreshes_an_attached_member_by_id_with_the_cap(pool: PgPool) {
         test::call_service(&app, req).await.status(),
         StatusCode::NOT_FOUND
     );
+}
+
+// ── Campaign effectiveness ────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn campaign_effectiveness_counts_returns_within_30_days(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let admin = seed_user(&pool, org, "org_admin").await;
+    let member = seed_member(&pool, org, "+201000000020", "tok-campaign-eff").await;
+
+    let now = chrono::Utc::now();
+    let sent_at = now - chrono::Duration::days(20);
+
+    sqlx::query(
+        "INSERT INTO loyalty_winbacks (customer_id, org_id, since, seq, reward_amount, sent_at) \
+         VALUES ($1, $2, $3, 1, 100, $4)",
+    )
+    .bind(member)
+    .bind(org)
+    .bind(sent_at - chrono::Duration::days(10))
+    .bind(sent_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Earned again 5 days after the nudge — counts as a return. The ledger is
+    // append-only (no UPDATE/DELETE), so `created_at` is set on insert.
+    let order_id = seed_order(&pool, branch, admin, 1).await;
+    sqlx::query(
+        "INSERT INTO loyalty_transactions \
+            (org_id, customer_id, branch_id, kind, currency, points, order_id, created_at) \
+         VALUES ($1, $2, $3, 'earn', 'points', 10, $4, $5)",
+    )
+    .bind(org)
+    .bind(member)
+    .bind(branch)
+    .bind(order_id)
+    .bind(sent_at + chrono::Duration::days(5))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let jwt = token(admin, org, UserRole::OrgAdmin, None);
+
+    let req = test::TestRequest::get()
+        .uri("/loyalty/campaign-effectiveness")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .to_request();
+    let body: Value = test::call_and_read_body_json(&app, req).await;
+
+    let campaigns = body["campaigns"].as_array().unwrap();
+    let winback = campaigns
+        .iter()
+        .find(|c| c["campaign"] == "winback")
+        .unwrap();
+    assert_eq!(winback["sent"], 1);
+    assert_eq!(winback["returned_within_30d"], 1);
+    assert_eq!(winback["return_rate"], 1.0);
+
+    let birthday = campaigns
+        .iter()
+        .find(|c| c["campaign"] == "birthday")
+        .unwrap();
+    assert_eq!(birthday["sent"], 0);
+    assert_eq!(birthday["return_rate"], 0.0);
+}
+
+// ── Points-liability trend ─────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn liability_trend_buckets_net_change_by_week(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let admin = seed_user(&pool, org, "org_admin").await;
+    let member = seed_member(&pool, org, "+201000000021", "tok-liability-trend").await;
+    enable_program(&pool, org, 1000, 100, false).await;
+
+    let week1 = chrono::Utc.with_ymd_and_hms(2024, 1, 3, 12, 0, 0).unwrap();
+    let week2 = chrono::Utc.with_ymd_and_hms(2024, 1, 17, 12, 0, 0).unwrap();
+    let earn_order = seed_order(&pool, branch, admin, 1).await;
+    let redeem_order = seed_order(&pool, branch, admin, 2).await;
+
+    sqlx::query(
+        "INSERT INTO loyalty_transactions (org_id, customer_id, branch_id, kind, currency, points, order_id, created_at) \
+         VALUES ($1, $2, $3, 'earn', 'points', 100, $4, $5)",
+    )
+    .bind(org)
+    .bind(member)
+    .bind(branch)
+    .bind(earn_order)
+    .bind(week1)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO loyalty_transactions (org_id, customer_id, branch_id, kind, currency, points, order_id, created_at) \
+         VALUES ($1, $2, $3, 'redeem', 'points', -30, $4, $5)",
+    )
+    .bind(org)
+    .bind(member)
+    .bind(branch)
+    .bind(redeem_order)
+    .bind(week2)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let jwt = token(admin, org, UserRole::OrgAdmin, None);
+
+    let req = test::TestRequest::get()
+        .uri("/loyalty/liability-trend?from=2024-01-01T00:00:00Z&to=2024-01-31T00:00:00Z")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .to_request();
+    let body: Value = test::call_and_read_body_json(&app, req).await;
+
+    assert_eq!(body["currency"], "points");
+    let points = body["points"].as_array().unwrap();
+    assert_eq!(points.len(), 2);
+    assert_eq!(points[0]["outstanding"], 100);
+    assert_eq!(points[1]["outstanding"], -30);
 }

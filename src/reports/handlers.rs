@@ -777,6 +777,59 @@ pub async fn branch_sales(
     }))
 }
 
+// ── GET /reports/branches/:id/channel-breakdown ──────────────
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct ChannelBreakdownRow {
+    pub channel: String,
+    pub orders: i64,
+    pub revenue: i64,
+    pub avg_order_value: i64,
+}
+
+#[utoipa::path(
+    get,
+    path = "/reports/branches/{branch_id}/channel-breakdown",
+    tag = "reports",
+    params(("branch_id" = Uuid, Path, description = "Branch ID"), DateRangeQuery),
+    responses((status = 200, description = "Sales by order channel (dine-in/takeaway/delivery)", body = Vec<ChannelBreakdownRow>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn branch_channel_breakdown(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    branch_id: web::Path<Uuid>,
+    query: web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "orders", "read").await?;
+    let (branch_ids, _org) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+
+    let rows = sqlx::query_as::<_, ChannelBreakdownRow>(
+        r#"
+        SELECT o.order_type AS channel,
+               COUNT(*)::bigint AS orders,
+               COALESCE(SUM(o.total_amount), 0)::bigint AS revenue,
+               COALESCE(SUM(o.total_amount) / COUNT(*), 0)::bigint AS avg_order_value
+        FROM orders o
+        WHERE o.branch_id = ANY($1)
+          AND o.status NOT IN ('voided', 'refunded')
+          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
+          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+        GROUP BY o.order_type
+        ORDER BY revenue DESC
+        "#,
+    )
+    .bind(&branch_ids)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+
 // ── GET /reports/branches/:id/stock ──────────────────────────
 
 #[utoipa::path(
@@ -977,6 +1030,10 @@ pub struct PeakHourPoint {
     pub voided: i64,
     pub discount: i64,
     pub tax: i64,
+    /// SUM(order_items.quantity) across non-voided orders in this hour bucket.
+    pub line_items: i64,
+    /// SUM(order_item_addons.quantity) across non-voided orders in this hour bucket.
+    pub addons: i64,
     /// Revenue in piastres averaged over the number of calendar days in the queried range.
     pub avg_revenue_per_day: i64,
     /// Orders averaged over the number of calendar days (may be fractional).
@@ -1061,6 +1118,33 @@ pub async fn branch_sales_peak_hours(
               AND ($3::timestamptz IS NULL OR o.created_at <= $3)
             GROUP BY 1
         ),
+        -- order_items/order_item_addons fan out orders, so they're summed in
+        -- their own bucketed CTEs rather than joined into `aggregated` above.
+        line_items_agg AS (
+            SELECT
+                EXTRACT(hour FROM o.created_at AT TIME ZONE $4)::int AS hour,
+                COALESCE(SUM(oi.quantity), 0)::bigint AS line_items
+            FROM order_items oi
+            JOIN orders o ON o.id = oi.order_id
+            WHERE o.branch_id = ANY($1)
+              AND o.status NOT IN ('voided', 'refunded')
+              AND ($2::timestamptz IS NULL OR o.created_at >= $2)
+              AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+            GROUP BY 1
+        ),
+        addons_agg AS (
+            SELECT
+                EXTRACT(hour FROM o.created_at AT TIME ZONE $4)::int AS hour,
+                COALESCE(SUM(oia.quantity), 0)::bigint AS addons
+            FROM order_item_addons oia
+            JOIN order_items oi ON oi.id = oia.order_item_id
+            JOIN orders o ON o.id = oi.order_id
+            WHERE o.branch_id = ANY($1)
+              AND o.status NOT IN ('voided', 'refunded')
+              AND ($2::timestamptz IS NULL OR o.created_at >= $2)
+              AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+            GROUP BY 1
+        ),
         totals AS (
             SELECT
                 COALESCE(SUM(revenue), 0) AS total_revenue,
@@ -1074,6 +1158,8 @@ pub async fn branch_sales_peak_hours(
             COALESCE(a.voided,   0)::bigint AS voided,
             COALESCE(a.discount, 0)::bigint AS discount,
             COALESCE(a.tax,      0)::bigint AS tax,
+            COALESCE(li.line_items, 0)::bigint AS line_items,
+            COALESCE(ad.addons,     0)::bigint AS addons,
             ROUND(COALESCE(a.revenue, 0)::numeric / d.days)::bigint        AS avg_revenue_per_day,
             (COALESCE(a.orders,  0)::float8 / d.days::float8)              AS avg_orders_per_day,
             CASE WHEN t.total_revenue > 0
@@ -1086,7 +1172,174 @@ pub async fn branch_sales_peak_hours(
         CROSS JOIN day_count d
         CROSS JOIN totals t
         LEFT JOIN aggregated a ON a.hour = h.hour
+        LEFT JOIN line_items_agg li ON li.hour = h.hour
+        LEFT JOIN addons_agg ad ON ad.hour = h.hour
         ORDER BY h.hour ASC
+        "#,
+    )
+    .bind(&branch_ids)
+    .bind(query.from)
+    .bind(query.to)
+    .bind(&tz)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+// ── GET /reports/branches/:id/sales/peak-days ────────────────
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct PeakDayPoint {
+    /// Day of week per `EXTRACT(dow ...)`: 0 = Sunday .. 6 = Saturday.
+    pub day_of_week: i32,
+    pub orders: i64,
+    pub revenue: i64,
+    pub voided: i64,
+    pub discount: i64,
+    pub tax: i64,
+    /// SUM(order_items.quantity) across non-voided orders on this weekday.
+    pub line_items: i64,
+    /// SUM(order_item_addons.quantity) across non-voided orders on this weekday.
+    pub addons: i64,
+    /// Revenue in piastres averaged over how many times this weekday occurred in the queried range.
+    pub avg_revenue_per_day: i64,
+    /// Orders averaged over how many times this weekday occurred (may be fractional).
+    pub avg_orders_per_day: f64,
+    /// This weekday's revenue as a percentage of the period total (0–100, 1 dp).
+    pub revenue_pct: f64,
+    /// This weekday's orders as a percentage of the period total (0–100, 1 dp).
+    pub orders_pct: f64,
+}
+
+#[utoipa::path(
+    get,
+    path = "/reports/branches/{branch_id}/sales/peak-days",
+    tag = "reports",
+    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    params(DateRangeQuery),
+    responses((status = 200, description = "Peak days-of-week aggregation (7 rows)", body = Vec<PeakDayPoint>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+#[tracing::instrument(skip_all, fields(branch_id = %*branch_id, from = ?query.from, to = ?query.to))]
+pub async fn branch_sales_peak_days(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    branch_id: web::Path<Uuid>,
+    query: web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "orders", "read").await?;
+    let (branch_ids, org) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+
+    let tz: String = sqlx::query_scalar(
+        "SELECT COALESCE(
+            (SELECT timezone::text FROM branches WHERE id = $1 AND deleted_at IS NULL),
+            (SELECT timezone::text FROM organizations WHERE id = $2),
+            'Africa/Cairo'
+         )",
+    )
+    .bind(*branch_id)
+    .bind(org)
+    .fetch_one(pool.get_ref())
+    .await?;
+
+    // Always return all 7 weekdays so the chart has a complete x-axis.
+    // "Per occurrence" averages divide by how many times that weekday actually
+    // fell in the range (via day_occurrences), not the range's total day count —
+    // a range with 4 Mondays and 5 Tuesdays would otherwise understate Mondays.
+    let rows = sqlx::query_as::<_, PeakDayPoint>(
+        r#"
+        WITH all_days AS (
+            SELECT generate_series(0, 6)::int AS day_of_week
+        ),
+        day_occurrences AS (
+            SELECT EXTRACT(dow FROM d)::int AS day_of_week, COUNT(*)::int AS occurrences
+            FROM generate_series(
+                COALESCE(
+                    ($2::timestamptz AT TIME ZONE $4)::date,
+                    (SELECT MIN((created_at AT TIME ZONE $4)::date) FROM orders WHERE branch_id = ANY($1))
+                ),
+                COALESCE(
+                    ($3::timestamptz AT TIME ZONE $4)::date,
+                    (SELECT MAX((created_at AT TIME ZONE $4)::date) FROM orders WHERE branch_id = ANY($1))
+                ),
+                interval '1 day'
+            ) d
+            GROUP BY 1
+        ),
+        aggregated AS (
+            SELECT
+                EXTRACT(dow FROM o.created_at AT TIME ZONE $4)::int AS day_of_week,
+                COUNT(o.id)   FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint  AS orders,
+                COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0))
+                         FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS revenue,
+                COUNT(o.id)   FILTER (WHERE o.status  = 'voided')::bigint  AS voided,
+                COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS discount,
+                COALESCE(SUM(o.tax_amount - COALESCE(rf.refunded_tax, 0)) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS tax
+            FROM orders o
+            LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
+            WHERE o.branch_id = ANY($1)
+              AND ($2::timestamptz IS NULL OR o.created_at >= $2)
+              AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+            GROUP BY 1
+        ),
+        line_items_agg AS (
+            SELECT
+                EXTRACT(dow FROM o.created_at AT TIME ZONE $4)::int AS day_of_week,
+                COALESCE(SUM(oi.quantity), 0)::bigint AS line_items
+            FROM order_items oi
+            JOIN orders o ON o.id = oi.order_id
+            WHERE o.branch_id = ANY($1)
+              AND o.status NOT IN ('voided', 'refunded')
+              AND ($2::timestamptz IS NULL OR o.created_at >= $2)
+              AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+            GROUP BY 1
+        ),
+        addons_agg AS (
+            SELECT
+                EXTRACT(dow FROM o.created_at AT TIME ZONE $4)::int AS day_of_week,
+                COALESCE(SUM(oia.quantity), 0)::bigint AS addons
+            FROM order_item_addons oia
+            JOIN order_items oi ON oi.id = oia.order_item_id
+            JOIN orders o ON o.id = oi.order_id
+            WHERE o.branch_id = ANY($1)
+              AND o.status NOT IN ('voided', 'refunded')
+              AND ($2::timestamptz IS NULL OR o.created_at >= $2)
+              AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+            GROUP BY 1
+        ),
+        totals AS (
+            SELECT
+                COALESCE(SUM(revenue), 0) AS total_revenue,
+                COALESCE(SUM(orders),  0) AS total_orders
+            FROM aggregated
+        )
+        SELECT
+            w.day_of_week,
+            COALESCE(a.orders,   0)::bigint AS orders,
+            COALESCE(a.revenue,  0)::bigint AS revenue,
+            COALESCE(a.voided,   0)::bigint AS voided,
+            COALESCE(a.discount, 0)::bigint AS discount,
+            COALESCE(a.tax,      0)::bigint AS tax,
+            COALESCE(li.line_items, 0)::bigint AS line_items,
+            COALESCE(ad.addons,     0)::bigint AS addons,
+            ROUND(COALESCE(a.revenue, 0)::numeric / GREATEST(1, COALESCE(o.occurrences, 1)))::bigint AS avg_revenue_per_day,
+            (COALESCE(a.orders,  0)::float8 / GREATEST(1, COALESCE(o.occurrences, 1))::float8)        AS avg_orders_per_day,
+            CASE WHEN t.total_revenue > 0
+                 THEN ROUND(COALESCE(a.revenue, 0)::numeric / t.total_revenue * 100, 1)::float8
+                 ELSE 0.0::float8 END                                       AS revenue_pct,
+            CASE WHEN t.total_orders > 0
+                 THEN ROUND(COALESCE(a.orders,  0)::numeric / t.total_orders  * 100, 1)::float8
+                 ELSE 0.0::float8 END                                       AS orders_pct
+        FROM all_days w
+        CROSS JOIN totals t
+        LEFT JOIN aggregated a ON a.day_of_week = w.day_of_week
+        LEFT JOIN line_items_agg li ON li.day_of_week = w.day_of_week
+        LEFT JOIN addons_agg ad ON ad.day_of_week = w.day_of_week
+        LEFT JOIN day_occurrences o ON o.day_of_week = w.day_of_week
+        ORDER BY w.day_of_week ASC
         "#,
     )
     .bind(&branch_ids)
@@ -2099,6 +2352,413 @@ pub async fn org_shrinkage(
         ORDER BY shrinkage_qty DESC
         "#,
     )
+    .bind(*org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+// ── GET /reports/branches|orgs/:id/supplier-spend ────────────
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct SupplierSpendRow {
+    pub supplier_id: Option<Uuid>,
+    pub supplier_name: String,
+    pub orders: i64,
+    pub total_spend: i64,
+}
+
+const SUPPLIER_SPEND_SELECT: &str = r#"
+    SELECT po.supplier_id, COALESCE(s.name, 'Unknown supplier') AS supplier_name,
+           COUNT(DISTINCT po.id)::bigint AS orders,
+           COALESCE(SUM(pol.quantity_received * pol.unit_cost), 0)::bigint AS total_spend
+    FROM purchase_orders po
+    JOIN purchase_order_lines pol ON pol.purchase_order_id = po.id
+    LEFT JOIN suppliers s ON s.id = po.supplier_id
+"#;
+
+#[utoipa::path(
+    get,
+    path = "/reports/branches/{branch_id}/supplier-spend",
+    tag = "reports",
+    params(("branch_id" = Uuid, Path, description = "Branch ID"), DateRangeQuery),
+    responses((status = 200, description = "Received purchase spend by supplier", body = Vec<SupplierSpendRow>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn branch_supplier_spend(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    branch_id: web::Path<Uuid>,
+    query: web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
+    let (branch_ids, _org) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+
+    let rows = sqlx::query_as::<_, SupplierSpendRow>(&format!(
+        r#"
+        {SUPPLIER_SPEND_SELECT}
+        WHERE po.branch_id = ANY($1) AND po.status = 'received'
+          AND ($2::timestamptz IS NULL OR po.received_at >= $2)
+          AND ($3::timestamptz IS NULL OR po.received_at <= $3)
+        GROUP BY po.supplier_id, s.name
+        ORDER BY total_spend DESC
+        "#
+    ))
+    .bind(&branch_ids)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+#[utoipa::path(
+    get,
+    path = "/reports/orgs/{org_id}/supplier-spend",
+    tag = "reports",
+    params(("org_id" = Uuid, Path, description = "Organization ID"), DateRangeQuery),
+    responses((status = 200, description = "Received purchase spend by supplier across the org", body = Vec<SupplierSpendRow>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn org_supplier_spend(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    org_id: web::Path<Uuid>,
+    query: web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
+    require_org(&claims, *org_id)?;
+
+    let rows = sqlx::query_as::<_, SupplierSpendRow>(&format!(
+        r#"
+        {SUPPLIER_SPEND_SELECT}
+        WHERE po.org_id = $1 AND po.status = 'received'
+          AND ($2::timestamptz IS NULL OR po.received_at >= $2)
+          AND ($3::timestamptz IS NULL OR po.received_at <= $3)
+        GROUP BY po.supplier_id, s.name
+        ORDER BY total_spend DESC
+        "#
+    ))
+    .bind(*org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+// ── GET /reports/branches|orgs/:id/po-lead-time ───────────────
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct PoLeadTimeRow {
+    pub supplier_id: Option<Uuid>,
+    pub supplier_name: String,
+    pub orders_received: i64,
+    pub avg_lead_time_days: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PoLeadTimeReport {
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    pub overall_avg_days: f64,
+    pub by_supplier: Vec<PoLeadTimeRow>,
+}
+
+const PO_LEAD_TIME_BY_SUPPLIER_SELECT: &str = r#"
+    SELECT po.supplier_id, COALESCE(s.name, 'Unknown supplier') AS supplier_name,
+           COUNT(*)::bigint AS orders_received,
+           AVG(EXTRACT(EPOCH FROM (po.received_at - po.created_at)) / 86400.0)::float8 AS avg_lead_time_days
+    FROM purchase_orders po
+    LEFT JOIN suppliers s ON s.id = po.supplier_id
+"#;
+
+#[utoipa::path(
+    get,
+    path = "/reports/branches/{branch_id}/po-lead-time",
+    tag = "reports",
+    params(("branch_id" = Uuid, Path, description = "Branch ID"), DateRangeQuery),
+    responses((status = 200, description = "Purchase order fulfillment lead time by supplier", body = PoLeadTimeReport), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn branch_po_lead_time(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    branch_id: web::Path<Uuid>,
+    query: web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
+    let (branch_ids, _org) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+
+    let by_supplier = sqlx::query_as::<_, PoLeadTimeRow>(&format!(
+        r#"
+        {PO_LEAD_TIME_BY_SUPPLIER_SELECT}
+        WHERE po.branch_id = ANY($1) AND po.status = 'received' AND po.received_at IS NOT NULL
+          AND ($2::timestamptz IS NULL OR po.received_at >= $2)
+          AND ($3::timestamptz IS NULL OR po.received_at <= $3)
+        GROUP BY po.supplier_id, s.name
+        ORDER BY avg_lead_time_days DESC
+        "#
+    ))
+    .bind(&branch_ids)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    let overall_avg_days: Option<f64> = sqlx::query_scalar(
+        r#"
+        SELECT AVG(EXTRACT(EPOCH FROM (po.received_at - po.created_at)) / 86400.0)::float8
+        FROM purchase_orders po
+        WHERE po.branch_id = ANY($1) AND po.status = 'received' AND po.received_at IS NOT NULL
+          AND ($2::timestamptz IS NULL OR po.received_at >= $2)
+          AND ($3::timestamptz IS NULL OR po.received_at <= $3)
+        "#,
+    )
+    .bind(&branch_ids)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_one(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(PoLeadTimeReport {
+        from: query.from,
+        to: query.to,
+        overall_avg_days: overall_avg_days.unwrap_or(0.0),
+        by_supplier,
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/reports/orgs/{org_id}/po-lead-time",
+    tag = "reports",
+    params(("org_id" = Uuid, Path, description = "Organization ID"), DateRangeQuery),
+    responses((status = 200, description = "Purchase order fulfillment lead time by supplier across the org", body = PoLeadTimeReport), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn org_po_lead_time(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    org_id: web::Path<Uuid>,
+    query: web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
+    require_org(&claims, *org_id)?;
+
+    let by_supplier = sqlx::query_as::<_, PoLeadTimeRow>(&format!(
+        r#"
+        {PO_LEAD_TIME_BY_SUPPLIER_SELECT}
+        WHERE po.org_id = $1 AND po.status = 'received' AND po.received_at IS NOT NULL
+          AND ($2::timestamptz IS NULL OR po.received_at >= $2)
+          AND ($3::timestamptz IS NULL OR po.received_at <= $3)
+        GROUP BY po.supplier_id, s.name
+        ORDER BY avg_lead_time_days DESC
+        "#
+    ))
+    .bind(*org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    let overall_avg_days: Option<f64> = sqlx::query_scalar(
+        r#"
+        SELECT AVG(EXTRACT(EPOCH FROM (po.received_at - po.created_at)) / 86400.0)::float8
+        FROM purchase_orders po
+        WHERE po.org_id = $1 AND po.status = 'received' AND po.received_at IS NOT NULL
+          AND ($2::timestamptz IS NULL OR po.received_at >= $2)
+          AND ($3::timestamptz IS NULL OR po.received_at <= $3)
+        "#,
+    )
+    .bind(*org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_one(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(PoLeadTimeReport {
+        from: query.from,
+        to: query.to,
+        overall_avg_days: overall_avg_days.unwrap_or(0.0),
+        by_supplier,
+    }))
+}
+
+// ── GET /reports/branches|orgs/:id/material-cost-trend ────────
+//
+// Flags ingredients whose current supplier has raised the price on 3+
+// consecutive received deliveries in a row, and — when a cheaper price for
+// the same ingredient shows up from any other supplier in the same window —
+// names that supplier as a switch candidate. Built on `goods_receipt_lines`
+// (actual, unit-normalized piastres-per-stock-unit) rather than
+// `purchase_order_lines`, since it already carries its own `supplier_id`/
+// `received_at` and needs no purchase-unit conversion.
+
+const MATERIAL_COST_TREND_MIN_STREAK: i64 = 3;
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct MaterialCostTrendRow {
+    pub org_ingredient_id: Uuid,
+    pub ingredient_name: String,
+    pub current_supplier_id: Option<Uuid>,
+    pub current_supplier_name: String,
+    /// Piastres per base stock unit, most recent receipt.
+    pub current_cost: i64,
+    /// Number of consecutive received deliveries, most recent first, each
+    /// pricier than the one before it.
+    pub streak_length: i64,
+    /// Piastres per base stock unit, the receipt just before the streak began.
+    pub base_cost: i64,
+    /// `(current_cost - base_cost) / base_cost * 100`, 1 dp.
+    pub pct_increase: f64,
+    pub cheaper_supplier_id: Option<Uuid>,
+    pub cheaper_supplier_name: Option<String>,
+    pub cheaper_cost: Option<i64>,
+}
+
+const MATERIAL_COST_TREND_CTES: &str = r#"
+    receipts AS (
+        SELECT grl.org_ingredient_id, gr.supplier_id, grl.unit_cost, gr.received_at
+        FROM goods_receipt_lines grl
+        JOIN goods_receipts gr ON gr.id = grl.goods_receipt_id
+        WHERE grl.unit_cost IS NOT NULL AND grl.quantity > 0
+          AND gr.is_return = false AND gr.supplier_id IS NOT NULL
+          AND {scope}
+          AND ($2::timestamptz IS NULL OR gr.received_at >= $2)
+          AND ($3::timestamptz IS NULL OR gr.received_at <= $3)
+    ),
+    latest AS (
+        SELECT DISTINCT ON (org_ingredient_id)
+            org_ingredient_id, supplier_id AS current_supplier_id, unit_cost AS current_cost
+        FROM receipts
+        ORDER BY org_ingredient_id, received_at DESC
+    ),
+    seq AS (
+        SELECT
+            r.org_ingredient_id, r.unit_cost,
+            ROW_NUMBER() OVER (PARTITION BY r.org_ingredient_id ORDER BY r.received_at DESC) AS rn,
+            LEAD(r.unit_cost) OVER (PARTITION BY r.org_ingredient_id ORDER BY r.received_at DESC) AS older_cost
+        FROM receipts r
+        JOIN latest l ON l.org_ingredient_id = r.org_ingredient_id AND l.current_supplier_id = r.supplier_id
+    ),
+    -- Newest-first per ingredient; `increased` compares each receipt to the
+    -- one just before it (older_cost). The oldest receipt has no older_cost
+    -- to compare against, so it always reads as a non-increase — the natural
+    -- floor that caps any streak at (receipt count - 1).
+    flagged AS (
+        SELECT org_ingredient_id, unit_cost, rn,
+               CASE WHEN older_cost IS NOT NULL AND unit_cost > older_cost THEN 1 ELSE 0 END AS increased
+        FROM seq
+    ),
+    streaks AS (
+        SELECT f.org_ingredient_id, (MIN(f.rn) FILTER (WHERE f.increased = 0) - 1) AS streak_length
+        FROM flagged f
+        GROUP BY f.org_ingredient_id
+        HAVING (MIN(f.rn) FILTER (WHERE f.increased = 0) - 1) >= {min_streak}
+    ),
+    streak_base AS (
+        SELECT s.org_ingredient_id, s.streak_length, f.unit_cost AS base_cost
+        FROM streaks s
+        JOIN flagged f ON f.org_ingredient_id = s.org_ingredient_id AND f.rn = s.streak_length + 1
+    ),
+    alternatives AS (
+        SELECT DISTINCT ON (r.org_ingredient_id)
+            r.org_ingredient_id, r.supplier_id AS alt_supplier_id, r.unit_cost AS alt_cost
+        FROM receipts r
+        JOIN latest l ON l.org_ingredient_id = r.org_ingredient_id
+        WHERE r.supplier_id != l.current_supplier_id
+        ORDER BY r.org_ingredient_id, r.unit_cost ASC, r.received_at DESC
+    )
+"#;
+
+const MATERIAL_COST_TREND_SELECT: &str = r#"
+    SELECT
+        oi.id AS org_ingredient_id, oi.name AS ingredient_name,
+        l.current_supplier_id, COALESCE(cs.name, 'Unknown supplier') AS current_supplier_name,
+        l.current_cost, sb.streak_length, sb.base_cost,
+        (CASE WHEN sb.base_cost > 0
+              THEN ROUND((l.current_cost - sb.base_cost)::numeric / sb.base_cost * 100, 1)
+              ELSE 0 END)::float8 AS pct_increase,
+        a.alt_supplier_id AS cheaper_supplier_id, als.name AS cheaper_supplier_name, a.alt_cost AS cheaper_cost
+    FROM streak_base sb
+    JOIN latest l ON l.org_ingredient_id = sb.org_ingredient_id
+    JOIN org_ingredients oi ON oi.id = sb.org_ingredient_id
+    LEFT JOIN suppliers cs ON cs.id = l.current_supplier_id
+    LEFT JOIN alternatives a ON a.org_ingredient_id = sb.org_ingredient_id AND a.alt_cost < l.current_cost
+    LEFT JOIN suppliers als ON als.id = a.alt_supplier_id
+    ORDER BY pct_increase DESC
+"#;
+
+#[utoipa::path(
+    get,
+    path = "/reports/branches/{branch_id}/material-cost-trend",
+    tag = "reports",
+    params(("branch_id" = Uuid, Path, description = "Branch ID"), DateRangeQuery),
+    responses((status = 200, description = "Ingredients with 3+ consecutive price rises from their current supplier, with a cheaper alternative when one exists", body = Vec<MaterialCostTrendRow>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn branch_material_cost_trend(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    branch_id: web::Path<Uuid>,
+    query: web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
+    let (branch_ids, _org) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+
+    let ctes = MATERIAL_COST_TREND_CTES
+        .replace("{scope}", "gr.branch_id = ANY($1)")
+        .replace("{min_streak}", &MATERIAL_COST_TREND_MIN_STREAK.to_string());
+    let rows = sqlx::query_as::<_, MaterialCostTrendRow>(&format!(
+        "WITH {ctes} {MATERIAL_COST_TREND_SELECT}"
+    ))
+    .bind(&branch_ids)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+#[utoipa::path(
+    get,
+    path = "/reports/orgs/{org_id}/material-cost-trend",
+    tag = "reports",
+    params(("org_id" = Uuid, Path, description = "Organization ID"), DateRangeQuery),
+    responses((status = 200, description = "Ingredients with 3+ consecutive price rises from their current supplier, with a cheaper alternative when one exists, across the org", body = Vec<MaterialCostTrendRow>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn org_material_cost_trend(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    org_id: web::Path<Uuid>,
+    query: web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
+    require_org(&claims, *org_id)?;
+
+    let ctes = MATERIAL_COST_TREND_CTES
+        .replace("{scope}", "gr.org_id = $1")
+        .replace("{min_streak}", &MATERIAL_COST_TREND_MIN_STREAK.to_string());
+    let rows = sqlx::query_as::<_, MaterialCostTrendRow>(&format!(
+        "WITH {ctes} {MATERIAL_COST_TREND_SELECT}"
+    ))
     .bind(*org_id)
     .bind(query.from)
     .bind(query.to)

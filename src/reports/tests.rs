@@ -10,10 +10,12 @@ use crate::auth::jwt::JwtSecret;
 use crate::models::UserRole;
 use crate::reports::handlers::{
     AddonSalesRow, BranchComparison, BranchSalesReport, BranchStockReport, BundleSalesRow,
-    CategorySales, CombinedItemSalesRow, ConsumptionRow, DeductionLogRow, InventoryValuationReport,
-    ItemSales, LowStockRow, OrgComparisonReport, PeakHourPoint, ShiftSummary, ShrinkageRow,
-    StockRow, TellerStats, TimeseriesPoint, WaiterStatsReport, WasteReportRow,
+    CategorySales, ChannelBreakdownRow, CombinedItemSalesRow, ConsumptionRow, DeductionLogRow,
+    InventoryValuationReport, ItemSales, LowStockRow, MaterialCostTrendRow, OrgComparisonReport,
+    PeakDayPoint, PeakHourPoint, PoLeadTimeReport, PoLeadTimeRow, ShiftSummary, ShrinkageRow,
+    StockRow, SupplierSpendRow, TellerStats, TimeseriesPoint, WaiterStatsReport, WasteReportRow,
 };
+use crate::reports::legal::AuditReport;
 use crate::reports::routes;
 
 fn get_secret() -> JwtSecret {
@@ -285,6 +287,55 @@ async fn test_branch_sales(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn test_channel_breakdown(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let shift_id_2 = seed_shift(&pool, branch_id, user_id).await;
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+
+    // One dine_in (the seeded default) and one moved to delivery — separate
+    // shifts since `seed_order` always numbers the order 1 for its shift.
+    seed_order(&pool, branch_id, user_id, shift_id).await;
+    let delivery_order = seed_order(&pool, branch_id, user_id, shift_id_2).await;
+    sqlx::query("UPDATE orders SET order_type = 'delivery' WHERE id = $1")
+        .bind(delivery_order)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let req = test::TestRequest::get()
+        .uri(&format!(
+            "/reports/branches/{}/channel-breakdown",
+            branch_id
+        ))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+
+    let rows: Vec<ChannelBreakdownRow> = test::read_body_json(resp).await;
+    assert_eq!(rows.len(), 2);
+    let dine_in = rows.iter().find(|r| r.channel == "dine_in").unwrap();
+    assert_eq!(dine_in.orders, 1);
+    assert_eq!(dine_in.revenue, 570);
+    assert_eq!(dine_in.avg_order_value, 570);
+    let delivery = rows.iter().find(|r| r.channel == "delivery").unwrap();
+    assert_eq!(delivery.orders, 1);
+    assert_eq!(delivery.revenue, 570);
+}
+
+#[sqlx::test]
 async fn test_branch_stock(pool: PgPool) {
     let app = test::init_service(
         App::new()
@@ -433,6 +484,87 @@ async fn test_branch_sales_peak_hours(pool: PgPool) {
     // Voided orders must not count towards revenue.
     let total_voided: i64 = rows.iter().map(|r| r.voided).sum();
     assert_eq!(total_voided, 0, "no voided orders were seeded");
+}
+
+#[sqlx::test]
+async fn test_branch_sales_peak_days(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+
+    seed_order(&pool, branch_id, user_id, shift_id).await;
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/reports/branches/{}/sales/peak-days", branch_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+
+    let rows: Vec<PeakDayPoint> = test::read_body_json(resp).await;
+
+    // Always returns exactly 7 rows (one per day of week), even if some are empty.
+    assert_eq!(rows.len(), 7, "peak days must return exactly 7 buckets");
+
+    // Days are 0–6 (Sunday–Saturday) in order.
+    for (i, row) in rows.iter().enumerate() {
+        assert_eq!(
+            row.day_of_week, i as i32,
+            "day_of_week at index {i} must equal {i}"
+        );
+    }
+
+    // The seeded order (revenue=570) must appear in exactly one bucket.
+    let nonempty: Vec<&PeakDayPoint> = rows.iter().filter(|r| r.orders > 0).collect();
+    assert_eq!(
+        nonempty.len(),
+        1,
+        "exactly one weekday bucket should have orders"
+    );
+    let hot = nonempty[0];
+    assert_eq!(hot.orders, 1);
+    assert_eq!(hot.revenue, 570);
+
+    // The order fell on this weekday exactly once in range → avg equals total.
+    assert_eq!(
+        hot.avg_revenue_per_day, 570,
+        "avg_revenue_per_day = total when the weekday occurred once"
+    );
+    assert!(
+        (hot.avg_orders_per_day - 1.0).abs() < 0.001,
+        "avg_orders_per_day should be 1.0"
+    );
+
+    assert!(
+        (hot.revenue_pct - 100.0).abs() < 0.1,
+        "revenue_pct should be 100.0"
+    );
+    assert!(
+        (hot.orders_pct - 100.0).abs() < 0.1,
+        "orders_pct should be 100.0"
+    );
+
+    // All empty-day buckets should have zero averages.
+    let empty_nonzero_avg = rows
+        .iter()
+        .filter(|r| r.orders == 0 && r.avg_revenue_per_day != 0)
+        .count();
+    assert_eq!(
+        empty_nonzero_avg, 0,
+        "empty weekday buckets must not carry non-zero averages"
+    );
 }
 
 #[sqlx::test]
@@ -1214,6 +1346,355 @@ async fn test_shrinkage_branch_and_org(pool: PgPool) {
         assert_eq!(theft.shrinkage_qty, 8.0);
         assert_eq!(theft.shrinkage_value, Some(800));
         assert!(rows.iter().any(|r| r.reason == "unexplained"));
+    }
+}
+
+async fn seed_supplier(pool: &PgPool, org_id: Uuid, name: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO suppliers (id, org_id, name) VALUES ($1, $2, $3)")
+        .bind(id)
+        .bind(org_id)
+        .bind(name)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_received_po(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Uuid,
+    supplier_id: Option<Uuid>,
+    created_by: Uuid,
+    ing_id: Uuid,
+    quantity_received: f64,
+    unit_cost: i64,
+    created_at: chrono::DateTime<Utc>,
+    received_at: chrono::DateTime<Utc>,
+) -> Uuid {
+    let po_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO purchase_orders \
+            (id, org_id, branch_id, supplier_id, status, created_by, created_at, received_at) \
+         VALUES ($1, $2, $3, $4, 'received', $5, $6, $7)",
+    )
+    .bind(po_id)
+    .bind(org_id)
+    .bind(branch_id)
+    .bind(supplier_id)
+    .bind(created_by)
+    .bind(created_at)
+    .bind(received_at)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO purchase_order_lines \
+            (purchase_order_id, org_ingredient_id, purchase_unit, quantity_ordered, quantity_received, unit_cost) \
+         VALUES ($1, $2, 'unit', $3, $3, $4)",
+    )
+    .bind(po_id)
+    .bind(ing_id)
+    .bind(quantity_received)
+    .bind(unit_cost)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    po_id
+}
+
+#[sqlx::test]
+async fn test_supplier_spend_branch_and_org(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "inventory", "read").await;
+    let ing = seed_ingredient(&pool, org_id, "Flour", "g").await;
+    let supplier_id = seed_supplier(&pool, org_id, "Acme Supplies").await;
+
+    let now = Utc::now();
+    // 10 units at 200 piastres = 2000 spend.
+    seed_received_po(
+        &pool,
+        org_id,
+        branch_id,
+        Some(supplier_id),
+        user_id,
+        ing,
+        10.0,
+        200,
+        now - chrono::Duration::days(2),
+        now - chrono::Duration::days(1),
+    )
+    .await;
+    // Unknown-supplier PO must still show up, bucketed separately.
+    seed_received_po(
+        &pool,
+        org_id,
+        branch_id,
+        None,
+        user_id,
+        ing,
+        5.0,
+        100,
+        now - chrono::Duration::days(2),
+        now - chrono::Duration::days(1),
+    )
+    .await;
+
+    let token = generate_org_admin_token(user_id, org_id);
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    for url in [
+        format!("/reports/branches/{branch_id}/supplier-spend"),
+        format!("/reports/orgs/{org_id}/supplier-spend"),
+    ] {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&url)
+                .insert_header(auth.clone())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        let rows: Vec<SupplierSpendRow> = test::read_body_json(resp).await;
+        assert_eq!(rows.len(), 2);
+        let named = rows
+            .iter()
+            .find(|r| r.supplier_id == Some(supplier_id))
+            .unwrap();
+        assert_eq!(named.supplier_name, "Acme Supplies");
+        assert_eq!(named.orders, 1);
+        assert_eq!(named.total_spend, 2000);
+        let unknown = rows.iter().find(|r| r.supplier_id.is_none()).unwrap();
+        assert_eq!(unknown.supplier_name, "Unknown supplier");
+        assert_eq!(unknown.total_spend, 500);
+    }
+}
+
+#[sqlx::test]
+async fn test_po_lead_time_branch_and_org(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "inventory", "read").await;
+    let ing = seed_ingredient(&pool, org_id, "Sugar", "g").await;
+    let supplier_id = seed_supplier(&pool, org_id, "Acme Supplies").await;
+
+    let now = Utc::now();
+    // Exactly 4 days lead time.
+    seed_received_po(
+        &pool,
+        org_id,
+        branch_id,
+        Some(supplier_id),
+        user_id,
+        ing,
+        1.0,
+        100,
+        now - chrono::Duration::days(10),
+        now - chrono::Duration::days(6),
+    )
+    .await;
+
+    let token = generate_org_admin_token(user_id, org_id);
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    for url in [
+        format!("/reports/branches/{branch_id}/po-lead-time"),
+        format!("/reports/orgs/{org_id}/po-lead-time"),
+    ] {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&url)
+                .insert_header(auth.clone())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        let report: PoLeadTimeReport = test::read_body_json(resp).await;
+        assert!((report.overall_avg_days - 4.0).abs() < 0.01);
+        assert_eq!(report.by_supplier.len(), 1);
+        let row = &report.by_supplier[0];
+        assert_eq!(row.orders_received, 1);
+        assert!((row.avg_lead_time_days - 4.0).abs() < 0.01);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_goods_receipt(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Uuid,
+    supplier_id: Uuid,
+    received_by: Uuid,
+    ing_id: Uuid,
+    unit_cost: i64,
+    received_at: chrono::DateTime<Utc>,
+) -> Uuid {
+    let gr_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO goods_receipts (id, org_id, branch_id, supplier_id, is_return, received_by, received_at) \
+         VALUES ($1, $2, $3, $4, false, $5, $6)",
+    )
+    .bind(gr_id)
+    .bind(org_id)
+    .bind(branch_id)
+    .bind(supplier_id)
+    .bind(received_by)
+    .bind(received_at)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO goods_receipt_lines (goods_receipt_id, org_ingredient_id, quantity, unit_cost) \
+         VALUES ($1, $2, 10, $3)",
+    )
+    .bind(gr_id)
+    .bind(ing_id)
+    .bind(unit_cost)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    gr_id
+}
+
+#[sqlx::test]
+async fn test_material_cost_trend_branch_and_org(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "inventory", "read").await;
+
+    let acme = seed_supplier(&pool, org_id, "Acme Supplies").await;
+    let cheap_co = seed_supplier(&pool, org_id, "Cheap Co").await;
+    let now = Utc::now();
+
+    // Beans: 4 receipts from Acme, each pricier than the last → a streak of 3
+    // rises (100 -> 110 -> 120 -> 130). Cheap Co has since sold the same
+    // ingredient for less, so it should surface as the switch candidate.
+    let beans = seed_ingredient(&pool, org_id, "Beans", "g").await;
+    seed_goods_receipt(
+        &pool,
+        org_id,
+        branch_id,
+        acme,
+        user_id,
+        beans,
+        100,
+        now - chrono::Duration::days(40),
+    )
+    .await;
+    seed_goods_receipt(
+        &pool,
+        org_id,
+        branch_id,
+        acme,
+        user_id,
+        beans,
+        110,
+        now - chrono::Duration::days(30),
+    )
+    .await;
+    seed_goods_receipt(
+        &pool,
+        org_id,
+        branch_id,
+        acme,
+        user_id,
+        beans,
+        120,
+        now - chrono::Duration::days(20),
+    )
+    .await;
+    seed_goods_receipt(
+        &pool,
+        org_id,
+        branch_id,
+        acme,
+        user_id,
+        beans,
+        130,
+        now - chrono::Duration::days(10),
+    )
+    .await;
+    seed_goods_receipt(
+        &pool,
+        org_id,
+        branch_id,
+        cheap_co,
+        user_id,
+        beans,
+        90,
+        now - chrono::Duration::days(25),
+    )
+    .await;
+
+    // Milk: only 2 receipts, both rising — below the 3-rise threshold, must
+    // not appear in the report at all.
+    let milk = seed_ingredient(&pool, org_id, "Milk", "ml").await;
+    seed_goods_receipt(
+        &pool,
+        org_id,
+        branch_id,
+        acme,
+        user_id,
+        milk,
+        50,
+        now - chrono::Duration::days(20),
+    )
+    .await;
+    seed_goods_receipt(
+        &pool,
+        org_id,
+        branch_id,
+        acme,
+        user_id,
+        milk,
+        60,
+        now - chrono::Duration::days(10),
+    )
+    .await;
+
+    let token = generate_org_admin_token(user_id, org_id);
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    for url in [
+        format!("/reports/branches/{branch_id}/material-cost-trend"),
+        format!("/reports/orgs/{org_id}/material-cost-trend"),
+    ] {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&url)
+                .insert_header(auth.clone())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        let rows: Vec<MaterialCostTrendRow> = test::read_body_json(resp).await;
+
+        assert_eq!(rows.len(), 1, "only Beans crosses the 3-rise threshold");
+        let row = &rows[0];
+        assert_eq!(row.org_ingredient_id, beans);
+        assert_eq!(row.current_supplier_id, Some(acme));
+        assert_eq!(row.current_cost, 130);
+        assert_eq!(row.streak_length, 3);
+        assert_eq!(row.base_cost, 100);
+        assert!((row.pct_increase - 30.0).abs() < 0.01);
+        assert_eq!(row.cheaper_supplier_id, Some(cheap_co));
+        assert_eq!(row.cheaper_cost, Some(90));
     }
 }
 
@@ -2026,4 +2507,376 @@ async fn delivery_sales_report_every_channel_and_the_fee_apart(pool: PgPool) {
     assert_eq!(outside["delivery_fees"], 300);
     assert_eq!(outside["goods_revenue"], 2000);
     assert_eq!(channels[3]["delivery_fees"], 0, "a pickup has no fee");
+}
+
+// ── Legal audit trail ────────────────────────────────────────
+
+async fn call_audit(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    path: &str,
+    token: &str,
+) -> AuditReport {
+    let resp = test::call_service(
+        app,
+        test::TestRequest::get()
+            .uri(path)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    test::read_body_json(resp).await
+}
+
+#[sqlx::test]
+async fn test_refunds_audit(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let order_id = seed_order(&pool, branch_id, user_id, shift_id).await;
+
+    sqlx::query(
+        "INSERT INTO order_refunds (org_id, branch_id, order_id, till_id, amount, method, is_cash, reason, issued_by)
+         VALUES ($1, $2, $3, $4, 200, 'cash', true, 'goodwill', $5)",
+    )
+    .bind(org_id)
+    .bind(branch_id)
+    .bind(order_id)
+    .bind(shift_id)
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let report = call_audit(
+        &app,
+        &format!("/reports/orgs/{org_id}/refunds-audit"),
+        &token,
+    )
+    .await;
+    assert_eq!(report.total_count, 1);
+    assert_eq!(report.total_amount_minor, 200);
+    assert_eq!(report.by_reason[0].label, "goodwill");
+    assert_eq!(report.by_issuer[0].count, 1);
+}
+
+#[sqlx::test]
+async fn test_voids_audit(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let order_id = seed_order(&pool, branch_id, user_id, shift_id).await;
+
+    sqlx::query(
+        "UPDATE orders SET status = 'voided', voided_at = now(), voided_by = $1, void_reason = 'wrong_order' WHERE id = $2",
+    )
+    .bind(user_id)
+    .bind(order_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let report = call_audit(&app, &format!("/reports/orgs/{org_id}/voids-audit"), &token).await;
+    assert_eq!(report.total_count, 1);
+    assert_eq!(report.total_amount_minor, 570);
+    assert_eq!(report.by_reason[0].label, "wrong_order");
+}
+
+#[sqlx::test]
+async fn test_discounts_audit(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let order_id = seed_order(&pool, branch_id, user_id, shift_id).await;
+
+    sqlx::query(
+        "UPDATE orders SET discount_amount = 100, discount_type = 'fixed', total_amount = total_amount - 100 WHERE id = $1",
+    )
+    .bind(order_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let report = call_audit(
+        &app,
+        &format!("/reports/orgs/{org_id}/discounts-audit"),
+        &token,
+    )
+    .await;
+    assert_eq!(report.total_count, 1);
+    assert_eq!(report.total_amount_minor, 100);
+    assert_eq!(report.by_reason[0].label, "fixed");
+    assert_eq!(report.by_issuer[0].count, 1);
+}
+
+#[sqlx::test]
+async fn test_waivers_audit(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let order_id = seed_order(&pool, branch_id, user_id, shift_id).await;
+
+    sqlx::query(
+        "UPDATE orders SET service_charge_waived_by = $1, service_charge_waived_at = now(), service_charge_waived_amount = 50 WHERE id = $2",
+    )
+    .bind(user_id)
+    .bind(order_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let report = call_audit(
+        &app,
+        &format!("/reports/orgs/{org_id}/waivers-audit"),
+        &token,
+    )
+    .await;
+    assert_eq!(report.total_count, 1);
+    assert_eq!(report.total_amount_minor, 50);
+    assert_eq!(report.by_reason[0].label, "Test Branch");
+}
+
+#[sqlx::test]
+async fn test_price_overrides(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let order_id = seed_order(&pool, branch_id, user_id, shift_id).await;
+
+    sqlx::query("UPDATE orders SET price_flagged = true WHERE id = $1")
+        .bind(order_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let report = call_audit(
+        &app,
+        &format!("/reports/orgs/{org_id}/price-overrides"),
+        &token,
+    )
+    .await;
+    assert_eq!(report.total_count, 1);
+    assert_eq!(report.total_amount_minor, 570);
+    assert_eq!(report.by_reason[0].label, "Test Branch");
+}
+
+#[sqlx::test]
+async fn test_manual_deductions_audit(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    grant_permission(&pool, "org_admin", "payroll", "read").await;
+
+    sqlx::query(
+        "INSERT INTO payroll_deductions (org_id, user_id, amount_piastres, reason, effective_date, source, created_by)
+         VALUES ($1, $2, 500, 'uniform', CURRENT_DATE, 'manual', $2)",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let report = call_audit(
+        &app,
+        &format!("/reports/orgs/{org_id}/manual-deductions-audit"),
+        &token,
+    )
+    .await;
+    assert_eq!(report.total_count, 1);
+    assert_eq!(report.total_amount_minor, 500);
+    assert_eq!(report.by_reason[0].label, "uniform");
+}
+
+#[sqlx::test]
+async fn test_deduction_overrides_audit(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    grant_permission(&pool, "org_admin", "payroll", "read").await;
+
+    // A machine-computed late penalty a manager waived outright: it forgives
+    // the whole original amount.
+    sqlx::query(
+        "INSERT INTO payroll_deductions
+            (org_id, user_id, amount_piastres, original_amount_piastres, reason, effective_date, source, waived_at, waived_by, waive_reason)
+         VALUES ($1, $2, 300, 300, 'late_penalty', CURRENT_DATE, 'late_penalty', now(), $2, 'traffic accident')",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let report = call_audit(
+        &app,
+        &format!("/reports/orgs/{org_id}/deduction-overrides-audit"),
+        &token,
+    )
+    .await;
+    assert_eq!(report.total_count, 1);
+    assert_eq!(report.total_amount_minor, 300);
+    assert_eq!(report.by_reason[0].label, "waived");
+}
+
+#[sqlx::test]
+async fn test_loyalty_adjustments_audit(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    grant_permission(&pool, "org_admin", "loyalty", "read").await;
+
+    let customer_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO loyalty_customers (id, org_id, phone, name, member_token) VALUES ($1, $2, '0100000000', 'Member', 'tok')",
+    )
+    .bind(customer_id)
+    .bind(org_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO loyalty_transactions (org_id, customer_id, branch_id, kind, points, created_by, note)
+         VALUES ($1, $2, $3, 'adjust', 40, $4, 'goodwill correction')",
+    )
+    .bind(org_id)
+    .bind(customer_id)
+    .bind(branch_id)
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let report = call_audit(
+        &app,
+        &format!("/reports/orgs/{org_id}/loyalty-adjustments-audit"),
+        &token,
+    )
+    .await;
+    assert_eq!(report.total_count, 1);
+    assert_eq!(report.total_amount_minor, 40);
+    assert_eq!(report.by_reason[0].label, "Test Branch");
+}
+
+#[sqlx::test]
+async fn test_attendance_corrections_audit(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    grant_permission(&pool, "org_admin", "attendance", "read").await;
+
+    sqlx::query(
+        "INSERT INTO attendance_records (org_id, user_id, branch_id, business_date, edited_by, edit_reason)
+         VALUES ($1, $2, $3, CURRENT_DATE, $2, 'forgot to check out')",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .bind(branch_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let report = call_audit(
+        &app,
+        &format!("/reports/orgs/{org_id}/attendance-corrections-audit"),
+        &token,
+    )
+    .await;
+    assert_eq!(report.total_count, 1);
+    assert_eq!(report.total_amount_minor, 0);
+    assert_eq!(report.by_reason[0].label, "forgot to check out");
 }
