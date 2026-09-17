@@ -1291,16 +1291,17 @@ pub async fn liability_trend(
 
     // Weeks are cut on the scope's wall clock (owner rule): the branch's zone
     // for a branch-scoped request, the org's for an org-wide one. A redemption
-    // at 00:30 Monday in Cairo belongs to that Monday's week, not the UTC
-    // Sunday before. `week` is the instant that local week starts.
+    // at 00:30 Saturday in Cairo belongs to that Saturday's week, not the UTC
+    // Friday before. Weeks start Saturday (`tz::WEEK_START`). `week` is the instant that local week starts.
     let tz = crate::tz::scope_tz_name(pool, query.branch_id.unwrap_or(Uuid::nil()), org_id).await?;
 
-    let points: Vec<LiabilityTrendPoint> = sqlx::query_as(
+    let week = crate::tz::week_start_sql("t.created_at AT TIME ZONE $5");
+    let points: Vec<LiabilityTrendPoint> = sqlx::query_as(&format!(
         // Every signed ledger row moves the balance: earns, redemptions, manual
         // and birthday/win-back adjustments, and all their reversals. Leaving the
         // adjustments out would make the weeks no longer sum to the balance.
         // `$5` (the zone) is bound, never interpolated: it is free text on the branch.
-        "SELECT date_trunc('week', t.created_at AT TIME ZONE $5) AT TIME ZONE $5 AS week, \
+        "SELECT {week} AT TIME ZONE $5 AS week, \
                 COALESCE(SUM(t.points), 0)::bigint AS outstanding \
            FROM loyalty_transactions t \
            JOIN loyalty_customers c ON c.id = t.customer_id AND c.deleted_at IS NULL \
@@ -1308,7 +1309,7 @@ pub async fn liability_trend(
             AND t.created_at >= $3 AND t.created_at < $4 \
           GROUP BY week \
           ORDER BY week",
-    )
+    ))
     .bind(org_id)
     .bind(&currency)
     .bind(from)

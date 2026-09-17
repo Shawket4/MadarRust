@@ -381,6 +381,53 @@ async fn a_custom_spec_widget_groups_and_ranks(pool: PgPool) {
     assert_eq!(w["grain"], "categorical");
 }
 
+/// Weekly buckets start SATURDAY on the merchant's wall clock (`tz::WEEK_START`):
+/// a sale at 23:30 Friday in Cairo closes one week, 00:30 Saturday opens the
+/// next — though both are Friday in UTC.
+#[sqlx::test]
+async fn the_week_dimension_starts_saturday_in_the_merchant_zone(pool: PgPool) {
+    let s = seed(&pool, "a").await;
+    // Cairo is UTC+3 in September 2026; 18 Sep is a Friday.
+    for (n, at) in [(1, "2026-09-18T20:30:00Z"), (2, "2026-09-18T21:30:00Z")] {
+        sqlx::query("UPDATE orders SET created_at = $1::timestamptz WHERE branch_id = $2 AND order_number = $3")
+            .bind(at)
+            .bind(s.branch)
+            .bind(n)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let app = metrics_app(&pool).await;
+    let body = post_query(
+        &app,
+        &org_admin_token(s.org),
+        json!({
+            "widgets": [{
+                "key": "weekly",
+                "spec": {
+                    "dataset": "orders",
+                    "dimensions": ["week"],
+                    "measures": ["order_count"],
+                    "period": { "preset": "all_time" }
+                }
+            }]
+        }),
+    )
+    .await;
+    let w = &body["results"]["weekly"];
+    assert_eq!(w["status"], "ok", "{w}");
+    let weeks: Vec<(String, i64)> = w["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["week"].as_str().unwrap().to_string(), r["order_count"].as_i64().unwrap()))
+        .collect();
+    assert_eq!(
+        weeks,
+        vec![("2026-09-12".to_string(), 1), ("2026-09-19".to_string(), 1)]
+    );
+}
+
 #[sqlx::test]
 async fn one_bad_widget_does_not_blank_the_dashboard(pool: PgPool) {
     // The reason results are per-widget outcomes rather than a batch that fails.

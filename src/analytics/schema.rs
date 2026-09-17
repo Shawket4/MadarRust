@@ -203,7 +203,7 @@ macro_rules! dims_with_time {
                   expr: concat!("(", $col, " AT TIME ZONE :tz)::date"),
                   kind: ColumnKind::Date, joins: &[], time: true },
             Dim { id: "week", label: "Week",
-                  expr: concat!("date_trunc('week', ", $col, " AT TIME ZONE :tz)::date"),
+                  expr: $crate::week_start_sql!(concat!($col, " AT TIME ZONE :tz"), "::date"),
                   kind: ColumnKind::Date, joins: &[], time: true },
             Dim { id: "month", label: "Month",
                   expr: concat!("date_trunc('month', ", $col, " AT TIME ZONE :tz)::date"),
@@ -1726,7 +1726,7 @@ const ATT_DIMS: &[Dim] = &[
     Dim {
         id: "week",
         label: "Week",
-        expr: "date_trunc('week', ar.business_date)::date",
+        expr: crate::week_start_sql!("ar.business_date", "::date"),
         kind: ColumnKind::Date,
         joins: &[],
         time: true,
