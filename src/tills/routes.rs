@@ -48,12 +48,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 web::get().to(handlers::list_cash_movements),
             )
             .route(
-                "/{till_id}/spot-checks",
-                web::post().to(crate::tills::spot_checks::create_spot_check),
+                "/{till_id}/spot-views",
+                web::post().to(crate::tills::spot_views::create_spot_view),
             )
             .route(
-                "/{till_id}/spot-checks",
-                web::get().to(crate::tills::spot_checks::list_spot_checks),
+                "/{till_id}/spot-views",
+                web::get().to(crate::tills::spot_views::list_spot_views),
             )
             .route("/{till_id}/close", web::post().to(handlers::close_till))
             .route(

@@ -470,12 +470,12 @@ keyed(crate::kitchen::kitchen_ticket_views(&mut *conn, ids).await?, &["org_id"])
             );
             // The per-method close reconciliation, for the Z report the device prints.
             let mut lines = crate::tills::reconcile::stored_lines_by_till(&mut *conn, ids).await?;
-            // The drawer's spot checks, for the Z report and the ledger rows.
-            let mut checks = crate::tills::spot_checks::spot_checks_by_till(&mut *conn, ids).await?;
+            // Who viewed / printed the spot report, for the Z report and the ledger rows.
+            let mut checks = crate::tills::spot_views::spot_views_by_till(&mut *conn, ids).await?;
             for (id, v) in out.iter_mut() {
                 if let Value::Object(m) = v {
                     m.insert(
-                        "spot_checks".into(),
+                        "spot_views".into(),
                         serde_json::to_value(checks.remove(id).unwrap_or_default()).unwrap_or_else(|_| json!([])),
                     );
                     m.insert(

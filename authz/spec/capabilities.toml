@@ -1939,10 +1939,10 @@ risk = "money"
 defaults = "om"
 approval = true
 pos = true
-en = "Cash spot check and live drawer figures"
-ar = "جرد الخزنة المفاجئ وأرقام الخزنة المباشرة"
-hint_en = "On for owners and managers: opens the live drawer view (expected cash, tenders, discrepancies) and shows the expected figures before closing. Without it a teller counts blind and sees the report after closing; a manager can unlock one check with their PIN."
-hint_ar = "مفعّل للمالك والمديرين: يفتح عرض الخزنة المباشر (النقد المتوقع، طرق الدفع، الفروقات) ويعرض الأرقام المتوقعة قبل الإغلاق. بدونه يعدّ الكاشير دون رؤية المتوقع ويرى التقرير بعد الإغلاق؛ ويمكن للمدير فتح جرد واحد برقمه السري."
+en = "Cash spot: see and print the live drawer figures"
+ar = "الجرد المفاجئ: عرض أرقام الخزنة المباشرة وطباعتها"
+hint_en = "On for owners and managers: Cash spot shows the full live till report (expected cash, every payment method, all figures) and prints it, and the expected figures show before closing. Without it a person counts blind at close and sees the report after closing; someone holding it can unlock one look with their PIN. Every look is recorded."
+hint_ar = "مفعّل للمالك والمديرين: يعرض الجرد المفاجئ تقرير الوردية المباشر كاملًا (النقد المتوقع، كل طرق الدفع، كل الأرقام) ويطبعه، وتظهر الأرقام المتوقعة قبل الإغلاق. بدونه يعدّ الشخص عند الإغلاق دون رؤية المتوقع ويرى التقرير بعد الإغلاق؛ ويمكن لمن يملكه فتح عرض واحد برقمه السري. كل عرض يُسجَّل."
 
 [[cap]]
 id = 204

@@ -3,7 +3,7 @@ pub mod legacy;
 pub mod legacy_routes;
 pub mod reconcile;
 pub mod routes;
-pub mod spot_checks;
+pub mod spot_views;
 
 #[cfg(test)]
 mod followup_tests;
@@ -14,6 +14,6 @@ mod reconcile_tests;
 #[cfg(test)]
 mod report_vectors_tests;
 #[cfg(test)]
-mod spot_check_tests;
+mod spot_view_tests;
 #[cfg(test)]
 mod tests;

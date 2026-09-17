@@ -308,8 +308,8 @@ paths(
         crate::tills::handlers::force_close_till,
         crate::tills::handlers::add_cash_movement,
         crate::tills::handlers::list_cash_movements,
-        crate::tills::spot_checks::create_spot_check,
-        crate::tills::spot_checks::list_spot_checks,
+        crate::tills::spot_views::create_spot_view,
+        crate::tills::spot_views::list_spot_views,
         crate::tills::handlers::delete_till,
         crate::refunds::handlers::list_till_refunds,
         // ── devices ──────────────────────────────────────────────────

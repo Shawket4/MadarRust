@@ -1,6 +1,7 @@
-//! Cash spot checks (owner design 2026-09-16 evening, item 5): the live routes,
-//! their permission gates, replay with and without a manager's approval, the
-//! Z report, and the blind close that flags its discrepancy.
+//! Cash spot report views (owner design 2026-09-16 item 5, corrected
+//! 2026-09-17): the audit trail of who viewed / printed the live till report,
+//! the permission gate (live route honours a one-time unlock), replay with and
+//! without an approval, the Z report, and the blind close's review queue.
 use actix_web::{App, http::StatusCode, test, web};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -90,9 +91,8 @@ where
     (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
 }
 
-/// Teller A's open till at branch A with a 1000 float and one 5000 cash sale
-/// and one 5000 card sale: expected cash 6000.
-async fn till_with_sales<S, B>(app: &S) -> Uuid
+/// Teller A's open till at branch A with one cash sale.
+async fn open_till<S, B>(app: &S) -> Uuid
 where
     S: actix_web::dev::Service<
             actix_http::Request,
@@ -111,121 +111,68 @@ where
     )
     .await;
     assert!(s.is_success(), "open: {s}");
-    for method in ["cash", "card"] {
-        let (s, _) = call(
-            app,
-            test::TestRequest::post().uri("/orders").set_json(json!({
-                "branch_id": BRANCH_A, "till_id": till, "payment_method": method,
-                "idempotency_key": Uuid::new_v4(),
-                "items": [{ "menu_item_id": ITEM, "quantity": 1, "unit_price": 5000, "addons": [], "optional_field_ids": [] }],
-                "subtotal": 5000, "tax_amount": 0, "total_amount": 5000
-            })),
-            bearer(TELLER_A, UserRole::Teller),
-        )
-        .await;
-        assert_eq!(s, StatusCode::CREATED);
-    }
+    let (s, _) = call(
+        app,
+        test::TestRequest::post().uri("/orders").set_json(json!({
+            "branch_id": BRANCH_A, "till_id": till, "payment_method": "cash",
+            "idempotency_key": Uuid::new_v4(),
+            "items": [{ "menu_item_id": ITEM, "quantity": 1, "unit_price": 5000, "addons": [], "optional_field_ids": [] }],
+            "subtotal": 5000, "tax_amount": 0, "total_amount": 5000
+        })),
+        bearer(TELLER_A, UserRole::Teller),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
     till
 }
 
-#[::core::prelude::v1::test]
-fn plan_methods_puts_cash_first_and_computes_discrepancies() {
-    use crate::tills::reconcile::MethodTotal;
-    use crate::tills::spot_checks::{SpotCheckMethodInput, plan_methods};
-    let server = vec![
-        MethodTotal {
-            method: "cash".into(),
-            payment_method_id: None,
-            is_cash: true,
-            system_total: 6000,
-            order_count: 1,
-        },
-        MethodTotal {
-            method: "card".into(),
-            payment_method_id: None,
-            is_cash: false,
-            system_total: 5000,
-            order_count: 1,
-        },
-    ];
-    let lines = plan_methods(&server, None, 5900, 6000);
-    assert_eq!(lines.len(), 2);
-    assert!(lines[0].is_cash);
-    assert_eq!(lines[0].discrepancy, Some(-100));
-    assert_eq!(lines[1].counted, None);
-    assert_eq!(lines[1].expected, 5000);
-
-    let inputs = vec![
-        SpotCheckMethodInput {
-            method: "card".into(),
-            is_cash: false,
-            expected: Some(4000),
-            counted: Some(4500),
-        },
-        SpotCheckMethodInput {
-            method: "cash".into(),
-            is_cash: true,
-            expected: Some(6000),
-            counted: Some(6000),
-        },
-    ];
-    let lines = plan_methods(&server, Some(&inputs), 6100, 6000);
-    assert_eq!(lines[0].method, "cash");
-    assert_eq!(lines[0].discrepancy, Some(100));
-    assert_eq!(lines[1].expected, 4000, "the counter's snapshot wins");
-    assert_eq!(lines[1].discrepancy, Some(500));
-}
-
 #[sqlx::test]
-async fn a_manager_records_a_spot_check_and_it_reaches_the_report(pool: PgPool) {
+async fn a_manager_views_and_prints_the_spot_report_and_the_z_report_lists_it(pool: PgPool) {
     seeded(&pool).await;
     let app = app!(pool);
-    let till = till_with_sales(&app).await;
+    let till = open_till(&app).await;
     let id = Uuid::new_v4();
-    let body = json!({ "id": id, "counted_cash": 5900, "note": "short a note" });
-    let (s, check) = call(
+    let (s, row) = call(
         &app,
         test::TestRequest::post()
-            .uri(&format!("/tills/{till}/spot-checks"))
-            .set_json(&body),
+            .uri(&format!("/tills/{till}/spot-views"))
+            .set_json(json!({ "id": id })),
         bearer(MANAGER, UserRole::BranchManager),
     )
     .await;
-    assert_eq!(s, StatusCode::CREATED, "{check}");
-    assert_eq!(check["expected_cash"], 6000);
-    assert_eq!(check["cash_discrepancy"], -100);
-    assert_eq!(check["checked_by"], MANAGER);
-    assert!(check["approved_by"].is_null());
-    assert_eq!(check["methods"][0]["is_cash"], true);
-    assert_eq!(check["methods"][1]["method"], "card");
-    assert_eq!(check["methods"][1]["expected"], 5000);
+    assert_eq!(s, StatusCode::CREATED, "{row}");
+    assert_eq!(row["viewed_by"], MANAGER);
+    assert_eq!(row["printed"], false);
+    assert!(row["approved_by"].is_null());
+    assert!(row.get("counted_cash").is_none(), "no amounts in a spot view");
 
-    // Same id again: one check.
-    let (s, _) = call(
+    // The print of the same view marks the same row.
+    let (s, row) = call(
         &app,
         test::TestRequest::post()
-            .uri(&format!("/tills/{till}/spot-checks"))
-            .set_json(&body),
+            .uri(&format!("/tills/{till}/spot-views"))
+            .set_json(json!({ "id": id, "printed": true })),
         bearer(MANAGER, UserRole::BranchManager),
     )
     .await;
     assert_eq!(s, StatusCode::OK);
+    assert_eq!(row["printed"], true);
+    assert!(row["printed_at"].is_string());
 
     // The owner too (defaults "om").
     let (s, _) = call(
         &app,
         test::TestRequest::post()
-            .uri(&format!("/tills/{till}/spot-checks"))
-            .set_json(json!({ "counted_cash": 6000, "expected_cash": 6000 })),
+            .uri(&format!("/tills/{till}/spot-views"))
+            .set_json(json!({})),
         bearer(ADMIN, UserRole::OrgAdmin),
     )
     .await;
     assert_eq!(s, StatusCode::CREATED);
 
-    // The teller whose till it is may read them (till.read).
     let (s, list) = call(
         &app,
-        test::TestRequest::get().uri(&format!("/tills/{till}/spot-checks")),
+        test::TestRequest::get().uri(&format!("/tills/{till}/spot-views")),
         bearer(TELLER_A, UserRole::Teller),
     )
     .await;
@@ -240,10 +187,10 @@ async fn a_manager_records_a_spot_check_and_it_reaches_the_report(pool: PgPool) 
     )
     .await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(report["spot_checks"].as_array().unwrap().len(), 2);
-    assert_eq!(report["expected_cash"], 6000, "a count never moves the drawer");
+    assert_eq!(report["spot_views"].as_array().unwrap().len(), 2);
+    assert_eq!(report["expected_cash"], 6000, "a view never moves the drawer");
 
-    // A closed till is not counted live.
+    // A closed till has no live spot report.
     let (s, _) = call(
         &app,
         test::TestRequest::post()
@@ -253,28 +200,27 @@ async fn a_manager_records_a_spot_check_and_it_reaches_the_report(pool: PgPool) 
     )
     .await;
     assert_eq!(s, StatusCode::OK);
-    let (s, err) = call(
+    let (s, _) = call(
         &app,
         test::TestRequest::post()
-            .uri(&format!("/tills/{till}/spot-checks"))
-            .set_json(json!({ "counted_cash": 1 })),
+            .uri(&format!("/tills/{till}/spot-views"))
+            .set_json(json!({})),
         bearer(MANAGER, UserRole::BranchManager),
     )
     .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "{err}");
+    assert_eq!(s, StatusCode::BAD_REQUEST);
 }
 
 #[sqlx::test]
 async fn without_the_permission_the_routes_refuse_before_looking_at_the_till(pool: PgPool) {
     seeded(&pool).await;
     let app = app!(pool);
-    let till = till_with_sales(&app).await;
-    // A teller does not hold till.cash_spot_check by default.
+    let till = open_till(&app).await;
     let (s, _) = call(
         &app,
         test::TestRequest::post()
-            .uri(&format!("/tills/{till}/spot-checks"))
-            .set_json(json!({ "counted_cash": 6000 })),
+            .uri(&format!("/tills/{till}/spot-views"))
+            .set_json(json!({})),
         bearer(TELLER_A, UserRole::Teller),
     )
     .await;
@@ -283,49 +229,90 @@ async fn without_the_permission_the_routes_refuse_before_looking_at_the_till(poo
     let (s, _) = call(
         &app,
         test::TestRequest::post()
-            .uri(&format!("/tills/{}/spot-checks", Uuid::new_v4()))
-            .set_json(json!({ "nonsense": true })),
+            .uri(&format!("/tills/{}/spot-views", Uuid::new_v4()))
+            .set_payload("not json"),
         bearer(TELLER_A, UserRole::Teller),
     )
     .await;
     assert_eq!(s, StatusCode::FORBIDDEN);
-    // A waiter cannot read tills.
+    // An approval the teller made for themself unlocks nothing.
     let (s, _) = call(
         &app,
-        test::TestRequest::get().uri(&format!("/tills/{}/spot-checks", Uuid::new_v4())),
+        test::TestRequest::post()
+            .uri(&format!("/tills/{till}/spot-views"))
+            .set_json(json!({ "approval": { "id": Uuid::new_v4(), "capability": "till.cash_spot_check", "approver_id": TELLER_A } })),
+        bearer(TELLER_A, UserRole::Teller),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = call(
+        &app,
+        test::TestRequest::get().uri(&format!("/tills/{}/spot-views", Uuid::new_v4())),
         bearer(WAITER, UserRole::Waiter),
     )
     .await;
     assert_eq!(s, StatusCode::FORBIDDEN);
-    // No token at all.
     let r = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri(&format!("/tills/{till}/spot-checks"))
+            .uri(&format!("/tills/{till}/spot-views"))
             .to_request(),
     )
     .await;
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM till_spot_checks")
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM till_spot_views")
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(n, 0);
 }
 
-fn spot_op(till: Uuid, id: Uuid, approver: Option<&str>) -> Value {
+#[sqlx::test]
+async fn the_live_route_honours_a_one_time_unlock_once(pool: PgPool) {
+    seeded(&pool).await;
+    let app = app!(pool);
+    let till = open_till(&app).await;
+    let approval = Uuid::new_v4();
+    let unlock = json!({ "id": approval, "capability": "till.cash_spot_check", "approver_id": MANAGER });
+    let (s, row) = call(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/tills/{till}/spot-views"))
+            .set_json(json!({ "approval": unlock, "printed": true })),
+        bearer(TELLER_A, UserRole::Teller),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{row}");
+    assert_eq!(row["viewed_by"], TELLER_A);
+    assert_eq!(row["approved_by"], MANAGER);
+    assert_eq!(row["approved_by_name"], "Manager Mike");
+    assert_eq!(row["printed"], true);
+    let verified: bool = sqlx::query_scalar(
+        "SELECT verified FROM approvals WHERE id = $1 AND op = 'SpotReportView'",
+    )
+    .bind(approval)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(verified);
+    // The same unlock for a second view is spent.
+    let (s, _) = call(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/tills/{till}/spot-views"))
+            .set_json(json!({ "approval": unlock })),
+        bearer(TELLER_A, UserRole::Teller),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+}
+
+fn view_op(till: Uuid, id: Uuid, approver: Option<&str>) -> Value {
     let mut op = json!({
-        "op": "cash_spot_check",
+        "op": "spot_report_view",
         "teller_id": TELLER_A,
         "till_id": till,
-        "request": {
-            "id": id, "counted_cash": 5500, "expected_cash": 6000,
-            "methods": [
-                { "method": "cash", "is_cash": true, "expected": 6000, "counted": 5500 },
-                { "method": "card", "is_cash": false, "expected": 5000, "counted": 5000 }
-            ],
-            "checked_at": "2026-09-17T09:00:00Z"
-        }
+        "request": { "id": id, "printed": true, "viewed_at": "2026-09-17T09:00:00Z" }
     });
     if let Some(a) = approver {
         op["approval"] = json!({ "id": Uuid::new_v4(), "capability": "till.cash_spot_check", "approver_id": a });
@@ -334,44 +321,40 @@ fn spot_op(till: Uuid, id: Uuid, approver: Option<&str>) -> Value {
 }
 
 #[sqlx::test]
-async fn a_tellers_queued_spot_check_is_kept_and_flagged_without_an_approval(pool: PgPool) {
+async fn a_tellers_queued_view_is_kept_and_flagged_without_an_approval(pool: PgPool) {
     seeded(&pool).await;
     let app = app!(pool);
-    let till = till_with_sales(&app).await;
+    let till = open_till(&app).await;
     let id = Uuid::new_v4();
     let (s, row) = call(
         &app,
         test::TestRequest::post()
             .uri("/sync/replay")
-            .set_json(spot_op(till, id, None)),
+            .set_json(view_op(till, id, None)),
         bearer(TELLER_A, UserRole::Teller),
     )
     .await;
-    assert_eq!(s, StatusCode::CREATED, "accepted: the count happened: {row}");
-    assert_eq!(row["cash_discrepancy"], -500);
-    assert_eq!(row["methods"][1]["discrepancy"], 0);
-    let flags: Vec<(String, String)> = sqlx::query_as(
-        "SELECT op, capability FROM authz_replay_flags WHERE author_id = $1",
-    )
-    .bind(uid(TELLER_A))
-    .fetch_all(&pool)
-    .await
-    .unwrap();
+    assert_eq!(s, StatusCode::CREATED, "accepted: it was seen: {row}");
+    let flags: Vec<(String, String)> =
+        sqlx::query_as("SELECT op, capability FROM authz_replay_flags WHERE author_id = $1")
+            .bind(uid(TELLER_A))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
     assert_eq!(
         flags,
-        vec![("CashSpotCheck".to_string(), "till.cash_spot_check".to_string())]
+        vec![("SpotReportView".to_string(), "till.cash_spot_check".to_string())]
     );
-    // Replayed twice: one row, one flag.
     let (s, _) = call(
         &app,
         test::TestRequest::post()
             .uri("/sync/replay")
-            .set_json(spot_op(till, id, None)),
+            .set_json(view_op(till, id, None)),
         bearer(TELLER_A, UserRole::Teller),
     )
     .await;
     assert_eq!(s, StatusCode::OK);
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM till_spot_checks WHERE till_id = $1")
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM till_spot_views WHERE till_id = $1")
         .bind(till)
         .fetch_one(&pool)
         .await
@@ -380,35 +363,30 @@ async fn a_tellers_queued_spot_check_is_kept_and_flagged_without_an_approval(poo
 }
 
 #[sqlx::test]
-async fn a_managers_pin_unlocks_one_spot_check_for_a_teller(pool: PgPool) {
+async fn a_managers_pin_unlocks_one_queued_view_for_a_teller(pool: PgPool) {
     seeded(&pool).await;
     let app = app!(pool);
-    let till = till_with_sales(&app).await;
-
-    // Self-approval approves nothing: kept, but flagged, and no approver named.
+    let till = open_till(&app).await;
     let (s, row) = call(
         &app,
         test::TestRequest::post()
             .uri("/sync/replay")
-            .set_json(spot_op(till, Uuid::new_v4(), Some(TELLER_A))),
+            .set_json(view_op(till, Uuid::new_v4(), Some(TELLER_A))),
         bearer(TELLER_A, UserRole::Teller),
     )
     .await;
     assert_eq!(s, StatusCode::CREATED);
-    assert!(row["approved_by"].is_null());
-
+    assert!(row["approved_by"].is_null(), "self-approval approves nothing");
     let (s, row) = call(
         &app,
         test::TestRequest::post()
             .uri("/sync/replay")
-            .set_json(spot_op(till, Uuid::new_v4(), Some(MANAGER))),
+            .set_json(view_op(till, Uuid::new_v4(), Some(MANAGER))),
         bearer(TELLER_A, UserRole::Teller),
     )
     .await;
     assert_eq!(s, StatusCode::CREATED, "{row}");
     assert_eq!(row["approved_by"], MANAGER);
-    assert_eq!(row["approved_by_name"], "Manager Mike");
-    assert_eq!(row["checked_by"], TELLER_A);
     let flags: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM authz_replay_flags WHERE author_id = $1 AND capability = 'till.cash_spot_check'",
     )
@@ -417,30 +395,19 @@ async fn a_managers_pin_unlocks_one_spot_check_for_a_teller(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(flags, 1, "only the self-approved one is flagged");
-    let verified: Vec<bool> = sqlx::query_scalar(
-        "SELECT verified FROM approvals WHERE subject_user_id = $1 AND op = 'CashSpotCheck' ORDER BY verified",
-    )
-    .bind(uid(TELLER_A))
-    .fetch_all(&pool)
-    .await
-    .unwrap();
-    assert_eq!(verified, vec![false, true]);
 }
 
 #[sqlx::test]
 async fn a_blind_close_with_a_discrepancy_lands_in_the_review_queue(pool: PgPool) {
     seeded(&pool).await;
     let app = app!(pool);
-    let till = till_with_sales(&app).await;
-    // The teller counts blind (no spot check, no preview) and closes 300 short.
+    let till = open_till(&app).await;
     let (s, out) = call(
         &app,
-        test::TestRequest::post()
-            .uri("/sync/replay")
-            .set_json(json!({
-                "op": "close_till", "teller_id": TELLER_A, "till_id": till,
-                "request": { "closing_cash_declared": 5700 }
-            })),
+        test::TestRequest::post().uri("/sync/replay").set_json(json!({
+            "op": "close_till", "teller_id": TELLER_A, "till_id": till,
+            "request": { "closing_cash_declared": 5700 }
+        })),
         bearer(TELLER_A, UserRole::Teller),
     )
     .await;
@@ -452,14 +419,14 @@ async fn a_blind_close_with_a_discrepancy_lands_in_the_review_queue(pool: PgPool
     )
     .await;
     assert_eq!(s, StatusCode::OK);
-    let flagged = list["data"].as_array().unwrap();
     assert!(
-        flagged
+        list["data"]
+            .as_array()
+            .unwrap()
             .iter()
             .any(|t| t["id"] == till.to_string() && t["reconciliation_status"] == "disagreed"),
         "{list}"
     );
-    // The finished report the teller previews after closing.
     let (s, report) = call(
         &app,
         test::TestRequest::get().uri(&format!("/tills/{till}/report")),

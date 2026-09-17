@@ -100,16 +100,18 @@ pub enum ReplayOp {
         device_id: Option<Uuid>,
         request: CashMovementRequest,
     },
-    // A cash spot check counted on the till (owner design 2026-09-16 item 5).
-    // Idempotent on the request's client-minted `id`. A counter who lacks
-    // `till.cash_spot_check` carries a manager's one-time approval; without a
-    // valid one the check is still kept (it happened) and flagged.
-    CashSpotCheck {
+    // The cash spot report viewed / printed on the till (owner design 2026-09-16
+    // item 5, corrected 2026-09-17): an audit row, no amounts.
+    // Idempotent on the request's client-minted `id` (a print marks the same
+    // row). A viewer who lacks `till.cash_spot_check` carries a one-time
+    // approval; without a valid one the view is still kept (it happened) and
+    // flagged.
+    SpotReportView {
         teller_id: Uuid,
         till_id: Uuid,
         #[serde(default)]
         device_id: Option<Uuid>,
-        request: crate::tills::spot_checks::CashSpotCheckRequest,
+        request: crate::tills::spot_views::SpotViewRequest,
     },
     // Open-ticket ops. Typically a waiter fires and adds rounds, the cashier
     // settles, and either may void — but "typically" is not enforced here:
@@ -246,7 +248,7 @@ impl ReplayOp {
             | ReplayOp::VoidOrder { teller_id, .. }
             | ReplayOp::RefundOrder { teller_id, .. }
             | ReplayOp::CashMovement { teller_id, .. }
-            | ReplayOp::CashSpotCheck { teller_id, .. }
+            | ReplayOp::SpotReportView { teller_id, .. }
             | ReplayOp::FireOpenTicket { teller_id, .. }
             | ReplayOp::AddTicketRound { teller_id, .. }
             | ReplayOp::SettleOpenTicket { teller_id, .. }
@@ -275,7 +277,7 @@ impl ReplayOp {
             ReplayOp::OpenTill { .. } => "OpenTill",
             ReplayOp::CloseTill { .. } => "CloseTill",
             ReplayOp::CashMovement { .. } => "CashMovement",
-            ReplayOp::CashSpotCheck { .. } => "CashSpotCheck",
+            ReplayOp::SpotReportView { .. } => "SpotReportView",
             ReplayOp::CreateOrder { .. } => "CreateOrder",
             ReplayOp::VoidOrder { .. } => "VoidOrder",
             ReplayOp::RefundOrder { .. } => "RefundOrder",
@@ -328,7 +330,7 @@ impl ReplayOp {
             ReplayOp::OpenTill { .. }
                 | ReplayOp::CloseTill { .. }
                 | ReplayOp::CashMovement { .. }
-                | ReplayOp::CashSpotCheck { .. }
+                | ReplayOp::SpotReportView { .. }
                 | ReplayOp::CreateOrder { .. }
                 | ReplayOp::RefundOrder { .. }
                 | ReplayOp::SettleOpenTicket { .. }
@@ -369,7 +371,7 @@ impl ReplayOp {
             ReplayOp::CloseTill { .. } => &[("tills", "update")],
             ReplayOp::CashMovement { .. } => &[("tills", "update")],
             // No legacy cell: see `flagged_caps`.
-            ReplayOp::CashSpotCheck { .. } => &[],
+            ReplayOp::SpotReportView { .. } => &[],
             ReplayOp::CreateOrder { .. } => &[("orders", "create")],
             // A void is its own rung. Ringing up is `create`; voiding is
             // `delete` — nothing hard-deletes an order, so the rung was free,
@@ -433,7 +435,7 @@ impl ReplayOp {
     /// (§4.4.5), never refused.
     fn flagged_caps(&self) -> &'static [crate::authz::Cap] {
         match self {
-            ReplayOp::CashSpotCheck { .. } => &[crate::authz::Cap::TillCashSpotCheck],
+            ReplayOp::SpotReportView { .. } => &[crate::authz::Cap::TillCashSpotCheck],
             _ => &[],
         }
     }
@@ -611,9 +613,9 @@ pub async fn replay(
 
     // The target must belong to the bearer's org — block any cross-org replay.
     let op_branch = op_branch_must_be_in_org(pool.get_ref(), &op, token_org).await?;
-    // A spot check unlocked by a verified approval names who unlocked it.
+    // A spot view unlocked by a verified approval names who unlocked it.
     let mut op = op;
-    if let (ReplayOp::CashSpotCheck { request, .. }, Some(a), Ok(crate::authz::Cap::TillCashSpotCheck)) =
+    if let (ReplayOp::SpotReportView { request, .. }, Some(a), Ok(crate::authz::Cap::TillCashSpotCheck)) =
         (&mut op, &approval, &approved)
     {
         request.approved_by = Some(a.approver_id);
@@ -676,7 +678,7 @@ pub struct ReplayApproval {
 
 /// The approver is an active person of the org, not the author, and holds the
 /// act now. Returns the capability, or why not.
-async fn verify_approval(
+pub(crate) async fn verify_approval(
     pool: &sqlx::PgPool,
     a: &ReplayApproval,
     author: Uuid,
@@ -709,7 +711,7 @@ async fn verify_approval(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn record_approval(
+pub(crate) async fn record_approval(
     pool: &sqlx::PgPool,
     a: &ReplayApproval,
     org: Uuid,
@@ -766,7 +768,7 @@ fn replay_occurred_at(body: &serde_json::Value) -> chrono::DateTime<chrono::Utc>
     parse(body.get("occurred_at"))
         .or_else(|| parse(req.and_then(|r| r.get("issued_at"))))
         .or_else(|| parse(req.and_then(|r| r.get("created_at"))))
-        .or_else(|| parse(req.and_then(|r| r.get("checked_at"))))
+        .or_else(|| parse(req.and_then(|r| r.get("viewed_at"))))
         .unwrap_or_else(chrono::Utc::now)
 }
 
@@ -1011,14 +1013,14 @@ async fn replay_dispatch(
             )
             .await
         }
-        ReplayOp::CashSpotCheck {
+        ReplayOp::SpotReportView {
             till_id,
             device_id,
             mut request,
             ..
         } => {
             request.device_id = request.device_id.or(device_id).or(header_device);
-            crate::tills::spot_checks::create_spot_check_inner(
+            crate::tills::spot_views::create_spot_view_inner(
                 pool,
                 Some(hub.get_ref()),
                 till_id,
@@ -1285,7 +1287,7 @@ async fn op_branch_must_be_in_org(
         }
         ReplayOp::CloseTill { till_id, .. }
         | ReplayOp::CashMovement { till_id, .. }
-        | ReplayOp::CashSpotCheck { till_id, .. } => {
+        | ReplayOp::SpotReportView { till_id, .. } => {
             sqlx::query_as::<_, (Uuid, Uuid)>(
                 "SELECT b.id, b.org_id FROM tills s JOIN branches b ON b.id = s.branch_id WHERE s.id = $1",
             )

@@ -52321,12 +52321,12 @@
         ]
       }
     },
-    "/tills/{till_id}/spot-checks": {
+    "/tills/{till_id}/spot-views": {
       "get": {
         "tags": [
           "tills"
         ],
-        "operationId": "list_spot_checks",
+        "operationId": "list_spot_views",
         "parameters": [
           {
             "name": "till_id",
@@ -52341,13 +52341,13 @@
         ],
         "responses": {
           "200": {
-            "description": "The till's spot checks, oldest first",
+            "description": "Who viewed / printed the till's spot report, oldest first",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/TillSpotCheck"
+                    "$ref": "#/components/schemas/TillSpotView"
                   }
                 }
               }
@@ -52424,7 +52424,7 @@
         "tags": [
           "tills"
         ],
-        "operationId": "create_spot_check",
+        "operationId": "create_spot_view",
         "parameters": [
           {
             "name": "till_id",
@@ -52441,7 +52441,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CashSpotCheckRequest"
+                "$ref": "#/components/schemas/SpotViewRequest"
               }
             }
           },
@@ -52449,21 +52449,21 @@
         },
         "responses": {
           "200": {
-            "description": "Already recorded (same id)",
+            "description": "Already recorded (same id); a print marks it printed",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TillSpotCheck"
+                  "$ref": "#/components/schemas/TillSpotView"
                 }
               }
             }
           },
           "201": {
-            "description": "Spot check recorded",
+            "description": "Spot report view recorded",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TillSpotCheck"
+                  "$ref": "#/components/schemas/TillSpotView"
                 }
               }
             }
@@ -58222,81 +58222,6 @@
           },
           "note": {
             "type": "string"
-          }
-        }
-      },
-      "CashSpotCheckRequest": {
-        "type": "object",
-        "required": [
-          "counted_cash"
-        ],
-        "properties": {
-          "approval_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid",
-            "description": "Replay only: the approval id carried on the envelope (ignored live)."
-          },
-          "approved_by": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid",
-            "description": "Replay only: the person whose PIN unlocked this check (ignored live)."
-          },
-          "checked_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
-          },
-          "counted_cash": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The cash counted in the drawer, minor units."
-          },
-          "device_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          },
-          "expected_cash": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "The expected cash the counter saw. Absent → the server computes it now."
-          },
-          "id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid",
-            "description": "Client-minted id; a retried or replayed check with the same id is one check."
-          },
-          "methods": {
-            "type": [
-              "array",
-              "null"
-            ],
-            "items": {
-              "$ref": "#/components/schemas/SpotCheckMethodInput"
-            },
-            "description": "Per-method expected / counted figures. Absent → the server's own totals, uncounted."
-          },
-          "note": {
-            "type": [
-              "string",
-              "null"
-            ]
           }
         }
       },
@@ -76844,69 +76769,91 @@
         },
         "additionalProperties": false
       },
-      "SpotCheckMethodInput": {
+      "SpotViewApproval": {
         "type": "object",
+        "description": "A one-time unlock minted on the till: someone holding\n`till.cash_spot_check` typed their PIN.",
         "required": [
-          "method"
+          "id",
+          "capability",
+          "approver_id"
         ],
         "properties": {
-          "counted": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64"
+          "approver_id": {
+            "type": "string",
+            "format": "uuid"
           },
-          "expected": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "The expected figure the counter saw. Absent → the server's own figure."
+          "capability": {
+            "type": "string",
+            "description": "Always `till.cash_spot_check`."
           },
-          "is_cash": {
-            "type": "boolean"
-          },
-          "method": {
-            "type": "string"
+          "id": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },
-      "SpotCheckMethodLine": {
+      "SpotViewRequest": {
         "type": "object",
-        "description": "One payment method on a spot check: what the system expected and, when the\ncounter counted it, what they found. Cash is always the first line.",
-        "required": [
-          "method",
-          "is_cash",
-          "expected"
-        ],
         "properties": {
-          "counted": {
+          "approval": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SpotViewApproval",
+                "description": "Live route: the one-time unlock, when the caller does not hold\n`till.cash_spot_check`. (Replay carries it on the envelope.)"
+              }
+            ]
+          },
+          "approval_id": {
             "type": [
-              "integer",
+              "string",
               "null"
             ],
-            "format": "int64",
-            "description": "Null when this method was not counted."
+            "format": "uuid",
+            "description": "Set by replay from a verified envelope approval (ignored live)."
           },
-          "discrepancy": {
+          "approved_by": {
             "type": [
-              "integer",
+              "string",
               "null"
             ],
-            "format": "int64",
-            "description": "`counted - expected`, null when not counted."
+            "format": "uuid",
+            "description": "Set by replay from a verified envelope approval (ignored live)."
           },
-          "expected": {
-            "type": "integer",
-            "format": "int64"
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           },
-          "is_cash": {
-            "type": "boolean"
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Client-minted id; a retry, a replay or the print of the same view is one row."
           },
-          "method": {
-            "type": "string"
+          "printed": {
+            "type": "boolean",
+            "description": "The spot report was printed."
+          },
+          "printed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "viewed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
           }
         }
       },
@@ -79218,12 +79165,12 @@
             "format": "int64",
             "description": "Table bills whose service charge was removed (`orders:waive_service`),\nand what those charges came to. Not part of any total."
           },
-          "spot_checks": {
+          "spot_views": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/TillSpotCheck"
+              "$ref": "#/components/schemas/TillSpotView"
             },
-            "description": "Cash spot checks taken on this till, oldest first. Additive."
+            "description": "Who viewed (and printed) the cash spot report of this till, oldest first. Additive."
           },
           "standard_float": {
             "type": [
@@ -79318,19 +79265,16 @@
           }
         ]
       },
-      "TillSpotCheck": {
+      "TillSpotView": {
         "type": "object",
         "required": [
           "id",
           "till_id",
           "branch_id",
-          "counted_cash",
-          "expected_cash",
-          "cash_discrepancy",
-          "methods",
-          "checked_by",
-          "checked_by_name",
-          "checked_at",
+          "viewed_by",
+          "viewed_by_name",
+          "printed",
+          "viewed_at",
           "created_at"
         ],
         "properties": {
@@ -79358,26 +79302,6 @@
             "type": "string",
             "format": "uuid"
           },
-          "cash_discrepancy": {
-            "type": "integer",
-            "format": "int64",
-            "description": "`counted_cash - expected_cash`."
-          },
-          "checked_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "checked_by": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "checked_by_name": {
-            "type": "string"
-          },
-          "counted_cash": {
-            "type": "integer",
-            "format": "int64"
-          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -79389,29 +79313,34 @@
             ],
             "format": "uuid"
           },
-          "expected_cash": {
-            "type": "integer",
-            "format": "int64"
-          },
           "id": {
             "type": "string",
             "format": "uuid"
           },
-          "methods": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/SpotCheckMethodLine"
-            }
+          "printed": {
+            "type": "boolean"
           },
-          "note": {
+          "printed_at": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "format": "date-time"
           },
           "till_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "viewed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "viewed_by": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "viewed_by_name": {
+            "type": "string"
           }
         }
       },

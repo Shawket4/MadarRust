@@ -132,19 +132,17 @@ INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ('{id:a}',
 "#,
     },
     Scenario {
-        name: "spot_checks",
+        name: "spot_views",
         tills: &["t1"],
         sql: r#"
 INSERT INTO tills (id, branch_id, teller_id, status, opening_cash, opened_at) VALUES ('{id:t1}', '{branch}', '{sara}', 'open', 2000, '2026-09-14 08:00+00');
 INSERT INTO orders (id, branch_id, till_id, teller_id, order_number, payment_method, order_ref, subtotal, total_amount, created_at)
-     VALUES ('{id:a}', '{branch}', '{id:t1}', '{sara}', 1, 'Cash', 'V-SC', 3000, 3000, '2026-09-14 09:00+00');
+     VALUES ('{id:a}', '{branch}', '{id:t1}', '{sara}', 1, 'Cash', 'V-SV', 3000, 3000, '2026-09-14 09:00+00');
 INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ('{id:a}', 'Cash', 3000, true);
--- a manager's count 200 short, then a teller's PIN-unlocked count that agrees
-INSERT INTO till_spot_checks (id, till_id, branch_id, counted_cash, expected_cash, cash_discrepancy, methods, note, checked_by, approved_by, checked_at, created_at) VALUES
-  ('{id:s1}', '{id:t1}', '{branch}', 4800, 5000, -200,
-   '[{"method":"Cash","is_cash":true,"expected":5000,"counted":4800,"discrepancy":-200}]', 'short', '{omar}', NULL, '2026-09-14 09:30+00', '2026-09-14 09:30+00'),
-  ('{id:s2}', '{id:t1}', '{branch}', 5000, 5000, 0,
-   '[{"method":"Cash","is_cash":true,"expected":5000,"counted":5000,"discrepancy":0}]', NULL, '{sara}', '{omar}', '2026-09-14 10:00+00', '2026-09-14 10:00+00');
+-- a manager viewed and printed the spot report; later a teller viewed it on a PIN unlock
+INSERT INTO till_spot_views (id, till_id, branch_id, viewed_by, printed, printed_at, approved_by, viewed_at, created_at) VALUES
+  ('{id:v1}', '{id:t1}', '{branch}', '{omar}', true, '2026-09-14 09:31+00', NULL, '2026-09-14 09:30+00', '2026-09-14 09:30+00'),
+  ('{id:v2}', '{id:t1}', '{branch}', '{sara}', false, NULL, '{omar}', '2026-09-14 10:00+00', '2026-09-14 10:00+00');
 "#,
     },
     Scenario {
@@ -348,10 +346,9 @@ async fn run_scenario(pool: &PgPool, sc: &Scenario) -> Value {
                 "refunds_issued_service_charge": f.refunds_issued_service_charge,
                 "service_charge_waived_count": f.service_charge_waived_count,
                 "service_charge_waived_amount": f.service_charge_waived_amount,
-                "spot_checks": f.spot_checks.iter().map(|c| json!({
-                    "id": c.id, "counted_cash": c.counted_cash, "expected_cash": c.expected_cash,
-                    "cash_discrepancy": c.cash_discrepancy, "checked_by_name": c.checked_by_name,
-                    "approved_by_name": c.approved_by_name, "checked_at": c.checked_at,
+                "spot_views": f.spot_views.iter().map(|v| json!({
+                    "id": v.id, "printed": v.printed, "viewed_by_name": v.viewed_by_name,
+                    "approved_by_name": v.approved_by_name, "viewed_at": v.viewed_at,
                 })).collect::<Vec<_>>(),
                 "close_methods": methods.iter().map(|m| json!({
                     "method": m.method, "is_cash": m.is_cash, "system_total": m.system_total, "order_count": m.order_count,
