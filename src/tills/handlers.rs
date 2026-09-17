@@ -327,6 +327,9 @@ pub struct TillReportFigures {
     pub standard_float: Option<i64>,
     pub suggested_safe_drop: Option<i64>,
     pub expected_cash: i64,
+    /// Who viewed (and printed) the cash spot report of this till, oldest first. Additive.
+    #[serde(default)]
+    pub spot_views: Vec<crate::tills::spot_views::TillSpotView>,
     pub printed_at: DateTime<Utc>,
     #[serde(default)]
     pub timezone: Option<String>,
@@ -1243,7 +1246,9 @@ pub(crate) async fn report_figures(
         ("open", Some(float)) => Some((expected_cash - float).max(0)),
         _ => None,
     };
+    let spot_views = crate::tills::spot_views::spot_views_for_till(pool, till_id).await?;
     Ok(TillReportFigures {
+        spot_views,
         payment_summary,
         total_payments,
         voided_amount,

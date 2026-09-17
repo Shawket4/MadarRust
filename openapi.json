@@ -52544,6 +52544,221 @@
         ]
       }
     },
+    "/tills/{till_id}/spot-views": {
+      "get": {
+        "tags": [
+          "tills"
+        ],
+        "operationId": "list_spot_views",
+        "parameters": [
+          {
+            "name": "till_id",
+            "in": "path",
+            "description": "Till ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Who viewed / printed the till's spot report, oldest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TillSpotView"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "tills"
+        ],
+        "operationId": "create_spot_view",
+        "parameters": [
+          {
+            "name": "till_id",
+            "in": "path",
+            "description": "Till ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpotViewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Already recorded (same id); a print marks it printed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TillSpotView"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Spot report view recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TillSpotView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/timezones": {
       "get": {
         "tags": [
@@ -77233,6 +77448,94 @@
         },
         "additionalProperties": false
       },
+      "SpotViewApproval": {
+        "type": "object",
+        "description": "A one-time unlock minted on the till: someone holding\n`till.cash_spot_check` typed their PIN.",
+        "required": [
+          "id",
+          "capability",
+          "approver_id"
+        ],
+        "properties": {
+          "approver_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "capability": {
+            "type": "string",
+            "description": "Always `till.cash_spot_check`."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "SpotViewRequest": {
+        "type": "object",
+        "properties": {
+          "approval": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SpotViewApproval",
+                "description": "Live route: the one-time unlock, when the caller does not hold\n`till.cash_spot_check`. (Replay carries it on the envelope.)"
+              }
+            ]
+          },
+          "approval_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Set by replay from a verified envelope approval (ignored live)."
+          },
+          "approved_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Set by replay from a verified envelope approval (ignored live)."
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Client-minted id; a retry, a replay or the print of the same view is one row."
+          },
+          "printed": {
+            "type": "boolean",
+            "description": "The spot report was printed."
+          },
+          "printed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "viewed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
       "StaffDocument": {
         "type": "object",
         "required": [
@@ -79655,6 +79958,13 @@
             "format": "int64",
             "description": "Table bills whose service charge was removed (`orders:waive_service`),\nand what those charges came to. Not part of any total."
           },
+          "spot_views": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TillSpotView"
+            },
+            "description": "Who viewed (and printed) the cash spot report of this till, oldest first. Additive."
+          },
           "standard_float": {
             "type": [
               "integer",
@@ -79747,6 +80057,85 @@
             }
           }
         ]
+      },
+      "TillSpotView": {
+        "type": "object",
+        "required": [
+          "id",
+          "till_id",
+          "branch_id",
+          "viewed_by",
+          "viewed_by_name",
+          "printed",
+          "viewed_at",
+          "created_at"
+        ],
+        "properties": {
+          "approval_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "approved_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "approved_by_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "printed": {
+            "type": "boolean"
+          },
+          "printed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "till_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "viewed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "viewed_by": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "viewed_by_name": {
+            "type": "string"
+          }
+        }
       },
       "TillStatus": {
         "type": "string",
