@@ -258,6 +258,7 @@ paths(
         crate::inventory::handlers::list_movements,
         crate::inventory::handlers::create_waste,
         crate::inventory::handlers::list_waste,
+        crate::inventory::waste::record_waste,
         crate::inventory::handlers::create_transfer,
         crate::inventory::handlers::list_transfers,
         crate::inventory::handlers::update_transfer,

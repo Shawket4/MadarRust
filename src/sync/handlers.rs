@@ -224,6 +224,12 @@ pub enum ReplayOp {
         #[serde(default)]
         customer_id: Option<Uuid>,
     },
+    // Waste recorded at the till (phase 6, `inventory.waste.record`). The id
+    // inside the request is client-minted, so a re-flush posts once.
+    RecordWaste {
+        teller_id: Uuid,
+        request: crate::inventory::waste::RecordWasteRequest,
+    },
 }
 
 impl ReplayOp {
@@ -253,7 +259,8 @@ impl ReplayOp {
             | ReplayOp::NoShowBooking { teller_id, .. }
             | ReplayOp::AwardLoyaltyPoints { teller_id, .. }
             | ReplayOp::CreateCustomer { teller_id, .. }
-            | ReplayOp::AttachCustomer { teller_id, .. } => *teller_id,
+            | ReplayOp::AttachCustomer { teller_id, .. }
+            | ReplayOp::RecordWaste { teller_id, .. } => *teller_id,
         }
     }
 
@@ -285,6 +292,7 @@ impl ReplayOp {
             ReplayOp::AwardLoyaltyPoints { .. } => "AwardLoyaltyPoints",
             ReplayOp::CreateCustomer { .. } => "CreateCustomer",
             ReplayOp::AttachCustomer { .. } => "AttachCustomer",
+            ReplayOp::RecordWaste { .. } => "RecordWaste",
         }
     }
 
@@ -319,6 +327,9 @@ impl ReplayOp {
                 | ReplayOp::RefundOrder { .. }
                 | ReplayOp::SettleOpenTicket { .. }
                 | ReplayOp::AwardLoyaltyPoints { .. }
+                // The food is already in the bin: stock moved whether or not
+                // the person was allowed to say so.
+                | ReplayOp::RecordWaste { .. }
         )
     }
 
@@ -407,6 +418,9 @@ impl ReplayOp {
             ReplayOp::AwardLoyaltyPoints { .. } => &[("loyalty", "update")],
             // Architecture E capabilities with no legacy cell: see `required_caps`.
             ReplayOp::CreateCustomer { .. } | ReplayOp::AttachCustomer { .. } => &[],
+            // Same capability as `POST /inventory/waste`; its `max_value` limit
+            // and branch scope are checked in `replay` with the waste's value.
+            ReplayOp::RecordWaste { .. } => &[("inventory_waste", "create")],
         }
     }
 
@@ -536,8 +550,25 @@ pub async fn replay(
     // the customer paid and left while the shop was offline. Dropping the op
     // does not un-take the money, it only loses the record and leaves the
     // drawer short at close.
+    // A waste's value, from the server's own recipe and costs (never the
+    // till's figure): the `max_value` limit and an approval are judged on it.
+    let waste_plan = match &op {
+        ReplayOp::RecordWaste { request, .. } => {
+            Some(crate::inventory::waste::plan_waste(pool.get_ref(), token_org, request).await?)
+        }
+        _ => None,
+    };
     let approved = match &approval {
-        Some(a) => verify_approval(pool.get_ref(), a, teller_id, token_org).await,
+        Some(a) => {
+            verify_approval(
+                pool.get_ref(),
+                a,
+                teller_id,
+                token_org,
+                waste_plan.as_ref().map(|p| p.value_minor.unwrap_or(0)),
+            )
+            .await
+        }
         None => Err("none".into()),
     };
     let mut flags: Vec<(&'static str, &'static str)> = Vec::new();
@@ -563,6 +594,30 @@ pub async fn replay(
         }
     }
 
+    // The waste limit and branch scope: held at THIS branch, within
+    // `max_value`, or approved by someone who is. Otherwise accept and flag.
+    if let (ReplayOp::RecordWaste { request, .. }, Some(plan)) = (&op, &waste_plan)
+        && flags.is_empty()
+    {
+        let cap = crate::authz::Cap::InventoryWasteRecord;
+        let decision = crate::authz::require::decide_for(
+            pool.get_ref(),
+            teller_id,
+            &crate::inventory::waste::limit_request(plan.value_minor),
+            Some(request.branch_id),
+        )
+        .await?;
+        if !decision.is_allow() && !approved.as_ref().is_ok_and(|c| *c == cap) {
+            flags.push(match decision {
+                madar_authz::Decision::NeedsApproval(madar_authz::Why::OverLimit { .. })
+                | madar_authz::Decision::Deny(madar_authz::Why::OverLimit { .. }) => {
+                    ("inventory.waste.record", "max_value")
+                }
+                _ => ("inventory_waste", "create"),
+            });
+        }
+    }
+
     for &cap in op.required_caps() {
         let held = crate::authz::require::effective(pool.get_ref(), teller_id, None)
             .await?
@@ -584,7 +639,18 @@ pub async fn replay(
         _ => None,
     };
     let op_name = op.variant_name();
-    let result = replay_dispatch(&req, &pool, &hub, op, actor, legacy_op, header_device).await;
+    let approval_id = approval.as_ref().filter(|_| approved.is_ok()).map(|a| a.id);
+    let result = replay_dispatch(
+        &req,
+        &pool,
+        &hub,
+        op,
+        actor,
+        legacy_op,
+        header_device,
+        approval_id,
+    )
+    .await;
     if result.is_ok()
         && let Some(a) = &approval
     {
@@ -627,6 +693,9 @@ pub struct ReplayApproval {
     pub approver_id: Uuid,
     #[serde(default)]
     pub amount_minor: Option<i64>,
+    /// The value an approval covered (`max_value` limits, e.g. a waste).
+    #[serde(default)]
+    pub value_minor: Option<i64>,
 }
 
 /// The approver is an active person of the org, not the author, and holds the
@@ -636,6 +705,8 @@ async fn verify_approval(
     a: &ReplayApproval,
     author: Uuid,
     org: Uuid,
+    // The op's value as the SERVER computed it; wins over the till's figure.
+    value_minor: Option<i64>,
 ) -> Result<crate::authz::Cap, String> {
     let cap = crate::authz::Cap::from_key(&a.capability).ok_or("unknown capability")?;
     if a.approver_id == author {
@@ -657,6 +728,7 @@ async fn verify_approval(
         .map_err(|e| e.to_string())?;
     let mut req = madar_authz::Request::of(cap);
     req.amount = a.amount_minor;
+    req.value = value_minor.or(a.value_minor);
     match madar_authz::decide(&eff, &req) {
         madar_authz::Decision::Allow => Ok(cap),
         _ => Err("the approver does not hold this act".into()),
@@ -688,7 +760,7 @@ async fn record_approval(
     .bind(&a.capability)
     .bind(subject)
     .bind(a.approver_id)
-    .bind(a.amount_minor)
+    .bind(a.amount_minor.or(a.value_minor))
     .bind(op)
     .bind(occurred_at)
     .bind(verified.is_ok())
@@ -818,6 +890,7 @@ async fn stamp_sync_seq(
     Ok(resp)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn replay_dispatch(
     req: &HttpRequest,
     pool: &crate::db::Db,
@@ -826,6 +899,7 @@ async fn replay_dispatch(
     actor: ActingContext,
     legacy_op: bool,
     header_device: Option<Uuid>,
+    approval_id: Option<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let _ = req;
     match op {
@@ -1198,6 +1272,23 @@ async fn replay_dispatch(
             Ok(HttpResponse::Ok()
                 .json(serde_json::json!({"order_id": order_id, "customer_id": resolved})))
         }
+        ReplayOp::RecordWaste { mut request, .. } => {
+            request.device_id = request.device_id.or(header_device);
+            let out = crate::inventory::waste::record_waste_inner(
+                pool.get_ref(),
+                actor.org_id,
+                actor.teller_id,
+                "pos",
+                &request,
+                approval_id,
+            )
+            .await?;
+            Ok(if out.created {
+                HttpResponse::Created().json(out)
+            } else {
+                HttpResponse::Ok().json(out)
+            })
+        }
     }
 }
 
@@ -1330,6 +1421,12 @@ async fn op_branch_must_be_in_org(
             }
             None => None,
         },
+        ReplayOp::RecordWaste { request, .. } => {
+            sqlx::query_as::<_, (Uuid, Uuid)>("SELECT id, org_id FROM branches WHERE id = $1")
+                .bind(request.branch_id)
+                .fetch_optional(pool)
+                .await?
+        }
         ReplayOp::AttachCustomer { order_id, .. } => {
             sqlx::query_as::<_, (Uuid, Uuid)>(
                 "SELECT b.id, b.org_id FROM orders o JOIN branches b ON b.id = o.branch_id WHERE o.id = $1",
