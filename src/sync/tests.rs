@@ -1460,3 +1460,381 @@ async fn an_allow_override_caps_a_discount_for_one_person(pool: PgPool) {
         Some(500)
     );
 }
+
+// ── Discounts on a TABLE'S BILL (stream 9) ────────────────────────────────
+//
+// A bill is a sale. Until now the settle path applied a discount with no
+// capability check and no cap — the one way round the counter-sale gate.
+
+/// A fired ticket, ready to settle, on a fixture that caps the teller's manual
+/// discount at 10.00 (`discount_sale_fixture`).
+async fn fired_ticket(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    bearer: &str,
+    teller: Uuid,
+    branch: Uuid,
+    item: Uuid,
+) -> Uuid {
+    let r = fire_by_replay(app, bearer, teller, branch, item).await;
+    assert_eq!(r.status(), 201, "the ticket fires");
+    test::read_body_json::<OpenTicketView, _>(r).await.id
+}
+
+fn settle_op(
+    teller: Uuid,
+    ticket: Uuid,
+    shift: Uuid,
+    discount: serde_json::Value,
+    approval: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut request = serde_json::json!({
+        "till_id": shift,
+        "payment_method": "cash",
+    });
+    for (k, v) in discount.as_object().unwrap() {
+        request[k] = v.clone();
+    }
+    let mut op = serde_json::json!({
+        "op": "settle_open_ticket",
+        "teller_id": teller,
+        "ticket_id": ticket,
+        "request": request,
+    });
+    if let Some(a) = approval {
+        op["request"]["discount_approval_id"] = a["id"].clone();
+        op["approval"] = a;
+    }
+    op
+}
+
+async fn bill_flags(pool: &PgPool, teller: Uuid) -> Vec<(String, String)> {
+    sqlx::query_as(
+        "SELECT capability, reason FROM authz_replay_flags
+          WHERE author_id = $1 AND op = 'SettleOpenTicket' ORDER BY capability",
+    )
+    .bind(teller)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// The locked rule, now for a bill: a queued settle whose discount is over the
+/// cashier's cap is ACCEPTED (the party paid and left) and flagged. A manager's
+/// PIN approval carried by the op clears it and is recorded on the order.
+#[sqlx::test]
+async fn a_table_bills_over_cap_discount_is_flagged_without_approval_and_clean_with_one(
+    pool: PgPool,
+) {
+    let app = app_with_orders!(pool);
+    let (org, branch, item, teller, manager, shift) = discount_sale_fixture(&pool).await;
+    grant(&pool, "teller", "open_tickets", "create").await;
+    grant(&pool, "teller", "open_tickets", "update").await;
+    let bearer = token(teller, org, UserRole::Teller);
+
+    // 20.00 off by hand on a 20.00 bill: double the teller's 10.00 cap.
+    let over = serde_json::json!({
+        "discount_kind": "manual_amount",
+        "discount_type": "fixed",
+        "discount_value": 2000,
+        "discount_amount": 2000
+    });
+
+    let ticket = fired_ticket(&app, &bearer, teller, branch, item).await;
+    let r = replay(&app, &bearer, &settle_op(teller, ticket, shift, over.clone(), None)).await;
+    assert!(r.status().is_success(), "the bill lands anyway: {}", r.status());
+    assert_eq!(
+        bill_flags(&pool, teller).await,
+        vec![(
+            "orders.discount.manual_amount".to_string(),
+            "unauthorized_offline".to_string()
+        )],
+        "accepted and flagged, never refused"
+    );
+    let (kind, by, appr, amount): (Option<String>, Option<Uuid>, Option<Uuid>, i32) =
+        sqlx::query_as(
+            "SELECT discount_kind, discount_applied_by, discount_approval_id, discount_amount
+               FROM orders WHERE open_ticket_id = $1",
+        )
+        .bind(ticket)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(kind.as_deref(), Some("manual_amount"), "attributed like a counter sale");
+    assert_eq!(by, Some(teller));
+    assert_eq!(appr, None);
+    assert_eq!(amount, 2000, "the money as the drawer took it");
+
+    // A second bill, this one with a manager's approval: clean.
+    let approval_id = Uuid::new_v4();
+    let good = serde_json::json!({
+        "id": approval_id, "capability": "orders.discount.manual_amount",
+        "approver_id": manager, "amount_minor": 2000
+    });
+    let ticket2 = fired_ticket(&app, &bearer, teller, branch, item).await;
+    let r = replay(&app, &bearer, &settle_op(teller, ticket2, shift, over, Some(good))).await;
+    assert!(r.status().is_success(), "{}", r.status());
+    assert_eq!(
+        bill_flags(&pool, teller).await.len(),
+        1,
+        "the approved bill adds no flag"
+    );
+    let stored: Option<Uuid> =
+        sqlx::query_scalar("SELECT discount_approval_id FROM orders WHERE open_ticket_id = $1")
+            .bind(ticket2)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, Some(approval_id), "the approval rides onto the order");
+    let verified: bool = sqlx::query_scalar("SELECT verified FROM approvals WHERE id = $1")
+        .bind(approval_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(verified);
+}
+
+/// Within the cap, a bill is clean — and a discount the CASHIER never mentions,
+/// inherited in silence from the waiter's ticket, is judged all the same. That
+/// silence was the hole: the figure charged was the waiter's and nobody asked.
+#[sqlx::test]
+async fn a_bill_within_the_cap_is_clean_and_an_inherited_waiter_discount_is_still_judged(
+    pool: PgPool,
+) {
+    let app = app_with_orders!(pool);
+    let (org, branch, item, teller, _manager, shift) = discount_sale_fixture(&pool).await;
+    grant(&pool, "teller", "open_tickets", "create").await;
+    grant(&pool, "teller", "open_tickets", "update").await;
+    let bearer = token(teller, org, UserRole::Teller);
+
+    // 5.00 off, half the cap.
+    let under = serde_json::json!({
+        "discount_kind": "manual_amount",
+        "discount_type": "fixed",
+        "discount_value": 500,
+        "discount_amount": 500
+    });
+    let ticket = fired_ticket(&app, &bearer, teller, branch, item).await;
+    let r = replay(&app, &bearer, &settle_op(teller, ticket, shift, under, None)).await;
+    assert!(r.status().is_success());
+    assert!(bill_flags(&pool, teller).await.is_empty(), "within the cap");
+
+    // Now a ticket the WAITER discounted by 20.00, settled in silence.
+    let ticket2 = fired_ticket(&app, &bearer, teller, branch, item).await;
+    sqlx::query(
+        "UPDATE open_tickets SET discount_type = 'fixed', discount_value = 2000 WHERE id = $1",
+    )
+    .bind(ticket2)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let r = replay(
+        &app,
+        &bearer,
+        &settle_op(teller, ticket2, shift, serde_json::json!({}), None),
+    )
+    .await;
+    assert!(r.status().is_success(), "the bill still lands");
+    assert_eq!(
+        bill_flags(&pool, teller).await,
+        vec![(
+            "orders.discount.manual_amount".to_string(),
+            "unauthorized_offline".to_string()
+        )],
+        "a discount inherited in silence is the same act, and over the cap"
+    );
+}
+
+/// LIVE, there is no manager on hand: a bill discount over the cashier's cap is
+/// refused outright (403), exactly as `POST /orders` refuses a counter sale's.
+#[sqlx::test]
+async fn a_live_settle_refuses_a_bill_discount_over_the_cashiers_cap(pool: PgPool) {
+    let app = app_with_orders!(pool);
+    let (org, branch, item, teller, _manager, shift) = discount_sale_fixture(&pool).await;
+    grant(&pool, "teller", "open_tickets", "create").await;
+    grant(&pool, "teller", "open_tickets", "update").await;
+    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
+        .bind(teller)
+        .bind(branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let bearer = token(teller, org, UserRole::Teller);
+    let ticket = fired_ticket(&app, &bearer, teller, branch, item).await;
+
+    let settle = |value: i64| {
+        test::TestRequest::post()
+            .uri(&format!("/open-tickets/{ticket}/settle"))
+            .insert_header(("Authorization", format!("Bearer {bearer}")))
+            .set_json(serde_json::json!({
+                "till_id": shift,
+                "payment_method": "cash",
+                "discount_kind": "manual_amount",
+                "discount_type": "fixed",
+                "discount_value": value,
+                "discount_amount": value
+            }))
+            .to_request()
+    };
+
+    let r = test::call_service(&app, settle(2000)).await;
+    assert_eq!(r.status(), 403, "over the cap, live: refused, not flagged");
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM orders WHERE open_ticket_id = $1")
+        .bind(ticket)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 0, "nothing was booked");
+
+    // Within the cap the same bill settles, and names who discounted it.
+    let r = test::call_service(&app, settle(1000)).await;
+    assert!(r.status().is_success(), "{}", r.status());
+    let (kind, by): (Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT discount_kind, discount_applied_by FROM orders WHERE open_ticket_id = $1",
+    )
+    .bind(ticket)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(kind.as_deref(), Some("manual_amount"));
+    assert_eq!(by, Some(teller), "the cashier holding the token");
+}
+
+/// A preset switched OFF while the till was offline. The sale already happened:
+/// it lands with the amount AS RUNG (never recomputed from the dead rule) and is
+/// flagged for the owner. Live, the same preset is still a clean error.
+#[sqlx::test]
+async fn a_replayed_sale_whose_preset_was_switched_off_lands_with_the_amount_as_rung(
+    pool: PgPool,
+) {
+    let app = app_with_orders!(pool);
+    let (org, branch, item, teller, _manager, shift) = discount_sale_fixture(&pool).await;
+    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
+        .bind(teller)
+        .bind(branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // "Staff 25%", generous enough to need the preset grant but not a cap.
+    let preset = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO discounts (id, org_id, name, type, value, is_active) \
+         VALUES ($1, $2, 'Staff', 'percentage', 0.25, false)",
+    )
+    .bind(preset)
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let bearer = token(teller, org, UserRole::Teller);
+
+    // LIVE: a cashier picking a dead rule gets a clean error. Nothing happened
+    // yet, and they can pick another.
+    let r = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {bearer}")))
+            .set_json(serde_json::json!({
+                "branch_id": branch, "till_id": shift, "payment_method": "cash",
+                "discount_id": preset, "discount_amount": 500,
+                "items": [{ "menu_item_id": item, "quantity": 1 }]
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(r.status(), 400, "live, a dead preset is a clean error");
+
+    // REPLAY: the money moved. 5.00 was what the till took off under the rule
+    // as it stood; that figure stands, and the owner is told.
+    let key = Uuid::new_v4();
+    let r = replay(
+        &app,
+        &bearer,
+        &serde_json::json!({
+            "op": "create_order",
+            "teller_id": teller,
+            "request": {
+                "branch_id": branch, "till_id": shift, "payment_method": "cash",
+                "idempotency_key": key,
+                "discount_id": preset, "discount_kind": "preset",
+                "discount_amount": 500,
+                "items": [{ "menu_item_id": item, "quantity": 1 }]
+            }
+        }),
+    )
+    .await;
+    assert!(r.status().is_success(), "the sale lands: {}", r.status());
+    let amount: i32 =
+        sqlx::query_scalar("SELECT discount_amount FROM orders WHERE idempotency_key = $1")
+            .bind(key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(amount, 500, "as rung — NOT 25% of whatever the basket is now");
+    let flags: Vec<(String, String)> = sqlx::query_as(
+        "SELECT capability, reason FROM authz_replay_flags WHERE author_id = $1",
+    )
+    .bind(teller)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        flags.contains(&(
+            "orders.discount.preset:inactive".to_string(),
+            "unauthorized_offline".to_string()
+        )),
+        "the owner is told which rule is dead: {flags:?}"
+    );
+}
+
+/// A bill paid in two goes — the party's own split, one settle per financial
+/// transaction — carries its OWN discount ask and its own approval each time.
+/// Nobody gets a second discount free on the back of the first one's approval.
+#[sqlx::test]
+async fn each_settle_of_a_split_bill_answers_for_its_own_discount(pool: PgPool) {
+    let app = app_with_orders!(pool);
+    let (org, branch, item, teller, manager, shift) = discount_sale_fixture(&pool).await;
+    grant(&pool, "teller", "open_tickets", "create").await;
+    grant(&pool, "teller", "open_tickets", "update").await;
+    let bearer = token(teller, org, UserRole::Teller);
+
+    let over = serde_json::json!({
+        "discount_kind": "manual_amount",
+        "discount_type": "fixed",
+        "discount_value": 2000,
+        "discount_amount": 2000
+    });
+
+    // Half the party: approved by the manager. Clean.
+    let first = fired_ticket(&app, &bearer, teller, branch, item).await;
+    let good = serde_json::json!({
+        "id": Uuid::new_v4(), "capability": "orders.discount.manual_amount",
+        "approver_id": manager, "amount_minor": 2000
+    });
+    let r = replay(
+        &app,
+        &bearer,
+        &settle_op(teller, first, shift, over.clone(), Some(good)),
+    )
+    .await;
+    assert!(r.status().is_success(), "{}", r.status());
+    assert!(bill_flags(&pool, teller).await.is_empty());
+
+    // The other half, same discount, no approval of its own: flagged. The
+    // approval on the first settle does not stretch over the second.
+    let second = fired_ticket(&app, &bearer, teller, branch, item).await;
+    let r = replay(&app, &bearer, &settle_op(teller, second, shift, over, None)).await;
+    assert!(r.status().is_success(), "the money still lands");
+    assert_eq!(
+        bill_flags(&pool, teller).await,
+        vec![(
+            "orders.discount.manual_amount".to_string(),
+            "unauthorized_offline".to_string()
+        )],
+        "the discount is per settle, not per party"
+    );
+}
