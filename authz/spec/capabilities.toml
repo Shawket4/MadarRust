@@ -623,9 +623,9 @@ approval = true
 limits = ["max_value"]
 pos = true
 en = "Record waste"
-ar = "تسجيل الهالك"
+ar = "تسجيل التالف"
 hint_en = "Off for tellers by default. Turn it on to let the till record waste."
-hint_ar = "مغلق للكاشير افتراضيًا. فعّله ليسجل الكاشير الهالك من نقطة البيع."
+hint_ar = "مغلق للكاشير في الأصل. فعّله عشان الكاشير يسجل التالف من نقطة البيع."
 
 [[cap]]
 id = 50
@@ -1940,9 +1940,9 @@ defaults = "om"
 approval = true
 pos = true
 en = "Cash spot: see and print the live drawer figures"
-ar = "الجرد المفاجئ: عرض أرقام الخزنة المباشرة وطباعتها"
+ar = "مراجعة الخزنة: عرض الأرقام لحظيًا وطباعتها"
 hint_en = "On for owners and managers: Cash spot shows the full live till report (expected cash, every payment method, all figures) and prints it, and the expected figures show before closing. Without it a person counts blind at close and sees the report after closing; someone holding it can unlock one look with their PIN. Every look is recorded."
-hint_ar = "مفعّل للمالك والمديرين: يعرض الجرد المفاجئ تقرير الوردية المباشر كاملًا (النقد المتوقع، كل طرق الدفع، كل الأرقام) ويطبعه، وتظهر الأرقام المتوقعة قبل الإغلاق. بدونه يعدّ الشخص عند الإغلاق دون رؤية المتوقع ويرى التقرير بعد الإغلاق؛ ويمكن لمن يملكه فتح عرض واحد برقمه السري. كل عرض يُسجَّل."
+hint_ar = "مفعّلة للمالك والمديرين: مراجعة الخزنة بتوّري تقرير الوردية كامل (الكاش المتوقع، كل طرق الدفع) وتطبعه، والأرقام المتوقعة تظهر قبل ما يقفل الدرج. من غيرها الكاشير يعدّ من غير ما يشوف المتوقع، ويشوف التقرير بعد القفل؛ وأي حد يملك الصلاحية يقدر يفتح عرض واحد برقمه السري. كل عرض بيتسجل."
 
 [[cap]]
 id = 204
@@ -1968,7 +1968,7 @@ approval = true
 limits = ["max_amount"]
 pos = true
 en = "Enter a discount amount by hand"
-ar = "إدخال قيمة خصم يدويًا"
+ar = "خصم مبلغ بإيدك"
 
 [[cap]]
 id = 206
@@ -1981,7 +1981,7 @@ approval = true
 limits = ["max_percent"]
 pos = true
 en = "Enter a discount percentage by hand"
-ar = "إدخال نسبة خصم يدويًا"
+ar = "خصم نسبة بإيدك"
 
 [[cap]]
 id = 207
@@ -1992,7 +1992,7 @@ risk = "money"
 defaults = "om"
 pos = true
 en = "See sales metrics on the till"
-ar = "عرض مؤشرات المبيعات على نقطة البيع"
+ar = "عرض أرقام المبيعات على نقطة البيع"
 
 [[cap]]
 id = 208
@@ -2152,9 +2152,9 @@ defaults = "om"
 approval = true
 pos = true
 en = "Resume an order someone else started"
-ar = "استئناف طلب بدأه شخص آخر"
+ar = "استكمال طلب حد تاني بدأه"
 hint_en = "A held order another person parked on this till. Without it, a manager enters their PIN."
-hint_ar = "طلب معلّق تركه شخص آخر على هذا الجهاز. بدونها يُدخل المدير رمزه."
+hint_ar = "طلب معلّق سايبه حد تاني على الجهاز ده. من غيرها المدير يدخل الرقم السري بتاعه."
 
 # ============================================================================
 # Role templates (Phase 7). `defaults` above IS the restaurant template for the
