@@ -1438,6 +1438,65 @@ async fn the_live_order_route_refuses_a_discount_over_the_cap_or_without_the_cap
     assert_eq!(r.status(), 403, "no orders.discount.manual_amount");
 }
 
+/// The live route now takes a manager's one-time PIN unlock (owner,
+/// 2026-09-17): the SAME rule as replay, checked by the SAME
+/// `verify_approval`. A valid approval lets an over-cap discount through and
+/// records who approved it; an approver missing the capability, or approving
+/// their own act, is still refused; the live and replay verdicts agree.
+#[sqlx::test]
+async fn a_live_discount_over_the_cap_with_a_managers_pin_is_allowed_and_recorded(pool: PgPool) {
+    let app = app_with_orders!(pool);
+    let (org, branch, item, teller, manager, shift) = discount_sale_fixture(&pool).await;
+    for (r, a) in [("orders", "read")] {
+        grant(&pool, "branch_manager", r, a).await;
+    }
+    cap_role_grant(&pool, manager, 205, serde_json::json!({})).await;
+    let bearer = token(teller, org, UserRole::Teller);
+    let post = |body: serde_json::Value| {
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {bearer}")))
+            .set_json(body)
+            .to_request()
+    };
+    let mut over_cap = serde_json::json!({
+        "branch_id": branch, "shift_id": shift, "payment_method": "cash",
+        "discount_kind": "manual_amount", "discount_type": "fixed",
+        "discount_value": 1500, "discount_amount": 1500,
+        "items": [{ "menu_item_id": item, "quantity": 1 }]
+    });
+
+    // A stranger's PIN doesn't hold the discount capability: still refused.
+    let stranger = seed_user(&pool, org, "teller").await;
+    over_cap["live_approval"] = serde_json::json!({
+        "id": Uuid::new_v4(), "capability": "orders.discount.manual_amount",
+        "approver_id": stranger, "amount_minor": 1500,
+    });
+    let r = test::call_service(&app, post(over_cap.clone())).await;
+    assert_eq!(r.status(), 403, "the approver doesn't hold it either");
+
+    // The teller cannot approve their own over-cap discount.
+    over_cap["live_approval"]["approver_id"] = serde_json::json!(teller);
+    let r = test::call_service(&app, post(over_cap.clone())).await;
+    assert_eq!(r.status(), 403, "self-approval is refused");
+
+    // A manager's PIN unlocks it.
+    over_cap["live_approval"]["approver_id"] = serde_json::json!(manager);
+    let approval_id = over_cap["live_approval"]["id"].clone();
+    let r = test::call_service(&app, post(over_cap)).await;
+    assert!(r.status().is_success(), "{:?}", r.status());
+    let v: serde_json::Value = test::read_body_json(r).await;
+    assert_eq!(v["discount_applied_by"], serde_json::json!(teller));
+    assert_eq!(v["discount_approval_id"], approval_id);
+    let approver: Uuid =
+        sqlx::query_scalar("SELECT approver_user_id FROM approvals WHERE id = $1")
+            .bind(uuid::Uuid::parse_str(approval_id.as_str().unwrap()).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(approver, manager);
+}
+
 /// An allow override's limits replace the role's: the cap a till reads for a
 /// hand-typed discount comes from the person's override.
 #[sqlx::test]
@@ -1701,6 +1760,54 @@ async fn a_live_settle_refuses_a_bill_discount_over_the_cashiers_cap(pool: PgPoo
     .unwrap();
     assert_eq!(kind.as_deref(), Some("manual_amount"));
     assert_eq!(by, Some(teller), "the cashier holding the token");
+}
+
+/// The live settle route takes the same manager-PIN unlock as `POST /orders`
+/// (owner, 2026-09-17): over the cashier's cap, a valid live approval lets the
+/// bill settle and records who approved it.
+#[sqlx::test]
+async fn a_live_settle_takes_a_managers_pin_over_the_cashiers_cap(pool: PgPool) {
+    let app = app_with_orders!(pool);
+    let (org, branch, item, teller, manager, shift) = discount_sale_fixture(&pool).await;
+    grant(&pool, "teller", "open_tickets", "create").await;
+    grant(&pool, "teller", "open_tickets", "update").await;
+    cap_role_grant(&pool, manager, 205, serde_json::json!({})).await;
+    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
+        .bind(teller)
+        .bind(branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let bearer = token(teller, org, UserRole::Teller);
+    let ticket = fired_ticket(&app, &bearer, teller, branch, item).await;
+    let approval_id = Uuid::new_v4();
+    let settle = test::TestRequest::post()
+        .uri(&format!("/open-tickets/{ticket}/settle"))
+        .insert_header(("Authorization", format!("Bearer {bearer}")))
+        .set_json(serde_json::json!({
+            "till_id": shift,
+            "payment_method": "cash",
+            "discount_kind": "manual_amount",
+            "discount_type": "fixed",
+            "discount_value": 2000,
+            "discount_amount": 2000,
+            "live_approval": {
+                "id": approval_id, "capability": "orders.discount.manual_amount",
+                "approver_id": manager, "amount_minor": 2000,
+            }
+        }))
+        .to_request();
+    let r = test::call_service(&app, settle).await;
+    assert!(r.status().is_success(), "{}", r.status());
+    let (by, approval): (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+        "SELECT discount_applied_by, discount_approval_id FROM orders WHERE open_ticket_id = $1",
+    )
+    .bind(ticket)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(by, Some(teller));
+    assert_eq!(approval, Some(approval_id));
 }
 
 /// A preset switched OFF while the till was offline. The sale already happened:

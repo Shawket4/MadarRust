@@ -601,6 +601,14 @@ pub struct CreateOrderRequest {
     /// the discount past the person's cap. Additive.
     #[serde(default)]
     pub discount_approval_id: Option<Uuid>,
+    /// A manager's one-time PIN approval for the LIVE route (owner,
+    /// 2026-09-17): the offline queue has always carried an `approval` on the
+    /// replay envelope; this is the same object, sent with the live request
+    /// instead, so a live over-cap discount need not queue to be approved.
+    /// Verified the same way replay verifies one; `discount_approval_id`
+    /// above is set from its `id` once verified. Additive.
+    #[serde(default)]
+    pub live_approval: Option<crate::sync::handlers::ReplayApproval>,
     pub amount_tendered: Option<i32>,
     pub tip_amount: Option<i32>,
     pub tip_payment_method: Option<String>,
@@ -1528,8 +1536,10 @@ pub async fn create_order(
     check_permission(pool.get_ref(), &claims, "orders", "create").await?;
     require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
 
-    // A discount is its own act with its own caps. Live, there is no manager
-    // on hand to approve: anything `decide` does not allow outright is refused.
+    // A discount is its own act with its own caps. Live, a manager can now
+    // unlock it on the spot with their PIN (owner, 2026-09-17): anything
+    // `decide` does not allow outright needs `body.live_approval`, verified
+    // the same way replay verifies one — never a second, forked check.
     let mut body = body;
     if let Some(org) = claims.org_id()
         && let Some(ask) =
@@ -1542,11 +1552,37 @@ pub async fn create_order(
             Some(body.branch_id),
         )
         .await?;
-        if ask.decide(&eff) != crate::authz::Decision::Allow {
-            return Err(crate::authz::require::denied(ask.cap));
-        }
+        let decision = ask.decide(&eff);
+        let allowed_outright = crate::sync::handlers::allow_or_approved_live(
+            pool.get_ref(),
+            decision,
+            ask.cap,
+            body.live_approval.as_ref(),
+            claims.user_id(),
+            org,
+            None,
+            Some(&ask),
+        )
+        .await?;
         body.discount_applied_by = Some(claims.user_id());
-        body.discount_approval_id = None;
+        if allowed_outright {
+            body.discount_approval_id = None;
+        } else {
+            let a = body.live_approval.clone().expect("checked by allow_or_approved_live");
+            body.discount_approval_id = Some(a.id);
+            crate::sync::handlers::record_approval(
+                pool.get_ref(),
+                &a,
+                org,
+                Some(body.branch_id),
+                None,
+                claims.user_id(),
+                "create_order_live",
+                chrono::Utc::now(),
+                &Ok(ask.cap),
+            )
+            .await;
+        }
     }
 
     // "Every dine-in sale belongs to a table", where a shop has asked for it.

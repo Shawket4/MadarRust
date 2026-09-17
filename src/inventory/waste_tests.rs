@@ -396,6 +396,61 @@ async fn the_live_route_refuses_a_waste_over_the_persons_limit(pool: PgPool) {
     );
 }
 
+/// The live waste route now takes a manager's one-time PIN unlock (owner,
+/// 2026-09-17), the same rule `verify_approval` already checks at replay: a
+/// manager holding `inventory.waste.record` unlocks an over-limit waste live;
+/// an approver who doesn't hold it does not.
+#[sqlx::test]
+async fn a_live_waste_over_the_limit_with_a_managers_pin_is_allowed(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let manager = seed_user(&pool, org, "branch_manager").await;
+    allow_waste(&pool, org, teller, Some(500)).await;
+    allow_waste(&pool, org, manager, None).await;
+    let beans = seed_ingredient(&pool, org, "Beans", "g", 2.0).await;
+    let bearer = token(teller, org, UserRole::Teller);
+    let mut over = waste_body(Uuid::new_v4(), branch, "ingredient", beans, 1000.0, None);
+    let approval_id = Uuid::new_v4();
+
+    // A manager who does NOT hold the capability doesn't unlock it either.
+    let other_manager = seed_user(&pool, org, "branch_manager").await;
+    over["live_approval"] = json!({
+        "id": approval_id, "capability": "inventory.waste.record",
+        "approver_id": other_manager, "value_minor": 2000,
+    });
+    let r = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/inventory/waste")
+            .insert_header(("Authorization", format!("Bearer {bearer}")))
+            .set_json(over.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(r.status(), 403, "the approver doesn't hold it either");
+
+    over["live_approval"]["approver_id"] = json!(manager);
+    let r = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/inventory/waste")
+            .insert_header(("Authorization", format!("Bearer {bearer}")))
+            .set_json(over)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(r.status(), 201, "{}", r.status());
+    let approver: Uuid =
+        sqlx::query_scalar("SELECT approver_user_id FROM approvals WHERE id = $1")
+            .bind(approval_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(approver, manager);
+}
+
 async fn replay(
     app: &impl actix_web::dev::Service<
         actix_http::Request,

@@ -198,6 +198,11 @@ pub struct SettleOpenTicketRequest {
     /// cap, verified at replay like a counter sale's. Additive.
     #[serde(default)]
     pub discount_approval_id: Option<Uuid>,
+    /// A manager's one-time PIN approval for the LIVE settle route (owner,
+    /// 2026-09-17), same shape and same verification as the replay one.
+    /// Additive.
+    #[serde(default)]
+    pub live_approval: Option<crate::sync::handlers::ReplayApproval>,
     #[serde(default)]
     pub tip_amount: Option<i32>,
     #[serde(default)]
@@ -1220,9 +1225,9 @@ pub async fn settle_open_ticket(
     // It used to be the one way round them: a cashier with no discount grant at
     // all could take 50% off a bill because the settle route never asked.
     //
-    // Live, there is no manager on hand: anything `decide` does not allow
-    // outright is refused (403), matching `POST /orders`. Offline, the money has
-    // already moved, so `/sync/replay` accepts and flags instead.
+    // Live, a manager can now unlock it on the spot with their PIN (owner,
+    // 2026-09-17), matching `POST /orders`. Offline, the money has already
+    // moved, so `/sync/replay` accepts and flags instead.
     let mut body = body;
     if let Some(org) = claims.org_id()
         && let Some(ask) = settle_discount_ask(pool.get_ref(), org, *id, &body).await?
@@ -1234,11 +1239,37 @@ pub async fn settle_open_ticket(
                 .await?;
         let eff =
             crate::authz::require::effective_for_claims(pool.get_ref(), &claims, branch).await?;
-        if ask.decide(&eff) != crate::authz::Decision::Allow {
-            return Err(crate::authz::require::denied(ask.cap));
-        }
+        let decision = ask.decide(&eff);
+        let allowed_outright = crate::sync::handlers::allow_or_approved_live(
+            pool.get_ref(),
+            decision,
+            ask.cap,
+            body.live_approval.as_ref(),
+            claims.user_id(),
+            org,
+            None,
+            Some(&ask),
+        )
+        .await?;
         body.discount_applied_by = Some(claims.user_id());
-        body.discount_approval_id = None;
+        if allowed_outright {
+            body.discount_approval_id = None;
+        } else {
+            let a = body.live_approval.clone().expect("checked by allow_or_approved_live");
+            body.discount_approval_id = Some(a.id);
+            crate::sync::handlers::record_approval(
+                pool.get_ref(),
+                &a,
+                org,
+                branch,
+                None,
+                claims.user_id(),
+                "settle_open_ticket_live",
+                chrono::Utc::now(),
+                &Ok(ask.cap),
+            )
+            .await;
+        }
     }
 
     settle_open_ticket_inner(
@@ -1453,6 +1484,7 @@ pub(crate) async fn settle_open_ticket_inner(
         discount_percent_bps: body.discount_percent_bps.filter(|_| cashier_spoke),
         discount_applied_by: body.discount_applied_by,
         discount_approval_id: body.discount_approval_id,
+        live_approval: None,
         amount_tendered: body.amount_tendered,
         tip_amount: body.tip_amount,
         tip_payment_method: body.tip_payment_method.clone(),
