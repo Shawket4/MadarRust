@@ -505,3 +505,172 @@ async fn figures_agree_with_branch_sales(pool: PgPool) {
     assert_eq!(body["net_sales"], 900);
     let _ = NaiveDate::from_ymd_opt(2026, 9, 9);
 }
+
+// ── Shared vectors for the POS's offline figures ─────────────────────────────
+//
+// The POS computes these figures from the rows `POST /sync/pull` delivers when
+// the endpoint is unreachable. This seeds one scenario with fixed ids and
+// times, takes its rows exactly as the feed projects them, and records what
+// `compute` says for several windows. madar-core `metrics` loads the file and
+// must agree field by field. Regenerate after a formula or projection change:
+//
+// ```sh
+// MADAR_WRITE_POS_METRICS_VECTORS=1 cargo nextest run --lib -E 'test(pos_metrics_vectors)'
+// cp tests/fixtures/pos_metrics_vectors.json \
+//    ../madar/rust-core/crates/madar-core/tests/fixtures/pos_metrics_vectors.json
+// ```
+
+const VECTORS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/pos_metrics_vectors.json"
+);
+
+fn vid(label: &str) -> Uuid {
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        format!("pos-metrics-vector:{label}").as_bytes(),
+    )
+}
+
+const VECTOR_SQL: &str = "
+INSERT INTO organizations (id, name, slug) VALUES ('{id:org}', 'Metrics vector', 'metrics-vector');
+INSERT INTO branches (id, org_id, name, code, timezone) VALUES ('{id:branch}', '{id:org}', 'Vector', 'MVC', 'Africa/Cairo');
+INSERT INTO users (id, org_id, name, email, password_hash, role) VALUES
+  ('{id:sara}', '{id:org}', 'Sara', 'sara@metrics-vector.test', 'x', 'teller');
+INSERT INTO org_payment_methods (id, org_id, name, color, icon, is_cash, created_at) VALUES
+  ('{id:pm:cash}', '{id:org}', 'cash', '#000', 'cash', true, '2026-01-01 00:00+00'),
+  ('{id:pm:card}', '{id:org}', 'card', '#00f', 'card', false, '2026-01-01 00:00+00');
+INSERT INTO categories (id, org_id, name) VALUES ('{id:cat}', '{id:org}', 'Drinks');
+INSERT INTO menu_items (id, org_id, category_id, name, base_price, is_active) VALUES
+  ('{id:latte}', '{id:org}', '{id:cat}', 'Latte', 500, true),
+  ('{id:cake}',  '{id:org}', '{id:cat}', 'Cake', 333, true),
+  ('{id:tea}',   '{id:org}', '{id:cat}', 'Tea', 250, true);
+INSERT INTO tills (id, branch_id, teller_id, status, opening_cash, opened_at)
+  VALUES ('{id:till}', '{id:branch}', '{id:sara}', 'open', 0, '2026-09-09 08:00+03');
+INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, subtotal, discount_amount, tax_amount,
+                    total_amount, status, order_number, payment_method, order_ref, created_at, updated_at) VALUES
+  ('{id:o1}', '{id:branch}', '{id:sara}', '{id:till}', '{id:k1}',  999, 0, 0,  999, 'completed', 1, 'cash', 'MVC-1', '2026-09-09 23:59+03', '2026-09-09 23:59+03'),
+  ('{id:o2}', '{id:branch}', '{id:sara}', '{id:till}', '{id:k2}',  777, 0, 0,  777, 'completed', 2, 'cash', 'MVC-2', '2026-09-12 00:00+03', '2026-09-12 00:00+03'),
+  ('{id:o3}', '{id:branch}', '{id:sara}', '{id:till}', '{id:k3}', 1000, 0, 0, 1000, 'completed', 3, 'cash', 'MVC-3', '2026-09-10 00:30+03', '2026-09-10 00:30+03'),
+  ('{id:o4}', '{id:branch}', '{id:sara}', '{id:till}', '{id:k4}', 1500, 0, 0, 1500, 'completed', 4, 'cash', 'MVC-4', '2026-09-10 09:15+03', '2026-09-10 09:15+03'),
+  ('{id:o5}', '{id:branch}', '{id:sara}', '{id:till}', '{id:k5}',  400, 0, 0,  400, 'completed', 5, 'card', 'MVC-5', '2026-09-11 09:45+03', '2026-09-11 09:45+03'),
+  ('{id:o6}', '{id:branch}', '{id:sara}', '{id:till}', '{id:k6}',  250, 0, 0,  250, 'completed', 6, 'cash', 'MVC-6', '2026-09-11 13:00+03', '2026-09-11 13:00+03'),
+  ('{id:o7}', '{id:branch}', '{id:sara}', '{id:till}', '{id:k7}',  333, 0, 0,  333, 'completed', 7, 'card', 'MVC-7', '2026-09-11 23:30+03', '2026-09-11 23:30+03');
+INSERT INTO order_payments (id, order_id, method, amount) VALUES
+  ('{id:p1}', '{id:o1}', 'cash', 999), ('{id:p2}', '{id:o2}', 'cash', 777), ('{id:p3}', '{id:o3}', 'cash', 1000),
+  ('{id:p4a}', '{id:o4}', 'cash', 600), ('{id:p4b}', '{id:o4}', 'card', 900), ('{id:p5}', '{id:o5}', 'card', 400),
+  ('{id:p6}', '{id:o6}', 'cash', 250), ('{id:p7}', '{id:o7}', 'card', 333);
+INSERT INTO order_items (id, order_id, menu_item_id, item_name, quantity, unit_price, line_total) VALUES
+  ('{id:i1}', '{id:o1}', '{id:latte}', 'Latte', 2, 500, 999),
+  ('{id:i2}', '{id:o2}', '{id:tea}', 'Tea', 3, 259, 777),
+  ('{id:i3}', '{id:o3}', '{id:latte}', 'Latte', 2, 500, 1000),
+  ('{id:i4a}', '{id:o4}', '{id:latte}', 'Latte', 1, 500, 500),
+  ('{id:i4b}', '{id:o4}', '{id:cake}', 'Cake', 3, 333, 1000),
+  ('{id:i5}', '{id:o5}', '{id:tea}', 'Tea', 1, 400, 400),
+  ('{id:i6}', '{id:o6}', '{id:tea}', 'Tea', 1, 250, 250),
+  ('{id:i7}', '{id:o7}', '{id:cake}', 'Cake', 1, 333, 333);
+INSERT INTO order_refunds (id, order_id, till_id, amount, method, is_cash, reason, issued_by, issued_at, created_at) VALUES
+  ('{id:r1}', '{id:o3}', '{id:till}', 300, 'cash', true, 'customer_request', '{id:sara}', '2026-09-10 01:00+03', '2026-09-10 01:00+03'),
+  ('{id:r2}', '{id:o5}', '{id:till}', 400, 'card', false, 'customer_request', '{id:sara}', '2026-09-11 10:00+03', '2026-09-11 10:00+03'),
+  ('{id:r3}', '{id:o1}', '{id:till}', 99, 'cash', true, 'customer_request', '{id:sara}', '2026-09-11 14:00+03', '2026-09-11 14:00+03');
+UPDATE orders SET status = 'refunded' WHERE id = '{id:o5}';
+UPDATE orders SET status = 'voided', voided_at = '2026-09-11 13:05+03', voided_by = '{id:sara}', void_reason = 'wrong_order'
+ WHERE id = '{id:o6}';
+";
+
+/// The windows recorded, as branch-local days.
+const VECTOR_WINDOWS: &[(&str, &str)] = &[
+    ("2026-09-10", "2026-09-11"),
+    ("2026-09-09", "2026-09-09"),
+    ("2026-09-11", "2026-09-11"),
+    ("2026-09-09", "2026-09-12"),
+    ("2026-09-13", "2026-09-13"),
+];
+
+fn vector_scrub(v: &mut Value) {
+    match v {
+        Value::Object(m) => {
+            for k in ["changed_at", "updated_at", "printed_at", "seq"] {
+                m.remove(k);
+            }
+            if let Some(Value::Array(legs)) = m.get_mut("payment_legs") {
+                legs.sort_by_key(|l| {
+                    (
+                        l["method"].as_str().unwrap_or("").to_string(),
+                        l["amount"].as_i64(),
+                    )
+                });
+            }
+            m.values_mut().for_each(vector_scrub);
+        }
+        Value::Array(a) => a.iter_mut().for_each(vector_scrub),
+        _ => {}
+    }
+}
+
+#[sqlx::test]
+async fn pos_metrics_vectors(pool: PgPool) {
+    let mut sql = VECTOR_SQL.to_string();
+    while let Some(start) = sql.find("{id:") {
+        let end = start + sql[start..].find('}').unwrap();
+        let label = sql[start + 4..end].to_string();
+        sql.replace_range(start..=end, &vid(&label).to_string());
+    }
+    sqlx::raw_sql(&sql).execute(&pool).await.expect("seed");
+    let (org, branch) = (vid("org"), vid("branch"));
+
+    let body = crate::sync::pull::PullRequest {
+        branch_id: branch,
+        device_id: None,
+        types: None,
+        limit: None,
+        ledger_page_size: None,
+        snapshot_cursor: None,
+    };
+    let full = crate::sync::pull::pull_core(&pool, org, &body, None)
+        .await
+        .unwrap();
+    let rows = |ty: &str| -> Vec<Value> {
+        let mut v: Vec<Value> = full.data.get(ty).cloned().unwrap_or_default();
+        v.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+        v
+    };
+    assert_eq!(rows("order").len(), 7, "every sale rides the snapshot");
+    assert_eq!(rows("refund").len(), 3);
+
+    let mut expected = Vec::new();
+    for (from, to) in VECTOR_WINDOWS {
+        let (from, to) = (from.parse().unwrap(), to.parse().unwrap());
+        let r = crate::reports::pos_metrics::compute(&pool, branch, from, to)
+            .await
+            .unwrap();
+        expected.push(serde_json::to_value(r).unwrap());
+    }
+    let mut doc = serde_json::json!({
+        "about": "POS metrics vectors generated by MadarRust src/reports/pos_metrics_tests.rs; \
+                  rows are /sync/pull projections, expected is GET /reports/branches/{id}/pos-metrics.",
+        "branch_id": branch,
+        "rows": {
+            "till": rows("till"),
+            "order": rows("order"),
+            "refund": rows("refund"),
+            "payment_method": rows("payment_method"),
+        },
+        "expected": expected,
+    });
+    vector_scrub(&mut doc);
+    let text = serde_json::to_string_pretty(&doc).unwrap() + "\n";
+    if std::env::var("MADAR_WRITE_POS_METRICS_VECTORS").is_ok() {
+        std::fs::write(VECTORS, &text).unwrap();
+        return;
+    }
+    let committed: Value = serde_json::from_str(
+        &std::fs::read_to_string(VECTORS)
+            .expect("tests/fixtures/pos_metrics_vectors.json (regenerate: see the comment above)"),
+    )
+    .unwrap();
+    assert_eq!(
+        committed, doc,
+        "pos-metrics or its projections changed: regenerate the vectors and copy them to the POS"
+    );
+}
