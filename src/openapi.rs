@@ -150,6 +150,7 @@ paths(
         crate::authz::api::set_policy,
         crate::authz::api::list_flags,
         crate::authz::api::review_flag,
+        crate::authz::api::bulk_review_flags,
         crate::permissions::handlers::get_user_permissions,
         crate::permissions::handlers::get_permission_matrix,
         crate::permissions::handlers::upsert_user_permission,

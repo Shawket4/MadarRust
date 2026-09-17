@@ -643,6 +643,105 @@ async fn flagged_offline_acts_are_the_owners_queue(pool: PgPool) {
     assert_eq!(rows[0]["reviewed_by"], json!(owner));
 }
 
+/// Bulk-resolve: many flags at once, with a note, one PIN's worth of review
+/// (owner, 2026-09-17). A bad id never loses the good ones, and resubmitting
+/// the same batch is a no-op success, never a double record or an error.
+#[sqlx::test]
+async fn bulk_review_resolves_many_flags_at_once_and_is_idempotent(pool: PgPool) {
+    seed(&pool).await;
+    let app = app!(pool);
+    let o = org(&pool).await;
+    let b = branch(&pool, o).await;
+    let owner = user(&pool, o, "org_admin", "Owner", None).await;
+    let teller = user(&pool, o, "teller", "Sara", None).await;
+    assign(&pool, teller, b).await;
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO authz_replay_flags
+                 (org_id, branch_id, op, author_id, capability, reason, occurred_at)
+             VALUES ($1, $2, 'RefundOrder', $3, 'refunds:create', 'stale_snapshot', now())
+             RETURNING id",
+        )
+        .bind(o)
+        .bind(b)
+        .bind(teller)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    let missing_id = ids.iter().max().unwrap() + 10_000;
+
+    // No approvals.review: refused before the ids are even looked at.
+    let (s, _) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/authz/flags/bulk-review")
+            .set_json(json!({ "flag_ids": ids, "note": "checked the till" })),
+        &token(teller, o, UserRole::Teller),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+
+    let ot = token(owner, o, UserRole::OrgAdmin);
+    let mut batch = ids.clone();
+    batch.push(missing_id);
+    let (s, result) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/authz/flags/bulk-review")
+            .set_json(json!({ "flag_ids": batch, "note": "checked the till" })),
+        &ot,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let resolved: Vec<i64> = result["resolved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(resolved.len(), 3, "all three real flags resolved");
+    for id in &ids {
+        assert!(resolved.contains(id));
+    }
+    let pending = result["pending"].as_array().unwrap();
+    assert_eq!(pending.len(), 1, "the bad id stays visible, not dropped");
+    assert_eq!(pending[0]["id"], json!(missing_id));
+
+    let (note,): (Option<String>,) =
+        sqlx::query_as("SELECT review_note FROM authz_replay_flags WHERE id = $1")
+            .bind(ids[0])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(note.as_deref(), Some("checked the till"));
+
+    // Resubmitting the same batch: still all resolved, no error, no second row.
+    let (s, result2) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/authz/flags/bulk-review")
+            .set_json(json!({ "flag_ids": ids })),
+        &ot,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "idempotent resubmit");
+    assert_eq!(result2["resolved"].as_array().unwrap().len(), 3);
+    let (note_after,): (Option<String>,) =
+        sqlx::query_as("SELECT review_note FROM authz_replay_flags WHERE id = $1")
+            .bind(ids[0])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        note_after.as_deref(),
+        Some("checked the till"),
+        "the note from the first review is not overwritten by a no-op resubmit"
+    );
+}
+
 /// Owner decisions 2026-09-16: `staff.permissions.edit` is off for managers by
 /// default, and even granted it stays anti-escalation gated. The editor grants
 /// or revokes only what they hold, never hands on role or owner management they
