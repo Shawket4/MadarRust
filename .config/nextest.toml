@@ -1,6 +1,10 @@
 # cargo nextest run — per-test process isolation, real parallelism, and no
 # silent hangs: a test slower than 60s is reported, and killed at 3 min.
 [profile.default]
+# These tests are database-bound: each waits on Postgres far more than it uses a
+# CPU, so 12 (one per core) leaves the machine idle. The :5433 cluster allows 500
+# connections. Raise only with the RAM cluster; measure before changing.
+test-threads = 24
 slow-timeout = { period = "60s", terminate-after = 3 }
 fail-fast = false
 retries = 0
