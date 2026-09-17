@@ -118,6 +118,22 @@ lto = true
 codegen-units = 1
 strip = true
 
+# Debug info trimmed to line tables (backtraces keep file:line); dependencies
+# carry none. Faster builds and a much smaller target dir.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+# The POS real-backend scenarios (madar/tool/offline_b_backend.sh): release
+# optimisations without LTO, so the scenario backend builds in minutes.
+[profile.scenario]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+
 [dev-dependencies]
 # Measures the shipped font in the QR-card layout test, so the "Powered by"
 # lockup is checked against real glyph advances rather than a guess at them.

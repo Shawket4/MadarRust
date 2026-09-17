@@ -146,7 +146,15 @@ pub async fn create_spot_view(
             .and_then(|v| v.get("approval").cloned())
             .and_then(|a| serde_json::from_value::<crate::sync::handlers::ReplayApproval>(a).ok())
             .ok_or_else(|| crate::authz::require::denied(Cap::TillCashSpotCheck))?;
-        match crate::sync::handlers::verify_approval(pool.get_ref(), &a, claims.user_id(), org).await
+        match crate::sync::handlers::verify_approval(
+            pool.get_ref(),
+            &a,
+            claims.user_id(),
+            org,
+            None,
+            None,
+        )
+        .await
         {
             Ok(Cap::TillCashSpotCheck) => unlock = Some(a),
             _ => return Err(crate::authz::require::denied(Cap::TillCashSpotCheck)),
