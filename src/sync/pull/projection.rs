@@ -544,7 +544,9 @@ keyed(crate::kitchen::kitchen_ticket_views(&mut *conn, ids).await?, &["org_id"])
                         'service_charge_waived_by', o.service_charge_waived_by, \
                         'service_charge_waived_by_name', sw.name, \
                         'service_charge_waived_at', o.service_charge_waived_at, \
-                        'service_charge_waived_amount', o.service_charge_waived_amount) \
+                        'service_charge_waived_amount', o.service_charge_waived_amount, \
+                        'discount_kind', o.discount_kind, 'discount_percent_bps', o.discount_percent_bps, \
+                        'discount_applied_by', o.discount_applied_by, 'discount_approval_id', o.discount_approval_id) \
                    FROM orders o LEFT JOIN users sw ON sw.id = o.service_charge_waived_by \
                   WHERE o.id = ANY($1)",
             )
