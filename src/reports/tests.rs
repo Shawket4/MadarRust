@@ -2216,6 +2216,15 @@ async fn org_tax_and_legal_audits_add_up_and_agree_with_branch_sales(pool: PgPoo
     .await;
     assert_eq!(discounts["total_count"], 1);
     assert_eq!(discounts["total_amount_minor"], 50);
+    // Attribution (phase 6): a sale from before it reads `unattributed`, and
+    // the entry names the till operator as who applied it.
+    assert_eq!(discounts["by_kind"][0]["label"], "unattributed");
+    assert_eq!(discounts["entries"].as_array().map(Vec::len), Some(1));
+    assert_eq!(discounts["entries"][0]["amount_minor"], 50);
+    assert_eq!(discounts["entries"][0]["flagged"], false);
+    assert!(discounts["entries"][0]["applied_by_name"].is_string());
+    let voids_again = get_json(&app, &format!("/reports/orgs/{org_id}/voids-audit"), &token).await;
+    assert!(voids_again.get("entries").is_none(), "other audits keep their shape");
 
     let waivers = get_json(
         &app,

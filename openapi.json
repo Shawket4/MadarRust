@@ -55804,11 +55804,31 @@
               "$ref": "#/components/schemas/AuditBreakdownEntry"
             }
           },
+          "by_kind": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/AuditBreakdownEntry"
+            },
+            "description": "Discounts audit only: by act (`preset` / `manual_amount` /\n`manual_percent`; `unattributed` for sales from before). Additive."
+          },
           "by_reason": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/AuditBreakdownEntry"
             }
+          },
+          "entries": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/DiscountAuditEntry"
+            },
+            "description": "Discounts audit only: the most recent discounted sales, newest first\n(at most 200). Additive."
           },
           "from": {
             "type": [
@@ -60660,12 +60680,43 @@
             ],
             "format": "int32"
           },
+          "discount_applied_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Who put the discount on the sale (the signed-in till person). Read on\nreplay only; live, it is the caller. Additive."
+          },
+          "discount_approval_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The manager approval (`approval.id` on the replay envelope) that let\nthe discount past the person's cap. Additive."
+          },
           "discount_id": {
             "type": [
               "string",
               "null"
             ],
             "format": "uuid"
+          },
+          "discount_kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Which discount act this is: `preset` | `manual_amount` | `manual_percent`.\nAbsent (older clients): a `discount_id` means preset, an ad-hoc discount\nis manual of its type. Additive."
+          },
+          "discount_percent_bps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The percentage asked for, in basis points (1250 = 12.5%). Additive."
           },
           "discount_type": {
             "type": [
@@ -63333,6 +63384,92 @@
             "type": "number",
             "format": "double",
             "description": "The stored value: a FRACTION for `percentage` (0.14 = 14%, like every\nother rate in this schema), or minor units for `fixed`. The same\ncolumn as [`Discount::value`], spelled the way the engine holds it."
+          }
+        }
+      },
+      "DiscountAuditEntry": {
+        "type": "object",
+        "description": "One discounted sale in the discounts audit.",
+        "required": [
+          "order_id",
+          "branch_name",
+          "created_at",
+          "amount_minor",
+          "flagged"
+        ],
+        "properties": {
+          "amount_minor": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "applied_by_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Who applied it (the till operator for older sales)."
+          },
+          "approval_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "approved_by_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "branch_name": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "flagged": {
+            "type": "boolean",
+            "description": "The sale was replayed with a discount its author was not allowed and\nno valid manager approval (`authz_replay_flags`)."
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`preset` | `manual_amount` | `manual_percent`, or `null` before attribution."
+          },
+          "order_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "order_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "percent_bps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Basis points, for a percentage."
+          },
+          "preset_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "preset_name": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -68484,12 +68621,56 @@
             "type": "integer",
             "format": "int32"
           },
+          "discount_applied_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Who applied the discount. Additive."
+          },
+          "discount_applied_by_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "discount_approval_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The manager approval that let the discount past the person's cap. Additive."
+          },
+          "discount_approved_by_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The approving manager's name, when the approval was recorded. Additive."
+          },
           "discount_id": {
             "type": [
               "string",
               "null"
             ],
             "format": "uuid"
+          },
+          "discount_kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`preset` | `manual_amount` | `manual_percent`; `null` without a\ndiscount or on sales from before discounts were attributed. Additive."
+          },
+          "discount_percent_bps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The percentage asked for, in basis points. Additive."
           },
           "discount_rate": {
             "type": "number",

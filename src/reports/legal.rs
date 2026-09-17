@@ -3,10 +3,9 @@
 //! share one shape (a total plus a reason and an issuer breakdown); price
 //! overrides has no "reason" of its own, so it breaks down by branch instead.
 //!
-//! "Issuer" for a discount or a price override is the order's `teller_id` —
-//! there is no separate "who applied this discount" column, so the till
-//! operator who rang the sale is the closest real signal, not a literal
-//! approval record.
+//! "Issuer" for a discount is `orders.discount_applied_by` (the till operator
+//! for sales from before discounts were attributed); for a price override it
+//! is the order's `teller_id`.
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::{DateTime, Utc};
@@ -38,6 +37,37 @@ pub struct AuditReport {
     pub total_amount_minor: i64,
     pub by_reason: Vec<AuditBreakdownEntry>,
     pub by_issuer: Vec<AuditBreakdownEntry>,
+    /// Discounts audit only: by act (`preset` / `manual_amount` /
+    /// `manual_percent`; `unattributed` for sales from before). Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_kind: Option<Vec<AuditBreakdownEntry>>,
+    /// Discounts audit only: the most recent discounted sales, newest first
+    /// (at most 200). Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entries: Option<Vec<DiscountAuditEntry>>,
+}
+
+/// One discounted sale in the discounts audit.
+#[derive(Debug, Serialize, serde::Deserialize, sqlx::FromRow, ToSchema)]
+pub struct DiscountAuditEntry {
+    pub order_id: Uuid,
+    pub order_ref: Option<String>,
+    pub branch_name: String,
+    pub created_at: DateTime<Utc>,
+    /// `preset` | `manual_amount` | `manual_percent`, or `null` before attribution.
+    pub kind: Option<String>,
+    pub preset_id: Option<Uuid>,
+    pub preset_name: Option<String>,
+    pub amount_minor: i64,
+    /// Basis points, for a percentage.
+    pub percent_bps: Option<i32>,
+    /// Who applied it (the till operator for older sales).
+    pub applied_by_name: Option<String>,
+    pub approval_id: Option<Uuid>,
+    pub approved_by_name: Option<String>,
+    /// The sale was replayed with a discount its author was not allowed and
+    /// no valid manager approval (`authz_replay_flags`).
+    pub flagged: bool,
 }
 
 /// `reports.legal`, then the branches the caller may see
@@ -143,6 +173,8 @@ pub async fn refunds_audit(
         total_amount_minor,
         by_reason,
         by_issuer,
+        by_kind: None,
+        entries: None,
     }))
 }
 
@@ -231,6 +263,8 @@ pub async fn voids_audit(
         total_amount_minor,
         by_reason,
         by_issuer,
+        by_kind: None,
+        entries: None,
     }))
 }
 
@@ -299,13 +333,62 @@ pub async fn discounts_audit(
         SELECT u.name AS label, COUNT(*)::bigint AS count, COALESCE(SUM(o.discount_amount), 0)::bigint AS amount_minor
         FROM orders o
         JOIN branches b ON b.id = o.branch_id
-        JOIN users u ON u.id = o.teller_id
+        JOIN users u ON u.id = COALESCE(o.discount_applied_by, o.teller_id)
         WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4)) AND o.{SOLD} AND o.discount_amount > 0
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         GROUP BY u.id, u.name
         ORDER BY count DESC
         LIMIT 10
+        "#,
+    ))
+    .bind(org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .bind(&scope)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    let by_kind: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
+        r#"
+        SELECT COALESCE(o.discount_kind, 'unattributed') AS label,
+               COUNT(*)::bigint AS count, COALESCE(SUM(o.discount_amount), 0)::bigint AS amount_minor
+        FROM orders o
+        JOIN branches b ON b.id = o.branch_id
+        WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4)) AND o.{SOLD} AND o.discount_amount > 0
+          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
+          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+        GROUP BY COALESCE(o.discount_kind, 'unattributed')
+        ORDER BY count DESC
+        "#,
+    ))
+    .bind(org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .bind(&scope)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    let entries: Vec<DiscountAuditEntry> = sqlx::query_as(&format!(
+        r#"
+        SELECT o.id AS order_id, o.order_ref, b.name AS branch_name, o.created_at,
+               o.discount_kind AS kind, o.discount_id AS preset_id, d.name AS preset_name,
+               o.discount_amount::bigint AS amount_minor, o.discount_percent_bps AS percent_bps,
+               u.name AS applied_by_name, o.discount_approval_id AS approval_id,
+               au.name AS approved_by_name,
+               EXISTS (SELECT 1 FROM authz_replay_flags f
+                        WHERE f.subject_id = o.id AND f.capability LIKE 'orders.discount.%') AS flagged
+        FROM orders o
+        JOIN branches b ON b.id = o.branch_id
+        LEFT JOIN discounts d ON d.id = o.discount_id
+        LEFT JOIN users u ON u.id = COALESCE(o.discount_applied_by, o.teller_id)
+        LEFT JOIN approvals ap ON ap.id = o.discount_approval_id
+        LEFT JOIN users au ON au.id = ap.approver_user_id
+        WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4)) AND o.{SOLD} AND o.discount_amount > 0
+          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
+          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+        ORDER BY o.created_at DESC
+        LIMIT 200
         "#,
     ))
     .bind(org_id)
@@ -322,6 +405,8 @@ pub async fn discounts_audit(
         total_amount_minor,
         by_reason,
         by_issuer,
+        by_kind: Some(by_kind),
+        entries: Some(entries),
     }))
 }
 
@@ -414,6 +499,8 @@ pub async fn waivers_audit(
         total_amount_minor,
         by_reason,
         by_issuer,
+        by_kind: None,
+        entries: None,
     }))
 }
 
@@ -501,6 +588,8 @@ pub async fn price_overrides(
         total_amount_minor,
         by_reason,
         by_issuer,
+        by_kind: None,
+        entries: None,
     }))
 }
 
@@ -602,6 +691,8 @@ pub async fn manual_deductions_audit(
         total_amount_minor,
         by_reason,
         by_issuer,
+        by_kind: None,
+        entries: None,
     }))
 }
 
@@ -688,6 +779,8 @@ pub async fn deduction_overrides_audit(
         total_amount_minor,
         by_reason,
         by_issuer,
+        by_kind: None,
+        entries: None,
     }))
 }
 
@@ -763,6 +856,8 @@ pub async fn loyalty_adjustments_audit(
         total_amount_minor,
         by_reason,
         by_issuer,
+        by_kind: None,
+        entries: None,
     }))
 }
 
@@ -840,5 +935,7 @@ pub async fn attendance_corrections_audit(
         total_amount_minor: 0,
         by_reason,
         by_issuer,
+        by_kind: None,
+        entries: None,
     }))
 }
