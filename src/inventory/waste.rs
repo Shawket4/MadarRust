@@ -33,7 +33,14 @@ use crate::inventory::movements::{MovementParams, record_movement};
 
 /// Reasons a person may pick. `order_cancelled` is the system's own (a voided
 /// made order) and is not offered here.
-pub const WASTE_REASONS: &[&str] = &["expired", "spoiled", "damaged", "overproduction", "theft", "other"];
+pub const WASTE_REASONS: &[&str] = &[
+    "expired",
+    "spoiled",
+    "damaged",
+    "overproduction",
+    "theft",
+    "other",
+];
 
 /// One waste as a till (or the API) records it.
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
@@ -109,18 +116,20 @@ pub struct WasteRecorded {
 pub struct WastePlan {
     pub subject_name: String,
     pub unit: String,
-    /// `(ingredient, qty in its base unit (positive), unit cost)`
-    pub lines: Vec<(Uuid, f64, Option<i64>)>,
+    /// `(ingredient, qty in its base unit (positive), exact unit cost in piastres)`.
+    /// The ledger row stores the cost rounded to whole piastres; the value uses
+    /// the exact figure, or sub-piastre costs (a ml of milk) would count as 0.
+    pub lines: Vec<(Uuid, f64, Option<f64>)>,
     pub value_minor: Option<i64>,
     pub value_partial: bool,
 }
 
 /// `Σ qty × unit cost`, rounded once; partial when a line has no cost.
 /// The till computes the same figure (`madar-core` `waste::value_of`).
-pub fn value_of(lines: &[(Uuid, f64, Option<i64>)]) -> (Option<i64>, bool) {
+pub fn value_of(lines: &[(Uuid, f64, Option<f64>)]) -> (Option<i64>, bool) {
     let known: Vec<f64> = lines
         .iter()
-        .filter_map(|(_, q, c)| c.map(|c| q * c as f64))
+        .filter_map(|(_, q, c)| c.map(|c| q * c))
         .collect();
     let partial = known.len() < lines.len();
     if known.is_empty() {
@@ -128,6 +137,25 @@ pub fn value_of(lines: &[(Uuid, f64, Option<i64>)]) -> (Option<i64>, bool) {
     } else {
         (Some(known.iter().sum::<f64>().round() as i64), partial)
     }
+}
+
+/// The branch's actual cost per unit, else the org standard cost (unrounded).
+pub async fn exact_unit_cost(
+    pool: &PgPool,
+    branch_id: Uuid,
+    ing: Uuid,
+) -> Result<Option<f64>, AppError> {
+    Ok(sqlx::query_scalar::<_, Option<f64>>(
+        "SELECT COALESCE(bs.cost_per_unit, oi.cost_per_unit)::float8 \
+         FROM org_ingredients oi \
+         LEFT JOIN branch_stock bs ON bs.org_ingredient_id = oi.id AND bs.branch_id = $2 \
+         WHERE oi.id = $1",
+    )
+    .bind(ing)
+    .bind(branch_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten())
 }
 
 fn bad(msg: impl Into<String>) -> AppError {
@@ -151,9 +179,11 @@ pub async fn plan_waste(
     }
     let branch_org = crate::inventory::handlers::branch_org(pool, req.branch_id).await?;
     if branch_org != org_id {
-        return Err(AppError::Forbidden("Branch belongs to another organization".into()));
+        return Err(AppError::Forbidden(
+            "Branch belongs to another organization".into(),
+        ));
     }
-    let mut lines: Vec<(Uuid, f64, Option<i64>)> = Vec::new();
+    let mut lines: Vec<(Uuid, f64, Option<f64>)> = Vec::new();
     let (subject_name, unit) = match req.subject_kind.as_str() {
         "ingredient" => {
             let row: Option<(String, String)> = sqlx::query_as(
@@ -171,8 +201,7 @@ pub async fn plan_waste(
             if qty <= 0.0 {
                 return Err(bad("quantity must be greater than 0"));
             }
-            let cost = crate::inventory::handlers::branch_unit_cost(pool, req.branch_id, req.subject_id)
-                .await?;
+            let cost = exact_unit_cost(pool, req.branch_id, req.subject_id).await?;
             lines.push((req.subject_id, qty, cost));
             (name, unit)
         }
@@ -203,13 +232,13 @@ pub async fn plan_waste(
             )
             .await?;
             for d in config.deductions.into_iter().filter(|d| !d.undeducted) {
-                let Some(ing) = d.org_ingredient_id else { continue };
+                let Some(ing) = d.org_ingredient_id else {
+                    continue;
+                };
                 match lines.iter_mut().find(|(id, _, _)| *id == ing) {
                     Some(l) => l.1 += d.quantity,
                     None => {
-                        let cost =
-                            crate::inventory::handlers::branch_unit_cost(pool, req.branch_id, ing)
-                                .await?;
+                        let cost = exact_unit_cost(pool, req.branch_id, ing).await?;
                         lines.push((ing, d.quantity, cost));
                     }
                 }
@@ -258,7 +287,22 @@ pub async fn load_waste(pool: &PgPool, id: Uuid) -> Result<Option<WasteRecorded>
     .bind(id)
     .fetch_optional(pool)
     .await?;
-    let Some((branch_id, source, subject_kind, subject_name, size_label, quantity, unit, reason, note, value_minor, value_partial, recorded_by, occurred_at)) = head else {
+    let Some((
+        branch_id,
+        source,
+        subject_kind,
+        subject_name,
+        size_label,
+        quantity,
+        unit,
+        reason,
+        note,
+        value_minor,
+        value_partial,
+        recorded_by,
+        occurred_at,
+    )) = head
+    else {
         return Ok(None);
     };
     let lines: Vec<WasteLine> = sqlx::query_as(
@@ -360,7 +404,7 @@ pub async fn record_waste_inner(
                 org_ingredient_id: *ing,
                 movement_type: "waste",
                 quantity: -*qty,
-                unit_cost: *cost,
+                unit_cost: cost.map(|c| c.round() as i64),
                 reason: Some(req.reason.as_str()),
                 source_type: Some("waste"),
                 source_id: Some(req.id),
@@ -431,7 +475,8 @@ pub async fn record_waste(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     // Permission FIRST, before the body is even read.
-    crate::authz::require::require(pool.get_ref(), &claims, Cap::InventoryWasteRecord, None).await?;
+    crate::authz::require::require(pool.get_ref(), &claims, Cap::InventoryWasteRecord, None)
+        .await?;
     let body: RecordWasteRequest = serde_json::from_value(body.into_inner())
         .map_err(|e| bad(format!("Json deserialize error: {e}")))?;
     crate::authz::require::require(
@@ -464,8 +509,20 @@ pub async fn record_waste(
     body.device_id = body
         .device_id
         .or_else(|| crate::devices::DeviceHeader::from_request_headers(&req));
-    let source = if body.device_id.is_some() { "pos" } else { "dashboard" };
-    let out = record_waste_inner(pool.get_ref(), org_id, claims.user_id(), source, &body, None).await?;
+    let source = if body.device_id.is_some() {
+        "pos"
+    } else {
+        "dashboard"
+    };
+    let out = record_waste_inner(
+        pool.get_ref(),
+        org_id,
+        claims.user_id(),
+        source,
+        &body,
+        None,
+    )
+    .await?;
     Ok(if out.created {
         HttpResponse::Created().json(out)
     } else {

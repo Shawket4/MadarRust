@@ -553,9 +553,9 @@ pub async fn replay(
     // A waste's value, from the server's own recipe and costs (never the
     // till's figure): the `max_value` limit and an approval are judged on it.
     let waste_plan = match &op {
-        ReplayOp::RecordWaste { request, .. } => Some(
-            crate::inventory::waste::plan_waste(pool.get_ref(), token_org, request).await?,
-        ),
+        ReplayOp::RecordWaste { request, .. } => {
+            Some(crate::inventory::waste::plan_waste(pool.get_ref(), token_org, request).await?)
+        }
         _ => None,
     };
     let approved = match &approval {
@@ -639,10 +639,7 @@ pub async fn replay(
         _ => None,
     };
     let op_name = op.variant_name();
-    let approval_id = approval
-        .as_ref()
-        .filter(|_| approved.is_ok())
-        .map(|a| a.id);
+    let approval_id = approval.as_ref().filter(|_| approved.is_ok()).map(|a| a.id);
     let result = replay_dispatch(
         &req,
         &pool,

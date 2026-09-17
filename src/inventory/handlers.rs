@@ -1324,10 +1324,17 @@ pub async fn create_waste(
     ensure_ingredient_in_org(pool.get_ref(), body.org_ingredient_id, org_id).await?;
 
     // The `max_value` limit, judged at the branch (same rule as the till's route).
-    let cost = branch_unit_cost(pool.get_ref(), *branch_id, body.org_ingredient_id).await?;
-    let (value, _) = crate::inventory::waste::value_of(&[(body.org_ingredient_id, body.quantity, cost)]);
+    let cost = crate::inventory::waste::exact_unit_cost(
+        pool.get_ref(),
+        *branch_id,
+        body.org_ingredient_id,
+    )
+    .await?;
+    let (value, _) =
+        crate::inventory::waste::value_of(&[(body.org_ingredient_id, body.quantity, cost)]);
     let eff =
-        crate::authz::require::effective_for_claims(pool.get_ref(), &claims, Some(*branch_id)).await?;
+        crate::authz::require::effective_for_claims(pool.get_ref(), &claims, Some(*branch_id))
+            .await?;
     if !madar_authz::decide(&eff, &crate::inventory::waste::limit_request(value)).is_allow() {
         return Err(AppError::Forbidden(
             "This waste is over your limit or outside your branches.".into(),
