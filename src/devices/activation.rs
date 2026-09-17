@@ -301,6 +301,10 @@ pub async fn revoke_code(
     pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
+    // Refuse a caller who may edit no branch at all before looking the code up
+    // (route guard); `gate` below then decides at the code's own branch.
+    let claims = extract_claims(&req)?;
+    crate::authz::require::require(pool.get_ref(), &claims, Cap::BranchesEdit, None).await?;
     let branch: Uuid =
         sqlx::query_scalar("SELECT branch_id FROM device_activation_codes WHERE id = $1")
             .bind(*id)

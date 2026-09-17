@@ -276,57 +276,8 @@ async fn run() -> std::io::Result<()> {
             .app_data(web::JsonConfig::default().error_handler(|err, _req| {
                 madar_rust::errors::AppError::BadRequest(err.to_string()).into()
             }))
-            .route(
-                "/health",
-                web::get().to(|| async { actix_web::HttpResponse::Ok().finish() }),
-            )
-            .configure(auth::routes::configure)
-            .configure(orgs::routes::configure)
-            .configure(users::routes::configure)
-            .configure(permissions::routes::configure)
-            .configure(madar_rust::authz::api::configure)
-            .configure(branches::routes::configure)
-            .configure(menu::routes::configure)
-            .configure(inventory::routes::configure)
-            .configure(recipes::routes::configure)
-            .configure(tills::legacy_routes::configure)
-            .configure(devices::routes::configure)
-            .configure(staff::routes::configure)
-            .configure(tills::routes::configure)
-            // One `/floor` scope: `reservations::routes` owns it and pulls the
-            // cross-table operations of `floor_ops` in. A second scope on the
-            // same prefix would be unreachable — actix never falls through.
-            .configure(reservations::routes::configure)
-            .configure(bookings::routes::configure)
-            .configure(realtime::routes::configure)
-            .configure(kitchen::routes::configure)
-            .configure(tickets::routes::configure)
-            .configure(stocktakes::routes::configure)
-            .configure(madar_rust::assets::routes::configure)
-            .configure(sync::routes::configure)
-            .configure(purchasing::routes::configure)
-            .configure(orders::routes::configure)
-            .configure(refunds::routes::configure)
-            .configure(discounts::routes::configure)
-            .configure(customers::routes::configure)
-            .configure(|cfg| reports::routes::configure(cfg, read_pool.clone()))
-            // Metrics share the read replica with reports: both are read-only
-            // and both are dashboard-driven bursts.
-            .configure(|cfg| analytics::routes::configure(cfg, read_pool.clone()))
-            .configure(uploads::routes::configure)
-            .configure(bundles::routes::configure)
-            .configure(insights::routes::configure)
-            .configure(integrations::routes::configure)
-            .configure(payment_methods::routes::configure)
-            .configure(costing::routes::configure)
-            .configure(delivery::routes::configure)
-            .configure(loyalty::routes::configure)
-            // Apple's own paths, where a pass's `webServiceURL` points. Not
-            // under JwtMiddleware: the caller is a customer's phone, which
-            // authenticates with the pass's own token.
-            .configure(loyalty::wallet::web_service::configure)
-            .configure(qr_card::routes::configure)
-            .configure(ai::routes::configure);
+            // Every API route. The route-coverage guard mounts exactly this.
+            .configure(|cfg| madar_rust::app_routes::configure_api(cfg, read_pool.clone()));
 
         // Public demo endpoints only when DEMO_MODE is on.
         if demo_enabled {

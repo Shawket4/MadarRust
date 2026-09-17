@@ -9,6 +9,7 @@
 
 pub mod ai;
 pub mod analytics;
+pub mod app_routes;
 pub mod assets;
 pub mod auth;
 pub mod authz;
@@ -74,3 +75,6 @@ pub mod rls_tests;
 
 #[cfg(test)]
 mod tills_migration_tests;
+
+#[cfg(test)]
+mod route_guard_tests;

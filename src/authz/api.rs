@@ -340,9 +340,7 @@ fn guard_err(e: GuardError) -> AppError {
             format!("{cap} is always on for this role and can't be removed")
         }
         GuardError::OwnerProtected => "Only an owner can change an owner's access".to_string(),
-        GuardError::NotAbove => {
-            "You can only change people whose role is below yours".to_string()
-        }
+        GuardError::NotAbove => "You can only change people whose role is below yours".to_string(),
     };
     AppError::Forbidden(msg)
 }
@@ -537,6 +535,9 @@ pub async fn create_role(
 ) -> Result<HttpResponse, AppError> {
     let claims = claims_of(&req)?;
     let org = org_of(&req, &claims)?;
+    // Permission before validation (route guard): a caller who may not manage roles
+    // learns nothing from how their request is malformed or what exists.
+    super::require::require(pool.get_ref(), &claims, Cap::StaffRolesManage, None).await?;
     let kind = RoleKind::parse(&body.kind)
         .filter(|k| *k != RoleKind::OrgAdmin)
         .ok_or_else(|| {
@@ -658,6 +659,9 @@ pub async fn set_role_grant(
 ) -> Result<HttpResponse, AppError> {
     let claims = claims_of(&req)?;
     let org = org_of(&req, &claims)?;
+    // Permission before validation (route guard): a caller who may not manage roles
+    // learns nothing from how their request is malformed or what exists.
+    super::require::require(pool.get_ref(), &claims, Cap::StaffRolesManage, None).await?;
     let cap = cap_of(&body.capability)?;
     let role = one_role(pool.get_ref(), org, *id).await?;
     if !role.editable {
@@ -922,6 +926,9 @@ pub async fn set_override(
 ) -> Result<HttpResponse, AppError> {
     let claims = claims_of(&req)?;
     let org = org_of(&req, &claims)?;
+    // Permission before validation (route guard): a caller who may not edit permissions
+    // learns nothing from how their request is malformed or what exists.
+    super::require::require(pool.get_ref(), &claims, Cap::StaffPermissionsEdit, None).await?;
     let cap = cap_of(&body.capability)?;
     target_row(pool.get_ref(), org, *id).await?;
     if let Some(b) = body.branch_id {
@@ -1050,6 +1057,9 @@ pub async fn set_assignments(
 ) -> Result<HttpResponse, AppError> {
     let claims = claims_of(&req)?;
     let org = org_of(&req, &claims)?;
+    // Permission before validation (route guard): a caller who may not edit people
+    // learns nothing from how their request is malformed or what exists.
+    super::require::require(pool.get_ref(), &claims, Cap::StaffUsersEdit, None).await?;
     let (_, target_is_owner) = target_row(pool.get_ref(), org, *id).await?;
     if body.assignments.is_empty() {
         return Err(AppError::BadRequest(
