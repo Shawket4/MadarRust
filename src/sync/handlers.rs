@@ -870,8 +870,11 @@ pub async fn replay(
     stamp_sync_seq(pool.get_ref(), op_branch, result).await
 }
 
-/// A manager's approval carried by a queued op (PERMISSIONS_ARCHITECTURE §4.2).
-#[derive(Debug, Clone, serde::Deserialize)]
+/// A manager's approval carried by a queued op (PERMISSIONS_ARCHITECTURE §4.2),
+/// or — the same shape — a live request's one-time manager-PIN unlock (owner,
+/// 2026-09-17). `Serialize` + `ToSchema` are for the live half: the offline
+/// queue only ever deserializes one from the wire.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
 pub struct ReplayApproval {
     pub id: Uuid,
     /// Capability key, e.g. `orders.void`.
@@ -930,6 +933,39 @@ pub(crate) async fn verify_approval(
     match madar_authz::decide(&eff, &req) {
         madar_authz::Decision::Allow => Ok(cap),
         _ => Err("the approver does not hold this act".into()),
+    }
+}
+
+/// The LIVE half of the manager-PIN approval flow (owner, 2026-09-17): every
+/// act whose REPLAY half already accepts a [`ReplayApproval`] now takes one
+/// live too, through this ONE helper, so a live 403 and a queued flag are
+/// decided by the same rule.
+///
+/// `decision` is the caller's own `madar_authz::decide` result for the acting
+/// person. `Ok(true)` means allowed outright (nothing to record); `Ok(false)`
+/// means a valid approval let it through — the caller must still call
+/// [`record_approval`] itself (it knows the right `op` name and subject) and
+/// attribute the act to the approval; `Err` is the 403 to return as-is.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn allow_or_approved_live(
+    pool: &sqlx::PgPool,
+    decision: madar_authz::Decision,
+    cap: crate::authz::Cap,
+    approval: Option<&ReplayApproval>,
+    author: Uuid,
+    org: Uuid,
+    value_minor: Option<i64>,
+    discount: Option<&crate::orders::discount_authz::DiscountAsk>,
+) -> Result<bool, AppError> {
+    if decision.is_allow() {
+        return Ok(true);
+    }
+    let Some(a) = approval else {
+        return Err(crate::authz::require::denied(cap));
+    };
+    match verify_approval(pool, a, author, org, value_minor, discount).await {
+        Ok(verified_cap) if verified_cap == cap => Ok(false),
+        _ => Err(crate::authz::require::denied(cap)),
     }
 }
 

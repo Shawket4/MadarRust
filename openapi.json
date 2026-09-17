@@ -60974,6 +60974,17 @@
               "$ref": "#/components/schemas/OrderItemInput"
             }
           },
+          "live_approval": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReplayApproval",
+                "description": "A manager's one-time PIN approval for the LIVE route (owner,\n2026-09-17): the offline queue has always carried an `approval` on the\nreplay envelope; this is the same object, sent with the live request\ninstead, so a live over-cap discount need not queue to be approved.\nVerified the same way replay verifies one; `discount_approval_id`\nabove is set from its `id` once verified. Additive."
+              }
+            ]
+          },
           "loyalty_customer_id": {
             "type": [
               "string",
@@ -75146,6 +75157,17 @@
             "format": "uuid",
             "description": "Client-minted; the idempotency key."
           },
+          "live_approval": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReplayApproval",
+                "description": "A manager's one-time PIN approval for the LIVE route (owner,\n2026-09-17), over the person's `max_value` limit. Additive."
+              }
+            ]
+          },
           "note": {
             "type": [
               "string",
@@ -75649,6 +75671,52 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "ReplayApproval": {
+        "type": "object",
+        "description": "A manager's approval carried by a queued op (PERMISSIONS_ARCHITECTURE §4.2),\nor — the same shape — a live request's one-time manager-PIN unlock (owner,\n2026-09-17). `Serialize` + `ToSchema` are for the live half: the offline\nqueue only ever deserializes one from the wire.",
+        "required": [
+          "id",
+          "capability",
+          "approver_id"
+        ],
+        "properties": {
+          "amount_minor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "approver_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "capability": {
+            "type": "string",
+            "description": "Capability key, e.g. `orders.void`."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "percent_bps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Basis points, for an act capped by `max_percent` (a discount). Additive."
+          },
+          "value_minor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The value an approval covered (`max_value` limits, e.g. a waste)."
           }
         }
       },
@@ -76842,6 +76910,17 @@
               "null"
             ],
             "format": "double"
+          },
+          "live_approval": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReplayApproval",
+                "description": "A manager's one-time PIN approval for the LIVE settle route (owner,\n2026-09-17), same shape and same verification as the replay one.\nAdditive."
+              }
+            ]
           },
           "loyalty_customer_id": {
             "type": [

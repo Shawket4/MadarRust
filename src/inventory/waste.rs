@@ -70,6 +70,10 @@ pub struct RecordWasteRequest {
     pub occurred_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub device_id: Option<Uuid>,
+    /// A manager's one-time PIN approval for the LIVE route (owner,
+    /// 2026-09-17), over the person's `max_value` limit. Additive.
+    #[serde(default)]
+    pub live_approval: Option<crate::sync::handlers::ReplayApproval>,
     #[serde(default)]
     pub till_id: Option<Uuid>,
 }
@@ -495,15 +499,18 @@ pub async fn record_waste(
     let eff =
         crate::authz::require::effective_for_claims(pool.get_ref(), &claims, Some(body.branch_id))
             .await?;
-    match madar_authz::decide(&eff, &limit_request(plan.value_minor)) {
-        madar_authz::Decision::Allow => {}
-        _ => {
-            return Err(AppError::Forbidden(
-                "This waste is over your limit; a manager has to record it or approve it on the till."
-                    .into(),
-            ));
-        }
-    }
+    let decision = madar_authz::decide(&eff, &limit_request(plan.value_minor));
+    let allowed_outright = crate::sync::handlers::allow_or_approved_live(
+        pool.get_ref(),
+        decision,
+        Cap::InventoryWasteRecord,
+        body.live_approval.as_ref(),
+        claims.user_id(),
+        org_id,
+        plan.value_minor,
+        None,
+    )
+    .await?;
 
     let mut body = body;
     body.device_id = body
@@ -514,13 +521,31 @@ pub async fn record_waste(
     } else {
         "dashboard"
     };
+    let approval_id = if allowed_outright {
+        None
+    } else {
+        let a = body.live_approval.clone().expect("checked above");
+        crate::sync::handlers::record_approval(
+            pool.get_ref(),
+            &a,
+            org_id,
+            Some(body.branch_id),
+            None,
+            claims.user_id(),
+            "record_waste_live",
+            chrono::Utc::now(),
+            &Ok(Cap::InventoryWasteRecord),
+        )
+        .await;
+        Some(a.id)
+    };
     let out = record_waste_inner(
         pool.get_ref(),
         org_id,
         claims.user_id(),
         source,
         &body,
-        None,
+        approval_id,
     )
     .await?;
     Ok(if out.created {
