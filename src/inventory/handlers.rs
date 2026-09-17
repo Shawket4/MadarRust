@@ -165,6 +165,50 @@ pub struct StockMovement {
     pub created_by: Option<Uuid>,
     pub created_by_name: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    // ── Waste log only (null elsewhere) ──
+    /// `pos` | `dashboard` | `order` (a voided made order).
+    #[serde(default)]
+    #[sqlx(default)]
+    pub waste_source: Option<String>,
+    /// `ingredient` | `menu_item`, when the waste was recorded with a header.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub waste_subject_kind: Option<String>,
+    /// What the person picked (the menu item for an exploded item waste).
+    #[serde(default)]
+    #[sqlx(default)]
+    pub waste_subject_name: Option<String>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub waste_size_label: Option<String>,
+    /// The quantity as the person typed it, in `waste_unit`.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub waste_quantity: Option<f64>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub waste_unit: Option<String>,
+    /// The whole waste's value (all its lines), piastres.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub waste_value_minor: Option<i64>,
+    /// When it happened on the device (a queued waste lands later).
+    #[serde(default)]
+    #[sqlx(default)]
+    pub occurred_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub device_id: Option<Uuid>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub device_name: Option<String>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub till_id: Option<Uuid>,
+    /// The manager who approved it on the till.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub approved_by_name: Option<String>,
 }
 
 // ── Request types ─────────────────────────────────────────────
@@ -1261,7 +1305,13 @@ pub async fn create_waste(
     body: web::Json<CreateWasteRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "inventory_waste", "create").await?;
+    crate::authz::require::require(
+        pool.get_ref(),
+        &claims,
+        crate::authz::Cap::InventoryWasteRecord,
+        None,
+    )
+    .await?;
     require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
 
     validate_waste_reason(&body.reason)?;
@@ -1272,6 +1322,17 @@ pub async fn create_waste(
     }
     let org_id = branch_org(pool.get_ref(), *branch_id).await?;
     ensure_ingredient_in_org(pool.get_ref(), body.org_ingredient_id, org_id).await?;
+
+    // The `max_value` limit, judged at the branch (same rule as the till's route).
+    let cost = branch_unit_cost(pool.get_ref(), *branch_id, body.org_ingredient_id).await?;
+    let (value, _) = crate::inventory::waste::value_of(&[(body.org_ingredient_id, body.quantity, cost)]);
+    let eff =
+        crate::authz::require::effective_for_claims(pool.get_ref(), &claims, Some(*branch_id)).await?;
+    if !madar_authz::decide(&eff, &crate::inventory::waste::limit_request(value)).is_allow() {
+        return Err(AppError::Forbidden(
+            "This waste is over your limit or outside your branches.".into(),
+        ));
+    }
 
     let mut tx = pool.get_ref().begin().await?;
 
@@ -1326,7 +1387,13 @@ pub async fn list_waste(
     page: web::Query<ListPageQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "inventory_waste", "read").await?;
+    crate::authz::require::require(
+        pool.get_ref(),
+        &claims,
+        crate::authz::Cap::InventoryWasteRead,
+        None,
+    )
+    .await?;
     let (limit, offset) = page_bounds(page.limit, page.offset);
 
     // nil UUID = every branch in the caller's org ("All branches"); any other
@@ -1354,11 +1421,29 @@ pub async fn list_waste(
             m.branch_stock_id, m.type::text AS movement_type,
             m.quantity, m.balance_after, m.unit_cost, m.reason, m.below_zero,
             m.source_type, m.source_id, m.note, m.created_by,
-            u.name AS created_by_name, m.created_at
+            u.name AS created_by_name, m.created_at,
+            CASE WHEN we.id IS NOT NULL THEN we.source
+                 WHEN m.source_type = 'order' THEN 'order'
+                 ELSE 'dashboard' END AS waste_source,
+            we.subject_kind AS waste_subject_kind,
+            we.subject_name AS waste_subject_name,
+            we.size_label AS waste_size_label,
+            we.quantity::float8 AS waste_quantity,
+            we.unit AS waste_unit,
+            we.value_minor AS waste_value_minor,
+            we.occurred_at AS occurred_at,
+            we.device_id,
+            COALESCE(d.label, d.code) AS device_name,
+            we.till_id,
+            ap.name AS approved_by_name
         FROM inventory_movements m
         JOIN org_ingredients oi ON oi.id = m.org_ingredient_id
         JOIN branches b         ON b.id  = m.branch_id
         LEFT JOIN users u       ON u.id  = m.created_by
+        LEFT JOIN waste_events we ON m.source_type = 'waste' AND we.id = m.source_id
+        LEFT JOIN devices d     ON d.id  = we.device_id
+        LEFT JOIN approvals a   ON a.id  = we.approval_id
+        LEFT JOIN users ap      ON ap.id = a.approver_user_id
         WHERE {scope_condition} AND m.type = 'waste'
         ORDER BY m.created_at DESC, m.id DESC
         LIMIT $2 OFFSET $3

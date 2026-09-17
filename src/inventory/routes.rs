@@ -63,6 +63,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 web::get().to(handlers::list_movements),
             )
             // ── Waste ─────────────────────────────────────────────────
+            .route("/waste", web::post().to(crate::inventory::waste::record_waste))
             .route(
                 "/branches/{branch_id}/waste",
                 web::post().to(handlers::create_waste),
