@@ -52321,6 +52321,221 @@
         ]
       }
     },
+    "/tills/{till_id}/spot-checks": {
+      "get": {
+        "tags": [
+          "tills"
+        ],
+        "operationId": "list_spot_checks",
+        "parameters": [
+          {
+            "name": "till_id",
+            "in": "path",
+            "description": "Till ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The till's spot checks, oldest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TillSpotCheck"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "tills"
+        ],
+        "operationId": "create_spot_check",
+        "parameters": [
+          {
+            "name": "till_id",
+            "in": "path",
+            "description": "Till ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CashSpotCheckRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Already recorded (same id)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TillSpotCheck"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Spot check recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TillSpotCheck"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/timezones": {
       "get": {
         "tags": [
@@ -58007,6 +58222,81 @@
           },
           "note": {
             "type": "string"
+          }
+        }
+      },
+      "CashSpotCheckRequest": {
+        "type": "object",
+        "required": [
+          "counted_cash"
+        ],
+        "properties": {
+          "approval_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Replay only: the approval id carried on the envelope (ignored live)."
+          },
+          "approved_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Replay only: the person whose PIN unlocked this check (ignored live)."
+          },
+          "checked_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "counted_cash": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The cash counted in the drawer, minor units."
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "expected_cash": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The expected cash the counter saw. Absent → the server computes it now."
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Client-minted id; a retried or replayed check with the same id is one check."
+          },
+          "methods": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/SpotCheckMethodInput"
+            },
+            "description": "Per-method expected / counted figures. Absent → the server's own totals, uncounted."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -76554,6 +76844,72 @@
         },
         "additionalProperties": false
       },
+      "SpotCheckMethodInput": {
+        "type": "object",
+        "required": [
+          "method"
+        ],
+        "properties": {
+          "counted": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "expected": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The expected figure the counter saw. Absent → the server's own figure."
+          },
+          "is_cash": {
+            "type": "boolean"
+          },
+          "method": {
+            "type": "string"
+          }
+        }
+      },
+      "SpotCheckMethodLine": {
+        "type": "object",
+        "description": "One payment method on a spot check: what the system expected and, when the\ncounter counted it, what they found. Cash is always the first line.",
+        "required": [
+          "method",
+          "is_cash",
+          "expected"
+        ],
+        "properties": {
+          "counted": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Null when this method was not counted."
+          },
+          "discrepancy": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`counted - expected`, null when not counted."
+          },
+          "expected": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "is_cash": {
+            "type": "boolean"
+          },
+          "method": {
+            "type": "string"
+          }
+        }
+      },
       "StaffDocument": {
         "type": "object",
         "required": [
@@ -78862,6 +79218,13 @@
             "format": "int64",
             "description": "Table bills whose service charge was removed (`orders:waive_service`),\nand what those charges came to. Not part of any total."
           },
+          "spot_checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TillSpotCheck"
+            },
+            "description": "Cash spot checks taken on this till, oldest first. Additive."
+          },
           "standard_float": {
             "type": [
               "integer",
@@ -78954,6 +79317,103 @@
             }
           }
         ]
+      },
+      "TillSpotCheck": {
+        "type": "object",
+        "required": [
+          "id",
+          "till_id",
+          "branch_id",
+          "counted_cash",
+          "expected_cash",
+          "cash_discrepancy",
+          "methods",
+          "checked_by",
+          "checked_by_name",
+          "checked_at",
+          "created_at"
+        ],
+        "properties": {
+          "approval_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "approved_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "approved_by_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "cash_discrepancy": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`counted_cash - expected_cash`."
+          },
+          "checked_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "checked_by": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "checked_by_name": {
+            "type": "string"
+          },
+          "counted_cash": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "expected_cash": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "methods": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SpotCheckMethodLine"
+            }
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "till_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
       },
       "TillStatus": {
         "type": "string",
