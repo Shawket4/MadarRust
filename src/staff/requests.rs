@@ -672,6 +672,12 @@ pub async fn decide_request(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     let caller = claims.user_id_safe()?;
+    // Only cancelling one's OWN request needs no permission (checked below, once
+    // the request is loaded). Anything else is refused before the body is
+    // validated or the request looked up (route guard).
+    if body.status != "cancelled" {
+        check_permission(pool.get_ref(), &claims, "leave", "update").await?;
+    }
     let decision = validate_decision(&body.status)?;
     let org_id = scope_org(&req, &claims)?;
 

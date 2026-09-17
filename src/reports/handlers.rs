@@ -1104,17 +1104,9 @@ pub async fn branch_sales_peak_hours(
     let (branch_ids, org) =
         resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
-    let tz: String = sqlx::query_scalar(
-        "SELECT COALESCE(
-            (SELECT timezone::text FROM branches WHERE id = $1 AND deleted_at IS NULL),
-            (SELECT timezone::text FROM organizations WHERE id = $2),
-            'Africa/Cairo'
-         )",
-    )
-    .bind(*branch_id)
-    .bind(org)
-    .fetch_one(pool.get_ref())
-    .await?;
+    // The same zone rule as every other report (`tz::scope_tz_name`): the
+    // branch's effective zone, or the org's for "all branches".
+    let tz: String = crate::tz::scope_tz_name(pool.get_ref(), *branch_id, org).await?;
 
     // Always return all 24 hours so the chart has a complete x-axis.
     // Also surfaces per-day averages and share-of-total percentages for each bucket.
@@ -1272,17 +1264,9 @@ pub async fn branch_sales_peak_days(
     let (branch_ids, org) =
         resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
-    let tz: String = sqlx::query_scalar(
-        "SELECT COALESCE(
-            (SELECT timezone::text FROM branches WHERE id = $1 AND deleted_at IS NULL),
-            (SELECT timezone::text FROM organizations WHERE id = $2),
-            'Africa/Cairo'
-         )",
-    )
-    .bind(*branch_id)
-    .bind(org)
-    .fetch_one(pool.get_ref())
-    .await?;
+    // The same zone rule as every other report (`tz::scope_tz_name`): the
+    // branch's effective zone, or the org's for "all branches".
+    let tz: String = crate::tz::scope_tz_name(pool.get_ref(), *branch_id, org).await?;
 
     // Always return all 7 weekdays so the chart has a complete x-axis.
     // "Per occurrence" averages divide by how many times that weekday actually
